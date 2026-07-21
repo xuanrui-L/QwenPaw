@@ -302,7 +302,7 @@ export default function TimelineCanvas({
           <b className="text-[var(--color-text-primary)]">时间轴</b>
           <span className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 font-semibold text-[var(--color-accent)]">
             {seconds(playheadTick, timeline.ticks_per_second)}s ·{" "}
-            {active.length} 项同时出现
+            该时刻有{active.length}项内容
           </span>
           <span
             className={`rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 ${
@@ -533,7 +533,18 @@ export default function TimelineCanvas({
                   key={lane.id}
                   className="relative flex h-[42px] border-b border-[var(--color-border)]/65 last:border-b-0"
                 >
-                  <div className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)]">
+                  <div
+                    title="选取整行"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() =>
+                      useCreatorInteractionStore
+                        .getState()
+                        .setActiveLaneElementIds(
+                          lane.elements.map((element) => element.element_id),
+                        )
+                    }
+                    className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)]"
+                  >
                     {lane.id}
                   </div>
                   <div className="relative min-w-0 flex-1">
