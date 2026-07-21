@@ -543,7 +543,7 @@ export default function TimelineCanvas({
                           lane.elements.map((element) => element.element_id),
                         )
                     }
-                    className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)]"
+                    className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)] hover:text-[12px] hover:font-bold"
                   >
                     {lane.id}
                   </div>
