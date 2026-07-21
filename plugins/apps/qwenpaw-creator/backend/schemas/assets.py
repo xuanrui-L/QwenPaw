@@ -248,7 +248,9 @@ class SourceAgentEntityInput(StrictModel):
     @model_validator(mode="after")
     def validate_optional_range(self) -> "SourceAgentEntityInput":
         if (self.start_ms is None) != (self.end_ms is None):
-            raise ValueError("entity startMs/endMs must both be present or absent")
+            raise ValueError(
+                "entity startMs/endMs must both be present or absent",
+            )
         if self.start_ms is not None and self.end_ms <= self.start_ms:
             raise ValueError("entity endMs must be greater than startMs")
         return self
@@ -270,7 +272,9 @@ class SourceAgentSemanticInput(StrictModel):
                 "semantic entry startMs/endMs must both be present or absent",
             )
         if self.start_ms is not None and self.end_ms <= self.start_ms:
-            raise ValueError("semantic entry endMs must be greater than startMs")
+            raise ValueError(
+                "semantic entry endMs must be greater than startMs",
+            )
         if any(not item.strip() for item in self.tags):
             raise ValueError("semantic entry tags cannot contain empty values")
         return self

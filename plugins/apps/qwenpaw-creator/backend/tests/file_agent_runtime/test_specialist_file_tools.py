@@ -97,7 +97,9 @@ def test_project_assets_scope_admits_image_asset_children(tmp_path) -> None:
         admitted_target_refs=["project:assets"],
     )
     tool = next(
-        item for item in manifest if item["function"]["name"] == "image_generation"
+        item
+        for item in manifest
+        if item["function"]["name"] == "image_generation"
     )["function"]
     target = tool["parameters"]["properties"]["targetRef"]
     spec = registry.spec_for(
@@ -145,7 +147,9 @@ def test_project_assets_scope_does_not_expand_for_r2v_image_tool(
     )
 
 
-def test_ai_edit_rules_are_dynamic_specialist_prompt_not_runtime_state() -> None:
+def test_ai_edit_rules_are_dynamic_specialist_prompt_not_runtime_state() -> (
+    None
+):
     project = Project.new(project_id="project-1", name="Interview")
     project.settings.content_type = "interview"
     project.settings.target_duration_seconds = 90

@@ -283,7 +283,10 @@ def _probe_media(
     )
 
 
-def _source_module_result_ref(context: SourceAgentToolContext, kind: str) -> str:
+def _source_module_result_ref(
+    context: SourceAgentToolContext,
+    kind: str,
+) -> str:
     identity = uuid5(
         NAMESPACE_URL,
         (
@@ -455,7 +458,9 @@ class SourceMediaAnalysisService:
                 "transcript": [],
             }
         media_uri = (
-            local_path.as_uri() if local_path is not None else str(source_url or "")
+            local_path.as_uri()
+            if local_path is not None
+            else str(source_url or "")
         )
         result = await asr_model.transcribe(media_uri)
         model_run_id = f"asr-{uuid5(NAMESPACE_URL, result_ref).hex}"
@@ -504,7 +509,10 @@ class SourceMediaAnalysisService:
                 context.specialist_run_id,
             ),
         ):
-            if message.role != "tool" or message.metadata.get("tool") != tool_name:
+            if (
+                message.role != "tool"
+                or message.metadata.get("tool") != tool_name
+            ):
                 continue
             for content_part in message.content_parts:
                 if not isinstance(content_part, Mapping):
@@ -516,7 +524,10 @@ class SourceMediaAnalysisService:
                     value = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(value, Mapping) and value.get("resultRef") == result_ref:
+                if (
+                    isinstance(value, Mapping)
+                    and value.get("resultRef") == result_ref
+                ):
                     return value
         raise ValidationError(
             f"素材理解模块结果不存在或不属于当前 SpecialistRun: {result_ref}",
@@ -542,6 +553,7 @@ class SourceMediaAnalysisService:
             raise ValidationError("非视频素材不得提交 shots 时间线")
 
         def assert_range(start: int, end: int, label: str) -> None:
+            del start
             if duration_ms is not None and end > duration_ms:
                 raise ValidationError(
                     f"{label} 时间范围超过素材时长: {end}>{duration_ms}",
@@ -589,7 +601,8 @@ class SourceMediaAnalysisService:
             precise_semantics = sum(
                 1
                 for item in payload.semantic_entries
-                if item.start_ms is not None and item.end_ms - item.start_ms <= 30_000
+                if item.start_ms is not None
+                and item.end_ms - item.start_ms <= 30_000
             )
             if precise_semantics < minimum_precise_semantics:
                 raise ValidationError(
@@ -630,7 +643,9 @@ class SourceMediaAnalysisService:
             target_ref,
         )
         visual_ratio = self._assert_agent_ranges(agent_payload, media)
-        evidence_ref = f"asset://{version.logical_asset_id}@{version.version_id}"
+        evidence_ref = (
+            f"asset://{version.logical_asset_id}@{version.version_id}"
+        )
         identity = (
             context.provider_message_id
             or context.assistant_message_id
@@ -693,20 +708,26 @@ class SourceMediaAnalysisService:
                 "ratio": (
                     visual_ratio
                     if media.media_kind == "video"
-                    else 1.0 if media.media_kind == "image" else None
+                    else 1.0
+                    if media.media_kind == "image"
+                    else None
                 ),
             },
             "asr": {
                 "mode": (
                     "available"
                     if asr_available
-                    else "unavailable" if asr_applicable else "not_applicable"
+                    else "unavailable"
+                    if asr_applicable
+                    else "not_applicable"
                 ),
                 "producer": "model_native" if asr_available else None,
                 "ratio": 1.0 if asr_available else None,
             },
             "ocr": {
-                "mode": "unavailable" if visual_available else "not_applicable",
+                "mode": "unavailable"
+                if visual_available
+                else "not_applicable",
                 "producer": None,
                 "ratio": None,
             },
@@ -799,7 +820,11 @@ class SourceMediaAnalysisService:
             round_id=context.specialist_run_id,
             run_id=context.specialist_run_id,
             task_id=_stable_id("source-agent-commit", project_id, command_id),
-            attempt_id=_stable_id("source-agent-attempt", project_id, command_id),
+            attempt_id=_stable_id(
+                "source-agent-attempt",
+                project_id,
+                command_id,
+            ),
             intelligence_version_id=intelligence_version_id,
             intelligence_file_id=_stable_id(
                 "source-intelligence-file",
@@ -990,7 +1015,8 @@ class SourceMediaAnalysisService:
                         "sourceId": job.source_id,
                         "analysisVersionId": index.id,
                         "coverage": {
-                            key: value.mode for key, value in index.coverage.items()
+                            key: value.mode
+                            for key, value in index.coverage.items()
                         },
                     },
                 },
@@ -1018,7 +1044,9 @@ class SourceMediaAnalysisService:
         snapshot = self.services.projects.read(project_id)
         project = snapshot.project
         source = self._source_for_logical_asset(project, logical_asset_id)
-        selected_id = intelligence_version_id or source.current_intelligence_version_id
+        selected_id = (
+            intelligence_version_id or source.current_intelligence_version_id
+        )
         if selected_id is None:
             raise NotFoundError("该 Asset 尚无 source intelligence 索引")
         record = project.assets.intelligence_versions_by_id.get(selected_id)
@@ -1063,7 +1091,9 @@ class SourceMediaAnalysisService:
                 "Source Intelligence 索引不是 canonical JSON",
             )
         expected_runs = [item.id for item in index.model_runs]
-        expected_coverage = {key: value.mode for key, value in index.coverage.items()}
+        expected_coverage = {
+            key: value.mode for key, value in index.coverage.items()
+        }
         if (
             index.id != record.intelligence_version_id
             or index.asset_id != logical_asset_id
@@ -1239,7 +1269,8 @@ class SourceMediaAnalysisService:
                     or existing_task.kind is not TaskKind.SOURCE_INTELLIGENCE
                     or existing_task.request_fingerprint != request_fingerprint
                     or existing_task.idempotency_key != command_id
-                    or existing_task.expected_target_version != version.checksum
+                    or existing_task.expected_target_version
+                    != version.checksum
                     or existing_task.input_generation != frozen_generation
                     or existing_task.input_etag != frozen_etag
                 ):
@@ -1535,7 +1566,9 @@ class SourceMediaAnalysisService:
                         "Source Intelligence immutable path 已存在但内容不同",
                     )
             candidate = current.project.model_dump(mode="json")
-            candidate["assets"]["files_by_id"][indexed.file_id] = indexed.model_dump(
+            candidate["assets"]["files_by_id"][
+                indexed.file_id
+            ] = indexed.model_dump(
                 mode="json",
             )
             intelligence = SourceIntelligenceVersion(
@@ -1544,12 +1577,14 @@ class SourceMediaAnalysisService:
                 file_id=indexed.file_id,
                 source_checksum=job.source_version.checksum,
                 model_run_ids=[item.id for item in index.model_runs],
-                coverage={key: value.mode for key, value in index.coverage.items()},
+                coverage={
+                    key: value.mode for key, value in index.coverage.items()
+                },
                 created_at=created_at,
             )
-            candidate["assets"]["intelligence_versions_by_id"][index.id] = (
-                intelligence.model_dump(mode="json")
-            )
+            candidate["assets"]["intelligence_versions_by_id"][
+                index.id
+            ] = intelligence.model_dump(mode="json")
             candidate["sources"]["sources"]["items"][job.source_id][
                 "current_intelligence_version_id"
             ] = index.id
@@ -1670,7 +1705,8 @@ class SourceMediaAnalysisService:
                         "sourceId": job.source_id,
                         "analysisVersionId": index.id,
                         "coverage": {
-                            key: value.mode for key, value in index.coverage.items()
+                            key: value.mode
+                            for key, value in index.coverage.items()
                         },
                     },
                 },
@@ -1795,7 +1831,8 @@ class SourceMediaAnalysisService:
         )
         return (
             source is not None
-            and source.selected_asset_version_id == job.source_version.version_id
+            and source.selected_asset_version_id
+            == job.source_version.version_id
             and version == job.source_version
             and indexed == job.indexed_file
         )
@@ -1809,9 +1846,11 @@ class SourceMediaAnalysisService:
         indexed = project.assets.files_by_id.get(job.intelligence_file_id)
         return bool(
             source is not None
-            and source.current_intelligence_version_id == job.intelligence_version_id
+            and source.current_intelligence_version_id
+            == job.intelligence_version_id
             and intelligence is not None
-            and intelligence.source_asset_version_id == job.source_version.version_id
+            and intelligence.source_asset_version_id
+            == job.source_version.version_id
             and intelligence.file_id == job.intelligence_file_id
             and indexed is not None
             and indexed.kind == "source_intelligence",
@@ -1824,7 +1863,9 @@ class SourceMediaAnalysisService:
             "sourceId": job.source_id,
             "sourceAssetVersionId": job.source_version.version_id,
             "fileId": (
-                job.indexed_file.file_id if job.indexed_file is not None else None
+                job.indexed_file.file_id
+                if job.indexed_file is not None
+                else None
             ),
             "sourceUrl": public_source_url(job.source_version),
             "sourceChecksum": job.source_version.checksum,
@@ -2109,17 +2150,24 @@ def recover_interrupted_source_analysis(
                 )
                 recovered += 1
         for task in executions.list_tasks(project_id):
-            if task.kind is not TaskKind.SOURCE_INTELLIGENCE or task.status not in {
-                TaskStatus.QUEUED,
-                TaskStatus.RUNNING,
-            }:
+            if (
+                task.kind is not TaskKind.SOURCE_INTELLIGENCE
+                or task.status
+                not in {
+                    TaskStatus.QUEUED,
+                    TaskStatus.RUNNING,
+                }
+            ):
                 continue
             recovery_job = convergence._recovery_job_from_task(task)
             if recovery_job is not None:
                 converged = convergence._converge_published_job_sync(
                     recovery_job,
                 )
-                if converged is not None and converged.status is TaskStatus.SUCCEEDED:
+                if (
+                    converged is not None
+                    and converged.status is TaskStatus.SUCCEEDED
+                ):
                     recovered += 1
                     continue
             if task.status is TaskStatus.RUNNING:

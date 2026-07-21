@@ -169,6 +169,7 @@ def test_dashscope_temporary_upload_accepts_in_memory_reference_bytes(
             )
 
         def post(self, url, *, data, files):
+            del data
             filename, file_source, media_type = files["file"]
             observed["upload"] = {
                 "url": url,
@@ -205,7 +206,7 @@ def test_reference_media_data_url_inlines_png_for_seedance() -> None:
 
     prefix = "data:image/png;base64,"
     assert data_url.startswith(prefix)
-    assert base64.b64decode(data_url[len(prefix):]) == content
+    assert base64.b64decode(data_url[len(prefix) :]) == content
 
 
 def test_reference_media_data_url_guesses_media_type_from_magic() -> None:

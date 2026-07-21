@@ -3,6 +3,7 @@
 # pylint: disable=line-too-long,protected-access,too-many-branches
 # pylint: disable=too-many-return-statements,too-many-statements
 # pylint: disable=wrong-import-order
+# pylint: disable=raise-missing-from
 """External-root model configuration and explicit provider connection probes."""
 
 from __future__ import annotations
@@ -313,18 +314,28 @@ def _notify_agent_model_config_changed() -> None:
         runtime.notify(project.project_id)
 
 
-async def _validate_section_connectivity(section: str, config: dict[str, Any]) -> None:
+async def _validate_section_connectivity(
+    section: str,
+    config: dict[str, Any],
+) -> None:
     """Run connectivity probe for a single section. Raises ValidationError on failure."""
 
-    if section == "execution_authorization" or section == "executionAuthorization":
+    if section in ("execution_authorization", "executionAuthorization"):
         return
 
     if section == "oss":
         oss = config.get("oss", {})
-        if not oss.get("enabled") or not oss.get("endpoint") or not oss.get("access_key_id") or not oss.get("access_key_secret") or not oss.get("bucket"):
+        if (
+            not oss.get("enabled")
+            or not oss.get("endpoint")
+            or not oss.get("access_key_id")
+            or not oss.get("access_key_secret")
+            or not oss.get("bucket")
+        ):
             return
         try:
             import oss2
+
             auth = oss2.Auth(oss["access_key_id"], oss["access_key_secret"])
             bucket = oss2.Bucket(auth, oss["endpoint"], oss["bucket"])
             bucket.get_bucket_info()
@@ -332,9 +343,9 @@ async def _validate_section_connectivity(section: str, config: dict[str, Any]) -
             exc_str = str(exc)
             if "InvalidAccessKeyId" in exc_str or "AccessDenied" in exc_str:
                 raise ValidationError("OSS: Access Key 无效或权限不足，请检查配置")
-            elif "NoSuchBucket" in exc_str:
+            if "NoSuchBucket" in exc_str:
                 raise ValidationError("OSS: Bucket 不存在，请检查 Bucket 名称")
-            elif "connect" in exc_str.lower() or "timeout" in exc_str.lower():
+            if "connect" in exc_str.lower() or "timeout" in exc_str.lower():
                 raise ValidationError("OSS: 无法连接到 OSS 服务，请检查 Endpoint 和网络")
             raise ValidationError(f"OSS: {exc_str}")
         return
@@ -372,14 +383,19 @@ async def _validate_section_connectivity(section: str, config: dict[str, Any]) -
                     if isinstance(body, dict):
                         err_obj = body.get("error")
                         msg = (
-                            err_obj.get("message") if isinstance(err_obj, dict)
-                            else body.get("message") or body.get("error") or str(body)
+                            err_obj.get("message")
+                            if isinstance(err_obj, dict)
+                            else body.get("message")
+                            or body.get("error")
+                            or str(body)
                         )
                     else:
                         msg = str(body)
                 except ValueError:
                     msg = resp.text[:200]
-                raise ValidationError(f"{section}: HTTP {resp.status_code}: {msg or '请求失败'}")
+                raise ValidationError(
+                    f"{section}: HTTP {resp.status_code}: {msg or '请求失败'}",
+                )
         except httpx.ConnectError:
             raise ValidationError(f"{section}: 无法连接到服务，请检查 Base URL 是否正确")
         except httpx.TimeoutException:
@@ -493,7 +509,7 @@ async def patch_model_config_section(
                 return {"ok": True}
             if reservation.record.status is IdempotencyStatus.FAILED:
                 raise StorageIntegrityError(
-                    "上一次模型配置写入失败，请使用新的 Idempotency-Key 重试"
+                    "上一次模型配置写入失败，请使用新的 Idempotency-Key 重试",
                 )
 
             existing = load_model_config(include_environment=False)

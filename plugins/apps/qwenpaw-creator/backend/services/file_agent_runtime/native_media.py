@@ -161,7 +161,9 @@ async def source_intelligence_content_parts(
             )
         if version.media_kind not in {"image", "video"}:
             continue
-        part_type = "image_url" if version.media_kind == "image" else "video_url"
+        part_type = (
+            "image_url" if version.media_kind == "image" else "video_url"
+        )
         identity = (part_type, version_id)
         if identity in seen:
             continue

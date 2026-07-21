@@ -113,7 +113,12 @@ export default function ElementList({
       <header className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
         <div className="flex min-w-0 items-baseline gap-1.5">
           <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-          时间点:{sec(playheadTick, timeline.ticks_per_second)}s, {elements.filter((element) => activeIds.has(element.element_id)).length}项内容
+            时间点:{sec(playheadTick, timeline.ticks_per_second)}s,{" "}
+            {
+              elements.filter((element) => activeIds.has(element.element_id))
+                .length
+            }
+            项内容
           </h3>
           <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
             按开始时间排列
@@ -160,75 +165,77 @@ export default function ElementList({
             </div>
           )
         ) : (
-          elements.filter((element) => activeIds.has(element.element_id)).map((element) => {
-            const selected = selectedElementId === element.element_id;
-            const active = activeIds.has(element.element_id);
-            const meta = ELEMENT_TYPE_META[element.creation.type];
-            const status = statusOf(element, tasks);
-            const start = element.span.start_tick;
-            const end = start + element.span.duration_tick;
-            return (
-              <button
-                key={element.element_id}
-                ref={(node) => {
-                  if (node) itemRefs.current.set(element.element_id, node);
-                  else itemRefs.current.delete(element.element_id);
-                }}
-                type="button"
-                data-element-list-item={element.element_id}
-                onClick={() => onSelect(element.element_id)}
-                className={`relative w-full overflow-hidden rounded-xl border p-3 text-left transition ${
-                  selected
-                    ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]/45 shadow-sm ring-2 ring-[var(--color-accent)]/10"
-                    : "border-[var(--color-border)] bg-white hover:border-[var(--color-border-strong)] hover:shadow-sm"
-                } ${element.enabled ? "" : "opacity-60"}`}
-              >
-                <i
-                  className="absolute inset-y-0 left-0 w-1"
-                  style={{ background: meta.color }}
-                />
-                <div className="flex items-start justify-between gap-2 pl-1">
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <span style={{ color: meta.color }}>
-                        <TypeIcon element={element} />
-                      </span>
-                      <span className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]">
-                        {element.label || element.element_id}
-                      </span>
-                      {active && (
-                        <span
-                          className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-accent)]"
-                          title="当前时刻活跃"
-                        />
-                      )}
+          elements
+            .filter((element) => activeIds.has(element.element_id))
+            .map((element) => {
+              const selected = selectedElementId === element.element_id;
+              const active = activeIds.has(element.element_id);
+              const meta = ELEMENT_TYPE_META[element.creation.type];
+              const status = statusOf(element, tasks);
+              const start = element.span.start_tick;
+              const end = start + element.span.duration_tick;
+              return (
+                <button
+                  key={element.element_id}
+                  ref={(node) => {
+                    if (node) itemRefs.current.set(element.element_id, node);
+                    else itemRefs.current.delete(element.element_id);
+                  }}
+                  type="button"
+                  data-element-list-item={element.element_id}
+                  onClick={() => onSelect(element.element_id)}
+                  className={`relative w-full overflow-hidden rounded-xl border p-3 text-left transition ${
+                    selected
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)]/45 shadow-sm ring-2 ring-[var(--color-accent)]/10"
+                      : "border-[var(--color-border)] bg-white hover:border-[var(--color-border-strong)] hover:shadow-sm"
+                  } ${element.enabled ? "" : "opacity-60"}`}
+                >
+                  <i
+                    className="absolute inset-y-0 left-0 w-1"
+                    style={{ background: meta.color }}
+                  />
+                  <div className="flex items-start justify-between gap-2 pl-1">
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span style={{ color: meta.color }}>
+                          <TypeIcon element={element} />
+                        </span>
+                        <span className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]">
+                          {element.label || element.element_id}
+                        </span>
+                        {active && (
+                          <span
+                            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-accent)]"
+                            title="当前时刻活跃"
+                          />
+                        )}
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-[var(--color-text-secondary)]">
+                        {elementCreationSummary(element.creation) ||
+                          "尚未补充创作说明"}
+                      </p>
                     </div>
-                    <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-[var(--color-text-secondary)]">
-                      {elementCreationSummary(element.creation) ||
-                        "尚未补充创作说明"}
-                    </p>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-semibold ${status.tone}`}
+                    >
+                      {status.label}
+                    </span>
                   </div>
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-semibold ${status.tone}`}
-                  >
-                    {status.label}
-                  </span>
-                </div>
-                <div className="mt-2 flex items-center justify-between gap-2 pl-1 text-[10px]">
-                  <span
-                    className="rounded-full px-2 py-0.5 font-semibold"
-                    style={{ color: meta.color, background: meta.soft }}
-                  >
-                    {meta.label}
-                  </span>
-                  <span className="font-mono text-[var(--color-text-tertiary)]">
-                    {sec(start, timeline.ticks_per_second)}s –{" "}
-                    {sec(end, timeline.ticks_per_second)}s
-                  </span>
-                </div>
-              </button>
-            );
-          })
+                  <div className="mt-2 flex items-center justify-between gap-2 pl-1 text-[10px]">
+                    <span
+                      className="rounded-full px-2 py-0.5 font-semibold"
+                      style={{ color: meta.color, background: meta.soft }}
+                    >
+                      {meta.label}
+                    </span>
+                    <span className="font-mono text-[var(--color-text-tertiary)]">
+                      {sec(start, timeline.ticks_per_second)}s –{" "}
+                      {sec(end, timeline.ticks_per_second)}s
+                    </span>
+                  </div>
+                </button>
+              );
+            })
         )}
       </div>
     </section>

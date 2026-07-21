@@ -261,6 +261,7 @@ async def test_check_model_connection_non_chat_model_skips_chat_probe(
     monkeypatch.setattr(provider, "_client", lambda timeout=5: fake_client)
 
     async def fake_check_connection(self, timeout=5):
+        del self
         connection_checks.append(timeout)
         return True, ""
 
@@ -280,7 +281,7 @@ async def test_check_model_connection_non_chat_model_skips_chat_probe(
         assert ok is True
         assert "not a chat model" in msg
 
-    assert chat_calls == []
+    assert not chat_calls
     assert connection_checks == [4, 4, 4, 4]
 
 

@@ -30,7 +30,10 @@ from services.project_files.agent_tools import (
     agent_project_tool_manifest,
 )
 from services.project_files.facade import CreatorFileServices
-from services.source_analysis import SourceAgentToolContext, source_analysis_service
+from services.source_analysis import (
+    SourceAgentToolContext,
+    source_analysis_service,
+)
 
 
 class SpecialistToolWait(StrEnum):
@@ -109,9 +112,9 @@ class SpecialistToolSpec:
                     )
                 else:
                     target["enum"] = list(targets)
-                    target["description"] = (
-                        "必须逐字使用本 SpecialistRun 已准入的 targetRef。"
-                    )
+                    target[
+                        "description"
+                    ] = "必须逐字使用本 SpecialistRun 已准入的 targetRef。"
         return value
 
 
@@ -255,16 +258,14 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
             "type": "string",
             "minLength": 1,
             "description": (
-                "外层 VLM 基于原生媒体形成的详尽全局理解，覆盖主体、场景、动作、"
-                "镜头语言、风格、质量变化、异常与不确定内容。"
+                "外层 VLM 基于原生媒体形成的详尽全局理解，覆盖主体、场景、动作、" "镜头语言、风格、质量变化、异常与不确定内容。"
             ),
         },
         "shots": {
             "type": "array",
             "items": _SOURCE_SHOT_SCHEMA,
             "description": (
-                "视频必须覆盖至少 90% 完整时间线；图片和音频传空数组。"
-                "每段使用整数毫秒半开区间 [startMs,endMs)。"
+                "视频必须覆盖至少 90% 完整时间线；图片和音频传空数组。" "每段使用整数毫秒半开区间 [startMs,endMs)。"
             ),
         },
         "entities": {
@@ -275,10 +276,7 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
         "semanticEntries": {
             "type": "array",
             "items": _SOURCE_SEMANTIC_SCHEMA,
-            "description": (
-                "可检索、可剪辑的事件级与细节级语义。视频/音频每条必须含时间范围；"
-                "图片不得填写时间范围。"
-            ),
+            "description": ("可检索、可剪辑的事件级与细节级语义。视频/音频每条必须含时间范围；" "图片不得填写时间范围。"),
         },
         "moduleResultRefs": {
             "type": "object",
@@ -407,12 +405,17 @@ class FileSpecialistToolRegistry:
             for spec in _SPECS
             if role in spec.roles
         ]
-        names = [item["function"]["name"] for item in (*project_tools, *business_tools)]
+        names = [
+            item["function"]["name"]
+            for item in (*project_tools, *business_tools)
+        ]
         if len(names) != len(set(names)):
             raise RuntimeError(
                 "Specialist tool manifest contains duplicate names",
             )
-        return tuple(deepcopy(item) for item in (*project_tools, *business_tools))
+        return tuple(
+            deepcopy(item) for item in (*project_tools, *business_tools)
+        )
 
     async def invoke(
         self,

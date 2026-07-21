@@ -20,10 +20,7 @@ import {
   patchExecutionAuthorization,
   testModelConnection,
 } from "@/api/creator";
-import type {
-  ModelConfigData,
-  ModelConfigItem,
-} from "@/contracts/creator";
+import type { ModelConfigData, ModelConfigItem } from "@/contracts/creator";
 
 const LLM_PROTOCOLS = [
   "Anthropic Claude",

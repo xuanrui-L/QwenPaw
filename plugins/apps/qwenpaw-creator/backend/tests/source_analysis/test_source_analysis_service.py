@@ -220,7 +220,9 @@ def test_fake_provider_publishes_one_canonical_index_and_read_apis(
     intelligence_id = source.current_intelligence_version_id
     assert snapshot.generation == 2
     assert intelligence_id == dispatch.job.intelligence_version_id
-    intelligence = snapshot.project.assets.intelligence_versions_by_id[intelligence_id]
+    intelligence = snapshot.project.assets.intelligence_versions_by_id[
+        intelligence_id
+    ]
     assert intelligence.source_asset_version_id == asset_version_id
     indexed = snapshot.project.assets.files_by_id[intelligence.file_id]
     assert indexed.kind == "source_intelligence"
@@ -256,7 +258,9 @@ def test_fake_provider_publishes_one_canonical_index_and_read_apis(
         return current, exact, queried
 
     current, exact, queried = asyncio.run(read_api())
-    assert current.status_code == exact.status_code == queried.status_code == 200
+    assert (
+        current.status_code == exact.status_code == queried.status_code == 200
+    )
     assert current.json()["id"] == exact.json()["id"] == intelligence_id
     assert queried.json()["items"]
 
@@ -288,7 +292,10 @@ def test_url_backed_source_is_analyzed_before_runtime_cache_exists(
     assert analyzer.observed_local_path is None
     assert analyzer.observed_url == "https://assets.example/source.mp4"
     project = services.projects.read("project-1").project
-    assert project.assets.source_versions_by_id[item["assetVersionId"]].file_id is None
+    assert (
+        project.assets.source_versions_by_id[item["assetVersionId"]].file_id
+        is None
+    )
     source = next(iter(project.sources.sources.items.values()))
     assert source.current_intelligence_version_id is not None
 
@@ -418,6 +425,7 @@ def test_default_inner_provider_is_removed_in_favor_of_outer_vlm_commit(
     tmp_path,
     monkeypatch,
 ) -> None:
+    del monkeypatch
     source = tmp_path / "source.mp4"
     source.write_bytes(b"not-probed-when-config-is-missing")
     version = SourceAssetVersion(
@@ -720,15 +728,14 @@ def test_long_video_commit_accepts_natural_shots_and_requires_precise_semantics(
         precise_semantic_count: int,
     ):
         boundaries = [
-            round(index * duration_ms / shot_count) for index in range(shot_count + 1)
+            round(index * duration_ms / shot_count)
+            for index in range(shot_count + 1)
         ]
         shots = [
             {
                 "startMs": boundaries[index],
                 "endMs": boundaries[index + 1],
-                "description": (
-                    f"连续场景 {index + 1}，记录主体动作、构图和画质变化。"
-                ),
+                "description": (f"连续场景 {index + 1}，记录主体动作、构图和画质变化。"),
                 "events": [f"状态变化 {index + 1}"],
                 "confidence": 0.9,
             }

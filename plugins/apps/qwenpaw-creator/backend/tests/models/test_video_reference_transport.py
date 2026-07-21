@@ -136,6 +136,7 @@ def test_wan_local_reference_video_uploads_and_keeps_video_kind(
     monkeypatch.setattr(model_config, "get_video_api_key", lambda: "video-key")
 
     async def fake_upload(content, filename, *, api_key, model_name):
+        del content, filename, api_key, model_name
         return "oss://dashscope-instant/clip.mp4"
 
     monkeypatch.setattr(
