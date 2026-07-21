@@ -301,8 +301,8 @@ export default function TimelineCanvas({
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <b className="text-[var(--color-text-primary)]">时间轴</b>
           <span className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 font-semibold text-[var(--color-accent)]">
-            {seconds(playheadTick, timeline.ticks_per_second)}s ·{" "}
-            该时刻有{active.length}项内容
+            {seconds(playheadTick, timeline.ticks_per_second)}s · 该时刻有
+            {active.length}项内容
           </span>
           <span
             className={`rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 ${
