@@ -113,15 +113,12 @@ export default function ElementList({
       <header className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
         <div className="flex min-w-0 items-baseline gap-1.5">
           <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-            时间线内容
+          时间点:{sec(playheadTick, timeline.ticks_per_second)}s, {elements.filter((element) => activeIds.has(element.element_id)).length}项内容
           </h3>
           <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
             按开始时间排列
           </span>
         </div>
-        <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-secondary)]">
-          {elements.length}
-        </span>
       </header>
       <div
         ref={listRef}
@@ -163,7 +160,7 @@ export default function ElementList({
             </div>
           )
         ) : (
-          elements.map((element) => {
+          elements.filter((element) => activeIds.has(element.element_id)).map((element) => {
             const selected = selectedElementId === element.element_id;
             const active = activeIds.has(element.element_id);
             const meta = ELEMENT_TYPE_META[element.creation.type];
