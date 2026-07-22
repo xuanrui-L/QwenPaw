@@ -711,6 +711,49 @@ def test_outer_vlm_commit_resolves_remote_cache_media_metadata(
     assert resolved[6].duration_ms == 3_502_567
 
 
+def test_video_coverage_error_reports_actual_duration_and_required_coverage() -> None:
+    media = SourceMediaMetadata(
+        mediaKind="video",
+        mediaType="video/mp4",
+        durationMs=19_867,
+        width=1280,
+        height=720,
+    )
+    payload = SourceAgentIntelligenceInput.model_validate(
+        {
+            "summary": "宠物在户外移动，当前只记录到部分时间线。",
+            "shots": [
+                {
+                    "startMs": 0,
+                    "endMs": 15_000,
+                    "description": "低角度镜头记录宠物穿过户外场地。",
+                    "events": ["向前移动"],
+                    "confidence": 0.9,
+                },
+            ],
+            "entities": [],
+            "semanticEntries": [
+                {
+                    "startMs": 0,
+                    "endMs": 15_000,
+                    "text": "宠物穿过户外场地",
+                    "tags": ["宠物", "户外"],
+                    "confidence": 0.9,
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(ValidationError) as caught:
+        SourceMediaAnalysisService._assert_agent_ranges(payload, media)
+
+    message = str(caught.value)
+    assert "19867ms" in message
+    assert "75.5%" in message
+    assert "17881ms" in message
+    assert "不得根据文件大小猜测时长" in message
+
+
 def test_long_video_commit_accepts_natural_shots_and_requires_precise_semantics() -> (
     None
 ):

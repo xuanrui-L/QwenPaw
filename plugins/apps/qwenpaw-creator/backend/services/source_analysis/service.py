@@ -590,8 +590,14 @@ class SourceMediaAnalysisService:
             duration_ms,
         )
         if ratio < 0.9:
+            covered_ms = round(ratio * duration_ms)
+            required_ms = math.ceil(duration_ms * 0.9)
             raise ValidationError(
-                "视频 shots 时间线覆盖不足 90%，必须记录开头、过渡、静止/黑屏和结尾",
+                "视频 shots 时间线覆盖不足 90%: "
+                f"素材实际时长 {duration_ms}ms，当前覆盖约 "
+                f"{covered_ms}ms ({ratio:.1%})，至少需覆盖 "
+                f"{required_ms}ms。请按实际时长补齐开头、过渡、"
+                "静止/黑屏和结尾，不得根据文件大小猜测时长。",
             )
         if duration_ms >= 600_000:
             minimum_precise_semantics = min(
