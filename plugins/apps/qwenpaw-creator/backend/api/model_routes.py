@@ -409,6 +409,24 @@ async def get_model_config() -> ModelConfigData:
     return load_model_config(include_environment=False)
 
 
+# Semantic diagnostic read: this performs no Creator/runtime/config mutation,
+# so it is intentionally outside the mutating-route idempotency registry.
+@router.get("/resolved")
+async def get_resolved_models() -> dict[str, Any]:
+    """Return the runtime-resolved model identity execution actually uses.
+
+    Unlike ``/models/config`` (persisted-only), this reflects request-scoped
+    host tool config, environment overrides and defaults — i.e. the value
+    ``get_video_model_name()`` returns at submission time.  Read-only.
+    """
+    return {
+        "video": {
+            "provider": model_config.get_video_backend(),
+            "model": model_config.get_video_model_name(),
+        },
+    }
+
+
 @router.post("/config")
 async def update_model_config(
     data: ModelConfigData,

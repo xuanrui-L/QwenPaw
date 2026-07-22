@@ -75,6 +75,16 @@ describe("R2V Workbench page", () => {
     useCreatorInteractionStore.getState().reset();
     useAgentDockUiStore.getState().reset();
     seedProject();
+    // Default resolved-models mock so rendering the workbench never issues a
+    // real network call; tests that assert on the value override this.
+    installMockFetch([
+      {
+        match: "/models/resolved",
+        response: {
+          json: { video: { provider: "wan", model: "wan2.7-r2v" } },
+        },
+      },
+    ]);
   });
 
   it("renders the origin/main workbench surfaces for an R2V Element", () => {
@@ -102,6 +112,24 @@ describe("R2V Workbench page", () => {
     expect(screen.getByText("资产绑定")).toBeInTheDocument();
     expect(useCreatorInteractionStore.getState().selectedRef).toBe(
       "element:r2v-window",
+    );
+  });
+
+  it("shows the runtime-resolved video model instead of creation.recipe.model", async () => {
+    installMockFetch([
+      {
+        match: "/models/resolved",
+        response: {
+          json: {
+            video: { provider: "wan", model: "happyhorse-1.1-r2v" },
+          },
+        },
+      },
+    ]);
+    renderWorkbench();
+
+    await waitFor(() =>
+      expect(screen.getByText("happyhorse-1.1-r2v")).toBeInTheDocument(),
     );
   });
 

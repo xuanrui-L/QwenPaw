@@ -183,9 +183,7 @@ def _authorization_view(
     scope.setdefault("operation", record.operation)
     scope.setdefault("message", record.summary)
     billing = scope.get("billing")
-    currency = (
-        billing.get("currency") if isinstance(billing, dict) else None
-    )
+    currency = billing.get("currency") if isinstance(billing, dict) else None
     return {
         "id": record.authorization_id,
         "transactionId": record.round_id,
