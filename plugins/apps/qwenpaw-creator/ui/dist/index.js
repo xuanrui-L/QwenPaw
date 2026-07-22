@@ -9,7 +9,7 @@
   }
 
   const CREATOR_BG_COLOR = "#f9f8f4";
-  const CREATOR_BUILD_ID = "f571f67a7d13";
+  const CREATOR_BUILD_ID = "83ac5f16330b";
   const NAVIGATION_MESSAGE = "qwenpaw-creator:navigation";
   const RESTORE_ROUTE_MESSAGE = "qwenpaw-creator:restore-route";
 

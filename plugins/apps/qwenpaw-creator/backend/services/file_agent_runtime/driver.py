@@ -67,6 +67,10 @@ from services.runtime_files.execution_models import (
     SpecialistRunRecord,
 )
 from services.runtime_files.execution_store import ProjectExecutionStore
+from services.execution_pricing import (
+    CostEstimate,
+    estimate_execution_cost,
+)
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
     FileSpecialistToolRegistry,
@@ -2089,6 +2093,13 @@ class FileCreatorAgentRuntime:
         )
         target_ref = str(arguments.get("targetRef") or "project:unknown")
         provider, model = _execution_provider_model(spec)
+        tool_arguments = dict(arguments.get("arguments") or {})
+        estimate = estimate_execution_cost(
+            provider_kind=spec.provider_kind,
+            provider=provider,
+            model=model,
+            arguments=tool_arguments,
+        )
         record = ExecutionAuthorizationRecord(
             authorization_id=authorization_id,
             project_id=project_id,
@@ -2098,15 +2109,25 @@ class FileCreatorAgentRuntime:
             operation=spec.name,
             target_scope=[target_ref],
             authorization_token=secrets.token_urlsafe(32),
-            summary=f"执行 {spec.name}：{target_ref}",
+            summary=_authorization_summary(
+                spec,
+                target_ref=target_ref,
+                provider=provider,
+                model=model,
+                tool_arguments=tool_arguments,
+                estimate=estimate,
+            ),
             scope={
                 "operation": spec.name,
                 "targetRefs": [target_ref],
-                "parameters": dict(arguments.get("arguments") or {}),
+                "parameters": tool_arguments,
+                "promptPreview": _prompt_preview(tool_arguments, limit=200),
+                "billing": estimate.as_payload() if estimate else None,
             },
             requested_provider=provider,
             requested_model=model,
             requested_candidates=1,
+            estimated_cost=estimate.estimated_cost if estimate else None,
             caused_by_request_id=tools.context.caused_by_request_id,
             caused_by_message_id=request.message_id,
             caused_by_message_seq=request.message_seq,
@@ -2139,6 +2160,9 @@ class FileCreatorAgentRuntime:
                 "targetRef": target_ref,
                 "provider": provider,
                 "model": model,
+                "summary": authorization.summary,
+                "estimatedCost": authorization.estimated_cost,
+                "billing": estimate.as_payload() if estimate else None,
                 "toolCallId": call_id,
             },
         )
@@ -2962,6 +2986,54 @@ def _execution_provider_model(spec: SpecialistToolSpec) -> tuple[str, str]:
     if spec.provider_kind == "video":
         return get_video_backend(), get_video_model_name()
     return str(spec.provider_kind or "creator-tool"), "configured"
+
+
+_AUTHORIZATION_OPERATION_LABELS = {
+    "image_generation": "生成图片",
+    "r2v_generation": "生成视频",
+}
+
+
+def _prompt_preview(tool_arguments: Mapping[str, Any], *, limit: int) -> str:
+    prompt = str(tool_arguments.get("prompt") or "").strip()
+    if len(prompt) <= limit:
+        return prompt
+    return prompt[: limit - 1] + "…"
+
+
+def _authorization_summary(
+    spec: SpecialistToolSpec,
+    *,
+    target_ref: str,
+    provider: str,
+    model: str,
+    tool_arguments: Mapping[str, Any],
+    estimate: CostEstimate | None,
+) -> str:
+    """One human-readable line telling the user exactly what will run."""
+
+    label = _AUTHORIZATION_OPERATION_LABELS.get(spec.name, f"执行 {spec.name}")
+    parts = [f"{label}：{target_ref}", f"模型 {provider}/{model}"]
+    if spec.provider_kind == "image":
+        ratio = str(tool_arguments.get("aspectRatio") or "16:9")
+        parts.append(f"画幅 {ratio}")
+    elif spec.provider_kind == "video":
+        duration = tool_arguments.get("durationSeconds")
+        if duration:
+            parts.append(f"{duration}秒")
+        resolution = tool_arguments.get("resolution")
+        if resolution:
+            parts.append(str(resolution).upper())
+        ratio = tool_arguments.get("ratio")
+        if ratio:
+            parts.append(f"比例 {ratio}")
+        if "generateAudio" in tool_arguments:
+            parts.append(
+                "有声" if tool_arguments.get("generateAudio") else "无声",
+            )
+    if estimate is not None:
+        parts.append(f"预计费用 {estimate.display_text}（{estimate.formula}）")
+    return " · ".join(parts)
 
 
 __all__ = [

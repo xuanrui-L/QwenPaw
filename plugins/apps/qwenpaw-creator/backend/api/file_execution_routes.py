@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Header, Query, status
 from pydantic import Field
 
 from domain.enums import (
+    CreatorCommandType,
     SpecialistRole,
     SpecialistRunStatus,
     TaskKind,
@@ -181,6 +182,10 @@ def _authorization_view(
     scope = dict(record.scope or {})
     scope.setdefault("operation", record.operation)
     scope.setdefault("message", record.summary)
+    billing = scope.get("billing")
+    currency = (
+        billing.get("currency") if isinstance(billing, dict) else None
+    )
     return {
         "id": record.authorization_id,
         "transactionId": record.round_id,
@@ -193,6 +198,7 @@ def _authorization_view(
         "provider": record.requested_provider or "creator-tool",
         "model": record.requested_model or "configured",
         "estimatedCost": record.estimated_cost,
+        "currency": currency,
         "maxCandidates": record.requested_candidates or 1,
         "createdAt": record.created_at.isoformat(),
     }
@@ -298,6 +304,45 @@ async def cancel_task(
 
         file_r2v_execution_service(services).notify_terminal_task(task)
     return _task_view(task)
+
+
+@router.post(
+    "/timelines/{timeline_id}/render",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def render_timeline(
+    project_id: str,
+    timeline_id: str,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    services: CreatorFileServices = Depends(project_file_services),
+) -> dict[str, Any]:
+    """用户主动导出成片：确定性本地合成，不经过 Agent 链路。
+
+    读取目标 Timeline 全部已就绪的 R2V/Edit 元素按 span 顺序合成，
+    结果写入 timeline render ArtifactSlot，前端快照轮询后自动切成片预览。
+    """
+
+    key = resolve_idempotency_key(idempotency_key)
+    from services.media_files.local_execution import (
+        execute_file_local_media_command,
+    )
+
+    execution = await execute_file_local_media_command(
+        services,
+        project_id=project_id,
+        command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
+        target_ref=f"timeline:{timeline_id}",
+        arguments={},
+        idempotency_key=key,
+    )
+    return {
+        "ok": True,
+        "taskId": execution.task_id,
+        "artifactVersionId": execution.artifact_version_id,
+        "generation": execution.project_generation,
+        "etag": execution.project_etag,
+        "replayed": execution.replayed,
+    }
 
 
 @router.get("/execution-authorizations")

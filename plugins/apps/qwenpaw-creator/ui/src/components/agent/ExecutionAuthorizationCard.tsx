@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { message } from "antd";
-import { PlayCircle } from "lucide-react";
+import { Coins, PlayCircle } from "lucide-react";
 import type {
   ExecutionAuthorizationApproval,
   ExecutionAuthorizationView,
@@ -12,6 +12,18 @@ const BUTTON_BASE =
   "rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50";
 const BUTTON_PRIMARY = `${BUTTON_BASE} bg-[var(--color-accent)] text-white hover:opacity-90`;
 const BUTTON_GHOST = `${BUTTON_BASE} border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]`;
+
+export interface AuthorizationBilling {
+  estimatedCost?: number | null;
+  currency?: string;
+  displayText?: string;
+  unitPrice?: string;
+  formula?: string;
+  pricingModel?: string;
+  pricingSource?: string;
+  approximate?: boolean;
+  notes?: string[];
+}
 
 export function authorizationApprovalPayload(
   authorization: ExecutionAuthorizationView,
@@ -25,18 +37,59 @@ export function authorizationApprovalPayload(
   };
 }
 
+export function authorizationBilling(
+  authorization: ExecutionAuthorizationView,
+): AuthorizationBilling | null {
+  const billing = authorization.scope.billing;
+  if (!billing || typeof billing !== "object") return null;
+  return billing as AuthorizationBilling;
+}
+
+function authorizationOperation(
+  authorization: ExecutionAuthorizationView,
+): string {
+  return typeof authorization.scope.operation === "string"
+    ? taskKindLabel(authorization.scope.operation)
+    : "高成本媒体执行";
+}
+
+function authorizationParameterSummary(
+  authorization: ExecutionAuthorizationView,
+): string {
+  const raw = authorization.scope.parameters;
+  if (!raw || typeof raw !== "object") return "";
+  const parameters = raw as Record<string, unknown>;
+  const parts: string[] = [];
+  if (parameters.durationSeconds) {
+    parts.push(`时长 ${parameters.durationSeconds}秒`);
+  }
+  if (typeof parameters.resolution === "string") {
+    parts.push(`分辨率 ${parameters.resolution.toUpperCase()}`);
+  }
+  if (typeof parameters.ratio === "string") {
+    parts.push(`比例 ${parameters.ratio}`);
+  }
+  if (typeof parameters.aspectRatio === "string") {
+    parts.push(`画幅 ${parameters.aspectRatio}`);
+  }
+  if (typeof parameters.generateAudio === "boolean") {
+    parts.push(parameters.generateAudio ? "有声" : "无声");
+  }
+  return parts.join(" · ");
+}
+
 export function authorizationDetail(
   authorization: ExecutionAuthorizationView,
 ): string {
   const messageText = authorization.scope.message;
   if (typeof messageText === "string" && messageText.trim()) return messageText;
-  const operation =
-    typeof authorization.scope.operation === "string"
-      ? taskKindLabel(authorization.scope.operation)
-      : "高成本媒体执行";
-  return `${operation} · ${creatorTargetLabel(authorization.targetRef)} · ${
-    authorization.provider
-  }/${authorization.model}`;
+  const detail = `${authorizationOperation(authorization)} · ${creatorTargetLabel(
+    authorization.targetRef,
+  )} · ${authorization.provider}/${authorization.model}`;
+  const billing = authorizationBilling(authorization);
+  return billing?.displayText
+    ? `${detail} · 预计费用 ${billing.displayText}`
+    : detail;
 }
 
 export default function ExecutionAuthorizationCard({
@@ -48,6 +101,9 @@ export default function ExecutionAuthorizationCard({
   const decline = useExecutionAuthorizationStore((state) => state.decline);
   const [busy, setBusy] = useState(false);
   if (authorization.status !== "PENDING") return null;
+
+  const billing = authorizationBilling(authorization);
+  const parameterSummary = authorizationParameterSummary(authorization);
 
   const continueRun = async () => {
     setBusy(true);
@@ -88,12 +144,63 @@ export default function ExecutionAuthorizationCard({
               生产确认
             </span>
             <span className="min-w-0 flex-1 truncate text-xs font-semibold text-[var(--color-text-primary)]">
-              端到端生产等待确认
+              {authorizationOperation(authorization)}等待确认
             </span>
           </div>
-          <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
-            {authorizationDetail(authorization)}
-          </p>
+          <dl className="mt-1.5 space-y-0.5 text-[11px] leading-4">
+            <div className="flex gap-1">
+              <dt className="shrink-0 text-[var(--color-text-tertiary)]">
+                对象
+              </dt>
+              <dd className="min-w-0 truncate text-[var(--color-text-secondary)]">
+                {creatorTargetLabel(authorization.targetRef)}
+              </dd>
+            </div>
+            <div className="flex gap-1">
+              <dt className="shrink-0 text-[var(--color-text-tertiary)]">
+                模型
+              </dt>
+              <dd className="min-w-0 truncate text-[var(--color-text-secondary)]">
+                {authorization.provider} / {authorization.model}
+              </dd>
+            </div>
+            {parameterSummary && (
+              <div className="flex gap-1">
+                <dt className="shrink-0 text-[var(--color-text-tertiary)]">
+                  参数
+                </dt>
+                <dd className="min-w-0 text-[var(--color-text-secondary)]">
+                  {parameterSummary}
+                </dd>
+              </div>
+            )}
+          </dl>
+          {billing ? (
+            <div className="mt-1.5 rounded-md border border-[var(--color-warning)]/30 bg-[var(--color-bg-primary)]/60 px-2 py-1.5">
+              <p className="flex items-center gap-1 text-[11px] font-semibold leading-4 text-[var(--color-warning)]">
+                <Coins className="h-3 w-3" />
+                预计费用 {billing.displayText ?? "费用未知"}
+              </p>
+              {billing.formula && (
+                <p className="mt-0.5 text-[10px] leading-4 text-[var(--color-text-secondary)]">
+                  计算：{billing.formula}
+                  {billing.pricingModel ? `（按 ${billing.pricingModel} 计价）` : ""}
+                </p>
+              )}
+              {(billing.notes ?? []).map((note) => (
+                <p
+                  key={note}
+                  className="text-[10px] leading-4 text-[var(--color-text-tertiary)]"
+                >
+                  {note}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+              {authorizationDetail(authorization)}
+            </p>
+          )}
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
