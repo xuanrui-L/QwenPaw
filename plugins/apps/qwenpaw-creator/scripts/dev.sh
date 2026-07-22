@@ -18,6 +18,7 @@
 #
 # Environment:
 #   QWENPAW_BIN          qwenpaw executable (default: qwenpaw on PATH)
+#   QWENPAW_PYTHON       Python used by QwenPaw (default: python3 on PATH)
 #   QWENPAW_WORKING_DIR  working dir of the target instance (default ~/.qwenpaw)
 #   QWENPAW_PORT         API port for backend hot reload (default 8088)
 #
@@ -30,6 +31,7 @@ set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 QWENPAW_BIN="${QWENPAW_BIN:-qwenpaw}"
+QWENPAW_PYTHON="${QWENPAW_PYTHON:-python3}"
 WORKING_DIR="${QWENPAW_WORKING_DIR:-$HOME/.qwenpaw}"
 WORKING_DIR="${WORKING_DIR/#\~/$HOME}"
 
@@ -51,6 +53,8 @@ install_plugin() {
 
   echo "==> Installing via qwenpaw plugin install --force ..."
   "$QWENPAW_BIN" plugin install "$STAGE_DIR" --force
+  echo "==> Ensuring Playwright Chromium is installed for motion overlays ..."
+  "$QWENPAW_PYTHON" -m playwright install chromium
   echo "==> Installed. If a console page is already open, hard-refresh it."
 }
 
