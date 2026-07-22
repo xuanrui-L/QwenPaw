@@ -552,6 +552,9 @@ class FfmpegLocalMediaRunner:
             process = subprocess.Popen(
                 [self.executable, *arguments],
                 cwd=cwd,
+                # ffmpeg 默认读 stdin；继承服务进程的 tty 会在后台运行时
+                # 触发 SIGTTIN 把进程组挂起，必须显式断开。
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

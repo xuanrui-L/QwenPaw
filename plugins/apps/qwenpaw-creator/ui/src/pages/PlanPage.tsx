@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Scissors, Sparkles } from "lucide-react";
+import { message } from "antd";
+import { Loader2, Scissors } from "lucide-react";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
-import { useAgentDockUiStore } from "@/store/agentDockUiStore";
+import { renderTimeline } from "@/api/creator";
 import {
   selectPrimaryTimeline,
   timelineEndTick,
 } from "@/selectors/timelineElementSelectors";
+import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { useReviewFieldFocus } from "@/routing/reviewFocus";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
@@ -45,6 +47,7 @@ export default function PlanPage() {
       : null;
   const [playheadTick, setPlayheadTick] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const durationTick = timelineEndTick(timeline);
   const displayDurationTick = timeline
     ? durationTick ||
@@ -94,13 +97,6 @@ export default function PlanPage() {
     [base, selectedElementId, timeline],
   );
 
-  const focusAgent = useCallback((ref: string, prompt: string) => {
-    useCreatorInteractionStore.getState().select(ref);
-    useAgentDockUiStore.getState().setOpen(true);
-    useAgentDockUiStore.getState().setTab("conversation");
-    useAgentDockUiStore.getState().setDraft(prompt);
-  }, []);
-
   if (!project) {
     if (syncStatus === "invalid" || syncStatus === "not_found") {
       return (
@@ -123,19 +119,34 @@ export default function PlanPage() {
 
   const patchValue = (path: string, before: unknown, value: unknown) =>
     patchProject(id, [{ op: "replace", path, before, value }]);
-  const openElementAgent = (
-    element: TimelineElementDocument,
-    instruction?: string,
-  ) => {
-    focusAgent(
-      `element:${element.element_id}`,
-      instruction ||
-        `请修改时间线内容「${
-          element.label || "当前内容"
-        }」，先读取现有内容并说明计划。`,
-    );
+  // 导出门禁：只统计参与成片合成的主轨元素（r2v/edit）；文案 overlay
+  // 由合成器确定性绘制，motion/media overlay 与 audio 不参与合成。
+  const composeElements = Object.values(timeline.elements_by_id).filter(
+    (element) =>
+      element.enabled &&
+      (element.creation.type === "r2v" || element.creation.type === "edit"),
+  );
+  const notReadyCount = composeElements.filter(
+    (element) =>
+      resolveElementPlayback(project, timeline, element, tasks).status !==
+      "ready",
+  ).length;
+  const exportDisabled =
+    composeElements.length === 0 || notReadyCount > 0 || exporting;
+  const exportTimeline = async () => {
+    setExporting(true);
+    try {
+      // 导出是确定性后端合成，不经过 Agent；完成后立即拉新快照，
+      // 预览会自动切换到新鲜成片。
+      await renderTimeline(id, timeline.timeline_id);
+      await pollOnce(id);
+      message.success("成片已导出，预览已切换到成片");
+    } catch (error) {
+      message.error(`导出成片失败：${(error as Error).message}`);
+    } finally {
+      setExporting(false);
+    }
   };
-  const timelineTargetRef = `timeline:${timeline.timeline_id}`;
   const openElementWorkbench = (element: TimelineElementDocument) =>
     navigate(`${base}/element/${encodeURIComponent(element.element_id)}`);
 
@@ -186,29 +197,25 @@ export default function PlanPage() {
           </span>
           <button
             type="button"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
-            onClick={() =>
-              focusAgent(
-                timelineTargetRef,
-                "请检查当前时间轴中的全部内容和制作结果，满足条件后渲染最终成片。",
-              )
+            disabled={exportDisabled}
+            title={
+              composeElements.length === 0
+                ? "时间轴还没有可合成的画面内容"
+                : notReadyCount > 0
+                  ? `还有 ${notReadyCount} 项内容生成中，全部就绪后可导出`
+                  : exporting
+                    ? "正在合成导出成片"
+                    : "合成并导出最终成片文件"
             }
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-bg-primary)]"
+            onClick={() => void exportTimeline()}
           >
-            <Scissors className="h-3.5 w-3.5" />
-            生成成片
-          </button>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-white transition hover:border-[var(--color-accent-hover)] hover:bg-[var(--color-accent-hover)]"
-            onClick={() =>
-              focusAgent(
-                timelineTargetRef,
-                "请根据当前项目目标规划并完善整条时间轴，用清晰的时间范围、画面位置、叠放关系和制作方式表达全部内容。",
-              )
-            }
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            Agent 规划
+            {exporting ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Scissors className="h-3.5 w-3.5" />
+            )}
+            {exporting ? "导出中…" : "导出成片"}
           </button>
         </div>
       </header>
@@ -257,7 +264,6 @@ export default function PlanPage() {
           patching={patching || requestInFlight}
           onClose={() => navigate(base)}
           onPatch={patchValue}
-          onAgent={openElementAgent}
           onOpenWorkbench={openElementWorkbench}
         />
       </main>

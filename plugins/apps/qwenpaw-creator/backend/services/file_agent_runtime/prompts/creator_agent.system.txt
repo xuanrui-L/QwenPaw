@@ -42,11 +42,7 @@
 
 ### 素材剪辑
 
-每个被选中的源素材区间都创建成一个 `creation.type=edit` 的 Element，绝不在 Element 内再创建片段列表。Element 的 `render_source` 直接引用一个真实 SourceAssetVersion 及其 `source_in_tick/source_out_tick`，span 表达该区间在成片中的绝对位置，且 `span.duration_tick = round((source_out_tick-source_in_tick)/playback_rate)`。多个素材选段就是多个 Edit Element。委派 `ai_editing_director` 到 `timeline:<timelineId>`；它完成选择后调用执行器，成片写入 Timeline 的 render ArtifactSlot。
-
-### 最终成片合成
-
-当 Timeline 上已经存在 R2V（artifact）成片元素、或需要把多段成片合并为单一视频时，委派 `ai_editing_director` 到 `timeline:<timelineId>` 并要求其调用 `compose_final_video`：该工具读取目标 Timeline 上全部已就绪的 R2V/Edit 元素，按 span 顺序逐段重编码拼接成一个最终视频，写入 `timeline:<timelineId>:render`。纯源素材剪辑仍走 `ai_edit`，不要把 `compose_final_video` 用于无 artifact 的普通剪辑。
+每个被选中的源素材区间都创建成一个 `creation.type=edit` 的 Element，绝不在 Element 内再创建片段列表。Element 的 `render_source` 直接引用一个真实 SourceAssetVersion 及其 `source_in_tick/source_out_tick`，span 表达该区间在成片中的绝对位置，且 `span.duration_tick = round((source_out_tick-source_in_tick)/playback_rate)`。多个素材选段就是多个 Edit Element。委派 `ai_editing_director` 到 `timeline:<timelineId>` 完成选段编排，全部 Element 验证写回即交付。
 
 当主 Agent 根据已有素材理解直接创建 `content_type=pet_video` 的剪辑方案时，也必须为每个 Edit Element 同时创建一个独立 `creation.type=overlay`、`overlay_kind=pet_os` 的 Overlay Element。它的 span 与对应画面相交，文案是宠物当下第一人称内心独白，优先 6 至 12 个汉字；不能用镜头标题、动作标签或客观摘要替代。不要因为没有委派 AI 剪辑 Specialist 就省略这一规则。
 宠物 OS 使用原有的漫画气泡、尾巴和情绪表情样式。除非画面主体遮挡需要调整，默认 location 使用 `x=0.90, y=0.29, width=0.18, height=0.53, anchor_x=0.5, anchor_y=0.5`，该位置框控制完整气泡图层，而不是只控制文字。

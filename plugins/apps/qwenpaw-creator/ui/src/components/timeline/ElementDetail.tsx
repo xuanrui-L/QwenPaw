@@ -32,7 +32,6 @@ interface ElementDetailProps {
   patching: boolean;
   onClose: () => void;
   onPatch: (path: string, before: unknown, value: unknown) => Promise<void>;
-  onAgent: (element: TimelineElementDocument, prompt?: string) => void;
   onOpenWorkbench: (element: TimelineElementDocument) => void;
 }
 
@@ -137,7 +136,6 @@ export default function ElementDetail({
   patching,
   onClose,
   onPatch,
-  onAgent,
   onOpenWorkbench,
 }: ElementDetailProps) {
   const outputs = useMemo(
@@ -653,13 +651,6 @@ export default function ElementDetail({
             onClick={() => onOpenWorkbench(element)}
           >
             进入 R2V 工作台
-          </Button>
-          <Button
-            onClick={() =>
-              onAgent(element, "请继续完成当前 AI 生成画面的分镜和视频生成。")
-            }
-          >
-            继续制作
           </Button>
         </footer>
       )}

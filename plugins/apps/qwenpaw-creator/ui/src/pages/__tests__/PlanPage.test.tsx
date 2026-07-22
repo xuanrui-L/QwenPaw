@@ -395,21 +395,67 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getByText("垂直位置（%）")).toBeInTheDocument();
   });
 
-  it("keeps Agent planning at Timeline level without exposing an Element Agent shortcut", () => {
-    const { calls } = installMockFetch([]);
+  it("keeps a single export action gated on element readiness without planning shortcuts", async () => {
+    const { calls } = installMockFetch([
+      {
+        match: "/timelines/timeline%3Amain/render",
+        method: "POST",
+        response: {
+          json: {
+            ok: true,
+            taskId: "task-render",
+            artifactVersionId: "final-v2",
+            generation: 4,
+            etag: '"sha256:g4"',
+            replayed: false,
+          },
+        },
+      },
+    ]);
     renderPage("/project/p1/plan?element=r2v-window");
 
-    fireEvent.click(screen.getByRole("button", { name: "Agent 规划" }));
-    expect(useCreatorInteractionStore.getState().selectedRef).toBe(
-      "timeline:timeline:main",
-    );
-    expect(useAgentDockUiStore.getState().draft).toContain(
-      "时间范围、画面位置、叠放关系和制作方式",
-    );
+    // 规划/继续制作类快捷按钮已移除，Agent 入口统一在 AgentDock。
+    expect(
+      screen.queryByRole("button", { name: "Agent 规划" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "继续制作" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "在 Agent 中修改" }),
     ).not.toBeInTheDocument();
+
+    // fixture 全部就绪 → 导出可用；点击直接调确定性导出端点，不经 Agent。
+    const exportButton = screen.getByRole("button", { name: "导出成片" });
+    expect(exportButton).toBeEnabled();
+    fireEvent.click(exportButton);
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.method === "POST" &&
+            call.url.includes("/timelines/timeline%3Amain/render"),
+        ),
+      ).toBe(true),
+    );
+    expect(useAgentDockUiStore.getState().draft).toBe("");
     expect(calls.some((call) => call.url.includes("/commands"))).toBe(false);
+  });
+
+  it("disables export while any enabled element is still not ready", () => {
+    const project = cloneProject();
+    project.assets.artifact_slots_by_id[
+      "element:r2v-window:video"
+    ].selected_version_id = null;
+    seedProject(project);
+    renderPage();
+
+    const exportButton = screen.getByRole("button", { name: "导出成片" });
+    expect(exportButton).toBeDisabled();
+    expect(exportButton).toHaveAttribute(
+      "title",
+      expect.stringContaining("项内容生成中"),
+    );
   });
 
   it("keeps the detail header free of a delete action while retaining close", () => {

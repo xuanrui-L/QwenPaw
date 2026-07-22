@@ -23,9 +23,6 @@ from typing import Any
 from domain.enums import CreatorCommandType, SpecialistRole
 from domain.errors import PermissionDeniedError, ValidationError
 from services.media_files.image_execution import execute_file_image_command
-from services.media_files.local_execution import (
-    execute_file_local_media_command,
-)
 from services.media_files.r2v_execution import execute_file_r2v_command
 from services.project_files.agent_tools import (
     AgentProjectTools,
@@ -348,40 +345,6 @@ _SPECS = (
         wait=SpecialistToolWait.TASK,
         provider_kind="video",
     ),
-    SpecialistToolSpec(
-        name="ai_edit",
-        description=(
-            "执行已经通过 jq_project 写入目标 Timeline 的 Edit/Overlay Elements。"
-            "本工具不生成选择；选择内容来自本 Specialist 的 prompt。"
-        ),
-        roles=frozenset({SpecialistRole.AI_EDITING_DIRECTOR}),
-        parameters=_tool_schema(
-            _arguments_schema(
-                {"operation": {"type": "string", "const": "execute"}},
-                ("operation",),
-            ),
-        ),
-        long_running=True,
-        provider_kind="local_media",
-    ),
-    SpecialistToolSpec(
-        name="compose_final_video",
-        description=(
-            "把目标 Timeline 上全部已就绪的 R2V/Edit 元素按 span 顺序合成最终成片，"
-            "写入 timeline:<timelineId>:render。当 Timeline 含 R2V（artifact）成片"
-            "元素、或需要把多段成片合并为单一视频时使用本工具；纯源素材剪辑仍用"
-            " ai_edit。本工具不生成选择，也不改动元素结构。"
-        ),
-        roles=frozenset({SpecialistRole.AI_EDITING_DIRECTOR}),
-        parameters=_tool_schema(
-            _arguments_schema(
-                {"operation": {"type": "string", "const": "compose"}},
-                ("operation",),
-            ),
-        ),
-        long_running=True,
-        provider_kind="local_media",
-    ),
 )
 
 _SPECS_BY_NAME = {item.name: item for item in _SPECS}
@@ -552,48 +515,6 @@ class FileSpecialistToolRegistry:
                 task_id=execution.task_id,
             )
 
-        if name == "ai_edit":
-            execution = await execute_file_local_media_command(
-                self.services,
-                project_id=project_id,
-                command=CreatorCommandType.EXECUTE_EDIT,
-                target_ref=target_ref,
-                arguments=payload,
-                idempotency_key=idempotency_key,
-            )
-            return SpecialistToolResult(
-                payload={
-                    "ok": True,
-                    "status": "SUCCEEDED",
-                    "taskId": execution.task_id,
-                    "artifactVersionId": execution.artifact_version_id,
-                    "generation": execution.project_generation,
-                    "etag": execution.project_etag,
-                    "replayed": execution.replayed,
-                },
-                task_id=execution.task_id,
-            )
-        if name == "compose_final_video":
-            execution = await execute_file_local_media_command(
-                self.services,
-                project_id=project_id,
-                command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
-                target_ref=target_ref,
-                arguments=payload,
-                idempotency_key=idempotency_key,
-            )
-            return SpecialistToolResult(
-                payload={
-                    "ok": True,
-                    "status": "SUCCEEDED",
-                    "taskId": execution.task_id,
-                    "artifactVersionId": execution.artifact_version_id,
-                    "generation": execution.project_generation,
-                    "etag": execution.project_etag,
-                    "replayed": execution.replayed,
-                },
-                task_id=execution.task_id,
-            )
         raise RuntimeError(f"unhandled Specialist tool: {name}")
 
 

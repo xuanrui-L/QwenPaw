@@ -45,8 +45,10 @@ def test_specialist_registry_owns_role_specific_media_tools(tmp_path) -> None:
 
     assert "image_generation" in visual
     assert {"image_generation", "r2v_generation"} <= r2v
-    assert "ai_edit" in editing
-    assert "compose_final_video" in editing
+    # 剪辑导演是纯编排角色：合成/导出由用户通过 HTTP 端点直接触发。
+    assert "ai_edit" not in editing
+    assert "compose_final_video" not in editing
+    assert {"read_project", "jq_project"} <= editing
     assert "transcribe_source_audio" in source
     assert "commit_source_intelligence" in source
     assert {"read_project", "read_project_file"} <= source
@@ -165,7 +167,8 @@ def test_ai_edit_rules_are_dynamic_specialist_prompt_not_runtime_state() -> (
     assert "60 至 120 秒" in prompt
     assert "interview_summary" in prompt
     assert "不超过 30 个汉字" in prompt
-    assert "`ai_edit`" in prompt
-    assert "`compose_final_video`" in prompt
+    # 纯编排角色：prompt 不提及已移除的合成类工具。
+    assert "`ai_edit`" not in prompt
+    assert "`compose_final_video`" not in prompt
     assert "operation=execute" not in prompt
     assert "本工具不生成 plan" not in prompt
