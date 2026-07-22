@@ -650,8 +650,30 @@ class EditCreation(StrictModel):
     source_intelligence_version_id: EntityId | None = None
 
 
+class MotionGraphic(StrictModel):
+    """One self-contained deterministic HTML/CSS animation document.
+
+    ``html`` is a complete standalone document that draws on a transparent
+    background and animates exclusively through CSS animations, so any
+    conforming renderer can seek it frame by frame.  External network
+    resources are never loaded during rendering.
+    """
+
+    format: Literal["html_css"] = "html_css"
+    html: str = Field(min_length=32, max_length=200_000)
+    fps: int = Field(default=24, ge=8, le=60)
+    loop: bool = True
+    design_notes: str = ""
+
+
 class OverlayCreation(StrictModel):
-    """Procedural or generated overlay creative facts."""
+    """Procedural or generated overlay creative facts.
+
+    ``motion`` carries one generated presentation document.  It is the whole
+    payload of an ``overlay_kind="motion"`` decoration, and the optional
+    generated styling of a text overlay (``pet_os`` / ``interview_summary``),
+    whose ``text`` stays the authoritative content either way.
+    """
 
     type: Literal["overlay"] = "overlay"
     overlay_kind: Literal["pet_os", "interview_summary", "motion", "media"]
@@ -659,6 +681,7 @@ class OverlayCreation(StrictModel):
     vibe: str = "chill"
     prompt: str = ""
     reference_version_ids: list[EntityId] = Field(default_factory=list)
+    motion: MotionGraphic | None = None
 
     @model_validator(mode="after")
     def _validate_payload(self) -> OverlayCreation:
@@ -672,6 +695,10 @@ class OverlayCreation(StrictModel):
         ):
             raise ValueError(
                 "generated overlay requires prompt or reference versions",
+            )
+        if self.motion is not None and self.overlay_kind == "media":
+            raise ValueError(
+                "motion payload is not valid for overlay_kind=media",
             )
         return self
 
@@ -1273,6 +1300,7 @@ __all__ = [
     "ProjectSource",
     "R2VCreation",
     "RenderSource",
+    "MotionGraphic",
     "Shot",
     "SourceAssetVersion",
     "SourceCatalog",

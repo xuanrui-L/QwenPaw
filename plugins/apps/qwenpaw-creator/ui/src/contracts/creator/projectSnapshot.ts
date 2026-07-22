@@ -194,6 +194,14 @@ export interface EditCreationDocument extends ProjectJsonRecord {
   source_intelligence_version_id: string | null;
 }
 
+export interface MotionGraphicDocument extends ProjectJsonRecord {
+  format: "html_css";
+  html: string;
+  fps: number;
+  loop: boolean;
+  design_notes: string;
+}
+
 export interface OverlayCreationDocument extends ProjectJsonRecord {
   type: "overlay";
   overlay_kind: "pet_os" | "interview_summary" | "motion" | "media";
@@ -201,6 +209,7 @@ export interface OverlayCreationDocument extends ProjectJsonRecord {
   vibe: string;
   prompt: string;
   reference_version_ids: string[];
+  motion?: MotionGraphicDocument | null;
 }
 
 export interface TransitionCreationDocument extends ProjectJsonRecord {

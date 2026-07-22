@@ -3,3 +3,7 @@
 # lockfile here. Creator persistence is filesystem-native.
 oss2
 imageio-ffmpeg
+# Deterministic HTML/CSS motion-overlay rendering (seek-and-capture).
+# Motion overlays degrade gracefully with a warning when the browser
+# runtime is unavailable.
+playwright

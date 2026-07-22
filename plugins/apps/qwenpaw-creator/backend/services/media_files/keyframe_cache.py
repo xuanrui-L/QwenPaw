@@ -209,6 +209,7 @@ def materialize_keyframe(
         try:
             result = subprocess.run(
                 command,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 timeout=30,

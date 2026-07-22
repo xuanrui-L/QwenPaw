@@ -665,6 +665,7 @@ def _composite_overlay(
     try:
         result = subprocess.run(
             command,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=120,

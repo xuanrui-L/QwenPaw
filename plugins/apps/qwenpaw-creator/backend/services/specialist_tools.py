@@ -26,6 +26,7 @@ from services.media_files.image_execution import execute_file_image_command
 from services.media_files.local_execution import (
     execute_file_local_media_command,
 )
+from services.media_files.motion_design import design_motion_overlays
 from services.media_files.r2v_execution import execute_file_r2v_command
 from services.project_files.agent_tools import (
     AgentProjectTools,
@@ -295,6 +296,33 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
     ("summary", "shots", "entities", "semanticEntries"),
 )
 
+_MOTION_DESIGN_ARGUMENTS = _arguments_schema(
+    {
+        "brief": {
+            "type": "string",
+            "description": "整体包装风格要求，例如节奏、情绪、配色倾向。",
+        },
+        "elementIds": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "maxItems": 24,
+            "uniqueItems": True,
+            "description": (
+                "只处理这些 Element：文字 Overlay Element ID 表示只为其生成样式，"
+                "Edit Element ID 表示只为其设计装饰动效；"
+                "省略时自动处理全部文字 Overlay 并稀疏挑选装饰片段。"
+            ),
+        },
+        "maxDecorations": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8,
+            "description": "装饰动效名额上限（默认 3）。装饰是锦上添花，只在少数关键片段出现；0 表示只做文字 Overlay 样式、不加装饰。",
+        },
+    },
+    (),
+)
+
 _SPECS = (
     SpecialistToolSpec(
         name="transcribe_source_audio",
@@ -347,6 +375,22 @@ _SPECS = (
         long_running=True,
         wait=SpecialistToolWait.TASK,
         provider_kind="video",
+    ),
+    SpecialistToolSpec(
+        name="design_motion_overlays",
+        description=(
+            "让视觉设计模型观察目标 Timeline 的真实画面帧做两件事："
+            "为每个文字 Overlay（pet_os/interview_summary）生成贴合画面的精美"
+            "动态字幕卡样式，写入该 Element 的 creation.motion（渲染失败自动回退"
+            "固定气泡模板）；再从全片挑选少数最值得装饰的片段（默认最多 3 个），"
+            "生成 overlay_kind=motion 的装饰 Overlay Element。全部结果直接写入 "
+            "project.json 并返回逐项摘要；写入后可用 read_project 查看，"
+            "再执行 ai_edit 即可把样式与动效合成进成片。"
+        ),
+        roles=frozenset({SpecialistRole.AI_EDITING_DIRECTOR}),
+        parameters=_tool_schema(_MOTION_DESIGN_ARGUMENTS),
+        long_running=True,
+        provider_kind="vlm",
     ),
     SpecialistToolSpec(
         name="ai_edit",
@@ -551,6 +595,16 @@ class FileSpecialistToolRegistry:
                 },
                 task_id=execution.task_id,
             )
+
+        if name == "design_motion_overlays":
+            result = await design_motion_overlays(
+                self.services,
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments=payload,
+                idempotency_key=idempotency_key,
+            )
+            return SpecialistToolResult(payload=dict(result))
 
         if name == "ai_edit":
             execution = await execute_file_local_media_command(

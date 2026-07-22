@@ -49,6 +49,7 @@ from services.media_files.overlay import (
     render_interview_summary_overlay,
     render_pet_os_overlay,
 )
+from services.media_files.motion_overlay import render_motion_overlay
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileError,
@@ -134,6 +135,7 @@ class LocalMediaInput:
     original_sound: str = "preserve"
     location: Mapping[str, Any] | None = None
     overlay: Mapping[str, Any] | None = None
+    motions: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +209,7 @@ class FfmpegLocalMediaRunner:
             item.start_seconds is not None
             or item.location is not None
             or item.overlay is not None
+            or item.motions
             for item in spec.inputs
         ):
             segment_dir = _ensure_real_directory_chain(
@@ -260,6 +263,10 @@ class FfmpegLocalMediaRunner:
                 )
                 warning = self._apply_overlay(item, segment)
                 if warning is not None:
+                    overlay_warnings.append(
+                        f"{item.source_ref or item.version_id}: {warning}",
+                    )
+                for warning in self._apply_motion_overlays(item, segment):
                     overlay_warnings.append(
                         f"{item.source_ref or item.version_id}: {warning}",
                     )
@@ -370,6 +377,36 @@ class FfmpegLocalMediaRunner:
             return None
         video_size = self._probe_video_size(segment)
         rendered = segment.with_name(f"{segment.stem}-overlay.mp4")
+        styled_error: str | None = None
+        motion = overlay.get("motion")
+        if (
+            isinstance(motion, Mapping)
+            and str(motion.get("html") or "").strip()
+        ):
+            # A text overlay carrying a generated motion document renders
+            # through the deterministic motion pipeline; the procedural
+            # template below stays as the fallback so the required text
+            # bubble never silently disappears.
+            result = render_motion_overlay(
+                ffmpeg_path=self.executable,
+                input_path=segment,
+                output_path=rendered,
+                html=str(motion["html"]),
+                fps=min(60, max(8, int(motion.get("fps") or 24))),
+                loop=bool(motion.get("loop", True)),
+                video_size=video_size,
+                appear_at=overlay["appear_at"],
+                duration=overlay["duration"],
+                location=overlay.get("location"),
+            )
+            if result.success:
+                os.replace(rendered, segment)
+                return None
+            rendered.unlink(missing_ok=True)
+            styled_error = (
+                f"{overlay['kind']} 生成样式渲染失败，已回退固定样式: "
+                f"{result.error or '未知错误'}"
+            )
         if overlay["kind"] == "pet_os":
             result = render_pet_os_overlay(
                 ffmpeg_path=self.executable,
@@ -397,7 +434,102 @@ class FfmpegLocalMediaRunner:
             rendered.unlink(missing_ok=True)
             return result.error or f"{overlay['kind']} overlay 渲染失败"
         os.replace(rendered, segment)
-        return None
+        return styled_error
+
+    def _apply_motion_overlays(
+        self,
+        item: LocalMediaInput,
+        segment: Path,
+    ) -> list[str]:
+        """Burn every generated motion overlay into one prepared segment.
+
+        Motion overlays are additive polish: a failed document only records a
+        warning so the edit itself still completes.
+        """
+
+        warnings: list[str] = []
+        video_size: tuple[int, int] | None = None
+        for index, motion in enumerate(item.motions):
+            normalized = self._normalized_motion(item, motion)
+            if normalized is None:
+                continue
+            if video_size is None:
+                video_size = self._probe_video_size(segment)
+            rendered = segment.with_name(
+                f"{segment.stem}-motion-{index:02d}.mp4",
+            )
+            result = render_motion_overlay(
+                ffmpeg_path=self.executable,
+                input_path=segment,
+                output_path=rendered,
+                html=normalized["html"],
+                fps=normalized["fps"],
+                loop=normalized["loop"],
+                video_size=video_size,
+                appear_at=normalized["appear_at"],
+                duration=normalized["duration"],
+                location=normalized.get("location"),
+            )
+            if not result.success:
+                rendered.unlink(missing_ok=True)
+                warnings.append(
+                    f"motion overlay {normalized['element_id']} 渲染失败: "
+                    f"{result.error or '未知错误'}",
+                )
+                continue
+            os.replace(rendered, segment)
+        return warnings
+
+    @staticmethod
+    def _normalized_motion(
+        item: LocalMediaInput,
+        raw: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if not isinstance(raw, Mapping):
+            return None
+        html = str(raw.get("html") or "")
+        if not html.strip():
+            return None
+        segment_duration = (
+            item.end_seconds - item.start_seconds
+            if item.start_seconds is not None and item.end_seconds is not None
+            else item.duration_seconds
+        )
+        if segment_duration is None or not math.isfinite(segment_duration):
+            return None
+        try:
+            appear_at = float(raw.get("appear_at", 0.0))
+        except (TypeError, ValueError):
+            appear_at = 0.0
+        if not math.isfinite(appear_at):
+            appear_at = 0.0
+        appear_at = max(0.0, appear_at)
+        if appear_at >= segment_duration:
+            return None
+        try:
+            duration = float(raw.get("duration", segment_duration - appear_at))
+        except (TypeError, ValueError):
+            duration = segment_duration - appear_at
+        if not math.isfinite(duration) or duration <= 0:
+            duration = segment_duration - appear_at
+        duration = min(duration, segment_duration - appear_at)
+        try:
+            fps = int(raw.get("fps", 24))
+        except (TypeError, ValueError):
+            fps = 24
+        return {
+            "element_id": str(raw.get("element_id") or ""),
+            "html": html,
+            "fps": min(60, max(8, fps)),
+            "loop": bool(raw.get("loop", True)),
+            "appear_at": appear_at,
+            "duration": duration,
+            "location": (
+                dict(raw["location"])
+                if isinstance(raw.get("location"), Mapping)
+                else None
+            ),
+        }
 
     @staticmethod
     def _normalized_overlay(item: LocalMediaInput) -> dict[str, Any] | None:
@@ -441,6 +573,11 @@ class FfmpegLocalMediaRunner:
             "location": (
                 dict(raw["location"])
                 if isinstance(raw.get("location"), Mapping)
+                else None
+            ),
+            "motion": (
+                dict(raw["motion"])
+                if isinstance(raw.get("motion"), Mapping)
                 else None
             ),
         }
@@ -552,6 +689,7 @@ class FfmpegLocalMediaRunner:
             process = subprocess.Popen(
                 [self.executable, *arguments],
                 cwd=cwd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -620,6 +758,7 @@ class _FrozenInput:
     original_sound: str = "preserve"
     location: Mapping[str, Any] | None = None
     overlay: Mapping[str, Any] | None = None
+    motions: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -852,6 +991,7 @@ def _edit_overlay(
     overlay = overlays[0]
     intersection_start = max(element.span.start_tick, overlay.span.start_tick)
     intersection_end = min(element.span.end_tick, overlay.span.end_tick)
+    motion = overlay.creation.motion
     return {
         "kind": overlay.creation.overlay_kind,
         "text": overlay.creation.text,
@@ -859,6 +999,11 @@ def _edit_overlay(
         "location": (
             overlay.location.model_dump(mode="json")
             if overlay.location is not None
+            else None
+        ),
+        "motion": (
+            {"html": motion.html, "fps": motion.fps, "loop": motion.loop}
+            if motion is not None
             else None
         ),
         "appear_at": (intersection_start - element.span.start_tick)
@@ -891,6 +1036,56 @@ def _validate_contiguous_edit_elements(
                 "render_source.source_in_tick/source_out_tick。",
             )
         expected_start_tick = element.span.end_tick
+
+
+def _edit_motion_overlays(
+    timeline: Timeline,
+    element: TimelineElement,
+) -> tuple[Mapping[str, Any], ...]:
+    """Project every generated motion Overlay onto one edit input.
+
+    Unlike the single burned-in text overlay, any number of motion documents
+    may stack on one segment; they composite in ``z_index`` order.
+    """
+
+    overlays = sorted(
+        (
+            candidate
+            for candidate in timeline.elements_by_id.values()
+            if candidate.enabled
+            and isinstance(candidate.creation, OverlayCreation)
+            and candidate.creation.overlay_kind == "motion"
+            and candidate.creation.motion is not None
+            and candidate.span.overlaps(element.span)
+        ),
+        key=lambda candidate: (candidate.z_index, candidate.element_id),
+    )
+    motions: list[Mapping[str, Any]] = []
+    for overlay in overlays:
+        motion = overlay.creation.motion
+        intersection_start = max(
+            element.span.start_tick,
+            overlay.span.start_tick,
+        )
+        intersection_end = min(element.span.end_tick, overlay.span.end_tick)
+        motions.append(
+            {
+                "element_id": overlay.element_id,
+                "html": motion.html,
+                "fps": motion.fps,
+                "loop": motion.loop,
+                "location": (
+                    overlay.location.model_dump(mode="json")
+                    if overlay.location is not None
+                    else None
+                ),
+                "appear_at": (intersection_start - element.span.start_tick)
+                / timeline.ticks_per_second,
+                "duration": (intersection_end - intersection_start)
+                / timeline.ticks_per_second,
+            },
+        )
+    return tuple(motions)
 
 
 def _timeline_execution(
@@ -977,6 +1172,11 @@ def _timeline_execution(
                     _edit_overlay(timeline, element)
                     if isinstance(element.creation, EditCreation)
                     else None
+                ),
+                motions=(
+                    _edit_motion_overlays(timeline, element)
+                    if isinstance(element.creation, EditCreation)
+                    else ()
                 ),
             ),
         )
@@ -1113,6 +1313,7 @@ def _resolved_fingerprint(
                     "originalSound": item.original_sound,
                     "location": item.location,
                     "overlay": item.overlay,
+                    "motions": [dict(motion) for motion in item.motions],
                 }
                 for item in resolved.inputs
             ],
@@ -1699,6 +1900,7 @@ class FileLocalMediaExecutionService:
                     original_sound=frozen.original_sound,
                     location=frozen.location,
                     overlay=frozen.overlay,
+                    motions=frozen.motions,
                 ),
             )
         output_path = work_dir / "output.mp4"
@@ -1756,6 +1958,7 @@ class FileLocalMediaExecutionService:
                         "originalSound": item.original_sound,
                         "location": item.location,
                         "overlay": item.overlay,
+                        "motions": [dict(motion) for motion in item.motions],
                     }
                     for item in local_inputs
                 ],
