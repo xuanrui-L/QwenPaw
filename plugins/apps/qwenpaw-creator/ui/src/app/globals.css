@@ -727,3 +727,20 @@ a {
   opacity: 0.65;
   animation: slide-progress 1.4s ease-in-out infinite;
 }
+
+/* 时间轴轨道块：Element 产物生成中的斜纹流动动效（颜色跟随类型色）。 */
+@keyframes element-generating-stripes {
+  to {
+    background-position: 17px 0;
+  }
+}
+
+.element-generating-stripes {
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 8px,
+    currentColor 8px 12px
+  );
+  opacity: 0.18;
+  animation: element-generating-stripes 0.9s linear infinite;
+}

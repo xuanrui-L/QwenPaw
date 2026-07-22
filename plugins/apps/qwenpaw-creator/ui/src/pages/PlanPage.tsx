@@ -258,6 +258,7 @@ export default function PlanPage() {
         playheadTick={Math.min(playheadTick, displayDurationTick)}
         selectedElementId={selectedElementId}
         previewOpen={previewOpen}
+        tasks={tasks}
         onPreviewOpenChange={setPreviewOpen}
         onPlayheadChange={(tick) =>
           setPlayheadTick(Math.max(0, Math.min(displayDurationTick, tick)))

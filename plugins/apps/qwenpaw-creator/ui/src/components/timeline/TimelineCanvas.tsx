@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type {
   ProjectDocument,
+  TaskView,
   TimelineDocument,
   TimelineElementDocument,
 } from "@/contracts/creator";
@@ -22,6 +23,12 @@ import {
   packDisplayLanes,
   resolveTimelineRender,
 } from "@/selectors/timelineElementSelectors";
+import type { ElementPlaybackStatus } from "@/selectors/elementPlaybackSelectors";
+import {
+  ELEMENT_PLAYBACK_STATUS_LABEL,
+  resolveElementPlayback,
+} from "@/selectors/elementPlaybackSelectors";
+import TimelineLivePreview from "@/components/timeline/TimelineLivePreview";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -40,6 +47,7 @@ interface TimelineCanvasProps {
   playheadTick: number;
   selectedElementId: string | null;
   previewOpen: boolean;
+  tasks: TaskView[];
   onPreviewOpenChange: (open: boolean) => void;
   onPlayheadChange: (tick: number) => void;
   onSelectElement: (elementId: string) => void;
@@ -68,6 +76,7 @@ export default function TimelineCanvas({
   playheadTick,
   selectedElementId,
   previewOpen,
+  tasks,
   onPreviewOpenChange,
   onPlayheadChange,
   onSelectElement,
@@ -106,6 +115,21 @@ export default function TimelineCanvas({
   const renderUrl = renderedVersion
     ? getArtifactVersionMediaUrl(renderedVersion.version_id)
     : null;
+  // 单一预览自动选源：有新鲜成片直接播成片；否则用成片同口径的
+  // 实时拼装，成片合成/过期后由快照轮询自动切换，无需用户选择。
+  const previewMode =
+    renderUrl && !renderedVersion?.stale ? "final" : "live";
+  // 实时拼装预览里的就绪态，同时驱动轨道块的生成中/失败样式。
+  const playbackStates = useMemo(() => {
+    const states = new Map<string, ElementPlaybackStatus>();
+    Object.values(timeline.elements_by_id).forEach((element) => {
+      states.set(
+        element.element_id,
+        resolveElementPlayback(project, timeline, element, tasks).status,
+      );
+    });
+    return states;
+  }, [project, tasks, timeline]);
   const scrollable = lanes.length > 4;
   const timelineDuration = Math.max(1, durationTick);
 
@@ -245,8 +269,9 @@ export default function TimelineCanvas({
   }, [playheadTick, previewOpen, renderUrl, timeline.ticks_per_second]);
 
   useEffect(() => {
-    if (!previewOpen || !renderUrl) setPlaying(false);
-  }, [previewOpen, renderUrl]);
+    if (!previewOpen) setPlaying(false);
+    else if (previewMode === "final" && !renderUrl) setPlaying(false);
+  }, [previewOpen, previewMode, renderUrl]);
 
   useLayoutEffect(() => {
     if (!selection) {
@@ -363,7 +388,19 @@ export default function TimelineCanvas({
           data-timeline-video-preview
           className="relative flex h-[clamp(220px,40vh,400px)] min-h-0 w-full shrink items-center justify-center overflow-hidden bg-[#12100f]"
         >
-          {renderUrl ? (
+          {previewMode === "live" ? (
+            <TimelineLivePreview
+              project={project}
+              timeline={timeline}
+              durationTick={timelineDuration}
+              playheadTick={playheadTick}
+              playing={playing}
+              muted={muted}
+              tasks={tasks}
+              onPlayheadChange={onPlayheadChange}
+              onPlayingChange={setPlaying}
+            />
+          ) : renderUrl ? (
             <video
               ref={videoRef}
               src={renderUrl}
@@ -393,18 +430,51 @@ export default function TimelineCanvas({
               <span>暂无成片预览</span>
             </div>
           )}
+          <div
+            data-preview-source-chip
+            className="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-full border border-white/20 bg-black/45 px-2.5 py-1 text-[11px] font-semibold text-white/85 backdrop-blur"
+            title={
+              previewMode === "final"
+                ? "正在播放已合成的成片"
+                : "实时拼装与成片同口径渲染；成片合成后自动切换"
+            }
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                previewMode === "final"
+                  ? "bg-[var(--color-success)]"
+                  : "animate-pulse bg-[var(--color-accent)]"
+              }`}
+            />
+            {previewMode === "final"
+              ? "成片"
+              : renderedVersion?.stale
+                ? "内容已更新 · 实时预览"
+                : "实时预览"}
+          </div>
           <div className="absolute inset-x-0 bottom-0 flex items-center gap-2 bg-gradient-to-b from-transparent to-black/80 px-4 pb-3 pt-12">
             <button
               type="button"
-              disabled={!videoRef.current && !renderUrl}
+              disabled={
+                previewMode === "final"
+                  ? !videoRef.current && !renderUrl
+                  : timelineDuration <= 1
+              }
               onClick={() => {
+                if (previewMode === "live") {
+                  // 播到尾部后再次播放从头开始。
+                  if (!playing && playheadTick >= timelineDuration)
+                    onPlayheadChange(0);
+                  setPlaying((value) => !value);
+                  return;
+                }
                 const video = videoRef.current;
                 if (!video) return;
                 if (video.paused) void video.play();
                 else video.pause();
               }}
               className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--color-accent)] text-white disabled:opacity-40"
-              aria-label="播放或暂停成片"
+              aria-label="播放或暂停预览"
             >
               {playing ? (
                 <Pause className="h-3.5 w-3.5" />
@@ -435,11 +505,6 @@ export default function TimelineCanvas({
               {seconds(timelineDuration, timeline.ticks_per_second)}s
             </span>
           </div>
-          {renderedVersion?.stale && (
-            <span className="absolute right-3 top-3 rounded-full bg-[var(--color-warning)] px-2 py-1 text-[10px] font-semibold text-white">
-              上次成片 · 已过期
-            </span>
-          )}
         </div>
       )}
 
@@ -550,6 +615,8 @@ export default function TimelineCanvas({
                   <div className="relative min-w-0 flex-1">
                     {lane.elements.map((element) => {
                       const meta = ELEMENT_TYPE_META[element.creation.type];
+                      const playbackState =
+                        playbackStates.get(element.element_id) ?? "pending";
                       const left = percent(
                         element.span.start_tick,
                         timelineDuration,
@@ -564,6 +631,7 @@ export default function TimelineCanvas({
                           key={element.element_id}
                           type="button"
                           data-element-block={element.element_id}
+                          data-element-block-state={playbackState}
                           title={`${element.label || "时间线内容"} · ${seconds(
                             element.span.start_tick,
                             timeline.ticks_per_second,
@@ -571,7 +639,11 @@ export default function TimelineCanvas({
                             element.span.start_tick +
                               element.span.duration_tick,
                             timeline.ticks_per_second,
-                          )}s`}
+                          )}s${
+                            playbackState === "ready"
+                              ? ""
+                              : ` · ${ELEMENT_PLAYBACK_STATUS_LABEL[playbackState]}`
+                          }`}
                           onPointerDown={(event) => event.stopPropagation()}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -581,18 +653,42 @@ export default function TimelineCanvas({
                             selected
                               ? "z-20 border-[var(--color-accent)] ring-2 ring-[var(--color-accent)]/20"
                               : "z-10"
-                          } ${element.enabled ? "" : "opacity-45"}`}
+                          } ${element.enabled ? "" : "opacity-45"} ${
+                            playbackState === "queued" ? "border-dashed" : ""
+                          }`}
                           style={{
                             left: `${left}%`,
                             width: `${Math.min(100 - left, width)}%`,
                             color: meta.color,
                             borderColor: selected
                               ? undefined
-                              : `${meta.color}80`,
+                              : playbackState === "failed"
+                                ? "var(--color-danger)"
+                                : `${meta.color}80`,
                             background: meta.soft,
                           }}
                         >
+                          {playbackState === "generating" && (
+                            <i
+                              aria-hidden
+                              className="element-generating-stripes pointer-events-none absolute inset-0"
+                              style={{ color: meta.color }}
+                            />
+                          )}
                           <span className="min-w-0 truncate">
+                            {(playbackState === "generating" ||
+                              playbackState === "queued") && (
+                              <span
+                                aria-hidden
+                                className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--color-warning)] align-middle"
+                              />
+                            )}
+                            {playbackState === "failed" && (
+                              <span
+                                aria-hidden
+                                className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-danger)] align-middle"
+                              />
+                            )}
                             {element.label || "时间线内容"}
                           </span>
                           <span className="truncate whitespace-nowrap text-[9px] font-medium opacity-75">

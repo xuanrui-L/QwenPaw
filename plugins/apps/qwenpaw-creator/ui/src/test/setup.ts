@@ -37,6 +37,17 @@ if (!Element.prototype.setPointerCapture) {
   Element.prototype.hasPointerCapture = () => false;
 }
 
+// jsdom 未实现 HTMLMediaElement 的播放控制，实时拼装预览测试需要可调用的 stub。
+if (typeof HTMLMediaElement !== "undefined") {
+  HTMLMediaElement.prototype.play = function play() {
+    this.dispatchEvent(new Event("play"));
+    return Promise.resolve();
+  };
+  HTMLMediaElement.prototype.pause = function pause() {
+    this.dispatchEvent(new Event("pause"));
+  };
+}
+
 class TestEventSource {
   static instances: TestEventSource[] = [];
   static readonly CLOSED = 2;

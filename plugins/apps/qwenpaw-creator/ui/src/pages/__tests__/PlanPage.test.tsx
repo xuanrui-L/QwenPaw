@@ -93,7 +93,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     ).toEqual(["edit-opening", "audio-bgm", "overlay-title"]);
   });
 
-  it("keeps an empty Timeline actionable through Element creation", () => {
+  it("keeps an empty Timeline guided through the Agent without an add-content button", () => {
     const project = cloneProject();
     project.timelines.items["timeline:main"].elements_by_id = {};
     seedProject(project);
@@ -102,8 +102,8 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getByText("时间轴中还没有内容")).toBeInTheDocument();
     expect(screen.getByText("时间轴还是空的")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "添加内容" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "添加内容" }),
+    ).not.toBeInTheDocument();
   });
 
   it("replaces the empty-Timeline hints with a live working state while the Agent runs", () => {
@@ -291,6 +291,96 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.queryByText("Timeline 组合预览")).not.toBeInTheDocument();
   });
 
+  it("defaults to the live assembled preview when no final render exists", () => {
+    const project = cloneProject();
+    delete project.assets.artifact_slots_by_id["timeline:timeline:main:render"];
+    delete project.assets.artifact_versions_by_id["final-v1"];
+    seedProject(project);
+    const { container } = renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "视频预览" }));
+
+    expect(
+      container.querySelector("[data-timeline-live-preview]"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("暂无成片预览")).not.toBeInTheDocument();
+    expect(
+      container.querySelector('[data-live-layer="edit-opening"]'),
+    ).toHaveAttribute("src", "/api/qwenpaw-creator/media/assets/cat-video-v1");
+    expect(
+      container.querySelector("[data-preview-source-chip]"),
+    ).toHaveTextContent("实时预览");
+  });
+
+  it("auto-selects the preview source without a user-facing mode toggle", () => {
+    const { container } = renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "视频预览" }));
+
+    // 有新鲜成片 → 自动播成片，状态签只读、无切换按钮
+    expect(
+      container.querySelector("[data-timeline-live-preview]"),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector("[data-timeline-video-preview] video"),
+    ).toHaveAttribute("src", "/api/qwenpaw-creator/media/artifacts/final-v1");
+    const chip = container.querySelector("[data-preview-source-chip]");
+    expect(chip).toHaveTextContent("成片");
+    expect(chip?.tagName).not.toBe("BUTTON");
+    expect(chip?.querySelector("button")).toBeNull();
+  });
+
+  it("falls back to the live preview automatically when the final render is stale", () => {
+    const project = cloneProject();
+    project.assets.artifact_versions_by_id["final-v1"].stale = true;
+    seedProject(project);
+    const { container } = renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "视频预览" }));
+
+    expect(
+      container.querySelector("[data-timeline-live-preview]"),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector("[data-preview-source-chip]"),
+    ).toHaveTextContent("内容已更新 · 实时预览");
+  });
+
+  it("marks generating Elements on their timeline blocks", () => {
+    const project = cloneProject();
+    project.assets.artifact_slots_by_id[
+      "element:r2v-window:video"
+    ].selected_version_id = null;
+    seedProject(project);
+    useCreatorTaskViewStore.setState({
+      tasks: [
+        {
+          id: "task-r2v",
+          projectId: "p1",
+          transactionId: null,
+          specialistRunId: null,
+          kind: "r2v_generation",
+          targetRef: "element:r2v-window",
+          status: "RUNNING",
+          progress: null,
+          resultRefs: [],
+          createdAt: "2026-07-20T00:00:00Z",
+        },
+      ],
+    });
+    const { container } = renderPage();
+
+    const block = container.querySelector(
+      '[data-element-block="r2v-window"]',
+    ) as HTMLElement;
+    expect(block).toHaveAttribute("data-element-block-state", "generating");
+    expect(
+      block.querySelector(".element-generating-stripes"),
+    ).toBeInTheDocument();
+    expect(
+      container
+        .querySelector('[data-element-block="edit-opening"]')
+        ?.getAttribute("data-element-block-state"),
+    ).toBe("ready");
+  });
+
   it("projects the Element box from its anchor coordinates", () => {
     const { container } = renderPage("/project/p1/plan?element=overlay-os");
     const box = container.querySelector(
@@ -322,15 +412,15 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(calls.some((call) => call.url.includes("/commands"))).toBe(false);
   });
 
-  it("places deletion in the detail header instead of the content footer", () => {
+  it("keeps the detail header free of a delete action while retaining close", () => {
     const { container } = renderPage("/project/p1/plan?element=overlay-os");
 
     const actions = container.querySelector(
       "[data-element-detail-header-actions]",
     );
-    expect(actions).toContainElement(
-      screen.getByRole("button", { name: "删除当前内容" }),
-    );
+    expect(
+      screen.queryByRole("button", { name: "删除当前内容" }),
+    ).not.toBeInTheDocument();
     expect(actions).toContainElement(
       screen.getByRole("button", { name: "关闭内容详情" }),
     );
