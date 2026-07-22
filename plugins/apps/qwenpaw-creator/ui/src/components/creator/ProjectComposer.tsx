@@ -1,5 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Modal, Select, Tooltip, message } from "antd";
+import {
+  EyeOutlined,
+  PictureOutlined,
+  VideoCameraOutlined,
+} from "@ant-design/icons";
 import {
   FileText,
   Film,
@@ -9,11 +14,12 @@ import {
   Rocket,
   X,
 } from "lucide-react";
-import type { CreatorContentPart, CreatorScenario } from "@/contracts/creator";
+import type { CreatorContentPart, CreatorScenario, ModelConfigData } from "@/contracts/creator";
 import {
   createAssetImport,
   createProject,
   getAssetImport,
+  getModelConfig,
   getTask,
   ingestAssetFile,
   ingestAssetValue,
@@ -23,6 +29,7 @@ import {
 import { taskErrorMessage } from "@/lib/taskPresentation";
 import { creatorStatusLabel } from "@/lib/creatorPresentation";
 import { useRouter } from "@/routing/navigation";
+import ModelConfigModal from "./ModelConfigModal";
 
 const { TextArea } = Input;
 
@@ -156,6 +163,38 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
   const projectRequest = useRef({ signature: "", id: "" });
   const initialMessageRequests = useRef(new Map<string, string>());
   const sourceRequestIds = useRef(new Map<string, string>());
+  const [modelConfig, setModelConfig] = useState<ModelConfigData | null>(null);
+  const [modelConfigModalOpen, setModelConfigModalOpen] = useState(false);
+  const hasUrl =
+    urlDraft.trim().length > 0 || attachments.some((att) => att.kind === "url");
+  const hasAttachments = attachments.length > 0 || hasUrl;
+  const missingRequiredModels: string[] | null = useMemo(() => {
+    if (!modelConfig) return null;
+    const required: ("vlm" | "image" | "video")[] =
+      scenario === "short_drama"
+        ? ["image", "video"]
+        : scenario === "video_edit" || hasAttachments
+          ? ["vlm"]
+          : [];
+    const missing: string[] = [];
+    for (const type of required) {
+      const item = modelConfig[type];
+      const ok =
+        type === "vlm" && modelConfig.vlm.use_llm && modelConfig.llm.model_name
+          ? modelConfig.vlm.enabled
+          : Boolean(item.model_name && item.enabled);
+      if (!ok) missing.push(type);
+    }
+    return missing;
+  }, [modelConfig, scenario, hasAttachments]);
+  const refreshModelConfig = useCallback(() => {
+    getModelConfig()
+      .then(setModelConfig)
+      .catch(() => setModelConfig(null));
+  }, []);
+  useEffect(() => {
+    refreshModelConfig();
+  }, [refreshModelConfig, scenario, hasAttachments]);
 
   const requestIdFor = (key: string) => {
     const existing = sourceRequestIds.current.get(key);
@@ -226,10 +265,13 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
   };
 
   const isVideoEdit = scenario === "video_edit";
+  const hasMissingModels =
+    missingRequiredModels !== null && missingRequiredModels.length > 0;
   const canLaunch =
     projectDescription.trim().length > 0 &&
     !launching &&
-    (!isVideoEdit || contentType !== null);
+    (!isVideoEdit || contentType !== null) &&
+    !hasMissingModels;
 
   const handleScenarioChange = (next: CreatorScenario) => {
     setScenario(next);
@@ -239,6 +281,7 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
   const launchHint = () => {
     if (!projectDescription.trim()) return "请用文字描述你的目标";
     if (isVideoEdit && contentType === null) return "请选择视频剪辑的内容类型";
+    if (hasMissingModels) return "请先配置当前场景必选的模型";
     return undefined;
   };
 
@@ -249,6 +292,10 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
     }
     if (isVideoEdit && contentType === null) {
       message.warning("请选择视频剪辑的内容类型");
+      return;
+    }
+    if (hasMissingModels) {
+      message.warning("请先配置当前场景必选的模型");
       return;
     }
     const pendingUrl = urlDraft.trim();
@@ -639,6 +686,38 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
             </div>
           )}
 
+          {hasMissingModels && (
+            <button
+              type="button"
+              onClick={() => {
+                setModelConfigModalOpen(true);
+              }}
+              className="flex flex-wrap items-center gap-2 border-t border-[var(--color-warning)]/30 bg-[var(--color-warning-soft)]/40 px-3 py-2 text-left transition-colors hover:bg-[var(--color-warning-soft)]/70"
+            >
+              <span className="text-[11px] font-medium text-[var(--color-warning)]">
+                必选模型未配置：
+              </span>
+              {missingRequiredModels!.map((type) => {
+                const meta = {
+                  vlm: { label: "VLM", icon: <EyeOutlined style={{ fontSize: 10 }} /> },
+                  image: { label: "Image", icon: <PictureOutlined style={{ fontSize: 10 }} /> },
+                  video: { label: "Video", icon: <VideoCameraOutlined style={{ fontSize: 10 }} /> },
+                }[type] ?? { label: type, icon: null };
+                return (
+                  <span
+                    key={type}
+                    className="inline-flex items-center gap-1 rounded-full border border-[var(--color-warning)]/40 bg-white/60 px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-warning)]"
+                  >
+                    {meta.icon}
+                    {meta.label}
+                  </span>
+                );
+              })}
+              <span className="ml-auto text-[11px] font-semibold text-[var(--color-accent)]">
+                点击配置 →
+              </span>
+            </button>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] px-3 py-2">
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <Button
@@ -734,6 +813,13 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
           附件将进入资产库「用户上传」分类。
         </p>
       </div>
+      <ModelConfigModal
+        open={modelConfigModalOpen}
+        onClose={() => {
+          setModelConfigModalOpen(false);
+          refreshModelConfig();
+        }}
+      />
     </Modal>
   );
 }
