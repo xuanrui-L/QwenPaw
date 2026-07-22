@@ -172,7 +172,7 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
     if (!modelConfig) return null;
     const required: ("vlm" | "image" | "video")[] =
       scenario === "short_drama"
-        ? ["image", "video"]
+        ? ["vlm", "image", "video"]
         : scenario === "video_edit" || hasAttachments
           ? ["vlm"]
           : [];
