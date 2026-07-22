@@ -112,6 +112,18 @@ export function creatorToolLabel(name: string): string {
     ai_edit: "执行剪辑",
     r2v_generation: "生成视频",
     image_generation: "生成画面",
+    read_file: "读取文件",
+    write_file: "写入文件",
+    edit_file: "编辑文件",
+    append_file: "追加内容",
+    grep_search: "搜索内容",
+    glob_search: "搜索文件",
+    ast_search: "搜索代码结构",
+    plan: "制定计划",
+    final: "整理回复",
+    finalize_video: "合成视频",
+    yield_until_runtime_event: "等待执行",
+    complete_current_change: "完成检查",
   };
   return labels[name] ?? "制作工具";
 }
@@ -122,8 +134,27 @@ export function creatorRoleLabel(name: string): string {
     visual_development_agent: "视觉开发",
     v_generation_director: "视频生成",
     ai_editing_director: "剪辑导演",
+    r2v_generation_director: "生成视频",
+    story_planning_agent: "规划故事",
+    unit_planning_routing_agent: "规划单元",
+    review_consistency_agent: "一致性检查",
   };
   return labels[name] ?? (name || "专业制作");
+}
+
+export function getEstimatedDuration(toolName: string): string | null {
+  const durations: Record<string, string> = {
+    image_generation: "预计 30-60 秒",
+    r2v_generation: "预计 2-5 分钟",
+    analyze_source_media: "预计 10-30 秒",
+    ai_edit: "预计 30-60 秒",
+    finalize_video: "预计 1-3 分钟",
+    plan: "预计 5-15 秒",
+    grep_search: "预计 1-5 秒",
+    glob_search: "预计 1-5 秒",
+    ast_search: "预计 1-5 秒",
+  };
+  return durations[toolName] ?? null;
 }
 
 export function creatorEventLabel(type: string): string {

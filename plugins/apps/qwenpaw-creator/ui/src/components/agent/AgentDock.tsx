@@ -5,14 +5,17 @@ import { ArrowUpOutlined } from "@ant-design/icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  CircleCheck,
   Eraser,
   Info,
   ListTodo,
+  Loader2,
   MessageSquare,
   PanelRightClose,
   PanelRightOpen,
   Sparkles,
   Square,
+  XCircle,
 } from "lucide-react";
 import { getAssetVersionMediaUrl, getGeneratedMediaUrl } from "@/api/creator";
 import type {
@@ -41,6 +44,7 @@ import {
   creatorStatusLabel,
   creatorTargetLabel,
   creatorToolLabel,
+  getEstimatedDuration,
   taskKindLabel,
 } from "@/lib/creatorPresentation";
 import {
@@ -326,13 +330,15 @@ function MessageParts({
 }
 
 function useLiveDisclosure(active: boolean) {
-  const [expanded, setExpanded] = useState(active);
+  const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
+  const [expanded, setExpanded] = useState(false);
   const wasActive = useRef(active);
   useEffect(() => {
+    if (!allowExpand) return;
     if (active && !wasActive.current) setExpanded(true);
     if (!active && wasActive.current) setExpanded(false);
     wasActive.current = active;
-  }, [active]);
+  }, [active, allowExpand]);
   return { expanded, setExpanded };
 }
 
@@ -345,6 +351,7 @@ function ThinkingDisclosure({
   active: boolean;
   compact?: boolean;
 }) {
+  const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
   const { expanded, setExpanded } = useLiveDisclosure(active);
   if (!children) return null;
   return (
@@ -356,16 +363,19 @@ function ThinkingDisclosure({
       } border-l-2 border-[var(--color-border-strong)] pl-2`}
     >
       <div className="flex items-center gap-2">
-        <span className="text-[var(--color-text-secondary)]">
-          {active ? "▸ 思考..." : "✓ 思考"}
+        <span className={`flex items-center gap-1.5 ${active ? "text-[var(--color-text-secondary)]" : "text-[var(--color-success)]"}`}>
+          {active ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleCheck className="h-3 w-3" />}
+          {active ? "思考中" : "思考完成"}
         </span>
-        <button
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-          className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)]"
-        >
-          {expanded ? "收起" : "详情"}
-        </button>
+        {allowExpand && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)]"
+          >
+            {expanded ? "收起" : "详情"}
+          </button>
+        )}
       </div>
       {expanded && (
         <pre
@@ -401,18 +411,18 @@ function waitingActionTitle(reason: string): string {
 }
 
 function actionTitle(envelope: CreatorActionEnvelope, active: boolean): string {
-  if (envelope.action === "tool_call")
-    return active
-      ? `${creatorToolLabel(envelope.tool || "")}...`
-      : creatorToolLabel(envelope.tool || "");
+  if (envelope.action === "tool_call") {
+    const label = creatorToolLabel(envelope.tool || "");
+    return active ? `${label}中` : `${label}完成`;
+  }
   if (envelope.action === "yield_until_runtime_event") {
     return waitingActionTitle(actionReason(envelope));
   }
   if (envelope.action === "complete_current_change")
-    return active ? "完成当前修改..." : "完成检查已提交";
-  if (envelope.action === "plan") return active ? "制定计划..." : "计划已生成";
-  if (envelope.action === "final") return active ? "整理回复..." : "回复已生成";
-  return active ? `${envelope.action}...` : envelope.action;
+    return active ? "完成检查中" : "完成检查已提交";
+  if (envelope.action === "plan") return active ? "制定计划中" : "计划已生成";
+  if (envelope.action === "final") return active ? "整理回复中" : "回复已生成";
+  return active ? `${envelope.action}中` : envelope.action;
 }
 
 function ActionDisclosure({
@@ -424,6 +434,7 @@ function ActionDisclosure({
   active: boolean;
   compact?: boolean;
 }) {
+  const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
   const { expanded, setExpanded } = useLiveDisclosure(active);
   const payload = envelope.payload
     ? JSON.stringify(envelope.payload, null, 2)
@@ -439,22 +450,19 @@ function ActionDisclosure({
       } border-l-2 border-[var(--color-accent)]/25 pl-2`}
     >
       <div className="flex items-center gap-2">
-        <span
-          className={
-            active || waiting
-              ? "text-[var(--color-text-secondary)]"
-              : "text-[var(--color-success)]"
-          }
-        >
-          {active ? "▸" : waiting ? "◷" : "✓"} {actionTitle(envelope, active)}
+        <span className={`flex items-center gap-1.5 ${active || waiting ? "text-[var(--color-text-secondary)]" : "text-[var(--color-success)]"}`}>
+          {active ? <Loader2 className="h-3 w-3 animate-spin" /> : waiting ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleCheck className="h-3 w-3" />}
+          {actionTitle(envelope, active)}
         </span>
-        <button
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-          className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)]"
-        >
-          {expanded ? "收起" : "详情"}
-        </button>
+        {allowExpand && (
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)]"
+          >
+            {expanded ? "收起" : "详情"}
+          </button>
+        )}
       </div>
       {expanded && (
         <pre
@@ -503,13 +511,22 @@ function ConversationMessage({ item }: { item: CreatorMessage }) {
       </div>
     );
   }
+  if (typeof window !== "undefined" && window.location.hostname === "localhost") {
+    console.log("[ConversationMessage]", { streaming, thinking: !!thinking, thinkingLen: thinking.length, contentLen: content.length, completed: item.metadata?.completed });
+  }
   return (
     <div
       data-agent-message
       className="space-y-1.5 text-[11px] leading-5 text-[var(--color-text-secondary)]"
     >
-      <ThinkingDisclosure active={streaming}>{thinking}</ThinkingDisclosure>
-      {content.length > 0 && <MessageParts parts={content} richText />}
+      {streaming && !thinking && (
+        <div className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>处理中</span>
+        </div>
+      )}
+      {thinking && <ThinkingDisclosure active={streaming}>{thinking}</ThinkingDisclosure>}
+      {content.length > 0 && !streaming && <MessageParts parts={content} richText />}
       {envelope &&
         !(envelope.syntax === "native" && envelope.action === "tool_call") &&
         (streaming ||
@@ -639,6 +656,9 @@ function SubagentMessageBubble({
   const thinking = subagentThinkingText(item);
   const envelope = actionEnvelopeFromStreamText(body);
   const visibleBody = envelope?.narration ?? body;
+  if (typeof window !== "undefined" && window.location.hostname === "localhost") {
+    console.log("[SubagentMessageBubble]", { completed: item.completed, thinking: !!thinking, thinkingLen: thinking.length, bodyLen: body.length, visibleBodyLen: visibleBody.length, messageId: item.messageId });
+  }
   if (!body && !thinking && item.completed) return null;
   return (
     <div
@@ -653,10 +673,8 @@ function SubagentMessageBubble({
           </span>
         </div>
       )}
-      <ThinkingDisclosure active={!item.completed} compact>
-        {thinking}
-      </ThinkingDisclosure>
-      {visibleBody && (
+      {thinking && <ThinkingDisclosure active={!item.completed} compact>{thinking}</ThinkingDisclosure>}
+      {visibleBody && item.completed && (
         <pre className="mt-1 whitespace-pre-wrap break-words font-sans text-[11px] leading-5 text-[var(--color-text-secondary)]">
           {visibleBody}
         </pre>
@@ -673,6 +691,7 @@ function SubagentMessageBubble({
 }
 
 function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
+  const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
   const active = item.status === "started";
   const { expanded, setExpanded } = useLiveDisclosure(active);
   const rawArguments = Object.entries(item.argumentDeltas ?? {})
@@ -692,8 +711,7 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
       : item.status === "failed"
       ? "text-[var(--color-danger)]"
       : "text-[var(--color-text-tertiary)]";
-  const icon =
-    item.status === "started" ? "▸" : item.status === "succeeded" ? "✓" : "✕";
+  const displayLabel = creatorToolLabel(item.tool);
   return (
     <div
       data-subagent-tool={item.toolCallId}
@@ -701,10 +719,17 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
       className="border-l-2 border-[var(--color-accent)]/25 pl-2 text-[10px]"
     >
       <div className="flex items-center gap-2">
-        <span className={tone}>
-          {icon} {creatorToolLabel(item.tool)}
+        <span className={`flex items-center gap-1.5 ${tone}`}>
+          {item.status === "started" ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : item.status === "succeeded" ? (
+            <CircleCheck className="h-3 w-3" />
+          ) : (
+            <XCircle className="h-3 w-3" />
+          )}
+          <span>{displayLabel}{active ? "中" : item.status === "succeeded" ? "完成" : "失败"}</span>
         </span>
-        {hasDetails && (
+        {hasDetails && allowExpand && (
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
@@ -778,7 +803,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
       <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px]">
         <div className="flex min-w-0 items-center gap-1.5">
           <b className="truncate text-[var(--color-accent)]">
-            {roleDisplayName(activity, undefined)}
+            {creatorRoleLabel(activity.role || roleDisplayName(activity, undefined))}
           </b>
           <span
             className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold ${activityStatus.tone}`}
@@ -843,6 +868,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
 
 /** 工具调用卡片：一行状态 + 可展开查看参数/结果。 */
 function ToolCallCard({ data }: { data: ToolCallPresentation }) {
+  const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
   const activity = useCreatorSessionStore(
     (state) => state.subagentActivities[data.actionId],
   );
@@ -861,10 +887,15 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
         ? result
         : JSON.stringify(result, null, 2)
       : "";
+
+  const fileTools = ["read_file", "write_file", "edit_file", "append_file", "read_project", "read_project_file", "jq_project", "grep_search", "glob_search", "ast_search"];
+  const isFileTool = fileTools.includes(tool);
+
   const hasArgs =
-    !delegated && Boolean((args && Object.keys(args).length > 0) || rawArgs);
-  const hasResult = !delegated && result !== undefined && result !== null;
+    !delegated && !isFileTool && Boolean((args && Object.keys(args).length > 0) || rawArgs);
+  const hasResult = !delegated && !isFileTool && result !== undefined && result !== null;
   const hasDetails = delegated || hasArgs || hasResult;
+
   const effectiveStatus =
     delegated && activity
       ? activity.completed
@@ -882,12 +913,20 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       : effectiveStatus === "failed"
       ? "text-[var(--color-danger)]"
       : "text-[var(--color-text-secondary)]";
-  const icon =
-    effectiveStatus === "started"
-      ? "▸"
-      : effectiveStatus === "succeeded"
-      ? "✓"
-      : "✕";
+
+  let displayLabel: string;
+  if (delegated) {
+    if (role) {
+      displayLabel = creatorRoleLabel(role);
+    } else {
+      displayLabel = "专业制作";
+    }
+  } else {
+    displayLabel = creatorToolLabel(tool);
+  }
+
+  const estimatedDuration = active ? getEstimatedDuration(tool) : null;
+
   return (
     <div
       data-agent-tool={data.actionId}
@@ -895,13 +934,23 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       className="text-[11px]"
     >
       <div className="flex items-center gap-2">
-        <span className={tone}>
-          {icon} {delegated ? `安排给 ${role}` : creatorToolLabel(tool)}
-          {!delegated && effectiveStatus === "failed" && data.error
-            ? "：执行失败，可展开查看原因"
-            : ""}
+        <span className={`flex items-center gap-1.5 ${tone}`}>
+          {effectiveStatus === "started" ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : effectiveStatus === "succeeded" ? (
+            <CircleCheck className="h-3.5 w-3.5" />
+          ) : (
+            <XCircle className="h-3.5 w-3.5" />
+          )}
+          <span>{displayLabel}{active ? "中" : effectiveStatus === "succeeded" ? "完成" : "失败"}</span>
+          {estimatedDuration && (
+            <span className="text-[10px] text-[var(--color-text-tertiary)]">{estimatedDuration}</span>
+          )}
+          {allowExpand && !delegated && effectiveStatus === "failed" && data.error && (
+            <span className="text-[10px]">：{String(data.error)}</span>
+          )}
         </span>
-        {hasDetails && (
+        {hasDetails && allowExpand && (
           <button
             onClick={() => setExpanded((e) => !e)}
             className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)]"

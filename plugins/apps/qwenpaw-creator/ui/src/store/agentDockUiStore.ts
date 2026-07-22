@@ -27,12 +27,14 @@ interface AgentDockUiState {
   runFilter: string;
   draft: string;
   selection: SelectionAttachment | null;
+  allowExpandDetails: boolean;
   setOpen: (open: boolean) => void;
   setTab: (tab: AgentDockTab) => void;
   setSize: (width: number, height: number) => void;
   setRunFilter: (filter: string) => void;
   setDraft: (draft: string) => void;
   setSelection: (selection: SelectionAttachment | null) => void;
+  setAllowExpandDetails: (allow: boolean) => void;
   reset: () => void;
 }
 
@@ -44,6 +46,7 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
   runFilter: "all",
   draft: "",
   selection: null,
+  allowExpandDetails: false,
   setOpen: (open) => set({ open }),
   setTab: (tab) => set({ tab, open: true }),
   setSize: (width, height) =>
@@ -52,6 +55,7 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
   setDraft: (draft) => set({ draft }),
   setSelection: (selection) =>
     set({ selection, tab: "conversation", open: true }),
+  setAllowExpandDetails: (allowExpandDetails) => set({ allowExpandDetails }),
   reset: () =>
     set({
       open: true,
@@ -61,5 +65,6 @@ export const useAgentDockUiStore = create<AgentDockUiState>((set) => ({
       runFilter: "all",
       draft: "",
       selection: null,
+      allowExpandDetails: false,
     }),
 }));

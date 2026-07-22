@@ -62,6 +62,7 @@ const ROLE_WORKING_LABELS: Record<string, string> = {
   source_intelligence_agent: "素材理解中…",
   visual_development_agent: "画面设计中…",
   v_generation_director: "视频生成中…",
+  r2v_generation_director: "视频生成中…",
   ai_editing_director: "剪辑制作中…",
 };
 

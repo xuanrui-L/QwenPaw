@@ -9,6 +9,7 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { isTechnicalControlText } from "@/lib/creatorMessagePresentation";
 import {
+  creatorRoleLabel,
   creatorStatusLabel,
   creatorTargetLabel,
   creatorToolLabel,
@@ -206,7 +207,7 @@ function EventCard({ event }: { event: CreatorEvent }) {
     );
   }
   if (event.type.startsWith("subagent.")) {
-    const label = String(data.roleDisplayName ?? data.role ?? "专业制作");
+    const label = creatorRoleLabel(String(data.roleDisplayName ?? data.role ?? ""));
     const completed = event.type.endsWith("completed");
     const failed =
       event.type.endsWith("failed") || event.type.endsWith("stale");
