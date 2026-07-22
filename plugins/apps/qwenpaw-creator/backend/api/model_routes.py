@@ -314,72 +314,6 @@ def _notify_agent_model_config_changed() -> None:
         runtime.notify(project.project_id)
 
 
-def _translate_provider_error(msg: str) -> str:
-    if not msg:
-        return msg
-    msg_lower = msg.lower()
-
-    if "does not exist" in msg_lower and "access" in msg_lower:
-        return "模型名称不存在或无访问权限，请检查模型名和 API Key"
-    if "model_not_found" in msg_lower or ("model" in msg_lower and "not found" in msg_lower and "access" not in msg_lower):
-        return "模型名称不存在，请检查配置的模型名是否正确"
-
-    if "invalid_api_key" in msg_lower or ("incorrect" in msg_lower and "api key" in msg_lower):
-        return "API Key 无效，请检查 API Key 是否正确"
-    if "unauthorized" in msg_lower:
-        return "认证失败，请检查 API Key 和认证信息"
-    if ("no" in msg_lower and "api key" in msg_lower) or ("api_key" in msg_lower and "required" in msg_lower):
-        return "缺少 API Key，请在配置中添加"
-
-    if "no static resource" in msg_lower:
-        return "协议或 Base URL 配置错误，请求的接口路径不存在，请检查协议类型和 Base URL 是否匹配"
-    if "404" in msg and ("page not found" in msg_lower or "not found" in msg_lower):
-        return "接口地址不存在，请检查 Base URL 和协议选择是否匹配"
-
-    if "unexpected item type in content" in msg_lower:
-        return "该模型不支持多模态输入（图片），请选择支持多模态的模型"
-    if "the provided messages input is invalid" in msg_lower or "messages input is invalid" in msg_lower:
-        return "消息格式无效，请检查模型是否支持多模态输入"
-    if "content is invalid" in msg_lower and ("image" in msg_lower or "type" in msg_lower):
-        return "该模型不支持多模态输入（图片），请选择支持多模态的模型"
-    if "invalidparameter" in msg_lower and ("algo" in msg_lower or "algorithm" in msg_lower):
-        return "模型服务参数错误，请检查模型是否支持所选功能"
-
-    if "rate limit" in msg_lower or "too many requests" in msg_lower:
-        return "请求频率超限，请稍后重试"
-    if "insufficient_quota" in msg_lower or ("quota" in msg_lower and ("exceed" in msg_lower or "insufficient" in msg_lower)):
-        return "API 额度不足，请检查账户余额或充值"
-
-    if "context length" in msg_lower or "maximum" in msg_lower and "length" in msg_lower:
-        return "请求超出模型上下文长度限制"
-
-    if "internal server error" in msg_lower or "500" in msg:
-        return "模型服务内部错误，请稍后重试"
-    if "service unavailable" in msg_lower or "503" in msg:
-        return "模型服务暂不可用，请稍后重试"
-    if "bad gateway" in msg_lower or "502" in msg:
-        return "模型服务网关错误，请稍后重试"
-
-    if ("connect" in msg_lower and ("fail" in msg_lower or "refused" in msg_lower or "reset" in msg_lower)):
-        return "无法连接到服务，请检查 Base URL 和网络"
-    if ("dns" in msg_lower and ("fail" in msg_lower or "resolve" in msg_lower)):
-        return "DNS 解析失败，请检查 Base URL 是否正确"
-    if "timeout" in msg_lower or "timed out" in msg_lower:
-        return "连接超时，请检查网络或 Base URL"
-
-    if "ssl" in msg_lower and ("certificate" in msg_lower or "handshake" in msg_lower):
-        return "SSL 证书验证失败，请检查服务地址或网络环境"
-
-    if "InvalidAccessKeyId" in msg or "AccessDenied" in msg:
-        return "Access Key 无效或权限不足，请检查配置"
-    if "NoSuchBucket" in msg:
-        return "Bucket 不存在，请检查 Bucket 名称"
-    if "RequestTimeTooSkewed" in msg:
-        return "OSS 请求时间偏差过大，请检查系统时间"
-
-    return f"上游服务错误: {msg}"
-
-
 async def _validate_section_connectivity(
     section: str,
     config: dict[str, Any],
@@ -413,7 +347,7 @@ async def _validate_section_connectivity(
                 raise ValidationError("OSS: Bucket 不存在，请检查 Bucket 名称")
             if "connect" in exc_str.lower() or "timeout" in exc_str.lower():
                 raise ValidationError("OSS: 无法连接到 OSS 服务，请检查 Endpoint 和网络")
-            raise ValidationError(f"OSS: {_translate_provider_error(exc_str)}")
+            raise ValidationError(f"OSS: {exc_str}")
         return
 
     item = config.get(section, {})
@@ -460,14 +394,14 @@ async def _validate_section_connectivity(
                 except ValueError:
                     msg = resp.text[:200]
                 raise ValidationError(
-                    f"{section}: {_translate_provider_error(msg) if msg else '请求失败'}",
+                    f"{section}: HTTP {resp.status_code}: {msg or '请求失败'}",
                 )
         except httpx.ConnectError:
             raise ValidationError(f"{section}: 无法连接到服务，请检查 Base URL 是否正确")
         except httpx.TimeoutException:
             raise ValidationError(f"{section}: 连接超时，请检查网络或 Base URL")
         except httpx.HTTPError as exc:
-            raise ValidationError(f"{section}: {_translate_provider_error(str(exc))}")
+            raise ValidationError(f"{section}: {exc}")
 
 
 @router.get("/config", response_model=ModelConfigData)
@@ -763,7 +697,7 @@ async def test_model_connection(
         return ConnectionTestResponse(
             ok=False,
             ms=elapsed,
-            error=_translate_provider_error(provider_error) if provider_error else "请求失败",
+            error=f"HTTP {response.status_code}: {provider_error or '请求失败'}",
         )
     except httpx.ConnectError:
         return ConnectionTestResponse(
@@ -781,7 +715,7 @@ async def test_model_connection(
         return ConnectionTestResponse(
             ok=False,
             ms=round((time.monotonic() - start) * 1000),
-            error=_translate_provider_error(str(exc)),
+            error=str(exc),
         )
 
 
@@ -829,4 +763,4 @@ async def test_oss_connection(
                 ok=False,
                 error="无法连接到 OSS 服务，请检查 Endpoint 和网络",
             )
-        return ConnectionTestResponse(ok=False, error=_translate_provider_error(exc_str))
+        return ConnectionTestResponse(ok=False, error=exc_str)
