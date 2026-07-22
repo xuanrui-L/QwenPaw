@@ -23,8 +23,7 @@ export default function TopNav() {
   if (!project) return null;
   const routeSection = pathname.split("/").filter(Boolean)[2] || "plan";
   const activeKey = activeTabKey(routeSection);
-  const masterScript =
-    project.strategy.creative_brief || project.description || "";
+  const masterScript = project.description || "";
   const masterScriptPreview =
     masterScript.length > 20 ? `${masterScript.slice(0, 20)}…` : masterScript;
 
