@@ -1,6 +1,8 @@
 ui/node_modules/
-# !ui/dist/
-# !ui/dist/**
+!ui/dist/
+!ui/dist/**
+# Sourcemaps stay local-only (4.9MB of the 6.2MB dist)
+ui/dist/**/*.map
 .env
 __pycache__/
 *.pyc
