@@ -2898,7 +2898,7 @@ def _specialist_tool_recovery(name: str) -> str:
             "Put bulk objects in jsonArgs. For every Edit item, set duration_tick to "
             "round((source_out_tick - source_in_tick) / playback_rate). Remove nonexistent "
             "references; not-yet-produced artifacts stay null. Parenthesize computed jq "
-            "values before binding them, for example (\"source:\" + $logicalId) as "
+            'values before binding them, for example ("source:" + $logicalId) as '
             "$sourceKey, and parenthesize expressions used as object values. Never finish "
             "with a saved pre-edit root such as $project because that discards mutations."
         )

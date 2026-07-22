@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
+# pylint: disable=too-many-return-statements
+# pylint: disable=too-many-branches
 """File-native toolkits owned by Creator specialists.
 
 The Agent runtime consumes this registry as a generic AgentScope tool surface.
@@ -362,6 +364,24 @@ _SPECS = (
         long_running=True,
         provider_kind="local_media",
     ),
+    SpecialistToolSpec(
+        name="compose_final_video",
+        description=(
+            "把目标 Timeline 上全部已就绪的 R2V/Edit 元素按 span 顺序合成最终成片，"
+            "写入 timeline:<timelineId>:render。当 Timeline 含 R2V（artifact）成片"
+            "元素、或需要把多段成片合并为单一视频时使用本工具；纯源素材剪辑仍用"
+            " ai_edit。本工具不生成选择，也不改动元素结构。"
+        ),
+        roles=frozenset({SpecialistRole.AI_EDITING_DIRECTOR}),
+        parameters=_tool_schema(
+            _arguments_schema(
+                {"operation": {"type": "string", "const": "compose"}},
+                ("operation",),
+            ),
+        ),
+        long_running=True,
+        provider_kind="local_media",
+    ),
 )
 
 _SPECS_BY_NAME = {item.name: item for item in _SPECS}
@@ -537,6 +557,27 @@ class FileSpecialistToolRegistry:
                 self.services,
                 project_id=project_id,
                 command=CreatorCommandType.EXECUTE_EDIT,
+                target_ref=target_ref,
+                arguments=payload,
+                idempotency_key=idempotency_key,
+            )
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": "SUCCEEDED",
+                    "taskId": execution.task_id,
+                    "artifactVersionId": execution.artifact_version_id,
+                    "generation": execution.project_generation,
+                    "etag": execution.project_etag,
+                    "replayed": execution.replayed,
+                },
+                task_id=execution.task_id,
+            )
+        if name == "compose_final_video":
+            execution = await execute_file_local_media_command(
+                self.services,
+                project_id=project_id,
+                command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
                 target_ref=target_ref,
                 arguments=payload,
                 idempotency_key=idempotency_key,

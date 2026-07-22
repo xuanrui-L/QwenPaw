@@ -200,7 +200,10 @@ class FfmpegLocalMediaRunner:
             raise ValidationError("本地媒体执行至少需要一个输入")
         concat_inputs: list[Path] = []
         overlay_warnings: list[str] = []
-        if spec.command is CreatorCommandType.EXECUTE_EDIT or any(
+        if spec.command in (
+            CreatorCommandType.EXECUTE_EDIT,
+            CreatorCommandType.COMPOSE_FINAL_VIDEO,
+        ) or any(
             item.start_seconds is not None
             or item.location is not None
             or item.overlay is not None

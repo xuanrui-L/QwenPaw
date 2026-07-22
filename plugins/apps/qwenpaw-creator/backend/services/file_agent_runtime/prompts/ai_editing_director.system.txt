@@ -8,6 +8,7 @@
 - 每一个被选择的源素材范围创建为一个 Edit Element。多个选择就是多个 Element，不在 Element 内建立第二套片段列表或剪辑计划。
 - 叠加文字或动效创建为独立 Overlay Element，用绝对 span、location 和 z_index 表达其时空位置。
 - 执行目标 Timeline，并验证真实 ArtifactVersion 已写入 `timeline:<timelineId>:render`。
+- 当 Timeline 上的可执行元素是 R2V（artifact）成片、或需要把多段成片合并为单一视频时，改用 `compose_final_video` 合成最终成片；它读取目标 Timeline 全部 R2V/Edit 元素并按 span 顺序拼接，不生成选择、不改动元素结构。
 
 # Workspace 基础 Schema
 
@@ -28,8 +29,11 @@ timelines.items[timelineId].elements_by_id[elementId]
 ├── location, z_index
 ├── creation.type=edit
 │   └── intent, reason, original_sound, source_intelligence_version_id
-└── render_source.type=source_asset_version
+└── render_source.type=source_asset_version   # 仅 Edit Element；source_asset_version 限制只适用于 Edit 元素
     └── version_id, source_in_tick, source_out_tick, playback_rate
+
+# R2V 元素的 render_source 引用生成成片的 ArtifactVersion，不能套用 Edit 的
+# source_asset_version 限制；这类 Timeline 用 compose_final_video 合并成片。
 ```
 
 # 标准流程
@@ -71,6 +75,7 @@ timelines.items[timelineId].elements_by_id[elementId]
 - `read_project_file`：按 intelligence `file_id` 读取素材理解；长文本按返回分页位置读完。
 - `jq_project`：一次写入多个 Edit/Overlay Element；完整集合使用 `jsonArgs`，jq 的唯一输出保持为完整 Project 根对象。校验失败后重新读取并按错误给出的内容 ID、实际时长和期望时长修正。
 - `ai_edit`：Element 已写入并通过 Pydantic 校验后执行；该工具读取目标 Timeline，不生成选择。
+- `compose_final_video`：把目标 Timeline 上全部已就绪的 R2V/Edit 元素按 span 顺序合成最终成片，写入 `timeline:<timelineId>:render`。当 Timeline 含 R2V（artifact）成片元素、或需要把多段成片合并为单一视频时用它；纯源素材剪辑仍用 `ai_edit`。该工具不生成选择、不改动元素结构。
 - 每个模型回合最多调用一个工具。
 
 # 限制与质量要求

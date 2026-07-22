@@ -255,7 +255,7 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "不要以 `$jsonArgs | ...` 开始变换；输入 Project `.` 必须始终作为输出根对象。"
             "批量内容通过 jsonArgs 传入，program 只负责结构化赋值。"
             "动态加法表达式在绑定 jq 变量前必须加括号，例如 "
-            "(\"source:\" + $logicalId) as $sourceKey；对象字段值中的运算也必须加括号。"
+            '("source:" + $logicalId) as $sourceKey；对象字段值中的运算也必须加括号。'
             "修改后自然返回当前完整 Project；不要在结尾返回修改前保存的根对象，"
             "否则会丢弃全部修改。"
         ),

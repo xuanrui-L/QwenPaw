@@ -46,6 +46,7 @@ def test_specialist_registry_owns_role_specific_media_tools(tmp_path) -> None:
     assert "image_generation" in visual
     assert {"image_generation", "r2v_generation"} <= r2v
     assert "ai_edit" in editing
+    assert "compose_final_video" in editing
     assert "transcribe_source_audio" in source
     assert "commit_source_intelligence" in source
     assert {"read_project", "read_project_file"} <= source
@@ -165,5 +166,6 @@ def test_ai_edit_rules_are_dynamic_specialist_prompt_not_runtime_state() -> (
     assert "interview_summary" in prompt
     assert "不超过 30 个汉字" in prompt
     assert "`ai_edit`" in prompt
+    assert "`compose_final_video`" in prompt
     assert "operation=execute" not in prompt
     assert "本工具不生成 plan" not in prompt

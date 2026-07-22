@@ -104,7 +104,9 @@ def test_default_visual_location_is_a_full_frame_with_center_transform_origin() 
     assert (location.anchor_x, location.anchor_y) == (0.5, 0.5)
 
 
-def test_edit_execution_rejects_source_time_used_as_timeline_position() -> None:
+def test_edit_execution_rejects_source_time_used_as_timeline_position() -> (
+    None
+):
     misplaced = SimpleNamespace(
         element_id="edit:source-9-13",
         span=TimelineSpan(start_tick=9_000, duration_tick=4_000),
