@@ -440,21 +440,29 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     if (saving) return;
     setSaving(true);
     try {
-      const section = activeTab;
-      const sectionData = config[section];
+      const prev = snapshotRef.current;
+      if (!prev) throw new Error("快照丢失，请重新打开配置");
 
-      if (!tested[section]) {
-        const ok = await handleTest(section);
-        if (!ok) return;
+      const dirtySections: TabType[] = [];
+      for (const section of ["llm", "vlm", "asr", "image", "video"] as TabType[]) {
+        if (JSON.stringify(config[section]) !== JSON.stringify(prev[section])) {
+          dirtySections.push(section);
+        }
       }
 
-      const result = await patchModelConfigSection(
-        section,
-        sectionData as unknown as Record<string, unknown>,
-      );
-      if (!result.ok) throw new Error("服务端未确认配置写入");
+      for (const section of dirtySections) {
+        if (!tested[section]) {
+          const ok = await handleTest(section);
+          if (!ok) return;
+        }
+        const res = await patchModelConfigSection(
+          section,
+          config[section] as unknown as Record<string, unknown>,
+        );
+        if (!res.ok) throw new Error(`保存 ${section} 失败：服务端未确认写入`);
+      }
+
       message.success("配置已保存");
-      // 保存成功后同步快照并自动关闭窗口。
       snapshotRef.current = JSON.parse(JSON.stringify(config));
       onClose();
     } catch (error) {
@@ -463,7 +471,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     } finally {
       setSaving(false);
     }
-  }, [activeTab, config, tested, saving, handleTest, onClose]);
+  }, [config, tested, saving, handleTest, onClose]);
 
   const handleCancel = useCallback(() => {
     if (snapshotRef.current)
@@ -628,7 +636,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     const usingLlm =
       type === "vlm" && config.vlm.use_llm && config.llm.model_name;
     const configured =
-      type === "vlm" && !item.enabled
+      !item.enabled
         ? false
         : usingLlm
         ? true
@@ -712,8 +720,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   maxWidth: 100,
                 }}
               >
-                {usingLlm ? config.llm.model_name : item.model_name}
-                {!isTested && "（未测试）"}
+                {!item.enabled
+                  ? "（已关闭）"
+                  : usingLlm
+                  ? config.llm.model_name
+                  : item.model_name}
+                {!isTested && item.enabled && "（未测试）"}
               </span>
             )}
           </div>
@@ -922,17 +934,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               config.vlm.use_llm &&
               config.llm.model_name
             ) {
-              if (!tested.vlm) {
-                subText = "未测试";
-                subColor = "var(--color-text-tertiary)";
-              } else {
-                subText = config.llm.model_name;
-                subColor = "var(--color-success)";
-              }
+              subText = tested.vlm ? config.llm.model_name : `${config.llm.model_name}（未测试）`;
+              subColor = tested.vlm ? "var(--color-success)" : "var(--color-text-tertiary)";
+            } else if (!item.enabled && hasModel) {
+              subText = `${item.model_name}（已关闭）`;
+              subColor = "var(--color-text-tertiary)";
             } else if (!hasModel) {
               subText = "未配置";
               subColor = "var(--color-text-tertiary)";
-            } else if (meta.type !== "llm" && tested[meta.type] !== true) {
+            } else if (tested[meta.type] !== true) {
               subText = `${item.model_name}（未测试）`;
               subColor = "var(--color-danger)";
             } else {

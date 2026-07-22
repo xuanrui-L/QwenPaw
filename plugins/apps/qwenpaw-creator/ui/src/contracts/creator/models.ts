@@ -47,4 +47,5 @@ export interface ConnectionTestResponse {
   ms: number;
   error?: string | null;
   detail?: string | null;
+  suggestion?: string | null;
 }

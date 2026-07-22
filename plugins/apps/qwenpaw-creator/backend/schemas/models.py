@@ -76,3 +76,4 @@ class ConnectionTestResponse(StrictModel):
     ms: int = Field(ge=0, default=0)
     error: str | None = None
     detail: str | None = None
+    suggestion: str | None = None
