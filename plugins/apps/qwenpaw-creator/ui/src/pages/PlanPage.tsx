@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { message } from "antd";
-import { Plus, Scissors, Sparkles } from "lucide-react";
+import { Scissors, Sparkles } from "lucide-react";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
@@ -124,23 +123,6 @@ export default function PlanPage() {
 
   const patchValue = (path: string, before: unknown, value: unknown) =>
     patchProject(id, [{ op: "replace", path, before, value }]);
-  const removeElement = async (element: TimelineElementDocument) => {
-    await patchProject(id, [
-      {
-        op: "remove",
-        path: projectJsonPointer(
-          "timelines",
-          "items",
-          timeline.timeline_id,
-          "elements_by_id",
-          element.element_id,
-        ),
-        before: element,
-      },
-    ]);
-    navigate(base);
-    message.success("时间线内容已删除");
-  };
   const openElementAgent = (
     element: TimelineElementDocument,
     instruction?: string,
@@ -202,19 +184,6 @@ export default function PlanPage() {
           <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)]">
             {Object.keys(timeline.elements_by_id).length} 项内容
           </span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
-            onClick={() =>
-              focusAgent(
-                timelineTargetRef,
-                "请在当前时间轴中添加新的内容。先根据项目目标判断内容类型、时间位置和持续时长，再更新视频方案。",
-              )
-            }
-          >
-            <Plus className="h-3.5 w-3.5" />
-            添加内容
-          </button>
           <button
             type="button"
             className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
@@ -288,7 +257,6 @@ export default function PlanPage() {
           patching={patching || requestInFlight}
           onClose={() => navigate(base)}
           onPatch={patchValue}
-          onDelete={removeElement}
           onAgent={openElementAgent}
           onOpenWorkbench={openElementWorkbench}
         />

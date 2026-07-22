@@ -176,7 +176,7 @@ export default function ElementList({
                 时间轴还是空的
               </p>
               <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                可以从上方添加内容，或在 Agent 中描述想生成、剪辑和叠加的画面。
+                在 Agent 中描述想生成、剪辑和叠加的画面，方案会自动出现在这里。
               </p>
             </div>
           )

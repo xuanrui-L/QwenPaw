@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Input, InputNumber, Modal, Switch, message } from "antd";
+import { Button, Input, InputNumber, Switch, message } from "antd";
 import {
   ArrowUpRight,
   Box,
@@ -7,7 +7,6 @@ import {
   Film,
   Layers3,
   Sparkles,
-  Trash2,
   X,
 } from "lucide-react";
 import type {
@@ -33,7 +32,6 @@ interface ElementDetailProps {
   patching: boolean;
   onClose: () => void;
   onPatch: (path: string, before: unknown, value: unknown) => Promise<void>;
-  onDelete: (element: TimelineElementDocument) => Promise<void>;
   onAgent: (element: TimelineElementDocument, prompt?: string) => void;
   onOpenWorkbench: (element: TimelineElementDocument) => void;
 }
@@ -139,7 +137,6 @@ export default function ElementDetail({
   patching,
   onClose,
   onPatch,
-  onDelete,
   onAgent,
   onOpenWorkbench,
 }: ElementDetailProps) {
@@ -222,24 +219,6 @@ export default function ElementDetail({
           >
             {status.label}
           </span>
-          <Button
-            type="text"
-            danger
-            size="small"
-            icon={<Trash2 className="h-3.5 w-3.5" />}
-            aria-label="删除当前内容"
-            onClick={() =>
-              Modal.confirm({
-                title: "删除这项时间线内容？",
-                content: `将从时间轴中删除「${element.label || "当前内容"}」。`,
-                okText: "删除",
-                okButtonProps: { danger: true },
-                onOk: () => onDelete(element),
-              })
-            }
-          >
-            删除
-          </Button>
           <button
             type="button"
             onClick={onClose}
