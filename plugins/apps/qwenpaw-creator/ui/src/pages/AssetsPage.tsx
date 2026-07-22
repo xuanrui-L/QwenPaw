@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, message, Modal, Tabs } from "antd";
 import {
   Box,
+  Download,
   FileText,
   Film,
   Image as ImageIcon,
@@ -90,6 +91,27 @@ function fileMedia(
     ? "text"
     : "other";
   return { kind, type };
+}
+
+const MIME_EXTENSION_MAP: Record<string, string> = {
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "video/webm": ".webm",
+  "video/x-matroska": ".mkv",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "audio/mpeg": ".mp3",
+  "audio/wav": ".wav",
+  "audio/ogg": ".ogg",
+};
+
+function downloadName(name: string, mediaType: string): string {
+  const base = name.trim() || "download";
+  if (/\.[a-zA-Z0-9]{1,10}$/.test(base)) return base;
+  const ext =
+    MIME_EXTENSION_MAP[mediaType.split(";")[0].trim().toLowerCase()] ?? "";
+  return ext ? `${base}${ext}` : base;
 }
 
 function artifactMedia(
@@ -590,6 +612,29 @@ export default function AssetsPage() {
                   </details>
                 )}
                 <div className="flex gap-2">
+                  {selected.previewUrl && (
+                    <Button
+                      icon={<Download className="h-3.5 w-3.5" />}
+                      onClick={() => {
+                        const filename = downloadName(
+                          selected.name,
+                          selected.mediaType,
+                        );
+                        fetch(selected.previewUrl!)
+                          .then((res) => res.blob())
+                          .then((blob) => {
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = filename;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                          });
+                      }}
+                    >
+                      下载
+                    </Button>
+                  )}
                   <Button
                     className="flex-1"
                     icon={<Sparkles className="h-3.5 w-3.5" />}
