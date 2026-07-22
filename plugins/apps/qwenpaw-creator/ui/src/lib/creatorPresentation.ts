@@ -17,7 +17,7 @@ const TASK_KIND_LABELS: Record<TaskView["kind"], string> = {
 };
 
 export function taskKindLabel(kind: string): string {
-  return TASK_KIND_LABELS[kind as TaskView["kind"]] ?? "视频制作";
+  return TASK_KIND_LABELS[kind as TaskView["kind"]] ?? "任务执行";
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -124,8 +124,11 @@ export function creatorToolLabel(name: string): string {
     finalize_video: "合成视频",
     yield_until_runtime_event: "等待执行",
     complete_current_change: "完成检查",
+    ground_prompt_context: "核对画面上下文",
+    transcribe_source_audio: "音频转写",
+    commit_source_intelligence: "写入理解结果",
   };
-  return labels[name] ?? "制作工具";
+  return labels[name] ?? "处理中";
 }
 
 export function creatorRoleLabel(name: string): string {
@@ -139,7 +142,51 @@ export function creatorRoleLabel(name: string): string {
     unit_planning_routing_agent: "规划单元",
     review_consistency_agent: "一致性检查",
   };
-  return labels[name] ?? (name || "专业制作");
+  return labels[name] ?? (name || "制作助手");
+}
+
+const TOOL_RUNNING_LABELS: Record<string, string> = {
+  read_project: "正在查看项目…",
+  read_project_file: "正在阅读素材分析…",
+  jq_project: "正在修改项目…",
+  elements_at: "正在查看时间轴…",
+  ground_prompt_context: "正在核对画面上下文…",
+  analyze_source_media: "素材理解中…",
+  source_intelligence: "素材理解中…",
+  transcribe_source_audio: "素材音频转写中…",
+  commit_source_intelligence: "素材理解写入中…",
+  ai_edit: "剪辑执行中…",
+  read_file: "正在读取文件…",
+  write_file: "正在写入文件…",
+  edit_file: "正在编辑文件…",
+  append_file: "正在追加内容…",
+  grep_search: "正在搜索内容…",
+  glob_search: "正在搜索文件…",
+  ast_search: "正在搜索代码结构…",
+  plan: "正在制定计划…",
+  final: "正在整理回复…",
+  finalize_video: "正在合成视频…",
+  yield_until_runtime_event: "等待执行中…",
+  complete_current_change: "正在完成检查…",
+};
+
+export function getToolRunningLabel(name: string): string | null {
+  return TOOL_RUNNING_LABELS[name] ?? null;
+}
+
+const ROLE_RUNNING_LABELS: Record<string, string> = {
+  source_intelligence_agent: "素材理解中…",
+  visual_development_agent: "画面设计中…",
+  v_generation_director: "视频生成中…",
+  r2v_generation_director: "视频生成中…",
+  ai_editing_director: "剪辑制作中…",
+  story_planning_agent: "规划故事中…",
+  unit_planning_routing_agent: "规划单元中…",
+  review_consistency_agent: "一致性检查中…",
+};
+
+export function getRoleRunningLabel(name: string): string | null {
+  return ROLE_RUNNING_LABELS[name] ?? null;
 }
 
 export function getEstimatedDuration(toolName: string): string | null {

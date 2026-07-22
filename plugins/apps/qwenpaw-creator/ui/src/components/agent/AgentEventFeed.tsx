@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Button, message } from "antd";
 import { CircleCheck, CircleX, PlayCircle } from "lucide-react";
 import { interruptCreator } from "@/api/creator";
-import type { CreatorEvent, SpecialistRunView } from "@/contracts/creator";
+import type { CreatorEvent, ProjectDocument, SpecialistRunView } from "@/contracts/creator";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -145,7 +145,7 @@ function eventText(event: CreatorEvent): string {
   return "";
 }
 
-function EventCard({ event }: { event: CreatorEvent }) {
+function EventCard({ event, project }: { event: CreatorEvent; project: ProjectDocument | null }) {
   const data = event.data;
   const summary = eventText(event);
   if (event.type === "agent.plan") {
@@ -168,9 +168,9 @@ function EventCard({ event }: { event: CreatorEvent }) {
         {Boolean(data.scope) && (
           <p className="mt-1 text-[var(--color-text-tertiary)]">
             范围：
-            {Array.isArray(data.scope)
-              ? data.scope.join("、")
-              : String(data.scope)}
+            {(Array.isArray(data.scope) ? data.scope : [data.scope])
+              .map((ref) => creatorTargetLabel(String(ref), project))
+              .join("、")}
           </p>
         )}
       </div>
@@ -207,7 +207,9 @@ function EventCard({ event }: { event: CreatorEvent }) {
     );
   }
   if (event.type.startsWith("subagent.")) {
-    const label = creatorRoleLabel(String(data.roleDisplayName ?? data.role ?? ""));
+    const label = data.roleDisplayName
+      ? String(data.roleDisplayName)
+      : creatorRoleLabel(String(data.role ?? ""));
     const completed = event.type.endsWith("completed");
     const failed =
       event.type.endsWith("failed") || event.type.endsWith("stale");
@@ -361,7 +363,7 @@ export default function AgentEventFeed() {
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
             <PlayCircle className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-            端到端生产
+            制作流程
           </span>
           <span className="flex items-center gap-1.5">
             <span
@@ -456,7 +458,7 @@ export default function AgentEventFeed() {
       </div>
 
       {visibleEvents.map((event) => (
-        <EventCard key={event.eventId} event={event} />
+        <EventCard key={event.eventId} event={event} project={project} />
       ))}
     </div>
   );

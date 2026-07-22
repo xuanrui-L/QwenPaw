@@ -9,6 +9,8 @@ import type { ToolCallPresentation } from "@/lib/creatorMessagePresentation";
 import {
   creatorRoleLabel,
   creatorTargetLabel,
+  getRoleRunningLabel,
+  getToolRunningLabel,
   taskKindLabel,
 } from "./creatorPresentation";
 import { taskProgressPercent } from "./taskPresentation";
@@ -42,29 +44,6 @@ export interface AgentLiveStatusInput {
   tasks: TaskView[];
   project: ProjectDocument | null;
 }
-
-// 工具名 → 进行时子状态文案。生成类工具（image/r2v）单独结合 targetRef 细化。
-const RUNNING_TOOL_LABELS: Record<string, string> = {
-  read_project: "正在查看项目…",
-  read_project_file: "正在阅读素材分析…",
-  jq_project: "正在修改项目…",
-  elements_at: "正在查看时间轴…",
-  ground_prompt_context: "正在核对画面上下文…",
-  analyze_source_media: "素材理解中…",
-  source_intelligence: "素材理解中…",
-  transcribe_source_audio: "素材音频转写中…",
-  commit_source_intelligence: "素材理解写入中…",
-  ai_edit: "剪辑执行中…",
-};
-
-// 角色 → 子状态文案：子 Agent 活跃但暂无具体工具输出时的进行时描述。
-const ROLE_WORKING_LABELS: Record<string, string> = {
-  source_intelligence_agent: "素材理解中…",
-  visual_development_agent: "画面设计中…",
-  v_generation_director: "视频生成中…",
-  r2v_generation_director: "视频生成中…",
-  ai_editing_director: "剪辑制作中…",
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -136,7 +115,7 @@ function runningToolLabel(
     return imageGenerationLabel(toolTargetRef(args, fallbackRefs), project);
   if (tool === "r2v_generation")
     return r2vGenerationLabel(toolTargetRef(args, fallbackRefs), project);
-  return RUNNING_TOOL_LABELS[tool] ?? null;
+  return getToolRunningLabel(tool);
 }
 
 function subagentRoleName(activity: SubagentActivity): string {
@@ -145,10 +124,9 @@ function subagentRoleName(activity: SubagentActivity): string {
 
 /** 角色级子状态：优先用预设文案，未知角色降级为「角色」工作中。 */
 function roleWorkingLabel(activity: SubagentActivity): string {
-  return (
-    ROLE_WORKING_LABELS[activity.role] ??
-    `「${subagentRoleName(activity)}」工作中…`
-  );
+  const runningLabel = getRoleRunningLabel(activity.role);
+  if (runningLabel) return runningLabel;
+  return `「${subagentRoleName(activity)}」工作中…`;
 }
 
 /** 未完成子 Agent 里最新一个仍在执行的工具（含所属活动的 targetRefs 兜底）。 */
@@ -200,7 +178,7 @@ function activeMainToolLabel(
       const role = typeof args?.role === "string" ? args.role : "";
       return role
         ? `正在安排「${creatorRoleLabel(role)}」…`
-        : "正在安排专业制作…";
+        : "正在分配任务…";
     }
     const label = runningToolLabel(call.tool, call.arguments, [], project);
     if (label) return label;

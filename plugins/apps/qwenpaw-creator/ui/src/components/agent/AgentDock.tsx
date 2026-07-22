@@ -320,7 +320,7 @@ function MessageParts({
             key={index}
             className="mt-1 block rounded bg-[var(--color-bg-secondary)] px-2 py-1 text-[10px] text-[var(--color-text-secondary)]"
           >
-            {part.type} ·{" "}
+            {part.type === "audio" ? "音频附件" : part.type === "document" ? "文档附件" : part.type} ·{" "}
             {String(part.attachment.name || part.attachment.filename || "附件")}
           </span>
         );
@@ -363,7 +363,7 @@ function ThinkingDisclosure({
       } border-l-2 border-[var(--color-border-strong)] pl-2`}
     >
       <div className="flex items-center gap-2">
-        <span className={`flex items-center gap-1.5 ${active ? "text-[var(--color-text-secondary)]" : "text-[var(--color-success)]"}`}>
+        <span className={`flex items-center gap-1.5 ${active ? "text-[var(--color-text-secondary)]" : "text-[var(--color-text-tertiary)]"}`}>
           {active ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleCheck className="h-3 w-3" />}
           {active ? "思考中" : "思考完成"}
         </span>
@@ -392,6 +392,39 @@ function ThinkingDisclosure({
   );
 }
 
+function extractErrorMessage(error: string): string {
+  if (!error) return '';
+  try {
+    const parsed = JSON.parse(error);
+    const type = parsed.error?.type || '';
+    const message = parsed.error?.message || parsed.message || error;
+    const errorMap: Record<string, string> = {
+      'AgentProjectBaseRequired': '项目状态已过期，请重试',
+    };
+    if (errorMap[type]) return errorMap[type];
+    return message;
+  } catch {
+    return error;
+  }
+}
+
+const ERROR_MESSAGE_MAP: Record<string, string> = {
+  'AgentProjectBaseRequired': '项目状态已过期，请重试',
+  'R2V ArtifactSlot 归属冲突': '视频生成失败，请重试',
+  'exceeded 16 model turns': 'Agent 执行超时，请重试',
+  'retryable: false': '执行失败，无法自动重试',
+};
+
+function simplifyErrorMessage(text: string): string {
+  if (!text) return '';
+  for (const [key, value] of Object.entries(ERROR_MESSAGE_MAP)) {
+    if (text.includes(key)) return value;
+  }
+  const firstLine = text.split('\n')[0].trim();
+  const firstSentence = firstLine.split('。')[0].split('. ')[0];
+  return firstSentence || '执行失败，请重试';
+}
+
 function actionReason(envelope: CreatorActionEnvelope): string {
   const arguments_ = envelope.payload?.arguments;
   if (
@@ -405,7 +438,7 @@ function actionReason(envelope: CreatorActionEnvelope): string {
 }
 
 function waitingActionTitle(reason: string): string {
-  const subject = reason || "运行时事件";
+  const subject = reason || "执行结果";
   const prefixed = /^(?:正在)?等待/.test(subject) ? subject : `等待${subject}`;
   return prefixed.endsWith("中") ? prefixed : `${prefixed}中`;
 }
@@ -422,7 +455,7 @@ function actionTitle(envelope: CreatorActionEnvelope, active: boolean): string {
     return active ? "完成检查中" : "完成检查已提交";
   if (envelope.action === "plan") return active ? "制定计划中" : "计划已生成";
   if (envelope.action === "final") return active ? "整理回复中" : "回复已生成";
-  return active ? `${envelope.action}中` : envelope.action;
+  return active ? "处理中…" : "处理完成";
 }
 
 function ActionDisclosure({
@@ -803,7 +836,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
       <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px]">
         <div className="flex min-w-0 items-center gap-1.5">
           <b className="truncate text-[var(--color-accent)]">
-            {creatorRoleLabel(activity.role || roleDisplayName(activity, undefined))}
+            {activity.role ? creatorRoleLabel(activity.role) : roleDisplayName(activity, undefined)}
           </b>
           <span
             className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold ${activityStatus.tone}`}
@@ -813,7 +846,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
         </div>
         {activity.runId && (
           <span className="shrink-0 font-mono text-[9px] text-[var(--color-text-tertiary)]">
-            run {activity.runId.slice(0, 8)}
+            运行 #{activity.runId.slice(0, 8)}
           </span>
         )}
       </div>
@@ -850,7 +883,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
           )
         ) : activity.summaryText ? (
           <div className="text-[11px] leading-5 text-[var(--color-text-secondary)]">
-            <MarkdownContent compact>{activity.summaryText}</MarkdownContent>
+            <MarkdownContent compact>{simplifyErrorMessage(activity.summaryText)}</MarkdownContent>
           </div>
         ) : (
           <p
@@ -858,7 +891,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
               activity.completed ? "" : "animate-pulse"
             } text-[10px] text-[var(--color-text-tertiary)]`}
           >
-            {activity.completed ? "已结束" : "等待输出…"}
+            {activity.completed ? "已完成" : "等待输出中"}
           </p>
         )}
       </div>
@@ -926,6 +959,8 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
   }
 
   const estimatedDuration = active ? getEstimatedDuration(tool) : null;
+  const rawError = delegated ? (activity?.summaryText || '') : (data.error || '');
+  const errorMessage = simplifyErrorMessage(rawError);
 
   return (
     <div
@@ -946,9 +981,6 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           {estimatedDuration && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">{estimatedDuration}</span>
           )}
-          {allowExpand && !delegated && effectiveStatus === "failed" && data.error && (
-            <span className="text-[10px]">：{String(data.error)}</span>
-          )}
         </span>
         {hasDetails && allowExpand && (
           <button
@@ -959,6 +991,11 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           </button>
         )}
       </div>
+      {effectiveStatus === "failed" && errorMessage && (
+        <div className="mt-1 rounded-md bg-[var(--color-danger-soft)] px-2 py-1.5 text-[10px] text-[var(--color-danger)]">
+          {errorMessage}
+        </div>
+      )}
       {expanded && (
         <div className="mt-1 space-y-1">
           {delegated && (task || targets.length > 0) && (
@@ -1162,7 +1199,7 @@ function WorkspacePanel() {
     <div className="space-y-2.5 text-[11px] leading-5">
       <div>
         <p className="font-semibold text-[var(--color-text-secondary)]">
-          任务上下文
+          当前任务
         </p>
         <p className="text-[var(--color-text-tertiary)]">
           阶段{" "}
@@ -1183,7 +1220,7 @@ function WorkspacePanel() {
 
       <div>
         <p className="font-semibold text-[var(--color-text-secondary)]">
-          素材事实（{materialCount}）
+          素材概况（{materialCount}）
         </p>
         <div className="mt-0.5 flex flex-wrap gap-1">
           {!project ? (
@@ -1898,11 +1935,11 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
               <Sparkles className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />
               <div className="min-w-0">
                 <b className="block truncate text-xs text-[var(--color-text-primary)]">
-                  Creator Agent
+                  创作助手
                 </b>
                 {contextChips.length > 0 && (
                   <span className="block truncate text-[10px] text-[var(--color-text-tertiary)]">
-                    已绑定 {contextChips.length} 个上下文对象
+                    已关联 {contextChips.length} 项引用
                   </span>
                 )}
               </div>
