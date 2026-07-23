@@ -19,10 +19,10 @@ import type {
 } from "@/contracts/creator";
 import { getArtifactVersionMediaUrl } from "@/api/creator";
 import {
-  ELEMENT_TYPE_META,
   elementsAtTick,
   elementsOverlappingRange,
-  packDisplayLanes,
+  groupElementsByTracks,
+  resolveElementVisualMeta,
   resolveTimelineRender,
 } from "@/selectors/timelineElementSelectors";
 import type { ElementPlaybackStatus } from "@/selectors/elementPlaybackSelectors";
@@ -127,7 +127,8 @@ export default function TimelineCanvas({
     pointerId: number;
     resumeAfterScrub: boolean;
   } | null>(null);
-  const lanes = useMemo(() => packDisplayLanes(timeline), [timeline]);
+  const tracks = useMemo(() => groupElementsByTracks(timeline), [timeline]);
+  const totalLanes = tracks.reduce((sum, track) => sum + track.lanes.length, 0);
   const active = useMemo(
     () => elementsAtTick(timeline, playheadTick),
     [playheadTick, timeline],
@@ -175,7 +176,7 @@ export default function TimelineCanvas({
     });
     return states;
   }, [project, tasks, timeline]);
-  const scrollable = lanes.length > 4;
+  const scrollable = totalLanes > 4;
   const timelineDuration = Math.max(1, durationTick);
   const finalVideo = videoRef.current;
   const finalPreviewReady =
@@ -561,25 +562,20 @@ export default function TimelineCanvas({
               scrollable ? "ring-1 ring-[var(--color-border)]" : ""
             }`}
           >
-            {lanes.length} 层{scrollable ? " · 可上下滚动" : ""}
+            {tracks.length} 轨{scrollable ? " · 可上下滚动" : ""}
           </span>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <div className="hidden flex-wrap items-center gap-2 xl:flex">
-            {Object.entries(ELEMENT_TYPE_META).map(
-              ([type, meta]) =>
-                Object.values(timeline.elements_by_id).some(
-                  (element) => element.creation.type === type,
-                ) && (
-                  <span key={type} className="whitespace-nowrap">
-                    <i
-                      className="mr-1 inline-block h-2 w-2 rounded-sm"
-                      style={{ background: meta.color }}
-                    />
-                    {meta.label}
-                  </span>
-                ),
-            )}
+            {tracks.map((track) => (
+              <span key={track.type} className="whitespace-nowrap">
+                <i
+                  className="mr-1 inline-block h-2 w-2 rounded-sm"
+                  style={{ background: track.color }}
+                />
+                {track.label}
+              </span>
+            ))}
           </div>
           <button
             type="button"
@@ -803,7 +799,7 @@ export default function TimelineCanvas({
         ref={chartRef}
         data-timeline-chart
         className={`relative shrink-0 cursor-crosshair select-none px-3 pb-2 ${
-          previewOpen ? "max-h-[190px] overflow-hidden" : ""
+          previewOpen ? "max-h-[280px] overflow-hidden" : ""
         }`}
         onPointerDown={beginSelection}
         onPointerMove={moveSelection}
@@ -871,7 +867,7 @@ export default function TimelineCanvas({
               aria-label="紧凑时间轴概览；点击任意时刻查看同时出现的内容"
             >
               {Object.values(timeline.elements_by_id).map((element) => {
-                const meta = ELEMENT_TYPE_META[element.creation.type];
+                const meta = resolveElementVisualMeta(element);
                 const left = percent(element.span.start_tick, timelineDuration);
                 const width = Math.max(
                   0.7,
@@ -899,12 +895,12 @@ export default function TimelineCanvas({
             className={
               scrollable
                 ? `${
-                    previewOpen ? "max-h-[84px]" : "max-h-[210px]"
+                    previewOpen ? "max-h-[180px]" : "max-h-[320px]"
                   } overflow-y-auto overscroll-contain [scrollbar-gutter:stable]`
                 : ""
             }
           >
-            {lanes.length === 0 ? (
+            {tracks.length === 0 ? (
               agentWorking.working ? (
                 <div
                   data-timeline-working
@@ -922,28 +918,45 @@ export default function TimelineCanvas({
                 </div>
               )
             ) : (
-              lanes.map((lane) => (
-                <div
-                  key={lane.id}
-                  className="relative flex h-[42px] border-b border-[var(--color-border)]/65 last:border-b-0"
-                >
-                  <div
-                    title="选取整行"
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={() => {
-                      const laneElementIds = lane.elements.map(
-                        (element) => element.element_id,
-                      );
-                      onActiveElementIdsChange(laneElementIds);
-                      onPlayheadChange(0);
-                    }}
-                    className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)] hover:text-[12px] hover:font-bold"
-                  >
-                    {lane.id}
+              tracks.map((track) => (
+                <div key={track.type} data-track={track.type}>
+                  <div className="relative flex h-[26px] items-center border-b border-[var(--color-border)]/45 bg-[var(--color-bg-secondary)]/40">
+                    <div
+                      className="flex w-[68px] shrink-0 items-center justify-center gap-1 text-[10px] font-bold"
+                      style={{ color: track.color }}
+                    >
+                      <i
+                        className="h-2 w-2 shrink-0 rounded-sm"
+                        style={{ background: track.color }}
+                      />
+                      {track.label}
+                    </div>
+                    <span className="text-[9px] text-[var(--color-text-tertiary)]">
+                      {track.lanes.length} 层 · {track.lanes.reduce((sum, l) => sum + l.elements.length, 0)} 项
+                    </span>
                   </div>
-                  <div className="relative min-w-0 flex-1">
+                  {track.lanes.map((lane) => (
+                    <div
+                      key={lane.id}
+                      className="relative flex h-[42px] border-b border-[var(--color-border)]/65 last:border-b-0"
+                    >
+                      <div
+                        title={`选取整行 ${track.label}`}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={() => {
+                          const laneElementIds = lane.elements.map(
+                            (element) => element.element_id,
+                          );
+                          onActiveElementIdsChange(laneElementIds);
+                          onPlayheadChange(0);
+                        }}
+                        className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)] hover:text-[12px] hover:font-bold"
+                      >
+                        {lane.id}
+                      </div>
+                      <div className="relative min-w-0 flex-1">
                     {lane.elements.map((element) => {
-                      const meta = ELEMENT_TYPE_META[element.creation.type];
+                      const meta = resolveElementVisualMeta(element);
                       const playbackState =
                         playbackStates.get(element.element_id) ?? "pending";
                       const left = percent(
@@ -1064,7 +1077,9 @@ export default function TimelineCanvas({
                         </button>
                       );
                     })}
-                  </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ))
             )}
@@ -1146,7 +1161,7 @@ export default function TimelineCanvas({
             该时刻有 {pointCandidates.length} 项内容：
           </span>
           {pointCandidates.map((element) => {
-            const meta = ELEMENT_TYPE_META[element.creation.type];
+            const meta = resolveElementVisualMeta(element);
             return (
               <button
                 key={element.element_id}

@@ -89,20 +89,35 @@ describe("PlanPage Timeline/Element frontend", () => {
     seedProject();
   });
 
-  it("renders the canonical Timeline as overlapping display lanes and a start-sorted Element list", () => {
+  it("renders the canonical Timeline as categorized tracks and a start-sorted Element list", () => {
     const { container } = renderPage("/project/p1/plan?element=r2v-window");
 
     expect(screen.getByText("创作总纲")).toBeInTheDocument();
     expect(screen.getAllByText("20s").length).toBeGreaterThan(0);
     expect(screen.getByText("16:9")).toBeInTheDocument();
     expect(screen.getByText("6 项内容")).toBeInTheDocument();
-    expect(screen.getByText(/5 层/)).toHaveTextContent("可上下滚动");
+    expect(screen.getByText(/5 轨/)).toHaveTextContent("可上下滚动");
     expect(
-      container.querySelector('[class~="max-h-[210px]"]'),
+      container.querySelector('[class~="max-h-[320px]"]'),
     ).toBeInTheDocument();
     expect(screen.getAllByText("午饭名场面").length).toBeGreaterThan(0);
     expect(screen.getByText("分镜描述")).toBeInTheDocument();
     expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();
+
+    const chart = container.querySelector("[data-timeline-chart]") as HTMLElement;
+    vi.spyOn(chart, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 200,
+      width: 600,
+      height: 200,
+      toJSON: () => ({}),
+    });
+    fireEvent.pointerDown(chart, { clientX: 100, clientY: 100, pointerId: 1 });
+    fireEvent.pointerUp(chart, { clientX: 100, clientY: 100, pointerId: 1 });
 
     const listItems = [
       ...container.querySelectorAll("[data-element-list-item]"),
@@ -110,8 +125,8 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(
       listItems
         .map((item) => item.getAttribute("data-element-list-item"))
-        .slice(0, 3),
-    ).toEqual(["edit-opening", "audio-bgm", "overlay-title"]);
+        .slice(0, 2),
+    ).toEqual(["edit-opening", "audio-bgm"]);
   });
 
   it("keeps an empty Timeline guided through the Agent without an add-content button", () => {

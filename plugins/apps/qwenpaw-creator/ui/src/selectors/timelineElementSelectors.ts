@@ -108,6 +108,134 @@ export function packDisplayLanes(
   }));
 }
 
+export type TimelineTrackType = "subtitle" | "motion" | "clip" | "ai" | "transition";
+
+export const TRACK_ORDER: TimelineTrackType[] = [
+  "ai",
+  "clip",
+  "subtitle",
+  "motion",
+  "transition",
+];
+
+export const TRACK_TYPE_META: Record<
+  TimelineTrackType,
+  { label: string; color: string; soft: string }
+> = {
+  ai: { label: "AI 画面", color: "#ff7f16", soft: "rgba(255,127,22,.12)" },
+  clip: { label: "素材剪辑", color: "#3b82f6", soft: "rgba(59,130,246,.12)" },
+  subtitle: { label: "字幕", color: "#8b5cf6", soft: "rgba(139,92,246,.12)" },
+  motion: { label: "动效", color: "#f59e0b", soft: "rgba(245,158,11,.12)" },
+  transition: { label: "转场", color: "#0d9488", soft: "rgba(13,148,136,.12)" },
+};
+
+export function classifyElementTrack(
+  element: TimelineElementDocument,
+): TimelineTrackType | null {
+  const { creation } = element;
+  switch (creation.type) {
+    case "r2v":
+      return "ai";
+    case "edit":
+      return "clip";
+    case "transition":
+      return "transition";
+    case "overlay":
+      if (creation.overlay_kind === "pet_os" || creation.overlay_kind === "interview_summary") {
+        return "subtitle";
+      }
+      if (creation.overlay_kind === "motion" || creation.overlay_kind === "media") {
+        return "motion";
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
+const trackRank = new Map(
+  TRACK_ORDER.map((type, index) => [type, index]),
+);
+
+export function trackOrderedTimelineElements(
+  timeline: TimelineDocument | null | undefined,
+): TimelineElementDocument[] {
+  if (!timeline) return [];
+  return Object.values(timeline.elements_by_id).sort((left, right) => {
+    const leftTrack = classifyElementTrack(left);
+    const rightTrack = classifyElementTrack(right);
+    const leftRank = leftTrack !== null ? trackRank.get(leftTrack) ?? TRACK_ORDER.length : TRACK_ORDER.length;
+    const rightRank = rightTrack !== null ? trackRank.get(rightTrack) ?? TRACK_ORDER.length : TRACK_ORDER.length;
+    return (
+      leftRank - rightRank ||
+      left.span.start_tick - right.span.start_tick ||
+      right.z_index - left.z_index ||
+      left.element_id.localeCompare(right.element_id)
+    );
+  });
+}
+
+export interface TimelineTrack {
+  type: TimelineTrackType;
+  label: string;
+  color: string;
+  soft: string;
+  lanes: DisplayLane[];
+}
+
+export function resolveElementVisualMeta(element: TimelineElementDocument): {
+  label: string;
+  color: string;
+  soft: string;
+} {
+  const trackType = classifyElementTrack(element);
+  if (trackType) return TRACK_TYPE_META[trackType];
+  return ELEMENT_TYPE_META[element.creation.type];
+}
+
+export function groupElementsByTracks(
+  timeline: TimelineDocument | null | undefined,
+): TimelineTrack[] {
+  if (!timeline) return [];
+  const grouped = new Map<TimelineTrackType, TimelineElementDocument[]>();
+  for (const element of orderedTimelineElements(timeline)) {
+    const trackType = classifyElementTrack(element);
+    if (!trackType) continue;
+    const list = grouped.get(trackType);
+    if (list) list.push(element);
+    else grouped.set(trackType, [element]);
+  }
+  return TRACK_ORDER
+    .filter((type) => grouped.has(type))
+    .map((type) => {
+      const elements = grouped.get(type)!;
+      const meta = TRACK_TYPE_META[type];
+      const laneMap: Array<{ endTick: number; elements: TimelineElementDocument[] }> = [];
+      for (const element of elements) {
+        const lane = laneMap.find(
+          (candidate) => candidate.endTick <= element.span.start_tick,
+        );
+        const endTick = element.span.start_tick + element.span.duration_tick;
+        if (lane) {
+          lane.elements.push(element);
+          lane.endTick = endTick;
+        } else {
+          laneMap.push({ endTick, elements: [element] });
+        }
+      }
+      return {
+        type,
+        label: meta.label,
+        color: meta.color,
+        soft: meta.soft,
+        lanes: laneMap.map((lane, index) => ({
+          id: `${type}-${index + 1}`,
+          elements: lane.elements,
+        })),
+      };
+    });
+}
+
 export function selectedSlotVersion(
   project: ProjectDocument,
   slotId: string,
