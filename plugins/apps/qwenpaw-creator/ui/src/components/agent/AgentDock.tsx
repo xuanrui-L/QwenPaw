@@ -1432,6 +1432,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
   const inputRef = useRef<MentionInputHandle>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
+  const previousTab = useRef(tab);
   const previousPendingAuthorizationCount = useRef(0);
   const lastOpenedFileReviewToken = useRef<string | null>(null);
   const resizeRef = useRef<{
@@ -1708,6 +1709,38 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [open, orderedMessages, queued, toolCalls]);
+
+  useEffect(() => {
+    const wasReview = previousTab.current === "review";
+    previousTab.current = tab;
+    // The review tab unmounts the conversation scroll container; switching to
+    // either activity or conversation remounts it with scrollTop reset to 0.
+    // Re-anchor to the bottom so the latest content stays in view instead of
+    // jumping to the top on return from the decision center.
+    if (!open || tab === "review" || !wasReview) return;
+    stickBottom.current = true;
+    let handle = 0;
+    let attempts = 0;
+    // The remounted flex container and async markdown/media content settle
+    // layout over several frames, so retry until the scroll is actually pinned
+    // to the bottom rather than no-opping on the first unconstrained read.
+    const anchor = () => {
+      const el = scrollRef.current;
+      if (!el) return false;
+      el.scrollTop = el.scrollHeight;
+      setShowJump(false);
+      return (
+        el.scrollHeight > 0 &&
+        el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+      );
+    };
+    const tick = () => {
+      if (anchor() || ++attempts > 8) return;
+      handle = requestAnimationFrame(tick);
+    };
+    handle = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(handle);
+  }, [open, tab]);
 
   useEffect(() => {
     if (!open || showDecisions || !selectionAttachment) return;
