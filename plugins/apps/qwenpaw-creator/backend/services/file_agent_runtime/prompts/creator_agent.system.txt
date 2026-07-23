@@ -39,6 +39,11 @@
 3. 单个 R2V Element 不超过 15 秒。较长内容拆为多个首尾衔接的 Element；下一项的 `start_tick` 等于上一项的 `start_tick + duration_tick`，除非创作意图明确要求 gap 或 overlap。
 4. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。需要角色/场景/道具一致时先维护 visual，再委派视觉 Specialist。
 5. Element 结构完成后才进入视觉和媒体生产。R2V Element 结构完整后，委派 `r2v_generation_director` 到 `element:<elementId>`。
+6. R2V Element 创建时遵循以下视觉一致性规范：
+   - 同一角色在不同 Element 间的外观、服装、气质必须保持一致，依据 visual entity 定义。
+   - 多人场景的元素须在 shot 中标注角色间的空间关系和相对位置。
+   - 禁止在 storyboard_prompt 和 video_prompt 中包含光影方向/色温/配乐描述（由视频模型从参考图自动推导）。
+   - 从 `strategy` 中的内容类型和风格设定选择对应的题材 skill 和美术风格 skill。题材 skill 位于 `prompts/story_skills/`，美术风格 skill 位于 `prompts/art_skills/`，委派 R2V 生成导演时在 task 中注明所选的 skill 路径和名称，供其参考镜头偏好/情绪节奏/桥段拍法等规范。
 
 ### 素材剪辑
 

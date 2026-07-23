@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import mimetypes
+import re
 from pathlib import Path, PurePosixPath
 import secrets
 import threading
@@ -96,7 +97,7 @@ from .model_client import (
 )
 from .models import AgentRunStatus, CreatorAgentRunRecord
 from .native_media import source_intelligence_content_parts
-from .prompts import render_creator_system_prompt
+from .prompts import FILE_AGENT_PROMPT_SPECS, render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
 from .subagents import (
     DELEGATE_TOOL_NAME,
@@ -1392,6 +1393,18 @@ class FileCreatorAgentRuntime:
             "issues": issues,
         }
 
+    @staticmethod
+    def _find_skill_id(task: str, prefix: str) -> str | None:
+        m = re.search(
+            rf"prompts/{prefix}/(\w+)\.system\.txt",
+            task,
+        )
+        if not m:
+            return None
+        skill_map = {"story_skills": "story_skill", "art_skills": "art_skill"}
+        skill_id = f"{skill_map[prefix]}.{m.group(1)}"
+        return skill_id if skill_id in FILE_AGENT_PROMPT_SPECS else None
+
     async def _run_subagent(
         self,
         *,
@@ -1419,6 +1432,8 @@ class FileCreatorAgentRuntime:
             project_id=project_id,
             project=snapshot.project,
             workspace_schema=tools.schema_prompt.text,
+            story_skill_id=self._find_skill_id(delegated.task, "story_skills"),
+            art_skill_id=self._find_skill_id(delegated.task, "art_skills"),
         )
         record = SpecialistRunRecord(
             run_id=specialist_run_id,

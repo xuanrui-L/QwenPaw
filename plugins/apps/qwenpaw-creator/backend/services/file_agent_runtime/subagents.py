@@ -10,7 +10,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from domain.enums import SpecialistRole
-from services.file_agent_runtime.prompts import render_file_agent_prompt
+from services.file_agent_runtime.prompts import (
+    FILE_AGENT_PROMPT_SPECS,
+    load_file_agent_prompt,
+    render_file_agent_prompt,
+)
 from services.project_files.models import Project
 from services.project_files.schema_prompt import build_project_schema_prompt
 
@@ -135,6 +139,8 @@ def specialist_system_prompt(
     project_id: str,
     project: Project | None = None,
     workspace_schema: str | None = None,
+    story_skill_id: str | None = None,
+    art_skill_id: str | None = None,
 ) -> str:
     if role not in _DELEGATABLE_ROLES:
         raise ValueError(f"specialist role has no active prompt: {role.value}")
@@ -162,6 +168,15 @@ def specialist_system_prompt(
                 ),
             },
         )
+    if role is SpecialistRole.R2V_GENERATION_DIRECTOR:
+        if story_skill_id and story_skill_id in FILE_AGENT_PROMPT_SPECS:
+            values["story_skill_content"] = load_file_agent_prompt(story_skill_id)
+        else:
+            values["story_skill_content"] = "（未指定）"
+        if art_skill_id and art_skill_id in FILE_AGENT_PROMPT_SPECS:
+            values["art_skill_content"] = load_file_agent_prompt(art_skill_id)
+        else:
+            values["art_skill_content"] = "（未指定）"
     return render_file_agent_prompt(_ROLE_PROMPT_IDS[role], **values)
 
 
