@@ -1438,6 +1438,7 @@ async def get_asset_content(
                 "Content-Length": str(cache.size_bytes),
                 "Content-Disposition": inline_content_disposition(
                     version.name,
+                    version.media_type,
                 ),
                 "ETag": f'"sha256:{cache.sha256}"',
             },
@@ -1457,7 +1458,10 @@ async def get_asset_content(
         media_type=version.media_type,
         headers={
             "Content-Length": str(indexed.size_bytes),
-            "Content-Disposition": inline_content_disposition(version.name),
+            "Content-Disposition": inline_content_disposition(
+                version.name,
+                version.media_type,
+            ),
             "ETag": f'"sha256:{indexed.sha256}"',
         },
     )

@@ -3,14 +3,23 @@
 
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 from urllib.parse import quote
 
 
-def inline_content_disposition(name: str) -> str:
-    """Build a Latin-1-safe inline filename with an RFC 5987 UTF-8 value."""
+def inline_content_disposition(name: str, media_type: str = "") -> str:
+    """Build a Latin-1-safe inline filename with an RFC 5987 UTF-8 value.
+
+    When *media_type* is provided and *name* has no suffix, a matching
+    extension is appended so that downloaded files keep a usable extension.
+    """
 
     original = Path(str(name or "media")).name or "media"
+    if media_type and not Path(original).suffix:
+        ext = mimetypes.guess_extension(media_type.split(";")[0].strip())
+        if ext:
+            original = f"{original}{ext}"
     fallback = "".join(
         character
         if 32 <= ord(character) < 127 and character not in {'"', "\\"}
