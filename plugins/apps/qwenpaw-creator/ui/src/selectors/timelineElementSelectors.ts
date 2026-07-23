@@ -108,7 +108,7 @@ export function packDisplayLanes(
   }));
 }
 
-export type TimelineTrackType = "subtitle" | "motion" | "clip" | "ai" | "transition";
+export type TimelineTrackType = "subtitle" | "motion" | "clip" | "ai" | "transition" | "audio";
 
 export const TRACK_ORDER: TimelineTrackType[] = [
   "ai",
@@ -116,6 +116,7 @@ export const TRACK_ORDER: TimelineTrackType[] = [
   "subtitle",
   "motion",
   "transition",
+  "audio",
 ];
 
 export const TRACK_TYPE_META: Record<
@@ -127,6 +128,7 @@ export const TRACK_TYPE_META: Record<
   subtitle: { label: "字幕", color: "#8b5cf6", soft: "rgba(139,92,246,.12)" },
   motion: { label: "动效", color: "#f59e0b", soft: "rgba(245,158,11,.12)" },
   transition: { label: "转场", color: "#0d9488", soft: "rgba(13,148,136,.12)" },
+  audio: { label: "音频", color: "#12b76a", soft: "rgba(18,183,106,.12)" },
 };
 
 export function classifyElementTrack(
@@ -140,6 +142,8 @@ export function classifyElementTrack(
       return "clip";
     case "transition":
       return "transition";
+    case "audio":
+      return "audio";
     case "overlay":
       if (creation.overlay_kind === "pet_os" || creation.overlay_kind === "interview_summary") {
         return "subtitle";
