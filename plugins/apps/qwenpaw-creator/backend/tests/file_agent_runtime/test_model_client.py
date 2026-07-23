@@ -345,6 +345,44 @@ def test_agentscope_client_preserves_stream_control_exceptions() -> None:
     asyncio.run(scenario())
 
 
+def test_agentscope_client_retries_one_empty_provider_turn() -> None:
+    class EmptyThenTextModel:
+        model = "qwen3.7-plus"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, messages, *, tools=None):
+            del messages, tools
+            self.calls += 1
+            if self.calls == 1:
+                return ChatResponse(
+                    id="response-empty",
+                    content=[ThinkingBlock(thinking="分析完成")],
+                    is_last=True,
+                )
+            return ChatResponse(
+                id="response-retry",
+                content=[TextBlock(text="素材理解已写入")],
+                is_last=True,
+            )
+
+    async def scenario():
+        provider = EmptyThenTextModel()
+        client = AgentScopeAgentChatClient(provider)  # type: ignore[arg-type]
+        turn = await client.complete(
+            messages=[{"role": "user", "content": "理解素材"}],
+            tools=_tools(),
+        )
+        return provider, turn
+
+    provider, turn = asyncio.run(scenario())
+
+    assert provider.calls == 2
+    assert turn.content == "素材理解已写入"
+    assert turn.provider_message_id == "response-retry"
+
+
 @pytest.mark.parametrize(
     "markup",
     [

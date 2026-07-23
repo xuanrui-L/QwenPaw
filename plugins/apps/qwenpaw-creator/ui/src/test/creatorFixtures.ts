@@ -176,6 +176,13 @@ export const projectDocument: ProjectDocument = {
               vibe: "轻快",
               prompt: "文字轻盈浮现",
               reference_version_ids: [],
+              motion: {
+                format: "html_css",
+                html: "<!doctype html><html><body><div class='title'>小猫出发</div></body></html>",
+                fps: 24,
+                loop: true,
+                design_notes: "标题轻盈浮现",
+              },
             },
             outputs: {},
             render_source: null,

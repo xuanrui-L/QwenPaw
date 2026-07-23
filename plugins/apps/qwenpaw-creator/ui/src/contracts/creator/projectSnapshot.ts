@@ -200,6 +200,14 @@ export interface MotionGraphicDocument extends ProjectJsonRecord {
   fps: number;
   loop: boolean;
   design_notes: string;
+  motif?: string;
+  template_version?: number | null;
+  theme?: string;
+  variant?: string;
+  emotion?: string;
+  entrance?: string;
+  exit?: string;
+  intensity?: number;
 }
 
 export interface OverlayCreationDocument extends ProjectJsonRecord {

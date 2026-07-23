@@ -197,6 +197,14 @@ export function resolveElementPlayback(
       },
     };
   }
+  // 动态 overlay 的 HTML/CSS 文档本身就是可预览内容，不需要等待独立媒体产物。
+  // 成片阶段仍由后端逐帧渲染并合成；这里只负责浏览器内的实时预览。
+  if (
+    element.creation.type === "overlay" &&
+    element.creation.motion?.html
+  ) {
+    return { element, status: "ready", media: null };
+  }
   // 文案类 overlay（pet_os/interview_summary）没有独立产物，成片在合成时
   // 用确定性渲染器画气泡；实时预览用同款规格直接绘制，视为已就绪。
   if (

@@ -494,10 +494,23 @@ export default function TimelineCanvas({
                 <Volume2 className="h-3.5 w-3.5" />
               )}
             </button>
-            <div className="h-1 flex-1 overflow-hidden rounded-full bg-white/30">
+            <div className="relative h-1 flex-1 rounded-full bg-white/30">
               <i
-                className="block h-full bg-[var(--color-accent)]"
+                className="pointer-events-none block h-full overflow-hidden rounded-full bg-[var(--color-accent)]"
                 style={{ width: `${percent(playheadTick, timelineDuration)}%` }}
+              />
+              <input
+                data-preview-scrubber
+                type="range"
+                min={0}
+                max={timelineDuration}
+                step={1}
+                value={Math.min(playheadTick, timelineDuration)}
+                onChange={(event) =>
+                  onPlayheadChange(Number(event.currentTarget.value))
+                }
+                aria-label="拖动预览时间轴"
+                className="absolute -inset-y-3 left-0 m-0 h-7 w-full cursor-pointer opacity-0"
               />
             </div>
             <span className="font-mono text-[11px] text-white">

@@ -17,9 +17,18 @@ from services.media_files.local_execution import (
 )
 from services.media_files.motion_design import (
     _select_decoration_ids,
+    _story_arc_motifs,
+    _validated_story_beats,
     _validated_design,
+    _validated_location,
 )
 from services.media_files.motion_overlay import _alpha_plane_stats
+from services.media_files.motion_templates import (
+    MOTION_TEMPLATE_VERSION,
+    SUPPORTED_MOTIFS,
+    render_caption_template,
+    render_decoration_template,
+)
 from services.media_files.overlay import OverlayRenderResult
 from services.project_files.models import (
     EditCreation,
@@ -141,6 +150,187 @@ class TestValidatedDesignTextMode:
             "skip_reason": "画面已经很满",
         }
         assert _validated_design(raw) == "画面已经很满"
+
+
+class TestMotionDesignSafety:
+    _DECOR = {
+        "needed": True,
+        "concept": "纯图形闪光",
+        "fps": 24,
+        "location": {
+            "x": 0.1,
+            "y": 0.1,
+            "width": 0.2,
+            "height": 0.2,
+            "anchor_x": 0,
+            "anchor_y": 0,
+        },
+    }
+
+    def test_location_box_must_stay_inside_canvas(self) -> None:
+        with pytest.raises(ValidationError, match="超出画布边界"):
+            _validated_location(
+                {
+                    "x": 0.95,
+                    "y": 0.1,
+                    "width": 0.2,
+                    "height": 0.2,
+                    "anchor_x": 0,
+                    "anchor_y": 0,
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "html",
+        [
+            "<html><body onload='alert(1)'><i></i></body></html>",
+            "<html><body><iframe src='file:///etc/passwd'></iframe></body></html>",
+            "<html><body><a href='javascript:alert(1)'></a></body></html>",
+        ],
+    )
+    def test_active_or_embedded_content_is_rejected(self, html: str) -> None:
+        with pytest.raises(ValidationError):
+            _validated_design({**self._DECOR, "html": html})
+
+    def test_allowlisted_motif_uses_trusted_template(self) -> None:
+        design = _validated_design(
+            {
+                **self._DECOR,
+                "motif": "approval_checks",
+                "primary_color": "#66aa55",
+                "secondary_color": "#224422",
+                "html": "",
+            },
+        )
+        assert not isinstance(design, str)
+        motion, _location, _concept = design
+        assert motion.motif == "approval_checks"
+        assert motion.template_version == MOTION_TEMPLATE_VERSION
+        assert 'data-motion-motif="approval_checks"' in motion.html
+        assert "#66aa55" in motion.html
+
+
+class TestMotionTemplates:
+    @pytest.mark.parametrize("motif", sorted(SUPPORTED_MOTIFS))
+    def test_every_template_is_text_free_and_animated(self, motif: str) -> None:
+        html = render_decoration_template(motif)
+        assert f'data-motion-motif="{motif}"' in html
+        assert "@keyframes" in html
+        assert len(html) >= 32
+
+    def test_paw_trail_uses_the_trusted_three_paw_sequence(self) -> None:
+        html = render_decoration_template("paw_trail")
+
+        assert html.count('class="shape paw p') == 3
+        assert "animation-delay:.08s" in html
+        assert "animation-delay:.38s" in html
+        assert "animation-delay:.68s" in html
+        assert ".toe{width:20%;height:20%" in html
+        assert ".t2{left:27%;top:7%}" in html
+        assert ".t3{right:27%;top:3%}" in html
+
+    def test_alert_mark_keeps_the_dot_above_the_triangle_border(self) -> None:
+        html = render_decoration_template("alert_mark")
+
+        assert ".dot{left:45%;top:62%;width:10%" in html
+
+    def test_template_metadata_survives_loading_older_project_json(self) -> None:
+        html = render_decoration_template(
+            "alert_mark",
+            theme="neon_night",
+            variant="neon",
+            emotion="surprise",
+            entrance="stamp",
+            exit="shrink",
+            intensity=0.85,
+        )
+        motion = MotionGraphic.model_validate({"html": html})
+
+        assert motion.motif == "alert_mark"
+        assert motion.template_version == MOTION_TEMPLATE_VERSION
+        assert motion.theme == "neon_night"
+        assert motion.variant == "neon"
+        assert motion.emotion == "surprise"
+        assert motion.entrance == "stamp"
+        assert motion.exit == "shrink"
+        assert motion.intensity == pytest.approx(0.85)
+
+    def test_caption_fallback_keeps_exact_text_and_escapes_markup(self) -> None:
+        html = render_caption_template("飞！<安全>", emotion="action")
+
+        assert "飞！&lt;安全&gt;" in html
+        assert 'data-motion-motif="caption_card"' in html
+        design = _validated_design(
+            {
+                "concept": "可靠动态字幕卡",
+                "html": html,
+                "location": {
+                    "x": 0.78,
+                    "y": 0.23,
+                    "width": 0.34,
+                    "height": 0.30,
+                    "anchor_x": 0.5,
+                    "anchor_y": 0.5,
+                },
+            },
+            required_text="飞！<安全>",
+            default_loop=False,
+        )
+        assert not isinstance(design, str)
+
+    def test_caption_fallback_shrinks_long_copy_to_stay_inside_card(self) -> None:
+        html = render_caption_template("大家快看它挺淡定，还有点意思")
+
+        assert "font-size:8.5vh" in html
+        assert "line-height:1.08" in html
+        assert "overflow:hidden" in html
+
+    def test_decoration_css_content_text_is_rejected(self) -> None:
+        html = (
+            "<html><head><style>.x:after{content:'WOW'}</style></head>"
+            "<body><i class='x'></i></body></html>"
+        )
+        with pytest.raises(ValidationError, match="CSS content"):
+            _validated_design(
+                {**TestMotionDesignSafety._DECOR, "html": html},
+            )
+
+
+class TestMotionStoryArc:
+    def test_neutral_fallback_has_three_connected_beats(self) -> None:
+        arc = _story_arc_motifs(["opening", "meeting", "ending"])
+
+        assert arc["opening"][1] == "focus_target"
+        assert arc["opening"][2]["entrance"] == "draw_in"
+        assert arc["meeting"][1] == "sparkles"
+        assert arc["ending"][1] == "approval_checks"
+
+    def test_free_form_plan_is_used_without_story_categories(self) -> None:
+        beats = [
+            ("雨滴出现", "leaf_accent", {"emotion": "chill"}),
+            ("突然加速", "paw_trail", {"emotion": "action"}),
+            ("停在门前", "focus_target", {"emotion": "curious"}),
+        ]
+        arc = _story_arc_motifs(["opening", "turn", "ending"], beats)
+
+        assert arc["opening"] == beats[0]
+        assert arc["turn"] == beats[1]
+        assert arc["ending"] == beats[2]
+
+    def test_story_plan_rejects_unknown_visual_vocabulary(self) -> None:
+        assert _validated_story_beats(
+            [
+                {
+                    "role": "开场",
+                    "motif": "invented_shape",
+                    "emotion": "chill",
+                    "entrance": "pop",
+                    "exit": "soft_fade",
+                    "intensity": 0.5,
+                }
+            ]
+            * 3,
+        ) is None
 
 
 class TestAlphaPlaneStats:

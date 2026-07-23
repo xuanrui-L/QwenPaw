@@ -20,8 +20,10 @@ and a subprocess gives every capture a hard kill-switch timeout.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
+import re
 import signal
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -30,6 +32,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+from collections import OrderedDict
 from typing import Any
 
 from services.media_files.overlay import OverlayRenderResult
@@ -43,6 +47,10 @@ _FFMPEG_TIMEOUT_SECONDS = 180
 _PROBE_TIMEOUT_SECONDS = 90
 _CAPTURE_BASE_TIMEOUT_SECONDS = 120
 _CAPTURE_PER_FRAME_SECONDS = 3.0
+_PROBE_CACHE_MAX_ITEMS = 128
+_FRAME_CACHE_MAX_ITEMS = 32
+_probe_cache: OrderedDict[tuple[str, int, int, str], MotionDocumentProbe] = OrderedDict()
+_probe_cache_lock = threading.Lock()
 
 # Self-contained capture worker: it imports nothing from this backend, reads
 # one JSON job from stdin and writes one JSON result line to stdout.  Keeping
@@ -73,10 +81,23 @@ COLLECT = '''
 '''
 
 SEEK = '''
-(milliseconds) => {
+(payload) => {
+  const milliseconds = typeof payload === 'number'
+    ? payload : Number(payload.milliseconds || 0);
+  const outputMs = typeof payload === 'number'
+    ? 0 : Number(payload.outputMs || 0);
   for (const animation of document.getAnimations({ subtree: true })) {
     try { animation.currentTime = milliseconds; } catch (error) {}
   }
+  const stage = document.querySelector('[data-motion-exit]');
+  const exitStyle = stage ? stage.getAttribute('data-motion-exit') : 'none';
+  const progress = outputMs > 0 ? milliseconds / outputMs : 0;
+  const exitProgress = Math.max(0, Math.min(1, (progress - 0.85) / 0.15));
+  document.documentElement.style.opacity =
+    exitStyle === 'none' ? '1' : String(1 - exitProgress);
+  document.body.style.transformOrigin = 'center';
+  document.body.style.transform = exitStyle === 'shrink'
+    ? `scale(${1 - exitProgress * 0.18})` : 'none';
 }
 '''
 
@@ -101,15 +122,20 @@ def main():
                     device_scale_factor=1,
                 )
 
+                doc_uri = doc_path.as_uri()
+
                 def gate(route):
-                    if route.request.url.startswith("file:"):
+                    # Only the generated document itself may come from the
+                    # local filesystem. Generated HTML must not probe other
+                    # file: URLs or reach the network.
+                    if route.request.url == doc_uri:
                         route.continue_()
                     else:
                         route.abort()
 
                 page.route("**/*", gate)
                 page.goto(
-                    doc_path.as_uri(), wait_until="load", timeout=15000,
+                    doc_uri, wait_until="load", timeout=15000,
                 )
                 page.add_style_tag(
                     content=(
@@ -122,12 +148,21 @@ def main():
                 count = int(info.get("count") or 0)
                 total_ms = float(info.get("totalMs") or 0.0)
                 if job["mode"] == "probe" and count > 0 and job.get("frames_dir"):
-                    # Sample two mid-animation instants so documents that
-                    # start fully transparent still show their real content.
-                    for index, fraction in enumerate((0.25, 0.6)):
+                    # Sample the whole animation envelope. Two midpoints miss
+                    # entrance overshoot, late rotation and end-frame clipping.
+                    for index, fraction in enumerate(
+                        (0.05, 0.15, 0.3, 0.5, 0.7, 0.9, 1.0)
+                    ):
                         page.evaluate(
                             SEEK,
-                            (total_ms * fraction) if total_ms > 1.0 else 0.0,
+                            {
+                                "milliseconds": (
+                                    total_ms * fraction
+                                    if total_ms > 1.0
+                                    else 0.0
+                                ),
+                                "outputMs": total_ms,
+                            },
                         )
                         page.screenshot(
                             path="%s/%05d.png" % (job["frames_dir"], index),
@@ -144,7 +179,15 @@ def main():
                             timestamp_ms = timestamp_ms % total_ms
                         elif total_ms > 1.0:
                             timestamp_ms = min(timestamp_ms, total_ms)
-                        page.evaluate(SEEK, timestamp_ms)
+                        page.evaluate(
+                            SEEK,
+                            {
+                                "milliseconds": timestamp_ms,
+                                "outputMs": (
+                                    int(job["frame_count"]) * 1000.0 / fps
+                                ),
+                            },
+                        )
                         page.screenshot(
                             path="%s/%05d.png" % (frames_dir, index),
                             omit_background=True,
@@ -379,6 +422,18 @@ def probe_motion_document(
 ) -> MotionDocumentProbe:
     """Load a motion document once and report its animation facts."""
 
+    cache_key = (
+        hashlib.sha256(html.encode("utf-8")).hexdigest(),
+        int(box_width),
+        int(box_height),
+        str(ffmpeg_path or ""),
+    )
+    with _probe_cache_lock:
+        cached = _probe_cache.get(cache_key)
+        if cached is not None:
+            _probe_cache.move_to_end(cache_key)
+            return cached
+
     with tempfile.TemporaryDirectory(prefix="motion-probe-") as probe_dir:
         result = _run_capture_worker(
             {
@@ -422,13 +477,36 @@ def probe_motion_document(
                 animation_count=count,
                 animation_total_ms=total_ms,
             )
-        return MotionDocumentProbe(
+        probe = MotionDocumentProbe(
             True,
             animation_count=count,
             animation_total_ms=total_ms,
             visible_coverage=coverage,
             edge_contact=edge_contact,
         )
+        with _probe_cache_lock:
+            _probe_cache[cache_key] = probe
+            _probe_cache.move_to_end(cache_key)
+            while len(_probe_cache) > _PROBE_CACHE_MAX_ITEMS:
+                _probe_cache.popitem(last=False)
+        return probe
+
+
+def _complete_frame_cache(frames_dir: Path, frame_count: int) -> bool:
+    return frames_dir.is_dir() and all(
+        (frames_dir / f"{index:05d}.png").is_file()
+        for index in range(frame_count)
+    )
+
+
+def _prune_frame_cache(cache_root: Path) -> None:
+    entries = sorted(
+        (entry for entry in cache_root.iterdir() if entry.is_dir()),
+        key=lambda entry: entry.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in entries[_FRAME_CACHE_MAX_ITEMS:]:
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def _capture_frames(
@@ -486,6 +564,7 @@ def render_motion_overlay(
     appear_at: float,
     duration: float,
     location: Mapping[str, Any] | None = None,
+    viewport_inset: float = 0.0,
 ) -> OverlayRenderResult:
     """Render one motion document and composite it over a prepared segment."""
 
@@ -500,13 +579,71 @@ def render_motion_overlay(
     if frame_count > _MAX_FRAMES_PER_OVERLAY:
         frame_count = _MAX_FRAMES_PER_OVERLAY
         effective_fps = max(_MIN_EFFECTIVE_FPS, frame_count / duration)
-    frames_dir = output_path.with_suffix(".motion-frames")
-    shutil.rmtree(frames_dir, ignore_errors=True)
-    frames_dir.mkdir(mode=0o700)
-    try:
+    if viewport_inset > 0:
+        inset_percent = min(12.0, max(0.0, viewport_inset * 100.0))
+        safety_css = (
+            "<style data-qwenpaw-viewport-safety>"
+            f"html{{padding:{inset_percent:.3f}%!important;box-sizing:border-box!important;overflow:hidden!important}}"
+            "body{width:100%!important;height:100%!important;box-sizing:border-box!important;"
+            "overflow:visible!important;transform:scale(.9)!important;transform-origin:center!important}"
+            "p,[class*=text],[class*=title],[class*=caption]{"
+            "max-width:100%!important;font-size:min(8vh,8vw)!important;line-height:1.15!important;"
+            "white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;"
+            "letter-spacing:.02em!important;-webkit-text-stroke:0!important;"
+            "text-shadow:1px 1px 0 rgba(0,0,0,.22)!important}"
+            "[data-motion-motif=caption_card] [class*=text]{"
+            "font-size:min(10vh,12vw)!important;line-height:1.08!important;"
+            "max-height:100%!important}"
+            "[data-motion-motif=paw_trail] .p4,[data-motion-motif=paw_trail] .p5{display:none!important}"
+            "[data-motion-motif=paw_trail] .toe{width:20%!important;height:20%!important}"
+            "[data-motion-motif=paw_trail] .t1{left:2%!important;top:28%!important}"
+            "[data-motion-motif=paw_trail] .t2{left:27%!important;top:7%!important}"
+            "[data-motion-motif=paw_trail] .t3{left:auto!important;right:27%!important;top:3%!important}"
+            "[data-motion-motif=paw_trail] .t4{left:auto!important;right:2%!important;top:24%!important}"
+            "[data-motion-motif=paw_trail] .p1,[data-motion-motif=paw_trail] .p2,"
+            "[data-motion-motif=paw_trail] .p3{opacity:0;animation:qwenpaw-paw-appear .36s "
+            "cubic-bezier(.2,.85,.2,1) forwards!important}"
+            "[data-motion-motif=paw_trail] .p1{animation-delay:.08s!important}"
+            "[data-motion-motif=paw_trail] .p2{animation-delay:.38s!important}"
+            "[data-motion-motif=paw_trail] .p3{animation-delay:.68s!important}"
+            "[data-motion-motif=alert_mark] .bar{top:29%!important;height:29%!important}"
+            "[data-motion-motif=alert_mark] .dot{left:45%!important;top:62%!important;width:10%!important}"
+            "@keyframes qwenpaw-paw-appear{0%{opacity:0}100%{opacity:1}}"
+            "</style>"
+        )
+        html = (
+            re.sub(
+                r"</head>",
+                lambda _match: f"{safety_css}</head>",
+                html,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            if re.search(r"</head>", html, re.IGNORECASE)
+            else safety_css + html
+        )
+    frame_identity = json.dumps(
+        {
+            "html": hashlib.sha256(html.encode("utf-8")).hexdigest(),
+            "box": [box_width, box_height],
+            "frames": frame_count,
+            "fps": round(effective_fps, 6),
+            "loop": loop,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    cache_key = hashlib.sha256(frame_identity.encode("utf-8")).hexdigest()
+    cache_root = Path(tempfile.gettempdir()) / "qwenpaw-motion-frame-cache-v1"
+    cache_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    frames_dir = cache_root / cache_key
+    if not _complete_frame_cache(frames_dir, frame_count):
+        staged_dir = Path(
+            tempfile.mkdtemp(prefix=f"{cache_key[:12]}-", dir=cache_root),
+        )
         error = _capture_frames(
             html=html,
-            frames_dir=frames_dir,
+            frames_dir=staged_dir,
             box_width=box_width,
             box_height=box_height,
             frame_count=frame_count,
@@ -514,7 +651,19 @@ def render_motion_overlay(
             loop=loop,
         )
         if error is not None:
+            shutil.rmtree(staged_dir, ignore_errors=True)
             return OverlayRenderResult(False, error)
+        if not _complete_frame_cache(frames_dir, frame_count):
+            shutil.rmtree(frames_dir, ignore_errors=True)
+            try:
+                staged_dir.replace(frames_dir)
+            except OSError:
+                # A concurrent renderer may have populated the same key.
+                shutil.rmtree(staged_dir, ignore_errors=True)
+        else:
+            shutil.rmtree(staged_dir, ignore_errors=True)
+        _prune_frame_cache(cache_root)
+    try:
         alpha_filter = (
             f"format=rgba,colorchannelmixer=aa={opacity:.6f},"
             if opacity < 1.0
@@ -563,7 +712,9 @@ def render_motion_overlay(
             return OverlayRenderResult(False, (result.stderr or "")[-300:])
         return OverlayRenderResult(True)
     finally:
-        shutil.rmtree(frames_dir, ignore_errors=True)
+        # Frames are content-addressed and reused across preview/export runs.
+        # The cache is bounded by _FRAME_CACHE_MAX_ITEMS above.
+        pass
 
 
 __all__ = [

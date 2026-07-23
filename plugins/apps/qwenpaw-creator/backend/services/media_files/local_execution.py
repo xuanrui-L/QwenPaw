@@ -110,6 +110,15 @@ if TYPE_CHECKING:
 
 logger = setup_logger("services.media_files.local_execution")
 
+_RETIRED_MOTION_MOTIFS = (
+    "speed_lines",
+    "side_eye",
+    "sassy_cat",
+    "surprised_cat",
+    "happy_cat",
+    "confused_cat",
+)
+
 _LOCAL_MEDIA_COMMANDS = frozenset(
     {
         CreatorCommandType.EXECUTE_EDIT,
@@ -398,6 +407,7 @@ class FfmpegLocalMediaRunner:
                 appear_at=overlay["appear_at"],
                 duration=overlay["duration"],
                 location=overlay.get("location"),
+                viewport_inset=0.05,
             )
             if result.success:
                 os.replace(rendered, segment)
@@ -469,6 +479,7 @@ class FfmpegLocalMediaRunner:
                 appear_at=normalized["appear_at"],
                 duration=normalized["duration"],
                 location=normalized.get("location"),
+                viewport_inset=0.05,
             )
             if not result.success:
                 rendered.unlink(missing_ok=True)
@@ -489,6 +500,12 @@ class FfmpegLocalMediaRunner:
             return None
         html = str(raw.get("html") or "")
         if not html.strip():
+            return None
+        if any(
+            f'data-motion-motif="{motif}"' in html
+            or f"data-motion-motif='{motif}'" in html
+            for motif in _RETIRED_MOTION_MOTIFS
+        ):
             return None
         segment_duration = (
             item.end_seconds - item.start_seconds

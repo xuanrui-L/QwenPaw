@@ -421,6 +421,7 @@ class AgentScopeAgentChatClient:
         on_text_delta: AgentTextDeltaCallback | None = None,
         on_thinking_delta: AgentTextDeltaCallback | None = None,
         on_tool_call_delta: AgentToolDeltaCallback | None = None,
+        _empty_retries_remaining: int = 1,
     ) -> AgentModelTurn:
         native_messages = records_to_agentscope_messages(messages)
         allowed_names = {
@@ -568,6 +569,15 @@ class AgentScopeAgentChatClient:
                 "AgentScope ToolCallBlock",
             ) from exc
         if not text and not calls:
+            if _empty_retries_remaining > 0:
+                return await self.complete(
+                    messages=messages,
+                    tools=tools,
+                    on_text_delta=on_text_delta,
+                    on_thinking_delta=on_thinking_delta,
+                    on_tool_call_delta=on_tool_call_delta,
+                    _empty_retries_remaining=_empty_retries_remaining - 1,
+                )
             raise AgentModelError(
                 "Creator AgentScope model returned empty text and no ToolCallBlock",
             )

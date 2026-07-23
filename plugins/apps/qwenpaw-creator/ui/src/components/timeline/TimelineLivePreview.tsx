@@ -31,6 +31,14 @@ interface TimelineLivePreviewProps {
 
 /** 视频层与播放头允许的最大偏差（秒），超过则回拉。 */
 const DRIFT_TOLERANCE_SECONDS = 0.3;
+const RETIRED_MOTION_MOTIFS = new Set([
+  "speed_lines",
+  "side_eye",
+  "sassy_cat",
+  "surprised_cat",
+  "happy_cat",
+  "confused_cat",
+]);
 
 function aspectRatioStyle(aspectRatio: string): string {
   const match = /^(\d+(?:\.\d+)?)[:x](\d+(?:\.\d+)?)$/.exec(
@@ -168,6 +176,127 @@ function TextOverlayLayer({
         <InterviewSummaryBox text={element.creation.text} />
       )}
     </div>
+  );
+}
+
+export function syncMotionAnimation(
+  animation: Animation,
+  localTimeMs: number,
+  playing: boolean,
+) {
+  const endTime = animation.effect?.getComputedTiming().endTime ?? Infinity;
+  const finiteEnd = Number.isFinite(endTime) ? Number(endTime) : null;
+  animation.currentTime =
+    finiteEnd === null ? localTimeMs : Math.min(localTimeMs, finiteEnd);
+
+  // Calling play() on a finished finite entrance animation auto-rewinds it
+  // to its transparent first frame. Keep it filled at the final keyframe;
+  // only active/infinite animations should advance with the preview clock.
+  if (!playing || (finiteEnd !== null && localTimeMs >= finiteEnd)) {
+    animation.pause();
+  } else {
+    animation.play();
+  }
+}
+
+export function motionExitProgress(
+  exitStyle: string | undefined,
+  localTimeMs: number,
+  durationMs: number,
+) {
+  if (!exitStyle || exitStyle === "none" || durationMs <= 0) return 0;
+  const progress = localTimeMs / durationMs;
+  return Math.max(0, Math.min(1, (progress - 0.85) / 0.15));
+}
+
+function motionDataSetting(html: string, name: string): string | undefined {
+  const match = new RegExp(`data-motion-${name}=["']([^"']+)["']`, "i").exec(
+    html,
+  );
+  return match?.[1];
+}
+
+function motionPreviewDocument(html: string, keepInsideViewport: boolean): string {
+  const safetyStyle = keepInsideViewport
+    ? `<style data-qwenpaw-viewport-safety>html{padding:5%!important;box-sizing:border-box!important;overflow:hidden!important}body{width:100%!important;height:100%!important;box-sizing:border-box!important;overflow:visible!important;transform:scale(.9)!important;transform-origin:center!important}p,[class*=text],[class*=title],[class*=caption]{max-width:100%!important;font-size:min(8vh,8vw)!important;line-height:1.15!important;white-space:normal!important;overflow-wrap:anywhere!important;word-break:break-word!important;letter-spacing:.02em!important;-webkit-text-stroke:0!important;text-shadow:1px 1px 0 rgba(0,0,0,.22)!important}[data-motion-motif=caption_card] [class*=text]{font-size:min(10vh,12vw)!important;line-height:1.08!important;max-height:100%!important}${pawTrailCompatibilityCss()}</style>`
+    : `<style data-qwenpaw-motion-compat>${pawTrailCompatibilityCss()}</style>`;
+  return /<\/head>/i.test(html)
+    ? html.replace(/<\/head>/i, `${safetyStyle}</head>`)
+    : `${safetyStyle}${html}`;
+}
+
+function pawTrailCompatibilityCss(): string {
+  return "[data-motion-motif=paw_trail] .p4,[data-motion-motif=paw_trail] .p5{display:none!important}[data-motion-motif=paw_trail] .toe{width:20%!important;height:20%!important}[data-motion-motif=paw_trail] .t1{left:2%!important;top:28%!important}[data-motion-motif=paw_trail] .t2{left:27%!important;top:7%!important}[data-motion-motif=paw_trail] .t3{left:auto!important;right:27%!important;top:3%!important}[data-motion-motif=paw_trail] .t4{left:auto!important;right:2%!important;top:24%!important}[data-motion-motif=paw_trail] .p1,[data-motion-motif=paw_trail] .p2,[data-motion-motif=paw_trail] .p3{opacity:0;animation:qwenpaw-paw-appear .36s cubic-bezier(.2,.85,.2,1) forwards!important}[data-motion-motif=paw_trail] .p1{animation-delay:.08s!important}[data-motion-motif=paw_trail] .p2{animation-delay:.38s!important}[data-motion-motif=paw_trail] .p3{animation-delay:.68s!important}[data-motion-motif=alert_mark] .bar{top:29%!important;height:29%!important}[data-motion-motif=alert_mark] .dot{left:45%!important;top:62%!important;width:10%!important}@keyframes qwenpaw-paw-appear{0%{opacity:0}100%{opacity:1}}";
+}
+
+function MotionOverlayLayer({
+  layer,
+  playheadTick,
+  ticksPerSecond,
+  playing,
+}: {
+  layer: ElementPlayback;
+  playheadTick: number;
+  ticksPerSecond: number;
+  playing: boolean;
+}) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const { element } = layer;
+  const motion =
+    element.creation.type === "overlay" ? element.creation.motion : null;
+  const isTextOverlay =
+    element.creation.type === "overlay" &&
+    ["pet_os", "interview_summary"].includes(element.creation.overlay_kind);
+  const localTimeMs =
+    (Math.max(0, playheadTick - element.span.start_tick) / ticksPerSecond) *
+    1000;
+  // While playing, CSS animations advance on their own after one alignment.
+  // Paused scrubbing still needs every playhead change reflected immediately.
+  const pausedSeekTimeMs = playing ? null : localTimeMs;
+  const durationMs = (element.span.duration_tick / ticksPerSecond) * 1000;
+  const exitStyle =
+    motion?.exit ??
+    (motion?.html ? motionDataSetting(motion.html, "exit") : undefined);
+  const exitProgress = motionExitProgress(
+    exitStyle,
+    localTimeMs,
+    durationMs,
+  );
+  const boxStyle = locationBoxStyle(element.location);
+  const exitScale = exitStyle === "shrink" ? 1 - exitProgress * 0.18 : 1;
+  const baseOpacity =
+    typeof boxStyle.opacity === "number" ? boxStyle.opacity : 1;
+
+  const syncAnimations = () => {
+    const document = iframeRef.current?.contentDocument;
+    if (!document || typeof document.getAnimations !== "function") return;
+    document.getAnimations().forEach((animation) => {
+      syncMotionAnimation(animation, localTimeMs, playing);
+    });
+  };
+
+  useEffect(syncAnimations, [playing, pausedSeekTimeMs]);
+
+  if (!motion?.html) return null;
+  const motif = motionDataSetting(motion.html, "motif");
+  if (motif && RETIRED_MOTION_MOTIFS.has(motif)) return null;
+  return (
+    <iframe
+      ref={iframeRef}
+      data-live-motion-overlay={element.element_id}
+      srcDoc={motionPreviewDocument(motion.html, isTextOverlay)}
+      title={element.label || "动态动效"}
+      // 不开放脚本；allow-same-origin 仅用于父页面同步 CSS 动画时间轴。
+      sandbox="allow-same-origin"
+      onLoad={syncAnimations}
+      className="pointer-events-none absolute border-0 bg-transparent"
+      style={{
+        ...boxStyle,
+        opacity:
+          exitStyle === "none" ? baseOpacity : baseOpacity * (1 - exitProgress),
+        transform: `${boxStyle.transform ?? ""} scale(${exitScale})`.trim(),
+      }}
+    />
   );
 }
 
@@ -366,6 +495,20 @@ export default function TimelineLivePreview({
             );
           }
           if (status === "ready") {
+            if (
+              element.creation.type === "overlay" &&
+              element.creation.motion?.html
+            ) {
+              return (
+                <MotionOverlayLayer
+                  key={elementId}
+                  layer={layer}
+                  playheadTick={playheadTick}
+                  ticksPerSecond={ticksPerSecond}
+                  playing={playing}
+                />
+              );
+            }
             return (
               <TextOverlayLayer
                 key={elementId}

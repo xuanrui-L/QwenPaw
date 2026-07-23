@@ -138,17 +138,26 @@ describe("resolveElementPlayback", () => {
     expect(playback.media).toBeNull();
   });
 
-  it("keeps motion/media overlays pending until they have an artifact, matching compose", () => {
+  it("marks generated HTML/CSS motion overlays ready for browser preview", () => {
     const project = cloneProject();
     const timeline = timelineOf(project);
-    // overlay-title 是 motion 类 overlay，成片合成不会直接画文本。
     const playback = resolveElementPlayback(
       project,
       timeline,
       timeline.elements_by_id["overlay-title"],
     );
-    expect(playback.status).toBe("pending");
+    expect(playback.status).toBe("ready");
     expect(playback.media).toBeNull();
+  });
+
+  it("keeps motion overlays pending when no motion document or artifact exists", () => {
+    const project = cloneProject();
+    const timeline = timelineOf(project);
+    const element = timeline.elements_by_id["overlay-title"];
+    if (element.creation.type === "overlay") element.creation.motion = null;
+    expect(resolveElementPlayback(project, timeline, element).status).toBe(
+      "pending",
+    );
   });
 
   it("treats transitions as ready without a media layer", () => {

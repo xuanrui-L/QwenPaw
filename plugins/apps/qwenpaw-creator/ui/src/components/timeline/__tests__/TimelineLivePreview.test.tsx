@@ -1,6 +1,9 @@
 import { render } from "@testing-library/react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import TimelineLivePreview from "@/components/timeline/TimelineLivePreview";
+import TimelineLivePreview, {
+  motionExitProgress,
+  syncMotionAnimation,
+} from "@/components/timeline/TimelineLivePreview";
 import type { ProjectDocument, TaskView } from "@/contracts/creator";
 import { projectDocument } from "@/test/creatorFixtures";
 
@@ -92,6 +95,43 @@ function renderPreview(
 }
 
 describe("TimelineLivePreview", () => {
+  it("starts exit motion in the final fifteen percent", () => {
+    expect(motionExitProgress("soft_fade", 8400, 10000)).toBe(0);
+    expect(motionExitProgress("soft_fade", 9250, 10000)).toBeCloseTo(0.5);
+    expect(motionExitProgress("soft_fade", 10000, 10000)).toBe(1);
+    expect(motionExitProgress("none", 10000, 10000)).toBe(0);
+  });
+
+  it("keeps finished entrance animations on their filled final frame", () => {
+    const animation = {
+      currentTime: 0,
+      effect: { getComputedTiming: () => ({ endTime: 600 }) },
+      pause: vi.fn(),
+      play: vi.fn(),
+    } as unknown as Animation;
+
+    syncMotionAnimation(animation, 2000, true);
+
+    expect(animation.currentTime).toBe(600);
+    expect(animation.pause).toHaveBeenCalledOnce();
+    expect(animation.play).not.toHaveBeenCalled();
+  });
+
+  it("continues infinite ambient animations while preview is playing", () => {
+    const animation = {
+      currentTime: 0,
+      effect: { getComputedTiming: () => ({ endTime: Infinity }) },
+      pause: vi.fn(),
+      play: vi.fn(),
+    } as unknown as Animation;
+
+    syncMotionAnimation(animation, 2000, true);
+
+    expect(animation.currentTime).toBe(2000);
+    expect(animation.play).toHaveBeenCalledOnce();
+    expect(animation.pause).not.toHaveBeenCalled();
+  });
+
   it("stacks ready media and compose-grade copy overlays by z_index at the playhead", () => {
     const { container } = renderPreview(cloneProject(), 7000);
 
@@ -148,6 +188,81 @@ describe("TimelineLivePreview", () => {
       "src",
       "/api/qwenpaw-creator/media/artifacts/r2v-window-v1",
     );
+  });
+
+  it("renders generated HTML/CSS motion overlays instead of placeholders", () => {
+    const { container } = renderPreview(cloneProject(), 2000);
+    const motion = container.querySelector(
+      '[data-live-motion-overlay="overlay-title"]',
+    ) as HTMLIFrameElement;
+    expect(motion).toBeInTheDocument();
+    expect(motion).toHaveAttribute("sandbox", "allow-same-origin");
+    expect(motion.srcdoc).toContain("小猫出发");
+    expect(
+      container.querySelector('[data-live-placeholder="overlay-title"]'),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reduces older agent paw trails to the trusted three-paw sequence", () => {
+    const project = cloneProject();
+    const overlay =
+      project.timelines.items["timeline:main"].elements_by_id["overlay-title"];
+    if (overlay.creation.type !== "overlay" || !overlay.creation.motion) {
+      throw new Error("expected generated motion overlay");
+    }
+    overlay.creation.motion.html =
+      '<html><head></head><body><div data-motion-motif="paw_trail"><i class="p5"></i></div></body></html>';
+
+    const { container } = renderPreview(project, 2000);
+    const iframe = container.querySelector(
+      '[data-live-motion-overlay="overlay-title"]',
+    ) as HTMLIFrameElement;
+    expect(iframe.srcdoc).toContain("data-qwenpaw-motion-compat");
+    expect(iframe.srcdoc).toContain(".p5{display:none!important}");
+    expect(iframe.srcdoc).toContain("qwenpaw-paw-appear");
+  });
+
+  it("hides retired motion motifs already stored in older projects", () => {
+    const project = cloneProject();
+    const overlay =
+      project.timelines.items["timeline:main"].elements_by_id["overlay-title"];
+    if (overlay.creation.type !== "overlay" || !overlay.creation.motion) {
+      throw new Error("expected generated motion overlay");
+    }
+    overlay.creation.motion.html =
+      '<html><body><div data-motion-motif="surprised_cat"></div></body></html>';
+
+    const { container } = renderPreview(project, 2000);
+    expect(
+      container.querySelector('[data-live-motion-overlay="overlay-title"]'),
+    ).not.toBeInTheDocument();
+  });
+
+  it("normalizes generated OS text effects for readable preview", () => {
+    const project = cloneProject();
+    const overlay =
+      project.timelines.items["timeline:main"].elements_by_id["overlay-os"];
+    if (overlay.creation.type !== "overlay") throw new Error("expected overlay");
+    overlay.creation.motion = {
+      format: "html_css",
+      html: '<html><head></head><body><div class="text-row">午饭在哪里？</div></body></html>',
+      fps: 24,
+      loop: false,
+      design_notes: "test",
+    };
+
+    const { container } = renderPreview(project, 7000);
+    const iframe = container.querySelector(
+      '[data-live-motion-overlay="overlay-os"]',
+    ) as HTMLIFrameElement;
+
+    expect(iframe.srcdoc).toContain("data-qwenpaw-viewport-safety");
+    expect(iframe.srcdoc).toContain("-webkit-text-stroke:0!important");
+    expect(iframe.srcdoc).toContain("font-size:min(8vh,8vw)!important");
+    expect(iframe.srcdoc).toContain("line-height:1.15!important");
+    expect(iframe.srcdoc).toContain("white-space:normal!important");
+    expect(iframe.srcdoc).toContain("overflow:visible!important");
+    expect(iframe.srcdoc).toContain("transform:scale(.9)!important");
   });
 
   it("renders a full-frame generating placeholder while the r2v artifact is still pending", () => {
