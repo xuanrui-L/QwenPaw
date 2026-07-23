@@ -191,10 +191,6 @@ export default function TimelineCanvas({
           ) <= 0.35),
     );
 
-  useEffect(() => {
-    onActiveElementIdsChange(active.map((element) => element.element_id));
-  }, [active, onActiveElementIdsChange]);
-
   const tickAt = (clientX: number): number => {
     const rect = chartRef.current?.getBoundingClientRect();
     if (!rect) return 0;
