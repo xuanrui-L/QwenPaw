@@ -59,6 +59,7 @@ export function installMockFetch(
         statusText: "OK",
         headers: new Headers(resp.headers),
         json: async () => resp.json ?? {},
+        blob: async () => new Blob(),
       } as Response;
     },
   );

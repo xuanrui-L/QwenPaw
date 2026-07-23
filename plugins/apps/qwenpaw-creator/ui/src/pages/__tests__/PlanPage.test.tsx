@@ -484,7 +484,7 @@ describe("PlanPage Timeline/Element frontend", () => {
       .spyOn(HTMLAnchorElement.prototype, "click")
       .mockImplementation(() => undefined);
     fireEvent.click(downloadButton);
-    expect(clickSpy).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(clickSpy).toHaveBeenCalledTimes(1));
     clickSpy.mockRestore();
     expect(
       calls.some((call) => call.url.includes("/render")),

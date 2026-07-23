@@ -37,6 +37,11 @@ if (!Element.prototype.setPointerCapture) {
   Element.prototype.hasPointerCapture = () => false;
 }
 
+if (!URL.createObjectURL) {
+  URL.createObjectURL = () => "blob:mock";
+  URL.revokeObjectURL = () => {};
+}
+
 // jsdom 未实现 HTMLMediaElement 的播放控制，实时拼装预览测试需要可调用的 stub。
 if (typeof HTMLMediaElement !== "undefined") {
   HTMLMediaElement.prototype.play = function play() {

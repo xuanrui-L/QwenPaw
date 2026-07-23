@@ -346,14 +346,30 @@ export default function PlanPage() {
     return () => window.clearTimeout(timer);
   }, [allReady, freshRender, isComposing, generation, composeNow]);
 
-  const downloadRender = useCallback(() => {
+  const downloadRender = useCallback(async () => {
     if (!freshRender) return;
-    const link = document.createElement("a");
-    link.href = getArtifactVersionMediaUrl(freshRender.version_id);
-    link.download = `${freshRender.name || project?.name || "成片"}.mp4`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
+    const url = getArtifactVersionMediaUrl(freshRender.version_id);
+    const filename = `${freshRender.name || project?.name || "成片"}.mp4`;
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
   }, [freshRender, project?.name]);
 
   if (!project) {
