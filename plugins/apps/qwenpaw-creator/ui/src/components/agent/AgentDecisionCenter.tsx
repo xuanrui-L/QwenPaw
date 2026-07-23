@@ -1,5 +1,6 @@
 import { CheckCircle2 } from "lucide-react";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import ExecutionAuthorizationCard from "./ExecutionAuthorizationCard";
 
 export default function AgentDecisionCenter({
@@ -7,6 +8,7 @@ export default function AgentDecisionCenter({
 }: {
   projectId: string;
 }) {
+  const project = useProjectSnapshotStore((state) => state.project);
   const storeProjectId = useExecutionAuthorizationStore(
     (state) => state.projectId,
   );
@@ -57,7 +59,7 @@ export default function AgentDecisionCenter({
       <ul className="space-y-2">
         {pending.map((authorization) => (
           <li key={authorization.id}>
-            <ExecutionAuthorizationCard authorization={authorization} />
+            <ExecutionAuthorizationCard authorization={authorization} project={project} />
           </li>
         ))}
       </ul>

@@ -4,6 +4,7 @@ import { Coins, PlayCircle } from "lucide-react";
 import type {
   ExecutionAuthorizationApproval,
   ExecutionAuthorizationView,
+  ProjectDocument,
 } from "@/contracts/creator";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { creatorTargetLabel, taskKindLabel } from "@/lib/creatorPresentation";
@@ -94,8 +95,10 @@ export function authorizationDetail(
 
 export default function ExecutionAuthorizationCard({
   authorization,
+  project,
 }: {
   authorization: ExecutionAuthorizationView;
+  project?: ProjectDocument | null;
 }) {
   const approve = useExecutionAuthorizationStore((state) => state.approve);
   const decline = useExecutionAuthorizationStore((state) => state.decline);
@@ -153,7 +156,7 @@ export default function ExecutionAuthorizationCard({
                 对象
               </dt>
               <dd className="min-w-0 truncate text-[var(--color-text-secondary)]">
-                {creatorTargetLabel(authorization.targetRef)}
+                {creatorTargetLabel(authorization.targetRef, project)}
               </dd>
             </div>
             <div className="flex gap-1">
