@@ -48,6 +48,7 @@ export default function PlanPage() {
   const [playheadTick, setPlayheadTick] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [activeElementIds, setActiveElementIds] = useState<string[]>([]);
   const durationTick = timelineEndTick(timeline);
   const displayDurationTick = timeline
     ? durationTick ||
@@ -202,10 +203,10 @@ export default function PlanPage() {
               composeElements.length === 0
                 ? "时间轴还没有可合成的画面内容"
                 : notReadyCount > 0
-                  ? `还有 ${notReadyCount} 项内容生成中，全部就绪后可导出`
-                  : exporting
-                    ? "正在合成导出成片"
-                    : "合成并导出最终成片文件"
+                ? `还有 ${notReadyCount} 项内容生成中，全部就绪后可导出`
+                : exporting
+                ? "正在合成导出成片"
+                : "合成并导出最终成片文件"
             }
             className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-bg-primary)]"
             onClick={() => void exportTimeline()}
@@ -233,6 +234,7 @@ export default function PlanPage() {
         durationTick={displayDurationTick}
         playheadTick={Math.min(playheadTick, displayDurationTick)}
         selectedElementId={selectedElementId}
+        activeElementIds={activeElementIds}
         previewOpen={previewOpen}
         tasks={tasks}
         onPreviewOpenChange={setPreviewOpen}
@@ -240,6 +242,7 @@ export default function PlanPage() {
           setPlayheadTick(Math.max(0, Math.min(displayDurationTick, tick)))
         }
         onSelectElement={selectElement}
+        onActiveElementIdsChange={setActiveElementIds}
       />
 
       <main
@@ -252,6 +255,7 @@ export default function PlanPage() {
         <ElementList
           timeline={timeline}
           playheadTick={playheadTick}
+          activeElementIds={activeElementIds}
           selectedElementId={selectedElementId}
           tasks={tasks}
           onSelect={selectElement}

@@ -9,6 +9,19 @@ export function getModelConfig(): Promise<ModelConfigData> {
   return creatorRequest("/models/config");
 }
 
+export interface ResolvedModels {
+  video: { provider: string; model: string };
+}
+
+/**
+ * Runtime-resolved model identity that execution actually uses.
+ * Unlike getModelConfig (persisted-only), this reflects host tool config,
+ * environment overrides and defaults — i.e. get_video_model_name() at submit.
+ */
+export function getResolvedModels(): Promise<ResolvedModels> {
+  return creatorRequest("/models/resolved");
+}
+
 export function saveModelConfig(
   config: ModelConfigData,
 ): Promise<{ ok: boolean }> {

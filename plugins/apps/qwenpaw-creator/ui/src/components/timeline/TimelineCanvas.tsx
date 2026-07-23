@@ -46,11 +46,13 @@ interface TimelineCanvasProps {
   durationTick: number;
   playheadTick: number;
   selectedElementId: string | null;
+  activeElementIds: string[];
   previewOpen: boolean;
   tasks: TaskView[];
   onPreviewOpenChange: (open: boolean) => void;
   onPlayheadChange: (tick: number) => void;
   onSelectElement: (elementId: string) => void;
+  onActiveElementIdsChange: (ids: string[]) => void;
 }
 
 const LABEL_WIDTH = 68;
@@ -75,16 +77,19 @@ export default function TimelineCanvas({
   durationTick,
   playheadTick,
   selectedElementId,
+  activeElementIds,
   previewOpen,
   tasks,
   onPreviewOpenChange,
   onPlayheadChange,
   onSelectElement,
+  onActiveElementIdsChange,
 }: TimelineCanvasProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [muted, setMuted] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [selection, setSelection] = useState<TimelineSelection | null>(null);
+
   const agentWorking = useAgentWorkingState();
   const [toolbarPos, setToolbarPos] = useState<{
     left: number;
@@ -117,8 +122,7 @@ export default function TimelineCanvas({
     : null;
   // 单一预览自动选源：有新鲜成片直接播成片；否则用成片同口径的
   // 实时拼装，成片合成/过期后由快照轮询自动切换，无需用户选择。
-  const previewMode =
-    renderUrl && !renderedVersion?.stale ? "final" : "live";
+  const previewMode = renderUrl && !renderedVersion?.stale ? "final" : "live";
   // 实时拼装预览里的就绪态，同时驱动轨道块的生成中/失败样式。
   const playbackStates = useMemo(() => {
     const states = new Map<string, ElementPlaybackStatus>();
@@ -192,12 +196,25 @@ export default function TimelineCanvas({
           : { kind: "point", startTick, endTick: startTick },
       );
       setPointCandidates([]);
+      const selectedElements =
+        selection.kind === "point"
+          ? elementsAtTick(timeline, selection.startTick)
+          : elementsOverlappingRange(
+              timeline,
+              selection.startTick,
+              selection.endTick,
+            );
+      const elementIds = selectedElements.map((element) => element.element_id);
+      onActiveElementIdsChange(elementIds);
       return;
     }
+
     onPlayheadChange(tick);
     const candidates = elementsAtTick(timeline, tick);
     setSelection({ kind: "point", startTick: tick, endTick: tick });
     setPointCandidates(collapsed ? candidates : []);
+    const elementIds = candidates.map((element) => element.element_id);
+    onActiveElementIdsChange(elementIds);
   };
 
   const addSelectionToConversation = () => {
@@ -327,7 +344,7 @@ export default function TimelineCanvas({
           <b className="text-[var(--color-text-primary)]">时间轴</b>
           <span className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 font-semibold text-[var(--color-accent)]">
             {seconds(playheadTick, timeline.ticks_per_second)}s · 该时刻有
-            {active.length}项内容
+            {activeElementIds.length}项内容
           </span>
           <span
             className={`rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 ${
@@ -449,8 +466,8 @@ export default function TimelineCanvas({
             {previewMode === "final"
               ? "成片"
               : renderedVersion?.stale
-                ? "内容已更新 · 实时预览"
-                : "实时预览"}
+              ? "内容已更新 · 实时预览"
+              : "实时预览"}
           </div>
           <div className="absolute inset-x-0 bottom-0 flex items-center gap-2 bg-gradient-to-b from-transparent to-black/80 px-4 pb-3 pt-12">
             <button
@@ -614,13 +631,13 @@ export default function TimelineCanvas({
                   <div
                     title="选取整行"
                     onPointerDown={(event) => event.stopPropagation()}
-                    onClick={() =>
-                      useCreatorInteractionStore
-                        .getState()
-                        .setActiveLaneElementIds(
-                          lane.elements.map((element) => element.element_id),
-                        )
-                    }
+                    onClick={() => {
+                      const laneElementIds = lane.elements.map(
+                        (element) => element.element_id,
+                      );
+                      onActiveElementIdsChange(laneElementIds);
+                      onPlayheadChange(0);
+                    }}
                     className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)] hover:text-[12px] hover:font-bold"
                   >
                     {lane.id}
@@ -661,6 +678,7 @@ export default function TimelineCanvas({
                           onClick={(event) => {
                             event.stopPropagation();
                             onSelectElement(element.element_id);
+                            onActiveElementIdsChange([element.element_id]);
                           }}
                           className={`absolute top-1.5 flex h-[30px] min-w-3 flex-col justify-center overflow-hidden rounded-[7px] border px-2 text-left text-[10px] font-semibold shadow-sm transition ${
                             selected
@@ -676,8 +694,8 @@ export default function TimelineCanvas({
                             borderColor: selected
                               ? undefined
                               : playbackState === "failed"
-                                ? "var(--color-danger)"
-                                : `${meta.color}80`,
+                              ? "var(--color-danger)"
+                              : `${meta.color}80`,
                             background: meta.soft,
                           }}
                         >
@@ -726,10 +744,9 @@ export default function TimelineCanvas({
             )}
           </div>
         )}
-
         <div
           aria-hidden
-          className="pointer-events-none absolute bottom-2 top-6 z-[22] w-px bg-[var(--color-accent)]"
+          className="pointer-events-none absolute bottom-2 top-6 z-[22]"
           style={{
             left: `calc(${LABEL_WIDTH}px + (100% - ${LABEL_WIDTH + 24}px) * ${
               percent(playheadTick, timelineDuration) / 100

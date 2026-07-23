@@ -8,15 +8,14 @@ import type {
 import {
   ELEMENT_TYPE_META,
   elementCreationSummary,
-  elementsAtTick,
   orderedTimelineElements,
 } from "@/selectors/timelineElementSelectors";
 import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
-import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 
 interface ElementListProps {
   timeline: TimelineDocument;
   playheadTick: number;
+  activeElementIds: string[];
   selectedElementId: string | null;
   tasks: TaskView[];
   onSelect: (elementId: string) => void;
@@ -77,6 +76,7 @@ function sec(tick: number, ticksPerSecond: number): string {
 export default function ElementList({
   timeline,
   playheadTick,
+  activeElementIds,
   selectedElementId,
   tasks,
   onSelect,
@@ -85,30 +85,6 @@ export default function ElementList({
   const itemRefs = useRef(new Map<string, HTMLButtonElement>());
   const agentWorking = useAgentWorkingState();
   const elements = useMemo(() => orderedTimelineElements(timeline), [timeline]);
-  const activeLaneElementIds = useCreatorInteractionStore(
-    (state) => state.activeLaneElementIds,
-  );
-  const setActiveLaneElementIds = useCreatorInteractionStore(
-    (state) => state.setActiveLaneElementIds,
-  );
-  // When a lane is clicked in TimelineCanvas, `activeLaneElementIds` overrides
-  // the playhead-derived active set with that lane's element IDs.  Moving the
-  // playhead clears the override so the list returns to "current time point".
-  useEffect(() => {
-    if (activeLaneElementIds !== null) setActiveLaneElementIds(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playheadTick]);
-  const activeIds = useMemo(() => {
-    if (activeLaneElementIds) {
-      playheadTick = 0;
-      return new Set(activeLaneElementIds);
-    }
-    return new Set(
-      elementsAtTick(timeline, playheadTick).map(
-        (element) => element.element_id,
-      ),
-    );
-  }, [activeLaneElementIds, playheadTick, timeline]);
 
   useEffect(() => {
     if (!selectedElementId) return;
@@ -130,11 +106,7 @@ export default function ElementList({
         <div className="flex min-w-0 items-baseline gap-1.5">
           <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
             时间点:{sec(playheadTick, timeline.ticks_per_second)}s,{" "}
-            {
-              elements.filter((element) => activeIds.has(element.element_id))
-                .length
-            }
-            项内容
+            {activeElementIds.length}项内容
           </h3>
           <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
             按开始时间排序
@@ -182,10 +154,10 @@ export default function ElementList({
           )
         ) : (
           elements
-            .filter((element) => activeIds.has(element.element_id))
+            .filter((element) => activeElementIds.includes(element.element_id))
             .map((element) => {
               const selected = selectedElementId === element.element_id;
-              const active = activeIds.has(element.element_id);
+              const active = activeElementIds.includes(element.element_id);
               const meta = ELEMENT_TYPE_META[element.creation.type];
               const status = statusOf(element, tasks);
               const start = element.span.start_tick;
