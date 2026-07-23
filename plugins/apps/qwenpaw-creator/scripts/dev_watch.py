@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """dev_watch.py — Watch creator sources and hot-sync into a running QwenPaw.
 
 Frontend: expects `vite build --watch` (started by dev.sh) to keep
@@ -55,8 +56,15 @@ def snapshot(root: str, exts: tuple = ()) -> dict:
 
 def rsync(src: str, dst: str) -> None:
     subprocess.run(
-        ["rsync", "-a", "--delete", "--exclude", "__pycache__",
-         src.rstrip("/") + "/", dst.rstrip("/") + "/"],
+        [
+            "rsync",
+            "-a",
+            "--delete",
+            "--exclude",
+            "__pycache__",
+            src.rstrip("/") + "/",
+            dst.rstrip("/") + "/",
+        ],
         check=True,
     )
 
@@ -71,10 +79,15 @@ def sync_frontend() -> None:
     index_html = os.path.join(FRONTEND_SRC, "index.html")
     with open(index_html, "rb") as f:
         build_id = hashlib.sha256(f.read()).hexdigest()[:12]
-    with open(os.path.join(PLUGIN_DIR, "ui", "plugin-entry.js"), encoding="utf-8") as f:
+    with open(
+        os.path.join(PLUGIN_DIR, "ui", "plugin-entry.js"),
+        encoding="utf-8",
+    ) as f:
         entry = f.read()
     if "__CREATOR_BUILD_ID__" not in entry:
-        raise RuntimeError("plugin-entry.js missing __CREATOR_BUILD_ID__ placeholder")
+        raise RuntimeError(
+            "plugin-entry.js missing __CREATOR_BUILD_ID__ placeholder",
+        )
     dst_dist = os.path.join(INSTALLED_DIR, "ui", "dist")
     rsync(FRONTEND_SRC, os.path.join(dst_dist, "app"))
     with open(os.path.join(dst_dist, "index.js"), "w", encoding="utf-8") as f:
@@ -101,7 +114,10 @@ def main() -> None:
             "Run scripts/dev.sh install once first.",
         )
     print(f"[dev-watch] installed copy : {INSTALLED_DIR}")
-    print(f"[dev-watch] backend reload : POST 127.0.0.1:{PORT}/api/plugins/install (force)")
+    print(
+        "[dev-watch] backend reload : "
+        f"POST 127.0.0.1:{PORT}/api/plugins/install (force)",
+    )
     print("[dev-watch] watching ui/dist/app and backend/ ... (Ctrl+C to stop)")
 
     fe_state = snapshot(FRONTEND_SRC)
@@ -123,11 +139,17 @@ def main() -> None:
             try:
                 sync_frontend()
                 fe_state = fe_now
-                print(f"[dev-watch] {time.strftime('%H:%M:%S')} frontend synced — hard-refresh the browser")
+                print(
+                    f"[dev-watch] {time.strftime('%H:%M:%S')} "
+                    "frontend synced — hard-refresh the browser",
+                )
             except Exception as exc:
                 # Keep fe_state unchanged so the next poll retries (e.g. a
                 # sync attempted mid-build before index.html existed).
-                print(f"[dev-watch] frontend sync failed, retrying: {exc}", file=sys.stderr)
+                print(
+                    f"[dev-watch] frontend sync failed, retrying: {exc}",
+                    file=sys.stderr,
+                )
                 time.sleep(2)
 
         be_now = snapshot(BACKEND_SRC, (".py", ".json", ".txt"))
@@ -136,9 +158,15 @@ def main() -> None:
             be_state = be_now
             try:
                 reload_backend()
-                print(f"[dev-watch] {time.strftime('%H:%M:%S')} backend synced + hot-reloaded")
+                print(
+                    f"[dev-watch] {time.strftime('%H:%M:%S')} "
+                    "backend synced + hot-reloaded",
+                )
             except Exception as exc:
-                print(f"[dev-watch] backend reload FAILED: {exc}", file=sys.stderr)
+                print(
+                    f"[dev-watch] backend reload FAILED: {exc}",
+                    file=sys.stderr,
+                )
 
 
 if __name__ == "__main__":

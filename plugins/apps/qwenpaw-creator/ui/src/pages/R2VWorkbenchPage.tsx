@@ -17,7 +17,7 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
-import { getArtifactVersionMediaUrl } from "@/api/creator";
+import { getArtifactVersionMediaUrl, getResolvedModels } from "@/api/creator";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
@@ -156,6 +156,23 @@ export default function R2VWorkbenchPage() {
   const creation = element?.creation.type === "r2v" ? element.creation : null;
   const [viewedSbId, setViewedSbId] = useState<string | null>(null);
   const [viewedVideoId, setViewedVideoId] = useState<string | null>(null);
+  const [resolvedVideoModel, setResolvedVideoModel] = useState<string | null>(
+    null,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    getResolvedModels()
+      .then((resolved) => {
+        if (!cancelled) setResolvedVideoModel(resolved.video.model || null);
+      })
+      .catch(() => {
+        /* best-effort: fall back to recipe.model below */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     useCreatorInteractionStore
@@ -703,7 +720,10 @@ export default function R2VWorkbenchPage() {
             {[
               { label: "时长", value: `${totalDuration}s` },
               { label: "画幅", value: project.settings.aspect_ratio },
-              { label: "模型", value: creation.recipe?.model ?? "R2V" },
+              {
+                label: "模型",
+                value: resolvedVideoModel ?? creation.recipe?.model ?? "R2V",
+              },
             ].map((cell) => (
               <div
                 key={cell.label}
@@ -712,7 +732,10 @@ export default function R2VWorkbenchPage() {
                 <p className="text-[10px] text-[var(--color-text-tertiary)]">
                   {cell.label}
                 </p>
-                <p className="mt-1 truncate text-xs font-semibold text-[var(--color-text-primary)]">
+                <p
+                  title={cell.value}
+                  className="mt-1 truncate text-xs font-semibold text-[var(--color-text-primary)]"
+                >
                   {cell.value}
                 </p>
               </div>
