@@ -13,6 +13,7 @@ They remain diagnostic evidence rather than a second source of truth.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import logging
 import os
@@ -28,7 +29,14 @@ from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 from uuid import uuid4
 
-from .config import load_observability_config, trace_root
+from services.storage_root import require_creator_data_root
+from utils.logger import register_creator_log_project_resolver
+
+from .config import (
+    load_observability_config,
+    project_observability_directory,
+    trace_root,
+)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -71,15 +79,17 @@ def _enabled() -> bool:
         return False
 
 
-def _capture_content() -> bool:
-    return load_observability_config().capture_content
+def _trace_root(*, project_id: str | None = None) -> Path:
+    return trace_root(project_id=project_id)
 
 
-def _trace_root() -> Path:
-    return trace_root()
-
-
-def _json_safe(value: Any, *, key: str = "", depth: int = 0) -> Any:
+def _json_safe(
+    value: Any,
+    *,
+    capture_content: bool,
+    key: str = "",
+    depth: int = 0,
+) -> Any:
     if _SECRET_KEY.search(key):
         return "[REDACTED]"
     if depth > 6:
@@ -87,7 +97,7 @@ def _json_safe(value: Any, *, key: str = "", depth: int = 0) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        if not _capture_content() and key.lower() in {
+        if not capture_content and key.lower() in {
             "content",
             "prompt",
             "systemprompt",
@@ -105,6 +115,7 @@ def _json_safe(value: Any, *, key: str = "", depth: int = 0) -> Any:
         return {
             str(item_key): _json_safe(
                 item_value,
+                capture_content=capture_content,
                 key=str(item_key),
                 depth=depth + 1,
             )
@@ -114,12 +125,22 @@ def _json_safe(value: Any, *, key: str = "", depth: int = 0) -> Any:
         }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [
-            _json_safe(item, key=key, depth=depth + 1)
+            _json_safe(
+                item,
+                capture_content=capture_content,
+                key=key,
+                depth=depth + 1,
+            )
             for item in list(value)[:_MAX_COLLECTION_ITEMS]
         ]
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc).isoformat()
-    return _json_safe(str(value), key=key, depth=depth + 1)
+    return _json_safe(
+        str(value),
+        capture_content=capture_content,
+        key=key,
+        depth=depth + 1,
+    )
 
 
 def _new_id(prefix: str) -> str:
@@ -154,6 +175,11 @@ def current_trace_context() -> dict[str, str]:
     return dict(_CONTEXT.get())
 
 
+register_creator_log_project_resolver(
+    lambda: current_trace_context().get("projectId"),
+)
+
+
 @contextmanager
 def bind_trace_context(**values: object) -> Iterator[dict[str, str]]:
     merged = current_trace_context()
@@ -174,29 +200,53 @@ def _write(record: Mapping[str, Any]) -> None:
         config = load_observability_config()
     except Exception:
         return
-    _TRACE_LOGGER.setLevel(getattr(logging, config.log_level, logging.INFO))
-    safe = _json_safe(record)
-    line = json.dumps(
-        safe,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
     try:
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = _trace_root() / f"creator-trace-{day}.jsonl"
-        descriptor = os.open(
-            path,
-            os.O_APPEND | os.O_CREAT | os.O_WRONLY,
-            0o600,
+        _TRACE_LOGGER.setLevel(
+            getattr(logging, config.log_level, logging.INFO),
         )
+        safe = _json_safe(
+            record,
+            capture_content=config.capture_content,
+        )
+        line = json.dumps(
+            safe,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        scoped_project_id: str | None = None
+        project_id = safe.get("projectId")
+        if isinstance(project_id, str) and project_id:
+            try:
+                path = _trace_root(
+                    project_id=project_id,
+                ) / f"creator-trace-{day}.jsonl"
+                scoped_project_id = project_id
+            except Exception:
+                path = _trace_root() / f"creator-trace-{day}.jsonl"
+        else:
+            path = _trace_root() / f"creator-trace-{day}.jsonl"
         try:
-            os.write(descriptor, (line + "\n").encode("utf-8"))
-        finally:
-            os.close(descriptor)
+            descriptor = os.open(
+                path,
+                os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+                0o600,
+            )
+            try:
+                os.write(descriptor, (line + "\n").encode("utf-8"))
+            finally:
+                os.close(descriptor)
+        except Exception:
+            _TRACE_LOGGER.exception("creator trace persistence failed")
+        _TRACE_LOGGER.info(
+            line,
+            extra={"creator_project_id": scoped_project_id},
+        )
     except Exception:
-        _TRACE_LOGGER.exception("creator trace persistence failed")
-    _TRACE_LOGGER.info(line)
+        # Bad diagnostic data (for example a NaN provider metric) must never
+        # fail the business operation that attempted to emit it.
+        _TRACE_LOGGER.exception("creator trace emission failed")
 
 
 def trace_event(
@@ -336,14 +386,51 @@ def read_trace_records(
     wanted = {
         key: value for key, value in dict(filters or {}).items() if value
     }
-    matches: list[dict[str, Any]] = []
-    paths = sorted(_trace_root().glob("creator-trace-*.jsonl"), reverse=True)
+    matches: list[tuple[str, int, dict[str, Any]]] = []
+    roots: list[Path] = []
+    try:
+        roots.append(_trace_root())
+    except Exception:
+        pass
+    project_id = wanted.get("projectId")
+    if project_id:
+        try:
+            roots.insert(0, _trace_root(project_id=project_id))
+        except Exception:
+            pass
+    else:
+        try:
+            data_root = require_creator_data_root()
+            for candidate in data_root.iterdir():
+                try:
+                    trace_directory = project_observability_directory(
+                        candidate.name,
+                        "traces",
+                        data_root=data_root,
+                        create=False,
+                    )
+                except Exception:
+                    continue
+                if trace_directory.is_dir():
+                    roots.append(trace_directory)
+        except Exception:
+            pass
+    paths = sorted(
+        {
+            path
+            for root in roots
+            for path in root.glob("creator-trace-*.jsonl")
+        },
+        key=lambda path: (path.name, str(path)),
+        reverse=True,
+    )
+    sequence = 0
     for path in paths:
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except OSError:
             continue
-        for line in reversed(lines):
+        for line in lines:
             try:
                 record = json.loads(line)
             except (json.JSONDecodeError, TypeError):
@@ -352,7 +439,14 @@ def read_trace_records(
                 str(record.get(key) or "") == value
                 for key, value in wanted.items()
             ):
-                matches.append(record)
-                if len(matches) >= limit:
-                    return list(reversed(matches))
-    return list(reversed(matches))
+                sequence += 1
+                candidate = (
+                    str(record.get("timestamp") or ""),
+                    sequence,
+                    record,
+                )
+                if len(matches) < limit:
+                    heapq.heappush(matches, candidate)
+                elif candidate[:2] > matches[0][:2]:
+                    heapq.heapreplace(matches, candidate)
+    return [item[2] for item in sorted(matches)]

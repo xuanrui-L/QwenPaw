@@ -23,6 +23,7 @@ from services.file_agent_runtime import (
     FileCreatorAgentRuntime,
 )
 from services.file_agent_runtime.prompts import render_creator_system_prompt
+from services.observability import read_trace_records
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
 from services.project_files.review import ReviewDecisionItem
@@ -226,7 +227,10 @@ async def _wait_for(predicate, *, timeout: float = 5.0) -> None:
 
 def test_initial_creation_runs_auto_fix_tool_loop_without_review(
     tmp_path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+
     async def scenario():
         services, _snapshot = _create_project(tmp_path, initial_goal="请完善项目说明")
         driver = FileCreatorAgentRuntime(
@@ -241,6 +245,7 @@ def test_initial_creation_runs_auto_fix_tool_loop_without_review(
                 PROJECT_ID,
             ).last_consumed_message_seq
             == 1,
+            timeout=15.0,
         )
         await driver.wait_until_idle(PROJECT_ID)
         project = services.projects.read(PROJECT_ID)
@@ -276,6 +281,18 @@ def test_initial_creation_runs_auto_fix_tool_loop_without_review(
         "agent.tool_started",
         "agent.tool_completed",
     } <= event_types
+    trace_records = read_trace_records(filters={"projectId": PROJECT_ID})
+    trace_names = {item["name"] for item in trace_records}
+    assert {
+        "creator.agent.execution.started",
+        "creator.agent.run.started",
+        "creator.agent.tool_started",
+        "creator.agent.tool_completed",
+        "creator.agent.run.completed",
+        "creator.agent.execution.finished",
+    } <= trace_names
+    assert not any(name.endswith("_delta") for name in trace_names)
+    assert len({item["traceId"] for item in trace_records}) == 1
     assistant_turns = [item for item in messages if item.role == "assistant"]
     tool_results = [item for item in messages if item.role == "tool"]
     assert all(

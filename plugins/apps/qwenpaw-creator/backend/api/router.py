@@ -36,8 +36,8 @@ from .dependencies import (
 
 router = APIRouter(
     dependencies=[
-        Depends(bind_creator_tool_config),
         Depends(bind_creator_trace_request),
+        Depends(bind_creator_tool_config),
     ],
     route_class=CreatorErrorRoute,
 )

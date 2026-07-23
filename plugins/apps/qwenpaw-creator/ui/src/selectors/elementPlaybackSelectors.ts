@@ -18,6 +18,7 @@ export type ElementPlaybackStatus =
   | "generating"
   | "queued"
   | "failed"
+  | "stale"
   | "pending";
 
 export type ElementPlaybackMediaKind = "video" | "image" | "audio" | "other";
@@ -32,6 +33,7 @@ export interface ElementPlaybackMedia {
   playbackRate: number;
   loop: boolean;
   durationSeconds: number | null;
+  stale: boolean;
 }
 
 export interface ElementPlayback {
@@ -48,6 +50,7 @@ export const ELEMENT_PLAYBACK_STATUS_LABEL: Record<
   generating: "生成中",
   queued: "排队中",
   failed: "生成失败",
+  stale: "需重新生成",
   pending: "待生成",
 };
 
@@ -71,6 +74,7 @@ interface ResolvedMediaRef {
   mediaKind: ElementPlaybackMediaKind;
   versionId: string;
   durationSeconds: number | null;
+  stale: boolean;
 }
 
 function resolveArtifactVersionRef(
@@ -84,6 +88,7 @@ function resolveArtifactVersionRef(
     mediaKind: artifactMediaKind(project, version),
     versionId,
     durationSeconds: version.duration_seconds,
+    stale: version.stale,
   };
 }
 
@@ -102,6 +107,7 @@ function resolveSourceVersionRef(
         : "other",
     versionId,
     durationSeconds: version.duration_seconds,
+    stale: false,
   };
 }
 
@@ -184,7 +190,9 @@ export function resolveElementPlayback(
     const timing = fromRender && renderSource ? renderSource : null;
     return {
       element,
-      status: "ready",
+      status:
+        elementTaskStatus(element, tasks) ??
+        (resolved.stale ? "stale" : "ready"),
       media: {
         ...resolved,
         sourceInSeconds: timing ? timing.source_in_tick / ticksPerSecond : 0,

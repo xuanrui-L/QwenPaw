@@ -24,6 +24,7 @@ from services.media_files import (  # noqa: E402
     shutdown_file_media_execution_services,
     start_file_media_execution_services,
 )
+from services.observability import trace_event  # noqa: E402
 from services.project_files.facade import (  # noqa: E402
     clear_creator_file_service_registry,
     creator_file_services,
@@ -36,20 +37,52 @@ from services.source_analysis import (  # noqa: E402
     recover_interrupted_source_analysis,
     shutdown_source_analysis_services,
 )
+from utils.logger import configure_creator_file_logging  # noqa: E402
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Construction performs Project and Review journal recovery before the API
     # accepts traffic.  No database migration or SQL runtime is part of boot.
-    await asyncio.to_thread(ensure_creator_runtime_dependencies)
-    services = creator_file_services(require_creator_data_root())
-    recover_interrupted_source_analysis(services)
+    data_root = require_creator_data_root()
+    log_path = configure_creator_file_logging(data_root)
+    trace_event(
+        "creator.runtime.starting",
+        component="standalone",
+        attributes={
+            "dataRoot": str(data_root),
+            "logPath": str(log_path),
+        },
+    )
+    try:
+        await asyncio.to_thread(ensure_creator_runtime_dependencies)
+        services = creator_file_services(data_root)
+        recover_interrupted_source_analysis(services)
+    except BaseException as exc:
+        trace_event(
+            "creator.runtime.startup_failed",
+            component="standalone",
+            status="error",
+            attributes={
+                "errorType": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        raise
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
+        trace_event(
+            "creator.runtime.started",
+            component="standalone",
+            attributes={"dataRoot": str(data_root)},
+        )
         yield
     finally:
+        trace_event(
+            "creator.runtime.stopping",
+            component="standalone",
+        )
         try:
             await shutdown_file_media_execution_services()
         finally:
@@ -60,6 +93,10 @@ async def lifespan(_app: FastAPI):
                     await stop_creator_agent_runtime()
                 finally:
                     clear_creator_file_service_registry()
+                    trace_event(
+                        "creator.runtime.stopped",
+                        component="standalone",
+                    )
 
 
 app = FastAPI(title="QwenPaw-Creator Local Dev Backend", lifespan=lifespan)

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronUp,
@@ -56,6 +57,8 @@ interface TimelineCanvasProps {
 }
 
 const LABEL_WIDTH = 68;
+const CHART_PADDING = 12;
+const SELECTION_TOOLBAR_GAP = 6;
 
 function seconds(tick: number, ticksPerSecond: number, digits = 1): string {
   return (tick / ticksPerSecond).toFixed(digits).replace(/\.0$/, "");
@@ -69,6 +72,15 @@ function percent(tick: number, durationTick: number): number {
 
 function timelineRef(timeline: TimelineDocument): string {
   return `timeline:${timeline.timeline_id}`;
+}
+
+function niceScaleStep(secondsValue: number): number {
+  if (!Number.isFinite(secondsValue) || secondsValue <= 0) return 1;
+  const power = 10 ** Math.floor(Math.log10(secondsValue));
+  const normalized = secondsValue / power;
+  const nice =
+    normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return nice * power;
 }
 
 export default function TimelineCanvas({
@@ -107,6 +119,11 @@ export default function TimelineCanvas({
   const chartRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const previewScrubberRef = useRef<HTMLDivElement>(null);
+  const previewScrub = useRef<{
+    pointerId: number;
+    resumeAfterScrub: boolean;
+  } | null>(null);
   const lanes = useMemo(() => packDisplayLanes(timeline), [timeline]);
   const active = useMemo(
     () => elementsAtTick(timeline, playheadTick),
@@ -137,11 +154,24 @@ export default function TimelineCanvas({
   const scrollable = lanes.length > 4;
   const timelineDuration = Math.max(1, durationTick);
 
+  useEffect(() => {
+    onActiveElementIdsChange(active.map((element) => element.element_id));
+  }, [active, onActiveElementIdsChange]);
+
   const tickAt = (clientX: number): number => {
     const rect = chartRef.current?.getBoundingClientRect();
     if (!rect) return 0;
-    const inner = Math.max(1, rect.width - LABEL_WIDTH);
-    const x = Math.min(inner, Math.max(0, clientX - rect.left - LABEL_WIDTH));
+    const inner = Math.max(
+      1,
+      rect.width - LABEL_WIDTH - CHART_PADDING * 2,
+    );
+    const x = Math.min(
+      inner,
+      Math.max(
+        0,
+        clientX - rect.left - CHART_PADDING - LABEL_WIDTH,
+      ),
+    );
     return Math.round((x / inner) * timelineDuration);
   };
 
@@ -197,13 +227,9 @@ export default function TimelineCanvas({
       );
       setPointCandidates([]);
       const selectedElements =
-        selection.kind === "point"
-          ? elementsAtTick(timeline, selection.startTick)
-          : elementsOverlappingRange(
-              timeline,
-              selection.startTick,
-              selection.endTick,
-            );
+        endTick > startTick
+          ? elementsOverlappingRange(timeline, startTick, endTick)
+          : elementsAtTick(timeline, startTick);
       const elementIds = selectedElements.map((element) => element.element_id);
       onActiveElementIdsChange(elementIds);
       return;
@@ -260,6 +286,7 @@ export default function TimelineCanvas({
       const target = event.target as HTMLElement;
       if (
         chartRef.current?.contains(target) ||
+        target.closest("[data-timeline-selection-toolbar]") ||
         target.closest("[data-timeline-point-candidates]")
       )
         return;
@@ -280,7 +307,7 @@ export default function TimelineCanvas({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || document.activeElement === video) return;
+    if (!video) return;
     seekPreviewToPlayhead(video);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playheadTick, previewOpen, renderUrl, timeline.ticks_per_second]);
@@ -289,6 +316,100 @@ export default function TimelineCanvas({
     if (!previewOpen) setPlaying(false);
     else if (previewMode === "final" && !renderUrl) setPlaying(false);
   }, [previewOpen, previewMode, renderUrl]);
+
+  const previewTickAt = (clientX: number): number => {
+    const rect = previewScrubberRef.current?.getBoundingClientRect();
+    if (!rect) return playheadTick;
+    const fraction = Math.min(
+      1,
+      Math.max(0, (clientX - rect.left) / Math.max(1, rect.width)),
+    );
+    return Math.round(fraction * timelineDuration);
+  };
+
+  const pausePreviewForScrub = () => {
+    if (!playing) return;
+    if (previewMode === "live") setPlaying(false);
+    else videoRef.current?.pause();
+  };
+
+  const resumePreviewAfterScrub = () => {
+    if (previewMode === "live") {
+      setPlaying(true);
+      return;
+    }
+    void videoRef.current?.play();
+  };
+
+  const beginPreviewScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    previewScrub.current = {
+      pointerId: event.pointerId,
+      resumeAfterScrub: playing,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pausePreviewForScrub();
+    onPlayheadChange(previewTickAt(event.clientX));
+  };
+
+  const movePreviewScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (previewScrub.current?.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    onPlayheadChange(previewTickAt(event.clientX));
+  };
+
+  const finishPreviewScrub = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    commitPointerPosition: boolean,
+  ) => {
+    const current = previewScrub.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    if (commitPointerPosition) {
+      onPlayheadChange(previewTickAt(event.clientX));
+    }
+    previewScrub.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (current.resumeAfterScrub) resumePreviewAfterScrub();
+  };
+
+  const movePreviewScrubberByKeyboard = (
+    event: React.KeyboardEvent<HTMLDivElement>,
+  ) => {
+    const oneSecond = Math.max(1, timeline.ticks_per_second);
+    const fiveSeconds = oneSecond * 5;
+    let nextTick: number | null = null;
+    switch (event.key) {
+      case "ArrowLeft":
+      case "ArrowDown":
+        nextTick = playheadTick - oneSecond;
+        break;
+      case "ArrowRight":
+      case "ArrowUp":
+        nextTick = playheadTick + oneSecond;
+        break;
+      case "PageDown":
+        nextTick = playheadTick - fiveSeconds;
+        break;
+      case "PageUp":
+        nextTick = playheadTick + fiveSeconds;
+        break;
+      case "Home":
+        nextTick = 0;
+        break;
+      case "End":
+        nextTick = timelineDuration;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    onPlayheadChange(Math.min(timelineDuration, Math.max(0, nextTick)));
+  };
 
   useLayoutEffect(() => {
     if (!selection) {
@@ -301,22 +422,32 @@ export default function TimelineCanvas({
       if (!rect || !bar) return;
       const width = bar.offsetWidth || 116;
       const height = bar.offsetHeight || 32;
-      const centerTick =
+      const anchorTick =
         selection.kind === "point"
           ? selection.startTick
-          : (selection.startTick + selection.endTick) / 2;
-      const inner = Math.max(1, rect.width - LABEL_WIDTH - 24);
-      const x =
-        rect.left +
-        LABEL_WIDTH +
-        (inner * percent(centerTick, timelineDuration)) / 100;
-      const left = Math.min(
-        Math.max(x - width / 2, 8),
-        Math.max(8, window.innerWidth - width - 8),
+          : selection.endTick;
+      const inner = Math.max(
+        1,
+        rect.width - LABEL_WIDTH - CHART_PADDING * 2,
       );
-      // 悬浮在时间轴图表上方，不遮挡刻度与轨道；上方放不下时退回刻度下方
-      let top = rect.top - height - 6;
-      if (top < 8) top = rect.top + 30;
+      const anchorX =
+        rect.left +
+        CHART_PADDING +
+        LABEL_WIDTH +
+        (inner * percent(anchorTick, timelineDuration)) / 100;
+      const rightSide = anchorX + 8;
+      const left =
+        rightSide + width <= window.innerWidth - 8
+          ? rightSide
+          : Math.max(8, anchorX - width - 8);
+      const above = rect.top - height - SELECTION_TOOLBAR_GAP;
+      const top =
+        above >= 8
+          ? above
+          : Math.min(
+              Math.max(8, rect.top + SELECTION_TOOLBAR_GAP),
+              window.innerHeight - height - 8,
+            );
       setToolbarPos({ left, top });
     };
     update();
@@ -328,9 +459,30 @@ export default function TimelineCanvas({
     };
   }, [selection, timelineDuration]);
 
-  const rulerTicks = Array.from({ length: 7 }, (_, index) =>
-    Math.round((timelineDuration * index) / 6),
-  );
+  const scale = useMemo(() => {
+    const ticksPerSecond = Math.max(1, timeline.ticks_per_second);
+    const durationSeconds = timelineDuration / ticksPerSecond;
+    const majorStepSeconds = niceScaleStep(durationSeconds / 6);
+    const majorStepTick = Math.max(
+      1,
+      Math.round(majorStepSeconds * ticksPerSecond),
+    );
+    const minorStepTick = Math.max(1, Math.round(majorStepTick / 5));
+    const ticks: Array<{ tick: number; major: boolean }> = [];
+    for (let tick = 0; tick <= timelineDuration; tick += minorStepTick) {
+      ticks.push({
+        tick,
+        major: tick % majorStepTick === 0,
+      });
+    }
+    if (ticks[ticks.length - 1]?.tick !== timelineDuration) {
+      ticks.push({ tick: timelineDuration, major: true });
+    }
+    return {
+      ticks,
+      labelDigits: majorStepSeconds < 1 ? 1 : 0,
+    };
+  }, [timeline.ticks_per_second, timelineDuration]);
 
   return (
     <section
@@ -469,7 +621,7 @@ export default function TimelineCanvas({
               ? "内容已更新 · 实时预览"
               : "实时预览"}
           </div>
-          <div className="absolute inset-x-0 bottom-0 flex items-center gap-2 bg-gradient-to-b from-transparent to-black/80 px-4 pb-3 pt-12">
+          <div className="absolute inset-x-0 bottom-0 z-20 flex items-center gap-2 bg-gradient-to-b from-transparent to-black/80 px-4 pb-3 pt-12">
             <button
               type="button"
               disabled={
@@ -511,23 +663,40 @@ export default function TimelineCanvas({
                 <Volume2 className="h-3.5 w-3.5" />
               )}
             </button>
-            <div className="relative h-1 flex-1 rounded-full bg-white/30">
+            <div
+              ref={previewScrubberRef}
+              data-preview-scrubber
+              role="slider"
+              tabIndex={0}
+              aria-label="拖动预览时间轴"
+              aria-valuemin={0}
+              aria-valuemax={timelineDuration}
+              aria-valuenow={Math.min(playheadTick, timelineDuration)}
+              aria-valuetext={`${seconds(
+                playheadTick,
+                timeline.ticks_per_second,
+              )} 秒`}
+              onPointerDown={beginPreviewScrub}
+              onPointerMove={movePreviewScrub}
+              onPointerUp={(event) => finishPreviewScrub(event, true)}
+              onPointerCancel={(event) => finishPreviewScrub(event, false)}
+              onKeyDown={movePreviewScrubberByKeyboard}
+              className="relative h-7 flex-1 cursor-pointer touch-none rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]"
+            >
+              <span className="pointer-events-none absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full bg-white/30">
+                <i
+                  className="block h-full rounded-full bg-[var(--color-accent)]"
+                  style={{
+                    width: `${percent(playheadTick, timelineDuration)}%`,
+                  }}
+                />
+              </span>
               <i
-                className="pointer-events-none block h-full overflow-hidden rounded-full bg-[var(--color-accent)]"
-                style={{ width: `${percent(playheadTick, timelineDuration)}%` }}
-              />
-              <input
-                data-preview-scrubber
-                type="range"
-                min={0}
-                max={timelineDuration}
-                step={1}
-                value={Math.min(playheadTick, timelineDuration)}
-                onChange={(event) =>
-                  onPlayheadChange(Number(event.currentTarget.value))
-                }
-                aria-label="拖动预览时间轴"
-                className="absolute -inset-y-3 left-0 m-0 h-7 w-full cursor-pointer opacity-0"
+                aria-hidden
+                className="pointer-events-none absolute top-1/2 block h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-[var(--color-accent)] shadow-sm"
+                style={{
+                  left: `${percent(playheadTick, timelineDuration)}%`,
+                }}
               />
             </div>
             <span className="font-mono text-[11px] text-white">
@@ -551,16 +720,60 @@ export default function TimelineCanvas({
           drag.current = null;
         }}
       >
-        <div className="relative ml-[68px] h-6 border-b border-[var(--color-border)]">
-          {rulerTicks.map((tick) => (
+        <div
+          data-timeline-scale
+          className="relative ml-[68px] h-7 border-b border-[var(--color-border)]"
+        >
+          {scale.ticks.map(({ tick, major }) => (
             <span
               key={tick}
-              className="absolute top-1 -translate-x-1/2 text-[10px] text-[var(--color-text-tertiary)]"
+              data-timeline-scale-tick
+              data-major={major ? "true" : "false"}
+              aria-hidden={!major}
+              className="absolute inset-y-0 -translate-x-1/2"
               style={{ left: `${percent(tick, timelineDuration)}%` }}
             >
-              {seconds(tick, timeline.ticks_per_second, 0)}s
+              <i
+                className={`absolute bottom-0 left-1/2 w-px -translate-x-1/2 ${
+                  major
+                    ? "h-2.5 bg-[var(--color-border-strong)]"
+                    : "h-1.5 bg-[var(--color-border)]"
+                }`}
+              />
+              {major && (
+                <b className="absolute left-1/2 top-0 -translate-x-1/2 whitespace-nowrap text-[9px] font-medium text-[var(--color-text-tertiary)]">
+                  {seconds(
+                    tick,
+                    timeline.ticks_per_second,
+                    scale.labelDigits,
+                  )}
+                  s
+                </b>
+              )}
             </span>
           ))}
+        </div>
+        <div
+          aria-hidden
+          data-timeline-grid
+          className="pointer-events-none absolute bottom-2 top-7 z-0"
+          style={{
+            left: CHART_PADDING + LABEL_WIDTH,
+            right: CHART_PADDING,
+          }}
+        >
+          {scale.ticks
+            .filter(
+              ({ major, tick }) =>
+                major && tick > 0 && tick < timelineDuration,
+            )
+            .map(({ tick }) => (
+              <i
+                key={tick}
+                className="absolute inset-y-0 w-px bg-[var(--color-border)]/45"
+                style={{ left: `${percent(tick, timelineDuration)}%` }}
+              />
+            ))}
         </div>
         {collapsed ? (
           <div className="relative flex h-8 border-b border-[var(--color-border)]/65">
@@ -677,6 +890,9 @@ export default function TimelineCanvas({
                           onPointerDown={(event) => event.stopPropagation()}
                           onClick={(event) => {
                             event.stopPropagation();
+                            // Element 选中复用唯一的播放头；旧的点/区间选择不再
+                            // 留下一根独立标记线。
+                            clearSelection();
                             onSelectElement(element.element_id);
                             onActiveElementIdsChange([element.element_id]);
                           }}
@@ -746,62 +962,68 @@ export default function TimelineCanvas({
         )}
         <div
           aria-hidden
-          className="pointer-events-none absolute bottom-2 top-6 z-[22]"
+          data-timeline-playhead
+          className="pointer-events-none absolute bottom-2 top-7 z-[22] w-0 -translate-x-1/2 border-l-2 border-[var(--color-accent)] drop-shadow-[0_0_3px_var(--color-accent)]"
           style={{
-            left: `calc(${LABEL_WIDTH}px + (100% - ${LABEL_WIDTH + 24}px) * ${
-              percent(playheadTick, timelineDuration) / 100
-            })`,
+            left: `calc(${
+              CHART_PADDING + LABEL_WIDTH
+            }px + (100% - ${
+              LABEL_WIDTH + CHART_PADDING * 2
+            }px) * ${percent(playheadTick, timelineDuration) / 100})`,
           }}
         />
         {selection && (
           <>
-            <div
-              aria-hidden
-              className={`pointer-events-none absolute bottom-2 top-6 z-[21] border border-[var(--color-accent)] ${
-                selection.kind === "point"
-                  ? "w-1 bg-[var(--color-accent)]/30"
-                  : "bg-[var(--color-accent)]/15"
-              }`}
-              style={{
-                left: `calc(${LABEL_WIDTH}px + (100% - ${
-                  LABEL_WIDTH + 24
-                }px) * ${
-                  percent(selection.startTick, timelineDuration) / 100
-                })`,
-                width:
-                  selection.kind === "range"
-                    ? `calc((100% - ${LABEL_WIDTH + 24}px) * ${
-                        (selection.endTick - selection.startTick) /
-                        timelineDuration
-                      })`
-                    : undefined,
-              }}
-            />
-            <div
-              ref={toolbarRef}
-              data-timeline-selection-toolbar
-              className="rounded-lg border border-[var(--color-border)] bg-white p-0.5 shadow-lg"
-              style={{
-                position: "fixed",
-                top: toolbarPos?.top ?? -9999,
-                left: toolbarPos?.left ?? -9999,
-                visibility: toolbarPos ? "visible" : "hidden",
-                zIndex: 50,
-              }}
-            >
-              <button
-                type="button"
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  addSelectionToConversation();
+            {selection.kind === "range" && (
+              <div
+                aria-hidden
+                data-timeline-selection-range
+                className="pointer-events-none absolute bottom-2 top-7 z-[21] border border-[var(--color-accent)] bg-[var(--color-accent)]/15"
+                style={{
+                  left: `calc(${
+                    CHART_PADDING + LABEL_WIDTH
+                  }px + (100% - ${
+                    LABEL_WIDTH + CHART_PADDING * 2
+                  }px) * ${
+                    percent(selection.startTick, timelineDuration) / 100
+                  })`,
+                  width: `calc((100% - ${
+                    LABEL_WIDTH + CHART_PADDING * 2
+                  }px) * ${
+                    (selection.endTick - selection.startTick) /
+                    timelineDuration
+                  })`,
                 }}
-                className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+              />
+            )}
+            {createPortal(
+              <div
+                ref={toolbarRef}
+                data-timeline-selection-toolbar
+                className="rounded-lg border border-[var(--color-border)] bg-white p-0.5 shadow-lg"
+                style={{
+                  position: "fixed",
+                  top: toolbarPos?.top ?? -9999,
+                  left: toolbarPos?.left ?? -9999,
+                  visibility: toolbarPos ? "visible" : "hidden",
+                  zIndex: 50,
+                }}
               >
-                <MessageSquarePlus className="h-3.5 w-3.5" />
-                添加到对话
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    addSelectionToConversation();
+                  }}
+                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                >
+                  <MessageSquarePlus className="h-3.5 w-3.5" />
+                  添加到对话
+                </button>
+              </div>,
+              document.body,
+            )}
           </>
         )}
       </div>

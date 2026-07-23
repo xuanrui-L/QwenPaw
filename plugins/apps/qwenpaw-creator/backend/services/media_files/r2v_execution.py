@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
-import logging
 import os
 from pathlib import Path, PurePosixPath
 import stat
@@ -91,6 +90,7 @@ from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 from services.runtime_files.reconciliation import reconcile_terminal_task_runs
 
 # pylint: disable=no-name-in-module
+from utils.logger import setup_logger
 from utils.paths import media_task_scope, task_work_root
 
 # pylint: enable=no-name-in-module
@@ -122,7 +122,7 @@ _TERMINAL_TASKS = frozenset(
     },
 )
 
-logger = logging.getLogger(__name__)
+logger = setup_logger("services.media_files.r2v_execution")
 
 
 def _log_safe(value: object) -> str:

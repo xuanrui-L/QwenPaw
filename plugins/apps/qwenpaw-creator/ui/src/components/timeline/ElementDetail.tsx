@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Button, Input, InputNumber, Switch, message } from "antd";
+import { useMemo } from "react";
+import { Alert, Button, Input, InputNumber } from "antd";
 import {
   ArrowUpRight,
   Box,
@@ -29,9 +29,14 @@ interface ElementDetailProps {
   timeline: TimelineDocument;
   element: TimelineElementDocument | null;
   tasks: TaskView[];
-  patching: boolean;
+  applying: boolean;
+  dirtyCount: number;
+  conflictPaths: string[];
   onClose: () => void;
-  onPatch: (path: string, before: unknown, value: unknown) => Promise<void>;
+  onChange: (mutator: (element: TimelineElementDocument) => void) => void;
+  onApply: () => void;
+  onDiscard: () => void;
+  onAcceptConflicts: () => void;
   onOpenWorkbench: (element: TimelineElementDocument) => void;
 }
 
@@ -49,21 +54,17 @@ function TextField({
   multiline = false,
   path,
   field,
-  onCommit,
+  disabled = false,
+  onChange,
 }: {
   label: string;
   value: string;
   multiline?: boolean;
   path: string;
   field: string;
-  onCommit: (value: string) => Promise<void>;
+  disabled?: boolean;
+  onChange: (value: string) => void;
 }) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  const commit = () => {
-    if (draft === value) return;
-    void onCommit(draft).catch(() => setDraft(value));
-  };
   return (
     <label
       data-creator-field={field}
@@ -74,16 +75,16 @@ function TextField({
       <FieldLabel>{label}</FieldLabel>
       {multiline ? (
         <Input.TextArea
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commit}
+          value={value}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
           autoSize={{ minRows: 3, maxRows: 8 }}
         />
       ) : (
         <Input
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commit}
+          value={value}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
         />
       )}
     </label>
@@ -133,9 +134,14 @@ export default function ElementDetail({
   timeline,
   element,
   tasks,
-  patching,
+  applying,
+  dirtyCount,
+  conflictPaths,
   onClose,
-  onPatch,
+  onChange,
+  onApply,
+  onDiscard,
+  onAcceptConflicts,
   onOpenWorkbench,
 }: ElementDetailProps) {
   const outputs = useMemo(
@@ -170,15 +176,6 @@ export default function ElementDetail({
   ] as const;
   const pointer = (...segments: Array<string | number>) =>
     projectJsonPointer(...baseSegments, ...segments);
-  const patch = (
-    segments: Array<string | number>,
-    before: unknown,
-    value: unknown,
-  ) =>
-    onPatch(pointer(...segments), before, value).catch((error) => {
-      message.error((error as Error).message);
-      throw error;
-    });
   const creation = element.creation;
 
   return (
@@ -205,14 +202,33 @@ export default function ElementDetail({
         </div>
         <div
           data-element-detail-header-actions
-          className="flex shrink-0 items-center gap-1.5"
+          className="flex shrink-0 flex-wrap items-center justify-end gap-1.5"
         >
+          <Button
+            size="small"
+            disabled={dirtyCount === 0 || applying}
+            onClick={onDiscard}
+            className="!font-[inherit] !font-semibold"
+          >
+            放弃修改
+          </Button>
+          <Button
+            size="small"
+            type="primary"
+            loading={applying}
+            disabled={dirtyCount === 0 || conflictPaths.length > 0}
+            onClick={onApply}
+            className="!font-[inherit] !font-semibold"
+          >
+            {dirtyCount > 0 ? `应用修改（${dirtyCount}）` : "应用修改"}
+          </Button>
           {!element.enabled && (
             <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">
               已停用
             </span>
           )}
           <span
+            data-element-detail-status
             className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${status.tone}`}
           >
             {status.label}
@@ -229,23 +245,29 @@ export default function ElementDetail({
       </header>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 [scrollbar-gutter:stable]">
+        {conflictPaths.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            message="这些字段在编辑期间被其他操作更新"
+            description={
+              <div className="space-y-2">
+                <p>
+                  本地草稿仍然保留。确认使用本地修改覆盖最新值后，才能应用。
+                </p>
+                <Button size="small" onClick={onAcceptConflicts}>
+                  使用我的修改
+                </Button>
+              </div>
+            }
+          />
+        )}
         <section className="rounded-xl border border-[var(--color-border)] p-3">
-          <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="mb-3">
             <h4 className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
               <Clock3 className="h-3.5 w-3.5 text-[var(--color-accent)]" />
               时间与层级
             </h4>
-            <label className="flex items-center gap-2 text-[11px] text-[var(--color-text-secondary)]">
-              启用
-              <Switch
-                size="small"
-                checked={element.enabled}
-                loading={patching}
-                onChange={(checked) =>
-                  void patch(["enabled"], element.enabled, checked)
-                }
-              />
-            </label>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
             <label>
@@ -254,14 +276,15 @@ export default function ElementDetail({
                 className="w-full"
                 min={0}
                 step={0.1}
+                disabled={applying}
                 value={sec(element.span.start_tick, timeline.ticks_per_second)}
                 onChange={(value) => {
                   if (value == null) return;
-                  void patch(
-                    ["span", "start_tick"],
-                    element.span.start_tick,
-                    Math.round(Number(value) * timeline.ticks_per_second),
-                  );
+                  onChange((draft) => {
+                    draft.span.start_tick = Math.round(
+                      Number(value) * timeline.ticks_per_second,
+                    );
+                  });
                 }}
               />
             </label>
@@ -271,20 +294,19 @@ export default function ElementDetail({
                 className="w-full"
                 min={1 / timeline.ticks_per_second}
                 step={0.1}
+                disabled={applying}
                 value={sec(
                   element.span.duration_tick,
                   timeline.ticks_per_second,
                 )}
                 onChange={(value) => {
                   if (value == null) return;
-                  void patch(
-                    ["span", "duration_tick"],
-                    element.span.duration_tick,
-                    Math.max(
+                  onChange((draft) => {
+                    draft.span.duration_tick = Math.max(
                       1,
                       Math.round(Number(value) * timeline.ticks_per_second),
-                    ),
-                  );
+                    );
+                  });
                 }}
               />
             </label>
@@ -292,10 +314,13 @@ export default function ElementDetail({
               <FieldLabel>叠放顺序</FieldLabel>
               <InputNumber
                 className="w-full"
+                disabled={applying}
                 value={element.z_index}
                 onChange={(value) =>
                   value != null &&
-                  void patch(["z_index"], element.z_index, Number(value))
+                  onChange((draft) => {
+                    draft.z_index = Number(value);
+                  })
                 }
               />
             </label>
@@ -306,7 +331,12 @@ export default function ElementDetail({
               value={element.label}
               path={pointer("label")}
               field={`element:${element.element_id}/label`}
-              onCommit={(value) => patch(["label"], element.label, value)}
+              disabled={applying}
+              onChange={(value) =>
+                onChange((draft) => {
+                  draft.label = value;
+                })
+              }
             />
           </div>
         </section>
@@ -371,6 +401,7 @@ export default function ElementDetail({
                     <InputNumber
                       className="w-full"
                       step={1}
+                      disabled={applying}
                       min={
                         key === "width" || key === "height"
                           ? 0.1
@@ -390,11 +421,9 @@ export default function ElementDetail({
                           key === "rotation_degrees"
                             ? Number(value)
                             : Number(value) / 100;
-                        void patch(
-                          ["location", key],
-                          element.location![key],
-                          next,
-                        );
+                        onChange((draft) => {
+                          if (draft.location) draft.location[key] = next;
+                        });
                       }}
                     />
                   </label>
@@ -417,8 +446,12 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "intent")}
                 field={`element:${element.element_id}/creation/intent`}
-                onCommit={(value) =>
-                  patch(["creation", "intent"], creation.intent, value)
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "r2v")
+                      draft.creation.intent = value;
+                  })
                 }
               />
               <TextField
@@ -427,8 +460,12 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "narrative")}
                 field={`element:${element.element_id}/creation/narrative`}
-                onCommit={(value) =>
-                  patch(["creation", "narrative"], creation.narrative, value)
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "r2v")
+                      draft.creation.narrative = value;
+                  })
                 }
               />
               <TextField
@@ -437,12 +474,12 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "storyboard_prompt")}
                 field={`element:${element.element_id}/creation/storyboard_prompt`}
-                onCommit={(value) =>
-                  patch(
-                    ["creation", "storyboard_prompt"],
-                    creation.storyboard_prompt,
-                    value,
-                  )
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "r2v")
+                      draft.creation.storyboard_prompt = value;
+                  })
                 }
               />
               <TextField
@@ -451,12 +488,12 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "video_prompt")}
                 field={`element:${element.element_id}/creation/video_prompt`}
-                onCommit={(value) =>
-                  patch(
-                    ["creation", "video_prompt"],
-                    creation.video_prompt,
-                    value,
-                  )
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "r2v")
+                      draft.creation.video_prompt = value;
+                  })
                 }
               />
               {creation.shots.order.length > 0 && (
@@ -492,8 +529,12 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "intent")}
                 field={`element:${element.element_id}/creation/intent`}
-                onCommit={(value) =>
-                  patch(["creation", "intent"], creation.intent, value)
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "edit")
+                      draft.creation.intent = value;
+                  })
                 }
               />
               <TextField
@@ -502,16 +543,18 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "reason")}
                 field={`element:${element.element_id}/creation/reason`}
-                onCommit={(value) =>
-                  patch(["creation", "reason"], creation.reason, value)
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "edit")
+                      draft.creation.reason = value;
+                  })
                 }
               />
               {element.render_source?.type === "source_asset_version" && (
                 <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-[11px] leading-5 text-[var(--color-text-secondary)]">
-                  <b className="text-[var(--color-text-primary)]">
-                    {project.assets.source_versions_by_id[
-                      element.render_source.version_id
-                    ]?.name || "当前素材"}
+                  <b className="block truncate text-[var(--color-text-primary)]" title={decodeURIComponent(project.assets.source_versions_by_id[element.render_source.version_id]?.name || "当前素材")}>
+                    {decodeURIComponent(project.assets.source_versions_by_id[element.render_source.version_id]?.name || "当前素材")}
                   </b>
                   <br />
                   选用{" "}
@@ -540,8 +583,12 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "text")}
                 field={`element:${element.element_id}/creation/text`}
-                onCommit={(value) =>
-                  patch(["creation", "text"], creation.text, value)
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "overlay")
+                      draft.creation.text = value;
+                  })
                 }
               />
               <TextField
@@ -550,8 +597,12 @@ export default function ElementDetail({
                 multiline
                 path={pointer("creation", "prompt")}
                 field={`element:${element.element_id}/creation/prompt`}
-                onCommit={(value) =>
-                  patch(["creation", "prompt"], creation.prompt, value)
+                disabled={applying}
+                onChange={(value) =>
+                  onChange((draft) => {
+                    if (draft.creation.type === "overlay")
+                      draft.creation.prompt = value;
+                  })
                 }
               />
             </div>
@@ -643,11 +694,11 @@ export default function ElementDetail({
       </div>
 
       {creation.type === "r2v" && (
-        <footer className="flex shrink-0 items-center gap-2 border-t border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 py-3">
+        <footer className="flex shrink-0 items-center justify-end border-t border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 py-3">
           <Button
             type="primary"
-            className="flex-1"
             icon={<ArrowUpRight className="h-3.5 w-3.5" />}
+            disabled={dirtyCount > 0 || applying}
             onClick={() => onOpenWorkbench(element)}
           >
             进入 R2V 工作台

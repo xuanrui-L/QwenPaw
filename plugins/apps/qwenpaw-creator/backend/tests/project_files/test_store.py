@@ -48,6 +48,12 @@ def test_create_read_list_replace_and_delete(tmp_path):
     assert created.etag.startswith("sha256:")
     assert store.project_path("project-b").is_file()
     assert (store.project_root("project-b") / "assets").is_dir()
+    assert (
+        store.project_root("project-b") / "observability" / "logs"
+    ).is_dir()
+    assert (
+        store.project_root("project-b") / "observability" / "traces"
+    ).is_dir()
     assert (store.project_root("project-b") / "runtime" / "temp").is_dir()
     assert store.read("project-b") == created
     assert [item.project_id for item in store.list()] == [

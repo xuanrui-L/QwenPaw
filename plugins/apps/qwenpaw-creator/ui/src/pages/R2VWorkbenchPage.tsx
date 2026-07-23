@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Input, Select, message } from "antd";
+import { Alert, Button, Input, Modal, Select, message } from "antd";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -19,6 +19,7 @@ import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import { getArtifactVersionMediaUrl, getResolvedModels } from "@/api/creator";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
+import { useProjectDraft } from "@/lib/useProjectDraft";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
 import ShotList from "@/components/workbench/ShotList";
@@ -28,6 +29,7 @@ import type {
   ArtifactVersionDocument,
   ProjectDocument,
   TaskView,
+  TimelineElementDocument,
 } from "@/contracts/creator";
 
 const { TextArea } = Input;
@@ -68,16 +70,16 @@ function PromptTextArea({
   value,
   field,
   path,
-  onCommit,
+  disabled = false,
+  onChange,
 }: {
   label: string;
   value: string;
   field: string;
   path: string;
-  onCommit: (value: string) => Promise<unknown>;
+  disabled?: boolean;
+  onChange: (value: string) => void;
 }) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
   return (
     <div
       data-creator-field={field}
@@ -88,12 +90,9 @@ function PromptTextArea({
         {label}
       </p>
       <TextArea
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => {
-          if (draft === value) return;
-          void onCommit(draft).catch(() => setDraft(value));
-        }}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
         autoSize={{ minRows: 2, maxRows: 10 }}
         placeholder={`生成${label}后可在此编辑…`}
         className="!rounded-lg !border-[var(--color-border)] !bg-[var(--color-bg-secondary)] !text-xs"
@@ -148,11 +147,26 @@ export default function R2VWorkbenchPage() {
   const syncStatus = useProjectSnapshotStore((state) => state.syncStatus);
   const syncError = useProjectSnapshotStore((state) => state.syncError);
   const patchProject = useProjectSnapshotStore((state) => state.patch);
+  const patching = useProjectSnapshotStore((state) => state.patching);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const timeline = useMemo(() => selectPrimaryTimeline(project), [project]);
-  const element = timeline?.elements_by_id[elementId] ?? null;
+  const authorityElement = timeline?.elements_by_id[elementId] ?? null;
+  const elementDraft = useProjectDraft<
+    TimelineElementDocument | null
+  >(
+    authorityElement,
+    `${id}:${timeline?.timeline_id ?? "missing"}:${elementId}:r2v`,
+    [
+      "timelines",
+      "items",
+      timeline?.timeline_id ?? "missing",
+      "elements_by_id",
+      elementId,
+    ],
+  );
+  const element = elementDraft.value;
   const creation = element?.creation.type === "r2v" ? element.creation : null;
   const [viewedSbId, setViewedSbId] = useState<string | null>(null);
   const [viewedVideoId, setViewedVideoId] = useState<string | null>(null);
@@ -183,17 +197,40 @@ export default function R2VWorkbenchPage() {
     setViewedSbId(null);
     setViewedVideoId(null);
   }, [elementId]);
+  useEffect(() => {
+    if (!elementDraft.dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [elementDraft.dirty]);
 
   const planPath = `/project/${id}/plan`;
-  const backToPlan = useCallback(
-    () =>
+  const backToPlan = useCallback(() => {
+    const navigateBack = () =>
       navigate(
         element
           ? `${planPath}?element=${encodeURIComponent(element.element_id)}`
           : planPath,
-      ),
-    [element, planPath],
-  );
+      );
+    if (!elementDraft.dirty) {
+      navigateBack();
+      return;
+    }
+    Modal.confirm({
+      title: "还有未应用的修改",
+      content: "返回方案会放弃当前 R2V 页面草稿。",
+      okText: "放弃并返回",
+      okButtonProps: { danger: true },
+      cancelText: "继续编辑",
+      onOk: () => {
+        elementDraft.discard();
+        navigateBack();
+      },
+    });
+  }, [element, elementDraft, planPath]);
   const focusAgent = useCallback(
     (prompt: string) => {
       useCreatorInteractionStore.getState().select(`element:${elementId}`);
@@ -251,14 +288,41 @@ export default function R2VWorkbenchPage() {
       message.error((error as Error).message);
       throw error;
     });
-  const patchField = (
-    segments: Array<string | number>,
-    before: unknown,
-    value: unknown,
+  const updateElement = (
+    mutator: (draft: TimelineElementDocument) => void,
   ) =>
-    patchOps([
-      { op: "replace", path: elementPointer(...segments), before, value },
-    ]);
+    elementDraft.update((draft) => {
+      if (draft) mutator(draft);
+    });
+  const applyDraft = async () => {
+    if (!elementDraft.operations.length) return;
+    const invalidShot = creation.shots.order
+      .map((shotId) => creation.shots.items[shotId])
+      .find(
+        (shot) =>
+          !shot ||
+          !shot.description.trim() ||
+          !shot.camera?.trim() ||
+          !shot.framing?.trim() ||
+          shot.duration_seconds == null ||
+          shot.duration_seconds <= 0,
+      );
+    if (invalidShot) {
+      message.error("每个 Shot 都需要描述、运镜、景别和有效时长");
+      return;
+    }
+    try {
+      const response = await patchProject(id, elementDraft.operations);
+      elementDraft.markApplied();
+      if (response.editImpact?.regenerationRequired) {
+        message.success("修改已应用；旧生成结果已标记为基于旧方案");
+      } else {
+        message.success("修改已应用");
+      }
+    } catch (error) {
+      message.error(`应用修改失败：${(error as Error).message}`);
+    }
+  };
 
   const slotOf = (name: string): ArtifactSlotDocument | null => {
     const output = element.outputs[name];
@@ -402,58 +466,34 @@ export default function R2VWorkbenchPage() {
       })),
   ];
   const changeMaterialReferences = (next: string[]) =>
-    patchOps([
-      {
-        op: "replace",
-        path: elementPointer("creation", "storyboard_reference_version_ids"),
-        before: creation.storyboard_reference_version_ids,
-        value: next,
-      },
-      {
-        op: "replace",
-        path: elementPointer("creation", "video_reference_version_ids"),
-        before: creation.video_reference_version_ids,
-        value: next,
-      },
-    ]);
+    updateElement((draft) => {
+      if (draft.creation.type !== "r2v") return;
+      draft.creation.storyboard_reference_version_ids = next;
+      draft.creation.video_reference_version_ids = next;
+    });
 
   const addShot = () => {
     const shotId = `shot-${Date.now()}`;
-    return patchOps([
-      {
-        op: "add",
-        path: elementPointer("creation", "shots", "items", shotId),
-        missingBefore: true,
-        value: {
-          shot_id: shotId,
-          description: "",
-          camera: "⊙ 静止",
-          framing: "中景",
-          duration_seconds: 3,
-        },
-      },
-      {
-        op: "replace",
-        path: elementPointer("creation", "shots", "order"),
-        before: creation.shots.order,
-        value: [...creation.shots.order, shotId],
-      },
-    ]);
+    updateElement((draft) => {
+      if (draft.creation.type !== "r2v") return;
+      draft.creation.shots.items[shotId] = {
+        shot_id: shotId,
+        description: "",
+        camera: "⊙ 静止",
+        framing: "中景",
+        duration_seconds: 3,
+      };
+      draft.creation.shots.order.push(shotId);
+    });
   };
   const deleteShot = (shot: { shot_id: string }) =>
-    patchOps([
-      {
-        op: "remove",
-        path: elementPointer("creation", "shots", "items", shot.shot_id),
-        before: creation.shots.items[shot.shot_id],
-      },
-      {
-        op: "replace",
-        path: elementPointer("creation", "shots", "order"),
-        before: creation.shots.order,
-        value: creation.shots.order.filter((item) => item !== shot.shot_id),
-      },
-    ]);
+    updateElement((draft) => {
+      if (draft.creation.type !== "r2v") return;
+      delete draft.creation.shots.items[shot.shot_id];
+      draft.creation.shots.order = draft.creation.shots.order.filter(
+        (item) => item !== shot.shot_id,
+      );
+    });
 
   return (
     <div
@@ -482,7 +522,31 @@ export default function R2VWorkbenchPage() {
         <div className="flex flex-wrap items-center gap-2">
           <Button
             size="small"
+            disabled={!elementDraft.dirty || patching}
+            onClick={elementDraft.discard}
+            className="!text-xs"
+          >
+            放弃修改
+          </Button>
+          <Button
+            size="small"
+            type="primary"
+            loading={patching}
+            disabled={
+              !elementDraft.dirty || elementDraft.conflictPaths.length > 0
+            }
+            onClick={() => void applyDraft()}
+            className="!text-xs"
+          >
+            {elementDraft.dirty
+              ? `应用修改（${elementDraft.dirtyCount}）`
+              : "应用修改"}
+          </Button>
+          <Button
+            size="small"
             icon={<Wand2 className="h-3 w-3" />}
+            disabled={elementDraft.dirty || patching}
+            title={elementDraft.dirty ? "请先应用当前修改" : undefined}
             onClick={() =>
               focusAgent(
                 `请为「${elementLabel}」生成分镜图 Prompt，先读取当前分镜与创作意图。`,
@@ -495,6 +559,8 @@ export default function R2VWorkbenchPage() {
           <Button
             size="small"
             icon={<ImageIcon className="h-3 w-3" />}
+            disabled={elementDraft.dirty || patching}
+            title={elementDraft.dirty ? "请先应用当前修改" : undefined}
             onClick={() =>
               focusAgent(
                 `请为「${elementLabel}」生成分镜图，基于当前分镜图 Prompt 与引用资产。`,
@@ -507,6 +573,8 @@ export default function R2VWorkbenchPage() {
           <Button
             size="small"
             icon={<Clapperboard className="h-3 w-3" />}
+            disabled={elementDraft.dirty || patching}
+            title={elementDraft.dirty ? "请先应用当前修改" : undefined}
             onClick={() =>
               focusAgent(
                 `请为「${elementLabel}」生成视频 Prompt，覆盖全部分镜与运镜要求。`,
@@ -521,7 +589,8 @@ export default function R2VWorkbenchPage() {
             type="primary"
             icon={<Video className="h-3 w-3" />}
             loading={videoGenerating}
-            disabled={videoGenerating}
+            disabled={videoGenerating || elementDraft.dirty || patching}
+            title={elementDraft.dirty ? "请先应用当前修改" : undefined}
             onClick={() =>
               focusAgent(
                 `请为「${elementLabel}」生成视频，基于当前分镜与视频 Prompt 完成制作。`,
@@ -533,6 +602,21 @@ export default function R2VWorkbenchPage() {
           </Button>
         </div>
       </div>
+
+      {elementDraft.conflictPaths.length > 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          banner
+          message="部分字段在编辑期间被其他操作更新"
+          description="本地草稿已保留。确认使用本地值覆盖最新数据后再应用。"
+          action={
+            <Button size="small" onClick={elementDraft.acceptConflicts}>
+              使用我的修改
+            </Button>
+          }
+        />
+      )}
 
       <div className="grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
@@ -554,15 +638,16 @@ export default function R2VWorkbenchPage() {
             <ShotList
               shots={creation.shots}
               elementId={element.element_id}
+              disabled={patching}
               shotPointer={(shotId, field) =>
                 elementPointer("creation", "shots", "items", shotId, field)
               }
-              onPatchField={(shotId, field, before, value) =>
-                patchField(
-                  ["creation", "shots", "items", shotId, field],
-                  before,
-                  value,
-                )
+              onChangeField={(shotId, field, value) =>
+                updateElement((draft) => {
+                  if (draft.creation.type !== "r2v") return;
+                  const shot = draft.creation.shots.items[shotId];
+                  if (shot) Object.assign(shot, { [field]: value });
+                })
               }
               onAdd={addShot}
               onDelete={deleteShot}
@@ -592,6 +677,7 @@ export default function R2VWorkbenchPage() {
                     <Button
                       size="small"
                       type="primary"
+                      disabled={elementDraft.dirty || patching}
                       onClick={() =>
                         void setCurrentVersion(storyboardSlot, viewedStoryboard)
                       }
@@ -606,12 +692,12 @@ export default function R2VWorkbenchPage() {
                 value={creation.storyboard_prompt}
                 field={`element:${element.element_id}/creation/storyboard_prompt`}
                 path={elementPointer("creation", "storyboard_prompt")}
-                onCommit={(value) =>
-                  patchField(
-                    ["creation", "storyboard_prompt"],
-                    creation.storyboard_prompt,
-                    value,
-                  )
+                disabled={patching}
+                onChange={(value) =>
+                  updateElement((draft) => {
+                    if (draft.creation.type === "r2v")
+                      draft.creation.storyboard_prompt = value;
+                  })
                 }
               />
               {storyboardUrl ? (
@@ -625,17 +711,22 @@ export default function R2VWorkbenchPage() {
                   尚无分镜图
                 </div>
               )}
+              {viewedStoryboard?.stale && (
+                <p className="text-[10px] text-[var(--color-warning)]">
+                  该分镜图基于旧版方案，需要重新生成。
+                </p>
+              )}
               <PromptTextArea
                 label="视频 Prompt"
                 value={creation.video_prompt}
                 field={`element:${element.element_id}/creation/video_prompt`}
                 path={elementPointer("creation", "video_prompt")}
-                onCommit={(value) =>
-                  patchField(
-                    ["creation", "video_prompt"],
-                    creation.video_prompt,
-                    value,
-                  )
+                disabled={patching}
+                onChange={(value) =>
+                  updateElement((draft) => {
+                    if (draft.creation.type === "r2v")
+                      draft.creation.video_prompt = value;
+                  })
                 }
               />
             </div>
@@ -699,6 +790,7 @@ export default function R2VWorkbenchPage() {
                     <Button
                       size="small"
                       type="primary"
+                      disabled={elementDraft.dirty || patching}
                       onClick={() =>
                         void setCurrentVersion(videoSlot, viewedVideo)
                       }
@@ -780,12 +872,12 @@ export default function R2VWorkbenchPage() {
                   size="small"
                   className="!w-full"
                   value={creation.scene_ref || undefined}
+                  disabled={patching}
                   onChange={(value) =>
-                    void patchField(
-                      ["creation", "scene_ref"],
-                      creation.scene_ref,
-                      value ?? null,
-                    )
+                    updateElement((draft) => {
+                      if (draft.creation.type === "r2v")
+                        draft.creation.scene_ref = value ?? null;
+                    })
                   }
                   allowClear
                   placeholder="选择场景"
@@ -801,12 +893,12 @@ export default function R2VWorkbenchPage() {
                   mode="multiple"
                   className="!w-full"
                   value={creation.character_refs}
+                  disabled={patching}
                   onChange={(value) =>
-                    void patchField(
-                      ["creation", "character_refs"],
-                      creation.character_refs,
-                      value,
-                    )
+                    updateElement((draft) => {
+                      if (draft.creation.type === "r2v")
+                        draft.creation.character_refs = value;
+                    })
                   }
                   placeholder="选择角色"
                   options={entityOptions("character")}
@@ -821,12 +913,12 @@ export default function R2VWorkbenchPage() {
                   mode="multiple"
                   className="!w-full"
                   value={creation.prop_refs}
+                  disabled={patching}
                   onChange={(value) =>
-                    void patchField(
-                      ["creation", "prop_refs"],
-                      creation.prop_refs,
-                      value,
-                    )
+                    updateElement((draft) => {
+                      if (draft.creation.type === "r2v")
+                        draft.creation.prop_refs = value;
+                    })
                   }
                   placeholder="选择道具"
                   options={entityOptions("prop")}
@@ -841,7 +933,8 @@ export default function R2VWorkbenchPage() {
                   mode="multiple"
                   className="!w-full"
                   value={materialVersionIds}
-                  onChange={(value) => void changeMaterialReferences(value)}
+                  disabled={patching}
+                  onChange={changeMaterialReferences}
                   placeholder="选择素材"
                   options={materialOptions}
                 />

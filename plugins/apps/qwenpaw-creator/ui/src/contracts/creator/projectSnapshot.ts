@@ -364,4 +364,12 @@ export interface ProjectPatchResponse {
   etag: string;
   changedPointers: string[];
   project: ProjectDocument;
+  editImpact?: {
+    affectedElementIds: string[];
+    affectedTimelineIds: string[];
+    invalidatedArtifactVersionIds: string[];
+    renderTimelineIds: string[];
+    regenerationRequired: boolean;
+    renderBlockedByGeneration: boolean;
+  };
 }

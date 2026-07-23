@@ -20,6 +20,11 @@ from services.project_files.facade import (
     CreatorFileServices,
     creator_file_services,
 )
+from services.observability import (
+    bind_trace_context,
+    stable_trace_id,
+    trace_span,
+)
 from services.storage_root import require_creator_data_root
 
 
@@ -36,17 +41,41 @@ async def bind_creator_trace_request(
     request: Request,
     response: Response,
 ) -> AsyncIterator[None]:
-    """Attach dependency-free request correlation headers to Creator routes."""
+    """Persist one correlated span around every Creator API request."""
 
     request_id = (
         request.headers.get("X-Request-ID") or f"request-{uuid4().hex}"
     )
-    # Request correlation stays usable without importing the optional tracing
-    # package, which is deliberately outside the minimal file-native API
-    # dependency closure.
-    response.headers["X-Creator-Trace-ID"] = request_id
+    trace_id = stable_trace_id("requestId", request_id)
+    path_context = {
+        target: request.path_params.get(source)
+        for source, target in (
+            ("project_id", "projectId"),
+            ("session_id", "sessionId"),
+            ("run_id", "runId"),
+            ("task_id", "taskId"),
+        )
+        if request.path_params.get(source)
+    }
+    request.state.creator_request_id = request_id
+    request.state.creator_trace_id = trace_id
+    response.headers["X-Creator-Trace-ID"] = trace_id
     response.headers["X-Request-ID"] = request_id
-    yield
+    with bind_trace_context(
+        traceId=trace_id,
+        requestId=request_id,
+        **path_context,
+    ):
+        async with trace_span(
+            "creator.http.request",
+            component="api",
+            attributes={
+                "method": request.method,
+                "path": request.url.path,
+                "queryKeys": sorted(set(request.query_params.keys())),
+            },
+        ):
+            yield
 
 
 def resolve_idempotency_key(
@@ -92,8 +121,15 @@ class CreatorErrorRoute(APIRoute):
 
         async def structured_handler(request: Request) -> Response:
             try:
-                return await route_handler(request)
+                response = await route_handler(request)
             except CreatorError as error:
-                return await creator_error_handler(request, error)
+                response = await creator_error_handler(request, error)
+            trace_id = getattr(request.state, "creator_trace_id", None)
+            request_id = getattr(request.state, "creator_request_id", None)
+            if trace_id:
+                response.headers.setdefault("X-Creator-Trace-ID", trace_id)
+            if request_id:
+                response.headers.setdefault("X-Request-ID", request_id)
+            return response
 
         return structured_handler

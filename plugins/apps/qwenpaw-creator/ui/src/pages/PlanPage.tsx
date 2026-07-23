@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { message } from "antd";
+import { message, Modal } from "antd";
 import { Download, Loader2, RefreshCw } from "lucide-react";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -14,6 +14,7 @@ import {
 import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { useReviewFieldFocus } from "@/routing/reviewFocus";
+import { useProjectDraft } from "@/lib/useProjectDraft";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
 import ElementList from "@/components/timeline/ElementList";
 import ElementDetail from "@/components/timeline/ElementDetail";
@@ -33,9 +34,6 @@ export default function PlanPage() {
   );
   const syncStatus = useProjectSnapshotStore((state) => state.syncStatus);
   const syncError = useProjectSnapshotStore((state) => state.syncError);
-  const requestInFlight = useProjectSnapshotStore(
-    (state) => state.requestInFlight,
-  );
   const patching = useProjectSnapshotStore((state) => state.patching);
   const patchProject = useProjectSnapshotStore((state) => state.patch);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
@@ -46,6 +44,17 @@ export default function PlanPage() {
     selectedElementId && timeline
       ? timeline.elements_by_id[selectedElementId] ?? null
       : null;
+  const elementDraft = useProjectDraft(
+    selectedElement,
+    `${id}:${timeline?.timeline_id ?? "missing"}:${selectedElementId ?? "none"}:detail`,
+    [
+      "timelines",
+      "items",
+      timeline?.timeline_id ?? "missing",
+      "elements_by_id",
+      selectedElementId ?? "none",
+    ],
+  );
   const [playheadTick, setPlayheadTick] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [composing, setComposing] = useState(false);
@@ -78,6 +87,16 @@ export default function PlanPage() {
   }, [selectedElement]);
 
   useEffect(() => {
+    if (!elementDraft.dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [elementDraft.dirty]);
+
+  useEffect(() => {
     if (
       !selectedElement ||
       (playheadTick >= selectedElement.span.start_tick &&
@@ -89,27 +108,60 @@ export default function PlanPage() {
   }, [selectedElement]);
 
   const base = `/project/${id}/plan`;
+  const leaveDraft = useCallback(
+    (next: () => void) => {
+      if (!elementDraft.dirty) {
+        next();
+        return;
+      }
+      Modal.confirm({
+        title: "还有未应用的修改",
+        content: "离开后这些页面草稿会被放弃。你也可以先返回并点击“应用修改”。",
+        okText: "放弃并离开",
+        okButtonProps: { danger: true },
+        cancelText: "继续编辑",
+        onOk: () => {
+          elementDraft.discard();
+          next();
+        },
+      });
+    },
+    [elementDraft],
+  );
   const selectElement = useCallback(
     (elementId: string) => {
-      const element = timeline?.elements_by_id[elementId];
-      if (element) setPlayheadTick(element.span.start_tick);
-      navigate(
-        selectedElementId === elementId
-          ? base
-          : `${base}?element=${encodeURIComponent(elementId)}`,
-      );
+      leaveDraft(() => {
+        const element = timeline?.elements_by_id[elementId];
+        if (element) {
+          setPlayheadTick((currentTick) => {
+            const startTick = element.span.start_tick;
+            const endTick = startTick + element.span.duration_tick;
+            return currentTick >= startTick && currentTick < endTick
+              ? currentTick
+              : startTick;
+          });
+        }
+        navigate(
+          selectedElementId === elementId
+            ? base
+            : `${base}?element=${encodeURIComponent(elementId)}`,
+        );
+      });
     },
-    [base, selectedElementId, timeline],
+    [base, leaveDraft, selectedElementId, timeline],
   );
 
-  // 就绪口径：只统计参与成片合成的主轨元素（r2v/edit）；文案 overlay
-  // 由合成器确定性绘制，motion/media overlay 与 audio 不参与合成。
+  // 就绪口径：主轨画面与依赖生成结果的 motion/media overlay 必须就绪；
+  // 文案 overlay 由合成器确定性绘制，transition/audio 不需要独立生成。
   const readiness = useMemo(() => {
     if (!project || !timeline) return { total: 0, notReady: 0 };
     const items = Object.values(timeline.elements_by_id).filter(
       (element) =>
         element.enabled &&
-        (element.creation.type === "r2v" || element.creation.type === "edit"),
+        (element.creation.type === "r2v" ||
+          element.creation.type === "edit" ||
+          (element.creation.type === "overlay" &&
+            ["motion", "media"].includes(element.creation.overlay_kind))),
     );
     return {
       total: items.length,
@@ -193,10 +245,36 @@ export default function PlanPage() {
     );
   }
 
-  const patchValue = (path: string, before: unknown, value: unknown) =>
-    patchProject(id, [{ op: "replace", path, before, value }]);
+  const applyElementDraft = async () => {
+    const draft = elementDraft.value;
+    if (!draft || !elementDraft.operations.length) return;
+    if (
+      draft.creation.type === "overlay" &&
+      ["pet_os", "interview_summary"].includes(draft.creation.overlay_kind) &&
+      !draft.creation.text.trim()
+    ) {
+      message.error("文案类 Overlay 的文本不能为空");
+      return;
+    }
+    try {
+      const response = await patchProject(id, elementDraft.operations);
+      elementDraft.markApplied();
+      if (response.editImpact?.regenerationRequired) {
+        message.success("修改已应用；相关生成结果已标记为需要重新生成");
+      } else if (response.editImpact?.renderTimelineIds.length) {
+        message.success("修改已应用；实时预览已更新，成片将重新合成");
+      } else {
+        message.success("修改已应用");
+      }
+    } catch (error) {
+      message.error(`应用修改失败：${(error as Error).message}`);
+    }
+  };
+  const closeElementDetail = () => leaveDraft(() => navigate(base));
   const openElementWorkbench = (element: TimelineElementDocument) =>
-    navigate(`${base}/element/${encodeURIComponent(element.element_id)}`);
+    leaveDraft(() =>
+      navigate(`${base}/element/${encodeURIComponent(element.element_id)}`),
+    );
 
   return (
     <div
@@ -324,11 +402,20 @@ export default function PlanPage() {
         <ElementDetail
           project={project}
           timeline={timeline}
-          element={selectedElement}
+          element={elementDraft.value}
           tasks={tasks}
-          patching={patching || requestInFlight}
-          onClose={() => navigate(base)}
-          onPatch={patchValue}
+          applying={patching}
+          dirtyCount={elementDraft.dirtyCount}
+          conflictPaths={elementDraft.conflictPaths}
+          onClose={closeElementDetail}
+          onChange={(mutator) =>
+            elementDraft.update((draft) => {
+              if (draft) mutator(draft);
+            })
+          }
+          onApply={() => void applyElementDraft()}
+          onDiscard={elementDraft.discard}
+          onAcceptConflicts={elementDraft.acceptConflicts}
           onOpenWorkbench={openElementWorkbench}
         />
       </main>

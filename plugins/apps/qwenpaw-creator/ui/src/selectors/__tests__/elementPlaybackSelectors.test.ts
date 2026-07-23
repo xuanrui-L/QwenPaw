@@ -71,6 +71,26 @@ describe("resolveElementPlayback", () => {
     });
   });
 
+  it("keeps stale media visible but excludes it from the ready state", () => {
+    const project = cloneProject();
+    const timeline = timelineOf(project);
+    project.assets.artifact_versions_by_id["r2v-window-v1"].stale = true;
+    project.assets.artifact_versions_by_id[
+      "r2v-window-v1"
+    ].stale_reason = "生成输入已修改";
+
+    const playback = resolveElementPlayback(
+      project,
+      timeline,
+      timeline.elements_by_id["r2v-window"],
+    );
+    expect(playback.status).toBe("stale");
+    expect(playback.media).toMatchObject({
+      versionId: "r2v-window-v1",
+      stale: true,
+    });
+  });
+
   it("falls back to selected outputs when render_source is missing", () => {
     const project = cloneProject();
     const timeline = timelineOf(project);

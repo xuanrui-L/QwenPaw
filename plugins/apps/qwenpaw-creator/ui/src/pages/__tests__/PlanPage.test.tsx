@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { act } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import PlanPage from "@/pages/PlanPage";
 import { NavigationRuntime } from "@/routing/navigation";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
@@ -159,7 +159,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     installTimelineRect(chart);
 
     // 7.5s of a 20s Timeline. This point contains five overlapping Elements.
-    const x = 68 + ((1000 - 68) * 7.5) / 20;
+    const x = 80 + ((1000 - 92) * 7.5) / 20;
     fireEvent.pointerDown(chart, { pointerId: 1, clientX: x });
     fireEvent.pointerUp(chart, { pointerId: 1, clientX: x });
 
@@ -190,7 +190,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     fireEvent.click(screen.getByRole("button", { name: "收起时间轴" }));
     const chart = container.querySelector("[data-timeline-chart]")!;
     installTimelineRect(chart);
-    const x = 68 + ((1000 - 68) * 7.5) / 20;
+    const x = 80 + ((1000 - 92) * 7.5) / 20;
     fireEvent.pointerDown(chart, { pointerId: 3, clientX: x });
     fireEvent.pointerUp(chart, { pointerId: 3, clientX: x });
 
@@ -247,8 +247,8 @@ describe("PlanPage Timeline/Element frontend", () => {
     const { container } = renderPage();
     const chart = container.querySelector("[data-timeline-chart]")!;
     installTimelineRect(chart);
-    const x1 = 68 + ((1000 - 68) * 2) / 20;
-    const x2 = 68 + ((1000 - 68) * 9) / 20;
+    const x1 = 80 + ((1000 - 92) * 2) / 20;
+    const x2 = 80 + ((1000 - 92) * 9) / 20;
 
     fireEvent.pointerDown(chart, { pointerId: 2, clientX: x1 });
     fireEvent.pointerMove(chart, { pointerId: 2, clientX: x2 });
@@ -264,6 +264,55 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(
       screen.queryByRole("button", { name: "添加到对话" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("reuses the shared playhead inside an Element and seeks to the exact start outside it", async () => {
+    const { container } = renderPage();
+    const chart = container.querySelector("[data-timeline-chart]")!;
+    installTimelineRect(chart);
+    const x = 80 + ((1000 - 92) * 7.5) / 20;
+
+    fireEvent.pointerDown(chart, { pointerId: 4, clientX: x });
+    fireEvent.pointerUp(chart, { pointerId: 4, clientX: x });
+
+    const playhead = container.querySelector(
+      "[data-timeline-playhead]",
+    ) as HTMLDivElement;
+    const playingPosition = playhead.style.left;
+    expect(playingPosition).toContain("0.375");
+    expect(
+      document.querySelector("[data-timeline-selection-toolbar]"),
+    ).toBeInTheDocument();
+
+    // 7.5s is already inside r2v-window (5s–15s), so selecting it must not
+    // rewind the video or create a second selection line.
+    fireEvent.click(
+      container.querySelector(
+        '[data-element-block="r2v-window"]',
+      ) as HTMLButtonElement,
+    );
+    await waitFor(() => expect(playhead.style.left).toBe(playingPosition));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "午饭名场面" }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      document.querySelector("[data-timeline-selection-toolbar]"),
+    ).not.toBeInTheDocument();
+
+    // 7.5s is outside overlay-title (1s–6s), so the same playhead moves to its
+    // exact start, never to a pre-roll position.
+    fireEvent.click(
+      container.querySelector(
+        '[data-element-block="overlay-title"]',
+      ) as HTMLButtonElement,
+    );
+    await waitFor(() =>
+      expect(playhead.style.left).toBe(
+        "calc(80px + 0.05 * (100% - 92px))",
+      ),
+    );
   });
 
   it("opens a large aspect-ratio-aware preview backed by the selected final Timeline artifact", () => {
@@ -488,21 +537,56 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(calls.some((call) => call.url.includes("/render"))).toBe(false);
   });
 
-  it("keeps the detail header free of a delete action while retaining close", () => {
+  it("keeps the draft actions in the header immediately before the status tag", () => {
     const { container } = renderPage("/project/p1/plan?element=overlay-os");
 
     const actions = container.querySelector(
       "[data-element-detail-header-actions]",
-    );
+    )!;
+    const apply = screen.getByRole("button", { name: "应用修改" });
+    const discard = screen.getByRole("button", { name: "放弃修改" });
+    const status = actions.querySelector("[data-element-detail-status]")!;
     expect(
       screen.queryByRole("button", { name: "删除当前内容" }),
     ).not.toBeInTheDocument();
+    expect(actions).toContainElement(discard);
+    expect(actions).toContainElement(apply);
     expect(actions).toContainElement(
       screen.getByRole("button", { name: "关闭内容详情" }),
     );
+    expect(discard).toBeDisabled();
+    expect(apply).toBeDisabled();
     expect(
-      container.querySelector("[data-element-detail] footer"),
-    ).not.toBeInTheDocument();
+      apply.compareDocumentPosition(status) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(container.querySelector("[data-element-detail] footer")).toBeNull();
+  });
+
+  it("keeps inner-OS text local until Apply and can discard it", () => {
+    renderPage("/project/p1/plan?element=overlay-os");
+
+    const copy = screen.getByDisplayValue("午饭在哪里？");
+    fireEvent.change(copy, { target: { value: "罐头到底在哪里？" } });
+
+    const authority =
+      useProjectSnapshotStore.getState().project?.timelines.items[
+        "timeline:main"
+      ].elements_by_id["overlay-os"];
+    expect(
+      authority?.creation.type === "overlay"
+        ? authority.creation.text
+        : null,
+    ).toBe("午饭在哪里？");
+    expect(
+      screen.getByRole("button", { name: "应用修改（1）" }),
+    ).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    expect(screen.getByDisplayValue("午饭在哪里？")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "应用修改" }),
+    ).toBeDisabled();
   });
 
   it("commits detail edits through the schema-v2 Project CAS Patch endpoint", async () => {
@@ -533,6 +617,10 @@ describe("PlanPage Timeline/Element frontend", () => {
     const name = screen.getByDisplayValue("午饭名场面");
     fireEvent.change(name, { target: { value: "新的午饭名场面" } });
     fireEvent.blur(name);
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+    fireEvent.click(
+      screen.getByRole("button", { name: "应用修改（1）" }),
+    );
     await waitFor(() =>
       expect(calls.some((call) => call.method === "PATCH")).toBe(true),
     );

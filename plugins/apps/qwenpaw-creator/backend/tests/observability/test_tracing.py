@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
+from fastapi import Depends, FastAPI, Request, Response
+from httpx import ASGITransport, AsyncClient
 import pytest
 
+from api.dependencies import bind_creator_trace_request
 from schemas.observability import ObservabilityConfigData
 from services.observability import (
+    bind_trace_context,
     load_observability_config,
     observability_config_path,
     read_trace_records,
@@ -16,6 +21,22 @@ from services.observability import (
     trace_event,
     trace_span,
 )
+from services.project_files import Project, ProjectStore
+from utils.logger import (
+    configure_creator_file_logging,
+    creator_log_path,
+    setup_logger,
+    shutdown_creator_file_logging,
+)
+
+
+def _create_project(data_root, project_id: str) -> None:
+    ProjectStore(data_root).create(
+        Project.new(
+            project_id=project_id,
+            name=f"Observability {project_id}",
+        ),
+    )
 
 
 def test_trace_span_persists_parent_context_redaction_and_error(
@@ -159,3 +180,238 @@ def test_tracing_never_breaks_runtime_without_a_data_workspace(monkeypatch):
             pass
 
     asyncio.run(scenario())
+
+
+def test_creator_file_logging_and_trace_are_isolated_by_project(
+    tmp_path,
+    monkeypatch,
+):
+    data_root = tmp_path / "creator-runtime"
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(data_root))
+    save_observability_config(ObservabilityConfigData())
+    project_id = "project-log-1"
+    _create_project(data_root, project_id)
+
+    try:
+        system_log_path = configure_creator_file_logging(data_root)
+        logger = setup_logger("test.creator.file")
+        logger.info("system logging is active")
+        trace_event(
+            "creator.test.system_logging",
+            component="test",
+        )
+        with bind_trace_context(projectId=project_id):
+            logger.info("project file logging is active")
+        trace_event(
+            "creator.test.file_logging",
+            component="test",
+            projectId=project_id,
+        )
+        for handler in logger.handlers:
+            handler.flush()
+        for handler in logging.getLogger("qwenpaw.creator").handlers:
+            handler.flush()
+
+        project_log_path = creator_log_path(
+            data_root,
+            project_id=project_id,
+        )
+        assert system_log_path == creator_log_path(data_root)
+        assert system_log_path.stat().st_mode & 0o777 == 0o600
+        assert project_log_path.stat().st_mode & 0o777 == 0o600
+
+        system_content = system_log_path.read_text(encoding="utf-8")
+        assert "system logging is active" in system_content
+        assert '"name":"creator.test.system_logging"' in system_content
+        assert "project file logging is active" not in system_content
+        assert '"name":"creator.test.file_logging"' not in system_content
+
+        project_content = project_log_path.read_text(encoding="utf-8")
+        assert "project file logging is active" in project_content
+        assert '"name":"creator.test.file_logging"' in project_content
+        assert "system logging is active" not in project_content
+        assert '"name":"creator.test.system_logging"' not in project_content
+
+        system_traces = list(
+            (data_root / "observability" / "traces").glob(
+                "creator-trace-*.jsonl",
+            ),
+        )
+        project_traces = list(
+            (data_root / project_id / "observability" / "traces").glob(
+                "creator-trace-*.jsonl",
+            ),
+        )
+        assert len(system_traces) == 1
+        assert len(project_traces) == 1
+        assert (
+            '"name":"creator.test.system_logging"'
+            in system_traces[0].read_text(encoding="utf-8")
+        )
+        assert (
+            '"name":"creator.test.file_logging"'
+            not in system_traces[0].read_text(encoding="utf-8")
+        )
+        assert (
+            '"name":"creator.test.file_logging"'
+            in project_traces[0].read_text(encoding="utf-8")
+        )
+        assert project_traces[0].stat().st_mode & 0o777 == 0o600
+        assert (
+            read_trace_records(
+                filters={"projectId": project_id},
+            )[
+                0
+            ]["name"]
+            == "creator.test.file_logging"
+        )
+    finally:
+        shutdown_creator_file_logging()
+
+
+def test_creator_http_dependency_persists_correlated_request_span(
+    tmp_path,
+    monkeypatch,
+):
+    data_root = tmp_path / "creator-runtime"
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(data_root))
+    save_observability_config(ObservabilityConfigData())
+    _create_project(data_root, "project-http-1")
+    app = FastAPI()
+
+    @app.get(
+        "/projects/{project_id}/probe",
+        dependencies=[Depends(bind_creator_trace_request)],
+    )
+    async def probe(
+        request: Request,
+        response: Response,
+    ) -> dict[str, str]:
+        del request, response
+        return {"status": "ok"}
+
+    async def scenario():
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                "/projects/project-http-1/probe?refresh=true",
+                headers={"X-Request-ID": "request-http-1"},
+            )
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "request-http-1"
+    trace_id = response.headers["X-Creator-Trace-ID"]
+    assert trace_id.startswith("trace-")
+
+    records = read_trace_records(
+        filters={"requestId": "request-http-1"},
+        limit=10,
+    )
+    assert [item["name"] for item in records] == [
+        "creator.http.request.started",
+        "creator.http.request.finished",
+    ]
+    assert {item["traceId"] for item in records} == {trace_id}
+    assert {item["projectId"] for item in records} == {"project-http-1"}
+    assert records[0]["attributes"] == {
+        "method": "GET",
+        "path": "/projects/project-http-1/probe",
+        "queryKeys": ["refresh"],
+    }
+    assert not list(
+        (data_root / "observability" / "traces").glob(
+            "creator-trace-*.jsonl",
+        ),
+    )
+    assert len(
+        list(
+            (
+                data_root
+                / "project-http-1"
+                / "observability"
+                / "traces"
+            ).glob("creator-trace-*.jsonl"),
+        ),
+    ) == 1
+
+
+def test_unknown_project_trace_falls_back_to_system_without_creating_project(
+    tmp_path,
+    monkeypatch,
+):
+    data_root = tmp_path / "creator-runtime"
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(data_root))
+    save_observability_config(ObservabilityConfigData())
+
+    trace_event(
+        "creator.test.unknown_project",
+        component="test",
+        projectId="missing-project",
+    )
+
+    assert not (data_root / "missing-project").exists()
+    system_traces = list(
+        (data_root / "observability" / "traces").glob(
+            "creator-trace-*.jsonl",
+        ),
+    )
+    assert len(system_traces) == 1
+    assert (
+        '"name":"creator.test.unknown_project"'
+        in system_traces[0].read_text(encoding="utf-8")
+    )
+
+
+def test_project_observability_symlink_is_rejected_and_never_written(
+    tmp_path,
+    monkeypatch,
+):
+    data_root = tmp_path / "creator-runtime"
+    project_id = "project-symlink"
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(data_root))
+    save_observability_config(ObservabilityConfigData())
+    _create_project(data_root, project_id)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    observability_root = data_root / project_id / "observability"
+    (observability_root / "logs").rmdir()
+    (observability_root / "traces").rmdir()
+    observability_root.rmdir()
+    observability_root.symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    try:
+        system_log_path = configure_creator_file_logging(data_root)
+        logger = setup_logger("test.creator.symlink")
+        with bind_trace_context(projectId=project_id):
+            logger.warning("unsafe project path is a system diagnostic")
+        trace_event(
+            "creator.test.symlink_rejected",
+            component="test",
+            projectId=project_id,
+        )
+        for handler in logger.handlers:
+            handler.flush()
+
+        assert list(outside.iterdir()) == []
+        assert (
+            "unsafe project path is a system diagnostic"
+            in system_log_path.read_text(encoding="utf-8")
+        )
+        system_traces = list(
+            (data_root / "observability" / "traces").glob(
+                "creator-trace-*.jsonl",
+            ),
+        )
+        assert len(system_traces) == 1
+        assert (
+            '"name":"creator.test.symlink_rejected"'
+            in system_traces[0].read_text(encoding="utf-8")
+        )
+    finally:
+        shutdown_creator_file_logging()

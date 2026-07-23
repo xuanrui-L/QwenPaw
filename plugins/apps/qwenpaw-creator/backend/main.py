@@ -66,6 +66,7 @@ from services.media_files import (  # noqa: E402
     shutdown_file_media_execution_services,
     start_file_media_execution_services,
 )
+from services.observability import trace_event  # noqa: E402
 from services.project_files.facade import (  # noqa: E402
     CreatorFileServices,
     clear_creator_file_service_registry,
@@ -83,6 +84,7 @@ from services.source_analysis import (  # noqa: E402
     recover_interrupted_source_analysis,
     shutdown_source_analysis_services,
 )
+from utils.logger import configure_creator_file_logging  # noqa: E402
 
 
 def configure_creator_runtime_environment(
@@ -207,13 +209,31 @@ async def _startup() -> None:
     global _file_services
     try:
         configure_creator_runtime_environment()
+        data_root = require_creator_data_root()
+        log_path = configure_creator_file_logging(data_root)
+        trace_event(
+            "creator.runtime.starting",
+            component="pawapp",
+            attributes={
+                "dataRoot": str(data_root),
+                "logPath": str(log_path),
+            },
+        )
         dependency_status = await asyncio.to_thread(
             ensure_creator_runtime_dependencies,
         )
-        data_root = require_creator_data_root()
         services = creator_file_services(data_root)
         recover_interrupted_source_analysis(services)
-    except (CreatorDataRootError, CreatorBinaryDependencyError):
+    except (CreatorDataRootError, CreatorBinaryDependencyError) as exc:
+        trace_event(
+            "creator.runtime.startup_failed",
+            component="pawapp",
+            status="error",
+            attributes={
+                "errorType": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         logger.exception(
             "QwenPaw Creator runtime dependency preparation failed; startup aborted",
         )
@@ -221,7 +241,16 @@ async def _startup() -> None:
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
-    except BaseException:
+    except BaseException as exc:
+        trace_event(
+            "creator.runtime.startup_failed",
+            component="pawapp",
+            status="error",
+            attributes={
+                "errorType": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         try:
             await shutdown_file_media_execution_services()
         finally:
@@ -232,6 +261,14 @@ async def _startup() -> None:
         raise
     _file_services = services
     logger.info("QwenPaw Creator file runtime ready at %s", data_root)
+    trace_event(
+        "creator.runtime.started",
+        component="pawapp",
+        attributes={
+            "dataRoot": str(data_root),
+            "dependencyCount": len(dependency_status),
+        },
+    )
     logger.info(
         "QwenPaw Creator native tools ready: %s",
         {
@@ -285,6 +322,10 @@ async def _startup() -> None:
 @app.hook("shutdown", priority=90)
 async def _shutdown() -> None:
     global _file_services
+    trace_event(
+        "creator.runtime.stopping",
+        component="pawapp",
+    )
     _file_services = None
     try:
         await shutdown_file_media_execution_services()
@@ -296,6 +337,10 @@ async def _shutdown() -> None:
                 await stop_creator_agent_runtime()
             finally:
                 clear_creator_file_service_registry()
+                trace_event(
+                    "creator.runtime.stopped",
+                    component="pawapp",
+                )
 
 
 # The 'plugin' variable is what PluginLoader looks for.

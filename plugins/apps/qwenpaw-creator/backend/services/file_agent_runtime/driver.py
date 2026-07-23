@@ -72,6 +72,7 @@ from services.execution_pricing import (
     CostEstimate,
     estimate_execution_cost,
 )
+from services.observability import trace_event, traced_async
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
     FileSpecialistToolRegistry,
@@ -567,6 +568,21 @@ class FileCreatorAgentRuntime:
 
         task.add_done_callback(completed)
 
+    @traced_async(
+        "creator.agent.execution",
+        component="creator.file_agent_runtime",
+        context=lambda _self, project_id, message, *, run_id, epoch: {
+            "projectId": project_id,
+            "sessionId": message.creator_session_id,
+            "conversationId": message.conversation_id,
+            "runId": run_id,
+        },
+        attributes=lambda _self, project_id, message, *, run_id, epoch: {
+            "messageId": message.message_id,
+            "messageSeq": message.message_seq,
+            "epoch": epoch,
+        },
+    )
     async def _run_message(
         self,
         project_id: str,
@@ -2750,6 +2766,16 @@ class FileCreatorAgentRuntime:
             message_id=request.message_id,
             payload=dict(payload),
         )
+        if not event_type.endswith("_delta"):
+            trace_event(
+                f"creator.{event_type}",
+                component="creator.file_agent_runtime",
+                projectId=project_id,
+                sessionId=session_id,
+                conversationId=request.conversation_id,
+                runId=run_id,
+                attributes=dict(payload),
+            )
 
     def _begin_epoch(self, project_id: str, run_id: str) -> int:
         with self._publication_lock:

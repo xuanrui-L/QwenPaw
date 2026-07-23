@@ -8,6 +8,7 @@ import {
 } from "@/api/creator";
 import type {
   ProjectDocument,
+  ProjectPatchResponse,
   ProjectServerSyncStatus,
 } from "@/contracts/creator";
 
@@ -56,7 +57,7 @@ export interface ProjectSnapshotState {
   patch: (
     projectId: string,
     operations: ProjectEditOperation[],
-  ) => Promise<void>;
+  ) => Promise<ProjectPatchResponse>;
   startPolling: (
     projectId: string,
     options?: Partial<ProjectSnapshotPollOptions>,
@@ -339,7 +340,9 @@ export const useProjectSnapshotStore = create<ProjectSnapshotState>(
       if (!state.project || state.generation === null || !state.etag) {
         throw new Error("Project 快照尚未加载");
       }
-      if (!edits.length) return;
+      if (!edits.length) {
+        throw new Error("没有需要应用的 Project 修改");
+      }
       set({ patching: true, patchError: null });
       try {
         const operations = await Promise.all(
@@ -380,6 +383,7 @@ export const useProjectSnapshotStore = create<ProjectSnapshotState>(
             patchError: null,
           };
         });
+        return response;
       } catch (error) {
         const message = errorMessage(error);
         set((current) =>

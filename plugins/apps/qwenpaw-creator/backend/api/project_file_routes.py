@@ -29,6 +29,10 @@ from services.project_files.commit import (
     ProtectedFieldError,
     is_protected_pointer,
 )
+from services.project_files.edit_impact import (
+    apply_frontend_edit_impacts,
+    summarize_committed_edit_impact,
+)
 from services.project_files.facade import CreatorFileServices
 from services.project_files.json_pointer import (
     MISSING,
@@ -368,16 +372,22 @@ def _recover_patch_response(
             "Project Patch ChangeSet 与 transaction 不一致",
         )
 
+    project_data = project.model_dump(mode="json")
+    changed_pointers = [
+        item.json_pointer
+        for item in changeset.changes
+        if item.json_pointer is not None
+    ]
     return {
         "projectId": project_id,
         "generation": project.generation,
         "etag": journal.final_etag,
-        "changedPointers": [
-            item.json_pointer
-            for item in changeset.changes
-            if item.json_pointer is not None
-        ],
-        "project": project.model_dump(mode="json"),
+        "changedPointers": changed_pointers,
+        "project": project_data,
+        "editImpact": summarize_committed_edit_impact(
+            project_data,
+            changed_pointers,
+        ).response(),
     }
 
 
@@ -660,6 +670,11 @@ async def patch_project(
                     project_id,
                     request,
                 )
+                candidate, _ = apply_frontend_edit_impacts(
+                    candidate,
+                    [operation.path for operation in request.operations],
+                    base=base.project.model_dump(mode="json"),
+                )
                 result = await services.commit_candidate(
                     base=base,
                     candidate=candidate,
@@ -671,16 +686,22 @@ async def patch_project(
                     block_token=request.block_token,
                     _lifecycle_lock_held=True,
                 )
+                project_data = result.snapshot.project.model_dump(mode="json")
+                changed_pointers = [
+                    item.json_pointer
+                    for item in result.changeset.changes
+                    if item.json_pointer is not None
+                ]
                 body = {
                     "projectId": project_id,
                     "generation": result.snapshot.generation,
                     "etag": result.snapshot.etag,
-                    "changedPointers": [
-                        item.json_pointer
-                        for item in result.changeset.changes
-                        if item.json_pointer is not None
-                    ],
-                    "project": result.snapshot.project.model_dump(mode="json"),
+                    "changedPointers": changed_pointers,
+                    "project": project_data,
+                    "editImpact": summarize_committed_edit_impact(
+                        project_data,
+                        changed_pointers,
+                    ).response(),
                 }
         except Exception as exc:
             # A storage failure can be raised after project.json was already

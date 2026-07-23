@@ -141,7 +141,89 @@ def save_observability_config(data: ObservabilityConfigData) -> None:
     _load_cached.cache_clear()
 
 
-def trace_root(config: ObservabilityConfigData | None = None) -> Path:
+def project_observability_root(
+    project_id: str,
+    *,
+    data_root: Path | None = None,
+    create: bool = True,
+) -> Path:
+    """Resolve diagnostics inside one real, already-published Project."""
+
+    from services.project_files.store import ProjectStore
+
+    store = ProjectStore(data_root or require_creator_data_root())
+    project_root = store.project_root(project_id)
+    if (
+        not project_root.exists()
+        or project_root.is_symlink()
+        or not project_root.is_dir()
+    ):
+        raise ValidationError(f"Project 可观测目录不存在: {project_id}")
+    project_json = project_root / "project.json"
+    if (
+        not project_json.exists()
+        or project_json.is_symlink()
+        or not project_json.is_file()
+    ):
+        raise ValidationError(f"Project 可观测目录缺少 project.json: {project_id}")
+    resolved = project_root.resolve(strict=True)
+    try:
+        resolved.relative_to(store.root)
+    except ValueError as exc:
+        raise ValidationError(
+            "Project 可观测目录越出 Creator Data Workspace",
+        ) from exc
+    return _local_directory(resolved, "observability", create=create)
+
+
+def _local_directory(
+    parent: Path,
+    name: str,
+    *,
+    create: bool,
+) -> Path:
+    target = parent / name
+    if create:
+        target.mkdir(mode=0o700, exist_ok=True)
+    if not target.exists():
+        return target
+    if target.is_symlink() or not target.is_dir():
+        raise ValidationError(f"Creator 可观测路径不是安全目录: {target}")
+    resolved = target.resolve(strict=True)
+    try:
+        resolved.relative_to(parent.resolve(strict=True))
+    except ValueError as exc:
+        raise ValidationError("Creator 可观测目录越出所属 Project") from exc
+    return resolved
+
+
+def project_observability_directory(
+    project_id: str,
+    directory: str,
+    *,
+    data_root: Path | None = None,
+    create: bool = True,
+) -> Path:
+    """Resolve one safe logs/traces directory inside a real Project."""
+
+    if directory not in {"logs", "traces"}:
+        raise ValidationError(f"不支持的 Project 可观测目录: {directory}")
+    root = project_observability_root(
+        project_id,
+        data_root=data_root,
+        create=create,
+    )
+    return _local_directory(root, directory, create=create)
+
+
+def trace_root(
+    config: ObservabilityConfigData | None = None,
+    *,
+    project_id: str | None = None,
+) -> Path:
+    if project_id:
+        return project_observability_directory(project_id, "traces")
+
     configured = (
         config or load_observability_config()
     ).trace_directory.strip()
@@ -158,6 +240,8 @@ def trace_root(config: ObservabilityConfigData | None = None) -> Path:
 __all__ = [
     "load_observability_config",
     "observability_config_path",
+    "project_observability_directory",
+    "project_observability_root",
     "save_observability_config",
     "trace_root",
 ]
