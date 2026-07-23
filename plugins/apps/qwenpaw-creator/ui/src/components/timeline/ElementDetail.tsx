@@ -19,7 +19,6 @@ import { getArtifactVersionMediaUrl } from "@/api/creator";
 import {
   ELEMENT_TYPE_META,
   TRANSITION_KIND_LABEL,
-  elementCreationSummary,
   resolveElementOutputs,
 } from "@/selectors/timelineElementSelectors";
 import { outputLabel } from "@/lib/creatorPresentation";
@@ -220,9 +219,6 @@ export default function ElementDetail({
               {element.label || element.element_id}
             </h3>
           </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-text-secondary)]">
-            {elementCreationSummary(creation) || "尚未补充创作说明"}
-          </p>
         </div>
         <div
           data-element-detail-header-actions
