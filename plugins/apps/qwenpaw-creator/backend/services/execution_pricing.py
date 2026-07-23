@@ -193,10 +193,6 @@ def _is_same_priced_version(model: str, prefix: str) -> bool:
     return remainder == "" or bool(_DATED_VERSION_SUFFIX.match(remainder))
 
 
-def _version_note(model: str, prefix: str) -> str:
-    return "仅供参考"
-
-
 def _normalize_resolution(value: Any) -> str:
     text = str(value or "").strip().upper()
     return text if text in _VIDEO_PIXELS_BY_RESOLUTION else "720P"
@@ -227,14 +223,9 @@ def estimate_image_cost(
         if matched is None:
             approximate = True
             prefix, unit = "万相/千问生图档位", _DASHSCOPE_IMAGE_FALLBACK
-            notes.insert(0, f"未收录 {model} 的官网单价，按同家族典型档位估算")
         else:
             prefix, unit = matched
             approximate = not _is_same_priced_version(model, prefix)
-            if approximate:
-                notes.insert(0, _version_note(model, prefix))
-        if unit == 0:
-            notes.insert(0, "官网标注限时免费")
         return CostEstimate(
             estimated_cost=round(unit * count, 4),
             currency="CNY",
@@ -256,11 +247,6 @@ def estimate_image_cost(
     )
     exact = any(model.casefold() == item for item in _OPENAI_EXACT_MODELS)
     notes = [_DISCLAIMER]
-    if not exact:
-        notes.insert(
-            0,
-            f"gpt-image 家族不同版本单价不同，{model} 按 gpt-image-1 同档位近似",
-        )
     return CostEstimate(
         estimated_cost=round(unit * count, 4),
         currency="USD",
@@ -281,29 +267,20 @@ def _estimate_wan_video_cost(
     audio: bool,
 ) -> CostEstimate:
     matched = _match_prefix_price(model, _WAN_VIDEO_PRICES)
-    notes = [
-        "万相按成功输出的视频秒数计费，失败不计费",
-        _DISCLAIMER,
-    ]
+    notes = [_DISCLAIMER]
     if matched is None:
         approximate = True
         prefix, table = "万相视频生成档位", _WAN_VIDEO_FALLBACK
-        notes.insert(0, f"未收录 {model} 的官网单价，按同家族典型档位估算")
     else:
         prefix, table = matched
         approximate = not _is_same_priced_version(model, prefix)
-        if approximate:
-            notes.insert(0, _version_note(model, prefix))
     if not audio and prefix in _WAN_VIDEO_MUTED_PRICES:
         table = _WAN_VIDEO_MUTED_PRICES[prefix]
     unit = table.get(resolution)
     if unit is None:
-        # 该模型不支持所选分辨率档时，按其最高档估算。
         unit = max(table.values())
         approximate = True
     cost = round(unit * duration_seconds, 4)
-    if "r2v" in prefix:
-        notes.insert(0, "参考生视频若携带参考视频输入，输入部分最多再计 5 秒")
     return CostEstimate(
         estimated_cost=cost,
         currency="CNY",
@@ -323,27 +300,16 @@ def _estimate_seedance_video_cost(
     resolution: str,
 ) -> CostEstimate:
     matched = _match_prefix_price(model, _SEEDANCE_TOKEN_PRICES)
-    notes = [
-        f"tokens = 宽×高×{_SEEDANCE_FPS}fps×时长 ÷ 1024",
-        "按不含视频输入的单价估算，含视频输入时单价更低",
-        _DISCLAIMER,
-    ]
+    notes = [_DISCLAIMER]
     if matched is None:
         approximate = True
         prefix, price_per_million = "seedance 档位", _SEEDANCE_TOKEN_FALLBACK
-        notes.insert(0, f"未收录 {model} 的官网单价，按同家族典型档位估算")
     else:
         prefix, price_per_million = matched
         approximate = not _is_same_priced_version(model, prefix)
-        if approximate:
-            notes.insert(0, _version_note(model, prefix))
     pixels = _VIDEO_PIXELS_BY_RESOLUTION[resolution]
     tokens = pixels * _SEEDANCE_FPS * duration_seconds / 1024
     cost = round(tokens / 1_000_000 * price_per_million, 4)
-    notes.insert(
-        1 if approximate else 0,
-        f"{resolution} 按 {pixels:,} 像素估算",
-    )
     return CostEstimate(
         estimated_cost=cost,
         currency="CNY",
