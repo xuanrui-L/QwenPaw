@@ -129,6 +129,7 @@ function baseInput(
     agentStatusBar: statusBar(),
     stopping: false,
     hasQueuedInput: false,
+    isReplaying: false,
     subagentActivities: {},
     toolCalls: [],
     tasks: [],

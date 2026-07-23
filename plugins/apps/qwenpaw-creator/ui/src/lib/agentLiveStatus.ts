@@ -39,6 +39,7 @@ export interface AgentLiveStatusInput {
   agentStatusBar: AgentStatusBarView | null;
   stopping: boolean;
   hasQueuedInput: boolean;
+  isReplaying: boolean;
   subagentActivities: Record<string, SubagentActivity>;
   toolCalls: ToolCallPresentation[];
   tasks: TaskView[];
@@ -244,6 +245,7 @@ export function deriveAgentLiveStatus(
     agentStatusBar,
     stopping,
     hasQueuedInput,
+    isReplaying,
     subagentActivities,
     toolCalls,
     tasks,
@@ -254,6 +256,22 @@ export function deriveAgentLiveStatus(
     return {
       state: "stopping",
       label: "正在停止所有 Agent…",
+      progressPercent: null,
+    };
+
+  // 重放期间显示"加载中…"，抑制"工作中"动画
+  if (isReplaying)
+    return {
+      state: "idle",
+      label: "加载中…",
+      progressPercent: null,
+    };
+
+  // 终态项目直接返回idle，不显示"工作中"
+  if (session?.status === "IDLE" || session?.status === "CANCELLED" || session?.status === "ERROR")
+    return {
+      state: "idle",
+      label: "待命中，可随时输入修改意图。",
       progressPercent: null,
     };
 

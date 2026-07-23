@@ -121,6 +121,7 @@ interface CreatorSessionState {
   loadingOlder: boolean;
   connected: boolean;
   stopping: boolean;
+  isReplaying: boolean;
   error: string | null;
   stream: CreatorEventStream | null;
   bootstrap: (projectId: string) => Promise<void>;
@@ -331,6 +332,7 @@ function defaultState() {
     loadingOlder: false,
     connected: false,
     stopping: false,
+    isReplaying: false,
     error: null,
     stream: null as CreatorEventStream | null,
   };
@@ -518,16 +520,16 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         const sessionGeneration = ++sessionRefreshGeneration;
         const state = get();
         const sameProject = state.projectId === projectId;
-        const resumeAfter = sameProject ? state.lastEventSeq : 0;
+        const initialResumeAfter = sameProject ? state.lastEventSeq : 0;
         const preferredConversationId = sameProject
           ? state.activeConversationId
           : null;
         state.stream?.close();
         invalidateMessageRefresh();
         if (sameProject) {
-          set({ stream: null, connected: false, loading: true, error: null });
+          set({ stream: null, connected: false, loading: true, isReplaying: true, error: null });
         } else {
-          set({ ...defaultState(), projectId, loading: true });
+          set({ ...defaultState(), projectId, loading: true, isReplaying: true });
         }
         try {
           const [sessionResponse, conversationPage] = await Promise.all([
@@ -539,6 +541,15 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             get().projectId !== projectId
           )
             return;
+          // 终态项目跳过SSE重放
+          const TERMINAL_STATUSES = new Set(["IDLE", "CANCELLED", "ERROR"]);
+          const resumeAfter = TERMINAL_STATUSES.has(sessionResponse.session.status)
+            ? sessionResponse.session.lastEventSeq
+            : initialResumeAfter;
+          console.log("[bootstrap] session status:", sessionResponse.session.status);
+          console.log("[bootstrap] lastEventSeq:", sessionResponse.session.lastEventSeq);
+          console.log("[bootstrap] initialResumeAfter:", initialResumeAfter);
+          console.log("[bootstrap] final resumeAfter:", resumeAfter);
           let conversations = conversationPage.items;
           let activeConversationId =
             preferredConversationId &&
@@ -602,15 +613,22 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               hasMoreMessages: page.nextAfter != null,
               lastEventSeq: resumeAfter,
               loading: false,
+              stopping: false,
             };
           });
           const pendingEvents: CreatorEvent[] = [];
           let flushTimer: number | null = null;
+          let replayFlushed = false;
           const flushEvents = () => {
             flushTimer = null;
             if (pendingEvents.length === 0) return;
             const batch = pendingEvents.splice(0, pendingEvents.length);
             get().ingestEvents(batch);
+            // 首次flush完成后，标记重放结束
+            if (!replayFlushed) {
+              replayFlushed = true;
+              set({ isReplaying: false });
+            }
           };
           const durableStream = openCreatorEvents(
             projectId,
@@ -625,6 +643,14 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             },
             () => set({ connected: false }),
           );
+          // 无事件需要重放时，延迟设置isReplaying: false
+          if (resumeAfter >= (sessionResponse.session.lastEventSeq ?? 0)) {
+            window.setTimeout(() => {
+              if (bootstrapGeneration === lifecycleGeneration && get().projectId === projectId) {
+                set({ isReplaying: false });
+              }
+            }, 100);
+          }
           const stream: CreatorEventStream = {
             close: () => {
               durableStream.close();

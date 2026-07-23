@@ -352,6 +352,7 @@ function ThinkingDisclosure({
   compact?: boolean;
 }) {
   const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
+  const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const { expanded, setExpanded } = useLiveDisclosure(active);
   if (!children) return null;
   return (
@@ -364,8 +365,14 @@ function ThinkingDisclosure({
     >
       <div className="flex items-center gap-2">
         <span className={`flex items-center gap-1.5 ${active ? "text-[var(--color-text-secondary)]" : "text-[var(--color-text-tertiary)]"}`}>
-          {active ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleCheck className="h-3 w-3" />}
-          {active ? "思考中" : "思考完成"}
+          {isReplaying ? (
+            <CircleCheck className="h-3 w-3 opacity-50" />
+          ) : active ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <CircleCheck className="h-3 w-3" />
+          )}
+          {isReplaying ? "思考完成" : active ? "思考中" : "思考完成"}
         </span>
         {allowExpand && (
           <button
@@ -468,6 +475,7 @@ function ActionDisclosure({
   compact?: boolean;
 }) {
   const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
+  const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const { expanded, setExpanded } = useLiveDisclosure(active);
   const payload = envelope.payload
     ? JSON.stringify(envelope.payload, null, 2)
@@ -484,7 +492,15 @@ function ActionDisclosure({
     >
       <div className="flex items-center gap-2">
         <span className={`flex items-center gap-1.5 ${active || waiting ? "text-[var(--color-text-secondary)]" : "text-[var(--color-success)]"}`}>
-          {active ? <Loader2 className="h-3 w-3 animate-spin" /> : waiting ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleCheck className="h-3 w-3" />}
+          {isReplaying ? (
+            <CircleCheck className="h-3 w-3 opacity-50" />
+          ) : active ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : waiting ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <CircleCheck className="h-3 w-3" />
+          )}
           {actionTitle(envelope, active)}
         </span>
         {allowExpand && (
@@ -725,7 +741,16 @@ function SubagentMessageBubble({
 
 function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
   const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
-  const active = item.status === "started";
+  const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
+  const session = useCreatorSessionStore((state) => state.session);
+  const isProjectDone = session?.status === "IDLE"
+    || session?.status === "CANCELLED"
+    || session?.status === "ERROR";
+  const isProjectFailed = session?.status === "CANCELLED"
+    || session?.status === "ERROR";
+  const resolvedStatus = isProjectDone && item.status === "started"
+    ? (isProjectFailed ? "failed" : "succeeded") : item.status;
+  const active = resolvedStatus === "started";
   const { expanded, setExpanded } = useLiveDisclosure(active);
   const rawArguments = Object.entries(item.argumentDeltas ?? {})
     .sort(([left], [right]) => Number(left) - Number(right))
@@ -739,9 +764,9 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
   const hasOutputEvents = item.outputEvents.length > 0;
   const hasDetails = hasArgs || hasResult || hasOutputEvents;
   const tone =
-    item.status === "succeeded"
+    resolvedStatus === "succeeded"
       ? "text-[var(--color-success)]"
-      : item.status === "failed"
+      : resolvedStatus === "failed"
       ? "text-[var(--color-danger)]"
       : "text-[var(--color-text-tertiary)]";
   const displayLabel = creatorToolLabel(item.tool);
@@ -753,14 +778,16 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
     >
       <div className="flex items-center gap-2">
         <span className={`flex items-center gap-1.5 ${tone}`}>
-          {item.status === "started" ? (
+          {isReplaying ? (
+            <CircleCheck className="h-3 w-3 opacity-50" />
+          ) : resolvedStatus === "started" ? (
             <Loader2 className="h-3 w-3 animate-spin" />
-          ) : item.status === "succeeded" ? (
+          ) : resolvedStatus === "succeeded" ? (
             <CircleCheck className="h-3 w-3" />
           ) : (
             <XCircle className="h-3 w-3" />
           )}
-          <span>{displayLabel}{active ? "中" : item.status === "succeeded" ? "完成" : "失败"}</span>
+          <span>{displayLabel}{isReplaying ? "" : active ? "中" : resolvedStatus === "succeeded" ? "完成" : "失败"}</span>
         </span>
         {hasDetails && allowExpand && (
           <button
@@ -902,6 +929,13 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
 /** 工具调用卡片：一行状态 + 可展开查看参数/结果。 */
 function ToolCallCard({ data }: { data: ToolCallPresentation }) {
   const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
+  const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
+  const session = useCreatorSessionStore((state) => state.session);
+  const isProjectDone = session?.status === "IDLE"
+    || session?.status === "CANCELLED"
+    || session?.status === "ERROR";
+  const isProjectFailed = session?.status === "CANCELLED"
+    || session?.status === "ERROR";
   const activity = useCreatorSessionStore(
     (state) => state.subagentActivities[data.actionId],
   );
@@ -938,12 +972,15 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           : "succeeded"
         : "started"
       : status;
-  const active = effectiveStatus === "started";
+  // 项目终态，started 工具强制为终态
+  const resolvedStatus = isProjectDone && effectiveStatus === "started"
+    ? (isProjectFailed ? "failed" : "succeeded") : effectiveStatus;
+  const active = resolvedStatus === "started";
   const { expanded, setExpanded } = useLiveDisclosure(active);
   const tone =
-    effectiveStatus === "succeeded"
+    resolvedStatus === "succeeded"
       ? "text-[var(--color-success)]"
-      : effectiveStatus === "failed"
+      : resolvedStatus === "failed"
       ? "text-[var(--color-danger)]"
       : "text-[var(--color-text-secondary)]";
 
@@ -970,14 +1007,16 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
     >
       <div className="flex items-center gap-2">
         <span className={`flex items-center gap-1.5 ${tone}`}>
-          {effectiveStatus === "started" ? (
+          {isReplaying ? (
+            <CircleCheck className="h-3.5 w-3.5 opacity-50" />
+          ) : resolvedStatus === "started" ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : effectiveStatus === "succeeded" ? (
+          ) : resolvedStatus === "succeeded" ? (
             <CircleCheck className="h-3.5 w-3.5" />
           ) : (
             <XCircle className="h-3.5 w-3.5" />
           )}
-          <span>{displayLabel}{active ? "中" : effectiveStatus === "succeeded" ? "完成" : "失败"}</span>
+          <span>{displayLabel}{isReplaying ? "" : active ? "中" : resolvedStatus === "succeeded" ? "完成" : "失败"}</span>
           {estimatedDuration && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">{estimatedDuration}</span>
           )}
@@ -991,7 +1030,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           </button>
         )}
       </div>
-      {effectiveStatus === "failed" && errorMessage && (
+      {resolvedStatus === "failed" && errorMessage && (
         <div className="mt-1 rounded-md bg-[var(--color-danger-soft)] px-2 py-1.5 text-[10px] text-[var(--color-danger)]">
           {errorMessage}
         </div>
@@ -1347,6 +1386,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
   );
   const sendMessage = useCreatorSessionStore((state) => state.sendMessage);
   const stopping = useCreatorSessionStore((state) => state.stopping);
+  const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const stopAllAgents = useCreatorSessionStore((state) => state.stopAllAgents);
   const subagentActivities = useCreatorSessionStore(
     (state) => state.subagentActivities,
@@ -1489,6 +1529,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
         agentStatusBar,
         stopping,
         hasQueuedInput: queued.some((item) => item.state !== "failed"),
+        isReplaying,
         subagentActivities,
         toolCalls,
         tasks,
@@ -1499,6 +1540,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
       agentStatusBar,
       stopping,
       queued,
+      isReplaying,
       subagentActivities,
       toolCalls,
       tasks,

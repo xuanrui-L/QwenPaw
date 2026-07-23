@@ -497,10 +497,8 @@ export default function ElementDetail({
               />
               {element.render_source?.type === "source_asset_version" && (
                 <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-[11px] leading-5 text-[var(--color-text-secondary)]">
-                  <b className="text-[var(--color-text-primary)]">
-                    {project.assets.source_versions_by_id[
-                      element.render_source.version_id
-                    ]?.name || "当前素材"}
+                  <b className="block truncate text-[var(--color-text-primary)]" title={decodeURIComponent(project.assets.source_versions_by_id[element.render_source.version_id]?.name || "当前素材")}>
+                    {decodeURIComponent(project.assets.source_versions_by_id[element.render_source.version_id]?.name || "当前素材")}
                   </b>
                   <br />
                   选用{" "}
