@@ -923,7 +923,7 @@ export default function TimelineCanvas({
                   {track.lanes.map((lane, laneIndex) => (
                     <div
                       key={lane.id}
-                      className="relative flex h-[42px] border-b border-[var(--color-border)]/65 last:border-b-0"
+                      className="relative flex h-[35px] border-b border-[var(--color-border)]/65 last:border-b-0"
                     >
                       <div
                         title={`选取整行 ${track.label}`}
@@ -985,7 +985,7 @@ export default function TimelineCanvas({
                             onSelectElement(element.element_id);
                             onActiveElementIdsChange([element.element_id]);
                           }}
-                          className={`absolute top-1.5 flex h-[30px] min-w-3 overflow-hidden rounded-[7px] border text-[10px] font-semibold shadow-sm transition ${
+                          className={`absolute top-0.5 flex h-[30px] min-w-3 overflow-hidden rounded-[7px] border text-[10px] font-semibold shadow-sm transition ${
                             isTransition
                               ? "items-center justify-center px-0"
                               : "flex-col justify-center px-2 text-left"
