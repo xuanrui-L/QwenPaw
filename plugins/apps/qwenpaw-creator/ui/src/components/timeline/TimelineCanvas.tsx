@@ -920,22 +920,7 @@ export default function TimelineCanvas({
             ) : (
               tracks.map((track) => (
                 <div key={track.type} data-track={track.type}>
-                  <div className="relative flex h-[26px] items-center border-b border-[var(--color-border)]/45 bg-[var(--color-bg-secondary)]/40">
-                    <div
-                      className="flex w-[68px] shrink-0 items-center justify-center gap-1 text-[10px] font-bold"
-                      style={{ color: track.color }}
-                    >
-                      <i
-                        className="h-2 w-2 shrink-0 rounded-sm"
-                        style={{ background: track.color }}
-                      />
-                      {track.label}
-                    </div>
-                    <span className="text-[9px] text-[var(--color-text-tertiary)]">
-                      {track.lanes.length} 层 · {track.lanes.reduce((sum, l) => sum + l.elements.length, 0)} 项
-                    </span>
-                  </div>
-                  {track.lanes.map((lane) => (
+                  {track.lanes.map((lane, laneIndex) => (
                     <div
                       key={lane.id}
                       className="relative flex h-[42px] border-b border-[var(--color-border)]/65 last:border-b-0"
@@ -950,9 +935,10 @@ export default function TimelineCanvas({
                           onActiveElementIdsChange(laneElementIds);
                           onPlayheadChange(0);
                         }}
-                        className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold text-[var(--color-text-tertiary)] hover:text-[12px] hover:font-bold"
+                        className="flex w-[68px] shrink-0 items-center justify-center text-[10px] font-semibold hover:text-[12px] hover:font-bold"
+                        style={{ color: track.color }}
                       >
-                        {lane.id}
+                        {track.label}-{laneIndex + 1}
                       </div>
                       <div className="relative min-w-0 flex-1">
                     {lane.elements.map((element) => {
