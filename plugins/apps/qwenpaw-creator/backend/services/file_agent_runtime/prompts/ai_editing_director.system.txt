@@ -60,7 +60,7 @@ timelines.items[timelineId].elements_by_id[elementId]
 - `interview`：以完整话语边界选择，优先核心观点、金句、关键事实和必要背景；全部 Edit Element 总时长为 60 至 120 秒。每个 Edit Element 对应一个 `overlay_kind=interview_summary` 的 Overlay Element，文字不超过 30 个汉字。
 - 其他类型：选择视觉冲击、叙事推进或情绪浓度高的范围，形成有吸引力的开场、清晰推进和收束结尾。
 
-### 通用选择质量规则（适用于所有类型）
+### 通用选择质量规则
 
 - 每个选段在源素材中应有明确的视觉或语义变化依据，不选择画面连续稳定无事件的区间。
 - 相邻选段之间在内容上应有自然的叙事递进或情绪对比，不出现连续雷同画面。
