@@ -54,7 +54,7 @@ FILE_AGENT_PROMPT_SPECS = {
         _spec(
             "visual_development_agent.system",
             "visual_development_agent.system.txt",
-            "095aa422b54a3cea3460dc0a4372a416eaabc40f76427ccafdb6bf93cf5fdf09",
+            "89c4d4a94faa9a99a156674083d2894de3c76103b96db62511647992c009ca0a",
             "project_id",
             "workspace_schema",
         ),
