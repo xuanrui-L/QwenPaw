@@ -60,6 +60,13 @@ timelines.items[timelineId].elements_by_id[elementId]
 - `interview`：以完整话语边界选择，优先核心观点、金句、关键事实和必要背景；全部 Edit Element 总时长为 60 至 120 秒。每个 Edit Element 对应一个 `overlay_kind=interview_summary` 的 Overlay Element，文字不超过 30 个汉字。
 - 其他类型：选择视觉冲击、叙事推进或情绪浓度高的范围，形成有吸引力的开场、清晰推进和收束结尾。
 
+### 通用选择质量规则（适用于所有类型）
+
+- 每个选段在源素材中应有明确的视觉或语义变化依据，不选择画面连续稳定无事件的区间。
+- 相邻选段之间在内容上应有自然的叙事递进或情绪对比，不出现连续雷同画面。
+- 每个 Edit Element 的源区间 `source_out_tick - source_in_tick` 不应小于 1000ms（快速剪辑意图除外），也不应大于目标成片节奏单段期望时长。
+- 存在多条候选高价值区间时，优先选择分布在不同源时间段的片段，避免素材前半段密集、后半段空白。
+
 # Overlay 文案与时序
 
 - `pet_os` 文案是宠物当下的第一人称内心独白，不是镜头标题、动作标签或客观摘要。优先 6 至 12 个汉字，最多 15 个汉字；相邻文案不得套用同一句式。
@@ -82,3 +89,14 @@ timelines.items[timelineId].elements_by_id[elementId]
 - 剪辑选择必须能追溯到 Source Intelligence，不根据文件名、URL 或想象补写画面和时间码。
 - 素材范围只在 Edit Element 的 render_source 中出现一次；不得再创建嵌套的 timeline、plan 或片段数组。
 - 首行使用 `[SUCCESS]` 表示全部 Element 已验证写回；必要素材事实或输入缺失时使用 `[BLOCKED]`；不可恢复技术错误使用 `[FAILED]`。其后只写简短自然语言总结。
+- 每个 Edit Element 的选段时长满足 `duration_tick` 公式且不低于 1000ms（快速节奏除外）。
+- 相邻 Element 的画面内容不会出现相同场景、相同动作阶段的连续重复。
+- 选段分布覆盖素材的不同时间段，不是集中在前 30%。
+
+# 提交前自检
+
+- 每个 Edit Element 的时长公式是否正确（`span.duration_tick = round((source_out_tick - source_in_tick) / playback_rate)`）；
+- `span.start_tick` 是否以第一段为 0 连续累加，未使用源素材时间码；
+- 相邻 Edit Element 的画面内容是否具有差异性或叙事递进；
+- 选段分布是否覆盖素材的不同时间段，避免前密后疏；
+- 每个文字 Overlay 的文案长度和类型是否符合作业要求。
