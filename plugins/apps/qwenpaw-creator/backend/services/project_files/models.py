@@ -933,6 +933,83 @@ class Project(StrictModel):
     )
     assets: AssetIndex = Field(default_factory=AssetIndex)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_edit_duration(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        timelines = data.get("timelines")
+        if not isinstance(timelines, dict):
+            return data
+        items = timelines.get("items")
+        if not isinstance(items, dict):
+            return data
+        assets = data.get("assets")
+        if not isinstance(assets, dict):
+            return data
+        source_versions = assets.get("source_versions_by_id", {})
+        if not isinstance(source_versions, dict):
+            source_versions = {}
+        for timeline_id, timeline in items.items():
+            if not isinstance(timeline, dict):
+                continue
+            ticks_per_second = timeline.get(
+                "ticks_per_second",
+                DEFAULT_TIMELINE_TICKS_PER_SECOND,
+            )
+            elements = timeline.get("elements_by_id")
+            if not isinstance(elements, dict):
+                continue
+            for element_id, element in elements.items():
+                if not isinstance(element, dict):
+                    continue
+                creation = element.get("creation")
+                if not isinstance(creation, dict):
+                    continue
+                if creation.get("type") != "edit":
+                    continue
+                render_source = element.get("render_source")
+                if not isinstance(render_source, dict):
+                    continue
+                if render_source.get("type") != "source_asset_version":
+                    continue
+                source_in = render_source.get("source_in_tick")
+                source_out = render_source.get("source_out_tick")
+                rate = render_source.get("playback_rate", 1.0)
+                span = element.get("span")
+                if (
+                    not isinstance(span, dict)
+                    or not isinstance(source_in, int)
+                    or not isinstance(source_out, int)
+                    or not isinstance(rate, (int, float))
+                    or rate <= 0
+                ):
+                    continue
+                expected = round((source_out - source_in) / rate)
+                actual = span.get("duration_tick")
+                if not isinstance(actual, int) or actual == expected:
+                    continue
+                version_id = render_source.get("version_id")
+                source_version = (
+                    source_versions.get(version_id, {})
+                    if isinstance(version_id, str)
+                    else {}
+                )
+                duration_seconds = (
+                    source_version.get("duration_seconds")
+                    if isinstance(source_version, dict)
+                    else None
+                )
+                new_source_out = source_in + round(actual * rate)
+                if (
+                    isinstance(duration_seconds, (int, float))
+                    and new_source_out > duration_seconds * ticks_per_second
+                ):
+                    span["duration_tick"] = expected
+                else:
+                    render_source["source_out_tick"] = new_source_out
+        return data
+
     @field_validator("project_id")
     @classmethod
     def _validate_project_id(cls, value: str) -> str:

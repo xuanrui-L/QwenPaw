@@ -47,9 +47,10 @@ timelines.items[timelineId].elements_by_id[elementId]
    - `creation.source_intelligence_version_id` 指向同一源版本的理解结果；
    - Element ID 稳定且在整个 Project 中唯一。
 4. 需要叠加内容时，为每个时段创建独立 Overlay Element。Overlay 的绝对 span 必须与目标画面时段相交；对应整段画面的 Overlay 直接复制目标 Edit 的 Timeline span，不得复制源素材时间码；不要把 overlay 放入 EditCreation 或 render_source。
-5. 逐项计算并复核上述时长公式。用一次 `jq_project` 写入完整 Element 集合，再重新读取 Project 验证。把集合通过 `jsonArgs.elements` 传入，program 可写成 `.timelines.items[$timelineId].elements_by_id = $elements`；不要把大量对象内联到 program，也不要在末尾选择 Timeline 子对象，jq 必须返回完整 Project 根对象。
-6. 在 Edit Element 和文字 Overlay Element 写入完成后调用 `design_motion_overlays` 执行 `timeline:<timelineId>`。该工具观察真实画面帧，为每个文字 Overlay（`pet_os`/`interview_summary`）生成贴合画面的动态字幕卡样式写入其 `creation.motion`，并从全片挑选少数最值得装饰的片段生成 `overlay_kind=motion` 装饰 Overlay Element（含避开画面主体的 location），结果直接写入 Project；工具返回后重新读取 Project 确认写入结果。用户明确不要包装、或内容严肃不宜点缀时跳过这一步。
-7. 重新读取 Project，逐项确认写入的 Element 集合、动效样式与装饰 Overlay 完整且通过校验，然后结束本次委派。成片导出由确定性后端渲染接口负责，不在 Agent 回合内执行。
+5. 修改已有 Edit Element 的时长时，必须同时调整 `span.duration_tick` 和 `render_source.source_out_tick`（或 `source_in_tick`），使 `duration_tick = round((source_out_tick - source_in_tick) / playback_rate)` 仍然成立。只改 `duration_tick` 而不改源区间会导致校验失败。
+6. 逐项计算并复核上述时长公式。用一次 `jq_project` 写入完整 Element 集合，再重新读取 Project 验证。把集合通过 `jsonArgs.elements` 传入，program 可写成 `.timelines.items[$timelineId].elements_by_id = $elements`；不要把大量对象内联到 program，也不要在末尾选择 Timeline 子对象，jq 必须返回完整 Project 根对象。
+7. 在 Edit Element 和文字 Overlay Element 写入完成后调用 `design_motion_overlays` 执行 `timeline:<timelineId>`。该工具观察真实画面帧，为每个文字 Overlay（`pet_os`/`interview_summary`）生成贴合画面的动态字幕卡样式写入其 `creation.motion`，并从全片挑选少数最值得装饰的片段生成 `overlay_kind=motion` 装饰 Overlay Element（含避开画面主体的 location），结果直接写入 Project；工具返回后重新读取 Project 确认写入结果。用户明确不要包装、或内容严肃不宜点缀时跳过这一步。
+8. 重新读取 Project，逐项确认写入的 Element 集合、动效样式与装饰 Overlay 完整且通过校验，然后结束本次委派。成片导出由确定性后端渲染接口负责，不在 Agent 回合内执行。
 
 # 内容选择规则
 
