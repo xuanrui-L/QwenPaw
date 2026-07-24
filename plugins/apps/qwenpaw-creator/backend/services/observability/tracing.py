@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
-import logging
 import os
 import re
 import time
@@ -30,7 +29,10 @@ from typing import Any, ParamSpec, TypeVar
 from uuid import uuid4
 
 from services.storage_root import require_creator_data_root
-from utils.logger import register_creator_log_project_resolver
+from utils.logger import (
+    register_creator_log_project_resolver,
+    setup_logger,
+)
 
 from .config import (
     load_observability_config,
@@ -40,7 +42,7 @@ from .config import (
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
-_TRACE_LOGGER = logging.getLogger("qwenpaw").getChild("creator.trace")
+_TRACE_LOGGER = setup_logger('tracing')
 _CONTEXT: ContextVar[dict[str, str]] = ContextVar(
     "creator_trace_context",
     default={},
@@ -196,17 +198,11 @@ def bind_trace_context(**values: object) -> Iterator[dict[str, str]]:
 def _write(record: Mapping[str, Any]) -> None:
     if not _enabled():
         return
+
     try:
-        config = load_observability_config()
-    except Exception:
-        return
-    try:
-        _TRACE_LOGGER.setLevel(
-            getattr(logging, config.log_level, logging.INFO),
-        )
         safe = _json_safe(
             record,
-            capture_content=config.capture_content,
+            capture_content=load_observability_config().capture_content,
         )
         line = json.dumps(
             safe,
@@ -215,18 +211,17 @@ def _write(record: Mapping[str, Any]) -> None:
             allow_nan=False,
         )
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        scoped_project_id: str | None = None
         project_id = safe.get("projectId")
         if isinstance(project_id, str) and project_id:
             try:
                 path = _trace_root(
                     project_id=project_id,
                 ) / f"creator-trace-{day}.jsonl"
-                scoped_project_id = project_id
             except Exception:
                 path = _trace_root() / f"creator-trace-{day}.jsonl"
         else:
             path = _trace_root() / f"creator-trace-{day}.jsonl"
+
         try:
             descriptor = os.open(
                 path,
@@ -238,15 +233,11 @@ def _write(record: Mapping[str, Any]) -> None:
             finally:
                 os.close(descriptor)
         except Exception:
-            _TRACE_LOGGER.exception("creator trace persistence failed")
-        _TRACE_LOGGER.info(
-            line,
-            extra={"creator_project_id": scoped_project_id},
-        )
+            _TRACE_LOGGER.exception(f"failed to write creator trace to {str(path)}", exc_info=True)
     except Exception:
         # Bad diagnostic data (for example a NaN provider metric) must never
         # fail the business operation that attempted to emit it.
-        _TRACE_LOGGER.exception("creator trace emission failed")
+        _TRACE_LOGGER.exception("failed to create trace data", exc_info=True)
 
 
 def trace_event(
