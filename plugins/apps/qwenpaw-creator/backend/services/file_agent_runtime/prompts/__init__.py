@@ -61,7 +61,7 @@ FILE_AGENT_PROMPT_SPECS = {
         _spec(
             "r2v_generation_director.system",
             "r2v_generation_director.system.txt",
-            "50622c54bbcb59b0f4552993fd5ffc2b4eb47a1a192f5f12e5d210098688ca7a",
+            "64e4202151a59c8bdfb21e153e57f9af5c26aca5132c9a6c493ada5e44fd0336",
             "project_id",
             "workspace_schema",
             "video_model_guidance",
