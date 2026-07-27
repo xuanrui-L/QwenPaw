@@ -143,14 +143,14 @@ export function creatorRoleLabel(name: string): string {
   const labels: Record<string, string> = {
     source_intelligence_agent: "素材理解",
     visual_development_agent: "视觉开发",
-    v_generation_director: "视频生成",
-    ai_editing_director: "剪辑导演",
-    r2v_generation_director: "生成视频",
+    v_generation_director: "视频制作",
+    ai_editing_director: "剪辑制作",
+    r2v_generation_director: "视频制作",
     story_planning_agent: "规划故事",
     unit_planning_routing_agent: "规划单元",
     review_consistency_agent: "一致性检查",
   };
-  return labels[name] ?? (name || "制作助手");
+  return labels[name] ?? "专业制作";
 }
 
 const TOOL_RUNNING_LABELS: Record<string, string> = {
@@ -182,19 +182,10 @@ export function getToolRunningLabel(name: string): string | null {
   return TOOL_RUNNING_LABELS[name] ?? null;
 }
 
-const ROLE_RUNNING_LABELS: Record<string, string> = {
-  source_intelligence_agent: "素材理解中…",
-  visual_development_agent: "画面设计中…",
-  v_generation_director: "视频生成中…",
-  r2v_generation_director: "视频生成中…",
-  ai_editing_director: "剪辑制作中…",
-  story_planning_agent: "规划故事中…",
-  unit_planning_routing_agent: "规划单元中…",
-  review_consistency_agent: "一致性检查中…",
-};
-
 export function getRoleRunningLabel(name: string): string | null {
-  return ROLE_RUNNING_LABELS[name] ?? null;
+  const roleLabel = creatorRoleLabel(name);
+  if (!roleLabel || roleLabel === "制作助手") return null;
+  return `${roleLabel}中`;
 }
 
 export function getEstimatedDuration(toolName: string): string | null {

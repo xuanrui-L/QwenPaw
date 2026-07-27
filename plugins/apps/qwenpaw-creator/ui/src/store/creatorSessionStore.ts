@@ -1457,8 +1457,31 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                   : ((event.data.status ?? event.data.to) as
                       | CreatorSessionView["status"]
                       | undefined);
-              if (status && session)
+              if (status && session) {
                 session = { ...session, status, lastEventSeq: event.seq };
+                if (
+                  status === "IDLE" ||
+                  status === "CANCELLED" ||
+                  status === "ERROR"
+                ) {
+                  Object.entries(subagentActivities).forEach(
+                    ([key, activity]) => {
+                      if (activity.completed) return;
+                      subagentActivities = {
+                        ...subagentActivities,
+                        [key]: {
+                          ...activity,
+                          completed: true,
+                          terminalKind: "CANCELLED" as const,
+                          summaryText:
+                            activity.summaryText ?? "用户中止",
+                          terminalEventSeq: event.seq,
+                        },
+                      };
+                    },
+                  );
+                }
+              }
             }
           });
           const lastEventSeq = accepted.at(-1)!.seq;

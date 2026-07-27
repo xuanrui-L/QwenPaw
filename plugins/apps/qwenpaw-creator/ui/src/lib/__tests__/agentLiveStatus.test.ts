@@ -213,11 +213,14 @@ describe("deriveAgentLiveStatus", () => {
     expect(result.label).toBe("正在生成「在厨房准备早餐的特…」分镜图…");
   });
 
-  it("maps main-agent tools such as jq_project to a concrete label", () => {
+  it("skips internal project tools and falls back to thinking label", () => {
     const result = deriveAgentLiveStatus(
-      baseInput({ toolCalls: [mainToolCall("jq_project")] }),
+      baseInput({
+        toolCalls: [mainToolCall("jq_project")],
+        agentStatusBar: null,
+      }),
     );
-    expect(result.label).toBe("正在修改项目…");
+    expect(result.label).toBe("正在思考…");
   });
 
   it("expresses an active delegation through the role sub-state", () => {
@@ -239,7 +242,7 @@ describe("deriveAgentLiveStatus", () => {
         },
       }),
     );
-    expect(result.label).toBe("画面设计中…");
+    expect(result.label).toBe("视觉开发中");
   });
 
   it("does not show '正在安排' once the delegated subagent has completed (e.g. cancelled)", () => {
@@ -298,7 +301,7 @@ describe("deriveAgentLiveStatus", () => {
         },
       }),
     );
-    expect(idleRole.label).toBe("素材理解中…");
+    expect(idleRole.label).toBe("素材理解中");
   });
 
   it("shows a mini progress bar only for quantified task progress", () => {

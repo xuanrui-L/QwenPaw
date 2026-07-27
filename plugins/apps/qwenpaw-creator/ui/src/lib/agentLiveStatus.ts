@@ -135,12 +135,20 @@ function activeSubagentToolLabel(
   activities: Record<string, SubagentActivity>,
   project: ProjectDocument | null,
 ): string | null {
+  // 内部项目工具对用户无意义，跳过以避免显示"正在修改项目"等模糊状态。
+  const internalProjectTools = new Set([
+    "jq_project",
+    "read_project",
+    "read_project_file",
+    "elements_at",
+  ]);
   let latestSeq = -1;
   let latestLabel: string | null = null;
   Object.values(activities).forEach((activity) => {
     if (activity.completed) return;
     Object.values(activity.tools).forEach((tool) => {
       if (tool.status !== "started" || tool.firstEventSeq <= latestSeq) return;
+      if (internalProjectTools.has(tool.tool)) return;
       const label = runningToolLabel(
         tool.tool,
         tool.arguments,
@@ -161,6 +169,13 @@ function activeMainToolLabel(
   activities: Record<string, SubagentActivity>,
   project: ProjectDocument | null,
 ): string | null {
+  // 内部项目工具对用户无意义，跳过以避免显示"正在修改项目"等模糊状态。
+  const internalProjectTools = new Set([
+    "jq_project",
+    "read_project",
+    "read_project_file",
+    "elements_at",
+  ]);
   for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
     const call = toolCalls[index];
     if (call.status !== "started") continue;
@@ -181,6 +196,7 @@ function activeMainToolLabel(
         ? `正在安排「${creatorRoleLabel(role)}」…`
         : "正在分配任务…";
     }
+    if (internalProjectTools.has(call.tool)) continue;
     const label = runningToolLabel(call.tool, call.arguments, [], project);
     if (label) return label;
   }
