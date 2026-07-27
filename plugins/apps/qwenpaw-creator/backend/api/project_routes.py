@@ -13,7 +13,8 @@ import asyncio
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from fastapi import APIRouter, Depends, Header, Query, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError as PydanticValidationError
 from starlette.routing import Match
 from starlette.types import Scope
@@ -39,6 +40,7 @@ from services.project_files.store import (
     ProjectIntegrityError,
     ProjectNotFound,
     ProjectStoreError,
+    _safe_project_id,
 )
 from services.runtime_files.errors import RuntimeFileError
 from services.runtime_files.idempotency_store import IdempotencyRecordStore
@@ -378,24 +380,29 @@ async def delete_project(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/{project_id}/export", status_code=status.HTTP_204_NO_CONTENT)
+@router.get("/{project_id}/export")
 async def export_project(
     project_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
-) -> Response:
+) -> StreamingResponse:
     #
     logger.info(f'exporting project:{project_id}')
     resolve_idempotency_key(idempotency_key)
+    await interrupt_creator_agent_runtime(
+        project_id,
+        superseded=False,
+        reason="exporting_project",
+    )
     try:
-        archive_file_name, export_bytes = await asyncio.to_thread(services.projects.export, project_id)
-        return Response(
-            content=export_bytes,
+        safe_id = _safe_project_id(project_id)
+        return StreamingResponse(
+            content=services.projects.export(project_id),
             media_type="application/octet-stream",
             headers={
-                "Content-Disposition": f'attachment; filename="{archive_file_name}"',
+                "Content-Disposition": f'attachment; filename="{safe_id}.zip"',
             },
         )
     except Exception as e:
         logger.error(f'failed to export project {project_id}', exc_info=True)
-        raise Exception(f'failed to export project {project_id}') from e
+        raise HTTPException(status_code=500, detail=f"Failed to export project {project_id}") from e

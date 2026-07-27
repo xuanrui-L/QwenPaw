@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 import os
@@ -409,38 +409,47 @@ class ProjectStore:
                     f"Project was removed but tombstone cleanup failed: {safe_id}",
                 ) from exc
 
-    def export(self, project_id: str) -> tuple[str, bytes]:
-        """Compress the whole Project folder into a zip under ``CREATOR_DATA_ROOT``/exports/.
 
-        The archive is written outside the Project tree (in a sibling
-        ``exports/`` directory beneath the data root) so it is not recursively
-        included in itself.  Returns the path to the generated ``.zip`` file and the bytes content of the file.
+    def export(self, project_id: str) -> Iterator[bytes]:
+        """Compress the whole Project folder into a zip under ``CREATOR_DATA_ROOT``/exports/.
+        Yields the archive contents in 8192-byte chunks so
+        callers can stream the bytes without loading the whole file into memory.
 
         This is a best-effort snapshot of the on-disk tree: it does not take
         the lifecycle lock, so a concurrent mutation may be partially captured.
         """
         safe_id = _safe_project_id(project_id)
-        # Confirm the Project exists and is loadable before archiving.
-        self.read(safe_id)
+        with self.lifecycle_lock(safe_id), self._lock:
+            # Confirm the Project exists and is loadable before archiving.
+            self.read(safe_id)
 
-        # TODO: accquire folder lock before zipping
-        export_root = require_creator_data_root() / "exports"
-        export_root.mkdir(parents=True, exist_ok=True)
-        zip_file_stem = f"{safe_id}-{uuid4().hex}"
-        logger.info(f'exporting to:{str(export_root / zip_file_stem)}')
-        archive_path = shutil.make_archive(
-            str(export_root / zip_file_stem),
-            "zip",
-            root_dir=str(self.root),
-            base_dir=safe_id,
-        )
-        export_bytes =  Path(archive_path).read_bytes()
-        try:
-            Path(archive_path).unlink(missing_ok=True)
-        except Exception:
-            logger.error(f'failed to delete export file after use:{archive_path}', exc_info=True)
-        logger.info(f'export file byte size:{len(export_bytes)}')
-        return f'{zip_file_stem}.zip', export_bytes
+            # TODO: accquire folder lock before zipping
+            export_root = require_creator_data_root() / "exports"
+            export_root.mkdir(parents=True, exist_ok=True)
+            zip_file_stem = f"{safe_id}-{uuid4().hex}"
+            logger.info(f'exporting to:{str(export_root / zip_file_stem)}')
+            archive_path = f'./unset-{uuid4().hex}'
+            try:
+                archive_path = shutil.make_archive(
+                    str(export_root / zip_file_stem),
+                    "zip",
+                    root_dir=str(self.root),
+                    base_dir=safe_id,
+                )
+                logger.info(f'export file path:{archive_path}')
+                with open(archive_path, "rb") as archive_file:
+                    while True:
+                        chunk = archive_file.read(8192)
+                        if not chunk:
+                            break
+                        yield chunk
+            except Exception as e:
+                logger.error(f'failed to export project bytes:{archive_path}', exc_info=True)
+                raise Exception('failed to export project bytes') from e
+            finally:
+                logger.info(f'deleting project export zip file {archive_path}')
+                Path(archive_path).unlink(missing_ok=True)
+                logger.info(f'deleted project export zip file {archive_path}')
 
 
     def lifecycle_lock(self, project_id: str) -> CrossProcessFileLock:
