@@ -62,9 +62,7 @@ export default function PlanPage() {
   const [playheadTick, setPlayheadTick] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportChunks, setExportChunks] = useState<string[]>([]);
   const [exportLoading, setExportLoading] = useState(false);
-  var exportStatus: string = '';
   const [composing, setComposing] = useState(false);
   const [requestedComposeTaskId, setRequestedComposeTaskId] = useState<
     string | null
@@ -590,21 +588,19 @@ export default function PlanPage() {
             </span>
           </button>
       <Modal
-        title={`导出项目${exportStatus}`}
+        title="导出项目"
         open={exportOpen}
         okText="开始导出"
         cancelText="取消"
         onOk={handleExportOk}
         onCancel={() => {
           setExportLoading(false);
-          setExportChunks([]);
           setExportOpen((open) => !open);
         }}
 
         footer={[
           <Button key="back" onClick={() => {
             setExportLoading(false);
-            setExportChunks([]);
             setExportOpen((open) => !open);
           }}>
             取消
@@ -616,14 +612,6 @@ export default function PlanPage() {
       >
         <div>
           导出项目，需要执行:</div><div>获取整个项目数据控制权、</div><div>生成压缩文件、</div><div>下载压缩文件等步骤。</div><div>实行时间长，且执行期间不能对项目做其他操作，需要在当前窗口等待。</div>
-          {exportChunks.map((chunk, index) => (
-            <div
-              key={index}
-              // style={{ display: "block", width: "100%", whiteSpace: "pre-wrap" }}
-            >
-              {chunk} ...
-            </div>
-          ))}
       </Modal>
         </div>
       </header>
