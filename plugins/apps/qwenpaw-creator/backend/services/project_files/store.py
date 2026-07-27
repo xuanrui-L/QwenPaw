@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 from services.runtime_files.locking import CrossProcessFileLock
+from utils.logger import setup_logger
 
 from .models import Project
 from .serialization import (
@@ -27,6 +28,8 @@ from .serialization import (
     project_etag,
     project_file_bytes,
 )
+
+logger = setup_logger("services.project_files.store")
 
 
 DEFAULT_MAX_PROJECT_JSON_BYTES = 8 * 1024 * 1024
@@ -278,8 +281,9 @@ class ProjectStore:
         and ``name``. *sort_order* accepts ``asc`` or ``desc`` (default).
 
         Incomplete directories without ``project.json`` and internal deletion
-        tombstones are ignored. A discovered but corrupt Project is surfaced as
-        an integrity error instead of being silently hidden from callers.
+        tombstones are ignored. A discovered but corrupt Project is logged as
+        a warning and skipped so that one bad Project does not block listing
+        the remaining healthy ones.
         """
 
         summaries: list[ProjectSummary] = []
@@ -302,7 +306,11 @@ class ProjectStore:
                 continue
             if not (entry / "project.json").exists():
                 continue
-            snapshot = self.read(safe_id)
+            try:
+                snapshot = self.read(safe_id)
+            except ProjectStoreError as exc:
+                logger.warning("Skipping corrupt Project %s: %s", safe_id, exc)
+                continue
             summaries.append(
                 ProjectSummary(
                     project_id=safe_id,
