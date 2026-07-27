@@ -50,6 +50,9 @@ from .dependencies import (
     resolve_idempotency_key,
 )
 
+from utils.logger import setup_logger
+
+logger = setup_logger('project_routes')
 
 _CREATE_SCOPE = "POST /projects"
 
@@ -366,3 +369,26 @@ async def delete_project(
     except ProjectNotFound:
         pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{project_id}/export", status_code=status.HTTP_204_NO_CONTENT)
+async def export_project(
+    project_id: str,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    services: CreatorFileServices = Depends(project_file_services),
+) -> Response:
+    #
+    logger.info(f'exporting project:{project_id}')
+    resolve_idempotency_key(idempotency_key)
+    try:
+        archive_file_name, export_bytes = await asyncio.to_thread(services.projects.export, project_id)
+        return Response(
+            content=export_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{archive_file_name}"',
+            },
+        )
+    except Exception as e:
+        logger.error(f'failed to export project {project_id}', exc_info=True)
+        raise Exception(f'failed to export project {project_id}') from e
