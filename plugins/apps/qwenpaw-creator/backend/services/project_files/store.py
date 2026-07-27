@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 from services.runtime_files.locking import CrossProcessFileLock
+from services.storage_root import require_creator_data_root
 from utils.logger import setup_logger
 
 from .models import Project
@@ -28,6 +29,9 @@ from .serialization import (
     project_etag,
     project_file_bytes,
 )
+from utils.logger import setup_logger
+
+logger = setup_logger('store')
 
 logger = setup_logger("services.project_files.store")
 
@@ -404,6 +408,40 @@ class ProjectStore:
                 raise ProjectStoreError(
                     f"Project was removed but tombstone cleanup failed: {safe_id}",
                 ) from exc
+
+    def export(self, project_id: str) -> tuple[str, bytes]:
+        """Compress the whole Project folder into a zip under ``CREATOR_DATA_ROOT``/exports/.
+
+        The archive is written outside the Project tree (in a sibling
+        ``exports/`` directory beneath the data root) so it is not recursively
+        included in itself.  Returns the path to the generated ``.zip`` file and the bytes content of the file.
+
+        This is a best-effort snapshot of the on-disk tree: it does not take
+        the lifecycle lock, so a concurrent mutation may be partially captured.
+        """
+        safe_id = _safe_project_id(project_id)
+        # Confirm the Project exists and is loadable before archiving.
+        self.read(safe_id)
+
+        # TODO: accquire folder lock before zipping
+        export_root = require_creator_data_root() / "exports"
+        export_root.mkdir(parents=True, exist_ok=True)
+        zip_file_stem = f"{safe_id}-{uuid4().hex}"
+        logger.info(f'exporting to:{str(export_root / zip_file_stem)}')
+        archive_path = shutil.make_archive(
+            str(export_root / zip_file_stem),
+            "zip",
+            root_dir=str(self.root),
+            base_dir=safe_id,
+        )
+        export_bytes =  Path(archive_path).read_bytes()
+        try:
+            Path(archive_path).unlink(missing_ok=True)
+        except Exception:
+            logger.error(f'failed to delete export file after use:{archive_path}', exc_info=True)
+        logger.info(f'export file byte size:{len(export_bytes)}')
+        return f'{zip_file_stem}.zip', export_bytes
+
 
     def lifecycle_lock(self, project_id: str) -> CrossProcessFileLock:
         """Serialize creation/deletion with all Project-scoped mutations."""
