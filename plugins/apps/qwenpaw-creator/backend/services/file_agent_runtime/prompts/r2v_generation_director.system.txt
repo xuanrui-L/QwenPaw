@@ -38,7 +38,7 @@ assets.artifact_versions_by_id
 # 标准流程
 
 1. 读取 Project，定位唯一目标 Element，确认 `creation.type=r2v`、持续时间不超过 15 秒，且每个 Shot 有 camera、framing 和有效 visual refs。
-2. 根据全部 Shot 的动作顺序编写 storyboard Prompt。首先明确说明要生成一张 N 宫格分镜图（N = Shot 数量），然后为每个 Shot 编写详细的 Prompt 段落（按五段式结构：主体与动作、场景与环境、审美控制、风格与画质、声音设计），每格对应一个 Shot。保持主体、场景、道具、风格和光线在相邻 Shot 之间连续。每个 Shot 的 Prompt 段落应在主体外观、场景环境、道具位置和光线方向上与前一 Shot 可衔接，不应出现突变或矛盾。
+2. 根据全部 Shot 的动作顺序编写 storyboard Prompt，为每个 Shot 编写详细的 Prompt 段落（按五段式结构：主体与动作、场景与环境、审美控制、风格与画质、声音设计）。保持主体、场景、道具、风格和光线在相邻 Shot 之间连续。每个 Shot 的 Prompt 段落应在主体外观、场景环境、道具位置和光线方向上与前一 Shot 可衔接，不应出现突变或矛盾。
 3. 编写当前 Element 的 video Prompt，按以下顺序组织：主体身份与外观、动作推进与行为阶段、所在场景与背景、镜头运动与景别、情绪表演基调、光影方向与色调、色彩基调、声音/对白提示、稳定性与画质约束，并遵守「当前视频模型要求」中的参考指代与参数限制。
 4. 一次写入或更新目标 Element creation 中的 prompts、recipe 和 exact reference version IDs。
 5. 尚无 storyboard output 时调用 `image_generation`。完成后重新读取 Project，确认 `outputs.storyboard` 的 ArtifactSlot 选择了真实 ArtifactVersion。
