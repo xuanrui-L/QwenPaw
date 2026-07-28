@@ -388,6 +388,37 @@ def test_malformed_jq_project_arguments_recover_with_a_fresh_small_call(
     )
 
 
+def test_stale_snapshot_and_quarantine_replays_get_targeted_recovery() -> None:
+    """Quarantined/stale media tasks tell the model to re-admit fresh.
+
+    Replaying the identical call can only hit the same terminated Task;
+    without this guidance the model burned its remaining turns retrying.
+    """
+
+    stale = _specialist_tool_recovery(
+        "r2v_generation",
+        "Task task-1 ended as QUARANTINED: {'code': "
+        "'PROJECT_INPUT_SNAPSHOT_STALE', 'message': "
+        "'PROJECT_INPUT_SNAPSHOT_STALE'}",
+    )
+    assert "quarantined" in stale
+    assert "read_project" in stale
+    assert "fresh r2v_generation call" in stale
+
+    replay = _specialist_tool_recovery(
+        "image_generation",
+        "图片 Task 已终止: QUARANTINED",
+    )
+    assert "fresh image_generation call" in replay
+
+    # Unrelated failures keep their existing guidance.
+    generic = _specialist_tool_recovery(
+        "r2v_generation",
+        "Task task-2 ended as FAILED: provider timeout",
+    )
+    assert "quarantined" not in generic
+
+
 def test_r2v_real_face_rejection_gets_targeted_recovery() -> None:
     """The provider face-moderation error names the exact repair steps.
 

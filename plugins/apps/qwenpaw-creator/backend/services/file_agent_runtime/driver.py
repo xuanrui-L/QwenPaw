@@ -2920,14 +2920,18 @@ class FileCreatorAgentRuntime:
             if mainline_request is not None
             else ""
         )
+        # Never assert that the intervention is resolved: when the branch
+        # run ended by asking the user a question, claiming “已处理完成”
+        # makes the model abandon its own open question and resume work.
         text = (
-            "【系统自动消息 · 主线恢复】用户提出的修改意见（支线任务）已处理完成。"
-            "请回顾本会话的历史上下文，找到此前被中断的主线任务，并从中断处继续"
-            "执行主线工作，直到主线目标完成。\n"
-            "注意：\n"
-            "1. 不要重复已经完成的步骤；\n"
-            "2. 本消息不是新的修改意见，只是提醒你继续之前的主线；\n"
-            "3. 如果主线任务实际上已全部完成，请直接确认完成状态，不要进行任何新的修改。"
+            "【系统自动消息 · 主线恢复提醒】一次用户插入请求的处理回合已结束。"
+            "请先回顾你的上一条回复，再决定下一步：\n"
+            "1. 如果你正在等待用户答复（例如提出了问题、给出了待选择的方案），"
+            "请不要恢复主线：直接简短说明你仍在等待用户答复，然后结束本轮；\n"
+            "2. 如果插入请求确实已处理完毕，请回顾会话历史，找到此前被中断的"
+            "主线任务，从中断处继续执行，不要重复已完成的步骤；\n"
+            "3. 本消息不是新的修改意见；如果主线任务实际上已全部完成，"
+            "请直接确认完成状态，不要进行任何新的修改。"
         )
         if mainline_goal:
             text += f"\n\n被中断的主线任务原始请求：\n{mainline_goal}"
@@ -3463,6 +3467,27 @@ def _specialist_terminal(content: str) -> tuple[str, str]:
 
 
 def _specialist_tool_recovery(name: str, error: str = "") -> str:
+    media_tools = {"image_generation", "r2v_generation", "ai_edit"}
+    if name in media_tools and (
+        "PROJECT_INPUT_SNAPSHOT_STALE" in error
+        or "已终止: QUARANTINED" in error
+        or "ended as QUARANTINED" in error
+    ):
+        # The provider work finished but the Project advanced while it ran
+        # (often a review approval of an earlier output), so the frozen
+        # input snapshot failed CAS at publish and the Task was
+        # quarantined. Replaying the identical call can only hit the same
+        # terminated Task — name the fix or the model burns its remaining
+        # turns rediscovering it.
+        return (
+            "The Task was quarantined because the Project changed while it "
+            "was running (for example a review was approved), so its input "
+            "snapshot went stale; the terminated Task can never be resumed "
+            "by resending the same call. Call read_project to load the "
+            "current Project state, confirm the target still needs this "
+            "output, then issue one fresh " + name + " call so it is "
+            "admitted against the current snapshot."
+        )
     if name == "r2v_generation" and "real human face" in error.casefold():
         # Provider-side face moderation rejects the uploaded pixels, so
         # resubmitting the same references can never succeed. Identity is
