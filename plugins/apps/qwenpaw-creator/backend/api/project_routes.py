@@ -9,7 +9,6 @@ authorities used here.
 
 from __future__ import annotations
 
-import json
 import asyncio
 import shutil
 from typing import Any, Literal
@@ -470,10 +469,10 @@ async def import_project(
             for d in extract_dir.iterdir():
                 dirs.append(d)
 
-            if not (len(dirs) == 1 and dirs[0].is_dir() and dirs[0].name.startswith('project-')):
+            if not (len(dirs) == 1 and dirs[0].is_dir() and dirs[0].name.startswith('project-') and dirs[0].name == _safe_project_id(dirs[0].name)):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"expecting one project- folder from unpacked file but got {dirs}",
+                    detail=f'expecting one and only one project-*** folder from unpacked file but got {dirs}',
                 )
 
             logger.info(f'looking for project.json in {dirs[0]}')
@@ -481,7 +480,7 @@ async def import_project(
             # Project's project_id.
             project_json_path = None
             for f in dirs[0].iterdir():
-                if f.is_file and f.name == 'project.json':
+                if f.is_file() and f.name == 'project.json':
                     project_json_path = f
                     break
 
@@ -509,13 +508,13 @@ async def import_project(
             target_project_dir = Path(data_root, dirs[0].name)
             if target_project_dir.exists():
                 raise HTTPException(
-                    status_code=500,
+                    status_code=400,
                     detail=f"project already exists {target_project_dir}",
                 )
-            # Extract the zip again, this time into the data root so the
+            # move the unpacked project-*** folder into creator data root so the
             # Project directory is published under its real project_id.
-            shutil.unpack_archive(str(saved_zip), extract_dir=str(data_root), format="zip")
-            logger.info(f'unpacked zip again to final dest {data_root}')
+            shutil.move(dirs[0], data_root)
+            logger.info(f'moved project folder {dirs[0]} to {data_root}')
             return project_id
         finally:
             saved_zip.unlink(missing_ok=True)

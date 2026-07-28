@@ -14,7 +14,6 @@ import {
 import { taskErrorMessage } from "@/lib/taskPresentation";
 import { creatorStatusLabel } from "@/lib/creatorPresentation";
 import { useRouter } from "@/routing/navigation";
-import { ConsoleSqlOutlined } from "@ant-design/icons";
 
 const terminal = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "QUARANTINED"]);
 const wait = (ms: number) =>
@@ -85,7 +84,7 @@ export function ProjectImporter({ open, onClose, onImported }: ProjectImporterPr
     }
 
     setAttachment(selectedFile);
-  }, null,
+  }, [],
   );
 
   const removeAttachment = () => {
