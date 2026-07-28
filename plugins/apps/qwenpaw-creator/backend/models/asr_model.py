@@ -244,7 +244,8 @@ async def _fun_asr(media_url: str) -> ASRResult:
     }
     timeout = config.get_asr_timeout_seconds()
     logger.info(
-        "Fun-ASR: submitting transcription task (timeout=%ds) ...", timeout
+        "Fun-ASR: submitting transcription task (timeout=%ds) ...",
+        timeout,
     )
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=60)) as client:
         response = await client.post(
@@ -261,7 +262,8 @@ async def _fun_asr(media_url: str) -> ASRResult:
         if not task_id:
             raise RuntimeError("Fun-ASR submit response has no task_id")
         logger.info(
-            "Fun-ASR: task created task_id=%s, polling for result ...", task_id
+            "Fun-ASR: task created task_id=%s, polling for result ...",
+            task_id,
         )
         deadline = asyncio.get_running_loop().time() + timeout
         poll_start = asyncio.get_running_loop().time()
