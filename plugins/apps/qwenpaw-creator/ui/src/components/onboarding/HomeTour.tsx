@@ -24,15 +24,18 @@ const STEPS: TourStepBlueprint[] = [
   },
   {
     selectors: ['[data-onboarding-id="create-project"]'],
-    title: "第二步：新建项目",
+    title: "第二步：开始创作",
     description:
-      "选择视频场景（短剧 / 剪辑 / 通用），用一句话描述你的创意，也可以上传图片、视频素材。当前场景的必选模型未配置时，这里会给出提示并可直达配置。",
+      "选择视频场景（短剧 / 剪辑 / 通用），用一句话描述你的创意，也可以添加文件、文件夹或粘贴链接导入素材。当前场景的必选模型未配置时，这里会给出提示并可直达配置。",
   },
   {
-    selectors: ['[data-onboarding-id="project-list"]'],
+    selectors: [
+      '[data-onboarding-id="projects-tab"]',
+      '[data-onboarding-id="project-list"]',
+    ],
     title: "第三步：进入创作工作区",
     description:
-      "项目创建后会出现在这里，点击「打开」进入创作工作区：Agent 会规划创作总纲与时间轴并生成画面。首次进入工作区还有一段专属导览。",
+      "项目创建后会出现在「我的项目」中，点击「打开」进入创作工作区：Agent 会规划创作总纲与时间轴并生成画面。首次进入工作区还有一段专属导览。",
   },
 ];
 

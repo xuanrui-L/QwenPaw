@@ -210,6 +210,9 @@ async def list_projects(
                 "contentType": item.content_type,
                 "createdAt": item.created_at,
                 "updatedAt": item.updated_at,
+                "coverVersionId": item.cover_version_id,
+                "coverVersionSource": item.cover_version_source,
+                "finalVideoVersionId": item.final_video_version_id,
             }
             for item in page
         ],

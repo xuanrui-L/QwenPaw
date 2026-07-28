@@ -23,8 +23,7 @@
   },
   "meta": {
     "pawapp": {
-      "icon": "🎬",
-      "category": "video-creation",
+      "icon": "/api/frontend_plugin/qwenpaw-creator/files/ui/dist/app/logo-mark.png",
       "entry_page": "/apps/qwenpaw-creator",
       "launch_scope": "page"
     },

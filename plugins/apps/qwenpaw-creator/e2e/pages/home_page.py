@@ -13,11 +13,13 @@ class HomePage:
 
     def open(self):
         self.page.goto("/#/")
+        self.page.get_by_role("tab", name="我的项目", exact=True).click()
         self.page.get_by_role("heading", name="我的项目", exact=True).wait_for()
         return self
 
     def open_composer(self) -> ComposerModal:
-        self.page.get_by_role("button", name="新建项目", exact=True).click()
+        # The floating pill jumps back to the hero composer view.
+        self.page.get_by_role("button", name="开始创作", exact=True).click()
         return ComposerModal(self.page).wait_visible()
 
     def open_model_config(self):

@@ -15,6 +15,7 @@ import shutil
 import stat
 import tempfile
 import threading
+from typing import Any, Final
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -77,6 +78,105 @@ class ProjectSummary:
     created_at: datetime
     updated_at: datetime
     etag: str
+    cover_version_id: str | None = None
+    cover_version_source: str | None = None
+    final_video_version_id: str | None = None
+
+
+# Storyboard frames represent a Project best; character/scene reference images
+# are the next best thing before falling back to any rendered or uploaded image.
+_COVER_ARTIFACT_KINDS: Final = ("r2v_storyboard_image", "visual_asset_image")
+# Editing Projects usually own no still at all, so a rendered cut or an uploaded
+# clip supplies the cover through a keyframe instead of staying empty.
+_COVER_VIDEO_ARTIFACT_KINDS: Final = ("final_video", "element_video")
+
+
+def _cover_reference(project: Project) -> tuple[str, str] | None:
+    """Pick a stable preview image for *project* from its asset index.
+
+    Returns the version id plus the media family serving it: ``artifact`` or
+    ``source`` for images, ``artifact_frame`` or ``source_frame`` when the cover
+    must be extracted from a video.  ``None`` means the Project holds no visual
+    media at all.  The oldest candidate wins so the cover does not shuffle while
+    a Project keeps generating new frames.
+    """
+
+    files = project.assets.files_by_id
+
+    def _is_image(file_id: str | None) -> bool:
+        if file_id is None:
+            return False
+        indexed = files.get(file_id)
+        return bool(indexed and indexed.media_type.startswith("image/"))
+
+    def _is_video(file_id: str | None) -> bool:
+        if file_id is None:
+            return False
+        indexed = files.get(file_id)
+        return bool(indexed and indexed.media_type.startswith("video/"))
+
+    def _oldest(candidates: list[Any]) -> Any:
+        return min(
+            candidates,
+            key=lambda version: (version.created_at, version.version_id),
+        )
+
+    artifacts = list(project.assets.artifact_versions_by_id.values())
+    images = [version for version in artifacts if _is_image(version.file_id)]
+    for kind in (*_COVER_ARTIFACT_KINDS, None):
+        candidates = [
+            version
+            for version in images
+            if kind is None or version.kind == kind
+        ]
+        if candidates:
+            return _oldest(candidates).version_id, "artifact"
+    sources = list(project.assets.source_versions_by_id.values())
+    image_sources = [
+        version
+        for version in sources
+        if version.media_kind == "image" and _is_image(version.file_id)
+    ]
+    if image_sources:
+        return _oldest(image_sources).version_id, "source"
+    videos = [version for version in artifacts if _is_video(version.file_id)]
+    for kind in (*_COVER_VIDEO_ARTIFACT_KINDS, None):
+        candidates = [
+            version
+            for version in videos
+            if kind is None or version.kind == kind
+        ]
+        if candidates:
+            return _oldest(candidates).version_id, "artifact_frame"
+    # Uploaded clips may still live in the remote cache only; the keyframe route
+    # reports that as "not cached yet" and the card keeps its placeholder.
+    video_sources = [
+        version for version in sources if version.media_kind == "video"
+    ]
+    if video_sources:
+        return _oldest(video_sources).version_id, "source_frame"
+    return None
+
+
+def _final_video_reference(project: Project) -> str | None:
+    """Pick the newest rendered final cut of *project*, if any."""
+
+    files = project.assets.files_by_id
+    candidates = [
+        version
+        for version in project.assets.artifact_versions_by_id.values()
+        if version.kind == "final_video"
+        and version.file_id is not None
+        and (indexed := files.get(version.file_id)) is not None
+        and indexed.media_type.startswith("video/")
+    ]
+    if not candidates:
+        return None
+    newest = max(
+        candidates,
+        key=lambda version: (version.created_at, version.version_id),
+    )
+    return newest.version_id
 
 
 class ProjectStore:
@@ -303,6 +403,7 @@ class ProjectStore:
             if not (entry / "project.json").exists():
                 continue
             snapshot = self.read(safe_id)
+            cover = _cover_reference(snapshot.project)
             summaries.append(
                 ProjectSummary(
                     project_id=safe_id,
@@ -316,6 +417,11 @@ class ProjectStore:
                     created_at=snapshot.project.created_at,
                     updated_at=snapshot.project.updated_at,
                     etag=snapshot.etag,
+                    cover_version_id=cover[0] if cover else None,
+                    cover_version_source=cover[1] if cover else None,
+                    final_video_version_id=_final_video_reference(
+                        snapshot.project,
+                    ),
                 ),
             )
         reverse = sort_order == "desc"

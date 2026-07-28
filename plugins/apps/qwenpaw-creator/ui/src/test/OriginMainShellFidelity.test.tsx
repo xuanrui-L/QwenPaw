@@ -66,7 +66,7 @@ const modelConfig = {
 };
 
 describe("origin/main visible shell fidelity", () => {
-  it("keeps the origin Home card hierarchy, copy, classes, and actions", async () => {
+  it("keeps the redesigned Home project cards, copy, classes, and actions", async () => {
     installMockFetch([
       { match: "/models/config", response: { json: modelConfig } },
       {
@@ -97,41 +97,107 @@ describe("origin/main visible shell fidelity", () => {
         <HomePage />
       </MemoryRouter>,
     );
+    // The project grid lives under the second tab: text-only cards with
+    // name, description, meta row and update time, actions on hover.
+    fireEvent.click(screen.getByRole("tab", { name: "我的项目" }));
     expect(await screen.findByText("雪夜短片")).toBeInTheDocument();
-    for (const label of [
-      "视频场景 短剧",
-      "内容类型 采访",
-      "画面长宽比 16:9",
-      "图像分辨率 720P",
-    ]) {
-      expect(screen.getByText(label)).toHaveClass(
-        "badge",
-        "border",
-        "text-[var(--color-text-secondary)]",
-      );
-    }
-    expect(screen.getByRole("button", { name: "新建项目" })).toHaveClass(
-      "btn-primary",
-      "cursor-pointer",
+    // Content type is editing-only, so a short drama never shows it.
+    expect(screen.getByText("短剧")).toBeInTheDocument();
+    expect(screen.queryByText("类型：")).not.toBeInTheDocument();
+    expect(screen.queryByText("采访")).not.toBeInTheDocument();
+    expect(screen.getByText("16:9")).toBeInTheDocument();
+    expect(screen.getByText("720P")).toBeInTheDocument();
+    expect(screen.getByText("一段项目说明")).toHaveClass(
+      "line-clamp-2",
+      "text-[var(--color-text-tertiary)]",
     );
+    // No preview chip without a rendered final cut.
+    expect(
+      screen.queryByRole("button", { name: "预览 雪夜短片 成片" }),
+    ).not.toBeInTheDocument();
+    // Creation happens through the floating pill instead of a button.
+    expect(
+      screen.queryByRole("button", { name: "新建项目" }),
+    ).not.toBeInTheDocument();
+    const floatingEntry = screen
+      .getAllByRole("button", { name: "开始创作" })
+      .find((button) => button.className.includes("fixed"));
+    expect(floatingEntry).toBeDefined();
+    expect(floatingEntry).toHaveClass("bg-[#FF9D4D]", "rounded-full");
     expect(screen.getByRole("button", { name: "打开" })).toHaveClass(
-      "btn-primary",
       "flex-1",
       "cursor-pointer",
+      "border-[#EAE9E7]",
     );
     expect(screen.getByRole("button", { name: "删除 雪夜短片" })).toHaveClass(
-      "btn-primary",
       "flex-1",
       "cursor-pointer",
+      "bg-[var(--color-danger-soft)]",
     );
     expect(container.querySelector("header")).toHaveClass(
       "border-b",
       "bg-[var(--color-bg-primary)]",
     );
-    expect(screen.getByText("一段项目说明").parentElement).toHaveClass(
-      "min-h-[52px]",
-      "bg-[rgba(43,18,0,0.02)]",
+    // The floating pill returns to the hero composer view.
+    fireEvent.click(floatingEntry!);
+    expect(screen.getByRole("tab", { name: "开始创作" })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
+  });
+
+  it("shows the content type and the final-cut preview for editing projects", async () => {
+    installMockFetch([
+      { match: "/models/config", response: { json: modelConfig } },
+      {
+        match: "/projects",
+        response: {
+          json: {
+            items: [
+              {
+                projectId: "p2",
+                name: "采访粗切",
+                description: "一段项目说明",
+                scenario: "video_edit",
+                contentType: "interview",
+                aspectRatio: "16:9",
+                resolution: "720P",
+                coverVersionId: "ver-cover",
+                coverVersionSource: "artifact",
+                finalVideoVersionId: "ver-final",
+                createdAt: "2026-07-01T00:00:00Z",
+                updatedAt: "2026-07-02T00:00:00Z",
+              },
+            ],
+            limit: 100,
+            offset: 0,
+          },
+        },
+      },
+    ]);
+    const { container } = render(
+      <MemoryRouter>
+        <HomePage />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "我的项目" }));
+    expect(await screen.findByText("采访粗切")).toBeInTheDocument();
+    // Editing is the one scenario that carries a content type on the meta row.
+    expect(screen.getByText("类型：")).toHaveClass(
+      "font-medium",
+      "text-[var(--color-text-secondary)]",
+    );
+    expect(screen.getByText("采访")).toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+    );
+    // A final cut enables the preview chip playing in a modal video.
+    const previewButton = screen.getByRole("button", {
+      name: "预览 采访粗切 成片",
+    });
+    fireEvent.click(previewButton);
+    const video = container.ownerDocument.querySelector("video");
+    expect(video).not.toBeNull();
+    expect(video!.getAttribute("src")).toContain("/media/artifacts/ver-final");
   });
 
   it("keeps the origin Composer hierarchy, copy, controls, and 720px modal", () => {

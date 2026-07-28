@@ -298,22 +298,30 @@ async def asset_media(
     )
 
 
-@router.get("/media/assets/{version_id}/frame")
-async def asset_keyframe(
+async def _keyframe_response(
+    services: CreatorFileServices,
+    *,
     version_id: str,
-    timestamp: float = Query(ge=0, le=86_400),
-    width: int = Query(640, ge=160, le=1920),
-    services: CreatorFileServices = Depends(project_file_services),
+    kind: Literal["source", "artifact"],
+    timestamp: float,
+    width: int,
 ) -> FileResponse:
-    """Serve a persistent JPEG extracted only from the local source cache."""
+    """Serve a persistent JPEG extracted only from the local media cache."""
 
     project_root, indexed, version, project_id = await _indexed_version(
         services,
         version_id=version_id,
-        kind="source",
+        kind=kind,
     )
-    if not str(version.media_type).startswith("video/"):
-        raise NotFoundError("AssetVersion 不是可预览的视频")
+    media_type = (
+        indexed.media_type if indexed is not None else version.media_type
+    )
+    if not str(media_type).startswith("video/"):
+        raise NotFoundError(
+            "AssetVersion 不是可预览的视频"
+            if kind == "source"
+            else "ArtifactVersion 不是可预览的视频",
+        )
     if indexed is None:
         cache = await asyncio.to_thread(
             resolve_remote_cache,
@@ -354,6 +362,40 @@ async def asset_keyframe(
             "ETag": f'"sha256:{frame.sha256}"',
             "X-Creator-Media-Source": "local-keyframe-cache",
         },
+    )
+
+
+@router.get("/media/assets/{version_id}/frame")
+async def asset_keyframe(
+    version_id: str,
+    timestamp: float = Query(ge=0, le=86_400),
+    width: int = Query(640, ge=160, le=1920),
+    services: CreatorFileServices = Depends(project_file_services),
+) -> FileResponse:
+    return await _keyframe_response(
+        services,
+        version_id=version_id,
+        kind="source",
+        timestamp=timestamp,
+        width=width,
+    )
+
+
+@router.get("/media/artifacts/{version_id}/frame")
+async def artifact_keyframe(
+    version_id: str,
+    timestamp: float = Query(0.0, ge=0, le=86_400),
+    width: int = Query(640, ge=160, le=1920),
+    services: CreatorFileServices = Depends(project_file_services),
+) -> FileResponse:
+    """Still frame of a rendered video Artifact, used for project covers."""
+
+    return await _keyframe_response(
+        services,
+        version_id=version_id,
+        kind="artifact",
+        timestamp=timestamp,
+        width=width,
     )
 
 
