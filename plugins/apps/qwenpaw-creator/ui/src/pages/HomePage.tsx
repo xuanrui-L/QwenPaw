@@ -148,7 +148,7 @@ export default function HomePage() {
 
   const fetchProjects = useCallback(
     async (sort: SortField = sortBy, order: "asc" | "desc" = sortOrder) => {
-      console.log('refresing home page');
+      console.log("refresing home page");
       try {
         const data = await listProjects(100, 0, sort, order);
         setProjects(data.items || []);
