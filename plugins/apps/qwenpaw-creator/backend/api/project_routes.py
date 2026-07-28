@@ -434,37 +434,42 @@ async def _run_import(upload) -> str:
     imports_root.mkdir(parents=True, exist_ok=True)
 
     uploaded_file = Path(upload.filename or "import.zip").name
-    logger.info(f"importing project from {uploaded_file}")
-    upload_bytes = await upload.read()
-    logger.info(
-        f"read bytes from uploaded zip {uploaded_file}, {len(upload_bytes)} bytes",
-    )
     # Save the uploaded zip into the imports folder, then extract
     # it there so we can inspect project.json before publishing.
     temp_str = uuid4().hex
     saved_zip = imports_root / f"{temp_str}-{uploaded_file}"
+    try:
+        with open(saved_zip, "wb") as f:
+            while True:
+                chunk = await upload.read(8192)
+                if not chunk:
+                    break
+                f.write(chunk)
+            logger.info(
+                f"zip file size of {saved_zip}: {saved_zip.stat().st_size}",
+            )
+    except Exception as e:
+        raise BadRequestError(
+            f"failed to save uploaded file to {saved_zip}: {str(e)}",
+        ) from e
+
     extract_dir = imports_root / f"{temp_str}"
     try:
-        logger.info(f"writing zip bytes to {saved_zip}")
-        saved_zip.write_bytes(upload_bytes)
         extract_dir.mkdir(mode=0o700)
-        logger.info(f"unpacking zip from {saved_zip} to {extract_dir}")
         try:
             shutil.unpack_archive(
                 str(saved_zip),
                 extract_dir=extract_dir,
                 format="zip",
             )
+            logger.info(f"unpacked zip file {saved_zip} to {extract_dir}")
         except Exception as e:
             raise BadRequestError(
-                f"failed to unpack uploaded file: {str(e)}",
+                f"failed to unpack zip file {saved_zip}: {str(e)}",
             ) from e
 
         # extract_dir/project-xxx/, where project-xxx should be the only item in extract-dir
-        dirs = []
-        for d in extract_dir.iterdir():
-            dirs.append(d)
-
+        dirs = list(extract_dir.iterdir())
         if not (
             len(dirs) == 1
             and dirs[0].is_dir()
@@ -475,7 +480,6 @@ async def _run_import(upload) -> str:
                 f"expecting only one project-* folder from unpacked file: {dirs}",
             )
 
-        logger.info(f"looking for project.json in {dirs[0]}")
         # Load project.json from the extracted tree and read the
         # Project's project_id.
         project_json_path = None
@@ -490,7 +494,6 @@ async def _run_import(upload) -> str:
             )
 
         logger.info(f"loading project obj from {project_json_path}")
-        project_id = None
         try:
             project = load_project_json(project_json_path.read_bytes())
             project_id = str(project.project_id)

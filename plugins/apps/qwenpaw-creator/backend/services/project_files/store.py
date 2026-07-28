@@ -456,9 +456,9 @@ class ProjectStore:
             )
             raise ProjectStoreError("failed to export project bytes") from e
         finally:
-            logger.info(f"deleting project export zip file {archive_path}")
-            Path(archive_path).unlink(missing_ok=True)
-            logger.info(f"deleted project export zip file {archive_path}")
+            if archive_path:
+                Path(archive_path).unlink(missing_ok=True)
+                logger.info(f"deleted project export zip file {archive_path}")
 
     def lifecycle_lock(self, project_id: str) -> CrossProcessFileLock:
         """Serialize creation/deletion with all Project-scoped mutations."""
