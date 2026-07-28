@@ -29,11 +29,8 @@ from .serialization import (
     project_etag,
     project_file_bytes,
 )
-from utils.logger import setup_logger
 
-logger = setup_logger('store')
-
-logger = setup_logger("services.project_files.store")
+logger = setup_logger("store")
 
 
 DEFAULT_MAX_PROJECT_JSON_BYTES = 8 * 1024 * 1024
@@ -409,7 +406,6 @@ class ProjectStore:
                     f"Project was removed but tombstone cleanup failed: {safe_id}",
                 ) from exc
 
-
     def export(self, project_id: str) -> Iterator[bytes]:
         """Compress the whole Project folder into a zip under ``CREATOR_DATA_ROOT``/exports/.
         Yields the archive contents in 8192-byte chunks so
@@ -423,7 +419,7 @@ class ProjectStore:
 
         safe_id = _safe_project_id(project_id)
         zip_file_stem = f"{safe_id}-{uuid4().hex}"
-        logger.info(f'exporting to:{str(export_root / zip_file_stem)}')
+        logger.info(f"exporting to:{str(export_root / zip_file_stem)}")
 
         archive_path = None
         with self.lifecycle_lock(safe_id), self._lock:
@@ -436,10 +432,15 @@ class ProjectStore:
                     root_dir=str(self.root),
                     base_dir=safe_id,
                 )
-                logger.info(f'export file path:{archive_path}')
+                logger.info(f"export file path:{archive_path}")
             except Exception as e:
-                logger.error(f'failed to create export file for project {safe_id}', exc_info=True)
-                raise Exception(f'failed to create export file for project {safe_id}') from e
+                logger.error(
+                    f"failed to create export file for project {safe_id}",
+                    exc_info=True,
+                )
+                raise ProjectStoreError(
+                    f"failed to create export file for project {safe_id}",
+                ) from e
 
         try:
             with open(archive_path, "rb") as archive_file:
@@ -449,13 +450,15 @@ class ProjectStore:
                         break
                     yield chunk
         except Exception as e:
-            logger.error(f'failed to export project bytes:{archive_path}', exc_info=True)
-            raise Exception('failed to export project bytes') from e
+            logger.error(
+                f"failed to export project bytes:{archive_path}",
+                exc_info=True,
+            )
+            raise ProjectStoreError("failed to export project bytes") from e
         finally:
-            logger.info(f'deleting project export zip file {archive_path}')
+            logger.info(f"deleting project export zip file {archive_path}")
             Path(archive_path).unlink(missing_ok=True)
-            logger.info(f'deleted project export zip file {archive_path}')
-
+            logger.info(f"deleted project export zip file {archive_path}")
 
     def lifecycle_lock(self, project_id: str) -> CrossProcessFileLock:
         """Serialize creation/deletion with all Project-scoped mutations."""

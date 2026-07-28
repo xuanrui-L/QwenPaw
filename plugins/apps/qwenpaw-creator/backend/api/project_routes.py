@@ -15,7 +15,16 @@ from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, Query, Response, status, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    Query,
+    Response,
+    status,
+    HTTPException,
+    Request,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError as PydanticValidationError
 from starlette.routing import Match
@@ -51,16 +60,15 @@ from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.session_store import ProjectRuntimeBootstrap
 from services.storage_root import require_creator_data_root
 from services.project_files.serialization import load_project_json
-
+from utils.logger import setup_logger
 from .dependencies import (
     CreatorErrorRoute,
     project_file_services,
     resolve_idempotency_key,
 )
 
-from utils.logger import setup_logger
 
-logger = setup_logger('project_routes')
+logger = setup_logger("project_routes")
 
 _CREATE_SCOPE = "POST /projects"
 
@@ -392,14 +400,14 @@ async def export_project(
     services: CreatorFileServices = Depends(project_file_services),
 ) -> StreamingResponse:
     #
-    logger.info(f'exporting project:{project_id}')
+    logger.info(f"exporting project:{project_id}")
     resolve_idempotency_key(idempotency_key)
     await interrupt_creator_agent_runtime(
         project_id,
         superseded=False,
         reason="exporting_project",
     )
-    logger.debug('export project interrupted runtime')
+    logger.debug("export project interrupted runtime")
     try:
         safe_id = _safe_project_id(project_id)
         return StreamingResponse(
@@ -410,21 +418,128 @@ async def export_project(
             },
         )
     except Exception as e:
-        logger.error(f'failed to export project {project_id}', exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to export project {project_id}") from e
+        logger.error(f"failed to export project {project_id}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to export project {project_id}",
+        ) from e
+
+
+async def _run_import(upload) -> str:
+    data_root = require_creator_data_root()
+    imports_root = data_root / "imports"
+    imports_root.mkdir(parents=True, exist_ok=True)
+
+    uploaded_file = Path(upload.filename or "import.zip").name
+    logger.info(f"importing project from {uploaded_file}")
+    upload_bytes = await upload.read()
+    logger.info(
+        f"read bytes from uploaded zip {uploaded_file}, {len(upload_bytes)} bytes",
+    )
+    # Save the uploaded zip into the imports folder, then extract
+    # it there so we can inspect project.json before publishing.
+    temp_str = uuid4().hex
+    saved_zip = imports_root / f"{temp_str}-{uploaded_file}"
+    extract_dir = imports_root / f"{temp_str}"
+    try:
+        logger.info(f"writing zip bytes to {saved_zip}")
+        saved_zip.write_bytes(upload_bytes)
+        extract_dir.mkdir(mode=0o700)
+        logger.info(f"unpacking zip from {saved_zip} to {extract_dir}")
+        try:
+            shutil.unpack_archive(
+                str(saved_zip),
+                extract_dir=extract_dir,
+                format="zip",
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail="failed to unpack uploaded file.",
+            ) from e
+
+        # extract_dir/project-xxx/, where project-xxx should be the only item in extract-dir
+        dirs = []
+        for d in extract_dir.iterdir():
+            dirs.append(d)
+
+        if not (
+            len(dirs) == 1
+            and dirs[0].is_dir()
+            and dirs[0].name.startswith("project-")
+            and dirs[0].name == _safe_project_id(dirs[0].name)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"expecting only one project-* folder from unpacked file: {dirs}",
+            )
+
+        logger.info(f"looking for project.json in {dirs[0]}")
+        # Load project.json from the extracted tree and read the
+        # Project's project_id.
+        project_json_path = None
+        for f in dirs[0].iterdir():
+            if f.is_file() and f.name == "project.json":
+                project_json_path = f
+                break
+
+        if project_json_path is None:
+            raise HTTPException(
+                status_code=400,
+                detail="project.json not found in the uploaded data.",
+            )
+
+        logger.info(f"loading project obj from {project_json_path}")
+        project_id = None
+        try:
+            project = load_project_json(project_json_path.read_bytes())
+            project_id = str(project.project_id)
+            if not project_id:
+                raise ValueError(
+                    f"project_id not found in {project_json_path}",
+                )
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail="project.json is not a valid Project object.",
+            ) from e
+
+        logger.info(
+            f"found project id in {project_json_path}: {project_id}",
+        )
+
+        target_project_dir = Path(data_root, dirs[0].name)
+        if target_project_dir.exists():
+            raise HTTPException(
+                status_code=400,
+                detail=f"project already exists {target_project_dir}",
+            )
+        # move the unpacked project-*** folder into creator data root so the
+        # Project directory is published under its real project_id.
+        shutil.move(dirs[0], data_root)
+        logger.info(f"moved project folder {dirs[0]} to {data_root}")
+        return project_id
+    finally:
+        saved_zip.unlink(missing_ok=True)
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        logger.info(
+            f"deleted temporary importing file and folder {saved_zip}, {extract_dir}",
+        )
+
 
 @router.post("/import")
 async def import_project(
     request: Request,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
-    services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
-    logger.info(f'import request, idempotency_key:{idempotency_key}')
+    logger.info(f"import request, idempotency_key:{idempotency_key}")
     resolve_idempotency_key(idempotency_key)
     form = await request.form()
-    logger.debug(f'import request, form is ready')
+    logger.debug("import request, form is ready")
     for k, v in form.multi_items():
-        logger.debug(f'import request form, k:{k}, v: type:{type(v)}, value:{v}')
+        logger.debug(
+            f"import request form, k:{k}, v: type:{type(v)}, value:{v}",
+        )
     upload = next(
         (
             value
@@ -434,99 +549,20 @@ async def import_project(
         None,
     )
     if upload is None:
-        raise HTTPException(status_code=400, detail=f"No uploaded file in the request")
-
-    uploaded_file = Path(upload.filename or "import.zip").name
-    logger.info(f'importing project from {uploaded_file}')
-    upload_bytes = await upload.read()
-    logger.info(f'read bytes from uploaded zip {uploaded_file}, {len(upload_bytes)} bytes')
-
-    def _run_import() -> str:
-        data_root = require_creator_data_root()
-        imports_root = data_root / "imports"
-        imports_root.mkdir(parents=True, exist_ok=True)
-
-        # Save the uploaded zip into the imports folder, then extract
-        # it there so we can inspect project.json before publishing.
-        temp_str = uuid4().hex
-        saved_zip = imports_root / f"{temp_str}-{uploaded_file}"
-        extract_dir = imports_root / f"{temp_str}"
-        try:
-            logger.info(f'writing zip bytes to {saved_zip}')
-            saved_zip.write_bytes(upload_bytes)
-            extract_dir.mkdir(mode=0o700)
-            logger.info(f'unpacking zip from {saved_zip} to {extract_dir}')
-            try:
-                shutil.unpack_archive(str(saved_zip), extract_dir=extract_dir, format="zip")
-            except Exception as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"failed to unpack uploaded file.",
-                ) from e
-
-            # extract_dir/project-xxx/, where project-xxx should be the only item in extract-dir
-            dirs = []
-            for d in extract_dir.iterdir():
-                dirs.append(d)
-
-            if not (len(dirs) == 1 and dirs[0].is_dir() and dirs[0].name.startswith('project-') and dirs[0].name == _safe_project_id(dirs[0].name)):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f'expecting one and only one project-*** folder from unpacked file but got {dirs}',
-                )
-
-            logger.info(f'looking for project.json in {dirs[0]}')
-            # Load project.json from the extracted tree and read the
-            # Project's project_id.
-            project_json_path = None
-            for f in dirs[0].iterdir():
-                if f.is_file() and f.name == 'project.json':
-                    project_json_path = f
-                    break
-
-            if project_json_path is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="project.json not found in the uploaded data.",
-                )
-
-            logger.info(f'loading project obj from {project_json_path}')
-            project_id = None
-            try:
-                project = load_project_json(project_json_path.read_bytes())
-                project_id = str(project.project_id)
-                if not project_id:
-                    raise Exception(f'project_id not found in {project_json_path}')
-            except Exception as e:
-                raise HTTPException(
-                    status_code=400,
-                    detail="project.json is not a valid Project object.",
-                ) from e
-
-            logger.info(f'found project id in {project_json_path}: {project_id}')
-
-            target_project_dir = Path(data_root, dirs[0].name)
-            if target_project_dir.exists():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"project already exists {target_project_dir}",
-                )
-            # move the unpacked project-*** folder into creator data root so the
-            # Project directory is published under its real project_id.
-            shutil.move(dirs[0], data_root)
-            logger.info(f'moved project folder {dirs[0]} to {data_root}')
-            return project_id
-        finally:
-            saved_zip.unlink(missing_ok=True)
-            shutil.rmtree(extract_dir, ignore_errors=True)
-            logger.info(f'deleted temporary importing file and folder {saved_zip}, {extract_dir}')
+        raise HTTPException(
+            status_code=400,
+            detail="No uploaded file in the request",
+        )
 
     try:
-        project_id = await asyncio.to_thread(_run_import)
+        project_id = await _run_import(upload)
     except HTTPException:
-        logger.error(f'failed to import project 1', exc_info=True)
+        logger.error("failed to run import", exc_info=True)
         raise
     except Exception as e:
-        logger.error(f'failed to import project 2', exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to import project") from e
+        logger.error("failed to import project", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to import project",
+        ) from e
     return {"projectId": project_id}
