@@ -30,6 +30,8 @@ interface AppCardProps {
 
 export const AppCard: FC<AppCardProps> = ({ app, onClick, onUninstall }) => {
   const { t } = useTranslation();
+  // Icon is either an emoji glyph or an image URL / path / data URI.
+  const isImageIcon = /^(https?:\/\/|\/|data:)/.test(app.icon);
   return (
     <Card className={styles.appCardLarge} onClick={() => onClick(app)}>
       {onUninstall && (
@@ -46,9 +48,17 @@ export const AppCard: FC<AppCardProps> = ({ app, onClick, onUninstall }) => {
           </button>
         </Tooltip>
       )}
-      <div className={styles.appCardIconLarge}>
+      <div
+        className={`${styles.appCardIconLarge} ${
+          isImageIcon ? styles.appCardIconImage : ""
+        }`}
+      >
         {app.icon ? (
-          <span className={styles.appEmojiLarge}>{app.icon}</span>
+          isImageIcon ? (
+            <img src={app.icon} alt="" className={styles.appIconImageLarge} />
+          ) : (
+            <span className={styles.appEmojiLarge}>{app.icon}</span>
+          )
         ) : (
           <AppWindow size={48} strokeWidth={1.5} />
         )}
