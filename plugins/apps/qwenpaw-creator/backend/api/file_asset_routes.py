@@ -1109,7 +1109,9 @@ async def drain_remote_ingest_tasks(timeout_seconds: float = 15.0) -> None:
 
     global _REMOTE_INGEST_SHUTTING_DOWN
     _REMOTE_INGEST_SHUTTING_DOWN = True
-    pending = [task for task in _REMOTE_INGEST_TASKS.values() if not task.done()]
+    pending = [
+        task for task in _REMOTE_INGEST_TASKS.values() if not task.done()
+    ]
     for task in pending:
         task.cancel()
     if pending:

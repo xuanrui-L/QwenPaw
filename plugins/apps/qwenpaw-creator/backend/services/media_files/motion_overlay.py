@@ -280,7 +280,12 @@ def _kill_worker_session(process: subprocess.Popen) -> None:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         else:
             process.kill()
-    except (ProcessLookupError, PermissionError, OSError, subprocess.SubprocessError):
+    except (
+        ProcessLookupError,
+        PermissionError,
+        OSError,
+        subprocess.SubprocessError,
+    ):
         process.kill()
     try:
         process.communicate(timeout=10)
