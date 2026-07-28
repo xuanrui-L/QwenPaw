@@ -418,17 +418,17 @@ class ProjectStore:
         This is a best-effort snapshot of the on-disk tree: it does not take
         the lifecycle lock, so a concurrent mutation may be partially captured.
         """
+        export_root = require_creator_data_root() / "exports"
+        export_root.mkdir(parents=True, exist_ok=True)
+
         safe_id = _safe_project_id(project_id)
+        zip_file_stem = f"{safe_id}-{uuid4().hex}"
+        logger.info(f'exporting to:{str(export_root / zip_file_stem)}')
+
+        archive_path = None
         with self.lifecycle_lock(safe_id), self._lock:
             # Confirm the Project exists and is loadable before archiving.
             self.read(safe_id)
-
-            # TODO: accquire folder lock before zipping
-            export_root = require_creator_data_root() / "exports"
-            export_root.mkdir(parents=True, exist_ok=True)
-            zip_file_stem = f"{safe_id}-{uuid4().hex}"
-            logger.info(f'exporting to:{str(export_root / zip_file_stem)}')
-            archive_path = f'./unset-{uuid4().hex}'
             try:
                 archive_path = shutil.make_archive(
                     str(export_root / zip_file_stem),
@@ -437,19 +437,24 @@ class ProjectStore:
                     base_dir=safe_id,
                 )
                 logger.info(f'export file path:{archive_path}')
-                with open(archive_path, "rb") as archive_file:
-                    while True:
-                        chunk = archive_file.read(8192)
-                        if not chunk:
-                            break
-                        yield chunk
             except Exception as e:
-                logger.error(f'failed to export project bytes:{archive_path}', exc_info=True)
-                raise Exception('failed to export project bytes') from e
-            finally:
-                logger.info(f'deleting project export zip file {archive_path}')
-                Path(archive_path).unlink(missing_ok=True)
-                logger.info(f'deleted project export zip file {archive_path}')
+                logger.error(f'failed to create export file for project {safe_id}', exc_info=True)
+                raise Exception(f'failed to create export file for project {safe_id}') from e
+
+        try:
+            with open(archive_path, "rb") as archive_file:
+                while True:
+                    chunk = archive_file.read(8192)
+                    if not chunk:
+                        break
+                    yield chunk
+        except Exception as e:
+            logger.error(f'failed to export project bytes:{archive_path}', exc_info=True)
+            raise Exception('failed to export project bytes') from e
+        finally:
+            logger.info(f'deleting project export zip file {archive_path}')
+            Path(archive_path).unlink(missing_ok=True)
+            logger.info(f'deleted project export zip file {archive_path}')
 
 
     def lifecycle_lock(self, project_id: str) -> CrossProcessFileLock:

@@ -420,18 +420,12 @@ async def import_project(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
-    for k, v in request.headers.items():
-        logger.info(f'import request header k:{k}, v: type:{type(v)}, value:{v}')
-
-    logger.info(f'import request, method:{request.method}, '
-                f'url:{request.url}, client:{request.client.host}:{request.client.port}')
-
-    resolve_idempotency_key(idempotency_key)
     logger.info(f'import request, idempotency_key:{idempotency_key}')
+    resolve_idempotency_key(idempotency_key)
     form = await request.form()
-    logger.info(f'import request, form is ready')
+    logger.debug(f'import request, form is ready')
     for k, v in form.multi_items():
-        logger.info(f'import request form k:{k}, v: type:{type(v)}, value:{v}')
+        logger.debug(f'import request form, k:{k}, v: type:{type(v)}, value:{v}')
     upload = next(
         (
             value
@@ -453,7 +447,7 @@ async def import_project(
         imports_root = data_root / "imports"
         imports_root.mkdir(parents=True, exist_ok=True)
 
-        # 2 & 3. Save the uploaded zip into the imports folder, then extract
+        # Save the uploaded zip into the imports folder, then extract
         # it there so we can inspect project.json before publishing.
         temp_str = uuid4().hex
         saved_zip = imports_root / f"{temp_str}-{uploaded_file}"
@@ -483,7 +477,7 @@ async def import_project(
                 )
 
             logger.info(f'looking for project.json in {dirs[0]}')
-            # 4 & 5. Load project.json from the extracted tree and read the
+            # Load project.json from the extracted tree and read the
             # Project's project_id.
             project_json_path = None
             for f in dirs[0].iterdir():
@@ -518,13 +512,12 @@ async def import_project(
                     status_code=500,
                     detail=f"project already exists {target_project_dir}",
                 )
-            # 6. Extract the zip again, this time into the data root so the
+            # Extract the zip again, this time into the data root so the
             # Project directory is published under its real project_id.
             shutil.unpack_archive(str(saved_zip), extract_dir=str(data_root), format="zip")
             logger.info(f'unpacked zip again to final dest {data_root}')
             return project_id
         finally:
-            logger.info(f'done importing project from {uploaded_file}')
             saved_zip.unlink(missing_ok=True)
             shutil.rmtree(extract_dir, ignore_errors=True)
             logger.info(f'deleted temporary importing file and folder {saved_zip}, {extract_dir}')
