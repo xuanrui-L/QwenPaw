@@ -63,6 +63,7 @@ export default function PlanPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
+  const [exportBytes, setExportBytes] = useState(0);
   const [composing, setComposing] = useState(false);
   const [requestedComposeTaskId, setRequestedComposeTaskId] = useState<
     string | null
@@ -420,8 +421,11 @@ export default function PlanPage() {
 
   const handleExportOk = useCallback(async () => {
     setExportLoading(true);
+    setExportBytes(0);
     try {
-      await saveExportFile(id);
+      await saveExportFile(id, (byteLength) => {
+        setExportBytes((prev) => prev + byteLength);
+      });
     } catch (err) {
       message.error(err instanceof Error ? err.message : "导出失败");
     } finally {
@@ -622,6 +626,11 @@ export default function PlanPage() {
       >
         <div>
           导出项目，需要执行:</div><div>获取整个项目数据控制权、</div><div>生成压缩文件、</div><div>下载压缩文件等步骤。</div><div>实行时间长，且执行期间不能对项目做其他操作，需要在当前窗口等待。</div>
+        {exportLoading && (
+          <div className="mt-3 text-sm text-[var(--color-text-secondary)]">
+            已接收：{exportBytes} 字节
+          </div>
+        )}
       </Modal>
         </div>
       </header>

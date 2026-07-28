@@ -9,6 +9,7 @@ import {
   ArrowUp,
   ArrowDown,
   CircleHelp,
+  FileInput,
 } from "lucide-react";
 import type { ModelConfigData, ProjectSummary } from "@/contracts/creator";
 import { deleteProject, getModelConfig, listProjects } from "@/api/creator";
@@ -22,6 +23,7 @@ import {
 } from "@/components/creator/ProjectComposer";
 import { HomeTour } from "@/components/onboarding";
 import { useOnboardingStore } from "@/store/onboardingStore";
+import { ProjectImporter } from "@/components/creator/ProjectImportExport";
 
 interface ProjectCardProps {
   project: ProjectSummary;
@@ -122,6 +124,7 @@ export default function HomePage() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [importerOpen, setImporterOpen] = useState(false);
   const [sortBy, setSortBy] = useState<SortField>("updated_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const requestHomeTour = useOnboardingStore((state) => state.requestHomeTour);
@@ -145,6 +148,7 @@ export default function HomePage() {
 
   const fetchProjects = useCallback(
     async (sort: SortField = sortBy, order: "asc" | "desc" = sortOrder) => {
+      console.log('refresing home page');
       try {
         const data = await listProjects(100, 0, sort, order);
         setProjects(data.items || []);
@@ -312,6 +316,14 @@ export default function HomePage() {
                 <Plus className="w-4 h-4" />
                 新建项目
               </button>
+              <button
+                onClick={() => setImporterOpen(true)}
+                data-onboarding-id="import-project"
+                className="btn-primary cursor-pointer"
+              >
+                <FileInput className="w-4 h-4" />
+                导入已有项目
+              </button>
             </div>
           </div>
         </section>
@@ -365,6 +377,11 @@ export default function HomePage() {
           setConfigModalOpen(false);
           refreshModelConfig();
         }}
+      />
+      <ProjectImporter
+        open={importerOpen}
+        onClose={() => setImporterOpen(false)}
+        onImported={() => fetchProjects()}
       />
       <HomeTour />
     </div>
