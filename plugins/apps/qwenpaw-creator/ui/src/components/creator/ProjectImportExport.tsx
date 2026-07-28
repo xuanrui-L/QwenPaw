@@ -1,22 +1,63 @@
 import { useCallback, useRef, useState } from "react";
-import { Button, Modal, Tooltip, message } from "antd";
+import { Button, Modal, Progress, Tooltip, message } from "antd";
 import { Paperclip, X, FileInput } from "lucide-react";
-import { creatorFetch, newClientId, creatorRequest } from "@/api/creator";
+import {
+  creatorApiUrl,
+  creatorFetch,
+  creatorHeaders,
+  newClientId,
+} from "@/api/creator";
 import { useRouter } from "@/routing/navigation";
 
 interface ProjectImportResponse {
   projectId: string;
 }
 
-function importProject(file: File): Promise<ProjectImportResponse> {
+function importProject(
+  file: File,
+  onProgress?: (uploadedBytes: number, totalBytes: number) => void,
+): Promise<ProjectImportResponse> {
   const form = new FormData();
   const requestId = newClientId("import-project");
   form.append("clientRequestId", requestId);
   form.append("file", file, file.name);
-  return creatorRequest("/projects/import", {
-    method: "POST",
-    headers: { "Idempotency-Key": requestId },
-    body: form,
+
+  // fetch() has no upload-progress events, so use XMLHttpRequest to report
+  // the uploaded byte count to the UI while the request is in flight.
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", creatorApiUrl("/projects/import"));
+    const headers = creatorHeaders({ "Idempotency-Key": requestId });
+    headers.forEach((value, key) => xhr.setRequestHeader(key, value));
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress?.(event.loaded, event.total);
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as ProjectImportResponse);
+        } catch {
+          reject(new Error("导入失败：无法解析服务端响应"));
+        }
+        return;
+      }
+      let msg = `导入失败：HTTP ${xhr.status}`;
+      try {
+        const body = JSON.parse(xhr.responseText);
+        if (body?.message) msg = body.message;
+      } catch {
+        /* keep default message */
+      }
+      reject(new Error(msg));
+    };
+    xhr.onerror = () => reject(new Error("导入失败：网络错误"));
+    xhr.onabort = () => reject(new Error("导入失败：已取消"));
+
+    xhr.send(form);
   });
 }
 
@@ -34,10 +75,23 @@ export function ProjectImporter({
   const router = useRouter();
   const [attachment, setAttachment] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadedBytes, setUploadedBytes] = useState(0);
+  const [totalBytes, setTotalBytes] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fileSuffix = (file: File) => {
     return file.name.split(".").pop()?.toUpperCase() || undefined;
+  };
+
+  const formatBytes = (bytes: number) => {
+    if (bytes <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.min(
+      Math.floor(Math.log(bytes) / Math.log(1024)),
+      units.length - 1,
+    );
+    const value = bytes / Math.pow(1024, i);
+    return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
   };
 
   const addFile = useCallback((selectedFile: File) => {
@@ -54,10 +108,6 @@ export function ProjectImporter({
     setAttachment(selectedFile);
   }, []);
 
-  const removeAttachment = () => {
-    setAttachment(null);
-  };
-
   const canUpload = !uploading && attachment !== null;
 
   const uploadHint = () => {
@@ -71,8 +121,13 @@ export function ProjectImporter({
       return;
     }
     setUploading(true);
+    setUploadedBytes(0);
+    setTotalBytes(attachment.size);
     try {
-      const response = await importProject(attachment);
+      const response = await importProject(attachment, (loaded, total) => {
+        setUploadedBytes(loaded);
+        setTotalBytes(total);
+      });
       message.success("成功导入项目：" + response.projectId, 10);
       console.log("import response:" + JSON.stringify(response));
       setAttachment(null);
@@ -116,7 +171,10 @@ export function ProjectImporter({
             {!uploading && (
               <button
                 type="button"
-                onClick={onClose}
+                onClick={() => {
+                  setAttachment(null);
+                  onClose();
+                }}
                 className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text-primary)]"
                 aria-label="关闭"
               >
@@ -144,7 +202,8 @@ export function ProjectImporter({
                     {attachment.name}
                     <button
                       type="button"
-                      onClick={() => removeAttachment()}
+                      disabled={uploading}
+                      onClick={() => setAttachment(null)}
                       className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full hover:bg-[var(--color-border)]"
                       aria-label="移除附件"
                     >
@@ -156,11 +215,33 @@ export function ProjectImporter({
             </div>
           )}
 
+          {attachment && uploading && totalBytes > 0 && (
+            <div className="px-4 pb-3">
+              <div className="mb-1.5 flex items-center justify-between text-[11px] text-[var(--color-text-secondary)]">
+                <span>正在上传…</span>
+                <span>
+                  {formatBytes(uploadedBytes)} / {formatBytes(totalBytes)}
+                  <span className="ml-1 text-[var(--color-text-tertiary)]">
+                    ({Math.round((uploadedBytes / totalBytes) * 100)}
+                    %)
+                  </span>
+                </span>
+              </div>
+              <Progress
+                percent={Math.round((uploadedBytes / totalBytes) * 100)}
+                size="small"
+                status="active"
+                showInfo={false}
+              />
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] px-3 py-2">
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <Button
                 size="small"
                 type="text"
+                disabled={uploading}
                 icon={<Paperclip className="h-3.5 w-3.5" />}
                 onClick={() => fileInputRef.current?.click()}
                 className="!text-xs !text-[var(--color-text-secondary)]"
