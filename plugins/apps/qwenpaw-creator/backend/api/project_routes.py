@@ -22,7 +22,6 @@ from fastapi import (
     Query,
     Response,
     status,
-    HTTPException,
     Request,
 )
 from fastapi.responses import StreamingResponse
@@ -31,7 +30,12 @@ from starlette.routing import Match
 from starlette.types import Scope
 from starlette.datastructures import UploadFile
 
-from domain.errors import ConflictError, StorageIntegrityError, ValidationError
+from domain.errors import (
+    ConflictError,
+    StorageIntegrityError,
+    ValidationError,
+    BadRequestError,
+)
 from schemas.projects import (
     ExecutionPreauthorizationPolicy,
     ProjectCreateRequest,
@@ -419,9 +423,8 @@ async def export_project(
         )
     except Exception as e:
         logger.error(f"failed to export project {project_id}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to export project {project_id}",
+        raise StorageIntegrityError(
+            message=f"Failed to export project {project_id}: {str(e)}",
         ) from e
 
 
@@ -453,9 +456,8 @@ async def _run_import(upload) -> str:
                 format="zip",
             )
         except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail="failed to unpack uploaded file.",
+            raise BadRequestError(
+                f"failed to unpack uploaded file: {str(e)}",
             ) from e
 
         # extract_dir/project-xxx/, where project-xxx should be the only item in extract-dir
@@ -469,9 +471,8 @@ async def _run_import(upload) -> str:
             and dirs[0].name.startswith("project-")
             and dirs[0].name == _safe_project_id(dirs[0].name)
         ):
-            raise HTTPException(
-                status_code=400,
-                detail=f"expecting only one project-* folder from unpacked file: {dirs}",
+            raise BadRequestError(
+                f"expecting only one project-* folder from unpacked file: {dirs}",
             )
 
         logger.info(f"looking for project.json in {dirs[0]}")
@@ -484,9 +485,8 @@ async def _run_import(upload) -> str:
                 break
 
         if project_json_path is None:
-            raise HTTPException(
-                status_code=400,
-                detail="project.json not found in the uploaded data.",
+            raise BadRequestError(
+                "project.json not found in the uploaded data.",
             )
 
         logger.info(f"loading project obj from {project_json_path}")
@@ -499,10 +499,7 @@ async def _run_import(upload) -> str:
                     f"project_id not found in {project_json_path}",
                 )
         except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail="project.json is not a valid Project object.",
-            ) from e
+            raise BadRequestError(f"Invalid Project object: {str(e)}") from e
 
         logger.info(
             f"found project id in {project_json_path}: {project_id}",
@@ -510,9 +507,8 @@ async def _run_import(upload) -> str:
 
         target_project_dir = Path(data_root, dirs[0].name)
         if target_project_dir.exists():
-            raise HTTPException(
-                status_code=400,
-                detail=f"project already exists {target_project_dir}",
+            raise BadRequestError(
+                f"project already exists {target_project_dir}",
             )
         # move the unpacked project-*** folder into creator data root so the
         # Project directory is published under its real project_id.
@@ -549,20 +545,11 @@ async def import_project(
         None,
     )
     if upload is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No uploaded file in the request",
-        )
+        raise BadRequestError("No uploaded file in the request")
 
     try:
         project_id = await _run_import(upload)
-    except HTTPException:
-        logger.error("failed to run import", exc_info=True)
-        raise
     except Exception as e:
         logger.error("failed to import project", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to import project",
-        ) from e
+        raise BadRequestError(f"Failed to import project: {str(e)}") from e
     return {"projectId": project_id}

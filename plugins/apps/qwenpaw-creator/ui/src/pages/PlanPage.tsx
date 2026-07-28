@@ -427,7 +427,10 @@ export default function PlanPage() {
         setExportBytes((prev) => prev + byteLength);
       });
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "导出失败");
+      message.error(
+        "导出失败" + (err instanceof Error ? ": " + err.message : ""),
+        10,
+      );
     } finally {
       setExportLoading(false);
     }
@@ -601,37 +604,49 @@ export default function PlanPage() {
               导出项目
             </span>
           </button>
-      <Modal
-        title="导出项目"
-        open={exportOpen}
-        okText="开始导出"
-        cancelText="取消"
-        onOk={handleExportOk}
-        onCancel={() => {
-          setExportLoading(false);
-          setExportOpen((open) => !open);
-        }}
-
-        footer={[
-          <Button key="back" onClick={() => {
-            setExportLoading(false);
-            setExportOpen((open) => !open);
-          }}>
-            取消
-          </Button>,
-          <Button key="submit" type="primary" loading={exportLoading} onClick={handleExportOk}>
-            开始导出
-          </Button>,
-        ]}
-      >
-        <div>
-          导出项目，需要执行:</div><div>获取整个项目数据控制权、</div><div>生成压缩文件、</div><div>下载压缩文件等步骤。</div><div>实行时间长，且执行期间不能对项目做其他操作，需要在当前窗口等待。</div>
-        {exportLoading && (
-          <div className="mt-3 text-sm text-[var(--color-text-secondary)]">
-            已接收：{exportBytes} 字节
-          </div>
-        )}
-      </Modal>
+          <Modal
+            title="导出项目"
+            open={exportOpen}
+            okText="开始导出"
+            cancelText="取消"
+            onOk={handleExportOk}
+            onCancel={() => {
+              setExportLoading(false);
+              setExportOpen((open) => !open);
+            }}
+            footer={[
+              <Button
+                key="back"
+                onClick={() => {
+                  setExportLoading(false);
+                  setExportOpen((open) => !open);
+                }}
+              >
+                取消
+              </Button>,
+              <Button
+                key="submit"
+                type="primary"
+                loading={exportLoading}
+                onClick={handleExportOk}
+              >
+                开始导出
+              </Button>,
+            ]}
+          >
+            <div>导出项目，需要执行:</div>
+            <div>获取整个项目数据控制权、</div>
+            <div>生成压缩文件、</div>
+            <div>下载压缩文件等步骤。</div>
+            <div>
+              实行时间长，且执行期间不能对项目做其他操作，需要在当前窗口等待。
+            </div>
+            {exportLoading && (
+              <div className="mt-3 text-sm text-[var(--color-text-secondary)]">
+                已接收：{exportBytes} 字节
+              </div>
+            )}
+          </Modal>
         </div>
       </header>
 

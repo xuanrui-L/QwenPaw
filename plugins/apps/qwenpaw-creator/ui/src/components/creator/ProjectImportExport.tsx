@@ -1,55 +1,19 @@
 import { useCallback, useRef, useState } from "react";
 import { Button, Modal, Tooltip, message } from "antd";
-import {
-  Paperclip,
-  X,
-  FileInput,
-} from "lucide-react";
-import {
-  creatorFetch,
-  getTask,
-  newClientId,
-  creatorRequest,
-} from "@/api/creator";
-import { taskErrorMessage } from "@/lib/taskPresentation";
-import { creatorStatusLabel } from "@/lib/creatorPresentation";
+import { Paperclip, X, FileInput } from "lucide-react";
+import { creatorFetch, newClientId, creatorRequest } from "@/api/creator";
 import { useRouter } from "@/routing/navigation";
-
-const terminal = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "QUARANTINED"]);
-const wait = (ms: number) =>
-  new Promise((resolve) => window.setTimeout(resolve, ms));
-
-async function waitForTask(
-  projectId: string,
-  taskId: string,
-): Promise<string[]> {
-  for (;;) {
-    const task = await getTask(projectId, taskId);
-    if (terminal.has(task.status)) {
-      if (task.status !== "SUCCEEDED") {
-        throw new Error(
-          taskErrorMessage(
-            task.error,
-            `素材处理失败（${creatorStatusLabel(task.status)}）`,
-          ),
-        );
-      }
-      return task.resultRefs;
-    }
-    await wait(800);
-  }
-}
 
 interface ProjectImportResponse {
   projectId: string;
 }
 
-function importProject(file: File):Promise<ProjectImportResponse> {
+function importProject(file: File): Promise<ProjectImportResponse> {
   const form = new FormData();
   const requestId = newClientId("import-project");
   form.append("clientRequestId", requestId);
   form.append("file", file, file.name);
-  return creatorRequest('/projects/import', {
+  return creatorRequest("/projects/import", {
     method: "POST",
     headers: { "Idempotency-Key": requestId },
     body: form,
@@ -62,7 +26,11 @@ interface ProjectImporterProps {
   onImported?: () => void;
 }
 
-export function ProjectImporter({ open, onClose, onImported }: ProjectImporterProps) {
+export function ProjectImporter({
+  open,
+  onClose,
+  onImported,
+}: ProjectImporterProps) {
   const router = useRouter();
   const [attachment, setAttachment] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -70,22 +38,21 @@ export function ProjectImporter({ open, onClose, onImported }: ProjectImporterPr
 
   const fileSuffix = (file: File) => {
     return file.name.split(".").pop()?.toUpperCase() || undefined;
-  }
+  };
 
   const addFile = useCallback((selectedFile: File) => {
     if (!selectedFile) {
-      message.error('没有选择任何文件');
+      message.error("没有选择任何文件");
       return;
     }
 
-    if (fileSuffix(selectedFile) !== 'ZIP') {
-      message.error('只接受ZIP文件');
+    if (fileSuffix(selectedFile) !== "ZIP") {
+      message.error("只接受ZIP文件");
       return;
     }
 
     setAttachment(selectedFile);
-  }, [],
-  );
+  }, []);
 
   const removeAttachment = () => {
     setAttachment(null);
@@ -100,19 +67,22 @@ export function ProjectImporter({ open, onClose, onImported }: ProjectImporterPr
 
   const handleUpload = async () => {
     if (!attachment) {
-      message.error('请选择一个项目zip文件');
-      return
+      message.error("请选择一个项目zip文件");
+      return;
     }
     setUploading(true);
     try {
       const response = await importProject(attachment);
-      message.success("成功导入项目：" + response.projectId);
-      console.log('import response:' + JSON.stringify(response));
+      message.success("成功导入项目：" + response.projectId, 10);
+      console.log("import response:" + JSON.stringify(response));
       setAttachment(null);
       onClose();
       onImported?.();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "导入失败");
+      message.error(
+        "导入失败" + (error instanceof Error ? ": " + error.message : ""),
+        10,
+      );
       console.log(error instanceof Error ? error.message : "导入失败");
     } finally {
       setUploading(false);
@@ -156,7 +126,9 @@ export function ProjectImporter({ open, onClose, onImported }: ProjectImporterPr
           </div>
         </div>
 
-        <div className={`mt-3 rounded-xl border-2 transition-colors border-[var(--color-border)]`} >
+        <div
+          className={`mt-3 rounded-xl border-2 transition-colors border-[var(--color-border)]`}
+        >
           {attachment && (
             <div className="flex flex-wrap gap-1.5 px-4 pb-2">
               {(() => {
@@ -166,7 +138,7 @@ export function ProjectImporter({ open, onClose, onImported }: ProjectImporterPr
                     className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-1 pl-2 pr-1 text-[11px] text-[var(--color-text-secondary)]"
                   >
                     <b className="shrink-0 text-[10px] text-[var(--color-accent)]">
-                    {fileSuffix(attachment)}
+                      {fileSuffix(attachment)}
                     </b>
 
                     {attachment.name}
@@ -225,7 +197,6 @@ export function ProjectImporter({ open, onClose, onImported }: ProjectImporterPr
   );
 }
 
-
 export async function saveExportFile(
   projectId: string,
   onChunk?: (byteLength: number) => void,
@@ -241,7 +212,7 @@ export async function saveExportFile(
     throw new Error(`导出失败：HTTP ${response.status}`);
   }
   if (!response.body) {
-    throw new Error('导出失败：没有数据');
+    throw new Error("导出失败：没有数据");
   }
 
   let filename = `${projectId}.zip`;
