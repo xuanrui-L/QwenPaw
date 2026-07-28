@@ -101,7 +101,11 @@ from .model_client import (
     AgentScopeVlmChatClient,
     AgentToolCall,
 )
-from .models import AgentRunStatus, CreatorAgentRunRecord
+from .models import (
+    AgentRunStatus,
+    CreatorAgentRunRecord,
+    TERMINAL_AGENT_RUN_STATUSES,
+)
 from .native_media import source_intelligence_content_parts
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
@@ -220,6 +224,15 @@ def _creator_agent_tool_manifest() -> list[dict[str, Any]]:
         manifest.append(_ground_prompt_context_tool_manifest())
     manifest.append(delegate_tool_manifest())
     return manifest
+
+
+_TERMINAL_GOAL_STATUSES = frozenset(
+    {
+        CreatorGoalStatus.COMPLETED,
+        CreatorGoalStatus.CANCELLED,
+        CreatorGoalStatus.FAILED,
+    },
+)
 
 
 class FileAgentRuntimeError(RuntimeError):
@@ -721,6 +734,91 @@ class FileCreatorAgentRuntime:
         except asyncio.CancelledError:
             return
 
+    # How long a QUEUED run may sit without progress before reconcile may
+    # treat it as an orphan. Long enough that an in-flight admission in
+    # another process (created QUEUED, not yet transitioned to RUNNING) is
+    # never mistaken for one.
+    _ORPHAN_RUN_GRACE_SECONDS = 60.0
+
+    async def _reclaim_orphaned_run(
+        self,
+        project_id: str,
+        session: Any,
+    ) -> Any | None:
+        """Release a Session whose active run can never make progress.
+
+        Two crash shapes leave a dangling ``active_run_id`` behind:
+        a run that already reached a terminal status while the Session
+        pointer survived the crash between the two writes, and a QUEUED
+        run bound to a terminal Goal (the pre-fix admission path allowed
+        this), which no dispatcher will ever start. Both permanently
+        wedge the Session: admission rejects every new message with
+        "Active Goal is terminal" and reconcile treats the pointer as a
+        foreign-process lease. Anything else — a QUEUED run inside the
+        grace window or a RUNNING run — may legitimately belong to
+        another process sharing this Runtime root and stays untouched.
+
+        Returns the released Session, or ``None`` when nothing was
+        reclaimed.
+        """
+
+        try:
+            run = await asyncio.to_thread(
+                self.runs.get,
+                project_id,
+                session.active_run_id,
+            )
+        except Exception:
+            return None
+        if run.status is AgentRunStatus.QUEUED:
+            age = (datetime.now(UTC) - run.updated_at).total_seconds()
+            if age < self._ORPHAN_RUN_GRACE_SECONDS:
+                return None
+            try:
+                goal = await asyncio.to_thread(
+                    self.sessions.get_goal,
+                    project_id,
+                    run.goal_id,
+                )
+            except RuntimeGoalNotFound:
+                return None
+            if goal.status not in _TERMINAL_GOAL_STATUSES:
+                return None
+            try:
+                await asyncio.to_thread(
+                    self.runs.transition,
+                    project_id,
+                    run.run_id,
+                    expected_status=AgentRunStatus.QUEUED,
+                    status=AgentRunStatus.CANCELLED,
+                    updates={
+                        "error": {
+                            "code": "ORPHANED_ON_TERMINAL_GOAL",
+                            "message": (
+                                "run was queued against a terminal Goal "
+                                f"({goal.status.value}) and could never "
+                                "start; reconciled automatically"
+                            ),
+                        },
+                    },
+                )
+            except AgentRunStateConflict:
+                # Another process moved the run first; re-evaluate on the
+                # next poll instead of guessing.
+                return None
+        elif run.status not in TERMINAL_AGENT_RUN_STATUSES:
+            return None
+        try:
+            return await asyncio.to_thread(
+                self.sessions.clear_active_run,
+                project_id,
+                session.session_id,
+                expected_run_id=run.run_id,
+                status=CreatorSessionStatus.IDLE,
+            )
+        except SessionStateConflict:
+            return None
+
     async def _reconcile_project(self, project_id: str) -> None:
         handle = self._active.get(project_id)
         if handle is not None and handle.task.done():
@@ -767,15 +865,22 @@ class FileCreatorAgentRuntime:
                 == session.active_run_id
                 for item in user_messages
             )
-            if not interrupted:
-                return
-            session = await asyncio.to_thread(
-                self.sessions.clear_active_run,
-                project_id,
-                session.session_id,
-                expected_run_id=session.active_run_id,
-                status=CreatorSessionStatus.RESUMING,
-            )
+            if interrupted:
+                session = await asyncio.to_thread(
+                    self.sessions.clear_active_run,
+                    project_id,
+                    session.session_id,
+                    expected_run_id=session.active_run_id,
+                    status=CreatorSessionStatus.RESUMING,
+                )
+            else:
+                reclaimed = await self._reclaim_orphaned_run(
+                    project_id,
+                    session,
+                )
+                if reclaimed is None:
+                    return
+                session = reclaimed
 
         if handle is not None:
             if any(
@@ -2835,13 +2940,26 @@ class FileCreatorAgentRuntime:
     ):
         if session.active_goal_id is not None:
             try:
-                return await asyncio.to_thread(
+                goal = await asyncio.to_thread(
                     self.sessions.get_goal,
                     message.project_id,
                     session.active_goal_id,
                 )
             except RuntimeGoalNotFound:
-                pass
+                goal = None
+            # A COMPLETED Goal is finished work and can never own a new
+            # run: binding one deadlocks the Session, because admission
+            # rejects every later message with "Active Goal is terminal"
+            # while the dispatcher treats the queued run as a foreign
+            # lease. A resume request after completion starts a fresh
+            # Goal instead. CANCELLED/FAILED goals stay reusable — an
+            # AgentDock interrupt deliberately resumes its cancelled
+            # mainline under the same Goal identity.
+            if (
+                goal is not None
+                and goal.status is not CreatorGoalStatus.COMPLETED
+            ):
+                return goal
         return await asyncio.to_thread(
             self.sessions.create_goal,
             message.project_id,
