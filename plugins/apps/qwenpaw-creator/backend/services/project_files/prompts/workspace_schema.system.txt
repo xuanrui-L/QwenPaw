@@ -40,6 +40,7 @@ Project
   ```json
   {"type":"overlay","overlay_kind":"motion","prompt":"聚焦标记动效","motion":{"html":"<html>…</html>","emotion":"curious","entrance":"pop","exit":"soft_fade","intensity":0.6}}
   ```
+- Transition 元素的 `span` 必须完全包含在其两个端点元素 span 的交集中，即 `max(from.start, to.start) <= transition.start` 且 `transition.end <= min(from.end, to.end)`。创建 transition 前必须确保 `from_element_id` 和 `to_element_id` 对应的两个元素存在时间重叠，并将 transition 的 span 设在该重叠区间内。
 - outputs 通过 ArtifactSlot 表达具名产物，render_source 表达当前实际渲染来源。
 - source、visual、artifact、file 等引用必须指向当前 Project 中已经存在的实体或版本。
 - `assets` 中的文件和版本记录来自素材入库、素材理解或媒体生成结果；未产出的结果保持 `null` 或空集合。

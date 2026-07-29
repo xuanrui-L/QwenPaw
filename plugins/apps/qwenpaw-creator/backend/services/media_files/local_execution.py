@@ -1242,7 +1242,7 @@ def _edit_overlay(
         return None
     if len(overlays) > 1:
         raise ValidationError(
-            f"本地 runner 暂不支持在 Edit Element {element.element_id} 上叠加多个 Overlay Element",
+            f"本地 runner 暂不支持在 Element {element.element_id} 上叠加多个 Overlay Element",
         )
     overlay = overlays[0]
     intersection_start = max(element.span.start_tick, overlay.span.start_tick)
@@ -1526,16 +1526,8 @@ def _timeline_execution(
                     if element.location is not None
                     else None
                 ),
-                overlay=(
-                    _edit_overlay(timeline, element)
-                    if isinstance(element.creation, EditCreation)
-                    else None
-                ),
-                motions=(
-                    _edit_motion_overlays(timeline, element)
-                    if isinstance(element.creation, EditCreation)
-                    else ()
-                ),
+                overlay=_edit_overlay(timeline, element),
+                motions=_edit_motion_overlays(timeline, element),
             ),
         )
         read_set.append(

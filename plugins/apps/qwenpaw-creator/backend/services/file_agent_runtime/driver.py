@@ -2030,7 +2030,32 @@ class FileCreatorAgentRuntime:
                         raise AgentModelError(
                             f"{role_name} returned no final content or tool calls",
                         )
-                    marker, summary = _specialist_terminal(turn.content)
+                    try:
+                        marker, summary = _specialist_terminal(turn.content)
+                    except AgentModelError:
+                        correction = (
+                            "你的最终回复必须以 [SUCCESS]、[BLOCKED] 或 [FAILED] 开头。"
+                            "请重新输出，首行使用正确的标记：\n"
+                            "- [SUCCESS]：全部工作已完成并验证\n"
+                            "- [BLOCKED]：缺少必要信息或素材\n"
+                            "- [FAILED]：遇到不可恢复的技术错误\n"
+                            "标记后写简短总结。"
+                        )
+                        await asyncio.to_thread(
+                            self.executions.append_specialist_message,
+                            project_id,
+                            specialist_run_id,
+                            message_id=f"specialist-message-{uuid4().hex}",
+                            role="user",
+                            content_parts=[
+                                {"type": "text", "text": correction},
+                            ],
+                            metadata={"parentActionId": parent_action_id},
+                        )
+                        messages.append(
+                            {"role": "user", "content": correction},
+                        )
+                        continue
                     latest = None
                     if (
                         marker == "SUCCESS"

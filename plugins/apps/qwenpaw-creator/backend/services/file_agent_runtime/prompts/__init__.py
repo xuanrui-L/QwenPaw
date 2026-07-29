@@ -69,7 +69,7 @@ FILE_AGENT_PROMPT_SPECS = {
         _spec(
             "ai_editing_director.system",
             "ai_editing_director.system.txt",
-            "4ed7950e9854c29765990df37a8109295094c5ed51752283a3f74ead6521ebae",
+            "b26b7e2d589fa4de98a8f0e75cf40123c95617ccd7c72a449ba4f0ab45134162",
             "project_id",
             "workspace_schema",
             "content_type",
