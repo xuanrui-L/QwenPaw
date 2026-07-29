@@ -17,6 +17,7 @@ export interface AppCardData {
   description: string;
   category: string;
   icon: string;
+  icon_url?: string;
   entry_page: string;
   launch_scope?: string;
   status: string;
@@ -32,12 +33,17 @@ interface AppCardProps {
 export const AppCard: FC<AppCardProps> = ({ app, onClick, onUninstall }) => {
   const { t } = useTranslation();
   const [iconFailed, setIconFailed] = useState(false);
-  // Icon is either an emoji glyph or an image reference. plugin.json is
-  // developer-controlled, but reject script-like schemes anyway and fall
-  // back to the default glyph when the image cannot load (e.g. the plugin
-  // was installed without a built ui/dist).
-  const isImageIcon =
-    /^(https?:\/\/|\/|data:image\/)/.test(app.icon) && !iconFailed;
+  // icon_url points to an image while icon stays an emoji glyph so older
+  // hosts keep a sensible fallback. plugin.json is developer-controlled,
+  // but reject script-like schemes anyway and fall back to the emoji or
+  // the default glyph when the image cannot load (e.g. the plugin was
+  // installed without a built ui/dist).
+  const imageRef = /^(https?:\/\/|\/|data:image\/)/;
+  const iconSrc = [app.icon_url ?? "", app.icon].find((ref) =>
+    imageRef.test(ref),
+  );
+  const isImageIcon = !!iconSrc && !iconFailed;
+  const emojiIcon = imageRef.test(app.icon) ? "" : app.icon;
   return (
     <Card className={styles.appCardLarge} onClick={() => onClick(app)}>
       {onUninstall && (
@@ -59,17 +65,15 @@ export const AppCard: FC<AppCardProps> = ({ app, onClick, onUninstall }) => {
           isImageIcon ? styles.appCardIconImage : ""
         }`}
       >
-        {app.icon && !iconFailed ? (
-          isImageIcon ? (
-            <img
-              src={app.icon}
-              alt=""
-              className={styles.appIconImageLarge}
-              onError={() => setIconFailed(true)}
-            />
-          ) : (
-            <span className={styles.appEmojiLarge}>{app.icon}</span>
-          )
+        {isImageIcon ? (
+          <img
+            src={iconSrc}
+            alt=""
+            className={styles.appIconImageLarge}
+            onError={() => setIconFailed(true)}
+          />
+        ) : emojiIcon ? (
+          <span className={styles.appEmojiLarge}>{emojiIcon}</span>
         ) : (
           <AppWindow size={48} strokeWidth={1.5} />
         )}
