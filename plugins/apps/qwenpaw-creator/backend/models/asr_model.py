@@ -10,6 +10,7 @@ import json
 import mimetypes
 import subprocess
 import tempfile
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -328,18 +329,17 @@ async def _fun_asr(media_url: str) -> ASRResult:
                 )
             segments = _sentences(result_payload)
             result = ASRResult("dashscope", model, segments)
+            len_segments = len(segments)
             logger.info(
                 "Fun-ASR completed: %d segments from model=%s",
-                len(segments),
+                len_segments,
                 model,
             )
-            for seg in segments:
-                logger.debug(
-                    "  [%d-%d] %s",
-                    seg.start_ms,
-                    seg.end_ms,
-                    seg.text,
-                )
+            if logger.isEnabledFor(logging.DEBUG):
+                for idx, seg in enumerate(segments):
+                    logger.debug(
+                        f"seg {idx+1}/{len_segments}: [{seg.start_ms-seg.end_ms}] {seg.text}",
+                    )
             return result
 
 
@@ -453,18 +453,17 @@ async def _whisper(media_url: str) -> ASRResult:
                     if text and end > start:
                         normalized.append(ASRSegment(start, end, text))
     result = ASRResult("openai", model, tuple(normalized))
+    len_normalized = len(normalized)
     logger.info(
         "Whisper completed: %d segments from model=%s",
-        len(normalized),
+        len_normalized,
         model,
     )
-    for seg in normalized:
-        logger.debug(
-            "  [%d-%d] %s",
-            seg.start_ms,
-            seg.end_ms,
-            seg.text,
-        )
+    if logger.isEnabledFor(logging.DEBUG):
+        for idx, seg in enumerate(normalized):
+            logger.debug(
+                f"seg {idx+1}/{len_normalized}: [{seg.start_ms-seg.end_ms}] {seg.text}",
+            )
     return result
 
 
