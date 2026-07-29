@@ -4,6 +4,7 @@
 import { Card, Tag, Typography, Tooltip } from "antd";
 import { AppWindow, Trash2 } from "lucide-react";
 import type { FC } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import styles from "./index.module.less";
 
@@ -30,8 +31,13 @@ interface AppCardProps {
 
 export const AppCard: FC<AppCardProps> = ({ app, onClick, onUninstall }) => {
   const { t } = useTranslation();
-  // Icon is either an emoji glyph or an image URL / path / data URI.
-  const isImageIcon = /^(https?:\/\/|\/|data:)/.test(app.icon);
+  const [iconFailed, setIconFailed] = useState(false);
+  // Icon is either an emoji glyph or an image reference. plugin.json is
+  // developer-controlled, but reject script-like schemes anyway and fall
+  // back to the default glyph when the image cannot load (e.g. the plugin
+  // was installed without a built ui/dist).
+  const isImageIcon =
+    /^(https?:\/\/|\/|data:image\/)/.test(app.icon) && !iconFailed;
   return (
     <Card className={styles.appCardLarge} onClick={() => onClick(app)}>
       {onUninstall && (
@@ -53,9 +59,14 @@ export const AppCard: FC<AppCardProps> = ({ app, onClick, onUninstall }) => {
           isImageIcon ? styles.appCardIconImage : ""
         }`}
       >
-        {app.icon ? (
+        {app.icon && !iconFailed ? (
           isImageIcon ? (
-            <img src={app.icon} alt="" className={styles.appIconImageLarge} />
+            <img
+              src={app.icon}
+              alt=""
+              className={styles.appIconImageLarge}
+              onError={() => setIconFailed(true)}
+            />
           ) : (
             <span className={styles.appEmojiLarge}>{app.icon}</span>
           )
