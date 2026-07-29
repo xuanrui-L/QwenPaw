@@ -2047,9 +2047,9 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
           onClick={() => setOpen(true)}
           data-agent-dock-handle
           data-state={liveStatus.state}
-          className={`fixed right-0 top-1/2 z-40 flex ${
+          className={`fixed right-0 top-15 z-40 flex ${
             decisionCount > 0 ? "h-[96px]" : "h-[76px]"
-          } w-7 -translate-y-1/2 flex-col items-center justify-center rounded-l-xl border border-r-0 border-[var(--color-border)] bg-[var(--color-bg-card)]/92 text-[var(--color-text-tertiary)] shadow-lg backdrop-blur-xl transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]`}
+          } w-7 flex-col items-center justify-center rounded-l-xl border border-r-0 border-[var(--color-border)] bg-[var(--color-bg-card)]/92 text-[var(--color-text-tertiary)] shadow-lg backdrop-blur-xl transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]`}
           aria-label="打开 Agent"
           title={
             decisionCount > 0
