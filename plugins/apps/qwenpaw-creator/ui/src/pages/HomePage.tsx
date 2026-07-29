@@ -1,10 +1,19 @@
 import { useEffect, useState, useCallback, memo } from "react";
-import { Modal, message } from "antd";
-import { Film, ArrowUp, ArrowDown, CircleHelp } from "lucide-react";
+import { Dropdown, Modal, message } from "antd";
+import {
+  Film,
+  ArrowUp,
+  ArrowDown,
+  CircleHelp,
+  FileOutput,
+  Trash2,
+} from "lucide-react";
 import logoMarkUrl from "@/assets/design/logo-mark.png";
 import tabCreateIcon from "@/assets/design/icon-tab-create.svg";
 import tabProjectsIcon from "@/assets/design/icon-tab-projects.svg";
 import previewEyeIcon from "@/assets/design/icon-eye-preview.svg";
+import importProjectIcon from "@/assets/design/icon-import-project.svg";
+import cardMoreIcon from "@/assets/design/icon-card-more.svg";
 import type { ModelConfigData, ProjectSummary } from "@/contracts/creator";
 import {
   deleteProject,
@@ -30,12 +39,17 @@ import HeroTitle from "@/components/creator/HeroTitle";
 import InspirationExamples from "@/components/creator/InspirationExamples";
 import { HomeTour } from "@/components/onboarding";
 import { useOnboardingStore } from "@/store/onboardingStore";
+import {
+  ProjectImporter,
+  saveExportFile,
+} from "@/components/creator/ProjectImportExport";
 
 interface ProjectCardProps {
   project: ProjectSummary;
   onOpen: (id: string) => void;
   onDelete: (project: ProjectSummary) => void;
   onPreview: (project: ProjectSummary) => void;
+  onExport: (project: ProjectSummary) => void;
   formatDate: (dateStr: string) => string;
 }
 
@@ -45,6 +59,7 @@ const ProjectCard = memo(function ProjectCard({
   onOpen,
   onDelete,
   onPreview,
+  onExport,
   formatDate,
 }: ProjectCardProps) {
   var projectScenarioLabel = "未设置";
@@ -64,7 +79,15 @@ const ProjectCard = memo(function ProjectCard({
     project.scenario === "video_edit" && Boolean(project.contentType);
   const canPreview = Boolean(project.finalVideoVersionId);
   return (
-    <div className="group relative flex w-full flex-col gap-5 overflow-hidden rounded-lg border border-[#EAE9E7] bg-white p-4 transition-shadow hover:border-[#EFEDE5] hover:shadow-[0_4px_6px_rgba(0,0,0,0.08)]">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(project.projectId)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onOpen(project.projectId);
+      }}
+      className="group relative flex w-full cursor-pointer flex-col gap-5 overflow-hidden rounded-lg border border-[#EAE9E7] bg-white p-4 transition-colors hover:bg-[rgba(243,243,242,0.3)]"
+    >
       <div className="flex flex-col gap-3">
         <div className="flex items-center gap-1">
           <h3 className="min-w-0 flex-1 truncate text-sm font-medium leading-6 text-[var(--color-text-primary)]">
@@ -73,7 +96,10 @@ const ProjectCard = memo(function ProjectCard({
           {canPreview && (
             <button
               type="button"
-              onClick={() => onPreview(project)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPreview(project);
+              }}
               aria-label={`预览 ${project.name} 成片`}
               className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded bg-white px-2 text-sm font-medium leading-6 text-[#353332] transition-colors hover:text-[var(--color-accent)]"
             >
@@ -108,26 +134,47 @@ const ProjectCard = memo(function ProjectCard({
           </div>
         </div>
         <span
-          className="shrink-0 text-[var(--color-text-tertiary)]"
+          className="shrink-0 text-[var(--color-text-tertiary)] group-hover:hidden"
           title={`创建于 ${formatDate(project.createdAt)}`}
         >
           {formatDate(project.updatedAt)}
         </span>
-      </div>
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 flex translate-y-full gap-2 bg-white p-4 opacity-0 transition-all group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100">
-        <button
-          onClick={() => onOpen(project.projectId)}
-          className="flex-1 cursor-pointer rounded-md border border-[#EAE9E7] bg-white px-3 py-1 text-sm font-medium leading-6 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+        {/* Hovering swaps the timestamp for the actions menu, per the draft. */}
+        <Dropdown
+          trigger={["click"]}
+          menu={{
+            items: [
+              {
+                key: "export",
+                label: "导出项目",
+                icon: <FileOutput className="h-3.5 w-3.5" />,
+                onClick: ({ domEvent }) => {
+                  domEvent.stopPropagation();
+                  onExport(project);
+                },
+              },
+              {
+                key: "delete",
+                label: `删除 ${project.name}`,
+                danger: true,
+                icon: <Trash2 className="h-3.5 w-3.5" />,
+                onClick: ({ domEvent }) => {
+                  domEvent.stopPropagation();
+                  onDelete(project);
+                },
+              },
+            ],
+          }}
         >
-          打开
-        </button>
-        <button
-          onClick={() => onDelete(project)}
-          aria-label={`删除 ${project.name}`}
-          className="flex-1 cursor-pointer rounded-md bg-[var(--color-danger-soft)] px-3 py-1 text-sm font-medium leading-6 text-[var(--color-danger)] transition-opacity hover:opacity-80"
-        >
-          删除
-        </button>
+          <button
+            type="button"
+            aria-label={`${project.name} 更多操作`}
+            onClick={(e) => e.stopPropagation()}
+            className="hidden h-[18px] w-[18px] shrink-0 cursor-pointer items-center justify-center text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] group-hover:flex"
+          >
+            <MaskIcon src={cardMoreIcon} size={18} />
+          </button>
+        </Dropdown>
       </div>
     </div>
   );
@@ -156,6 +203,7 @@ export default function HomePage() {
   const [previewProject, setPreviewProject] = useState<ProjectSummary | null>(
     null,
   );
+  const [importerOpen, setImporterOpen] = useState(false);
   const [sortBy, setSortBy] = useState<SortField>("updated_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const requestHomeTour = useOnboardingStore((state) => state.requestHomeTour);
@@ -223,6 +271,29 @@ export default function HomePage() {
     },
     [fetchProjects],
   );
+
+  const handleExport = useCallback(async (project: ProjectSummary) => {
+    const key = `export-${project.projectId}`;
+    message.loading({
+      content: `正在导出「${project.name}」…`,
+      key,
+      duration: 0,
+    });
+    try {
+      await saveExportFile(project.projectId);
+      message.success({
+        content: `「${project.name}」导出完成`,
+        key,
+        duration: 5,
+      });
+    } catch (err) {
+      message.error({
+        content: err instanceof Error ? err.message : "导出失败",
+        key,
+        duration: 10,
+      });
+    }
+  }, []);
 
   const handleSortChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -397,6 +468,14 @@ export default function HomePage() {
                     <ArrowDown className="h-4 w-4" />
                   )}
                 </button>
+                <button
+                  onClick={() => setImporterOpen(true)}
+                  data-onboarding-id="import-project"
+                  className="flex cursor-pointer items-center gap-2 rounded-md border border-[#EAE9E7] bg-white px-3 py-1 text-sm font-medium leading-6 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                >
+                  <MaskIcon src={importProjectIcon} size={20} />
+                  导入项目
+                </button>
               </div>
             </section>
 
@@ -433,6 +512,7 @@ export default function HomePage() {
                     onOpen={handleOpen}
                     onDelete={handleDelete}
                     onPreview={setPreviewProject}
+                    onExport={handleExport}
                     formatDate={formatDate}
                   />
                 ))}
@@ -482,6 +562,11 @@ export default function HomePage() {
           setConfigModalOpen(false);
           refreshModelConfig();
         }}
+      />
+      <ProjectImporter
+        open={importerOpen}
+        onClose={() => setImporterOpen(false)}
+        onImported={() => fetchProjects()}
       />
       <HomeTour />
     </div>

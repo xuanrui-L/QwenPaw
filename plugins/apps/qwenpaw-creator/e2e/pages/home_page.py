@@ -33,9 +33,9 @@ class HomePage:
         return self
 
     def project_cards(self) -> Locator:
-        return self.page.locator("main .surface.surface-hover").filter(
-            has=self.page.get_by_role("button", name="打开", exact=True),
-        )
+        return self.page.locator(
+            '[data-onboarding-id="project-list"] > div',
+        ).filter(has=self.page.locator("h3"))
 
     def project_card(self, name: str) -> Locator:
         return self.project_cards().filter(has_text=name)

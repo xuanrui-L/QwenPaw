@@ -122,6 +122,107 @@
         ]
       },
       {
+        "name": "creator_web_grounding",
+        "description": "QwenPaw Creator web and image grounding configuration",
+        "icon": "🌐",
+        "requires_config": false,
+        "config_fields": [
+          {
+            "name": "enabled",
+            "label": "Grounding Enabled",
+            "type": "select",
+            "required": false,
+            "default": "true",
+            "options": ["true", "false"]
+          },
+          {
+            "name": "tavily_api_key",
+            "label": "Tavily API Key",
+            "type": "password",
+            "required": false,
+            "placeholder": "tvly-...",
+            "help": "Optional primary text and image retrieval provider."
+          },
+          {
+            "name": "native_search_enabled",
+            "label": "Qwen Native Search Fallback",
+            "type": "select",
+            "required": false,
+            "default": "true",
+            "options": ["true", "false"],
+            "help": "Uses DashScope Responses web_search/web_search_image only when the selected search adapter is compatible."
+          },
+          {
+            "name": "search_reuse_llm",
+            "label": "Reuse Creator LLM for Search",
+            "type": "select",
+            "required": false,
+            "default": "true",
+            "options": ["true", "false"]
+          },
+          {
+            "name": "search_api_key",
+            "label": "Qwen Search API Key",
+            "type": "password",
+            "required": false,
+            "help": "Used only when search_reuse_llm is false."
+          },
+          {
+            "name": "search_model",
+            "label": "Qwen Search Model",
+            "type": "text",
+            "required": false,
+            "help": "Used only when search_reuse_llm is false."
+          },
+          {
+            "name": "search_base_url",
+            "label": "Qwen Search Base URL",
+            "type": "text",
+            "required": false,
+            "help": "Used only when search_reuse_llm is false."
+          },
+          {
+            "name": "validation_source",
+            "label": "Validation Model Source",
+            "type": "select",
+            "required": false,
+            "default": "llm",
+            "options": ["llm", "vlm", "custom"],
+            "help": "Which model verifies grounded images: the Creator LLM, the Creator VLM, or the custom model below. Overrides the legacy reuse_llm switch."
+          },
+          {
+            "name": "reuse_llm",
+            "label": "Reuse Creator LLM for Validation",
+            "type": "select",
+            "required": false,
+            "default": "true",
+            "options": ["true", "false"],
+            "help": "Legacy switch; ignored when validation_source is set."
+          },
+          {
+            "name": "api_key",
+            "label": "Grounding LLM API Key",
+            "type": "password",
+            "required": false,
+            "help": "Used only when reuse_llm is false. Must support image input for visual verification."
+          },
+          {
+            "name": "model",
+            "label": "Grounding LLM Model",
+            "type": "text",
+            "required": false,
+            "help": "Used only when reuse_llm is false."
+          },
+          {
+            "name": "base_url",
+            "label": "Grounding LLM Base URL",
+            "type": "text",
+            "required": false,
+            "help": "Used only when reuse_llm is false."
+          }
+        ]
+      },
+      {
         "name": "creator_image_model",
         "description": "QwenPaw Creator image generation/editing configuration",
         "icon": "🎨",

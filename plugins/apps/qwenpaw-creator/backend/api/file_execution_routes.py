@@ -56,7 +56,12 @@ _TIMELINE_RENDER_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
 
 
 async def drain_timeline_render_jobs(timeout_seconds: float = 15.0) -> None:
-    """Cancel and await outstanding render tasks during plugin shutdown."""
+    """Cancel render coroutines and wait for real completion at shutdown.
+
+    Cancellation only interrupts the async portions; a worker inside a
+    ``to_thread``/subprocess segment finishes that segment first. Entries
+    whose tasks are still running after the timeout stay registered.
+    """
 
     pending = [
         task for _, task in _TIMELINE_RENDER_JOBS.values() if not task.done()
@@ -65,8 +70,12 @@ async def drain_timeline_render_jobs(timeout_seconds: float = 15.0) -> None:
         task.cancel()
     if pending:
         await asyncio.wait(pending, timeout=timeout_seconds)
-    _TIMELINE_RENDER_JOBS.clear()
-    _TIMELINE_RENDER_LOCKS.clear()
+    for identity, (_, task) in list(_TIMELINE_RENDER_JOBS.items()):
+        if task.done():
+            _TIMELINE_RENDER_JOBS.pop(identity, None)
+    for identity, lock in list(_TIMELINE_RENDER_LOCKS.items()):
+        if identity not in _TIMELINE_RENDER_JOBS and not lock.locked():
+            _TIMELINE_RENDER_LOCKS.pop(identity, None)
 
 
 class TaskCancelRequest(StrictModel):

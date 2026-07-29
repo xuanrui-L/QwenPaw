@@ -35,8 +35,12 @@ from models.config import (
     get_execution_authorization_mode,
     get_text_model_name,
     get_vlm_model_name,
+    get_web_grounding_enabled,
+    get_web_grounding_image_download_timeout_seconds,
     get_web_grounding_max_sources,
     get_web_grounding_timeout_seconds,
+    get_web_grounding_verification_timeout_seconds,
+    get_web_grounding_visual_search_timeout_seconds,
     get_image_model_name,
     get_video_backend,
     get_video_model_name,
@@ -45,6 +49,7 @@ from models.media_transport import validate_reference_image_bytes
 from services.project_files.agent_tools import (
     AgentProjectToolContext,
     AgentProjectTools,
+    JQ_PROJECT_TOOL_NAME,
     agent_project_tool_manifest,
 )
 from services.project_files.commit import ProjectCommitBoundary
@@ -94,8 +99,13 @@ from .model_client import (
     AgentModelTurn,
     AgentScopeAgentChatClient,
     AgentScopeVlmChatClient,
+    AgentToolCall,
 )
-from .models import AgentRunStatus, CreatorAgentRunRecord
+from .models import (
+    AgentRunStatus,
+    CreatorAgentRunRecord,
+    TERMINAL_AGENT_RUN_STATUSES,
+)
 from .native_media import source_intelligence_content_parts
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
@@ -108,6 +118,7 @@ from .subagents import (
 
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
+MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 
 
 def _grounding_stable_id(prefix: str, project_id: str, identity: str) -> str:
@@ -207,8 +218,275 @@ def _ground_prompt_context_tool_manifest() -> dict[str, Any]:
     }
 
 
+def _creator_agent_tool_manifest() -> list[dict[str, Any]]:
+    manifest = [*agent_project_tool_manifest()]
+    if get_web_grounding_enabled():
+        manifest.append(_ground_prompt_context_tool_manifest())
+    manifest.append(delegate_tool_manifest())
+    return manifest
+
+
+_TERMINAL_GOAL_STATUSES = frozenset(
+    {
+        CreatorGoalStatus.COMPLETED,
+        CreatorGoalStatus.CANCELLED,
+        CreatorGoalStatus.FAILED,
+    },
+)
+
+
 class FileAgentRuntimeError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class _JqProjectArgumentDiagnosis:
+    missing_top_level: tuple[str, ...]
+    invalid_top_level: tuple[str, ...]
+    unexpected_top_level: tuple[str, ...]
+    nested_required_paths: tuple[str, ...]
+    nested_scan_truncated: bool
+    raw_arguments_bytes: int
+    strict_json_parsed: bool
+    json_repair_applied: bool
+    strict_json_error: str | None
+    fingerprint: str
+
+    @property
+    def schema_valid(self) -> bool:
+        return not (
+            self.missing_top_level
+            or self.invalid_top_level
+            or self.unexpected_top_level
+        )
+
+    @property
+    def safe_to_execute(self) -> bool:
+        """Whether jq may run on these arguments.
+
+        jq_project mutates the Project, so a payload that only became a
+        JSON object through ``json_repair`` (typically a truncated stream
+        closed by the repairer) is never executed: the top-level shape may
+        look complete while string/JSON argument values silently lost their
+        tails. Read-only tools keep accepting repaired payloads.
+        """
+
+        return self.schema_valid and not self.json_repair_applied
+
+    def event_payload(self) -> dict[str, Any]:
+        return {
+            "rawArgumentsBytes": self.raw_arguments_bytes,
+            "strictJsonParsed": self.strict_json_parsed,
+            "jsonRepairApplied": self.json_repair_applied,
+            "strictJsonError": self.strict_json_error,
+            "schemaValid": self.schema_valid,
+            "safeToExecute": self.safe_to_execute,
+            "missingTopLevel": list(self.missing_top_level),
+            "invalidTopLevel": list(self.invalid_top_level),
+            "unexpectedTopLevel": list(self.unexpected_top_level),
+            "nestedRequiredPaths": list(self.nested_required_paths),
+            "nestedScanTruncated": self.nested_scan_truncated,
+            "fingerprint": self.fingerprint,
+        }
+
+
+# Shared call-shape guidance for jq_project argument failures. Composed by
+# both ``MalformedJqProjectArguments.tool_result`` and
+# ``_specialist_tool_recovery`` so the two recovery texts cannot drift when
+# the tool surface changes.
+_JQ_PROJECT_CALL_SHAPE_RECOVERY = (
+    "Issue a new jq_project call with projectId and program at the top "
+    "level; the Runtime selects the base snapshot itself. Keep program "
+    "small and put structured values in jsonArgs. Split bulk work into "
+    "separate commits for strategy/settings, visual entities, and "
+    "timeline elements, re-reading project.json between commits."
+)
+
+
+class MalformedJqProjectArguments(FileAgentRuntimeError):
+    """A jq_project call whose decoded object is unsafe to execute."""
+
+    def __init__(
+        self,
+        diagnosis: _JqProjectArgumentDiagnosis,
+        *,
+        attempt: int,
+        repeated_payload: bool,
+    ) -> None:
+        self.diagnosis = diagnosis
+        self.attempt = attempt
+        self.repeated_payload = repeated_payload
+        self.retries_remaining = max(
+            0,
+            MAX_MALFORMED_JQ_PROJECT_RETRIES - attempt + 1,
+        )
+        details: list[str] = []
+        if diagnosis.missing_top_level:
+            details.append(
+                "missing top-level " + ", ".join(diagnosis.missing_top_level),
+            )
+        if diagnosis.invalid_top_level:
+            details.append(
+                "invalid top-level " + ", ".join(diagnosis.invalid_top_level),
+            )
+        if diagnosis.unexpected_top_level:
+            details.append(
+                "unexpected top-level "
+                + ", ".join(diagnosis.unexpected_top_level),
+            )
+        if diagnosis.json_repair_applied:
+            details.append(
+                "arguments only parsed after json_repair"
+                + (
+                    f" ({diagnosis.strict_json_error})"
+                    if diagnosis.strict_json_error
+                    else ""
+                ),
+            )
+        message = "jq_project arguments are structurally corrupted; jq was not executed"
+        if details:
+            message += ": " + "; ".join(details)
+        super().__init__(message)
+
+    def tool_result(self) -> dict[str, Any]:
+        recovery = (
+            "Do not reuse or auto-hoist any nested field from this "
+            "corrupted payload. Call read_project to refresh your "
+            "snapshot. " + _JQ_PROJECT_CALL_SHAPE_RECOVERY
+        )
+        if self.diagnosis.json_repair_applied:
+            strict_error = self.diagnosis.strict_json_error or ""
+            if "Extra data" in strict_error:
+                # The model emitted a complete object and kept writing:
+                # it closed jsonArgs and the root brace too early, then
+                # streamed the remaining entries as orphan text. "Send
+                # smaller batches" alone does not break this loop — name
+                # the exact mistake and force one entry per call.
+                syntax_hint = (
+                    "Your previous arguments closed the top-level JSON "
+                    f"object too early ({strict_error}) and kept "
+                    "emitting content after the closing brace. "
+                )
+            else:
+                syntax_hint = (
+                    "Your previous arguments only became a JSON object "
+                    "after automatic repair"
+                    + (f" ({strict_error})" if strict_error else "")
+                    + "; the stream was likely cut off before the "
+                    "payload was complete. "
+                )
+            recovery = (
+                syntax_hint
+                + "Re-send the work as one jq_project call per timeline "
+                "element or settings change, keeping every payload well "
+                "under the size that failed. " + recovery
+            )
+        if self.repeated_payload:
+            recovery = (
+                "The same malformed payload was repeated. Do not resend it. "
+                + recovery
+            )
+        return {
+            "ok": False,
+            "error": {
+                "type": type(self).__name__,
+                "message": str(self),
+                "details": self.diagnosis.event_payload(),
+                "retry": {
+                    "attempt": self.attempt,
+                    "retriesRemaining": self.retries_remaining,
+                    "samePayload": self.repeated_payload,
+                },
+                "recovery": recovery,
+            },
+        }
+
+
+def _nested_required_key_paths(
+    value: Any,
+    required_keys: set[str],
+) -> tuple[tuple[str, ...], bool]:
+    """Find misplaced required jq keys without trusting or moving them.
+
+    Also reports whether the scan was cut short by the node/depth/result
+    budget, so an exhausted traversal is surfaced as partial instead of
+    silently looking like a complete diagnosis.
+    """
+
+    found: list[str] = []
+    remaining_nodes = 4_096
+    truncated = False
+
+    def visit(current: Any, path: str, depth: int) -> None:
+        nonlocal remaining_nodes, truncated
+        if remaining_nodes <= 0 or depth > 16 or len(found) >= 12:
+            if isinstance(current, (Mapping, list)) and current:
+                truncated = True
+            return
+        remaining_nodes -= 1
+        if isinstance(current, Mapping):
+            for key, child in current.items():
+                child_path = f"{path}.{key}"
+                if depth > 0 and key in required_keys:
+                    found.append(child_path)
+                    if len(found) >= 12:
+                        truncated = True
+                        return
+                visit(child, child_path, depth + 1)
+        elif isinstance(current, list):
+            for index, child in enumerate(current):
+                visit(child, f"{path}[{index}]", depth + 1)
+
+    visit(value, "$", 0)
+    return tuple(found), truncated
+
+
+def _jq_project_argument_diagnosis(
+    call: AgentToolCall,
+) -> _JqProjectArgumentDiagnosis:
+    arguments = call.arguments
+    required = {"projectId", "program"}
+    # ``baseEtag`` is deprecated on the model surface but still tolerated so
+    # an older prompt/history echo is never misdiagnosed as corruption.
+    allowed = required | {"baseEtag", "stringArgs", "jsonArgs"}
+    missing = tuple(sorted(required - arguments.keys()))
+    invalid: list[str] = []
+    for key in sorted(required & arguments.keys()):
+        if not isinstance(arguments[key], str) or not arguments[key].strip():
+            invalid.append(key)
+    for key in ("stringArgs", "jsonArgs"):
+        if key in arguments and not isinstance(arguments[key], Mapping):
+            invalid.append(key)
+    if isinstance(arguments.get("stringArgs"), Mapping) and any(
+        not isinstance(value, str)
+        for value in arguments["stringArgs"].values()
+    ):
+        invalid.append("stringArgs")
+    unexpected = tuple(sorted(set(arguments) - allowed))
+    encoded = json.dumps(
+        arguments,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    fingerprint = hashlib.sha256(encoded).hexdigest()[:16]
+    nested_paths, nested_truncated = _nested_required_key_paths(
+        arguments,
+        set(missing),
+    )
+    return _JqProjectArgumentDiagnosis(
+        missing_top_level=missing,
+        invalid_top_level=tuple(sorted(set(invalid))),
+        unexpected_top_level=unexpected,
+        nested_required_paths=nested_paths,
+        nested_scan_truncated=nested_truncated,
+        raw_arguments_bytes=call.raw_arguments_bytes or len(encoded),
+        strict_json_parsed=not call.arguments_repaired,
+        json_repair_applied=call.arguments_repaired,
+        strict_json_error=call.strict_json_error,
+        fingerprint=fingerprint,
+    )
 
 
 class ToolArgumentsJSONError(FileAgentRuntimeError):
@@ -456,6 +734,102 @@ class FileCreatorAgentRuntime:
         except asyncio.CancelledError:
             return
 
+    # How long a QUEUED run may sit without progress before reconcile may
+    # treat it as an orphan. Long enough that an in-flight admission in
+    # another process (created QUEUED, not yet transitioned to RUNNING) is
+    # never mistaken for one.
+    _ORPHAN_RUN_GRACE_SECONDS = 60.0
+
+    async def _reclaim_orphaned_run(
+        self,
+        project_id: str,
+        session: Any,
+    ) -> Any | None:
+        """Release a Session whose active run can never make progress.
+
+        Two crash shapes leave a dangling ``active_run_id`` behind:
+        a run that already reached a terminal status while the Session
+        pointer survived the crash between the two writes, and a QUEUED
+        run bound to a terminal Goal (the pre-fix admission path allowed
+        this), which no dispatcher will ever start. Both permanently
+        wedge the Session: admission rejects every new message with
+        "Active Goal is terminal" and reconcile treats the pointer as a
+        foreign-process lease. Anything else — a QUEUED run inside the
+        grace window or a RUNNING run — may legitimately belong to
+        another process sharing this Runtime root and stays untouched.
+
+        Returns the released Session, or ``None`` when nothing was
+        reclaimed.
+        """
+
+        try:
+            run = await asyncio.to_thread(
+                self.runs.get,
+                project_id,
+                session.active_run_id,
+            )
+        except Exception:
+            return None
+        if run.status is AgentRunStatus.QUEUED:
+            if not await self._cancel_queued_orphan(project_id, run):
+                return None
+        elif run.status not in TERMINAL_AGENT_RUN_STATUSES:
+            return None
+        try:
+            return await asyncio.to_thread(
+                self.sessions.clear_active_run,
+                project_id,
+                session.session_id,
+                expected_run_id=run.run_id,
+                status=CreatorSessionStatus.IDLE,
+            )
+        except SessionStateConflict:
+            return None
+
+    async def _cancel_queued_orphan(
+        self,
+        project_id: str,
+        run: CreatorAgentRunRecord,
+    ) -> bool:
+        """Cancel a QUEUED run that is provably unstartable, or decline."""
+
+        age = (datetime.now(UTC) - run.updated_at).total_seconds()
+        if age < self._ORPHAN_RUN_GRACE_SECONDS:
+            return False
+        try:
+            goal = await asyncio.to_thread(
+                self.sessions.get_goal,
+                project_id,
+                run.goal_id,
+            )
+        except RuntimeGoalNotFound:
+            return False
+        if goal.status not in _TERMINAL_GOAL_STATUSES:
+            return False
+        try:
+            await asyncio.to_thread(
+                self.runs.transition,
+                project_id,
+                run.run_id,
+                expected_status=AgentRunStatus.QUEUED,
+                status=AgentRunStatus.CANCELLED,
+                updates={
+                    "error": {
+                        "code": "ORPHANED_ON_TERMINAL_GOAL",
+                        "message": (
+                            "run was queued against a terminal Goal "
+                            f"({goal.status.value}) and could never "
+                            "start; reconciled automatically"
+                        ),
+                    },
+                },
+            )
+        except AgentRunStateConflict:
+            # Another process moved the run first; re-evaluate on the
+            # next poll instead of guessing.
+            return False
+        return True
+
     async def _reconcile_project(self, project_id: str) -> None:
         handle = self._active.get(project_id)
         if handle is not None and handle.task.done():
@@ -502,15 +876,22 @@ class FileCreatorAgentRuntime:
                 == session.active_run_id
                 for item in user_messages
             )
-            if not interrupted:
-                return
-            session = await asyncio.to_thread(
-                self.sessions.clear_active_run,
-                project_id,
-                session.session_id,
-                expected_run_id=session.active_run_id,
-                status=CreatorSessionStatus.RESUMING,
-            )
+            if interrupted:
+                session = await asyncio.to_thread(
+                    self.sessions.clear_active_run,
+                    project_id,
+                    session.session_id,
+                    expected_run_id=session.active_run_id,
+                    status=CreatorSessionStatus.RESUMING,
+                )
+            else:
+                reclaimed = await self._reclaim_orphaned_run(
+                    project_id,
+                    session,
+                )
+                if reclaimed is None:
+                    return
+                session = reclaimed
 
         if handle is not None:
             if any(
@@ -835,11 +1216,7 @@ class FileCreatorAgentRuntime:
         request: CreatorMessageRecord,
         tools: AgentProjectTools,
     ) -> _LoopResult:
-        tool_manifest = [
-            *agent_project_tool_manifest(),
-            _ground_prompt_context_tool_manifest(),
-            delegate_tool_manifest(),
-        ]
+        tool_manifest = _creator_agent_tool_manifest()
         conversation_records = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -868,6 +1245,8 @@ class FileCreatorAgentRuntime:
         ]
         tool_call_count = 0
         review_ids: list[str] = []
+        malformed_jq_attempts = 0
+        malformed_jq_fingerprints: set[str] = set()
         for _turn_number in range(1, self.max_model_turns + 1):
             self._assert_epoch(project_id, run_id, epoch)
             assistant_message_id = f"message-{uuid4().hex}"
@@ -974,6 +1353,7 @@ class FileCreatorAgentRuntime:
             for call in turn.tool_calls:
                 tool_call_count += 1
                 tool_failed = False
+                malformed_budget_exhausted = False
                 self._assert_epoch(project_id, run_id, epoch)
                 await self._event(
                     project_id,
@@ -992,6 +1372,48 @@ class FileCreatorAgentRuntime:
                 try:
                     if call.parse_error is not None:
                         raise ToolArgumentsJSONError(call.parse_error)
+                    if call.name == JQ_PROJECT_TOOL_NAME:
+                        diagnosis = _jq_project_argument_diagnosis(call)
+                        next_attempt = (
+                            0
+                            if diagnosis.safe_to_execute
+                            else malformed_jq_attempts + 1
+                        )
+                        await self._event(
+                            project_id,
+                            session_id,
+                            "agent.tool_arguments_checked",
+                            run_id,
+                            request,
+                            {
+                                "runId": run_id,
+                                "actionId": call.call_id,
+                                "toolCallId": call.call_id,
+                                "tool": call.name,
+                                "messageId": assistant_message_id,
+                                "malformedAttempt": next_attempt,
+                                **diagnosis.event_payload(),
+                            },
+                        )
+                        if not diagnosis.safe_to_execute:
+                            malformed_jq_attempts = next_attempt
+                            repeated_payload = (
+                                diagnosis.fingerprint
+                                in malformed_jq_fingerprints
+                            )
+                            malformed_jq_fingerprints.add(
+                                diagnosis.fingerprint,
+                            )
+                            raise MalformedJqProjectArguments(
+                                diagnosis,
+                                attempt=malformed_jq_attempts,
+                                repeated_payload=repeated_payload,
+                            )
+                        # A structurally valid replacement resolves the current
+                        # malformed-payload incident. Normal jq/CAS failures
+                        # retain their existing recovery behavior.
+                        malformed_jq_attempts = 0
+                        malformed_jq_fingerprints.clear()
                     if (
                         call.name != DELEGATE_TOOL_NAME
                         and call.arguments.get("projectId") != project_id
@@ -1056,14 +1478,23 @@ class FileCreatorAgentRuntime:
                     raise
                 except Exception as exc:
                     tool_failed = True
-                    error_result = {
-                        "ok": False,
-                        "error": {
-                            "type": type(exc).__name__,
-                            "message": str(exc),
-                            "recovery": _specialist_tool_recovery(call.name),
-                        },
-                    }
+                    if isinstance(exc, MalformedJqProjectArguments):
+                        error_result = exc.tool_result()
+                        malformed_budget_exhausted = (
+                            exc.attempt > MAX_MALFORMED_JQ_PROJECT_RETRIES
+                        )
+                    else:
+                        error_result = {
+                            "ok": False,
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                                "recovery": _specialist_tool_recovery(
+                                    call.name,
+                                    str(exc),
+                                ),
+                            },
+                        }
                     await self._persist_tool_result(
                         project_id,
                         session_id,
@@ -1088,6 +1519,12 @@ class FileCreatorAgentRuntime:
                         "failed": tool_failed,
                     },
                 )
+                if malformed_budget_exhausted:
+                    raise AgentModelError(
+                        "jq_project produced structurally corrupted tool "
+                        "arguments after 2 bounded retries; the run stopped "
+                        "before jq execution",
+                    )
         raise AgentModelError(
             f"Creator Agent exceeded {self.max_model_turns} model turns",
         )
@@ -1159,6 +1596,15 @@ class FileCreatorAgentRuntime:
             detector=detector,
             max_sources=get_web_grounding_max_sources(),
             timeout=float(get_web_grounding_timeout_seconds()),
+            visual_search_timeout=float(
+                get_web_grounding_visual_search_timeout_seconds(),
+            ),
+            image_download_timeout=float(
+                get_web_grounding_image_download_timeout_seconds(),
+            ),
+            verification_timeout=float(
+                get_web_grounding_verification_timeout_seconds(),
+            ),
             include_visuals=include_visuals,
         )
         return await self._promote_grounding_visuals(
@@ -1573,6 +2019,8 @@ class FileCreatorAgentRuntime:
         )
         tool_call_count = 0
         review_ids: list[str] = []
+        malformed_jq_attempts = 0
+        malformed_jq_fingerprints: set[str] = set()
         try:
             for _turn_number in range(1, self.max_model_turns + 1):
                 self._assert_epoch(project_id, parent_run_id, epoch)
@@ -1786,13 +2234,6 @@ class FileCreatorAgentRuntime:
 
                 call = turn.tool_calls[0]
                 tool_call_count += 1
-                if (
-                    call.parse_error is None
-                    and call.arguments.get("projectId") != project_id
-                ):
-                    raise FileAgentRuntimeError(
-                        "specialist tool call attempted another Project",
-                    )
                 await self._event(
                     project_id,
                     session_id,
@@ -1807,9 +2248,52 @@ class FileCreatorAgentRuntime:
                     },
                 )
                 failed = False
+                malformed_budget_exhausted = False
                 try:
                     if call.parse_error is not None:
                         raise ToolArgumentsJSONError(call.parse_error)
+                    if call.name == JQ_PROJECT_TOOL_NAME:
+                        diagnosis = _jq_project_argument_diagnosis(call)
+                        next_attempt = (
+                            0
+                            if diagnosis.safe_to_execute
+                            else malformed_jq_attempts + 1
+                        )
+                        await self._event(
+                            project_id,
+                            session_id,
+                            "subagent.tool_arguments_checked",
+                            parent_run_id,
+                            request,
+                            {
+                                **common,
+                                "messageId": message_id,
+                                "toolCallId": call.call_id,
+                                "tool": call.name,
+                                "malformedAttempt": next_attempt,
+                                **diagnosis.event_payload(),
+                            },
+                        )
+                        if not diagnosis.safe_to_execute:
+                            malformed_jq_attempts = next_attempt
+                            repeated_payload = (
+                                diagnosis.fingerprint
+                                in malformed_jq_fingerprints
+                            )
+                            malformed_jq_fingerprints.add(
+                                diagnosis.fingerprint,
+                            )
+                            raise MalformedJqProjectArguments(
+                                diagnosis,
+                                attempt=malformed_jq_attempts,
+                                repeated_payload=repeated_payload,
+                            )
+                        malformed_jq_attempts = 0
+                        malformed_jq_fingerprints.clear()
+                    if call.arguments.get("projectId") != project_id:
+                        raise FileAgentRuntimeError(
+                            "specialist tool call attempted another Project",
+                        )
                     result = await self._invoke_specialist_tool(
                         project_id=project_id,
                         session_id=session_id,
@@ -1849,14 +2333,23 @@ class FileCreatorAgentRuntime:
                     raise
                 except Exception as exc:
                     failed = True
-                    result = {
-                        "ok": False,
-                        "error": {
-                            "type": type(exc).__name__,
-                            "message": str(exc),
-                            "recovery": _specialist_tool_recovery(call.name),
-                        },
-                    }
+                    if isinstance(exc, MalformedJqProjectArguments):
+                        result = exc.tool_result()
+                        malformed_budget_exhausted = (
+                            exc.attempt > MAX_MALFORMED_JQ_PROJECT_RETRIES
+                        )
+                    else:
+                        result = {
+                            "ok": False,
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                                "recovery": _specialist_tool_recovery(
+                                    call.name,
+                                    str(exc),
+                                ),
+                            },
+                        }
                 await asyncio.to_thread(
                     self.executions.append_specialist_message,
                     project_id,
@@ -1904,6 +2397,12 @@ class FileCreatorAgentRuntime:
                         "failed": failed,
                     },
                 )
+                if malformed_budget_exhausted:
+                    raise AgentModelError(
+                        "jq_project produced structurally corrupted tool "
+                        "arguments after 2 bounded retries; the specialist "
+                        "stopped before jq execution",
+                    )
             raise AgentModelError(
                 f"{role_name} exceeded {self.max_model_turns} model turns",
             )
@@ -2452,13 +2951,26 @@ class FileCreatorAgentRuntime:
     ):
         if session.active_goal_id is not None:
             try:
-                return await asyncio.to_thread(
+                goal = await asyncio.to_thread(
                     self.sessions.get_goal,
                     message.project_id,
                     session.active_goal_id,
                 )
             except RuntimeGoalNotFound:
-                pass
+                goal = None
+            # A COMPLETED Goal is finished work and can never own a new
+            # run: binding one deadlocks the Session, because admission
+            # rejects every later message with "Active Goal is terminal"
+            # while the dispatcher treats the queued run as a foreign
+            # lease. A resume request after completion starts a fresh
+            # Goal instead. CANCELLED/FAILED goals stay reusable — an
+            # AgentDock interrupt deliberately resumes its cancelled
+            # mainline under the same Goal identity.
+            if (
+                goal is not None
+                and goal.status is not CreatorGoalStatus.COMPLETED
+            ):
+                return goal
         return await asyncio.to_thread(
             self.sessions.create_goal,
             message.project_id,
@@ -2537,14 +3049,18 @@ class FileCreatorAgentRuntime:
             if mainline_request is not None
             else ""
         )
+        # Never assert that the intervention is resolved: when the branch
+        # run ended by asking the user a question, claiming “已处理完成”
+        # makes the model abandon its own open question and resume work.
         text = (
-            "【系统自动消息 · 主线恢复】用户提出的修改意见（支线任务）已处理完成。"
-            "请回顾本会话的历史上下文，找到此前被中断的主线任务，并从中断处继续"
-            "执行主线工作，直到主线目标完成。\n"
-            "注意：\n"
-            "1. 不要重复已经完成的步骤；\n"
-            "2. 本消息不是新的修改意见，只是提醒你继续之前的主线；\n"
-            "3. 如果主线任务实际上已全部完成，请直接确认完成状态，不要进行任何新的修改。"
+            "【系统自动消息 · 主线恢复提醒】一次用户插入请求的处理回合已结束。"
+            "请先回顾你的上一条回复，再决定下一步：\n"
+            "1. 如果你正在等待用户答复（例如提出了问题、给出了待选择的方案），"
+            "请不要恢复主线：直接简短说明你仍在等待用户答复，然后结束本轮；\n"
+            "2. 如果插入请求确实已处理完毕，请回顾会话历史，找到此前被中断的"
+            "主线任务，从中断处继续执行，不要重复已完成的步骤；\n"
+            "3. 本消息不是新的修改意见；如果主线任务实际上已全部完成，"
+            "请直接确认完成状态，不要进行任何新的修改。"
         )
         if mainline_goal:
             text += f"\n\n被中断的主线任务原始请求：\n{mainline_goal}"
@@ -3079,22 +3595,61 @@ def _specialist_terminal(content: str) -> tuple[str, str]:
     )
 
 
-def _specialist_tool_recovery(name: str) -> str:
+def _specialist_tool_recovery(name: str, error: str = "") -> str:
+    media_tools = {"image_generation", "r2v_generation", "ai_edit"}
+    if name in media_tools and (
+        "PROJECT_INPUT_SNAPSHOT_STALE" in error
+        or "已终止: QUARANTINED" in error
+        or "ended as QUARANTINED" in error
+    ):
+        # The provider work finished but the Project advanced while it ran
+        # (often a review approval of an earlier output), so the frozen
+        # input snapshot failed CAS at publish and the Task was
+        # quarantined. Replaying the identical call can only hit the same
+        # terminated Task — name the fix or the model burns its remaining
+        # turns rediscovering it.
+        return (
+            "The Task was quarantined because the Project changed while it "
+            "was running (for example a review was approved), so its input "
+            "snapshot went stale; the terminated Task can never be resumed "
+            "by resending the same call. Call read_project to load the "
+            "current Project state, confirm the target still needs this "
+            "output, then issue one fresh " + name + " call so it is "
+            "admitted against the current snapshot."
+        )
+    if name == "r2v_generation" and "real human face" in error.casefold():
+        # Provider-side face moderation rejects the uploaded pixels, so
+        # resubmitting the same references can never succeed. Identity is
+        # already carried by the generated character-design artifacts.
+        return (
+            "The video provider rejected the uploaded reference images "
+            "because they appear to contain real human faces. This is a "
+            "provider content policy, not a transient failure — do not "
+            "resubmit the same references. Use jq_project to remove every "
+            "source-photo reference (asset-version IDs of downloaded or "
+            "uploaded real images) from the Element's "
+            "video_reference_version_ids, keep only generated "
+            "artifact-version references such as the character design and "
+            "storyboard images, then call r2v_generation again."
+        )
     if name == "jq_project":
         return (
-            "Re-read project.json and retry jq_project with a transform that returns the "
-            "complete Project root and preserves all Runtime-protected root fields. "
-            "Never assign schema_version, project_id, generation, created_at, or updated_at; "
-            "the Runtime maintains them. Start from the input Project `.`, not `$jsonArgs`. "
-            "Put bulk objects in jsonArgs. If the failure was malformed or misnested argument "
-            "JSON, regenerate the call with program as a top-level field and split an "
-            "oversized jsonArgs into a few smaller jq_project calls. For every Edit item, "
-            "set duration_tick to round((source_out_tick - source_in_tick) / playback_rate). "
-            "Remove nonexistent references; not-yet-produced artifacts stay null. "
-            "Parenthesize computed jq values before binding them, for example "
-            '("source:" + $logicalId) as $sourceKey, and parenthesize expressions used as '
-            "object values. Never finish with a saved pre-edit root such as $project "
-            "because that discards mutations."
+            "Re-read project.json and retry jq_project with a transform "
+            "that returns the complete Project root and preserves all "
+            "Runtime-protected root fields. Never assign schema_version, "
+            "project_id, generation, created_at, or updated_at; the "
+            "Runtime maintains them. Start from the input Project `.`, "
+            "not `$jsonArgs`. If the failure was malformed or misnested "
+            "argument JSON: " + _JQ_PROJECT_CALL_SHAPE_RECOVERY + " For "
+            "every Edit item, set duration_tick to "
+            "round((source_out_tick - source_in_tick) / playback_rate). "
+            "Remove nonexistent references; not-yet-produced artifacts "
+            "stay null. Parenthesize computed jq values before binding "
+            "them, for example "
+            '("source:" + $logicalId) as $sourceKey, and parenthesize '
+            "expressions used as object values. Never finish with a saved "
+            "pre-edit root such as $project because that discards "
+            "mutations."
         )
     if name == "ai_edit":
         return (

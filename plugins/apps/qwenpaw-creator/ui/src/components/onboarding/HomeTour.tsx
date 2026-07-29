@@ -15,7 +15,7 @@ const STEPS: TourStepBlueprint[] = [
     description: (
       <div>
         <p className="mb-2 text-xs leading-5 text-[var(--color-text-secondary)]">
-          五个徽标对应 LLM、VLM、ASR、图片与视频生成模型的启用状态，
+          六个徽标对应 LLM、VLM、Grounding、ASR、图片与视频生成模型的启用状态，
           点击设置图标即可配置。开始创作前需要先完成所需模型的配置：
         </p>
         <ModelSetupGuide />

@@ -40,7 +40,7 @@ FILE_AGENT_PROMPT_SPECS = {
         _spec(
             "creator_agent.system",
             "creator_agent.system.txt",
-            "e5d82de05e71935edd84dd133f75de71b1ef9930f3ec0f65e1143bb982db75c5",
+            "50bca0588f16b75db0dac32092c792e6676e3d29fa5b2c810e12033a41a1b94e",
             "project_id",
             "workspace_schema",
         ),
@@ -61,7 +61,7 @@ FILE_AGENT_PROMPT_SPECS = {
         _spec(
             "r2v_generation_director.system",
             "r2v_generation_director.system.txt",
-            "26a31dc0c4f8d6efc7c82a5f7ff64a6771e6d370406501ae1786b24e54c31057",
+            "130c7015dc30c566fc5c9e792bddc79120ddaa14ff49e467da410a747d42b4e9",
             "project_id",
             "workspace_schema",
             "video_model_guidance",

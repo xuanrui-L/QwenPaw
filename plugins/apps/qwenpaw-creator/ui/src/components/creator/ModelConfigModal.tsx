@@ -10,17 +10,21 @@ import {
   PictureOutlined,
   VideoCameraOutlined,
   AudioOutlined,
+  GlobalOutlined,
   ReloadOutlined,
   CloseOutlined,
 } from "@ant-design/icons";
 import {
   getModelConfig,
   saveModelConfig,
-  patchModelConfigSection,
   patchExecutionAuthorization,
   testModelConnection,
 } from "@/api/creator";
-import type { ModelConfigData, ModelConfigItem } from "@/contracts/creator";
+import type {
+  GroundingConfig,
+  ModelConfigData,
+  ModelConfigItem,
+} from "@/contracts/creator";
 import ModelSetupGuide from "@/components/onboarding/ModelSetupGuide";
 
 const LLM_PROTOCOLS = [
@@ -47,7 +51,7 @@ const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
 type ModelType = "llm" | "vlm" | "asr" | "image" | "video";
-type TabType = ModelType;
+type TabType = ModelType | "grounding";
 const DEFAULT_CONFIG: ModelConfigData = {
   llm: {
     enabled: true,
@@ -67,6 +71,24 @@ const DEFAULT_CONFIG: ModelConfigData = {
     custom_protocol: "",
     use_llm: false,
     multimodal: false,
+  },
+  grounding: {
+    enabled: true,
+    model_name: "",
+    api_key: "",
+    base_url: "",
+    protocol: "OpenAI 协议",
+    custom_protocol: "",
+    reuse_llm: true,
+    validation_source: "llm",
+    tavily_api_key: "",
+    native_search_enabled: true,
+    search_provider: "dashscope_qwen",
+    search_reuse_llm: true,
+    search_model_name: "",
+    search_api_key: "",
+    search_base_url: "",
+    search_protocol: "DashScope（百炼）",
   },
   asr: {
     enabled: false,
@@ -111,13 +133,64 @@ function hasUsableApiKey(item: ModelConfigItem): boolean {
   return item.api_key !== undefined && item.api_key.length > 0;
 }
 
+function groundingValidationModel(config: ModelConfigData): ModelConfigItem {
+  if (config.grounding.validation_source === "llm") return config.llm;
+  if (config.grounding.validation_source === "vlm") {
+    return config.vlm.use_llm ? config.llm : config.vlm;
+  }
+  return config.grounding;
+}
+
+function groundingSearchModel(config: ModelConfigData): ModelConfigItem {
+  if (config.grounding.search_reuse_llm) return config.llm;
+  return {
+    enabled: config.grounding.native_search_enabled,
+    model_name: config.grounding.search_model_name,
+    api_key: config.grounding.search_api_key,
+    base_url: config.grounding.search_base_url,
+    protocol: config.grounding.search_protocol,
+    custom_protocol: "",
+  };
+}
+
+/**
+ * Check whether a model's protocol/host indicates DashScope/Qwen native
+ * search capability. Mirrors the backend ``dashscope_native_search_unavailable_reason``
+ * hostname extraction so UI and server agree on edge-case URLs.
+ */
+export function supportsQwenNativeSearch(item: ModelConfigItem): boolean {
+  const protocol = item.protocol.toLocaleLowerCase();
+  if (protocol.includes("dashscope") || item.protocol.includes("百炼"))
+    return true;
+  try {
+    const host = new URL(item.base_url).hostname.toLocaleLowerCase();
+    return host.includes("dashscope");
+  } catch {
+    return false;
+  }
+}
+
+function groundingSearchLabel(config: ModelConfigData): string {
+  const providers: string[] = [];
+  if (config.grounding.tavily_api_key) providers.push("tavily");
+  const searchModel = groundingSearchModel(config);
+  if (
+    config.grounding.native_search_enabled &&
+    searchModel.model_name &&
+    supportsQwenNativeSearch(searchModel)
+  ) {
+    providers.push(searchModel.model_name);
+  }
+  return providers.join("/");
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
 }
 
 const CARD_META: {
-  type: ModelType;
+  type: TabType;
   label: string;
   icon: React.ReactNode;
   required: boolean;
@@ -133,6 +206,16 @@ const CARD_META: {
     label: "VLM 模型",
     icon: (
       <EyeOutlined
+        style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
+      />
+    ),
+    required: false,
+  },
+  {
+    type: "grounding",
+    label: "Grounding",
+    icon: (
+      <GlobalOutlined
         style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
       />
     ),
@@ -187,9 +270,23 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const loadConfig = useCallback(async () => {
     try {
       const data = await getModelConfig();
+      const receivedGrounding = data.grounding as Partial<GroundingConfig>;
+      const validationSource =
+        receivedGrounding.validation_source ??
+        (receivedGrounding.reuse_llm === false ? "custom" : "llm");
       const merged: ModelConfigData = {
         ...DEFAULT_CONFIG,
         ...data,
+        grounding: {
+          ...DEFAULT_CONFIG.grounding,
+          ...data.grounding,
+          validation_source: validationSource,
+          reuse_llm: validationSource === "llm",
+          search_reuse_llm:
+            receivedGrounding.search_reuse_llm ??
+            receivedGrounding.reuse_llm ??
+            true,
+        },
         oss: { ...DEFAULT_CONFIG.oss, ...data.oss },
         executionAuthorization: {
           ...DEFAULT_CONFIG.executionAuthorization,
@@ -206,6 +303,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         merged.video.protocol = VIDEO_PROTOCOLS[0];
       const initialTested: Record<string, boolean> = {};
       CARD_META.forEach((meta) => {
+        if (meta.type === "grounding") return;
         const item = merged[meta.type] as ModelConfigItem;
         if (item?.enabled) initialTested[meta.type] = true;
       });
@@ -258,6 +356,47 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       });
       if (field !== "enabled") {
         setTested((prev) => ({ ...prev, [type]: false }));
+        if (type === "llm" || type === "vlm") {
+          setTested((prev) => ({
+            ...prev,
+            groundingValidation: false,
+            groundingSearch:
+              type === "llm" && config.grounding.search_reuse_llm
+                ? false
+                : prev.groundingSearch,
+          }));
+        }
+      }
+    },
+    [config.grounding.search_reuse_llm],
+  );
+
+  const updateGrounding = useCallback(
+    (field: keyof GroundingConfig, value: unknown) => {
+      setConfig((prev) => ({
+        ...prev,
+        grounding: { ...prev.grounding, [field]: value },
+      }));
+      if (
+        field === "reuse_llm" ||
+        field === "validation_source" ||
+        field === "api_key" ||
+        field === "base_url" ||
+        field === "model_name" ||
+        field === "protocol"
+      ) {
+        setTested((prev) => ({ ...prev, groundingValidation: false }));
+      }
+      if (
+        field === "tavily_api_key" ||
+        field === "native_search_enabled" ||
+        field === "search_reuse_llm" ||
+        field === "search_api_key" ||
+        field === "search_base_url" ||
+        field === "search_model_name" ||
+        field === "search_protocol"
+      ) {
+        setTested((prev) => ({ ...prev, groundingSearch: false }));
       }
     },
     [],
@@ -437,6 +576,41 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     [config, updateItem],
   );
 
+  const handleGroundingTest = useCallback(async (): Promise<boolean> => {
+    const item = groundingValidationModel(config);
+    if (!item.base_url || !hasUsableApiKey(item) || !item.model_name) {
+      message.warning(
+        "请完整配置 Grounding 验证模型（Base URL、API Key、模型名称）",
+      );
+      return false;
+    }
+
+    setTesting((prev) => ({ ...prev, grounding: true }));
+    try {
+      const data = await testModelConnection({
+        type: "vlm",
+        base_url: item.base_url,
+        api_key: item.api_key,
+        model_name: item.model_name,
+        protocol: item.protocol,
+      });
+      if (!data.ok) {
+        message.warning(data.error || "Grounding LLM 图片输入测试失败");
+        setTested((prev) => ({ ...prev, groundingValidation: false }));
+        return false;
+      }
+      message.success("Grounding LLM 图片输入测试成功");
+      setTested((prev) => ({ ...prev, groundingValidation: true }));
+      return true;
+    } catch (err) {
+      message.error((err as Error).message || "测试 Grounding LLM 时发生错误");
+      setTested((prev) => ({ ...prev, groundingValidation: false }));
+      return false;
+    } finally {
+      setTesting((prev) => ({ ...prev, grounding: false }));
+    }
+  }, [config]);
+
   const handleSave = useCallback(async () => {
     if (saving) return;
     setSaving(true);
@@ -444,10 +618,38 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       const prev = snapshotRef.current;
       if (!prev) throw new Error("快照丢失，请重新打开配置");
 
+      if (config.grounding.enabled) {
+        const groundingModel = groundingValidationModel(config);
+        if (
+          !groundingModel.base_url ||
+          !groundingModel.model_name ||
+          !hasUsableApiKey(groundingModel)
+        ) {
+          message.warning(
+            "Grounding 默认开启，请完整配置验证模型，或关闭 Grounding",
+          );
+          return;
+        }
+        const searchModel = groundingSearchModel(config);
+        const nativeSearchReady =
+          config.grounding.native_search_enabled &&
+          !!searchModel.base_url &&
+          !!searchModel.model_name &&
+          hasUsableApiKey(searchModel) &&
+          supportsQwenNativeSearch(searchModel);
+        if (!config.grounding.tavily_api_key && !nativeSearchReady) {
+          message.warning(
+            "Grounding 搜索未配置：请填写 Tavily API Key，或配置支持原生搜索的 Qwen/DashScope 模型",
+          );
+          return;
+        }
+      }
+
       const dirtySections: TabType[] = [];
       for (const section of [
         "llm",
         "vlm",
+        "grounding",
         "asr",
         "image",
         "video",
@@ -458,15 +660,19 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       }
 
       for (const section of dirtySections) {
-        if (!tested[section]) {
+        if (section !== "grounding" && !tested[section]) {
           const ok = await handleTest(section);
           if (!ok) return;
         }
-        const res = await patchModelConfigSection(
-          section,
-          config[section] as unknown as Record<string, unknown>,
-        );
-        if (!res.ok) throw new Error(`保存 ${section} 失败：服务端未确认写入`);
+      }
+
+      if (dirtySections.length > 0) {
+        // Save everything in one POST: sequential per-section PATCHes each
+        // re-validate the full grounding config, so interdependent edits
+        // (e.g. a generic LLM plus a Tavily key) could fail mid-sequence
+        // and leave a partially saved configuration behind.
+        const res = await saveModelConfig(config);
+        if (!res.ok) throw new Error("保存失败：服务端未确认写入");
       }
 
       message.success("配置已保存");
@@ -636,7 +842,464 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     );
   };
 
+  const renderGroundingCard = (meta: (typeof CARD_META)[number]) => {
+    const { type, label, icon } = meta;
+    const isExpanded = expanded.grounding;
+    const verifier = groundingValidationModel(config);
+    const searchModel = groundingSearchModel(config);
+    const verifierReady =
+      !!verifier.model_name && !!verifier.base_url && hasUsableApiKey(verifier);
+    const nativeSearchReady =
+      config.grounding.native_search_enabled &&
+      !!searchModel.model_name &&
+      !!searchModel.base_url &&
+      hasUsableApiKey(searchModel) &&
+      supportsQwenNativeSearch(searchModel);
+    const searchReady = !!config.grounding.tavily_api_key || nativeSearchReady;
+    const searchLabel = groundingSearchLabel(config);
+
+    return (
+      <div key={type} className="glass-card">
+        <div
+          onClick={() => toggleExpand("grounding")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "14px 18px",
+            cursor: "pointer",
+            userSelect: "none",
+            borderBottom: isExpanded ? "1px solid var(--color-border)" : "none",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {icon}
+            <span style={{ fontSize: 14, fontWeight: 600 }}>{label}</span>
+            <span
+              style={{
+                fontSize: 10,
+                color: "var(--color-text-tertiary)",
+                background: "var(--color-bg-secondary)",
+                padding: "1px 7px",
+                borderRadius: 4,
+              }}
+            >
+              搜索 / 验证解耦
+            </span>
+            {config.grounding.enabled &&
+              (searchLabel || verifier.model_name) && (
+                <span
+                  className="text-ellipsis"
+                  style={{
+                    fontSize: 10,
+                    color:
+                      verifierReady && searchReady
+                        ? "var(--color-success)"
+                        : "var(--color-text-tertiary)",
+                    background: "var(--color-success-soft)",
+                    padding: "1px 7px",
+                    borderRadius: 4,
+                    maxWidth: 140,
+                  }}
+                >
+                  {searchLabel || "未配置搜索"}
+                  {verifier.model_name ? ` · ${verifier.model_name}` : ""}
+                </span>
+              )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: config.grounding.enabled
+                  ? "var(--color-success)"
+                  : "var(--color-border)",
+              }}
+            />
+            <label
+              className="desktop-toggle"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <input
+                type="checkbox"
+                aria-label="启用 Grounding"
+                checked={config.grounding.enabled}
+                onChange={(event) =>
+                  updateGrounding("enabled", event.target.checked)
+                }
+              />
+              <div className="track" />
+              <div className="thumb" />
+            </label>
+            <DownOutlined
+              style={{
+                fontSize: 10,
+                color: "var(--color-text-tertiary)",
+                transition: "transform 0.2s",
+                transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)",
+              }}
+            />
+          </div>
+        </div>
+        {isExpanded && (
+          <div
+            style={{
+              padding: "16px 18px 32px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 16,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 600 }}>1. 搜索</div>
+            {/* 优先级链：Tavily 优先，Qwen 原生搜索回退 */}
+            <div
+              style={{
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                padding: "12px 14px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "1px 6px",
+                    borderRadius: 4,
+                    background: "var(--color-accent-soft)",
+                    color: "var(--color-accent)",
+                    flexShrink: 0,
+                  }}
+                >
+                  优先
+                </span>
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  Tavily 搜索
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: config.grounding.tavily_api_key
+                      ? "var(--color-success)"
+                      : "var(--color-text-tertiary)",
+                  }}
+                >
+                  {config.grounding.tavily_api_key
+                    ? "已配置"
+                    : "未配置，将直接使用原生搜索"}
+                </span>
+              </div>
+              <div>
+                <label className="field-label">Tavily API Key（可选）</label>
+                <Input.Password
+                  placeholder="tvly-..."
+                  value={config.grounding.tavily_api_key}
+                  onChange={(event) =>
+                    updateGrounding("tavily_api_key", event.target.value)
+                  }
+                />
+              </div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                margin: "-8px 0 -8px 16px",
+                fontSize: 13,
+                lineHeight: 1,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              ↓
+            </div>
+            <div
+              style={{
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                padding: "12px 14px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+                opacity: config.grounding.native_search_enabled ? 1 : 0.75,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "1px 6px",
+                    borderRadius: 4,
+                    background: "var(--color-bg-secondary)",
+                    color: "var(--color-text-secondary)",
+                    flexShrink: 0,
+                  }}
+                >
+                  回退
+                </span>
+                <Checkbox
+                  checked={config.grounding.native_search_enabled}
+                  onChange={(event) =>
+                    updateGrounding(
+                      "native_search_enabled",
+                      event.target.checked,
+                    )
+                  }
+                >
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: "var(--color-text-primary)",
+                    }}
+                  >
+                    Qwen/DashScope 原生搜索
+                  </span>
+                </Checkbox>
+              </div>
+              {config.grounding.native_search_enabled ? (
+                <div
+                  style={{
+                    borderLeft: "2px solid var(--color-border)",
+                    marginLeft: 5,
+                    paddingLeft: 14,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                    }}
+                  >
+                    <Checkbox
+                      checked={config.grounding.search_reuse_llm}
+                      onChange={(event) =>
+                        updateGrounding(
+                          "search_reuse_llm",
+                          event.target.checked,
+                        )
+                      }
+                    >
+                      <span
+                        style={{
+                          fontSize: 12,
+                          color: "var(--color-text-secondary)",
+                        }}
+                      >
+                        复用 LLM 配置
+                      </span>
+                    </Checkbox>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: nativeSearchReady
+                          ? "var(--color-success)"
+                          : "var(--color-text-tertiary)",
+                      }}
+                    >
+                      {searchModel.model_name
+                        ? `当前：${searchModel.model_name}${
+                            nativeSearchReady ? "" : "（不支持原生搜索）"
+                          }`
+                        : "未配置"}
+                    </span>
+                  </div>
+                  {!config.grounding.search_reuse_llm && (
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr",
+                        gap: "0 16px",
+                      }}
+                    >
+                      <div>
+                        <label className="field-label">Qwen 搜索模型</label>
+                        <Input
+                          placeholder="qwen3.7-plus"
+                          value={config.grounding.search_model_name}
+                          onChange={(event) =>
+                            updateGrounding(
+                              "search_model_name",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="field-label">Qwen 搜索 API Key</label>
+                        <Input.Password
+                          placeholder="sk-search-..."
+                          value={config.grounding.search_api_key}
+                          onChange={(event) =>
+                            updateGrounding(
+                              "search_api_key",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="field-label">
+                          Qwen 搜索 Base URL
+                        </label>
+                        <Input
+                          placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"
+                          value={config.grounding.search_base_url}
+                          onChange={(event) =>
+                            updateGrounding(
+                              "search_base_url",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="field-label">搜索 Adapter</label>
+                        <Select
+                          value={config.grounding.search_protocol}
+                          onChange={(value) =>
+                            updateGrounding("search_protocol", value)
+                          }
+                          options={[
+                            {
+                              value: "DashScope（百炼）",
+                              label: "Qwen / DashScope（百炼）",
+                            },
+                          ]}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </div>
+
+            <div
+              style={{
+                borderTop: "1px solid var(--color-border)",
+                paddingTop: 16,
+                fontSize: 13,
+                fontWeight: 600,
+              }}
+            >
+              2. 验证
+            </div>
+            <div>
+              <label className="field-label">验证模型来源</label>
+              <Select
+                value={config.grounding.validation_source}
+                onChange={(value) => {
+                  updateGrounding("validation_source", value);
+                  updateGrounding("reuse_llm", value === "llm");
+                }}
+                options={[
+                  { value: "llm", label: "复用 LLM 配置" },
+                  { value: "vlm", label: "复用 VLM 配置" },
+                  { value: "custom", label: "自定义验证模型" },
+                ]}
+              />
+              {config.grounding.validation_source !== "custom" && (
+                <div
+                  style={{
+                    marginTop: 6,
+                    fontSize: 11,
+                    color: verifierReady
+                      ? "var(--color-success)"
+                      : "var(--color-text-tertiary)",
+                  }}
+                >
+                  {verifier.model_name
+                    ? `当前：${verifier.model_name}`
+                    : "未配置"}
+                </div>
+              )}
+            </div>
+
+            {config.grounding.validation_source === "custom" && (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "0 16px",
+                }}
+              >
+                <div>
+                  <label className="field-label">验证模型</label>
+                  <Input
+                    placeholder="model"
+                    value={config.grounding.model_name}
+                    onChange={(event) =>
+                      updateGrounding("model_name", event.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="field-label">验证模型 API Key</label>
+                  <Input.Password
+                    placeholder="sk-..."
+                    value={config.grounding.api_key}
+                    onChange={(event) =>
+                      updateGrounding("api_key", event.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="field-label">验证模型 Base URL</label>
+                  <Input
+                    placeholder="https://api.example.com"
+                    value={config.grounding.base_url}
+                    onChange={(event) =>
+                      updateGrounding("base_url", event.target.value)
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="field-label">API 协议</label>
+                  <Select
+                    value={config.grounding.protocol}
+                    onChange={(value) => updateGrounding("protocol", value)}
+                    options={VLM_PROTOCOLS.map((protocol) => ({
+                      value: protocol,
+                      label: protocol,
+                    }))}
+                  />
+                </div>
+              </div>
+            )}
+
+            <div>
+              <Button
+                className="test-btn"
+                icon={<LinkOutlined />}
+                loading={testing.grounding}
+                onClick={handleGroundingTest}
+              >
+                测试验证模型图片输入
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderCard = (meta: (typeof CARD_META)[number]) => {
+    if (meta.type === "grounding") return renderGroundingCard(meta);
     const { type, label, icon, required } = meta;
     const isExpanded = expanded[type];
     const item = config[type] as ModelConfigItem;
@@ -951,7 +1614,20 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             const active = activeTab === meta.type;
             let subText: string;
             let subColor: string;
-            if (
+            if (meta.type === "grounding") {
+              const verifier = groundingValidationModel(config);
+              const searchLabel = groundingSearchLabel(config);
+              subText = !config.grounding.enabled
+                ? "已关闭"
+                : searchLabel && verifier.model_name
+                ? `${searchLabel} · ${verifier.model_name}`
+                : "未配置";
+              subColor = !config.grounding.enabled
+                ? "var(--color-text-tertiary)"
+                : searchLabel && verifier.model_name
+                ? "var(--color-success)"
+                : "var(--color-text-tertiary)";
+            } else if (
               meta.type === "vlm" &&
               config.vlm.use_llm &&
               config.llm.model_name

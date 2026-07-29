@@ -274,17 +274,18 @@ async def _trace_event_offloaded(
     attributes: Mapping[str, Any] | None = None,
     **context: object,
 ) -> None:
-    """Build the record on the loop, persist it off the loop."""
+    """Run the complete event emission (config stat, build, write) off the
+    event loop; ``to_thread`` copies contextvars so the trace context binds.
+    """
 
-    record = _event_record(
+    await asyncio.to_thread(
+        trace_event,
         name,
         component=component,
         status=status,
         attributes=attributes,
         **context,
     )
-    if record is not None:
-        await asyncio.to_thread(_write, record)
 
 
 def _event_record(
@@ -411,7 +412,7 @@ def traced_async(
     return decorate
 
 
-def read_trace_records(
+def read_trace_records(  # pylint: disable=too-many-branches
     *,
     filters: Mapping[str, str] | None = None,
     limit: int = 200,

@@ -205,6 +205,7 @@ video Prompt 在 storyboard Prompt 基础上：
 - Project 写入范围集中在目标 R2V Element 的 creation。
 - storyboard/main output 和 ArtifactVersion 由媒体工具写回，不手工构造媒体版本。
 - reference version ID 必须是当前 Project 中真实存在的图片 SourceAssetVersion 或 ArtifactVersion。
+- 风格化（如卡通/Pixar）角色项目中，`video_reference_version_ids` 只引用已生成的角色设计/分镜 ArtifactVersion，不引用真人来源照片 SourceAssetVersion：视频供应商会拒绝含真人面部的参考图，且角色身份已由设计图承载。仅当用户明确要求自有素材原样出镜（如产品图）时才引用 SourceAssetVersion。
 - 首行使用 `[SUCCESS]` 表示目标视频版本已经验证写回；必要输入缺失时使用 `[BLOCKED]`；不可恢复技术错误使用 `[FAILED]`。其后只写简短自然语言总结。
 - 分镜 Prompt 必须覆盖目标 Element 的全部 Shot，每镜有独立段落。
 - Prompt 内容不超出分镜表定义的范围，不引入分镜表中不存在的视觉元素。

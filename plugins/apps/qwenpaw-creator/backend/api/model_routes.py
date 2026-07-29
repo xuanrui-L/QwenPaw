@@ -24,6 +24,7 @@ from models import config as model_config
 from schemas.models import (
     AsrConfig,
     ExecutionAuthorizationConfig,
+    GroundingConfig,
     LlmConfig,
     ModelConfigData,
     ModelConfigItem,
@@ -31,6 +32,8 @@ from schemas.models import (
     ConnectionTestResponse,
     OssConfig,
     VlmConfig,
+    reuse_llm_from_validation_source,
+    validation_source_from_reuse_llm,
 )
 from services.runtime_files.atomic_store import (
     atomic_replace_bytes,
@@ -62,7 +65,7 @@ router = APIRouter(
 )
 
 
-_SECTIONS = ("llm", "vlm", "asr", "image", "video", "oss")
+_SECTIONS = ("llm", "vlm", "grounding", "asr", "image", "video", "oss")
 _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
     "llm": {
         "base_url": ("TEXT_BASE_URL",),
@@ -73,6 +76,37 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
         "base_url": ("VLM_BASE_URL", "TEXT_BASE_URL"),
         "api_key": ("VLM_API_KEY", "TEXT_API_KEY"),
         "model_name": ("VLM_MODEL_NAME", "TEXT_MODEL_NAME"),
+    },
+    "grounding": {
+        "enabled": ("WEB_GROUNDING_ENABLED",),
+        "tavily_api_key": (
+            "TAVILY_API_KEY",
+            "WEB_GROUNDING_TAVILY_API_KEY",
+        ),
+        "reuse_llm": (
+            "WEB_GROUNDING_REUSE_LLM",
+            "WEB_GROUNDING_REUSE_VLM",
+        ),
+        "validation_source": ("WEB_GROUNDING_VALIDATION_SOURCE",),
+        "base_url": (
+            "WEB_GROUNDING_LLM_BASE_URL",
+            "WEB_GROUNDING_VLM_BASE_URL",
+        ),
+        "api_key": (
+            "WEB_GROUNDING_LLM_API_KEY",
+            "WEB_GROUNDING_VLM_API_KEY",
+        ),
+        "model_name": (
+            "WEB_GROUNDING_LLM_MODEL_NAME",
+            "WEB_GROUNDING_VLM_MODEL_NAME",
+        ),
+        "native_search_enabled": ("WEB_GROUNDING_NATIVE_SEARCH_ENABLED",),
+        "search_provider": ("WEB_GROUNDING_SEARCH_PROVIDER",),
+        "search_reuse_llm": ("WEB_GROUNDING_SEARCH_REUSE_LLM",),
+        "search_base_url": ("WEB_GROUNDING_SEARCH_BASE_URL",),
+        "search_api_key": ("WEB_GROUNDING_SEARCH_API_KEY",),
+        "search_model_name": ("WEB_GROUNDING_SEARCH_MODEL_NAME",),
+        "search_protocol": ("WEB_GROUNDING_SEARCH_PROTOCOL",),
     },
     "asr": {
         "base_url": ("ASR_BASE_URL",),
@@ -135,6 +169,16 @@ def _defaults() -> ModelConfigData:
             protocol="OpenAI 协议",
             use_llm=False,
             multimodal=False,
+        ),
+        grounding=GroundingConfig(
+            enabled=True,
+            reuse_llm=True,
+            validation_source="llm",
+            protocol="OpenAI 协议",
+            native_search_enabled=True,
+            search_provider="dashscope_qwen",
+            search_reuse_llm=True,
+            search_protocol="DashScope（百炼）",
         ),
         asr=AsrConfig(
             enabled=False,
@@ -241,6 +285,49 @@ def _assemble_model_config(
                 "model_name",
             ):
                 base[section]["enabled"] = True
+    grounding_section = configs.get("grounding")
+    grounding_explicit = (
+        grounding_section if isinstance(grounding_section, dict) else {}
+    )
+    if "validation_source" not in grounding_explicit and not (
+        include_environment
+        and os.environ.get("WEB_GROUNDING_VALIDATION_SOURCE")
+    ):
+        base["grounding"][
+            "validation_source"
+        ] = validation_source_from_reuse_llm(
+            base["grounding"].get("reuse_llm", True),
+        )
+    base["grounding"]["reuse_llm"] = reuse_llm_from_validation_source(
+        base["grounding"].get("validation_source") or "",
+    )
+    if "search_reuse_llm" not in grounding_explicit and not (
+        include_environment
+        and os.environ.get("WEB_GROUNDING_SEARCH_REUSE_LLM")
+    ):
+        # Before retrieval and verification were split, both reused the same
+        # model selection. Preserve that behavior when loading an old file.
+        base["grounding"]["search_reuse_llm"] = (
+            grounding_explicit.get(
+                "reuse_llm",
+                base["grounding"].get("reuse_llm", True),
+            )
+            if "validation_source" not in grounding_explicit
+            else True
+        )
+    if not base["grounding"].get("search_reuse_llm", True):
+        legacy_search_fields = {
+            "search_base_url": "base_url",
+            "search_api_key": "api_key",
+            "search_model_name": "model_name",
+            "search_protocol": "protocol",
+        }
+        for search_field, legacy_field in legacy_search_fields.items():
+            if search_field not in grounding_explicit:
+                base["grounding"][search_field] = base["grounding"].get(
+                    legacy_field,
+                    "",
+                )
     authorization = configs.get("execution_authorization")
     if isinstance(authorization, dict):
         base["execution_authorization"].update(authorization)
@@ -325,6 +412,78 @@ def mutate_model_config(
     return updated
 
 
+def _model_config_complete(item: ModelConfigItem) -> bool:
+    return bool(item.model_name and item.base_url and item.api_key)
+
+
+def _grounding_validation_model(data: ModelConfigData) -> ModelConfigItem:
+    source = data.grounding.validation_source
+    if source == "llm":
+        return data.llm
+    if source == "vlm":
+        return data.llm if data.vlm.use_llm else data.vlm
+    return data.grounding
+
+
+def _grounding_search_model(data: ModelConfigData) -> ModelConfigItem:
+    grounding = data.grounding
+    if grounding.search_reuse_llm:
+        return data.llm
+    return ModelConfigItem(
+        enabled=grounding.native_search_enabled,
+        model_name=grounding.search_model_name,
+        api_key=grounding.search_api_key,
+        base_url=grounding.search_base_url,
+        protocol=grounding.search_protocol,
+    )
+
+
+def _supports_dashscope_native_search(item: ModelConfigItem) -> bool:
+    protocol = item.protocol.casefold()
+    host = urlparse(item.base_url).hostname or ""
+    return (
+        "dashscope" in protocol or "百炼" in item.protocol or "dashscope" in host
+    )
+
+
+def _ensure_grounding_model_configured(data: ModelConfigData) -> None:
+    grounding = data.grounding
+    if not grounding.enabled:
+        return
+    verifier = _grounding_validation_model(data)
+    if not _model_config_complete(verifier):
+        source = {
+            "llm": "LLM",
+            "vlm": "VLM",
+            "custom": "Grounding 验证模型",
+        }[grounding.validation_source]
+        # When VLM reuses the LLM config, the missing piece is actually the
+        # LLM, not the VLM — say so to avoid confusing the user.
+        if grounding.validation_source == "vlm" and data.vlm.use_llm:
+            raise ValidationError(
+                "Grounding 验证模型复用了 LLM 配置，但 LLM 尚未完整配置；"
+                "请完整配置 LLM 的 Base URL、API Key 和模型名称，或关闭 Grounding",
+            )
+        raise ValidationError(
+            f"Grounding 默认启用；请完整配置 {source} 的 Base URL、API Key 和模型名称，或关闭 Grounding",
+        )
+    if grounding.tavily_api_key:
+        return
+    search_model = _grounding_search_model(data)
+    if not grounding.native_search_enabled:
+        raise ValidationError(
+            "Grounding 搜索未配置；请配置 Tavily，或启用 Qwen/DashScope 原生搜索",
+        )
+    if not _model_config_complete(search_model):
+        raise ValidationError(
+            "Grounding 搜索未配置；请配置 Tavily，或完整配置 Qwen/DashScope 搜索模型",
+        )
+    if not _supports_dashscope_native_search(search_model):
+        raise ValidationError(
+            "当前搜索模型不支持 Qwen/DashScope 原生 web_search；请配置 Tavily，或选择 DashScope（百炼）搜索模型",
+        )
+
+
 def request_tool_configs() -> dict[str, dict[str, Any]]:
     data = load_model_config()
     configs: dict[str, dict[str, Any]] = {}
@@ -343,6 +502,7 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
             "api_key": item.api_key,
             "model": item.model_name,
             "base_url": item.base_url,
+            "protocol": item.protocol,
         }
         if section == "asr":
             tool_config.update(
@@ -362,6 +522,28 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
                 else "wan"
             )
         configs[tool_name] = tool_config
+    grounding = data.grounding
+    configs[model_config.CREATOR_GROUNDING_CONFIG_TOOL] = {
+        "enabled": grounding.enabled,
+        "tavily_api_key": grounding.tavily_api_key,
+        "reuse_llm": grounding.reuse_llm,
+        "validation_source": grounding.validation_source,
+        "api_key": grounding.api_key,
+        "model": grounding.model_name,
+        "base_url": grounding.base_url,
+        "protocol": grounding.protocol,
+        "native_search_enabled": grounding.native_search_enabled,
+        "search_provider": grounding.search_provider,
+        "search_reuse_llm": grounding.search_reuse_llm,
+        "search_api_key": grounding.search_api_key,
+        "search_model": grounding.search_model_name,
+        "search_base_url": grounding.search_base_url,
+        "search_protocol": (
+            data.llm.protocol
+            if grounding.search_reuse_llm
+            else grounding.search_protocol
+        ),
+    }
     return configs
 
 
@@ -392,10 +574,29 @@ def _qwenpaw_tool_configs(request: Request) -> dict[str, dict[str, Any]]:
 
 
 async def bind_creator_tool_config(request: Request):
-    """Bind host config first, then fill only absent fields from external local config."""
+    """Bind host config first, then fill only absent fields from external local config.
+
+    ``request_tool_configs()`` stats and, on cache miss, lock-reads the config
+    file, so the complete resolution runs off the event loop.
+    """
 
     configs = _qwenpaw_tool_configs(request)
-    for tool_name, local in request_tool_configs().items():
+    grounding_host = configs.get(model_config.CREATOR_GROUNDING_CONFIG_TOOL)
+    if (
+        isinstance(grounding_host, dict)
+        and "reuse_llm" in grounding_host
+        and not grounding_host.get("validation_source")
+    ):
+        # Older host portals only expose the legacy reuse_llm switch. The
+        # local config always carries validation_source, which the runtime
+        # getters prefer — without this migration the merge would silently
+        # override the portal's "don't reuse the LLM" choice.
+        grounding_host["validation_source"] = validation_source_from_reuse_llm(
+            str(grounding_host["reuse_llm"]).strip().casefold()
+            not in {"0", "false", "no", "off"},
+        )
+    local_configs = await asyncio.to_thread(request_tool_configs)
+    for tool_name, local in local_configs.items():
         merged = dict(local)
         merged.update(configs.get(tool_name) or {})
         configs[tool_name] = merged
@@ -421,6 +622,8 @@ async def _validate_section_connectivity(
     """Run connectivity probe for a single section. Raises ValidationError on failure."""
 
     if section in ("execution_authorization", "executionAuthorization"):
+        return
+    if section == "grounding":
         return
 
     if section == "oss":
@@ -569,6 +772,7 @@ async def update_model_config(
                     "上一次模型配置写入失败，请使用新的 Idempotency-Key 重试",
                 )
             data.llm.enabled = True
+            _ensure_grounding_model_configured(data)
             save_model_config(data)
             _notify_agent_model_config_changed()
             records.complete(
@@ -618,7 +822,15 @@ async def patch_model_config_section(
     data: dict[str, Any] = Body(...),
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
 ) -> dict[str, bool]:
-    valid_sections = {"llm", "vlm", "asr", "image", "video", "oss"}
+    valid_sections = {
+        "llm",
+        "vlm",
+        "grounding",
+        "asr",
+        "image",
+        "video",
+        "oss",
+    }
     if section not in valid_sections:
         raise ValidationError(f"不支持的配置项: {section}")
 
@@ -632,10 +844,12 @@ async def patch_model_config_section(
         merged[section] = {**merged.get(section, {}), **data}
         if section == "llm":
             merged["llm"]["enabled"] = True
-        return _resolve_secret_masks(
+        resolved = _resolve_secret_masks(
             ModelConfigData.model_validate(merged),
             current,
         )
+        _ensure_grounding_model_configured(resolved)
+        return resolved
 
     def transaction() -> None:
         with records.operation_lock(

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import inspect
 import json
 from typing import Any, Protocol
@@ -71,6 +71,17 @@ class AgentToolCall:
     # object even after repair. The driver must surface this back to the
     # model as a failed tool result instead of failing the whole run.
     parse_error: str | None = None
+    # Transport diagnostics are intentionally excluded from equality, repr,
+    # and provider history. They let the Runtime distinguish strict provider
+    # JSON from syntax-repaired JSON without leaking malformed payloads back
+    # into the conversation or changing tool semantics.
+    raw_arguments_bytes: int = field(default=0, compare=False, repr=False)
+    arguments_repaired: bool = field(default=False, compare=False, repr=False)
+    strict_json_error: str | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
     def history_dict(self) -> dict[str, Any]:
         """Serialize the call for the driver's provider-independent turn history."""
@@ -100,18 +111,22 @@ class AgentModelTurn:
 _ARGS_PREVIEW_CHARS = 160
 
 
-def _parse_tool_arguments(raw: str) -> tuple[dict[str, Any], str | None]:
+def _parse_tool_arguments(
+    raw: str,
+) -> tuple[dict[str, Any], str | None, bool, str | None]:
     """Parse streamed tool-call arguments into a JSON object.
 
     Strict ``json.loads`` first; malformed payloads (truncated stream,
     unbalanced braces) go through ``json_repair`` exactly like AgentScope's
-    own ``_json_loads_with_repair``. Returns ``(arguments, parse_error)``—
-    an unrecoverable payload yields ``({}, message)`` so the tool call can
-    fail individually while the run keeps going.
+    own ``_json_loads_with_repair``. Returns ``(arguments, parse_error,
+    repaired, strict_error)``—an unrecoverable payload yields a
+    ``parse_error`` message so the tool call can fail individually while the
+    run keeps going, and ``repaired``/``strict_error`` let the Runtime tell
+    strict provider JSON from syntax-repaired JSON.
     """
 
     if not raw.strip():
-        return {}, None
+        return {}, None, False, None
     decode_error: json.JSONDecodeError | None = None
     try:
         parsed = json.loads(raw)
@@ -119,13 +134,18 @@ def _parse_tool_arguments(raw: str) -> tuple[dict[str, Any], str | None]:
         decode_error = error
     else:
         if isinstance(parsed, dict):
-            return parsed, None
+            return parsed, None, False, None
+    strict_error = (
+        f"JSONDecodeError: {decode_error}"
+        if decode_error is not None
+        else "decoded into a non-object value"
+    )
     try:
         repaired = repair_json(raw, stream_stable=True, return_objects=True)
     except Exception:
         repaired = None
     if isinstance(repaired, dict):
-        return repaired, None
+        return repaired, None, True, strict_error
     if len(raw) > 2 * _ARGS_PREVIEW_CHARS:
         preview = (
             raw[:_ARGS_PREVIEW_CHARS]
@@ -134,16 +154,12 @@ def _parse_tool_arguments(raw: str) -> tuple[dict[str, Any], str | None]:
         )
     else:
         preview = raw
-    detail = (
-        f"JSONDecodeError: {decode_error}"
-        if decode_error is not None
-        else "decoded into a non-object value"
-    )
-    return {}, (
-        "工具调用参数不是合法的 JSON 对象且无法自动修复（" + detail + "）。常见原因：花括号遗漏/错位或输出被截断。"
+    parse_error = (
+        "工具调用参数不是合法的 JSON 对象且无法自动修复（" + strict_error + "）。常见原因：花括号遗漏/错位或输出被截断。"
         "请重新生成本次工具调用；若参数体量巨大，可拆分为少量几次较小的调用。"
         f"参数原文预览：{preview!r}"
     )
+    return {}, parse_error, False, strict_error
 
 
 AgentTextDeltaCallback = Callable[[str], Awaitable[None]]
@@ -228,7 +244,7 @@ class CallbackAgentChatClient:
         return turn
 
 
-def _text_content(value: Any, *, field: str) -> str:
+def _text_content(value: Any, *, field_name: str) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -244,18 +260,18 @@ def _text_content(value: Any, *, field: str) -> str:
                 "text",
             }:
                 raise AgentModelError(
-                    f"Creator Agent history {field} contains non-text content",
+                    f"Creator Agent history {field_name} contains non-text content",
                 )
             pieces.append(str(item.get("text") or ""))
         return "".join(pieces)
-    raise AgentModelError(f"Creator Agent history {field} must be text")
+    raise AgentModelError(f"Creator Agent history {field_name} must be text")
 
 
-def _message_content_blocks(value: Any, *, field: str) -> list[Any]:
+def _message_content_blocks(value: Any, *, field_name: str) -> list[Any]:
     """Preserve native user media while keeping ordinary history compatible."""
 
     if value is None or isinstance(value, str):
-        text = _text_content(value, field=field)
+        text = _text_content(value, field_name=field_name)
         return [TextBlock(text=text)] if text else []
     if isinstance(value, Sequence) and not isinstance(
         value,
@@ -265,17 +281,17 @@ def _message_content_blocks(value: Any, *, field: str) -> list[Any]:
         for item in value:
             if not isinstance(item, Mapping):
                 raise AgentModelError(
-                    f"Creator Agent history {field} contains an invalid content part",
+                    f"Creator Agent history {field_name} contains an invalid content part",
                 )
             parts.append(dict(item))
         try:
             return list(native_content_blocks(parts))
         except Exception as exc:
             raise AgentModelError(
-                f"Creator Agent history {field} contains invalid native media: {exc}",
+                f"Creator Agent history {field_name} contains invalid native media: {exc}",
             ) from exc
     raise AgentModelError(
-        f"Creator Agent history {field} must be text or content parts",
+        f"Creator Agent history {field_name} must be text or content parts",
     )
 
 
@@ -326,7 +342,10 @@ def records_to_agentscope_messages(
         role = str(record.get("role") or "").strip()
         content_value = record.get("content")
         content = (
-            _text_content(content_value, field=f"message[{index}].content")
+            _text_content(
+                content_value,
+                field_name=f"message[{index}].content",
+            )
             if role in {"system", "tool"}
             else ""
         )
@@ -336,7 +355,7 @@ def records_to_agentscope_messages(
         if role == "user":
             blocks = _message_content_blocks(
                 content_value,
-                field=f"message[{index}].content",
+                field_name=f"message[{index}].content",
             )
             if not blocks:
                 raise AgentModelError(
@@ -347,7 +366,7 @@ def records_to_agentscope_messages(
         if role == "assistant":
             blocks = _message_content_blocks(
                 content_value,
-                field=f"message[{index}].content",
+                field_name=f"message[{index}].content",
             )
             raw_calls = record.get("tool_calls") or []
             if not isinstance(raw_calls, Sequence) or isinstance(
@@ -599,15 +618,24 @@ class AgentScopeAgentChatClient:
                     raise AgentModelError(
                         f"Creator AgentScope returned a tool not offered this turn: {name}",
                     )
-                arguments, parse_error = _parse_tool_arguments(
-                    block.input or "",
-                )
+                raw_arguments = block.input or ""
+                (
+                    arguments,
+                    parse_error,
+                    repaired,
+                    strict_error,
+                ) = _parse_tool_arguments(raw_arguments)
                 calls.append(
                     AgentToolCall(
                         call_id=call_id,
                         name=name,
                         arguments=arguments,
                         parse_error=parse_error,
+                        raw_arguments_bytes=len(
+                            raw_arguments.encode("utf-8"),
+                        ),
+                        arguments_repaired=repaired,
+                        strict_json_error=strict_error,
                     ),
                 )
 

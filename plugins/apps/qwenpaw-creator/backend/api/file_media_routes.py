@@ -22,6 +22,7 @@ from services.project_files.assets import AssetFileError, AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import IndexedFile
 from services.project_files.remote_cache import resolve_remote_cache
+from services.project_files.store import ProjectNotFound
 from services.runtime_files.execution_store import ProjectExecutionStore
 from utils.paths import media_path_from_url
 
@@ -194,9 +195,11 @@ def _version_in_project(
     version_id: str,
     kind: Literal["source", "artifact"],
 ) -> tuple[Path, IndexedFile | None, Any, str] | None:
+    # Only a genuinely missing Project means "no match here"; integrity,
+    # permission and I/O failures must propagate instead of becoming 404.
     try:
         snapshot = services.projects.read(project_id)
-    except Exception:
+    except ProjectNotFound:
         return None
     if kind == "source":
         version: Any = snapshot.project.assets.source_versions_by_id.get(

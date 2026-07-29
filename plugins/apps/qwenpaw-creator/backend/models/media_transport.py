@@ -41,6 +41,8 @@ _dashscope_temp_upload_locks: dict[
     asyncio.Lock,
 ] = {}
 _dashscope_credential_tokens: dict[str, str] = {}
+# Process-local salt for credential cache tokens; never persisted.
+_CREDENTIAL_TOKEN_SALT = uuid.uuid4().bytes
 
 
 async def get_oss_policy(model: str = "wan2.7-r2v") -> dict:
@@ -105,10 +107,16 @@ def _dashscope_transport_filename(path: Path, media_type: str) -> str:
 def _credential_cache_token(api_key: str) -> str:
     """Opaque per-process stand-in for *api_key* inside cache keys.
 
-    Keys are one-way hashes so raw credentials never persist in process
-    memory maps; values are random tokens that keep entries isolated.
+    Keys are salted PBKDF2 digests so raw credentials never persist in
+    process memory maps and cannot be cheaply brute-forced; values are
+    random tokens that keep entries isolated.
     """
-    digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        api_key.encode("utf-8"),
+        _CREDENTIAL_TOKEN_SALT,
+        50_000,
+    ).hex()
     if len(_dashscope_credential_tokens) >= 256:
         _dashscope_credential_tokens.clear()
     return _dashscope_credential_tokens.setdefault(digest, uuid.uuid4().hex)

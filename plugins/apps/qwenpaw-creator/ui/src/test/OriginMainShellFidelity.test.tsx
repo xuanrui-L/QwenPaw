@@ -26,6 +26,24 @@ const modelConfig = {
     use_llm: true,
     multimodal: true,
   },
+  grounding: {
+    enabled: true,
+    model_name: "",
+    api_key: "",
+    base_url: "",
+    protocol: "OpenAI 协议",
+    custom_protocol: "",
+    reuse_llm: true,
+    validation_source: "llm",
+    tavily_api_key: "",
+    native_search_enabled: true,
+    search_provider: "dashscope_qwen",
+    search_reuse_llm: true,
+    search_model_name: "",
+    search_api_key: "",
+    search_base_url: "",
+    search_protocol: "DashScope（百炼）",
+  },
   asr: {
     enabled: false,
     model_name: "fun-asr",
@@ -124,16 +142,14 @@ describe("origin/main visible shell fidelity", () => {
       .find((button) => button.className.includes("fixed"));
     expect(floatingEntry).toBeDefined();
     expect(floatingEntry).toHaveClass("bg-[#FF9D4D]", "rounded-full");
-    expect(screen.getByRole("button", { name: "打开" })).toHaveClass(
-      "flex-1",
-      "cursor-pointer",
-      "border-[#EAE9E7]",
-    );
-    expect(screen.getByRole("button", { name: "删除 雪夜短片" })).toHaveClass(
-      "flex-1",
-      "cursor-pointer",
-      "bg-[var(--color-danger-soft)]",
-    );
+    // Card actions live in the per-card dropdown menu.
+    fireEvent.click(screen.getByRole("button", { name: "雪夜短片 更多操作" }));
+    expect(
+      await screen.findByRole("menuitem", { name: /导出项目/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: /删除 雪夜短片/ }),
+    ).toBeInTheDocument();
     expect(container.querySelector("header")).toHaveClass(
       "border-b",
       "bg-[var(--color-bg-primary)]",

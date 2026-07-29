@@ -468,7 +468,15 @@ def _resolve_request(
             slot_id=f"asset:{entity_id}:image",
             slot_kind="visual_asset_image",
             owner_ref=f"asset:{entity_id}",
-            artifact_name=f"{entity.name} 视觉图",
+            # Stage variants of one entity share the slot; without the
+            # variant id in the name the UI reference picker shows
+            # indistinguishable duplicate titles.
+            artifact_name=(
+                f"{entity.name}"
+                f"（{variant.variant_id.removeprefix('var:')}）视觉图"
+                if variant
+                else f"{entity.name} 视觉图"
+            ),
             role=SpecialistRole.VISUAL_DEVELOPMENT,
             target_id=entity_id,
             variant_id=variant.variant_id if variant else None,

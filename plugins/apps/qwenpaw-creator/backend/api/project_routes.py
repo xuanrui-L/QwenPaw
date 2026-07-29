@@ -10,15 +10,32 @@ authorities used here.
 from __future__ import annotations
 
 import asyncio
+import shutil
 from typing import Any, Literal
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, Header, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    Header,
+    Query,
+    Response,
+    status,
+    Request,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError as PydanticValidationError
 from starlette.routing import Match
 from starlette.types import Scope
+from starlette.datastructures import UploadFile
 
-from domain.errors import ConflictError, StorageIntegrityError, ValidationError
+from domain.errors import (
+    ConflictError,
+    StorageIntegrityError,
+    ValidationError,
+    BadRequestError,
+)
 from schemas.projects import (
     ExecutionPreauthorizationPolicy,
     ProjectCreateRequest,
@@ -39,18 +56,23 @@ from services.project_files.store import (
     ProjectIntegrityError,
     ProjectNotFound,
     ProjectStoreError,
+    _safe_project_id,
 )
 from services.runtime_files.errors import RuntimeFileError
 from services.runtime_files.idempotency_store import IdempotencyRecordStore
 from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.session_store import ProjectRuntimeBootstrap
-
+from services.storage_root import require_creator_data_root
+from services.project_files.serialization import load_project_json
+from utils.logger import setup_logger
 from .dependencies import (
     CreatorErrorRoute,
     project_file_services,
     resolve_idempotency_key,
 )
 
+
+logger = setup_logger("project_routes")
 
 _CREATE_SCOPE = "POST /projects"
 
@@ -376,3 +398,164 @@ async def delete_project(
     except ProjectNotFound:
         pass
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{project_id}/export")
+async def export_project(
+    project_id: str,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+    services: CreatorFileServices = Depends(project_file_services),
+) -> StreamingResponse:
+    #
+    logger.info(f"exporting project:{project_id}")
+    resolve_idempotency_key(idempotency_key)
+    await interrupt_creator_agent_runtime(
+        project_id,
+        superseded=False,
+        reason="exporting_project",
+    )
+    logger.debug("export project interrupted runtime")
+    try:
+        safe_id = _safe_project_id(project_id)
+        return StreamingResponse(
+            content=services.projects.export(project_id),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_id}.zip"',
+            },
+        )
+    except Exception as e:
+        logger.error(f"failed to export project {project_id}", exc_info=True)
+        raise StorageIntegrityError(
+            message=f"Failed to export project {project_id}: {str(e)}",
+        ) from e
+
+
+async def _run_import(upload) -> str:
+    data_root = require_creator_data_root()
+    imports_root = data_root / "imports"
+    imports_root.mkdir(parents=True, exist_ok=True)
+
+    uploaded_file = Path(upload.filename or "import.zip").name
+    # Save the uploaded zip into the imports folder, then extract
+    # it there so we can inspect project.json before publishing.
+    temp_str = uuid4().hex
+    saved_zip = imports_root / f"{temp_str}-{uploaded_file}"
+    try:
+        with open(saved_zip, "wb") as f:
+            while True:
+                chunk = await upload.read(8192)
+                if not chunk:
+                    break
+                f.write(chunk)
+            logger.info(
+                f"zip file size of {saved_zip}: {saved_zip.stat().st_size}",
+            )
+    except Exception as e:
+        raise BadRequestError(
+            f"failed to save uploaded file to {saved_zip}: {str(e)}",
+        ) from e
+
+    extract_dir = imports_root / f"{temp_str}"
+    try:
+        extract_dir.mkdir(mode=0o700)
+        try:
+            shutil.unpack_archive(
+                str(saved_zip),
+                extract_dir=extract_dir,
+                format="zip",
+            )
+            logger.info(f"unpacked zip file {saved_zip} to {extract_dir}")
+        except Exception as e:
+            raise BadRequestError(
+                f"failed to unpack zip file {saved_zip}: {str(e)}",
+            ) from e
+
+        # extract_dir/project-xxx/, where project-xxx should be the only item in extract-dir
+        dirs = list(extract_dir.iterdir())
+        if not (
+            len(dirs) == 1
+            and dirs[0].is_dir()
+            and dirs[0].name.startswith("project-")
+            and dirs[0].name == _safe_project_id(dirs[0].name)
+        ):
+            raise BadRequestError(
+                f"expecting only one project-* folder from unpacked file: {dirs}",
+            )
+
+        # Load project.json from the extracted tree and read the
+        # Project's project_id.
+        project_json_path = None
+        for f in dirs[0].iterdir():
+            if f.is_file() and f.name == "project.json":
+                project_json_path = f
+                break
+
+        if project_json_path is None:
+            raise BadRequestError(
+                "project.json not found in the uploaded data.",
+            )
+
+        logger.info(f"loading project obj from {project_json_path}")
+        try:
+            project = load_project_json(project_json_path.read_bytes())
+            project_id = str(project.project_id)
+            if not project_id:
+                raise ValueError(
+                    f"project_id not found in {project_json_path}",
+                )
+        except Exception as e:
+            raise BadRequestError(f"Invalid Project object: {str(e)}") from e
+
+        logger.info(
+            f"found project id in {project_json_path}: {project_id}",
+        )
+
+        target_project_dir = Path(data_root, dirs[0].name)
+        if target_project_dir.exists():
+            raise BadRequestError(
+                f"project already exists {target_project_dir}",
+            )
+        # move the unpacked project-*** folder into creator data root so the
+        # Project directory is published under its real project_id.
+        shutil.move(dirs[0], data_root)
+        logger.info(f"moved project folder {dirs[0]} to {data_root}")
+        return project_id
+    finally:
+        saved_zip.unlink(missing_ok=True)
+        shutil.rmtree(extract_dir, ignore_errors=True)
+        logger.info(
+            f"deleted temporary importing file and folder {saved_zip}, {extract_dir}",
+        )
+
+
+@router.post("/import")
+async def import_project(
+    request: Request,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    logger.info(f"import request, idempotency_key:{idempotency_key}")
+    resolve_idempotency_key(idempotency_key)
+    form = await request.form()
+    logger.debug("import request, form is ready")
+    for k, v in form.multi_items():
+        logger.debug(
+            f"import request form, k:{k}, v: type:{type(v)}, value:{v}",
+        )
+    upload = next(
+        (
+            value
+            for _, value in form.multi_items()
+            if isinstance(value, UploadFile)
+        ),
+        None,
+    )
+    if upload is None:
+        raise BadRequestError("No uploaded file in the request")
+
+    try:
+        project_id = await _run_import(upload)
+    except Exception as e:
+        logger.error("failed to import project", exc_info=True)
+        raise BadRequestError(f"Failed to import project: {str(e)}") from e
+    return {"projectId": project_id}
