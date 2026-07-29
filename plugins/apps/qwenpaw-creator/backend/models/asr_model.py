@@ -338,7 +338,7 @@ async def _fun_asr(media_url: str) -> ASRResult:
             if logger.isEnabledFor(logging.DEBUG):
                 for idx, seg in enumerate(segments):
                     logger.debug(
-                        f"seg {idx+1}/{len_segments}: [{seg.start_ms-seg.end_ms}] {seg.text}",
+                        f"seg {idx+1}/{len_segments}: [{seg.start_ms}-{seg.end_ms}] {seg.text}",
                     )
             return result
 
@@ -462,7 +462,7 @@ async def _whisper(media_url: str) -> ASRResult:
     if logger.isEnabledFor(logging.DEBUG):
         for idx, seg in enumerate(normalized):
             logger.debug(
-                f"seg {idx+1}/{len_normalized}: [{seg.start_ms-seg.end_ms}] {seg.text}",
+                f"seg {idx+1}/{len_normalized}: [{seg.start_ms}-{seg.end_ms}] {seg.text}",
             )
     return result
 
