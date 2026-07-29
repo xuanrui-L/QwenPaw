@@ -148,7 +148,7 @@ describe("origin/main visible shell fidelity", () => {
       await screen.findByRole("menuitem", { name: /导出项目/ }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("menuitem", { name: /删除 雪夜短片/ }),
+      screen.getByRole("menuitem", { name: /删除/ }),
     ).toBeInTheDocument();
     expect(container.querySelector("header")).toHaveClass(
       "border-b",

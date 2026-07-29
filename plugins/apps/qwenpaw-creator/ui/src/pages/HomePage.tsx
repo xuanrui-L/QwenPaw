@@ -155,7 +155,7 @@ const ProjectCard = memo(function ProjectCard({
               },
               {
                 key: "delete",
-                label: `删除 ${project.name}`,
+                label: "删除",
                 danger: true,
                 icon: <Trash2 className="h-3.5 w-3.5" />,
                 onClick: ({ domEvent }) => {
