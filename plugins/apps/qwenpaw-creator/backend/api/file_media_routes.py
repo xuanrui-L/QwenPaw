@@ -12,7 +12,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
-from domain.errors import ConflictError, NotFoundError, StorageIntegrityError
+from domain.errors import (
+    ConflictError,
+    NotFoundError,
+    StorageIntegrityError,
+    ValidationError,
+)
 from services.media_files.ffmpeg import ffmpeg_readiness
 from services.media_files.keyframe_cache import (
     materialize_keyframe,
@@ -309,7 +314,16 @@ async def _keyframe_response(
     timestamp: float,
     width: int,
 ) -> FileResponse:
-    """Serve a persistent JPEG extracted only from the local media cache."""
+    """Serve a persistent JPEG extracted only from the local media cache.
+
+    Both route wrappers validate the bounds via ``Query``; direct callers
+    must honour the same preconditions.
+    """
+
+    if not 0 <= timestamp <= 86_400:
+        raise ValidationError("timestamp 必须在 0–86400 秒之间")
+    if not 160 <= width <= 1920:
+        raise ValidationError("width 必须在 160–1920 之间")
 
     project_root, indexed, version, project_id = await _indexed_version(
         services,
@@ -320,10 +334,11 @@ async def _keyframe_response(
         indexed.media_type if indexed is not None else version.media_type
     )
     if not str(media_type).startswith("video/"):
+        version_label = (
+            "AssetVersion" if kind == "source" else "ArtifactVersion"
+        )
         raise NotFoundError(
-            "AssetVersion 不是可预览的视频"
-            if kind == "source"
-            else "ArtifactVersion 不是可预览的视频",
+            f"{version_label} 不是可预览的视频（media_type={media_type}）",
         )
     if indexed is None:
         cache = await asyncio.to_thread(
