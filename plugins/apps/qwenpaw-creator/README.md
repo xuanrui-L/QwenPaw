@@ -25,6 +25,3 @@ mirror. If jq is unavailable or the opt-in download fails, Creator starts in
 degraded mode and reports the missing dependency through
 `GET /api/qwenpaw-creator/health`; workflows that require `jq_project` remain
 unavailable until jq is configured.
-
-Model and OSS credentials are configured through the six `creator_*` entries in
-QwenPaw Tools.
