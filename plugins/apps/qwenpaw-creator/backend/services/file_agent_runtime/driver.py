@@ -679,10 +679,26 @@ class FileCreatorAgentRuntime:
         *,
         superseded: bool = False,
         reason: str = "user_interrupt",
+        expected_run_id: str | None = None,
     ) -> bool:
         """Cancel one Project's current task and revoke all later commits."""
 
         handle = self._active.get(project_id)
+        if (
+            superseded
+            and expected_run_id is not None
+            and handle is not None
+            and handle.run_id != expected_run_id
+        ):
+            # The run captured by the superseding request's boundary is
+            # already gone and a different run now owns the Session —
+            # usually the replacement for that very request, which the
+            # dispatcher admitted while the API was still finishing its
+            # admission.  Cancelling it would swallow the request: the
+            # supersede cleanup consumes the message that caused the
+            # cancelled run, leaving nothing behind to resume.
+            self.notify(project_id)
+            return False
         if handle is None or handle.task.done():
             # Superseding an old AgentDock run is not a hard stop.  The API
             # path and the dispatcher may both observe the same durable
@@ -945,6 +961,19 @@ class FileCreatorAgentRuntime:
                 )
             return
         if not user_messages:
+            if (
+                session.status is CreatorSessionStatus.RESUMING
+                and session.active_run_id is None
+            ):
+                # A supersede cleanup consumed its own replacement message,
+                # so no pending input will ever move this Session out of
+                # RESUMING.  Surface the truth instead of spinning forever.
+                await asyncio.to_thread(
+                    self.sessions.set_session_status,
+                    project_id,
+                    session.session_id,
+                    CreatorSessionStatus.IDLE,
+                )
             return
         message = user_messages[0]
         if self._blocked_heads.get(project_id) == message.message_seq:

@@ -241,3 +241,107 @@ def test_reconcile_reclaims_a_queued_run_bound_to_a_terminal_goal(
     assert succeeded[0].goal_id != "goal-terminal"
     assert session.active_run_id is None
     assert session.error is None
+
+
+def test_supersede_with_foreign_expected_run_spares_the_active_run(
+    tmp_path,
+) -> None:
+    """A supersede aimed at a dead run must not kill its replacement.
+
+    The messages API fires the supersede after admission, but the
+    dispatcher may have already started the run for that very message;
+    cancelling it would consume the message and wedge the Session.
+    """
+
+    release = asyncio.Event()
+
+    async def callback(_messages, _tools) -> AgentModelTurn:
+        await release.wait()
+        return AgentModelTurn(content="完成")
+
+    async def scenario():
+        services = _create_project(tmp_path, initial_goal="第一个任务")
+        driver = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(callback),
+            poll_interval_seconds=0.01,
+        )
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: services.sessions.get_project_session(
+                PROJECT_ID,
+            ).active_run_id
+            is not None,
+        )
+        spared = await driver.interrupt(
+            PROJECT_ID,
+            superseded=True,
+            expected_run_id="agent-run-somebody-else",
+        )
+        release.set()
+        runs = CreatorAgentRunStore(services.root)
+        await _wait_for(
+            lambda: any(
+                run.status.value == "SUCCEEDED"
+                for run in runs.list(PROJECT_ID)
+            ),
+        )
+        await driver.wait_until_idle(PROJECT_ID)
+        records = runs.list(PROJECT_ID)
+        await driver.stop()
+        return spared, records
+
+    spared, records = asyncio.run(scenario())
+
+    assert spared is False
+    assert [record.status.value for record in records] == ["SUCCEEDED"]
+
+
+def test_reconcile_returns_a_wedged_resuming_session_to_idle(
+    tmp_path,
+) -> None:
+    """RESUMING with nothing pending and no run self-heals to IDLE."""
+
+    async def callback(_messages, _tools) -> AgentModelTurn:
+        return AgentModelTurn(content="完成")
+
+    async def scenario():
+        services = _create_project(tmp_path, initial_goal="第一个任务")
+        driver = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(callback),
+            poll_interval_seconds=0.01,
+        )
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        runs = CreatorAgentRunStore(services.root)
+        await _wait_for(
+            lambda: any(
+                run.status.value == "SUCCEEDED"
+                for run in runs.list(PROJECT_ID)
+            ),
+        )
+        await driver.wait_until_idle(PROJECT_ID)
+        # The wedge left behind by a supersede that consumed its own
+        # replacement message: RESUMING, no active run, nothing pending.
+        services.sessions.set_session_status(
+            PROJECT_ID,
+            SESSION_ID,
+            "RESUMING",
+        )
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: services.sessions.get_project_session(
+                PROJECT_ID,
+            ).status.value
+            == "IDLE",
+        )
+        session = services.sessions.get_project_session(PROJECT_ID)
+        await driver.stop()
+        return session
+
+    session = asyncio.run(scenario())
+
+    assert session.status.value == "IDLE"
+    assert session.active_run_id is None
