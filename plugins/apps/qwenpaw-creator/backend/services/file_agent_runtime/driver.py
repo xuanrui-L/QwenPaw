@@ -31,7 +31,9 @@ from domain.enums import (
 )
 from domain.errors import ConflictError
 from models.config import (
+    CREATION_CHECKPOINT_REQUIRED,
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    get_creation_checkpoint_mode,
     get_execution_authorization_mode,
     get_text_model_name,
     get_vlm_model_name,
@@ -71,7 +73,11 @@ from services.runtime_files.execution_models import (
     ExecutionAuthorizationStatus,
     SpecialistRunRecord,
 )
-from services.runtime_files.execution_store import ProjectExecutionStore
+from services.runtime_files.execution_store import (
+    ExecutionStoreError,
+    ProjectExecutionStore,
+)
+from services.runtime_files.errors import RecordNotFoundError
 from services.execution_pricing import (
     CostEstimate,
     estimate_execution_cost,
@@ -90,6 +96,16 @@ from services.runtime_files.session_store import (
 )
 from services.web_grounding import ground_prompt_context
 
+from .checkpoints import (
+    CHECKPOINT_PROVIDER,
+    checkpoint_authorization_id,
+    checkpoint_execution_request_id,
+    checkpoint_label,
+    checkpoint_operation,
+    checkpoint_recovery,
+    checkpoint_summary,
+    required_checkpoint_phases,
+)
 from .model_client import (
     AgentChatClient,
     AgentModelConfigurationError,
@@ -237,6 +253,29 @@ _TERMINAL_GOAL_STATUSES = frozenset(
 
 class FileAgentRuntimeError(RuntimeError):
     pass
+
+
+class CreationCheckpointBlocked(FileAgentRuntimeError):
+    """A pit stop the user has not cleared blocks costly generation."""
+
+    def __init__(
+        self,
+        phase: str,
+        status: ExecutionAuthorizationStatus,
+    ) -> None:
+        self.phase = phase
+        self.status = status
+        verdict = (
+            "被用户否决"
+            if status is ExecutionAuthorizationStatus.REJECTED
+            else f"未通过（{status.value}）"
+        )
+        super().__init__(
+            f"创作检查点「{checkpoint_label(phase)}」{verdict}；未执行任何生成。",
+        )
+
+    def recovery(self) -> str:
+        return checkpoint_recovery(self.phase)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2344,9 +2383,16 @@ class FileCreatorAgentRuntime:
                             "error": {
                                 "type": type(exc).__name__,
                                 "message": str(exc),
-                                "recovery": _specialist_tool_recovery(
-                                    call.name,
-                                    str(exc),
+                                "recovery": (
+                                    exc.recovery()
+                                    if isinstance(
+                                        exc,
+                                        CreationCheckpointBlocked,
+                                    )
+                                    else _specialist_tool_recovery(
+                                        call.name,
+                                        str(exc),
+                                    )
                                 ),
                             },
                         }
@@ -2475,6 +2521,21 @@ class FileCreatorAgentRuntime:
 
         spec = self.specialist_tools.spec_for(role, name)
         authorization_id: str | None = None
+        if spec is not None:
+            await self._require_creation_checkpoints(
+                project_id=project_id,
+                session_id=session_id,
+                parent_run_id=parent_run_id,
+                specialist_run_id=specialist_run_id,
+                round_id=round_id,
+                epoch=epoch,
+                request=request,
+                common=common,
+                call_id=call_id,
+                spec=spec,
+                role=role,
+                tools=tools,
+            )
         if (
             spec is not None
             and spec.requires_execution_authorization
@@ -2606,6 +2667,213 @@ class FileCreatorAgentRuntime:
                         {**dict(common), "toolCallId": call_id, "tool": name},
                     )
 
+    async def _require_creation_checkpoints(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        parent_run_id: str,
+        specialist_run_id: str,
+        round_id: str,
+        epoch: int,
+        request: CreatorMessageRecord,
+        common: Mapping[str, Any],
+        call_id: str,
+        spec: SpecialistToolSpec,
+        role: SpecialistRole,
+        tools: AgentProjectTools,
+    ) -> None:
+        """Block costly generation until the user cleared each pit stop.
+
+        The gate lives here, in deterministic tool admission, so a model
+        cannot skip a checkpoint by forgetting to ask. Each phase is one
+        durable approval per Project: once cleared, later calls pass
+        without prompting again.
+        """
+
+        if get_creation_checkpoint_mode() != CREATION_CHECKPOINT_REQUIRED:
+            return
+        for phase in required_checkpoint_phases(spec.name, role):
+            authorization = await self._creation_checkpoint_record(
+                project_id=project_id,
+                round_id=round_id,
+                specialist_run_id=specialist_run_id,
+                request=request,
+                call_id=call_id,
+                parent_run_id=parent_run_id,
+                phase=phase,
+                tools=tools,
+            )
+            if authorization.status is ExecutionAuthorizationStatus.APPROVED:
+                continue
+            if authorization.status is ExecutionAuthorizationStatus.PENDING:
+                await self._event(
+                    project_id,
+                    session_id,
+                    "creation.checkpoint_required",
+                    parent_run_id,
+                    request,
+                    {
+                        **dict(common),
+                        "authorizationId": authorization.authorization_id,
+                        "authorizationToken": (
+                            authorization.authorization_token
+                        ),
+                        "checkpointPhase": phase,
+                        "operation": authorization.operation,
+                        "summary": authorization.summary,
+                        "toolCallId": call_id,
+                        "tool": spec.name,
+                    },
+                )
+                authorization = await self._await_authorization_decision(
+                    project_id=project_id,
+                    session_id=session_id,
+                    parent_run_id=parent_run_id,
+                    specialist_run_id=specialist_run_id,
+                    epoch=epoch,
+                    request=request,
+                    common=common,
+                    call_id=call_id,
+                    authorization=authorization,
+                    decided_event="creation.checkpoint_decided",
+                    decided_payload={"checkpointPhase": phase},
+                )
+            if (
+                authorization.status
+                is not ExecutionAuthorizationStatus.APPROVED
+            ):
+                raise CreationCheckpointBlocked(phase, authorization.status)
+
+    async def _creation_checkpoint_record(
+        self,
+        *,
+        project_id: str,
+        round_id: str,
+        specialist_run_id: str,
+        request: CreatorMessageRecord,
+        call_id: str,
+        parent_run_id: str,
+        phase: str,
+        tools: AgentProjectTools,
+    ) -> ExecutionAuthorizationRecord:
+        """Read this Project's checkpoint approval, creating it on demand."""
+
+        authorization_id = checkpoint_authorization_id(project_id, phase)
+        try:
+            return await asyncio.to_thread(
+                self.executions.get_execution_authorization,
+                project_id,
+                authorization_id,
+            )
+        except RecordNotFoundError:
+            pass
+        candidate = ExecutionAuthorizationRecord(
+            authorization_id=authorization_id,
+            project_id=project_id,
+            round_id=round_id,
+            run_id=specialist_run_id,
+            execution_request_id=checkpoint_execution_request_id(
+                project_id,
+                phase,
+            ),
+            operation=checkpoint_operation(phase),
+            target_scope=[f"project:{project_id}"],
+            authorization_token=secrets.token_urlsafe(32),
+            summary=checkpoint_summary(phase),
+            scope={
+                "operation": checkpoint_operation(phase),
+                "checkpointPhase": phase,
+                "message": checkpoint_summary(phase),
+            },
+            # The decision-tray card echoes provider/model back on approve,
+            # and the API requires them to match the request exactly.
+            requested_provider=CHECKPOINT_PROVIDER,
+            requested_model=checkpoint_label(phase),
+            requested_candidates=1,
+            caused_by_request_id=tools.context.caused_by_request_id,
+            caused_by_message_id=request.message_id,
+            caused_by_message_seq=request.message_seq,
+            review_policy=tools.context.review_policy,
+            metadata={"toolCallId": call_id, "parentRunId": parent_run_id},
+        )
+        try:
+            return await asyncio.to_thread(
+                self.executions.create_execution_authorization,
+                candidate,
+            )
+        except ExecutionStoreError:
+            # A concurrent run created the same checkpoint first; its
+            # record is the authority.
+            return await asyncio.to_thread(
+                self.executions.get_execution_authorization,
+                project_id,
+                authorization_id,
+            )
+
+    async def _await_authorization_decision(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        parent_run_id: str,
+        specialist_run_id: str,
+        epoch: int,
+        request: CreatorMessageRecord,
+        common: Mapping[str, Any],
+        call_id: str,
+        authorization: ExecutionAuthorizationRecord,
+        decided_event: str = "execution.authorization_decided",
+        decided_payload: Mapping[str, Any] | None = None,
+    ) -> ExecutionAuthorizationRecord:
+        """Park the Specialist run until a persisted approval is decided."""
+
+        await asyncio.to_thread(
+            self.executions.transition_specialist_run,
+            project_id,
+            specialist_run_id,
+            expected_status=SpecialistRunStatus.RUNNING_MODEL,
+            status=SpecialistRunStatus.WAITING_AUTHORIZATION,
+        )
+        try:
+            while authorization.status is ExecutionAuthorizationStatus.PENDING:
+                self._assert_epoch(project_id, parent_run_id, epoch)
+                await asyncio.sleep(min(self.poll_interval_seconds, 0.5))
+                authorization = await asyncio.to_thread(
+                    self.executions.get_execution_authorization,
+                    project_id,
+                    authorization.authorization_id,
+                )
+        finally:
+            current = await asyncio.to_thread(
+                self.executions.get_specialist_run,
+                project_id,
+                specialist_run_id,
+            )
+            if current.status is SpecialistRunStatus.WAITING_AUTHORIZATION:
+                await asyncio.to_thread(
+                    self.executions.transition_specialist_run,
+                    project_id,
+                    specialist_run_id,
+                    expected_status=SpecialistRunStatus.WAITING_AUTHORIZATION,
+                    status=SpecialistRunStatus.RUNNING_MODEL,
+                )
+        await self._event(
+            project_id,
+            session_id,
+            decided_event,
+            parent_run_id,
+            request,
+            {
+                **dict(common),
+                **dict(decided_payload or {}),
+                "authorizationId": authorization.authorization_id,
+                "status": authorization.status.value,
+                "toolCallId": call_id,
+            },
+        )
+        return authorization
+
     async def _await_execution_authorization(
         self,
         *,
@@ -2681,13 +2949,6 @@ class FileCreatorAgentRuntime:
             self.executions.create_execution_authorization,
             record,
         )
-        await asyncio.to_thread(
-            self.executions.transition_specialist_run,
-            project_id,
-            specialist_run_id,
-            expected_status=SpecialistRunStatus.RUNNING_MODEL,
-            status=SpecialistRunStatus.WAITING_AUTHORIZATION,
-        )
         await self._event(
             project_id,
             session_id,
@@ -2709,41 +2970,16 @@ class FileCreatorAgentRuntime:
                 "toolCallId": call_id,
             },
         )
-        try:
-            while authorization.status is ExecutionAuthorizationStatus.PENDING:
-                self._assert_epoch(project_id, parent_run_id, epoch)
-                await asyncio.sleep(min(self.poll_interval_seconds, 0.5))
-                authorization = await asyncio.to_thread(
-                    self.executions.get_execution_authorization,
-                    project_id,
-                    authorization.authorization_id,
-                )
-        finally:
-            current = await asyncio.to_thread(
-                self.executions.get_specialist_run,
-                project_id,
-                specialist_run_id,
-            )
-            if current.status is SpecialistRunStatus.WAITING_AUTHORIZATION:
-                await asyncio.to_thread(
-                    self.executions.transition_specialist_run,
-                    project_id,
-                    specialist_run_id,
-                    expected_status=SpecialistRunStatus.WAITING_AUTHORIZATION,
-                    status=SpecialistRunStatus.RUNNING_MODEL,
-                )
-        await self._event(
-            project_id,
-            session_id,
-            "execution.authorization_decided",
-            parent_run_id,
-            request,
-            {
-                **dict(common),
-                "authorizationId": authorization.authorization_id,
-                "status": authorization.status.value,
-                "toolCallId": call_id,
-            },
+        authorization = await self._await_authorization_decision(
+            project_id=project_id,
+            session_id=session_id,
+            parent_run_id=parent_run_id,
+            specialist_run_id=specialist_run_id,
+            epoch=epoch,
+            request=request,
+            common=common,
+            call_id=call_id,
+            authorization=authorization,
         )
         if authorization.status is not ExecutionAuthorizationStatus.APPROVED:
             raise FileAgentRuntimeError(

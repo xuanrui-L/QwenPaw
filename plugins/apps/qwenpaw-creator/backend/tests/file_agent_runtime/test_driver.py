@@ -2145,12 +2145,21 @@ def test_specialist_cancel_while_waiting_runtime_emits_terminal_event(
     was still missing.  Locks in that the event fires on this path too.
     """
     import services.file_agent_runtime.driver as driver_module
-    from models.config import EXECUTION_AUTHORIZATION_ALLOW_ALL
+    from models.config import (
+        CREATION_CHECKPOINT_SKIP,
+        EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    )
 
     monkeypatch.setattr(
         driver_module,
         "get_execution_authorization_mode",
         lambda: EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    )
+    # This test owns cancel-while-waiting, not the creation pit stops.
+    monkeypatch.setattr(
+        driver_module,
+        "get_creation_checkpoint_mode",
+        lambda: CREATION_CHECKPOINT_SKIP,
     )
 
     async def scenario():
@@ -2709,6 +2718,13 @@ def test_costly_specialist_tool_waits_for_file_authorization(
         driver_module,
         "get_execution_authorization_mode",
         lambda: "required",
+    )
+    # This test owns the per-execution authorization gate; the creation
+    # pit stops are covered by test_creation_checkpoints.py.
+    monkeypatch.setattr(
+        driver_module,
+        "get_creation_checkpoint_mode",
+        lambda: "skip",
     )
     parent_turn = 0
     specialist_turn = 0

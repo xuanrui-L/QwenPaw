@@ -25,6 +25,8 @@ CREATOR_ASR_CONFIG_TOOL = "creator_asr_model"
 CREATOR_OSS_CONFIG_TOOL = "creator_media_oss"
 EXECUTION_AUTHORIZATION_REQUIRED = "required"
 EXECUTION_AUTHORIZATION_ALLOW_ALL = "allow_all"
+CREATION_CHECKPOINT_REQUIRED = "required"
+CREATION_CHECKPOINT_SKIP = "skip"
 CREATOR_CONFIG_TOOLS = (
     CREATOR_TEXT_CONFIG_TOOL,
     CREATOR_IMAGE_CONFIG_TOOL,
@@ -250,6 +252,16 @@ def get_execution_authorization_mode() -> str:
     if value == EXECUTION_AUTHORIZATION_ALLOW_ALL:
         return EXECUTION_AUTHORIZATION_ALLOW_ALL
     return EXECUTION_AUTHORIZATION_REQUIRED
+
+
+def get_creation_checkpoint_mode() -> str:
+    """Return the persisted mode for the creation pit-stop checkpoints."""
+
+    section = _get_user_config().get("creation_checkpoints")
+    value = section.get("mode") if isinstance(section, dict) else None
+    if value == CREATION_CHECKPOINT_SKIP:
+        return CREATION_CHECKPOINT_SKIP
+    return CREATION_CHECKPOINT_REQUIRED
 
 
 def _map_tool_to_section(tool_name: str) -> str:

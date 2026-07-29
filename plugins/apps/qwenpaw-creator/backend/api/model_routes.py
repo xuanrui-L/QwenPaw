@@ -795,6 +795,27 @@ async def update_model_config(
     return {"ok": True}
 
 
+@router.patch("/config/creation-checkpoints")
+async def patch_creation_checkpoints(
+    data: dict[str, Any] = Body(...),
+) -> dict[str, bool]:
+    mode = data.get("mode")
+    if mode not in ("required", "skip"):
+        raise ValidationError("mode 必须是 'required' 或 'skip'")
+
+    def mutate(current: ModelConfigData) -> ModelConfigData:
+        merged = current.model_dump()
+        merged["creation_checkpoints"] = {"mode": mode}
+        return ModelConfigData.model_validate(merged)
+
+    def transaction() -> None:
+        mutate_model_config(mutate)
+        _notify_agent_model_config_changed()
+
+    await asyncio.to_thread(transaction)
+    return {"ok": True}
+
+
 @router.patch("/config/execution-authorization")
 async def patch_execution_authorization(
     data: dict[str, Any] = Body(...),

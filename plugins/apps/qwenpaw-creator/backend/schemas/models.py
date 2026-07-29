@@ -102,6 +102,16 @@ class ExecutionAuthorizationConfig(StrictModel):
     mode: Literal["required", "allow_all"] = "required"
 
 
+class CreationCheckpointConfig(StrictModel):
+    """Pit-stop gates the user must clear before costly generation.
+
+    ``required`` blocks visual generation until the plan (and later the
+    character/scene designs) are confirmed; ``skip`` runs unattended.
+    """
+
+    mode: Literal["required", "skip"] = "required"
+
+
 class OssConfig(StrictModel):
     """QwenPaw Creator media OSS configuration stored in model_config.json."""
 
@@ -125,6 +135,10 @@ class ModelConfigData(StrictModel):
     execution_authorization: ExecutionAuthorizationConfig = Field(
         default_factory=ExecutionAuthorizationConfig,
         alias="executionAuthorization",
+    )
+    creation_checkpoints: CreationCheckpointConfig = Field(
+        default_factory=CreationCheckpointConfig,
+        alias="creationCheckpoints",
     )
 
 
