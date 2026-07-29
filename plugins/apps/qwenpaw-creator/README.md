@@ -26,6 +26,5 @@ degraded mode and reports the missing dependency through
 `GET /api/qwenpaw-creator/health`; workflows that require `jq_project` remain
 unavailable until jq is configured.
 
-Model and OSS credentials should normally be configured through the six
-`creator_*` entries in QwenPaw Tools. `.env.example` documents local-development
-fallback variables.
+Model and OSS credentials are configured through the six `creator_*` entries in
+QwenPaw Tools.
