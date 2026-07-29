@@ -65,6 +65,7 @@ export const DOC_GROUPS: DocGroup[] = [
     titleKey: "docs.groupPractice",
     children: [
       { slug: "practice-agent-team", titleKey: "docs.practiceAgentTeam" },
+      { slug: "creator", titleKey: "docs.creator" },
     ],
   },
   {

@@ -297,6 +297,7 @@
     "memory": "Memory",
     "memoryEvolvingAndProactive": "Memory-Evolving & Proactive",
     "codingMode": "Coding Mode",
+    "creator": "Creator",
     "context": "Context",
     "loopEngineering": "Loop Engineering",
     "commands": "Magic commands",
