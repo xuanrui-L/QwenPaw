@@ -1,148 +1,143 @@
 # QwenPaw Creator
 
-QwenPaw Creator is an **agentic video creation platform**: hand your goals, sources, and constraints to the Agent, and it handles planning, generation, editing, and composition like a full production team. The Agent runs through the entire creation process — playing the roles of screenwriter, director, visual development artist, motion designer, and editor — breaking down your goal, producing content step by step, and pausing at every key point for your review and confirmation. You can step in with a single sentence at any time to steer the direction.
+<p class="creator-lead">QwenPaw Creator is an <strong>agentic video creation platform</strong>: you set the goal, provide sources, and steer the direction; an Agent team handles planning, generation, editing, and composition, returning every important decision to you.</p>
 
-Creator can both **generate from scratch** (e.g. short dramas: script → assets → storyboard → video) and **edit existing footage into a finished film** (source understanding → timeline arrangement → subtitles/motion/transitions → composition). Whether you start from a single idea or a batch of raw footage, you can hand it all to Creator.
+- **The Agent stays throughout the process**: screenwriting, directing, visual development, motion, and editing Specialists collaborate against live project state;
+- **You remain in control**: redirect the work with a sentence or fine-tune an object directly on the timeline;
+- **Start either way**: generate a short drama from an idea, or turn existing footage into a finished film.
 
-![QwenPaw Creator home page](/docs/images/creator/home.png)
-
----
-
-## Quick start
-
-### Open Creator
-
-Creator is an app inside QwenPaw. Start QwenPaw, open the console (default `http://127.0.0.1:8088/`), go to **Apps** in the left navigation, and click QwenPaw Creator to enter the platform.
-
-![Open Creator from the QwenPaw Apps page](/docs/images/creator/app-entry.png)
-
-### Configure models
-
-Before first use, click **Model Configuration** next to the home-page input (or follow the onboarding guide) to connect your models. Different scenarios require different models:
-
-| Scenario                                | Required models                                                      |
-| --------------------------------------- | -------------------------------------------------------------------- |
-| All scenarios                           | Large language model (LLM)                                           |
-| Generative creation (short drama, etc.) | Image generation, video generation, and vision-language (VLM) models |
-| Editing uploaded sources                | VLM (for source understanding)                                       |
-| Sources with voice tracks               | Speech recognition (ASR) model                                       |
-
-Currently supported providers:
-
-| Capability       | Supported providers                                                                 |
-| ---------------- | ----------------------------------------------------------------------------------- |
-| LLM / VLM        | OpenAI protocol, Bailian, Claude, DeepSeek, Gemini, Qianfan, Volcano Engine, custom |
-| Image generation | OpenAI protocol, Bailian                                                            |
-| Video generation | Bailian (wan2.x r2v, happyhorse-1.x-r2v), Volcano Engine (doubao-seedance-2.x)      |
-| ASR              | Fun-ASR, Whisper                                                                    |
-
-### Create your first project
-
-On the home page, hand your creative intent to the Agent:
-
-1. **Describe the goal**: e.g. "A CEO-romance short drama — fast-paced, strong dramatic conflict, with a happy ending", or "Edit a one-minute highlight reel of my cat videos";
-2. **Provide sources** (optional): import videos, images, and documents via "Add file / Add folder / Add link". Once inside the project they become manageable, referenceable, and traceable project assets;
-3. **Pick the creation type and specs**: Short Drama / Editing / General (talking-head, text-to-video, and other formats work well with the General type plus a goal description), then choose resolution and aspect ratio (e.g. 720P, 16:9);
-4. Hit send — the Agent starts planning and takes you into the creation workbench.
+<figure class="creator-figure">
+  <img class="creator-shot" src="https://img.alicdn.com/imgextra/i3/O1CN01Lg9abZ1bycqw8mR6L_!!6000000003534-2-tps-2400-1240.png" alt="The two Creator workflows: generating from an idea and editing existing footage" />
+  <figcaption>Creator has one project entry. After entering, choose either “generate from an idea” or “edit existing footage,” then continue through one Agentic creation loop.</figcaption>
+</figure>
 
 ---
 
-## The creation workbench
+## Start your first project in three minutes
 
-Inside a project you'll work in the **Video Plan** workbench, where everything the Agent produces is presented and arranged in a structured way:
+### 1. Open Creator
 
-![Video Plan workbench](/docs/images/creator/workbench.png)
+Creator is installed and opened from **Apps** in QwenPaw. Start QwenPaw and open the console (default `http://127.0.0.1:8088/`), select **Apps** in the left navigation, find **QwenPaw Creator**, and choose Install. After installation, open it from the same Apps page.
 
-- **Creation outline**: the overall plan and film info (total duration, resolution, aspect ratio, content count);
-- **Timeline**: a multi-track view of the film — clips, subtitles, motion effects, and transitions each on their own track. Drag the playhead to jump to any moment;
-- **Time-point contents**: the lower-left list shows every item active at the current moment (type, time range, and summary), making it easy to confirm that footage, subtitles, and motion effects line up;
-- **Detail panel**: click any segment (on the timeline or in the list) to open its details, where you can inspect and edit start time, duration, stacking order, on-screen position, opacity, and more — then click "Apply changes";
-- **Asset library**: switch at the top to browse all sources and generated outputs in the project (character images, scene images, storyboard frames, video clips, etc.);
-- **Creation assistant**: the right panel is your conversation with the Agent, streaming every production step in real time (ideation, delegating Specialists, generation, plan updates). Type a revision request at any moment.
+<figure class="creator-figure">
+  <img class="creator-shot" src="https://img.alicdn.com/imgextra/i1/O1CN01MXPKfU25B6V6preKc_!!6000000007487-2-tps-850-620.png" alt="The Apps navigation and QwenPaw Creator card on the QwenPaw Apps page" />
+  <figcaption>Find QwenPaw Creator in Apps, install it, and open it from the same page.</figcaption>
+</figure>
 
-### Collaborating with the Agent
+### 2. Configure models
 
-The creation assistant is your companion throughout. A few practical tips:
+Before your first project, open **Model Configuration** at the lower right of the home composer (or follow the first-run guide). Connect only the capabilities your scenario needs:
 
-- **Reference with @**: type `@` to pull storyboard shots, sources, and other objects into the conversation as context; the currently selected object is attached automatically;
-- **Intervene anytime**: whether the Agent is planning or generating, issue a new instruction directly (e.g. "change the caption of the second clip to…") — it reads the current project state and makes the related changes;
-- **Stop instantly**: running tasks can be interrupted immediately with the stop button.
+| How you create                | Model capabilities you need                                       |
+| ----------------------------- | ----------------------------------------------------------------- |
+| Every scenario                | Large language model (LLM)                                        |
+| Generative work such as drama | Image generation, video generation, and vision-language (VLM)     |
+| Editing uploaded footage      | VLM; add speech recognition (ASR) when the footage contains voice |
+
+LLM / VLM connections include OpenAI-compatible APIs, Bailian, Claude, DeepSeek, Gemini, Qianfan, Volcano Engine, and custom providers. Available image, video, and ASR providers are grouped by capability in Model Configuration.
+
+### 3. Hand the goal and sources to the Agent
+
+1. **Describe the goal**: for example, “Create a fast-paced short drama with strong conflict and a warm ending,” or “Turn these cat videos into a one-minute highlight reel”;
+2. **Provide sources (optional)**: add files, folders, or links. Inside the project they become manageable, referenceable, and traceable assets;
+3. **Choose the format**: Short Drama / Editing / General, plus resolution and aspect ratio;
+4. Send the brief. The Agent starts planning and opens the workbench.
+
+<figure class="creator-figure">
+  <img class="creator-shot" src="https://img.alicdn.com/imgextra/i3/O1CN01SQFiPY25CTgmT9bXb_!!6000000007490-2-tps-2100-1320.png" alt="The Creator home composer with goal, source import, creation type, aspect ratio, and model controls" />
+  <figcaption>One composer holds the goal, sources, and constraints. It starts the project; the uploaded material then becomes structured project data.</figcaption>
+</figure>
 
 ---
 
-## Two typical ways to create
+## The workbench: selection becomes context, with manual control
 
-### Short drama generation: zero to film
+Creator’s Agentic layer is not merely a chat panel beside the editor: **the project content itself is addressable Agent context**. Select a timeline point, drag a time range, click a clip / subtitle / motion / transition / asset, or select page text, then choose **Add to conversation**. The selection appears as AgentDock context; describe the intended change and the Agent works against that exact object.
 
-For generative creation, the Agent moves through the following steps, where each step's output feeds the next:
+<figure class="creator-figure">
+  <img class="creator-shot" src="https://img.alicdn.com/imgextra/i4/O1CN014PTCfa1Zxaj8NkkAr_!!6000000003261-2-tps-2400-1800.png" alt="Creator workbench showing timeline, clip, and text selection flowing into AgentDock context while manual editing remains available" />
+  <figcaption>The same project object supports two parallel modes: add it to AgentDock context for a precise natural-language change, or open its details and edit the fields directly.</figcaption>
+</figure>
 
-```
-Script → Storyboard text → Asset generation (character anchor + scene base images) → Storyboard frames → Video → Composition
-```
+| What you select                                          | How it becomes Agent context                                                        | What remains manually editable                                               |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| A timeline point or dragged time range                   | Use the floating **Add to conversation** action to send the exact span to AgentDock | Continue adjusting clip bounds, order, track relationships, and rhythm       |
+| A clip, subtitle, motion, transition, asset, or artifact | The selection is associated automatically; use `@` to reference it again            | Open details to edit timing, stacking, position, opacity, or copy            |
+| A section of page text                                   | Select the text and choose **Add to conversation**                                  | Edit the source field directly, or ask the Agent to change only that passage |
 
-1. **Script and storyboard**: the Agent (screenwriter/director) writes the script and breaks it into structured shots (scenes, characters, actions, dialogue);
-2. **Asset generation**: the visual development Specialist first creates anchor images for each character and base images for each scene — the critical prerequisite that keeps characters and scenes consistent across the whole film;
-3. **Storyboard frames**: each shot's frame is generated using the asset images as reference inputs;
-4. **Video generation**: reference-to-video (r2v) models generate clips shot by shot from storyboard frames and asset images;
-5. **Composition**: once all clips are ready, the final film is composed automatically.
+Timeline content, project elements, assets, and text are therefore not static results that an Agent can only “see”; they are referenceable, locatable, editable, and reviewable project objects. Use **Asset Library** at the top to browse source material and generated outputs. **Video Preview / Download Film** checks and exports the current plan.
 
-Every step's output enters the review flow for your confirmation — for example, after a character image is generated:
+### Three practical Agent collaboration habits
 
-![Character asset image review](/docs/images/creator/asset-review.png)
+- **Reference with `@`**: attach a shot, source, or other object as context; the selected object is also carried into the conversation automatically;
+- **Intervene at any time**: ask for a targeted change such as “only rewrite the second caption” or a broader one such as “add a sunray motion treatment to the opening”;
+- **Stop when needed**: interrupt an in-progress task immediately with the stop control.
+
+---
+
+## Two typical creation paths
+
+### Short-drama generation: zero to film
+
+1. **Script and shots**: screenwriting / directing Specialists turn the goal into scenes, characters, action, and dialogue;
+2. **Consistency assets**: anchor images establish each character and scene;
+3. **Storyboard and video**: frames use those assets as references, then reference-to-video (r2v) models generate clips;
+4. **Composition**: ready clips enter the shared timeline and are composed into a complete film.
 
 ### Footage editing: sources to film
 
-For editing, just hand your raw footage to the Agent:
-
-1. **Import and understand sources**: the Agent uses the VLM (plus ASR for voice tracks) to understand each source segment and spot highlights;
-2. **Editing plan**: the Agent (editor) selects clips, arranges the timeline, and adds subtitles, motion effects, and transitions as needed;
-3. **Refine**: click any segment on the timeline to adjust it yourself, or ask the Agent (e.g. "add sunray decorations to the opening");
-4. **Compose**: confirm the plan and render the final film.
+1. **Understand sources**: VLM analysis (plus ASR for speech) finds content and highlight moments;
+2. **Build an edit plan**: the Agent selects clips, arranges the timeline, and adds subtitles, motion, and transitions;
+3. **Human + Agent refinement**: adjust a segment directly or ask the Agent to do it;
+4. **Preview and compose**: confirm the plan and render the film.
 
 ---
 
-## Review and cost control
+## Review: every Agent change has a clear decision
 
-Every change the Agent makes stays under your control.
+Generated media and Agent-authored text changes enter the decision tray. Content you edit manually applies directly and does not create another review item.
 
-### Content review
+<div class="creator-media-grid">
+  <figure class="creator-figure">
+    <img class="creator-shot" src="https://img.alicdn.com/imgextra/i1/O1CN01UhZVZn1sEECIv5SXW_!!6000000005734-2-tps-920-1050.png" alt="Media review card for a character visual asset" />
+    <figcaption><strong>Media review</strong>: inspect the result and its details, then Keep or Undo it individually or in a batch.</figcaption>
+  </figure>
+  <figure class="creator-figure">
+    <img class="creator-shot" src="https://img.alicdn.com/imgextra/i2/O1CN01Yb3MTwmx9zF1roSO_!!6000000001528-2-tps-920-760.png" alt="Text review card showing the content before and after a change" />
+    <figcaption><strong>Text review</strong>: see the before / after change immediately, or open its original context.</figcaption>
+  </figure>
+</div>
 
-- **Images and videos** generated or modified by the Agent enter the review queue — "Keep" to adopt, "Undo" to revert, item by item or all at once;
-- **Text changes** from Agent interventions are shown as red/green diffs; click "View" to jump to the original location for comparison;
-- Review items jump precisely to their generation context (character image → asset detail, storyboard frame → shot detail, video → video generation detail);
-- Content you **edit manually** is applied directly and skips review.
+Review items jump as close as possible to their generation context: character image → asset detail, storyboard frame → shot detail, and text change → original location.
 
-![Text change diff review](/docs/images/creator/text-review.png)
+### Production confirmation: see estimated cost before a paid call
 
-### Production confirmation (cost estimate)
+Before a paid image or video generation call, the Agent presents a **production confirmation card** with the target, model, parameters, and a locally estimated cost. The billable task is submitted only after you click **Continue**; **Cancel** ends that production request.
 
-Before calling a paid generation model (image/video), the Agent shows a **production confirmation card** listing the target, model, parameters, and prompt, along with a locally computed cost estimate. The billable task is only submitted after you click "Continue"; "Cancel" aborts the production. You can disable this confirmation in the model configuration.
+<figure class="creator-figure">
+  <img class="creator-shot creator-shot--compact" src="https://img.alicdn.com/imgextra/i2/O1CN01EJ5RXHZn1gH1gENM_!!6000000002366-2-tps-828-548.png" alt="Production confirmation focused on target, model, parameters, estimated cost, Continue, and Cancel" />
+  <figcaption>The confirmation card summarizes the target, model, parameters, and estimated cost; the paid task starts only after approval.</figcaption>
+</figure>
 
-![Production confirmation with cost estimate](/docs/images/creator/execution-auth.png)
-
-> 💰 Estimates are computed locally from each model's published pricing and are for reference only; actual charges follow your provider's bill.
+> 💰 The estimate is computed locally from published model pricing and is for reference only. Your provider’s bill is authoritative. This confirmation can be disabled in Model Configuration.
 
 ---
 
-## Preview and export
+## Preview, manage, and export
 
-- **Film preview**: click "Video Preview" in the workbench, or "Preview" on any project card in "My Projects", to play the current film directly;
-- **Download**: use "Download Film" at the top right of the workbench to export the final video file.
+- **Preview the film**: use “Video Preview” in the workbench, or “Preview” on a card in My Projects;
+- **Download**: use “Download Film” at the upper right of the workbench;
+- **Manage projects**: My Projects shows creation type, aspect ratio, resolution, and update time, with sorting controls.
 
-![Film preview](/docs/images/creator/film-preview.png)
-
-The "My Projects" page manages all your creations, sortable by update time, with creation type, aspect ratio, and resolution shown on each card:
-
-![My Projects](/docs/images/creator/projects.png)
+<figure class="creator-figure">
+  <img class="creator-shot" src="https://img.alicdn.com/imgextra/i2/O1CN01KhoHYq1vvgcvVfCfo_!!6000000006235-2-tps-3456-1882.png" alt="Full Creator project-management page with the complete film preview dialog open" />
+  <figcaption>My Projects brings project status and creation settings together; open Preview to inspect the finished film in a complete dialog.</figcaption>
+</figure>
 
 ---
 
 ## Appendix: installation and runtime
 
-Creator currently ships with QwenPaw as an app package. Install it while QwenPaw is offline; after a restart it appears in the Apps page:
+Open **Apps** in the QwenPaw console, find **QwenPaw Creator**, and select Install. After installation, open Creator directly from Apps.
 
-```bash
-qwenpaw plugin install /path/to/qwenpaw-creator
-```
-
-Creator relies on a few native tools (without touching your system installation): `ffmpeg` powers media processing and film composition (set `CREATOR_FFMPEG_PATH`, or it falls back to system `ffmpeg` / `imageio-ffmpeg`); `jq` powers the Agent's structured project file edits (`CREATOR_JQ_PATH` or `PATH`). With missing dependencies Creator starts in degraded mode; check `GET /api/qwenpaw-creator/health` for details.
+Creator uses a few local tools without changing your system installation: `ffmpeg` handles media processing and composition (set `CREATOR_FFMPEG_PATH`, otherwise it falls back to system `ffmpeg` or `imageio-ffmpeg`); `jq` supports structured Agent edits to project files (`CREATOR_JQ_PATH` or `PATH`). If a dependency is missing, Creator starts in degraded mode; inspect `GET /api/qwenpaw-creator/health` for details.
