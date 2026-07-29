@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Modal, Input, Select, Checkbox, Button, message } from "antd";
+import { Modal, Input, Select, Checkbox, Button, message, AutoComplete } from "antd";
 import { Brain } from "lucide-react";
 import {
   SettingOutlined,
@@ -19,7 +19,9 @@ import {
   saveModelConfig,
   patchExecutionAuthorization,
   testModelConnection,
+  getHostProviders,
 } from "@/api/creator";
+import type { HostProviderInfo } from "@/api/creator";
 import type {
   GroundingConfig,
   ModelConfigData,
@@ -30,6 +32,7 @@ import ModelSetupGuide from "@/components/onboarding/ModelSetupGuide";
 const LLM_PROTOCOLS = [
   "Anthropic Claude",
   "DashScope（百炼）",
+  "Aliyun Token Plan",
   "DeepSeek",
   "Google Gemini",
   "OpenAI 协议",
@@ -40,6 +43,7 @@ const LLM_PROTOCOLS = [
 const VLM_PROTOCOLS = [
   "Anthropic Claude",
   "DashScope（百炼）",
+  "Aliyun Token Plan",
   "DeepSeek",
   "Google Gemini",
   "OpenAI 协议",
@@ -50,6 +54,86 @@ const VLM_PROTOCOLS = [
 const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
+
+interface ProtocolPreset {
+  base_url: string;
+  freeze_url: boolean;
+  models: string[];
+  base_url_options?: { label: string; value: string }[];
+}
+
+const PROTOCOL_TO_PROVIDER_ID: Record<string, string> = {
+  "DashScope（百炼）": "dashscope",
+  "Aliyun Token Plan": "aliyun-tokenplan",
+  DeepSeek: "deepseek",
+  "OpenAI 协议": "openai",
+  "Anthropic Claude": "anthropic",
+  "Google Gemini": "gemini",
+  "Volcano Engine（火山引擎）": "volcengine-cn",
+  "百度千帆": "qianfan",
+  ModelScope: "modelscope",
+};
+
+const ASR_PRESETS: Record<string, ProtocolPreset> = {
+  "DashScope Fun-ASR": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    freeze_url: true,
+    models: ["fun-asr"],
+  },
+  "OpenAI Whisper": {
+    base_url: "https://api.openai.com/v1",
+    freeze_url: true,
+    models: ["whisper-1"],
+  },
+};
+
+const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
+  "DashScope（百炼）": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    freeze_url: true,
+    models: [
+      "wan2.7-image-pro",
+      "wan2.7-image",
+      "wan2.6-t2i",
+      "wan2.6-image",
+      "wan2.5-t2i-preview",
+      "wan2.2-t2i-plus",
+      "wan2.2-t2i-flash",
+      "wan2.1-t2i-plus",
+      "wan2.1-t2i-turbo",
+      "qwen-image-3.0-pro",
+      "qwen-image-2.0-pro",
+      "qwen-image-2.0",
+      "qwen-image-max",
+      "qwen-image-plus",
+      "z-image-turbo",
+    ],
+  },
+  "OpenAI 协议": {
+    base_url: "https://api.openai.com/v1",
+    freeze_url: true,
+    models: ["gpt-image-2"],
+  },
+};
+
+const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
+  "DashScope（百炼）": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    freeze_url: true,
+    models: [
+      "wan2.7-r2v",
+      "wan2.6-r2v-flash",
+      "wan2.6-r2v",
+      "happyhorse-1.1-r2v",
+    ],
+  },
+  "Volcano Engine（火山引擎）": {
+    base_url: "https://ark.cn-beijing.volces.com",
+    freeze_url: true,
+    models: ["doubao-seedance-2.0-pro", "doubao-seedance-2.0-lite"],
+  },
+};
+
 type ModelType = "llm" | "vlm" | "asr" | "image" | "video";
 type TabType = ModelType | "grounding";
 const DEFAULT_CONFIG: ModelConfigData = {
@@ -266,6 +350,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const [testingVlmMultimodal, setTestingVlmMultimodal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
+  const [hostProviders, setHostProviders] = useState<HostProviderInfo[]>([]);
+
+  useEffect(() => {
+    getHostProviders().then(setHostProviders);
+  }, []);
 
   const loadConfig = useCallback(async () => {
     try {
@@ -703,8 +792,80 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       ? IMAGE_PROTOCOLS
       : VIDEO_PROTOCOLS;
 
+  const getPresetForType = (
+    type: ModelType,
+    protocol: string,
+  ): ProtocolPreset | null => {
+    if (type === "llm" || type === "vlm") {
+      const providerId = PROTOCOL_TO_PROVIDER_ID[protocol];
+      if (!providerId) return null;
+      const provider = hostProviders.find((p) => p.id === providerId);
+      if (!provider) return null;
+      return {
+        base_url: provider.base_url,
+        freeze_url: provider.freeze_url,
+        models: [
+          ...provider.models.map((m) => m.id),
+          ...provider.extra_models.map((m) => m.id),
+        ],
+        base_url_options: provider.meta?.base_url_options,
+      };
+    }
+    if (type === "asr") return ASR_PRESETS[protocol] || null;
+    if (type === "image") return IMAGE_PRESETS[protocol] || null;
+    if (type === "video") return VIDEO_PRESETS[protocol] || null;
+    return null;
+  };
+
+  const getModelOptions = (
+    type: ModelType,
+    protocol: string,
+  ): { value: string; label: string }[] => {
+    if (type === "llm" || type === "vlm") {
+      const providerId = PROTOCOL_TO_PROVIDER_ID[protocol];
+      if (!providerId) return [];
+      const provider = hostProviders.find((p) => p.id === providerId);
+      if (!provider) return [];
+      return [
+        ...provider.models.map((m) => ({ value: m.id, label: m.id })),
+        ...provider.extra_models.map((m) => ({ value: m.id, label: m.id })),
+      ];
+    }
+    const preset = getPresetForType(type, protocol);
+    if (!preset?.models.length) return [];
+    return preset.models.map((m) => ({ value: m, label: m }));
+  };
+
+  const handleProtocolChange = (type: ModelType, protocol: string) => {
+    updateItem(type, "protocol", protocol);
+    const preset = getPresetForType(type, protocol);
+    if (preset) {
+      if (preset.base_url_options?.length) {
+        updateItem(type, "base_url", preset.base_url_options[0].value);
+      } else if (preset.base_url !== undefined) {
+        updateItem(type, "base_url", preset.base_url);
+      }
+      if (preset.models.length > 0) {
+        const currentModel = (config[type] as ModelConfigItem).model_name;
+        if (!preset.models.includes(currentModel)) {
+          updateItem(type, "model_name", preset.models[0]);
+        }
+      }
+    }
+    if (type === "asr") {
+      const provider = protocol === "OpenAI Whisper" ? "whisper" : "fun-asr";
+      updateItem("asr", "provider", provider);
+    }
+  };
+
   const renderFields = (type: ModelType) => {
     const item = config[type] as ModelConfigItem;
+    const preset = getPresetForType(type, item.protocol);
+    const modelOptions = getModelOptions(type, item.protocol);
+    const hasPresetModels = modelOptions.length > 0;
+    const urlDisabled = preset?.freeze_url || false;
+    const hasBaseUrlOptions = (preset?.base_url_options?.length ?? 0) > 0;
+
     return (
       <>
         <div
@@ -716,11 +877,24 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         >
           <div>
             <label className="field-label">模型名称</label>
-            <Input
-              placeholder="model"
-              value={item.model_name}
-              onChange={(e) => updateItem(type, "model_name", e.target.value)}
-            />
+            {hasPresetModels ? (
+              <AutoComplete
+                value={item.model_name}
+                onChange={(v) => updateItem(type, "model_name", v)}
+                options={modelOptions}
+                filterOption={(inputValue, option) =>
+                  (option?.label as string)?.toLowerCase().includes(inputValue.toLowerCase()) ||
+                  (option?.value as string)?.toLowerCase().includes(inputValue.toLowerCase())
+                }
+                placeholder="选择或输入模型"
+              />
+            ) : (
+              <Input
+                placeholder="model"
+                value={item.model_name}
+                onChange={(e) => updateItem(type, "model_name", e.target.value)}
+              />
+            )}
           </div>
           <div>
             <label className="field-label">API Key</label>
@@ -732,36 +906,30 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           </div>
           <div>
             <label className="field-label">Base URL</label>
-            <Input
-              placeholder="https://api.example.com"
-              value={item.base_url}
-              onChange={(e) => updateItem(type, "base_url", e.target.value)}
-            />
+            {hasBaseUrlOptions ? (
+              <Select
+                value={item.base_url}
+                onChange={(v) => updateItem(type, "base_url", v)}
+                options={preset!.base_url_options!.map((opt) => ({
+                  value: opt.value,
+                  label: opt.label,
+                }))}
+                style={{ width: "100%" }}
+              />
+            ) : (
+              <Input
+                placeholder="https://api.example.com"
+                value={item.base_url}
+                disabled={urlDisabled}
+                onChange={(e) => updateItem(type, "base_url", e.target.value)}
+              />
+            )}
           </div>
           <div>
             <label className="field-label">API 协议</label>
             <Select
               value={item.protocol}
-              onChange={(v) => {
-                updateItem(type, "protocol", v);
-                if (type === "asr") {
-                  const provider =
-                    v === "OpenAI Whisper" ? "whisper" : "fun-asr";
-                  updateItem("asr", "provider", provider);
-                  updateItem(
-                    "asr",
-                    "model_name",
-                    provider === "whisper" ? "whisper-1" : "fun-asr",
-                  );
-                  updateItem(
-                    "asr",
-                    "base_url",
-                    provider === "whisper"
-                      ? "https://api.openai.com/v1"
-                      : "https://dashscope.aliyuncs.com/api/v1",
-                  );
-                }
-              }}
+              onChange={(v) => handleProtocolChange(type, v)}
               options={protocolsFor(type).map((p) => ({ value: p, label: p }))}
             />
             {item.protocol === "自定义" && (
