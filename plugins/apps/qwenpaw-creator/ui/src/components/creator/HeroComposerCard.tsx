@@ -347,6 +347,7 @@ export default function HeroComposerCard() {
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
+            data-onboarding-id="model-config"
             onClick={() => setModelConfigModalOpen(true)}
             className="flex cursor-pointer items-center gap-1 rounded-full bg-[rgba(43,27,0,0.04)] px-4 py-1 text-sm font-medium leading-6 text-[#656563] transition-colors hover:bg-[rgba(43,27,0,0.08)] hover:text-[var(--color-text-primary)]"
           >

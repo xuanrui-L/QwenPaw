@@ -10,13 +10,16 @@ import ModelSetupGuide from "./ModelSetupGuide";
 
 const STEPS: TourStepBlueprint[] = [
   {
-    selectors: ['[data-onboarding-id="model-badges"]'],
+    selectors: [
+      '[data-onboarding-id="model-config"]',
+      '[data-onboarding-id="model-badges"]',
+    ],
     title: "第一步：配置模型",
     description: (
       <div>
         <p className="mb-2 text-xs leading-5 text-[var(--color-text-secondary)]">
-          六个徽标对应 LLM、VLM、Grounding、ASR、图片与视频生成模型的启用状态，
-          点击设置图标即可配置。开始创作前需要先完成所需模型的配置：
+          点击这里打开模型配置；顶栏徽标会实时显示 LLM、VLM、Grounding、
+          ASR、图片与视频生成模型的启用状态。开始创作前需要先完成所需模型的配置：
         </p>
         <ModelSetupGuide />
       </div>
