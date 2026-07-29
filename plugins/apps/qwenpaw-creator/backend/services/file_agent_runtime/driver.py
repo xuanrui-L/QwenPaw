@@ -771,40 +771,7 @@ class FileCreatorAgentRuntime:
         except Exception:
             return None
         if run.status is AgentRunStatus.QUEUED:
-            age = (datetime.now(UTC) - run.updated_at).total_seconds()
-            if age < self._ORPHAN_RUN_GRACE_SECONDS:
-                return None
-            try:
-                goal = await asyncio.to_thread(
-                    self.sessions.get_goal,
-                    project_id,
-                    run.goal_id,
-                )
-            except RuntimeGoalNotFound:
-                return None
-            if goal.status not in _TERMINAL_GOAL_STATUSES:
-                return None
-            try:
-                await asyncio.to_thread(
-                    self.runs.transition,
-                    project_id,
-                    run.run_id,
-                    expected_status=AgentRunStatus.QUEUED,
-                    status=AgentRunStatus.CANCELLED,
-                    updates={
-                        "error": {
-                            "code": "ORPHANED_ON_TERMINAL_GOAL",
-                            "message": (
-                                "run was queued against a terminal Goal "
-                                f"({goal.status.value}) and could never "
-                                "start; reconciled automatically"
-                            ),
-                        },
-                    },
-                )
-            except AgentRunStateConflict:
-                # Another process moved the run first; re-evaluate on the
-                # next poll instead of guessing.
+            if not await self._cancel_queued_orphan(project_id, run):
                 return None
         elif run.status not in TERMINAL_AGENT_RUN_STATUSES:
             return None
@@ -818,6 +785,50 @@ class FileCreatorAgentRuntime:
             )
         except SessionStateConflict:
             return None
+
+    async def _cancel_queued_orphan(
+        self,
+        project_id: str,
+        run: CreatorAgentRunRecord,
+    ) -> bool:
+        """Cancel a QUEUED run that is provably unstartable, or decline."""
+
+        age = (datetime.now(UTC) - run.updated_at).total_seconds()
+        if age < self._ORPHAN_RUN_GRACE_SECONDS:
+            return False
+        try:
+            goal = await asyncio.to_thread(
+                self.sessions.get_goal,
+                project_id,
+                run.goal_id,
+            )
+        except RuntimeGoalNotFound:
+            return False
+        if goal.status not in _TERMINAL_GOAL_STATUSES:
+            return False
+        try:
+            await asyncio.to_thread(
+                self.runs.transition,
+                project_id,
+                run.run_id,
+                expected_status=AgentRunStatus.QUEUED,
+                status=AgentRunStatus.CANCELLED,
+                updates={
+                    "error": {
+                        "code": "ORPHANED_ON_TERMINAL_GOAL",
+                        "message": (
+                            "run was queued against a terminal Goal "
+                            f"({goal.status.value}) and could never "
+                            "start; reconciled automatically"
+                        ),
+                    },
+                },
+            )
+        except AgentRunStateConflict:
+            # Another process moved the run first; re-evaluate on the
+            # next poll instead of guessing.
+            return False
+        return True
 
     async def _reconcile_project(self, project_id: str) -> None:
         handle = self._active.get(project_id)
