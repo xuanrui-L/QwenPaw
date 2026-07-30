@@ -13,7 +13,7 @@ import {
   listProjects,
   getArtifactVersionMediaUrl,
 } from "@/api/creator";
-import { useRouter } from "@/routing/navigation";
+import { useRouter, useSearchParams } from "@/routing/navigation";
 import ModelBadges from "@/components/creator/ModelBadges";
 import ModelConfigModal from "@/components/creator/ModelConfigModal";
 import {
@@ -161,6 +161,7 @@ const HOME_VIEWS: { key: HomeView; label: string; icon: string }[] = [
 
 export default function HomePage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [view, setView] = useState<HomeView>("create");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -206,6 +207,21 @@ export default function HomePage() {
   useEffect(() => {
     void fetchProjects();
   }, [fetchProjects]);
+
+  // Set which view to display based on a search parameter. Strip the param
+  // after consuming it, but bail when it's absent so the strip-induced
+  // searchParams change doesn't re-run setView a second time.
+  useEffect(() => {
+    const raw = searchParams.get("view");
+    if (raw === null) return;
+    const viewParam: HomeView = raw === "projects" ? "projects" : "create";
+    setView(viewParam);
+    const next = new URLSearchParams(searchParams);
+    next.delete("view");
+    const query = next.toString();
+    router.replace(query ? `/?${query}` : "/");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const handleOpen = useCallback(
     (id: string) => {
