@@ -57,6 +57,7 @@ try:
         is_encrypted as qwenpaw_is_encrypted,
     )
     from qwenpaw.constant import SECRET_DIR as QWENPAW_SECRET_DIR
+
     QWENPAW_SECRET_AVAILABLE = True
 except ImportError:
     QWENPAW_SECRET_AVAILABLE = False
@@ -354,17 +355,10 @@ def _assemble_model_config(
         for field in ("base_url", "api_key", "model_name"):
             if not base["vlm"].get(field):
                 base["vlm"][field] = base["llm"].get(field, "")
-    
+
     # 解密敏感字段（如果 QwenPaw secret store 可用）
-    if QWENPAW_SECRET_AVAILABLE and qwenpaw_decrypt is not None:
-        for section_name, section_data in base.items():
-            if isinstance(section_data, dict):
-                for field in _SECRET_FIELDS:
-                    if field in section_data:
-                        value = section_data[field]
-                        if value and isinstance(value, str) and qwenpaw_is_encrypted(value):
-                            section_data[field] = qwenpaw_decrypt(value)
-    
+    _decrypt_secret_fields(base)
+
     return ModelConfigData.model_validate(base)
 
 
@@ -387,6 +381,7 @@ def load_model_config(*, include_environment: bool = True) -> ModelConfigData:
 # Host Provider API Key Sync
 # ---------------------------------------------------------------------------
 
+
 def get_host_provider_api_key(provider_id: str) -> str | None:
     """从 QwenPaw 的加密存储中读取 provider 的 API key。
 
@@ -402,7 +397,9 @@ def get_host_provider_api_key(provider_id: str) -> str | None:
         return None
 
     for subdir in ["builtin", "custom"]:
-        provider_file = QWENPAW_SECRET_DIR / "providers" / subdir / f"{provider_id}.json"
+        provider_file = (
+            QWENPAW_SECRET_DIR / "providers" / subdir / f"{provider_id}.json"
+        )
         if provider_file.exists():
             try:
                 with open(provider_file, "r", encoding="utf-8") as f:
@@ -415,13 +412,17 @@ def get_host_provider_api_key(provider_id: str) -> str | None:
                         decrypted = qwenpaw_decrypt(encrypted_key)
                         # 如果解密失败，decrypt 会返回原值（仍带 ENC: 前缀）
                         if decrypted.startswith("ENC:"):
-                            logger.warning(f"Failed to decrypt API key for provider {provider_id}")
+                            logger.warning(
+                                f"Failed to decrypt API key for provider {provider_id}",
+                            )
                             continue
                         return decrypted
                     # 明文值（旧版本或测试环境）
                     return encrypted_key
             except Exception as e:
-                logger.warning(f"Failed to read provider {provider_id} from {provider_file}: {e}")
+                logger.warning(
+                    f"Failed to read provider {provider_id} from {provider_file}: {e}",
+                )
                 continue
 
     return None
@@ -431,6 +432,46 @@ def get_host_provider_api_key(provider_id: str) -> str | None:
 # means "keep the stored value".
 SECRET_MASK = "__CREATOR_SECRET__"
 _SECRET_FIELDS = ("api_key", "access_key_secret", "policy_api_key")
+
+
+def _decrypt_secret_fields(data: dict) -> dict:
+    """解密数据中的敏感字段"""
+    if not (QWENPAW_SECRET_AVAILABLE and qwenpaw_decrypt is not None):
+        return data
+
+    for section_data in data.values():
+        if not isinstance(section_data, dict):
+            continue
+        for field in _SECRET_FIELDS:
+            value = section_data.get(field)
+            if not (
+                value
+                and isinstance(value, str)
+                and qwenpaw_is_encrypted(value)
+            ):
+                continue
+            section_data[field] = qwenpaw_decrypt(value)
+    return data
+
+
+def _encrypt_secret_fields(data: dict) -> dict:
+    """加密数据中的敏感字段"""
+    if not (QWENPAW_SECRET_AVAILABLE and qwenpaw_encrypt is not None):
+        return data
+
+    for section_data in data.values():
+        if not isinstance(section_data, dict):
+            continue
+        for field in _SECRET_FIELDS:
+            value = section_data.get(field)
+            if not (
+                value
+                and isinstance(value, str)
+                and not qwenpaw_is_encrypted(value)
+            ):
+                continue
+            section_data[field] = qwenpaw_encrypt(value)
+    return data
 
 
 def _mask_secrets(data: ModelConfigData) -> ModelConfigData:
@@ -476,18 +517,11 @@ def mutate_model_config(
             include_environment=False,
         )
         updated = mutator(persisted)
-        
+
         # 加密敏感字段（如果 QwenPaw secret store 可用）
         updated_dict = updated.model_dump()
-        if QWENPAW_SECRET_AVAILABLE and qwenpaw_encrypt is not None:
-            for section_name, section_data in updated_dict.items():
-                if isinstance(section_data, dict):
-                    for field in _SECRET_FIELDS:
-                        if field in section_data:
-                            value = section_data[field]
-                            if value and isinstance(value, str) and not qwenpaw_is_encrypted(value):
-                                section_data[field] = qwenpaw_encrypt(value)
-        
+        _encrypt_secret_fields(updated_dict)
+
         atomic_replace_bytes(
             config_path,
             canonical_json_bytes(updated_dict) + b"\n",

@@ -30,7 +30,7 @@ export function getHostProviders(): Promise<HostProviderInfo[]> {
   const token = hostToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
   hostProvidersPromise = fetch("/api/models", { headers })
-    .then((r) => (r.ok ? r.json() as Promise<HostProviderInfo[]> : []))
+    .then((r) => (r.ok ? (r.json() as Promise<HostProviderInfo[]>) : []))
     .catch(() => [])
     .finally(() => {
       hostProvidersPromise = null;
@@ -98,9 +98,7 @@ export function patchExecutionAuthorization(
   });
 }
 
-export function getRealApiKey(
-  section: string,
-): Promise<{ api_key: string }> {
+export function getRealApiKey(section: string): Promise<{ api_key: string }> {
   return creatorRequest(`/models/real-api-key/${section}`);
 }
 

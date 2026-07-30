@@ -1,5 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Modal, Input, Select, Checkbox, Button, message, AutoComplete } from "antd";
+import {
+  Modal,
+  Input,
+  Select,
+  Checkbox,
+  Button,
+  message,
+  AutoComplete,
+} from "antd";
 import { Brain } from "lucide-react";
 import {
   SettingOutlined,
@@ -94,7 +102,7 @@ const PROTOCOL_TO_PROVIDER_ID: Record<string, string> = {
   "智谱 AI": "zhipu-cn",
   "SiliconFlow（硅基流动）": "siliconflow-cn",
   "ModelScope（魔搭）": "modelscope",
-  "百度千帆": "qianfan",
+  百度千帆: "qianfan",
   "Volcano Engine（火山引擎）": "volcengine-cn",
   "小米 MiMo": "mimo-tokenplan",
 };
@@ -382,12 +390,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   }, []);
 
   // 获取真实的 API key（用于测试）
-  const resolveRealApiKey = async (section: string, item?: ModelConfigItem): Promise<string> => {
+  const resolveRealApiKey = async (
+    section: string,
+    item?: ModelConfigItem,
+  ): Promise<string> => {
     // 如果前端已经有真实的 API key（不是掩码，不是空），直接使用
     if (item && item.api_key && item.api_key !== "__CREATOR_SECRET__") {
       return item.api_key;
     }
-    
+
     // 否则从后端获取
     try {
       const result = await getRealApiKey(section);
@@ -918,12 +929,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         }
       }
     }
-    
+
     // 如果是 LLM/VLM 类型，且是首次配置（api_key 为空），尝试从 host 同步 API key
     if ((type === "llm" || type === "vlm") && protocol !== "自定义") {
       const currentItem = config[type] as ModelConfigItem;
       // 只在首次配置时同步（api_key 为空）
-      if (!currentItem.api_key || currentItem.api_key === "__CREATOR_SECRET__") {
+      if (
+        !currentItem.api_key ||
+        currentItem.api_key === "__CREATOR_SECRET__"
+      ) {
         const providerId = PROTOCOL_TO_PROVIDER_ID[protocol];
         if (providerId) {
           try {
@@ -932,12 +946,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               updateItem(type, "api_key", result.api_key);
             }
           } catch (error) {
-            console.warn(`Failed to sync API key from host for ${providerId}:`, error);
+            console.warn(
+              `Failed to sync API key from host for ${providerId}:`,
+              error,
+            );
           }
         }
       }
     }
-    
+
     if (type === "asr") {
       const provider = protocol === "OpenAI Whisper" ? "whisper" : "fun-asr";
       updateItem("asr", "provider", provider);
@@ -969,8 +986,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 onChange={(v) => updateItem(type, "model_name", v)}
                 options={modelOptions}
                 filterOption={(inputValue, option) =>
-                  (option?.label as string)?.toLowerCase().includes(inputValue.toLowerCase()) ||
-                  (option?.value as string)?.toLowerCase().includes(inputValue.toLowerCase())
+                  (option?.label as string)
+                    ?.toLowerCase()
+                    .includes(inputValue.toLowerCase()) ||
+                  (option?.value as string)
+                    ?.toLowerCase()
+                    .includes(inputValue.toLowerCase())
                 }
                 placeholder="选择或输入模型"
               />
@@ -985,8 +1006,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           <div>
             <label className="field-label">API Key</label>
             <Input.Password
-              placeholder={item.api_key === "__CREATOR_SECRET__" ? "已配置" : "sk-..."}
-              value={item.api_key === "__CREATOR_SECRET__" ? "sk-****" : item.api_key}
+              placeholder={
+                item.api_key === "__CREATOR_SECRET__" ? "已配置" : "sk-..."
+              }
+              value={
+                item.api_key === "__CREATOR_SECRET__" ? "sk-****" : item.api_key
+              }
               onChange={(e) => updateItem(type, "api_key", e.target.value)}
             />
           </div>
