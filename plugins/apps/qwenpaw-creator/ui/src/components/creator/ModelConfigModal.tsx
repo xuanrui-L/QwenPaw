@@ -20,6 +20,8 @@ import {
   patchExecutionAuthorization,
   testModelConnection,
   getHostProviders,
+  getHostProviderApiKey,
+  getRealApiKey,
 } from "@/api/creator";
 import type { HostProviderInfo } from "@/api/creator";
 import type {
@@ -33,22 +35,38 @@ const LLM_PROTOCOLS = [
   "Anthropic Claude",
   "DashScope（百炼）",
   "Aliyun Token Plan",
+  "Aliyun Coding Plan",
   "DeepSeek",
   "Google Gemini",
   "OpenAI 协议",
+  "Azure OpenAI",
+  "MiniMax",
+  "Kimi（月之暗面）",
+  "智谱 AI",
+  "SiliconFlow（硅基流动）",
+  "ModelScope（魔搭）",
   "百度千帆",
   "Volcano Engine（火山引擎）",
+  "小米 MiMo",
   "自定义",
 ];
 const VLM_PROTOCOLS = [
   "Anthropic Claude",
   "DashScope（百炼）",
   "Aliyun Token Plan",
+  "Aliyun Coding Plan",
   "DeepSeek",
   "Google Gemini",
   "OpenAI 协议",
+  "Azure OpenAI",
+  "MiniMax",
+  "Kimi（月之暗面）",
+  "智谱 AI",
+  "SiliconFlow（硅基流动）",
+  "ModelScope（魔搭）",
   "百度千帆",
   "Volcano Engine（火山引擎）",
+  "小米 MiMo",
   "自定义",
 ];
 const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
@@ -65,13 +83,20 @@ interface ProtocolPreset {
 const PROTOCOL_TO_PROVIDER_ID: Record<string, string> = {
   "DashScope（百炼）": "dashscope",
   "Aliyun Token Plan": "aliyun-tokenplan",
+  "Aliyun Coding Plan": "aliyun-codingplan",
   DeepSeek: "deepseek",
   "OpenAI 协议": "openai",
+  "Azure OpenAI": "azure-openai",
   "Anthropic Claude": "anthropic",
   "Google Gemini": "gemini",
-  "Volcano Engine（火山引擎）": "volcengine-cn",
+  MiniMax: "minimax-cn",
+  "Kimi（月之暗面）": "kimi-cn",
+  "智谱 AI": "zhipu-cn",
+  "SiliconFlow（硅基流动）": "siliconflow-cn",
+  "ModelScope（魔搭）": "modelscope",
   "百度千帆": "qianfan",
-  ModelScope: "modelscope",
+  "Volcano Engine（火山引擎）": "volcengine-cn",
+  "小米 MiMo": "mimo-tokenplan",
 };
 
 const ASR_PRESETS: Record<string, ProtocolPreset> = {
@@ -356,6 +381,22 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     getHostProviders().then(setHostProviders);
   }, []);
 
+  // 获取真实的 API key（用于测试）
+  const resolveRealApiKey = async (section: string, item?: ModelConfigItem): Promise<string> => {
+    // 如果前端已经有真实的 API key（不是掩码，不是空），直接使用
+    if (item && item.api_key && item.api_key !== "__CREATOR_SECRET__") {
+      return item.api_key;
+    }
+    
+    // 否则从后端获取
+    try {
+      const result = await getRealApiKey(section);
+      return result.api_key;
+    } catch {
+      return "";
+    }
+  };
+
   const loadConfig = useCallback(async () => {
     try {
       const data = await getModelConfig();
@@ -582,10 +623,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
       setTestingLlmMultimodal(true);
       try {
+        // 获取真实的 API key（前端存储的是掩码）
+        const realApiKey = await resolveRealApiKey("llm", llmItem);
         const data = await testModelConnection({
           type: "vlm",
           base_url: llmItem.base_url,
-          api_key: llmItem.api_key,
+          api_key: realApiKey,
           model_name: llmItem.model_name,
           protocol: llmItem.protocol,
         });
@@ -633,13 +676,23 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
       setTesting((prev) => ({ ...prev, [type]: true }));
       try {
+        // 获取真实的 API key（前端存储的是掩码）
+        let testApiKey: string;
+        if (type === "asr" && config.asr.reuse_llm_key) {
+          // ASR 复用 LLM API key
+          testApiKey = await resolveRealApiKey("llm", config.llm);
+        } else if (type === "vlm" && config.vlm.use_llm) {
+          // VLM 复用 LLM 配置
+          testApiKey = await resolveRealApiKey("llm", config.llm);
+        } else {
+          // 使用当前配置的 API key
+          testApiKey = await resolveRealApiKey(type, item);
+        }
+
         const data = await testModelConnection({
           type,
           base_url: item.base_url,
-          api_key:
-            type === "asr" && config.asr.reuse_llm_key
-              ? config.llm.api_key
-              : item.api_key,
+          api_key: testApiKey,
           model_name: item.model_name,
           protocol: item.protocol,
           provider: type === "asr" ? config.asr.provider : undefined,
@@ -676,10 +729,23 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
     setTesting((prev) => ({ ...prev, grounding: true }));
     try {
+      // 获取真实的 API key（前端存储的是掩码）
+      // 根据验证模型来源获取对应的真实 API key
+      let realApiKey = item.api_key;
+      if (config.grounding.validation_source === "llm") {
+        realApiKey = await resolveRealApiKey("llm", config.llm);
+      } else if (config.grounding.validation_source === "vlm") {
+        const vlmSection = config.vlm.use_llm ? "llm" : "vlm";
+        const vlmItem = config.vlm.use_llm ? config.llm : config.vlm;
+        realApiKey = await resolveRealApiKey(vlmSection, vlmItem);
+      } else {
+        realApiKey = await resolveRealApiKey("grounding", item);
+      }
+
       const data = await testModelConnection({
         type: "vlm",
         base_url: item.base_url,
-        api_key: item.api_key,
+        api_key: realApiKey,
         model_name: item.model_name,
         protocol: item.protocol,
       });
@@ -836,7 +902,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     return preset.models.map((m) => ({ value: m, label: m }));
   };
 
-  const handleProtocolChange = (type: ModelType, protocol: string) => {
+  const handleProtocolChange = async (type: ModelType, protocol: string) => {
     updateItem(type, "protocol", protocol);
     const preset = getPresetForType(type, protocol);
     if (preset) {
@@ -852,6 +918,26 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         }
       }
     }
+    
+    // 如果是 LLM/VLM 类型，且是首次配置（api_key 为空），尝试从 host 同步 API key
+    if ((type === "llm" || type === "vlm") && protocol !== "自定义") {
+      const currentItem = config[type] as ModelConfigItem;
+      // 只在首次配置时同步（api_key 为空）
+      if (!currentItem.api_key || currentItem.api_key === "__CREATOR_SECRET__") {
+        const providerId = PROTOCOL_TO_PROVIDER_ID[protocol];
+        if (providerId) {
+          try {
+            const result = await getHostProviderApiKey(providerId);
+            if (result.api_key) {
+              updateItem(type, "api_key", result.api_key);
+            }
+          } catch (error) {
+            console.warn(`Failed to sync API key from host for ${providerId}:`, error);
+          }
+        }
+      }
+    }
+    
     if (type === "asr") {
       const provider = protocol === "OpenAI Whisper" ? "whisper" : "fun-asr";
       updateItem("asr", "provider", provider);
@@ -899,8 +985,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           <div>
             <label className="field-label">API Key</label>
             <Input.Password
-              placeholder="sk-..."
-              value={item.api_key}
+              placeholder={item.api_key === "__CREATOR_SECRET__" ? "已配置" : "sk-..."}
+              value={item.api_key === "__CREATOR_SECRET__" ? "sk-****" : item.api_key}
               onChange={(e) => updateItem(type, "api_key", e.target.value)}
             />
           </div>
