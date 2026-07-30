@@ -54,14 +54,14 @@ FILE_AGENT_PROMPT_SPECS = {
         _spec(
             "visual_development_agent.system",
             "visual_development_agent.system.txt",
-            "a5d2182a6ebe2cc4972e712b62c043e945279242ff026911a129c8fd2d65c0fa",
+            "983717f4a9b44d617f9364bc2b51d5a8d339a79731f40d9c602d7ec4abe6b81d",
             "project_id",
             "workspace_schema",
         ),
         _spec(
             "r2v_generation_director.system",
             "r2v_generation_director.system.txt",
-            "130c7015dc30c566fc5c9e792bddc79120ddaa14ff49e467da410a747d42b4e9",
+            "f701ef6a2d871b8528dbb5486da8775f906f9496329aa49945449f2b95eae088",
             "project_id",
             "workspace_schema",
             "video_model_guidance",
