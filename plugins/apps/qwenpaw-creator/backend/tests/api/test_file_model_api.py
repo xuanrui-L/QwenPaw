@@ -164,6 +164,30 @@ def test_grounding_rejects_non_search_llm_when_tavily_is_absent() -> None:
         )
 
 
+def test_creation_checkpoints_mode_round_trips_through_assembly(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A persisted skip mode must survive load and unrelated mutations."""
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    config_path = (tmp_path / "config" / "model_config.json").resolve()
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    payload = _config()
+    payload["creation_checkpoints"] = {"mode": "skip"}
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = model_routes.load_model_config(include_environment=False)
+    assert loaded.creation_checkpoints.mode == "skip"
+
+    # An unrelated read-modify-write transaction must not silently
+    # reset the persisted checkpoint mode back to the default.
+    model_routes.mutate_model_config(lambda config: config)
+    reloaded = model_routes.load_model_config(include_environment=False)
+    assert reloaded.creation_checkpoints.mode == "skip"
+
+
 def test_load_migrates_legacy_grounding_model_to_search_and_validation(
     tmp_path,
     monkeypatch,

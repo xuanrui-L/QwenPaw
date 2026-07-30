@@ -66,13 +66,34 @@ jobs:
           # Publish only when this exact version is missing from the CDN
           # index (or when forced via workflow_dispatch). Keeps re-runs and
           # non-version edits to plugin.json idempotent.
+          #
+          # Fail closed: only an explicit HTTP 404 counts as "not published
+          # yet". Network, auth or JSON failures abort the run instead of
+          # being misread as a green light to overwrite published objects.
           file_id="${PLUGIN_ID}-${VERSION}"
-          published=$(curl -fsSL "${CDN_BASE}/metadata/plugins/index.json" \
-            | jq -r --arg id "$file_id" '.files | has($id)' || echo "false")
           if [[ "$FORCE" == "true" ]]; then
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
             echo "Force publish requested for ${file_id}."
-          elif [[ "$published" == "true" ]]; then
+            exit 0
+          fi
+          http_code=$(curl -sSL --retry 3 -o plugins-index.json \
+            -w '%{http_code}' "${CDN_BASE}/metadata/plugins/index.json") || {
+            echo "ERROR: could not reach the CDN plugins index." >&2
+            exit 1
+          }
+          if [[ "$http_code" == "404" ]]; then
+            published="false"
+          elif [[ "$http_code" == "200" ]]; then
+            published=$(jq -r --arg id "$file_id" '.files | has($id)' \
+              plugins-index.json) || {
+              echo "ERROR: CDN plugins index is not valid JSON." >&2
+              exit 1
+            }
+          else
+            echo "ERROR: unexpected HTTP ${http_code} reading the plugins index." >&2
+            exit 1
+          fi
+          if [[ "$published" == "true" ]]; then
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
             echo "${file_id} already on CDN; skipping upload."
           else
@@ -128,10 +149,27 @@ jobs:
             -L CH
 
       - name: Sync Creator plugin zip to OSS (long-cache, immutable)
+        env:
+          FORCE: ${{ github.event.inputs.force }}
         run: |
           shopt -s nullglob
           while IFS= read -r -d '' f; do
             rel="${f#dist/plugins/}"
+            # Versioned zips are advertised as immutable; never overwrite
+            # an existing object except on an explicit manual force run.
+            # A stat failure other than NoSuchKey aborts instead of
+            # risking an overwrite.
+            if [[ "$FORCE" != "true" ]]; then
+              if stat_out=$(ossutil stat \
+                "oss://qwenpaw-download/files/plugins/${rel}" 2>&1); then
+                echo "Skipping ${rel}: already published and immutable."
+                continue
+              elif ! grep -qiE 'NoSuchKey|StatusCode=404' <<< "$stat_out"; then
+                echo "ERROR: could not stat files/plugins/${rel} on OSS:" >&2
+                echo "$stat_out" >&2
+                exit 1
+              fi
+            fi
             echo "Uploading $f -> files/plugins/${rel}"
             ossutil cp "$f" \
               "oss://qwenpaw-download/files/plugins/${rel}" \
@@ -142,8 +180,25 @@ jobs:
 
       - name: Merge historical versions into index
         run: |
-          ossutil cp "oss://qwenpaw-download/metadata/plugins/index.json" \
-            existing-index.json 2>/dev/null || echo '{}' > existing-index.json
+          # Fail closed: a fetch error must never masquerade as "no index
+          # yet" and shrink the authoritative file list to this plugin.
+          # Only a confirmed NoSuchKey/404 may bootstrap an empty index.
+          if stat_out=$(ossutil stat \
+            "oss://qwenpaw-download/metadata/plugins/index.json" 2>&1); then
+            ossutil cp "oss://qwenpaw-download/metadata/plugins/index.json" \
+              existing-index.json
+            python3 -c 'import json; json.load(open("existing-index.json"))' || {
+              echo "ERROR: existing plugins index is not valid JSON." >&2
+              exit 1
+            }
+          elif grep -qiE 'NoSuchKey|StatusCode=404' <<< "$stat_out"; then
+            echo "No plugins index on OSS yet; bootstrapping an empty one."
+            echo '{}' > existing-index.json
+          else
+            echo "ERROR: could not stat the plugins index on OSS:" >&2
+            echo "$stat_out" >&2
+            exit 1
+          fi
 
           python3 scripts/pack/merge_plugin_index.py \
             --new dist/plugins/index.json \
@@ -160,14 +215,30 @@ jobs:
 
       - name: Patch main metadata index to advertise plugins product
         run: |
-          ossutil cp "oss://qwenpaw-download/metadata/index.json" \
-            main-index.json 2>/dev/null || cat > main-index.json << 'EOF'
+          # Same fail-closed rule for the top-level product index: only a
+          # confirmed NoSuchKey/404 may bootstrap a fresh skeleton.
+          if stat_out=$(ossutil stat \
+            "oss://qwenpaw-download/metadata/index.json" 2>&1); then
+            ossutil cp "oss://qwenpaw-download/metadata/index.json" \
+              main-index.json
+            python3 -c 'import json; json.load(open("main-index.json"))' || {
+              echo "ERROR: existing main index is not valid JSON." >&2
+              exit 1
+            }
+          elif grep -qiE 'NoSuchKey|StatusCode=404' <<< "$stat_out"; then
+            echo "No main index on OSS yet; bootstrapping a skeleton."
+            cat > main-index.json << 'EOF'
           {
             "version": "1.0",
             "updated_at": "",
             "products": {}
           }
           EOF
+          else
+            echo "ERROR: could not stat the main index on OSS:" >&2
+            echo "$stat_out" >&2
+            exit 1
+          fi
 
           python3 scripts/pack/patch_main_index.py \
             --index main-index.json \

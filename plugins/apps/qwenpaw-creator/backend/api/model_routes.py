@@ -331,6 +331,9 @@ def _assemble_model_config(
     authorization = configs.get("execution_authorization")
     if isinstance(authorization, dict):
         base["execution_authorization"].update(authorization)
+    checkpoints = configs.get("creation_checkpoints")
+    if isinstance(checkpoints, dict):
+        base["creation_checkpoints"].update(checkpoints)
     if base["vlm"].get("use_llm"):
         for field in ("base_url", "api_key", "model_name"):
             if not base["vlm"].get(field):

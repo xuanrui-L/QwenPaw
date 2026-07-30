@@ -70,19 +70,32 @@ def checkpoint_operation(phase: str) -> str:
     return f"{CHECKPOINT_OPERATION_PREFIX}_{phase}"
 
 
-def checkpoint_authorization_id(project_id: str, phase: str) -> str:
-    """One durable approval per Project and phase, not per tool call."""
+def checkpoint_authorization_id(
+    project_id: str,
+    phase: str,
+    attempt: int = 0,
+) -> str:
+    """One durable approval per Project, phase and attempt.
 
-    return (
-        "authorization-"
-        + uuid5(
-            NAMESPACE_URL,
-            f"qwenpaw-creator:creation-checkpoint:{project_id}:{phase}",
-        ).hex
-    )
+    Attempt 0 keeps the original seed so approvals recorded before
+    attempts existed stay valid. A rejected attempt is a terminal audit
+    record; the next generation call opens attempt N+1 so the user can
+    approve the revised plan or designs instead of being locked out.
+    """
+
+    seed = f"qwenpaw-creator:creation-checkpoint:{project_id}:{phase}"
+    if attempt > 0:
+        seed = f"{seed}:attempt-{attempt}"
+    return "authorization-" + uuid5(NAMESPACE_URL, seed).hex
 
 
-def checkpoint_execution_request_id(project_id: str, phase: str) -> str:
+def checkpoint_execution_request_id(
+    project_id: str,
+    phase: str,
+    attempt: int = 0,
+) -> str:
+    if attempt > 0:
+        return f"creation-checkpoint:{project_id}:{phase}:attempt-{attempt}"
     return f"creation-checkpoint:{project_id}:{phase}"
 
 

@@ -2811,17 +2811,34 @@ class FileCreatorAgentRuntime:
         phase: str,
         tools: AgentProjectTools,
     ) -> ExecutionAuthorizationRecord:
-        """Read this Project's checkpoint approval, creating it on demand."""
+        """Read this Project's checkpoint approval, creating it on demand.
 
-        authorization_id = checkpoint_authorization_id(project_id, phase)
-        try:
-            return await asyncio.to_thread(
-                self.executions.get_execution_authorization,
+        Rejected attempts stay behind as terminal audit records; the next
+        generation call opens a fresh attempt so the user can approve the
+        revised plan or designs instead of being locked out forever.
+        """
+
+        attempt = 0
+        while True:
+            authorization_id = checkpoint_authorization_id(
                 project_id,
-                authorization_id,
+                phase,
+                attempt,
             )
-        except RecordNotFoundError:
-            pass
+            try:
+                record = await asyncio.to_thread(
+                    self.executions.get_execution_authorization,
+                    project_id,
+                    authorization_id,
+                )
+            except RecordNotFoundError:
+                break
+            if record.status not in (
+                ExecutionAuthorizationStatus.REJECTED,
+                ExecutionAuthorizationStatus.EXPIRED,
+            ):
+                return record
+            attempt += 1
         candidate = ExecutionAuthorizationRecord(
             authorization_id=authorization_id,
             project_id=project_id,
@@ -2830,6 +2847,7 @@ class FileCreatorAgentRuntime:
             execution_request_id=checkpoint_execution_request_id(
                 project_id,
                 phase,
+                attempt,
             ),
             operation=checkpoint_operation(phase),
             target_scope=[f"project:{project_id}"],

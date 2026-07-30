@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import stat as stat_module
+import zipfile
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid4, uuid5
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import (
     APIRouter,
@@ -80,6 +82,14 @@ _CREATE_SCOPE = "POST /projects"
 def _log_safe(value: Any) -> str:
     """Neutralize CR/LF in user-provided values before logging."""
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
+# Hard limits for project archive imports. The zip cap bounds what a
+# request may write to disk; the extraction caps stop zip bombs before
+# a single member is inflated.
+_IMPORT_MAX_ZIP_BYTES = 2 * 1024 * 1024 * 1024
+_IMPORT_MAX_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
+_IMPORT_MAX_MEMBERS = 20000
 
 
 class _RemovedProjectPutRoute(CreatorErrorRoute):
@@ -411,15 +421,11 @@ async def export_project(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> StreamingResponse:
-    #
+    # Export is a read: it must never cancel a running Agent, consume
+    # pending messages or mutate session state. The archive is the same
+    # best-effort on-disk snapshot documented on ProjectStore.export.
     logger.info(f"exporting project:{_log_safe(project_id)}")
     resolve_idempotency_key(idempotency_key)
-    await interrupt_creator_agent_runtime(
-        project_id,
-        superseded=False,
-        reason="exporting_project",
-    )
-    logger.debug("export project interrupted runtime")
     try:
         safe_id = _safe_project_id(project_id)
         return StreamingResponse(
@@ -439,6 +445,113 @@ async def export_project(
         ) from e
 
 
+def _validate_import_archive(saved_zip: Path) -> None:
+    """Preflight the archive with ZipInfo before anything is inflated."""
+
+    try:
+        with zipfile.ZipFile(saved_zip) as archive:
+            members = archive.infolist()
+            if len(members) > _IMPORT_MAX_MEMBERS:
+                raise BadRequestError(
+                    f"archive holds more than {_IMPORT_MAX_MEMBERS} entries",
+                )
+            total = 0
+            for info in members:
+                member = PurePosixPath(info.filename)
+                if member.is_absolute() or ".." in member.parts:
+                    raise BadRequestError(
+                        f"archive entry escapes the extraction root: "
+                        f"{info.filename!r}",
+                    )
+                mode = (info.external_attr >> 16) & 0o170000
+                if mode == stat_module.S_IFLNK:
+                    raise BadRequestError(
+                        f"archive entry is a symlink: {info.filename!r}",
+                    )
+                total += info.file_size
+                if (
+                    info.file_size > _IMPORT_MAX_EXTRACTED_BYTES
+                    or total > _IMPORT_MAX_EXTRACTED_BYTES
+                ):
+                    raise BadRequestError(
+                        "archive expands beyond the "
+                        f"{_IMPORT_MAX_EXTRACTED_BYTES} byte import limit",
+                    )
+    except zipfile.BadZipFile as e:
+        raise BadRequestError(f"not a valid zip archive: {str(e)}") from e
+
+
+async def _save_upload_to(upload, saved_zip: Path) -> None:
+    """Stream the upload to disk, enforcing the archive size cap."""
+
+    try:
+        written = 0
+        with open(saved_zip, "wb") as f:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _IMPORT_MAX_ZIP_BYTES:
+                    raise BadRequestError(
+                        "uploaded archive exceeds the "
+                        f"{_IMPORT_MAX_ZIP_BYTES} byte limit",
+                    )
+                f.write(chunk)
+        logger.info(
+            f"zip file size of {saved_zip}: {saved_zip.stat().st_size}",
+        )
+    except BadRequestError:
+        raise
+    except Exception as e:
+        raise BadRequestError(
+            f"failed to save uploaded file to {saved_zip}: {str(e)}",
+        ) from e
+
+
+def _resolve_extracted_project(extract_dir: Path) -> tuple[Path, str]:
+    """Locate the single project folder and verify its identity."""
+
+    # extract_dir/project-xxx/, where project-xxx should be the only item
+    dirs = list(extract_dir.iterdir())
+    if not (
+        len(dirs) == 1
+        and dirs[0].is_dir()
+        and dirs[0].name.startswith("project-")
+        and dirs[0].name == _safe_project_id(dirs[0].name)
+    ):
+        raise BadRequestError(
+            f"expecting only one project-* folder from unpacked file: {dirs}",
+        )
+
+    project_json_path = dirs[0] / "project.json"
+    if not project_json_path.is_file():
+        raise BadRequestError(
+            "project.json not found in the uploaded data.",
+        )
+
+    logger.info(f"loading project obj from {project_json_path}")
+    try:
+        project = load_project_json(project_json_path.read_bytes())
+        project_id = str(project.project_id)
+        if not project_id:
+            raise ValueError(
+                f"project_id not found in {project_json_path}",
+            )
+    except Exception as e:
+        raise BadRequestError(f"Invalid Project object: {str(e)}") from e
+
+    logger.info(
+        f"found project id in {project_json_path}: {project_id}",
+    )
+    if project_id != dirs[0].name:
+        raise BadRequestError(
+            f"archive folder {dirs[0].name!r} does not match "
+            f"project.json project_id {project_id!r}",
+        )
+    return dirs[0], project_id
+
+
 async def _run_import(upload) -> str:
     data_root = require_creator_data_root()
     imports_root = data_root / "imports"
@@ -449,26 +562,15 @@ async def _run_import(upload) -> str:
     # it there so we can inspect project.json before publishing.
     temp_str = uuid4().hex
     saved_zip = imports_root / f"{temp_str}-{uploaded_file}"
-    try:
-        with open(saved_zip, "wb") as f:
-            while True:
-                chunk = await upload.read(8192)
-                if not chunk:
-                    break
-                f.write(chunk)
-            logger.info(
-                f"zip file size of {saved_zip}: {saved_zip.stat().st_size}",
-            )
-    except Exception as e:
-        raise BadRequestError(
-            f"failed to save uploaded file to {saved_zip}: {str(e)}",
-        ) from e
-
     extract_dir = imports_root / f"{temp_str}"
     try:
+        await _save_upload_to(upload, saved_zip)
+        await asyncio.to_thread(_validate_import_archive, saved_zip)
+
         extract_dir.mkdir(mode=0o700)
         try:
-            shutil.unpack_archive(
+            await asyncio.to_thread(
+                shutil.unpack_archive,
                 str(saved_zip),
                 extract_dir=extract_dir,
                 format="zip",
@@ -479,55 +581,17 @@ async def _run_import(upload) -> str:
                 f"failed to unpack zip file {saved_zip}: {str(e)}",
             ) from e
 
-        # extract_dir/project-xxx/, where project-xxx should be the only item in extract-dir
-        dirs = list(extract_dir.iterdir())
-        if not (
-            len(dirs) == 1
-            and dirs[0].is_dir()
-            and dirs[0].name.startswith("project-")
-            and dirs[0].name == _safe_project_id(dirs[0].name)
-        ):
-            raise BadRequestError(
-                f"expecting only one project-* folder from unpacked file: {dirs}",
-            )
+        project_dir, project_id = _resolve_extracted_project(extract_dir)
 
-        # Load project.json from the extracted tree and read the
-        # Project's project_id.
-        project_json_path = None
-        for f in dirs[0].iterdir():
-            if f.is_file() and f.name == "project.json":
-                project_json_path = f
-                break
-
-        if project_json_path is None:
-            raise BadRequestError(
-                "project.json not found in the uploaded data.",
-            )
-
-        logger.info(f"loading project obj from {project_json_path}")
-        try:
-            project = load_project_json(project_json_path.read_bytes())
-            project_id = str(project.project_id)
-            if not project_id:
-                raise ValueError(
-                    f"project_id not found in {project_json_path}",
-                )
-        except Exception as e:
-            raise BadRequestError(f"Invalid Project object: {str(e)}") from e
-
-        logger.info(
-            f"found project id in {project_json_path}: {project_id}",
-        )
-
-        target_project_dir = Path(data_root, dirs[0].name)
+        target_project_dir = Path(data_root, project_dir.name)
         if target_project_dir.exists():
             raise BadRequestError(
                 f"project already exists {target_project_dir}",
             )
         # move the unpacked project-*** folder into creator data root so the
         # Project directory is published under its real project_id.
-        shutil.move(dirs[0], data_root)
-        logger.info(f"moved project folder {dirs[0]} to {data_root}")
+        await asyncio.to_thread(shutil.move, project_dir, data_root)
+        logger.info(f"moved project folder {project_dir} to {data_root}")
         return project_id
     finally:
         saved_zip.unlink(missing_ok=True)
