@@ -6,9 +6,11 @@ import asyncio
 
 import pytest
 
+from domain.errors import ConflictError
 from services.media_files.image_execution import FileImageExecutionService
 from services.media_files.r2v_execution import FileR2VExecutionService
 from services.project_files.facade import CreatorFileServices
+from services.project_files.review import ReviewDecisionItem
 from services.project_files.models import (
     ElementLocation,
     EntityCollection,
@@ -52,6 +54,10 @@ class _MutatingR2VProvider:
         self._services = services
         self._mutate = mutate
         self._mutated = False
+
+    @property
+    def mutated(self) -> bool:
+        return self._mutated
 
     async def submit(self, **_kwargs) -> str:
         return "provider-task-stale"
@@ -104,7 +110,12 @@ def _r2v_element() -> TimelineElement:
     )
 
 
-def _project_with_storyboard(tmp_path, monkeypatch) -> CreatorFileServices:
+def _project_with_storyboard(
+    tmp_path,
+    monkeypatch,
+    *,
+    accept_review: bool = True,
+) -> CreatorFileServices:
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
     services = CreatorFileServices.create(tmp_path.resolve())
     project = Project.new(project_id=PROJECT_ID, name="R2V Stale")
@@ -123,6 +134,20 @@ def _project_with_storyboard(tmp_path, monkeypatch) -> CreatorFileServices:
             idempotency_key="storyboard-1",
         ),
     )
+    if accept_review:
+        for review in services.reviews.all_pending(PROJECT_ID):
+            services.reviews.decide(
+                project_id=PROJECT_ID,
+                review_id=review.review_id,
+                decision_token=review.decision_token,
+                decisions=[
+                    ReviewDecisionItem(
+                        operation_id=operation.operation_id,
+                        decision="ACCEPT",
+                    )
+                    for operation in review.operations
+                ],
+            )
     return services
 
 
@@ -176,6 +201,23 @@ def test_unrelated_commit_during_render_does_not_quarantine(
         ELEMENT_ID
     ]
     assert element.outputs["main"].slot_id == f"element:{ELEMENT_ID}:main"
+
+
+def test_pending_storyboard_review_blocks_r2v_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _project_with_storyboard(
+        tmp_path,
+        monkeypatch,
+        accept_review=False,
+    )
+    provider = _MutatingR2VProvider(services, lambda _candidate: None)
+
+    with pytest.raises(ConflictError, match="不要继续下游生成"):
+        _run_video(services, provider)
+
+    assert not provider.mutated
 
 
 def test_changed_render_inputs_during_render_still_quarantine(

@@ -69,6 +69,7 @@ from services.media_files.element_adapter import (
     selected_element_output,
     target_element_id,
 )
+from services.media_files.review_admission import assert_media_review_admission
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
 from services.runtime_files.atomic_store import (
@@ -1011,6 +1012,16 @@ class FileR2VExecutionService:
             project_root=self.services.projects.project_root(project_id),
             target_ref=target_ref,
             arguments=dict(arguments),
+        )
+        reviews = await asyncio.to_thread(
+            self.services.reviews.all_pending,
+            project_id,
+        )
+        assert_media_review_admission(
+            reviews=reviews,
+            command_type=CreatorCommandType.GENERATE_R2V_VIDEO.value,
+            target_ref=resolved.target_ref,
+            reference_version_ids=resolved.reference_version_ids,
         )
         request = self._request_payload(base, resolved, stable)
         request_fingerprint = _fingerprint(request)
@@ -2674,6 +2685,7 @@ class FileR2VExecutionService:
                 "taskId": task.task_id,
                 "runId": task.run_id,
                 "commandType": CreatorCommandType.GENERATE_R2V_VIDEO.value,
+                "targetRef": str(request["targetRef"]),
                 "providerTaskId": state.provider_task_id,
                 "provider": {
                     key: value
