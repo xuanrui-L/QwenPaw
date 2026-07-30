@@ -85,6 +85,7 @@ _REVIEW_ACTIVE_STATUSES = frozenset(
 _REVIEW_MUTATING_CLASSIFICATIONS = frozenset(
     {
         MessageClassification.MUTATION_INSTRUCTION,
+        MessageClassification.REVIEW_REVISE,
         MessageClassification.WORKSPACE_COMMAND,
     },
 )

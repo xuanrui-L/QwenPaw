@@ -13,6 +13,7 @@ import pytest
 from PIL import Image
 
 from api.file_asset_routes import _AssetInput, _ingest_many_sync
+from domain.errors import ReviewPendingError
 from schemas.assets import SourceMediaMetadata, SourceModelRunRef
 from services.file_agent_runtime import (
     AgentModelConfigurationError,
@@ -24,7 +25,9 @@ from services.file_agent_runtime import (
 )
 from services.file_agent_runtime.driver import (
     MalformedJqProjectArguments,
+    _apply_review_feedback_to_tool_arguments,
     _jq_project_argument_diagnosis,
+    _review_feedback_target_refs,
     _specialist_tool_recovery,
 )
 from services.file_agent_runtime.prompts import render_creator_system_prompt
@@ -55,6 +58,153 @@ PROJECT_ID = "project-1"
 SESSION_ID = "session-1"
 CONVERSATION_ID = "conversation-1"
 GOAL_ID = "goal-1"
+
+
+def test_rejection_feedback_is_fenced_and_injected_into_media_prompt() -> None:
+    request = CreatorMessageRecord(
+        message_id="message-review-feedback",
+        project_id=PROJECT_ID,
+        creator_session_id=SESSION_ID,
+        conversation_id=CONVERSATION_ID,
+        message_seq=3,
+        role="user",
+        content_parts=[{"type": "text", "text": "请按反馈重做"}],
+        source="review_rejection_feedback",
+        channel=MessageChannel.AGENTDOCK,
+        classification=MessageClassification.REVIEW_REVISE,
+        metadata={
+            "decisionId": "decision-dramatic",
+            "rejectionFeedback": {
+                "action": "UNDO_AND_REGENERATE",
+                "problemNote": "画面张力不足",
+                "regenerationInstruction": "更加 dramatic",
+            },
+            "targets": [{"target_ref": "element:ep22"}],
+        },
+    )
+    arguments = {
+        "projectId": PROJECT_ID,
+        "targetRef": "element:ep22",
+        "arguments": {"prompt": "原始分镜 prompt"},
+    }
+
+    enriched, applied = _apply_review_feedback_to_tool_arguments(
+        request,
+        name="image_generation",
+        arguments=arguments,
+    )
+
+    assert _review_feedback_target_refs(request) == {"element:ep22"}
+    assert applied is True
+    assert arguments["arguments"]["prompt"] == "原始分镜 prompt"
+    prompt = enriched["arguments"]["prompt"]
+    assert "[review-decision:decision-dramatic]" in prompt
+    assert "画面张力不足" in prompt
+    assert "更加 dramatic" in prompt
+
+
+def test_stale_project_snapshots_are_elided_from_the_continuation() -> None:
+    """Only the newest runtime project echo survives prompt assembly.
+
+    A 50-element production run accumulated 18 full project.json echoes
+    (2.09MB) in one Conversation and every model call failed with an
+    input-length 400. Older echoes carry no information the model cannot
+    get from read_project, so they collapse to a one-line stub; durable
+    history keeps every byte.
+    """
+
+    from services.file_agent_runtime.driver import (
+        _continuation_message_text,
+    )
+
+    def message(seq: int, *, role: str, source: str, text: str):
+        return CreatorMessageRecord(
+            message_id=f"message-{seq}",
+            project_id=PROJECT_ID,
+            creator_session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            message_seq=seq,
+            role=role,
+            content_parts=[{"type": "text", "text": text}],
+            source=source,
+            channel=MessageChannel.RUNTIME,
+        )
+
+    old_snapshot = json.dumps(
+        {"project": {"generation": 11, "padding": "x" * 8000}},
+    )
+    new_snapshot = json.dumps(
+        {"project": {"generation": 113, "padding": "y" * 8000}},
+    )
+    prior = [
+        message(1, role="user", source="user", text="把故事写完"),
+        message(
+            2,
+            role="tool",
+            source="runtime_action_result",
+            text=old_snapshot,
+        ),
+        message(3, role="assistant", source="creator_agent", text="写好了"),
+        message(
+            4,
+            role="tool",
+            source="runtime_action_result",
+            text=new_snapshot,
+        ),
+    ]
+    request = message(5, role="user", source="user", text="继续")
+
+    rendered = _continuation_message_text(request, prior)
+
+    # The stale echo is gone, replaced by a stub that names its vintage.
+    assert "x" * 100 not in rendered
+    assert "generation 11 时点" in rendered
+    assert "read_project" in rendered
+    # The newest echo and ordinary messages survive verbatim.
+    assert "y" * 100 in rendered
+    assert "把故事写完" in rendered
+    assert "写好了" in rendered
+
+
+def test_small_runtime_results_are_never_elided() -> None:
+    from services.file_agent_runtime.driver import (
+        _continuation_message_text,
+    )
+
+    def message(seq: int, *, role: str, source: str, text: str):
+        return CreatorMessageRecord(
+            message_id=f"message-{seq}",
+            project_id=PROJECT_ID,
+            creator_session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            message_seq=seq,
+            role=role,
+            content_parts=[{"type": "text", "text": text}],
+            source=source,
+            channel=MessageChannel.RUNTIME,
+        )
+
+    prior = [
+        message(
+            1,
+            role="tool",
+            source="runtime_action_result",
+            text='{"ok": true, "taskId": "task-1"}',
+        ),
+        message(
+            2,
+            role="tool",
+            source="runtime_action_result",
+            text='{"ok": true, "taskId": "task-2"}',
+        ),
+    ]
+    request = message(3, role="user", source="user", text="继续")
+
+    rendered = _continuation_message_text(request, prior)
+
+    assert "task-1" in rendered
+    assert "task-2" in rendered
+    assert "已省略" not in rendered
 
 
 def test_grounding_tool_is_absent_when_grounding_is_disabled(
@@ -1933,6 +2083,26 @@ def test_intervention_completion_queues_mainline_resume(tmp_path) -> None:
 
         await _wait_for(lambda: len(_resume_messages()) == 1)
         resume = _resume_messages()[0]
+        await asyncio.sleep(0.05)
+        assert not any(
+            run.caused_by_message_seq == resume.message_seq
+            for run in driver.runs.list(PROJECT_ID)
+        ), "mainline resumed before the intervention Review was accepted"
+        review = services.reviews.active(PROJECT_ID)
+        assert review is not None
+        services.reviews.decide(
+            project_id=PROJECT_ID,
+            review_id=review.review_id,
+            decision_token=review.decision_token,
+            decisions=[
+                ReviewDecisionItem(
+                    operation_id=operation.operation_id,
+                    decision="ACCEPT",
+                )
+                for operation in review.operations
+            ],
+        )
+        driver.notify(PROJECT_ID)
         await _wait_for(
             lambda: any(
                 run.caused_by_message_seq == resume.message_seq
@@ -2839,3 +3009,114 @@ def test_costly_specialist_tool_waits_for_file_authorization(
     event_types = {item.event_type for item in events}
     assert "execution.authorization_required" in event_types
     assert "execution.authorization_decided" in event_types
+
+
+def test_review_pending_is_a_neutral_specialist_pause(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.file_agent_runtime.driver as driver_module
+    from models.config import (
+        CREATION_CHECKPOINT_SKIP,
+        EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    )
+
+    monkeypatch.setattr(
+        driver_module,
+        "get_execution_authorization_mode",
+        lambda: EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_creation_checkpoint_mode",
+        lambda: CREATION_CHECKPOINT_SKIP,
+    )
+    parent_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        if "r2v_generation" in names:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="generate-ep22-video",
+                        name="r2v_generation",
+                        arguments={
+                            "projectId": PROJECT_ID,
+                            "targetRef": "element:ep22",
+                            "arguments": {"prompt": "ep22 video"},
+                        },
+                    ),
+                ),
+            )
+        parent_turn += 1
+        if parent_turn == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="delegate-ep22-video",
+                        name="delegate_to_agent",
+                        arguments={
+                            "role": "r2v_generation_director",
+                            "target_refs": ["element:ep22"],
+                            "task": "生成 ep22 视频",
+                        },
+                    ),
+                ),
+            )
+        assert json.loads(_messages[-1]["content"])["status"] == (
+            "WAITING_REVIEW"
+        )
+        return AgentModelTurn(content="等待审阅通过后自动继续。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="生成 ep22 视频",
+        )
+        driver = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(callback),
+            poll_interval_seconds=0.01,
+        )
+
+        async def pending_review(**_kwargs):
+            raise ReviewPendingError(
+                "storyboard is waiting for review",
+                details={
+                    "reason": "INPUT_PENDING_REVIEW",
+                    "reviewId": "review-ep22",
+                    "artifactVersionId": "artifact-version-ep22",
+                    "targetRef": "element:ep22",
+                    "commandType": "GENERATE_R2V_VIDEO",
+                },
+            )
+
+        driver.specialist_tools.invoke = pending_review  # type: ignore[method-assign]
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: services.sessions.get_project_session(
+                PROJECT_ID,
+            ).last_consumed_message_seq
+            == 1,
+        )
+        await driver.wait_until_idle(PROJECT_ID)
+        specialist = driver.executions.list_specialist_runs(PROJECT_ID)[0]
+        events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+        await driver.stop()
+        return specialist, events
+
+    specialist, events = asyncio.run(scenario())
+    assert specialist.status.value == "BLOCKED"
+    assert specialist.metadata["waitingReview"] is True
+    assert "视频生成尚未开始" in (specialist.final_summary_text or "")
+    blocked = [
+        item for item in events if item.event_type == "subagent.blocked"
+    ]
+    assert len(blocked) == 1
+    assert blocked[0].payload["waitingReview"] is True
+    assert not [
+        item for item in events if item.event_type == "subagent.failed"
+    ]

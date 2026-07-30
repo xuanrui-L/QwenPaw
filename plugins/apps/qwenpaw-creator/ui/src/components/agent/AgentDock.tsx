@@ -6,6 +6,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   CircleCheck,
+  Clock3,
   Eraser,
   Info,
   Loader2,
@@ -903,7 +904,12 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
   const terminal = activity.terminalKind
     ? SUBAGENT_TERMINAL_META[activity.terminalKind]
     : null;
-  const activityStatus = terminal ?? SUBAGENT_RUNNING_META;
+  const activityStatus = activity.waitingReview
+    ? {
+        label: "等待审阅",
+        tone: "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
+      }
+    : terminal ?? SUBAGENT_RUNNING_META;
   return (
     <div
       data-subagent-activity={activity.parentActionId}
@@ -1033,8 +1039,10 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
   const effectiveStatus =
     delegated && activity
       ? activity.completed
-        ? activity.terminalKind === "FAILED" ||
-          activity.terminalKind === "BLOCKED"
+        ? activity.waitingReview
+          ? "waiting_review"
+          : activity.terminalKind === "FAILED" ||
+            activity.terminalKind === "BLOCKED"
           ? "failed"
           : activity.terminalKind === "CANCELLED" ||
             activity.terminalKind === "STALE"
@@ -1058,6 +1066,8 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       ? "text-[var(--color-danger)]"
       : resolvedStatus === "cancelled"
       ? "text-[var(--color-text-tertiary)]"
+      : resolvedStatus === "waiting_review"
+      ? "text-[var(--color-accent)]"
       : "text-[var(--color-text-secondary)]";
 
   let displayLabel: string;
@@ -1092,6 +1102,8 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : resolvedStatus === "succeeded" ? (
             <CircleCheck className="h-3.5 w-3.5" />
+          ) : resolvedStatus === "waiting_review" ? (
+            <Clock3 className="h-3.5 w-3.5" />
           ) : resolvedStatus === "cancelled" ? (
             <XCircle className="h-3.5 w-3.5 opacity-50" />
           ) : (
@@ -1107,6 +1119,8 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
               ? "完成"
               : resolvedStatus === "cancelled"
               ? "已中止"
+              : resolvedStatus === "waiting_review"
+              ? "等待审阅"
               : "失败"}
           </span>
           {subLabel && active && (

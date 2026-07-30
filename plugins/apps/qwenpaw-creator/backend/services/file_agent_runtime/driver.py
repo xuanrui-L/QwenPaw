@@ -29,7 +29,7 @@ from domain.enums import (
     SpecialistRunStatus,
     TaskStatus,
 )
-from domain.errors import ConflictError
+from domain.errors import ConflictError, ReviewPendingError
 from models.config import (
     CREATION_CHECKPOINT_REQUIRED,
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
@@ -888,6 +888,36 @@ class FileCreatorAgentRuntime:
             return False
         return True
 
+    async def _reconcile_admission_state(
+        self,
+        project_id: str,
+        session: Any,
+        handle: Any,
+    ) -> Any | None:
+        """Settle durable pauses before reconcile may dispatch anything.
+
+        Returns the converged Session, or ``None`` while the Session is
+        paused — a durable interrupt is being served, or an active Review
+        keeps the mainline waiting for the user.
+        """
+
+        if session.status is CreatorSessionStatus.INTERRUPT_REQUESTED:
+            if handle is not None:
+                await self.interrupt(project_id, reason="durable_interrupt")
+            elif session.active_run_id is None:
+                await self._record_idle_interrupt(
+                    project_id,
+                    reason="durable_interrupt",
+                )
+            return None
+        session = await self._converge_resolved_review(project_id, session)
+        # Pending Review is a durable, recoverable pause. Messages may be
+        # queued while the user decides, but none may start until every active
+        # Review is resolved and the Session projection has converged.
+        if session.status is CreatorSessionStatus.PENDING_REVIEW:
+            return None
+        return session
+
     async def _reconcile_project(self, project_id: str) -> None:
         handle = self._active.get(project_id)
         if handle is not None and handle.task.done():
@@ -903,16 +933,13 @@ class FileCreatorAgentRuntime:
             self.sessions.get_project_session_snapshot,
             project_id,
         )
-        if session.status is CreatorSessionStatus.INTERRUPT_REQUESTED:
-            if handle is not None:
-                await self.interrupt(project_id, reason="durable_interrupt")
-            elif session.active_run_id is None:
-                await self._record_idle_interrupt(
-                    project_id,
-                    reason="durable_interrupt",
-                )
+        session = await self._reconcile_admission_state(
+            project_id,
+            session,
+            handle,
+        )
+        if session is None:
             return
-        session = await self._converge_resolved_review(project_id, session)
         pending = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -1986,6 +2013,14 @@ class FileCreatorAgentRuntime:
     ) -> dict[str, Any]:
         delegated = DelegateToAgentInput.model_validate(dict(arguments))
         delegated.validate_contract(project_id=project_id)
+        feedback_target_refs = _review_feedback_target_refs(request)
+        if feedback_target_refs and not set(delegated.target_refs).issubset(
+            feedback_target_refs,
+        ):
+            raise FileAgentRuntimeError(
+                "review regeneration may only delegate the rejected targets: "
+                + ", ".join(sorted(feedback_target_refs)),
+            )
         role = delegated.role
         role_name = role.value
         snapshot = await asyncio.to_thread(
@@ -2000,6 +2035,17 @@ class FileCreatorAgentRuntime:
             project=snapshot.project,
             workspace_schema=tools.schema_prompt.text,
         )
+        record_metadata: dict[str, Any] = {"parentActionId": parent_action_id}
+        if request.source == "review_rejection_feedback":
+            record_metadata.update(
+                {
+                    "reviewId": request.metadata.get("reviewId"),
+                    "reviewDecisionId": request.metadata.get("decisionId"),
+                    "rejectionFeedback": request.metadata.get(
+                        "rejectionFeedback",
+                    ),
+                },
+            )
         record = SpecialistRunRecord(
             run_id=specialist_run_id,
             project_id=project_id,
@@ -2014,7 +2060,7 @@ class FileCreatorAgentRuntime:
             caused_by_message_id=request.message_id,
             caused_by_message_seq=request.message_seq,
             review_policy=tools.context.review_policy,
-            metadata={"parentActionId": parent_action_id},
+            metadata=record_metadata,
         )
         await asyncio.to_thread(self.executions.create_specialist_run, record)
         common = {
@@ -2054,6 +2100,9 @@ class FileCreatorAgentRuntime:
             f"本次委派：\n{delegated.task}\n\n"
             f"目标对象：{', '.join(delegated.target_refs)}"
         )
+        feedback_constraint = _review_feedback_constraint(request)
+        if feedback_constraint:
+            user_text += "\n\n" + feedback_constraint
         native_media_parts: list[dict[str, Any]] = []
         if role is SpecialistRole.SOURCE_INTELLIGENCE:
             native_media_parts = await source_intelligence_content_parts(
@@ -2368,6 +2417,7 @@ class FileCreatorAgentRuntime:
                 )
                 failed = False
                 malformed_budget_exhausted = False
+                waiting_review: ReviewPendingError | None = None
                 try:
                     if call.parse_error is not None:
                         raise ToolArgumentsJSONError(call.parse_error)
@@ -2451,13 +2501,29 @@ class FileCreatorAgentRuntime:
                 except (asyncio.CancelledError, StaleAgentRun):
                     raise
                 except Exception as exc:
-                    failed = True
-                    if isinstance(exc, MalformedJqProjectArguments):
+                    if isinstance(exc, ReviewPendingError):
+                        waiting_review = exc
+                        review_id = exc.details.get("reviewId")
+                        if (
+                            isinstance(review_id, str)
+                            and review_id
+                            and review_id not in review_ids
+                        ):
+                            review_ids.append(review_id)
+                        result = {
+                            "ok": True,
+                            "status": "WAITING_REVIEW",
+                            "message": exc.message,
+                            **exc.details,
+                        }
+                    elif isinstance(exc, MalformedJqProjectArguments):
+                        failed = True
                         result = exc.tool_result()
                         malformed_budget_exhausted = (
                             exc.attempt > MAX_MALFORMED_JQ_PROJECT_RETRIES
                         )
                     else:
+                        failed = True
                         result = {
                             "ok": False,
                             "error": {
@@ -2523,6 +2589,77 @@ class FileCreatorAgentRuntime:
                         "failed": failed,
                     },
                 )
+                if waiting_review is not None:
+                    target_ref = str(
+                        waiting_review.details.get("targetRef") or "当前目标",
+                    )
+                    command_type = str(
+                        waiting_review.details.get("commandType") or "",
+                    )
+                    if command_type == "GENERATE_R2V_VIDEO":
+                        summary = (
+                            f"{target_ref} 的分镜图已生成；视频生成尚未开始，" "等待审阅通过后自动继续。"
+                        )
+                    else:
+                        summary = (
+                            f"{target_ref} 的前置产物仍在等待审阅；" "本步骤尚未开始，审阅通过后自动继续。"
+                        )
+                    waiting_metadata = {
+                        **record_metadata,
+                        "waitingReview": True,
+                        "waitingReviewId": waiting_review.details.get(
+                            "reviewId",
+                        ),
+                        "waitingArtifactVersionId": (
+                            waiting_review.details.get("artifactVersionId")
+                        ),
+                    }
+                    await asyncio.to_thread(
+                        self.executions.transition_specialist_run,
+                        project_id,
+                        specialist_run_id,
+                        expected_status=SpecialistRunStatus.RUNNING_MODEL,
+                        status=SpecialistRunStatus.BLOCKED,
+                        updates={
+                            "final_marker": "BLOCKED",
+                            "final_summary_text": summary,
+                            "metadata": waiting_metadata,
+                        },
+                    )
+                    await self._event(
+                        project_id,
+                        session_id,
+                        "subagent.blocked",
+                        parent_run_id,
+                        request,
+                        {
+                            **common,
+                            "summary": summary,
+                            "waitingReview": True,
+                            "reviewId": waiting_review.details.get(
+                                "reviewId",
+                            ),
+                            "artifactVersionId": waiting_review.details.get(
+                                "artifactVersionId",
+                            ),
+                        },
+                    )
+                    latest = await asyncio.to_thread(
+                        self.services.projects.read,
+                        project_id,
+                    )
+                    return {
+                        "ok": True,
+                        "runId": specialist_run_id,
+                        "role": role_name,
+                        "status": "WAITING_REVIEW",
+                        "waitingReview": True,
+                        "summary": summary,
+                        "toolCallCount": tool_call_count,
+                        "generation": latest.generation,
+                        "etag": latest.etag,
+                        "reviewId": waiting_review.details.get("reviewId"),
+                    }
                 if malformed_budget_exhausted:
                     raise AgentModelError(
                         "jq_project produced structurally corrupted tool "
@@ -2612,6 +2749,11 @@ class FileCreatorAgentRuntime:
     ) -> dict[str, Any]:
         """Invoke one role-owned tool through generic guard/wait protocols."""
 
+        arguments, feedback_applied = _apply_review_feedback_to_tool_arguments(
+            request,
+            name=name,
+            arguments=arguments,
+        )
         spec = self.specialist_tools.spec_for(role, name)
         authorization_id: str | None = None
         if spec is not None:
@@ -2735,6 +2877,11 @@ class FileCreatorAgentRuntime:
                 )
             if authorization_id is not None:
                 result["executionAuthorizationId"] = authorization_id
+            if feedback_applied:
+                result["reviewFeedbackApplied"] = True
+                result["reviewDecisionId"] = request.metadata.get(
+                    "decisionId",
+                )
             return result
         finally:
             if waiting_runtime:
@@ -3844,6 +3991,66 @@ def _message_text(message: CreatorMessageRecord) -> str:
     return "\n".join(chunks).strip() or "请处理本消息中的项目请求。"
 
 
+# A conversation accumulates full project.json echoes from runtime
+# actions; a 50-element Project makes each echo ~400KB and the sum
+# overflows the model input window (observed: 2.09MB of history against a
+# 0.98MB limit, every run failing instantly with an invalid-parameter
+# 400). Only the newest echo can describe the current Project, so older
+# ones are pure — and misleading — weight. They are elided at prompt
+# assembly only; the durable history keeps every byte.
+_SNAPSHOT_SOURCE = "runtime_action_result"
+_SNAPSHOT_ELISION_MIN_CHARS = 4096
+
+
+def _snapshot_generation(text: str) -> int | None:
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    project = payload.get("project")
+    document = project if isinstance(project, dict) else payload
+    generation = document.get("generation")
+    return generation if isinstance(generation, int) else None
+
+
+def _elide_stale_snapshots(
+    prior_context: list[CreatorMessageRecord],
+) -> dict[int, str]:
+    """Map message seq → stub for every superseded project echo."""
+
+    candidates = [
+        item
+        for item in prior_context
+        if item.role == "tool"
+        and item.source == _SNAPSHOT_SOURCE
+        and sum(
+            len(part.text or "")
+            for part in item.content_parts
+            if part.text is not None
+        )
+        >= _SNAPSHOT_ELISION_MIN_CHARS
+    ]
+    stubs: dict[int, str] = {}
+    for item in candidates[:-1]:
+        generation = next(
+            (
+                _snapshot_generation(part.text)
+                for part in item.content_parts
+                if part.text
+            ),
+            None,
+        )
+        marker = (
+            f"generation {generation} 时点" if generation is not None else "历史时点"
+        )
+        stubs[item.message_seq] = (
+            f"[已省略{marker}的项目快照；它早已过期，" "当前项目状态请用 read_project 获取]"
+        )
+    return stubs
+
+
 def _continuation_message_text(
     request: CreatorMessageRecord,
     prior_context: list[CreatorMessageRecord],
@@ -3853,15 +4060,20 @@ def _continuation_message_text(
     current = _message_text(request)
     if not prior_context:
         return current
+    stubs = _elide_stale_snapshots(prior_context)
     history = [
         {
             "messageSeq": item.message_seq,
             "role": item.role,
             "source": item.source,
-            "content": [
-                part.model_dump(mode="json", exclude_none=True)
-                for part in item.content_parts
-            ],
+            "content": (
+                [{"type": "text", "text": stubs[item.message_seq]}]
+                if item.message_seq in stubs
+                else [
+                    part.model_dump(mode="json", exclude_none=True)
+                    for part in item.content_parts
+                ]
+            ),
             "metadata": dict(item.metadata),
         }
         for item in prior_context
@@ -3929,6 +4141,93 @@ def _require_source_intelligence_associations(
                 "Source Intelligence SUCCESS requires an indexed analysis file for "
                 f"asset:{logical_asset_id}",
             )
+
+
+def _review_feedback_target_refs(
+    request: CreatorMessageRecord,
+) -> frozenset[str]:
+    if request.source != "review_rejection_feedback":
+        return frozenset()
+    feedback = request.metadata.get("rejectionFeedback")
+    if not isinstance(feedback, Mapping) or (
+        feedback.get("action") != "UNDO_AND_REGENERATE"
+    ):
+        return frozenset()
+    raw_targets = request.metadata.get("targets")
+    if not isinstance(raw_targets, list):
+        return frozenset()
+    target_refs = {
+        target_ref.strip()
+        for item in raw_targets
+        if isinstance(item, Mapping)
+        for target_ref in [item.get("target_ref") or item.get("targetRef")]
+        if isinstance(target_ref, str) and target_ref.strip()
+    }
+    # Legacy visual reviews used visual-entity:<id>, while the current
+    # Specialist contract admits the same logical entity as asset:<id>.
+    target_refs.update(
+        "asset:" + target_ref.removeprefix("visual-entity:")
+        for target_ref in tuple(target_refs)
+        if target_ref.startswith("visual-entity:")
+    )
+    return frozenset(target_refs)
+
+
+def _review_feedback_constraint(
+    request: CreatorMessageRecord,
+) -> str | None:
+    """Render the durable rejection facts as a non-optional run constraint."""
+
+    target_refs = _review_feedback_target_refs(request)
+    if not target_refs:
+        return None
+    feedback = request.metadata.get("rejectionFeedback")
+    if not isinstance(feedback, Mapping):
+        return None
+    lines = [
+        "【Runtime 强制约束 · 审阅重做】",
+        "本轮只允许重做这些 targetRef：" + ", ".join(sorted(target_refs)),
+        "生成工具的最终 prompt 必须明确吸收下面的用户反馈；不能复用原 prompt。",
+    ]
+    problem_note = feedback.get("problemNote") or feedback.get("problem_note")
+    instruction = feedback.get("regenerationInstruction") or feedback.get(
+        "regeneration_instruction",
+    )
+    if isinstance(problem_note, str) and problem_note.strip():
+        lines.append("需要修正的问题：" + problem_note.strip())
+    if isinstance(instruction, str) and instruction.strip():
+        lines.append("必须执行的重做要求：" + instruction.strip())
+    return "\n".join(lines)
+
+
+def _apply_review_feedback_to_tool_arguments(
+    request: CreatorMessageRecord,
+    *,
+    name: str,
+    arguments: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], bool]:
+    """Deterministically carry rejection feedback into paid media prompts."""
+
+    if name not in {"image_generation", "r2v_generation"}:
+        return arguments, False
+    constraint = _review_feedback_constraint(request)
+    if constraint is None:
+        return arguments, False
+    raw_payload = arguments.get("arguments")
+    if not isinstance(raw_payload, Mapping):
+        return arguments, False
+    prompt = raw_payload.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return arguments, False
+    decision_id = str(request.metadata.get("decisionId") or "unknown")
+    marker = f"[review-decision:{decision_id}]"
+    if marker in prompt:
+        return arguments, True
+    payload = dict(raw_payload)
+    payload["prompt"] = f"{prompt.rstrip()}\n\n{marker}\n{constraint}"
+    enriched = dict(arguments)
+    enriched["arguments"] = payload
+    return enriched, True
 
 
 def _specialist_terminal(content: str) -> tuple[str, str]:

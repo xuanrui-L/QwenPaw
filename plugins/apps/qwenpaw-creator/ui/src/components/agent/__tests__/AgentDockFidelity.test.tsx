@@ -1368,6 +1368,83 @@ describe("AgentDock origin/main visible fidelity", () => {
     ).toHaveLength(1);
   });
 
+  it("renders a review-blocked delegation as waiting, not failed", () => {
+    useAgentDockUiStore.getState().setOpen(true);
+    useCreatorSessionStore.setState((state) => ({
+      ...state,
+      session: { ...state.session!, status: "PENDING_REVIEW" },
+      messages: [
+        {
+          messageId: "assistant-review-wait",
+          messageSeq: 1,
+          role: "assistant",
+          source: "creator_agent",
+          content: [{ type: "text", text: "继续生成 ep22 视频。" }],
+          metadata: {
+            actionId: "delegate-review-wait",
+            parsedAction: {
+              action: "tool_call",
+              tool: "delegate_to_agent",
+              arguments: {
+                role: "r2v_generation_director",
+                target_refs: ["element:ep22"],
+                task: "生成 ep22 视频",
+              },
+            },
+          },
+          createdAt: "now",
+        },
+      ],
+    }));
+    act(() =>
+      useCreatorSessionStore.getState().ingestEvents([
+        {
+          eventId: "delegate-review-wait-start",
+          seq: 1,
+          type: "agent.tool_started",
+          projectId: "p1",
+          creatorSessionId: "session-1",
+          at: "now",
+          data: {
+            actionId: "delegate-review-wait",
+            tool: "delegate_to_agent",
+            role: "r2v_generation_director",
+            targetRefs: ["element:ep22"],
+          },
+        },
+        {
+          eventId: "delegate-review-wait-blocked",
+          seq: 2,
+          type: "subagent.blocked",
+          projectId: "p1",
+          creatorSessionId: "session-1",
+          at: "now",
+          data: {
+            parentActionId: "delegate-review-wait",
+            runId: "run-review-wait",
+            role: "r2v_generation_director",
+            targetRefs: ["element:ep22"],
+            waitingReview: true,
+            summary: "分镜图已生成；视频尚未开始，等待审阅通过后自动继续。",
+          },
+        },
+      ]),
+    );
+
+    renderDock();
+
+    const tool = document.querySelector<HTMLElement>(
+      '[data-agent-tool="delegate-review-wait"]',
+    )!;
+    expect(tool).toHaveTextContent("等待审阅");
+    expect(tool).not.toHaveTextContent("失败");
+    expect(
+      useCreatorSessionStore.getState().subagentActivities[
+        "delegate-review-wait"
+      ],
+    ).toMatchObject({ waitingReview: true, terminalKind: "BLOCKED" });
+  });
+
   it("moves a streamed Sub-agent function call into its tool card and preserves detail scrolling", async () => {
     useAgentDockUiStore.getState().setOpen(true);
     useAgentDockUiStore.getState().setAllowExpandDetails(true);

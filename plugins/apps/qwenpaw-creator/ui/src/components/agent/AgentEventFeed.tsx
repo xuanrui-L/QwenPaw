@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Button, message } from "antd";
-import { CircleCheck, CircleX, PlayCircle } from "lucide-react";
+import { CircleCheck, CircleX, Clock3, PlayCircle } from "lucide-react";
 import { interruptCreator } from "@/api/creator";
 import type {
   CreatorEvent,
@@ -28,6 +28,7 @@ import { navigateToLocator } from "@/routing/locators";
 type OriginRunStatus =
   | "running"
   | "waiting_confirm"
+  | "waiting_review"
   | "done"
   | "partial"
   | "timeout"
@@ -44,6 +45,10 @@ const RUN_STATUS_META: Record<
   },
   waiting_confirm: {
     label: "等待确认",
+    tone: "text-[var(--color-accent)] bg-[var(--color-accent-soft)]",
+  },
+  waiting_review: {
+    label: "等待审阅",
     tone: "text-[var(--color-accent)] bg-[var(--color-accent-soft)]",
   },
   done: {
@@ -97,6 +102,11 @@ function originRunStatus(
   )
     return "waiting_confirm";
   if (
+    sessionStatus === "PENDING_REVIEW" ||
+    runs.some((run) => run.metadata.waitingReview === true)
+  )
+    return "waiting_review";
+  if (
     sessionStatus === "RUNNING" ||
     sessionStatus === "RESUMING" ||
     sessionStatus === "INTERRUPT_REQUESTED"
@@ -108,7 +118,11 @@ function originRunStatus(
   )
     return "timeout";
   const succeeded = runs.some((run) => run.status === "SUCCEEDED");
-  const failed = runs.some((run) => ["FAILED", "BLOCKED"].includes(run.status));
+  const failed = runs.some(
+    (run) =>
+      ["FAILED", "BLOCKED"].includes(run.status) &&
+      run.metadata.waitingReview !== true,
+  );
   if (succeeded && failed) return "partial";
   if (failed || sessionStatus === "ERROR") return "error";
   if (
@@ -297,7 +311,11 @@ export default function AgentEventFeed() {
       (task.status === "QUEUED" || task.status === "RUNNING"),
   );
   const failedTargetRuns = runs.flatMap((run) => {
-    if (!["FAILED", "BLOCKED"].includes(run.status)) return [];
+    if (
+      !["FAILED", "BLOCKED"].includes(run.status) ||
+      run.metadata.waitingReview === true
+    )
+      return [];
     const targetRefs = run.targetRefs.filter(
       (targetRef) =>
         targetRef.startsWith("element:") || targetRef.startsWith("timeline:"),
@@ -406,6 +424,8 @@ export default function AgentEventFeed() {
               >
                 {run.status === "SUCCEEDED" ? (
                   <CircleCheck className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-success)]" />
+                ) : run.metadata.waitingReview === true ? (
+                  <Clock3 className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-accent)]" />
                 ) : ["FAILED", "BLOCKED"].includes(run.status) ? (
                   <CircleX className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-danger)]" />
                 ) : (
@@ -416,7 +436,10 @@ export default function AgentEventFeed() {
                   {run.targetRefs
                     .map((ref) => creatorTargetLabel(ref, project))
                     .join("、") || "当前项目"}{" "}
-                  · {runStatusLabel(run.status)}
+                  ·{" "}
+                  {run.metadata.waitingReview === true
+                    ? "等待审阅"
+                    : runStatusLabel(run.status)}
                 </span>
               </li>
             ))}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from services.project_files.json_pointer import MISSING, hash_json_value
 from services.project_files.models import Project
 from services.project_files.review import (
     ReviewDecisionItem,
+    ReviewDecisionJournalState,
     ReviewRejectionAction,
     ReviewRejectionFeedback,
 )
@@ -761,15 +763,17 @@ def test_review_decision_recovers_crash_before_idempotency_completion(
 def test_rejection_feedback_appends_exactly_one_action_specific_message(
     tmp_path,
 ) -> None:
-    for action, expected_role, expected_text in (
+    for action, expected_role, expected_channel, expected_text in (
         (
             "UNDO_ONLY",
             "system",
+            "runtime",
             "没有要求重做",
         ),
         (
             "UNDO_AND_REGENERATE",
             "user",
+            "agentdock",
             "明确要求重新生成",
         ),
     ):
@@ -814,6 +818,7 @@ def test_rejection_feedback_appends_exactly_one_action_specific_message(
         )
         assert len(messages) == 1
         assert messages[0].role == expected_role
+        assert messages[0].channel.value == expected_channel
         assert messages[0].source == "review_rejection_feedback"
         assert messages[0].content_parts[0].text is not None
         assert expected_text in messages[0].content_parts[0].text
@@ -867,6 +872,79 @@ def test_rejection_feedback_requires_a_reject_decision(tmp_path) -> None:
 
     result = _run(scenario())
     assert result.status_code == 422
+
+
+def test_accepting_generated_artifact_queues_automatic_resume(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _app_instance, services, _base = _app(tmp_path)
+    runtime = services.sessions.create_project_runtime(
+        "project-1",
+        session_id="session-1",
+        conversation_id="conversation-1",
+    )
+    operation = SimpleNamespace(
+        operation_id="operation-storyboard",
+        json_pointer=(
+            "/assets/artifact_versions_by_id/artifact-version-storyboard"
+        ),
+        target_ref="element:ep22",
+        after={
+            "version_id": "artifact-version-storyboard",
+            "owner_ref": "element:ep22",
+            "name": "ep22 分镜图",
+            "metadata": {"targetRef": "element:ep22"},
+        },
+    )
+    journal = SimpleNamespace(
+        state=ReviewDecisionJournalState.FINALIZED,
+        rejection_feedback=None,
+        rejection_targets=[],
+        decisions=[
+            SimpleNamespace(
+                operation_id="operation-storyboard",
+                decision="ACCEPT",
+            ),
+        ],
+        review_before=SimpleNamespace(
+            operations=[operation],
+            request_message_seq=99,
+        ),
+    )
+    monkeypatch.setattr(
+        services.reviews,
+        "get_decision_journal",
+        lambda *_args: journal,
+    )
+
+    services._publish_review_followup(
+        project_id="project-1",
+        review_id="review-storyboard",
+        decision_id="decision-accept-storyboard",
+    )
+
+    messages = services.sessions.list_messages(
+        "project-1",
+        runtime.session.session_id,
+        after_seq=0,
+        limit=None,
+    )
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert messages[0].source == "review_approval_resume"
+    assert messages[0].channel.value == "agentdock"
+    assert messages[0].classification.value == "review_revise"
+    assert messages[0].content_parts[0].text is not None
+    assert "审阅已通过" in messages[0].content_parts[0].text
+    assert "不要要求用户输入 continue" in messages[0].content_parts[0].text
+    assert messages[0].metadata["targets"] == [
+        {
+            "target_ref": "element:ep22",
+            "artifact_version_id": "artifact-version-storyboard",
+            "label": "ep22 分镜图",
+        },
+    ]
 
 
 def test_startup_recovers_feedback_finalized_before_message_append(

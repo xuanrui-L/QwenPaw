@@ -97,6 +97,7 @@ export interface SubagentActivity {
   targetRefs: string[];
   firstEventSeq: number;
   completed: boolean;
+  waitingReview?: boolean;
   terminalKind?: "SUCCESS" | "BLOCKED" | "FAILED" | "STALE" | "CANCELLED";
   summaryText?: string;
   terminalEventSeq?: number;
@@ -1026,6 +1027,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 activity = {
                   ...activity,
                   completed: false,
+                  waitingReview: undefined,
                   terminalKind: undefined,
                   summaryText: undefined,
                   terminalEventSeq: undefined,
@@ -1041,6 +1043,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 activity = {
                   ...activity,
                   completed: true,
+                  waitingReview: event.data.waitingReview === true,
                   terminalKind,
                   summaryText: subagentSummary(event) ?? activity.summaryText,
                   terminalEventSeq: event.seq,
