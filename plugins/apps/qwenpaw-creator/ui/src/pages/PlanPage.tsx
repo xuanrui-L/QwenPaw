@@ -200,6 +200,9 @@ export default function PlanPage() {
     renderOutput?.selected && !renderOutput.selected.stale
       ? renderOutput.selected
       : null;
+  const renderIsCurrent =
+    freshRender !== null &&
+    (generation === null || freshRender.based_on_generation >= generation);
   const allReady = readiness.total > 0 && readiness.notReady === 0;
   const timelineTargetRef = timeline
     ? `timeline:${timeline.timeline_id}`
@@ -372,11 +375,12 @@ export default function PlanPage() {
     message.error(`成片合成失败：${detail}`);
   }, [id, pollOnce, requestedComposeTask]);
 
-  // Auto-compose once all main-track elements are ready and there is no fresh
-  // final cut; only one attempt per generation (no auto-retry on failure — a
-  // manual retry entry remains); a short debounce absorbs successive edits.
+  // Auto-compose once all main-track elements are ready and there is no
+  // up-to-date final cut; only one attempt per generation (no auto-retry on
+  // failure — a manual retry entry remains); a short debounce absorbs
+  // successive edits.
   useEffect(() => {
-    if (!allReady || freshRender || isComposing) return;
+    if (!allReady || renderIsCurrent || isComposing) return;
     if (
       generation !== null &&
       composeAttemptedGeneration.current === generation
@@ -387,7 +391,7 @@ export default function PlanPage() {
       void composeNow();
     }, 1500);
     return () => window.clearTimeout(timer);
-  }, [allReady, freshRender, isComposing, generation, composeNow]);
+  }, [allReady, renderIsCurrent, isComposing, generation, composeNow]);
 
   const downloadRender = useCallback(async () => {
     if (!freshRender) return;

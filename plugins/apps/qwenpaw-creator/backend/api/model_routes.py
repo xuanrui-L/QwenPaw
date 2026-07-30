@@ -332,9 +332,8 @@ def _assemble_model_config(
     if isinstance(authorization, dict):
         base["execution_authorization"].update(authorization)
     if base["vlm"].get("use_llm"):
-        for field in ("base_url", "api_key", "model_name"):
-            if not base["vlm"].get(field):
-                base["vlm"][field] = base["llm"].get(field, "")
+        for field in ("base_url", "api_key", "model_name", "protocol"):
+            base["vlm"][field] = base["llm"].get(field, "")
     return ModelConfigData.model_validate(base)
 
 

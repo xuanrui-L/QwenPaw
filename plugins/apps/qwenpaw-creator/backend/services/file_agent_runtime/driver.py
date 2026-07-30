@@ -95,6 +95,7 @@ from services.runtime_files.session_store import (
     SessionStateConflict,
 )
 from services.web_grounding import ground_prompt_context
+from utils.logger import setup_logger
 
 from .checkpoints import (
     CHECKPOINT_PROVIDER,
@@ -131,6 +132,8 @@ from .subagents import (
     delegate_tool_manifest,
     specialist_system_prompt,
 )
+
+logger = setup_logger("creator.agent_runtime")
 
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
@@ -1225,6 +1228,11 @@ class FileCreatorAgentRuntime:
             )
             return
         except AgentModelConfigurationError as exc:
+            logger.error(
+                "Agent run %s failed — model configuration missing: %s",
+                run_id,
+                exc,
+            )
             await self._fail_run(
                 project_id,
                 session.session_id,
@@ -1237,6 +1245,11 @@ class FileCreatorAgentRuntime:
             )
             self._blocked_heads[project_id] = message.message_seq
         except AgentModelError as exc:
+            logger.error(
+                "Agent run %s failed — model request error: %s",
+                run_id,
+                exc,
+            )
             await self._fail_run(
                 project_id,
                 session.session_id,
@@ -1250,6 +1263,12 @@ class FileCreatorAgentRuntime:
             self._blocked_heads[project_id] = message.message_seq
         except AgentStreamCallbackError as exc:
             cause = exc.cause
+            logger.error(
+                "Agent run %s failed — stream persistence error: %s: %s",
+                run_id,
+                type(cause).__name__,
+                cause,
+            )
             await self._fail_run(
                 project_id,
                 session.session_id,
@@ -1262,6 +1281,13 @@ class FileCreatorAgentRuntime:
             )
             self._blocked_heads[project_id] = message.message_seq
         except Exception as exc:
+            logger.error(
+                "Agent run %s failed — unexpected error: %s: %s",
+                run_id,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             await self._fail_run(
                 project_id,
                 session.session_id,
@@ -2507,6 +2533,11 @@ class FileCreatorAgentRuntime:
                 f"{role_name} exceeded {self.max_model_turns} model turns",
             )
         except (asyncio.CancelledError, StaleAgentRun):
+            logger.warning(
+                "Specialist run %s (%s) cancelled",
+                specialist_run_id,
+                role.value,
+            )
             await asyncio.to_thread(
                 self.executions.transition_specialist_run,
                 project_id,
@@ -2530,6 +2561,14 @@ class FileCreatorAgentRuntime:
             )
             raise
         except Exception as exc:
+            logger.error(
+                "Specialist run %s (%s) failed: %s: %s",
+                specialist_run_id,
+                role.value,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             await asyncio.to_thread(
                 self.executions.transition_specialist_run,
                 project_id,

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+import asyncio
 import inspect
 import json
+
 from typing import Any, Protocol
 
 from json_repair import repair_json
@@ -32,10 +34,13 @@ from models import config as model_config
 from models.concurrency import model_slot
 from models.dashscope_multimodal import DashScopeNativeFormatter
 from models.native_content import native_content_blocks
+from utils.logger import setup_logger
 from .tool_protocol import (
     NativeToolTextStream,
     NonNativeToolMarkupError,
 )
+
+logger = setup_logger("creator.model_client")
 
 
 class AgentModelError(RuntimeError):
@@ -498,6 +503,8 @@ class AgentScopeAgentChatClient:
         on_thinking_delta: AgentTextDeltaCallback | None = None,
         on_tool_call_delta: AgentToolDeltaCallback | None = None,
         _empty_retries_remaining: int = 1,
+        _rate_limit_retries_remaining: int = 3,
+        _transient_retries_remaining: int = 2,
     ) -> AgentModelTurn:
         native_messages = records_to_agentscope_messages(messages)
         allowed_names = {
@@ -587,9 +594,86 @@ class AgentScopeAgentChatClient:
             AgentModelConfigurationError,
             AgentStreamCallbackError,
             AgentStreamCallbackPassthrough,
-        ):
+        ) as exc:
+            logger.error(
+                "Model request failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             raise
         except Exception as exc:
+            exc_text = str(exc)
+            is_rate_limit = (
+                "<503>" in exc_text
+                or "ServiceUnavailable" in exc_text
+                or "Too many requests" in exc_text
+            )
+            if is_rate_limit and _rate_limit_retries_remaining > 0:
+                delay = 2 ** (3 - _rate_limit_retries_remaining)
+                model_name = (
+                    getattr(self.model, "model", "")
+                    or model_config.get_text_model_name()
+                )
+                logger.warning(
+                    "Model request rate-limited (503) [model=%s], retrying in %ds "
+                    "(%d retries remaining): %s",
+                    model_name,
+                    delay,
+                    _rate_limit_retries_remaining,
+                    exc_text,
+                )
+                await asyncio.sleep(delay)
+                return await self.complete(
+                    messages=messages,
+                    tools=tools,
+                    on_text_delta=on_text_delta,
+                    on_thinking_delta=on_thinking_delta,
+                    on_tool_call_delta=on_tool_call_delta,
+                    _empty_retries_remaining=_empty_retries_remaining,
+                    _rate_limit_retries_remaining=(
+                        _rate_limit_retries_remaining - 1
+                    ),
+                )
+            is_transient = (
+                "Download multimodal file timed out" in exc_text
+                or "ReadTimeout" in exc_text
+                or "ConnectTimeout" in exc_text
+                or "WriteTimeout" in exc_text
+            )
+            if is_transient and _transient_retries_remaining > 0:
+                delay = 2 ** (3 - _transient_retries_remaining)
+                model_name = (
+                    getattr(self.model, "model", "")
+                    or model_config.get_text_model_name()
+                )
+                logger.warning(
+                    "Model request transient error [model=%s], retrying in %ds "
+                    "(%d retries remaining): %s: %s",
+                    model_name,
+                    delay,
+                    _transient_retries_remaining,
+                    type(exc).__name__,
+                    exc_text,
+                )
+                await asyncio.sleep(delay)
+                return await self.complete(
+                    messages=messages,
+                    tools=tools,
+                    on_text_delta=on_text_delta,
+                    on_thinking_delta=on_thinking_delta,
+                    on_tool_call_delta=on_tool_call_delta,
+                    _empty_retries_remaining=_empty_retries_remaining,
+                    _rate_limit_retries_remaining=_rate_limit_retries_remaining,
+                    _transient_retries_remaining=(
+                        _transient_retries_remaining - 1
+                    ),
+                )
+            logger.error(
+                "Model request failed with unexpected error: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             raise AgentModelError(
                 f"Creator AgentScope model request failed: {exc}",
             ) from exc
