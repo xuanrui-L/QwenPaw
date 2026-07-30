@@ -5,11 +5,19 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from hashlib import sha256
+import logging
 from pathlib import Path
 import threading
 from typing import Any, Mapping
 
 from services.runtime_files.field_blocks import FieldBlockStore
+from services.runtime_files import (
+    MessageChannel,
+    MessageClassification,
+    RuntimeGoalNotFound,
+    RuntimeSessionNotFound,
+)
 from services.runtime_files.session_store import ProjectRuntimeSessionStore
 
 from .commit import ProjectCommitBoundary, ProjectCommitResult
@@ -24,8 +32,15 @@ from .review import (
     CreatorReviewRecoveryReport,
     ProjectReviewService,
     ReviewDecisionItem,
+    ReviewDecisionJournalState,
+    ReviewRejectionAction,
+    ReviewRejectionFeedback,
+    render_rejection_feedback_message,
 )
 from .store import ProjectSnapshot, ProjectStore
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -50,7 +65,7 @@ class CreatorFileServices:
         # Review decisions may depend on a compensating Project transaction.
         # Project journals therefore converge first, followed by Review facts.
         startup_review_recovery = reviews.recover_all()
-        return cls(
+        services = cls(
             root=root,
             projects=projects,
             commits=ProjectCommitBoundary(projects),
@@ -62,6 +77,8 @@ class CreatorFileServices:
             startup_recovery=startup_recovery,
             startup_review_recovery=startup_review_recovery,
         )
+        services.recover_review_rejection_feedback_messages()
+        return services
 
     def recover_project(
         self,
@@ -151,6 +168,7 @@ class CreatorFileServices:
         review_id: str,
         decision_token: str,
         decisions: list[ReviewDecisionItem],
+        rejection_feedback: ReviewRejectionFeedback | None = None,
         decision_id: str | None = None,
         _lifecycle_lock_held: bool = False,
     ):
@@ -160,12 +178,167 @@ class CreatorFileServices:
             review_id=review_id,
             decision_token=decision_token,
             decisions=decisions,
+            rejection_feedback=rejection_feedback,
             decision_id=decision_id,
             _lifecycle_lock_held=_lifecycle_lock_held,
         )
         current = await asyncio.to_thread(self.projects.read, project_id)
         await asyncio.to_thread(self.poller.note_commit, current)
         return result
+
+    async def publish_review_rejection_feedback(
+        self,
+        *,
+        project_id: str,
+        review_id: str,
+        decision_id: str,
+    ) -> ReviewRejectionAction | None:
+        """Append one idempotent Runtime message for a finalized rejection."""
+
+        return await asyncio.to_thread(
+            self._publish_review_rejection_feedback,
+            project_id=project_id,
+            review_id=review_id,
+            decision_id=decision_id,
+        )
+
+    def recover_review_rejection_feedback_messages(self) -> None:
+        """Replay the feedback outbox after a process crash.
+
+        A crash can happen after the Review journal is finalized but before
+        its Session message is appended. The deterministic client message ID
+        makes replay safe even when the first append actually succeeded.
+        """
+
+        for project_id in self.projects.discover_project_ids():
+            try:
+                journals = self.reviews.finalized_rejection_feedback_journals(
+                    project_id,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to discover rejection feedback for Project %s",
+                    project_id,
+                )
+                continue
+            for journal in journals:
+                try:
+                    self._publish_review_rejection_feedback(
+                        project_id=project_id,
+                        review_id=journal.review_id,
+                        decision_id=journal.decision_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to recover rejection feedback %s "
+                        "for Project %s",
+                        journal.decision_id,
+                        project_id,
+                    )
+
+    def _publish_review_rejection_feedback(
+        self,
+        *,
+        project_id: str,
+        review_id: str,
+        decision_id: str,
+    ) -> ReviewRejectionAction | None:
+        """Synchronous implementation shared by HTTP and startup recovery."""
+
+        journal = self.reviews.get_decision_journal(
+            project_id,
+            review_id,
+            decision_id,
+        )
+        if journal.state is not ReviewDecisionJournalState.FINALIZED:
+            return None
+        feedback = journal.rejection_feedback
+        text = render_rejection_feedback_message(journal)
+        if feedback is None or text is None:
+            return None
+        try:
+            session = self.sessions.get_project_session_snapshot(project_id)
+        except RuntimeSessionNotFound:
+            # Unit-created/legacy Projects may have Reviews but no Runtime
+            # Session. The feedback remains durable in the decision journal.
+            return feedback.action
+
+        messages = self.sessions.list_messages(
+            project_id,
+            session.session_id,
+            after_seq=0,
+            limit=None,
+        )
+        originating = next(
+            (
+                item
+                for item in messages
+                if item.message_seq
+                == journal.review_before.request_message_seq
+            ),
+            None,
+        )
+        conversation_id = (
+            originating.conversation_id if originating is not None else None
+        )
+        if conversation_id is None and session.active_goal_id is not None:
+            try:
+                goal = self.sessions.get_goal(
+                    project_id,
+                    session.active_goal_id,
+                )
+                conversation_id = goal.conversation_id
+            except RuntimeGoalNotFound:
+                pass
+        if conversation_id is None:
+            conversations = self.sessions.list_conversations(
+                project_id,
+                session.session_id,
+            )
+            default = next(
+                (item for item in conversations if item.is_default),
+                conversations[0] if conversations else None,
+            )
+            if default is None:
+                return feedback.action
+            conversation_id = default.conversation_id
+
+        digest = sha256(
+            f"{project_id}\0{review_id}\0{decision_id}".encode("utf-8"),
+        ).hexdigest()
+        self.sessions.append_message(
+            project_id,
+            session.session_id,
+            conversation_id,
+            role=(
+                "user"
+                if feedback.action is ReviewRejectionAction.UNDO_AND_REGENERATE
+                else "system"
+            ),
+            content_parts=[{"type": "text", "text": text}],
+            message_id=f"message-review-feedback-{digest}",
+            client_message_id=f"review-feedback-{digest}",
+            source="review_rejection_feedback",
+            channel=MessageChannel.RUNTIME,
+            classification=(
+                MessageClassification.REVIEW_REVISE
+                if feedback.action is ReviewRejectionAction.UNDO_AND_REGENERATE
+                else MessageClassification.REVIEW_COMMENT
+            ),
+            metadata={
+                "reviewId": review_id,
+                "decisionId": decision_id,
+                "rejectionFeedback": feedback.model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+                "targets": [
+                    item.model_dump(mode="json")
+                    for item in journal.rejection_targets
+                ],
+            },
+        )
+        return feedback.action
 
 
 _registry_lock = threading.RLock()

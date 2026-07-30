@@ -135,17 +135,53 @@ describe("FileProjectReviewPanel", () => {
     );
   });
 
-  it("submits all pending operations in one Undo all request", async () => {
+  it("opens feedback before undoing all pending operations", async () => {
     const value = review(2);
     const decide = seed(value);
     render(<FileProjectReviewPanel projectId="p1" review={value} />);
 
     fireEvent.click(screen.getByRole("button", { name: "全部撤销" }));
+    expect(decide).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toHaveTextContent("撤销 2 项内容");
+    fireEvent.click(screen.getByRole("button", { name: "仅撤销" }));
     await waitFor(() =>
-      expect(decide).toHaveBeenCalledWith("p1", "review-1", [
-        { operation_id: "operation-1", decision: "REJECT" },
-        { operation_id: "operation-2", decision: "REJECT" },
-      ]),
+      expect(decide).toHaveBeenCalledWith(
+        "p1",
+        "review-1",
+        [
+          { operation_id: "operation-1", decision: "REJECT" },
+          { operation_id: "operation-2", decision: "REJECT" },
+        ],
+        { action: "UNDO_ONLY" },
+      ),
+    );
+  });
+
+  it("submits structured feedback when undo and regenerate is selected", async () => {
+    const value = review();
+    const decide = seed(value);
+    render(<FileProjectReviewPanel projectId="p1" review={value} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "撤销 /description" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "哪里不对" }), {
+      target: { value: "人物状态不对" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "重做要求" }), {
+      target: { value: "保持身份一致，改成落魄时期" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "撤销并重做" }));
+
+    await waitFor(() =>
+      expect(decide).toHaveBeenCalledWith(
+        "p1",
+        "review-1",
+        [{ operation_id: "operation-1", decision: "REJECT" }],
+        {
+          action: "UNDO_AND_REGENERATE",
+          problemNote: "人物状态不对",
+          regenerationInstruction: "保持身份一致，改成落魄时期",
+        },
+      ),
     );
   });
 

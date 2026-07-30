@@ -60,10 +60,21 @@ export interface FileProjectReviewDecisionItem {
   decision: FileProjectReviewDecision;
 }
 
+export type FileProjectReviewRejectionAction =
+  | "UNDO_ONLY"
+  | "UNDO_AND_REGENERATE";
+
+export interface FileProjectReviewRejectionFeedback {
+  action: FileProjectReviewRejectionAction;
+  problemNote?: string;
+  regenerationInstruction?: string;
+}
+
 export interface FileProjectReviewDecisionRequest {
   decisionId: string;
   decisionToken: string;
   decisions: FileProjectReviewDecisionItem[];
+  rejectionFeedback?: FileProjectReviewRejectionFeedback;
 }
 
 export type FileProjectReviewPollResult =

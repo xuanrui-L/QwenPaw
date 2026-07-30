@@ -15,12 +15,36 @@ from services.project_files.commit import ProjectCommitBoundary
 from services.project_files.facade import CreatorFileServices
 from services.project_files.json_pointer import MISSING, hash_json_value
 from services.project_files.models import Project
+from services.project_files.review import (
+    ReviewDecisionItem,
+    ReviewRejectionAction,
+    ReviewRejectionFeedback,
+)
 from services.runtime_files import IdempotencyRecordStore, IdempotencyStatus
 from services.runtime_files.models import ReviewBoundary
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _post_review_decision_twice(app, url, payload):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+    ) as client:
+        first = await client.post(
+            url,
+            headers={"Idempotency-Key": payload["decisionId"]},
+            json=payload,
+        )
+        replay = await client.post(
+            url,
+            headers={"Idempotency-Key": payload["decisionId"]},
+            json=payload,
+        )
+    return first, replay
 
 
 def _app(tmp_path):
@@ -732,6 +756,166 @@ def test_review_decision_recovers_crash_before_idempotency_completion(
     )
     assert completed is not None
     assert completed.status is IdempotencyStatus.COMPLETED
+
+
+def test_rejection_feedback_appends_exactly_one_action_specific_message(
+    tmp_path,
+) -> None:
+    for action, expected_role, expected_text in (
+        (
+            "UNDO_ONLY",
+            "system",
+            "没有要求重做",
+        ),
+        (
+            "UNDO_AND_REGENERATE",
+            "user",
+            "明确要求重新生成",
+        ),
+    ):
+        app, services, base = _app(tmp_path / action.lower())
+        runtime = services.sessions.create_project_runtime(
+            "project-1",
+            session_id="session-1",
+            conversation_id="conversation-1",
+        )
+        review = _pending_review(services, base)
+        payload = {
+            "decisionId": f"decision-{action.lower()}",
+            "decisionToken": review.decision_token,
+            "decisions": [
+                {
+                    "operation_id": review.operations[0].operation_id,
+                    "decision": "REJECT",
+                },
+            ],
+            "rejectionFeedback": {
+                "action": action,
+                "problemNote": "人物状态不对",
+                "regenerationInstruction": "保持身份一致",
+            },
+        }
+        url = (
+            f"/projects/project-1/runtime/reviews/{review.review_id}/decisions"
+        )
+
+        first, replay = _run(
+            _post_review_decision_twice(app, url, payload),
+        )
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert replay.headers["X-Idempotent-Replay"] == "true"
+
+        messages = services.sessions.list_messages(
+            "project-1",
+            runtime.session.session_id,
+            after_seq=0,
+            limit=None,
+        )
+        assert len(messages) == 1
+        assert messages[0].role == expected_role
+        assert messages[0].source == "review_rejection_feedback"
+        assert messages[0].content_parts[0].text is not None
+        assert expected_text in messages[0].content_parts[0].text
+        assert "人物状态不对" in messages[0].content_parts[0].text
+
+        restarted = CreatorFileServices.create(services.root)
+        recovered_messages = restarted.sessions.list_messages(
+            "project-1",
+            runtime.session.session_id,
+            after_seq=0,
+            limit=None,
+        )
+        assert len(recovered_messages) == 1
+
+        journal = services.reviews.get_decision_journal(
+            "project-1",
+            review.review_id,
+            str(payload["decisionId"]),
+        )
+        assert journal.event is not None
+        assert journal.event.rejection_feedback is not None
+        assert journal.event.rejection_feedback.action.value == action
+
+
+def test_rejection_feedback_requires_a_reject_decision(tmp_path) -> None:
+    app, services, base = _app(tmp_path)
+    review = _pending_review(services, base)
+    url = f"/projects/project-1/runtime/reviews/{review.review_id}/decisions"
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                url,
+                headers={"Idempotency-Key": "invalid-feedback"},
+                json={
+                    "decisionId": "invalid-feedback",
+                    "decisionToken": review.decision_token,
+                    "decisions": [
+                        {
+                            "operation_id": review.operations[0].operation_id,
+                            "decision": "ACCEPT",
+                        },
+                    ],
+                    "rejectionFeedback": {"action": "UNDO_ONLY"},
+                },
+            )
+
+    result = _run(scenario())
+    assert result.status_code == 422
+
+
+def test_startup_recovers_feedback_finalized_before_message_append(
+    tmp_path,
+) -> None:
+    _app_instance, services, base = _app(tmp_path)
+    runtime = services.sessions.create_project_runtime(
+        "project-1",
+        session_id="session-1",
+        conversation_id="conversation-1",
+    )
+    review = _pending_review(services, base)
+    services.reviews.decide(
+        project_id="project-1",
+        review_id=review.review_id,
+        decision_token=review.decision_token,
+        decisions=[
+            ReviewDecisionItem(
+                operation_id=review.operations[0].operation_id,
+                decision="REJECT",
+            ),
+        ],
+        rejection_feedback=ReviewRejectionFeedback(
+            action=ReviewRejectionAction.UNDO_AND_REGENERATE,
+            problemNote="风格不一致",
+        ),
+        decision_id="decision-before-crash",
+    )
+    assert (
+        services.sessions.list_messages(
+            "project-1",
+            runtime.session.session_id,
+            after_seq=0,
+            limit=None,
+        )
+        == []
+    )
+
+    restarted = CreatorFileServices.create(services.root)
+    messages = restarted.sessions.list_messages(
+        "project-1",
+        runtime.session.session_id,
+        after_seq=0,
+        limit=None,
+    )
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert messages[0].content_parts[0].text is not None
+    assert "风格不一致" in messages[0].content_parts[0].text
 
 
 def test_failed_review_decision_is_terminal_and_replays_exact_error(
