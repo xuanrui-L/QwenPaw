@@ -131,7 +131,8 @@ function visualEntityName(project: ProjectDocument, ref: string): string {
   return project.visual.entities.items[entityId]?.name ?? ref;
 }
 
-function visualEntityId(ref: string): string {
+/** Normalize either a UI-prefixed ref or a canonical bare ID to an entity ID. */
+function normalizeVisualEntityId(ref: string): string {
   return ref.replace(/^visual-entity:/, "");
 }
 
@@ -661,15 +662,15 @@ export default function R2VWorkbenchPage() {
   ) =>
     updateElement((draft) => {
       if (draft.creation.type !== "r2v") return;
-      const nextEntityIds = nextRefs.map(visualEntityId);
+      const nextEntityIds = nextRefs.map(normalizeVisualEntityId);
       const previousEntityIds =
         field === "scene"
           ? draft.creation.scene_ref
-            ? [visualEntityId(draft.creation.scene_ref)]
+            ? [normalizeVisualEntityId(draft.creation.scene_ref)]
             : []
           : field === "characters"
-          ? draft.creation.character_refs.map(visualEntityId)
-          : draft.creation.prop_refs.map(visualEntityId);
+          ? draft.creation.character_refs.map(normalizeVisualEntityId)
+          : draft.creation.prop_refs.map(normalizeVisualEntityId);
       for (const entityId of previousEntityIds) {
         if (nextEntityIds.includes(entityId)) continue;
         // Schema v3 persists bare entity IDs. Also clean prefixed keys from
@@ -701,7 +702,7 @@ export default function R2VWorkbenchPage() {
     ...creation.prop_refs,
   ]
     .filter((ref): ref is string => Boolean(ref))
-    .map(visualEntityId)
+    .map(normalizeVisualEntityId)
     .filter((entityId, index, all) => all.indexOf(entityId) === index)
     .map((entityId) => project.visual.entities.items[entityId])
     .filter((entity) => Boolean(entity));

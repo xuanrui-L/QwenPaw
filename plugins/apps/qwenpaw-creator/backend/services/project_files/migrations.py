@@ -151,6 +151,10 @@ def _migrate_variant_selections(
             elif generated_ids:
                 selected = generated_ids[-1]
             variant["selected_artifact_version_id"] = selected
+        if len(variants) > 1:
+            # Schema v3 resolves multi-Variant entities only through an
+            # Element binding and the Variant-level selected pointer.
+            entity["selected_artifact_version_id"] = None
 
 
 def _r2v_creations(document: Mapping[str, Any]) -> Iterator[dict[str, Any]]:

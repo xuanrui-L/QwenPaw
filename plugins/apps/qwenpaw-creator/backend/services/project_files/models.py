@@ -1124,6 +1124,14 @@ class Project(StrictModel):
                             "selected visual variant artifact belongs to "
                             "another variant",
                         )
+            if (
+                len(entity.variants.order) > 1
+                and entity.selected_artifact_version_id is not None
+            ):
+                raise ValueError(
+                    "multi-Variant visual entities cannot use the legacy "
+                    "entity-level selected artifact",
+                )
             if entity.selected_artifact_version_id is not None:
                 _require_key(
                     artifact_versions,

@@ -188,6 +188,19 @@ def test_r2v_variant_binding_must_target_a_referenced_entity_and_variant():
         Project.model_validate(raw)
 
 
+def test_multi_variant_entity_rejects_legacy_entity_selection():
+    raw = _variant_project().model_dump(mode="json")
+    raw["visual"]["entities"]["items"]["char:hero"][
+        "selected_artifact_version_id"
+    ] = "artifact:legacy-default"
+
+    with pytest.raises(
+        ValidationError,
+        match="cannot use the legacy entity-level selected artifact",
+    ):
+        Project.model_validate(raw)
+
+
 def test_one_edit_element_selects_exactly_one_source_range():
     project = _edit_project()
     creation = (

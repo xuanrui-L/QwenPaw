@@ -235,6 +235,7 @@ def test_v2_variant_selections_and_bindings_migrate_deterministically() -> (
         ]
         is None
     )
+    assert hero["selected_artifact_version_id"] is None
     creation = migrated["timelines"]["items"]["timeline:main"][
         "elements_by_id"
     ]["ep01"]["creation"]
