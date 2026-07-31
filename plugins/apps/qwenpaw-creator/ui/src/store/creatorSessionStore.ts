@@ -293,6 +293,19 @@ function subagentSummary(event: CreatorEvent): string | undefined {
   return undefined;
 }
 
+function isLegacyReviewPause(
+  terminalKind: SubagentActivity["terminalKind"],
+  summary: string | undefined,
+): boolean {
+  // Runs created before Runtime emitted waitingReview used a plain BLOCKED
+  // event. Keep those durable histories neutral while all new events rely on
+  // the structured flag.
+  return (
+    terminalKind === "BLOCKED" &&
+    Boolean(summary && /等待(?:用户)?审阅|审阅通过后/u.test(summary))
+  );
+}
+
 function settleSubagentMessages(
   activity: SubagentActivity,
   runId: string,
@@ -1035,6 +1048,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               }
               const terminalKind = subagentTerminalKind(event);
               if (terminalKind) {
+                const summary = subagentSummary(event) ?? activity.summaryText;
                 activity = settleSubagentMessages(
                   activity,
                   activity.runId,
@@ -1043,9 +1057,11 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 activity = {
                   ...activity,
                   completed: true,
-                  waitingReview: event.data.waitingReview === true,
+                  waitingReview:
+                    event.data.waitingReview === true ||
+                    isLegacyReviewPause(terminalKind, summary),
                   terminalKind,
-                  summaryText: subagentSummary(event) ?? activity.summaryText,
+                  summaryText: summary,
                   terminalEventSeq: event.seq,
                 };
               }

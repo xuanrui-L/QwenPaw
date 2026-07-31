@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Input, Modal } from "antd";
 import type {
   FileProjectReviewRejectionAction,
@@ -18,93 +18,132 @@ export default function RejectionFeedbackModal({
   onCancel: () => void;
   onSubmit: (feedback: FileProjectReviewRejectionFeedback) => void;
 }) {
-  const [problemNote, setProblemNote] = useState("");
-  const [regenerationInstruction, setRegenerationInstruction] = useState("");
+  const [feedbackNote, setFeedbackNote] = useState("");
+  const [pendingAction, setPendingAction] =
+    useState<FileProjectReviewRejectionAction | null>(null);
+  const submitLock = useRef(false);
+  const wasBusy = useRef(false);
 
   useEffect(() => {
     if (!open) return;
-    setProblemNote("");
-    setRegenerationInstruction("");
+    setFeedbackNote("");
+    setPendingAction(null);
+    submitLock.current = false;
+    wasBusy.current = false;
   }, [open]);
 
+  useEffect(() => {
+    if (busy) {
+      wasBusy.current = true;
+      return;
+    }
+    if (!wasBusy.current) return;
+    wasBusy.current = false;
+    submitLock.current = false;
+    setPendingAction(null);
+  }, [busy]);
+
   const submit = (action: FileProjectReviewRejectionAction) => {
-    const normalizedProblem = problemNote.trim();
-    const normalizedInstruction = regenerationInstruction.trim();
+    if (busy || submitLock.current) return;
+    submitLock.current = true;
+    setPendingAction(action);
+    const normalizedFeedback = feedbackNote.trim();
     onSubmit({
       action,
-      ...(normalizedProblem ? { problemNote: normalizedProblem } : {}),
-      ...(normalizedInstruction
-        ? { regenerationInstruction: normalizedInstruction }
-        : {}),
+      ...(normalizedFeedback ? { feedbackNote: normalizedFeedback } : {}),
     });
   };
+  const submitting = busy || pendingAction !== null;
 
   return (
     <Modal
-      title="撤销反馈"
+      title={
+        <div className="min-w-0 pr-10">
+          <div className="text-base font-semibold leading-6 text-[var(--color-text-primary)]">
+            撤销内容
+          </div>
+          <div className="mt-0.5 text-xs font-normal leading-5 text-[var(--color-text-tertiary)]">
+            将撤销 {targetCount} 项内容
+          </div>
+        </div>
+      }
       open={open}
-      onCancel={busy ? undefined : onCancel}
-      closable={!busy}
-      maskClosable={!busy}
-      keyboard={!busy}
+      onCancel={submitting ? undefined : onCancel}
+      closable={!submitting}
+      maskClosable={!submitting}
+      keyboard={!submitting}
       destroyOnHidden
-      footer={
-        <div className="flex justify-end gap-2">
+      width={520}
+      footer={null}
+    >
+      <div className="pt-1">
+        <label className="block text-sm text-[var(--color-text-primary)]">
+          <span className="block font-medium leading-5">
+            反馈与调整要求
+            <span className="ml-1 font-normal text-[var(--color-text-tertiary)]">
+              可选
+            </span>
+          </span>
+          <span
+            id="rejection-feedback-help"
+            className="mb-2 mt-1 block text-xs leading-5 text-[var(--color-text-tertiary)]"
+          >
+            可以同时说明哪里不对，以及希望如何调整。
+          </span>
+          <Input.TextArea
+            aria-label="反馈与调整要求"
+            aria-describedby="rejection-feedback-help"
+            value={feedbackNote}
+            maxLength={2000}
+            showCount
+            autoFocus
+            autoSize={{ minRows: 4, maxRows: 8 }}
+            onChange={(event) => setFeedbackNote(event.target.value)}
+            placeholder="例如：人物仍像巅峰时期；请保持同一角色身份，改为衣衫褴褛、面容憔悴。"
+          />
+        </label>
+
+        <div className="mt-5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">
+          <span className="font-medium text-[var(--color-text-primary)]">
+            仅撤销
+          </span>
+          不会唤醒 Agent；
+          <span className="ml-1 font-medium text-[var(--color-text-primary)]">
+            撤销并重做
+          </span>
+          会把以上反馈作为强制约束继续执行。
+        </div>
+
+        <div className="mt-5 flex flex-col-reverse gap-2 border-t border-[var(--color-border)] pt-4 sm:flex-row sm:flex-wrap sm:justify-end">
           <button
             type="button"
-            disabled={busy}
+            disabled={submitting}
             onClick={onCancel}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-text-secondary)] disabled:opacity-50"
+            className="min-h-10 w-full rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-secondary)] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
             取消
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={submitting}
             onClick={() => submit("UNDO_ONLY")}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-sm text-[var(--color-text-primary)] disabled:opacity-50"
+            className="min-h-10 w-full rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-text-tertiary)] hover:bg-[var(--color-bg-secondary)] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
-            仅撤销
+            {submitting && pendingAction === "UNDO_ONLY"
+              ? "正在撤销…"
+              : "仅撤销"}
           </button>
           <button
             type="button"
-            disabled={busy}
+            disabled={submitting}
             onClick={() => submit("UNDO_AND_REGENERATE")}
-            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+            className="min-h-10 w-full rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white shadow-sm transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
           >
-            撤销并重做
+            {submitting && pendingAction === "UNDO_AND_REGENERATE"
+              ? "正在提交…"
+              : "撤销并重做"}
           </button>
         </div>
-      }
-    >
-      <p className="mb-4 text-sm text-[var(--color-text-secondary)]">
-        将撤销 {targetCount} 项内容。反馈可选；选择“仅撤销”不会唤醒 Agent。
-      </p>
-      <div className="space-y-4">
-        <label className="block text-sm text-[var(--color-text-primary)]">
-          <span className="mb-1 block font-medium">哪里不对（可选）</span>
-          <Input.TextArea
-            aria-label="哪里不对"
-            value={problemNote}
-            maxLength={2000}
-            showCount
-            autoSize={{ minRows: 2, maxRows: 6 }}
-            onChange={(event) => setProblemNote(event.target.value)}
-            placeholder="例如：人物状态不对，仍然像巅峰时期"
-          />
-        </label>
-        <label className="block text-sm text-[var(--color-text-primary)]">
-          <span className="mb-1 block font-medium">重做要求（可选）</span>
-          <Input.TextArea
-            aria-label="重做要求"
-            value={regenerationInstruction}
-            maxLength={2000}
-            showCount
-            autoSize={{ minRows: 2, maxRows: 6 }}
-            onChange={(event) => setRegenerationInstruction(event.target.value)}
-            placeholder="例如：保留同一角色身份，改为衣衫褴褛、面容憔悴"
-          />
-        </label>
       </div>
     </Modal>
   );

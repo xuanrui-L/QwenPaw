@@ -376,10 +376,16 @@ class CreatorFileServices:
             ),
         }
         if feedback is not None:
-            metadata["rejectionFeedback"] = feedback.model_dump(
+            serialized_feedback = feedback.model_dump(
                 mode="json",
                 by_alias=True,
             )
+            # Adding the unified field must not change the retry payload of
+            # legacy decisions. Session admission compares the entire payload
+            # for a stable client_message_id during crash recovery.
+            if serialized_feedback.get("feedbackNote") is None:
+                serialized_feedback.pop("feedbackNote", None)
+            metadata["rejectionFeedback"] = serialized_feedback
         else:
             metadata["reviewResolution"] = "ACCEPTED"
         if feedback is None or (

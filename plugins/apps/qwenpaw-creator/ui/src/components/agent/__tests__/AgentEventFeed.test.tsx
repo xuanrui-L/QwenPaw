@@ -451,7 +451,7 @@ describe("AgentEventFeed", () => {
           finalSummaryText:
             "element:ep22 的分镜图已生成；视频生成尚未开始，等待审阅通过后自动继续。",
           taskRefs: [],
-          metadata: { waitingReview: true },
+          metadata: {},
         },
       ],
     });

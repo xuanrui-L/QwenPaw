@@ -143,7 +143,15 @@ describe("FileProjectReviewPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "全部撤销" }));
     expect(decide).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog")).toHaveTextContent("撤销 2 项内容");
-    fireEvent.click(screen.getByRole("button", { name: "仅撤销" }));
+    expect(screen.getByText("撤销内容").parentElement).toHaveClass("pr-10");
+    const undoOnly = screen.getByRole("button", { name: "仅撤销" });
+    expect(undoOnly).toHaveClass("w-full", "sm:w-auto");
+    expect(undoOnly.parentElement).toHaveClass(
+      "flex-col-reverse",
+      "sm:flex-row",
+      "sm:flex-wrap",
+    );
+    fireEvent.click(undoOnly);
     await waitFor(() =>
       expect(decide).toHaveBeenCalledWith(
         "p1",
@@ -163,13 +171,19 @@ describe("FileProjectReviewPanel", () => {
     render(<FileProjectReviewPanel projectId="p1" review={value} />);
 
     fireEvent.click(screen.getByRole("button", { name: "撤销 /description" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "哪里不对" }), {
-      target: { value: "人物状态不对" },
+    const feedback = screen.getByRole("textbox", {
+      name: "反馈与调整要求",
     });
-    fireEvent.change(screen.getByRole("textbox", { name: "重做要求" }), {
-      target: { value: "保持身份一致，改成落魄时期" },
+    expect(screen.getAllByRole("textbox")).toHaveLength(1);
+    expect(screen.queryByRole("textbox", { name: "哪里不对" })).toBeNull();
+    fireEvent.change(feedback, {
+      target: {
+        value: "人物状态不对；保持身份一致，改成落魄时期",
+      },
     });
-    fireEvent.click(screen.getByRole("button", { name: "撤销并重做" }));
+    const regenerate = screen.getByRole("button", { name: "撤销并重做" });
+    fireEvent.click(regenerate);
+    fireEvent.click(regenerate);
 
     await waitFor(() =>
       expect(decide).toHaveBeenCalledWith(
@@ -178,11 +192,11 @@ describe("FileProjectReviewPanel", () => {
         [{ operation_id: "operation-1", decision: "REJECT" }],
         {
           action: "UNDO_AND_REGENERATE",
-          problemNote: "人物状态不对",
-          regenerationInstruction: "保持身份一致，改成落魄时期",
+          feedbackNote: "人物状态不对；保持身份一致，改成落魄时期",
         },
       ),
     );
+    expect(decide).toHaveBeenCalledTimes(1);
   });
 
   it("navigates to the ui_locator when a text operation is inspected", () => {

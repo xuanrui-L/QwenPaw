@@ -116,6 +116,13 @@ class ReviewRejectionFeedback(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     action: ReviewRejectionAction
+    feedback_note: str | None = Field(
+        default=None,
+        alias="feedbackNote",
+        max_length=2000,
+    )
+    # Legacy fields remain readable so existing decision journals and older
+    # portal clients continue to replay deterministically.
     problem_note: str | None = Field(
         default=None,
         alias="problemNote",
@@ -129,7 +136,11 @@ class ReviewRejectionFeedback(BaseModel):
 
     @model_validator(mode="after")
     def normalize_notes(self) -> ReviewRejectionFeedback:
-        for field_name in ("problem_note", "regeneration_instruction"):
+        for field_name in (
+            "feedback_note",
+            "problem_note",
+            "regeneration_instruction",
+        ):
             value = getattr(self, field_name)
             normalized = value.strip() if value is not None else None
             object.__setattr__(self, field_name, normalized or None)
@@ -354,6 +365,8 @@ def _render_rejection_feedback(
             "目标：",
             *target_lines,
         ]
+    if feedback.feedback_note:
+        lines.extend(("用户反馈与调整要求：", feedback.feedback_note))
     if feedback.problem_note:
         lines.extend(("用户指出的问题：", feedback.problem_note))
     if feedback.regeneration_instruction:

@@ -140,6 +140,25 @@ GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 
 
+def _specialist_waiting_review_summary(
+    role: SpecialistRole,
+    target_refs: list[str],
+) -> str:
+    target = "、".join(target_refs) or "当前目标"
+    if role is SpecialistRole.R2V_GENERATION_DIRECTOR:
+        return f"{target} 的分镜图已生成，视频尚未开始。" "请先审阅分镜图；审阅通过后将自动继续生成视频。"
+    return f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；审阅通过后将自动继续。"
+
+
+def _agent_waiting_review_summary(
+    specialist_summary: str | None,
+) -> str:
+    summary = (specialist_summary or "").strip()
+    if not summary:
+        summary = "当前产物已生成，后续步骤尚未开始。请先完成审阅；审阅通过后系统将自动继续。"
+    return f"{summary}\n\n无需另行发送消息。"
+
+
 def _grounding_stable_id(prefix: str, project_id: str, identity: str) -> str:
     value = uuid5(
         NAMESPACE_URL,
@@ -904,7 +923,11 @@ class FileCreatorAgentRuntime:
         if session.status is CreatorSessionStatus.INTERRUPT_REQUESTED:
             if handle is not None:
                 await self.interrupt(project_id, reason="durable_interrupt")
-            elif session.active_run_id is None:
+            else:
+                # No local handle: the pointed-at run either belongs to
+                # another live process (RUNNING — leave it to cancel itself)
+                # or is ownerless after a restart (QUEUED/terminal — serve
+                # the durable stop here, or nobody ever will).
                 await self._record_idle_interrupt(
                     project_id,
                     reason="durable_interrupt",
@@ -1366,6 +1389,7 @@ class FileCreatorAgentRuntime:
         ]
         tool_call_count = 0
         review_ids: list[str] = []
+        waiting_review_summary: str | None = None
         malformed_jq_attempts = 0
         malformed_jq_fingerprints: set[str] = set()
         for _turn_number in range(1, self.max_model_turns + 1):
@@ -1400,6 +1424,12 @@ class FileCreatorAgentRuntime:
                 delta_index += 1
 
             async def persist_text_delta(delta: str) -> None:
+                # Once a tool has opened a Review, the Runtime owns the pause
+                # and resume contract. Suppress the model's free-form final
+                # CTA so it cannot ask the user to send "continue"; the
+                # canonical review summary is emitted after the turn ends.
+                if review_ids:
+                    return
                 await persist_message_delta("text", delta)
 
             async def persist_thinking_delta(delta: str) -> None:
@@ -1443,6 +1473,20 @@ class FileCreatorAgentRuntime:
                 raise AgentModelError(
                     "Creator Agent returned more than one tool call in one turn",
                 )
+            if not turn.tool_calls and turn.content is None:
+                raise AgentModelError(
+                    "Creator Agent returned no final content or tool calls",
+                )
+            if not turn.tool_calls and review_ids:
+                canonical_summary = _agent_waiting_review_summary(
+                    waiting_review_summary,
+                )
+                turn = AgentModelTurn(
+                    content=canonical_summary,
+                    thinking=turn.thinking,
+                    provider_message_id=turn.provider_message_id,
+                )
+                await persist_message_delta("text", canonical_summary)
             await self._persist_assistant_turn(
                 project_id,
                 session_id,
@@ -1461,10 +1505,6 @@ class FileCreatorAgentRuntime:
                 ]
             messages.append(assistant_wire)
             if not turn.tool_calls:
-                if turn.content is None:
-                    raise AgentModelError(
-                        "Creator Agent returned no final content or tool calls",
-                    )
                 return _LoopResult(
                     summary=turn.content,
                     tool_call_count=tool_call_count,
@@ -1572,6 +1612,13 @@ class FileCreatorAgentRuntime:
                         and review_id not in review_ids
                     ):
                         review_ids.append(review_id)
+                    if result.get("status") == "WAITING_REVIEW":
+                        candidate_summary = result.get("summary")
+                        if (
+                            isinstance(candidate_summary, str)
+                            and candidate_summary.strip()
+                        ):
+                            waiting_review_summary = candidate_summary
                     await self._persist_tool_result(
                         project_id,
                         session_id,
@@ -2359,29 +2406,70 @@ class FileCreatorAgentRuntime:
                         "BLOCKED": SpecialistRunStatus.BLOCKED,
                         "FAILED": SpecialistRunStatus.FAILED,
                     }[marker]
+                    waiting_review_id: str | None = None
+                    if status is SpecialistRunStatus.BLOCKED and review_ids:
+                        pending_reviews = await asyncio.to_thread(
+                            self.services.reviews.all_pending,
+                            project_id,
+                        )
+                        pending_review_ids = {
+                            review.review_id for review in pending_reviews
+                        }
+                        waiting_review_id = next(
+                            (
+                                review_id
+                                for review_id in reversed(review_ids)
+                                if review_id in pending_review_ids
+                            ),
+                            None,
+                        )
+                    waiting_for_review = waiting_review_id is not None
+                    if waiting_for_review:
+                        summary = _specialist_waiting_review_summary(
+                            role,
+                            delegated.target_refs,
+                        )
+                    transition_updates: dict[str, Any] = {
+                        "final_marker": marker,
+                        "final_summary_text": summary,
+                    }
+                    if waiting_for_review:
+                        transition_updates["metadata"] = {
+                            **record_metadata,
+                            "waitingReview": True,
+                            "waitingReviewId": waiting_review_id,
+                        }
                     await asyncio.to_thread(
                         self.executions.transition_specialist_run,
                         project_id,
                         specialist_run_id,
                         expected_status=SpecialistRunStatus.RUNNING_MODEL,
                         status=status,
-                        updates={
-                            "final_marker": marker,
-                            "final_summary_text": summary,
-                        },
+                        updates=transition_updates,
                     )
                     terminal_event = {
                         SpecialistRunStatus.SUCCEEDED: "subagent.completed",
                         SpecialistRunStatus.BLOCKED: "subagent.blocked",
                         SpecialistRunStatus.FAILED: "subagent.failed",
                     }[status]
+                    terminal_payload: dict[str, Any] = {
+                        **common,
+                        "summary": summary,
+                    }
+                    if waiting_for_review:
+                        terminal_payload.update(
+                            {
+                                "waitingReview": True,
+                                "reviewId": waiting_review_id,
+                            },
+                        )
                     await self._event(
                         project_id,
                         session_id,
                         terminal_event,
                         parent_run_id,
                         request,
-                        {**common, "summary": summary},
+                        terminal_payload,
                     )
                     if latest is None:
                         latest = await asyncio.to_thread(
@@ -2389,15 +2477,26 @@ class FileCreatorAgentRuntime:
                             project_id,
                         )
                     return {
-                        "ok": status is SpecialistRunStatus.SUCCEEDED,
+                        "ok": (
+                            status is SpecialistRunStatus.SUCCEEDED
+                            or waiting_for_review
+                        ),
                         "runId": specialist_run_id,
                         "role": role_name,
-                        "status": status.value,
+                        "status": (
+                            "WAITING_REVIEW"
+                            if waiting_for_review
+                            else status.value
+                        ),
+                        "waitingReview": waiting_for_review,
                         "summary": summary,
                         "toolCallCount": tool_call_count,
                         "generation": latest.generation,
                         "etag": latest.etag,
-                        "reviewId": review_ids[-1] if review_ids else None,
+                        "reviewId": (
+                            waiting_review_id
+                            or (review_ids[-1] if review_ids else None)
+                        ),
                     }
 
                 call = turn.tool_calls[0]
@@ -2597,12 +2696,15 @@ class FileCreatorAgentRuntime:
                         waiting_review.details.get("commandType") or "",
                     )
                     if command_type == "GENERATE_R2V_VIDEO":
-                        summary = (
-                            f"{target_ref} 的分镜图已生成；视频生成尚未开始，" "等待审阅通过后自动继续。"
+                        summary = _specialist_waiting_review_summary(
+                            role,
+                            [target_ref],
                         )
                     else:
                         summary = (
-                            f"{target_ref} 的前置产物仍在等待审阅；" "本步骤尚未开始，审阅通过后自动继续。"
+                            f"{target_ref} 的前置产物已生成，"
+                            "本步骤尚未开始。请先完成审阅；"
+                            "审阅通过后将自动继续。"
                         )
                     waiting_metadata = {
                         **record_metadata,
@@ -3849,15 +3951,64 @@ class FileCreatorAgentRuntime:
         reason: str,
     ) -> None:
         try:
+            # Snapshot read (shared lock): the full get_project_session
+            # recovery holds the exclusive Runtime lock while it replays
+            # the whole event stream, which loses the lock race against
+            # steady UI polling on large sessions — the stop then never
+            # completes (observed live: LockTimeoutError on every poll
+            # while the dock showed 「正在停止所有 Agent」 forever).  The
+            # cleanup below only needs head pointers; each write takes
+            # its own short exclusive lock.
             session = await asyncio.to_thread(
-                self.sessions.get_project_session,
+                self.sessions.get_project_session_snapshot,
                 project_id,
             )
-            # An active_run_id without a local handle is owned by another
-            # process sharing this Runtime root.  Leave the durable interrupt
-            # request in place so that owner cancels itself on its next poll.
             if session.active_run_id is not None:
-                return
+                # A RUNNING run without a local handle is owned by another
+                # live process: leave the durable interrupt in place so that
+                # owner cancels itself.  A QUEUED or terminal run is
+                # ownerless (typically orphaned by a backend restart while
+                # the stop was pending) — no dispatcher will ever start or
+                # finish it, so the stop must be served here.
+                try:
+                    run = await asyncio.to_thread(
+                        self.runs.get,
+                        project_id,
+                        session.active_run_id,
+                    )
+                except Exception:
+                    return
+                if run.status is AgentRunStatus.QUEUED:
+                    try:
+                        await asyncio.to_thread(
+                            self.runs.transition,
+                            project_id,
+                            run.run_id,
+                            expected_status=AgentRunStatus.QUEUED,
+                            status=AgentRunStatus.CANCELLED,
+                            updates={
+                                "error": {
+                                    "code": "INTERRUPTED",
+                                    "message": (
+                                        "queued run cancelled by a durable "
+                                        "interrupt served after restart"
+                                    ),
+                                },
+                            },
+                        )
+                    except AgentRunStateConflict:
+                        # Another process started it first; that owner now
+                        # serves the interrupt.
+                        return
+                elif run.status not in TERMINAL_AGENT_RUN_STATUSES:
+                    return
+                session = await asyncio.to_thread(
+                    self.sessions.clear_active_run,
+                    project_id,
+                    session.session_id,
+                    expected_run_id=run.run_id,
+                    status=CreatorSessionStatus.INTERRUPT_REQUESTED,
+                )
             if session.last_consumed_message_seq < session.last_message_seq:
                 await asyncio.to_thread(
                     self.sessions.mark_messages_consumed,
@@ -4189,10 +4340,15 @@ def _review_feedback_constraint(
         "本轮只允许重做这些 targetRef：" + ", ".join(sorted(target_refs)),
         "生成工具的最终 prompt 必须明确吸收下面的用户反馈；不能复用原 prompt。",
     ]
+    feedback_note = feedback.get("feedbackNote") or feedback.get(
+        "feedback_note",
+    )
     problem_note = feedback.get("problemNote") or feedback.get("problem_note")
     instruction = feedback.get("regenerationInstruction") or feedback.get(
         "regeneration_instruction",
     )
+    if isinstance(feedback_note, str) and feedback_note.strip():
+        lines.append("必须吸收的用户反馈：" + feedback_note.strip())
     if isinstance(problem_note, str) and problem_note.strip():
         lines.append("需要修正的问题：" + problem_note.strip())
     if isinstance(instruction, str) and instruction.strip():

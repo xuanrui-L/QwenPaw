@@ -795,8 +795,7 @@ def test_rejection_feedback_appends_exactly_one_action_specific_message(
             ],
             "rejectionFeedback": {
                 "action": action,
-                "problemNote": "人物状态不对",
-                "regenerationInstruction": "保持身份一致",
+                "feedbackNote": "人物状态不对；保持身份一致",
             },
         }
         url = (
@@ -994,6 +993,22 @@ def test_startup_recovers_feedback_finalized_before_message_append(
     assert messages[0].role == "user"
     assert messages[0].content_parts[0].text is not None
     assert "风格不一致" in messages[0].content_parts[0].text
+    serialized_feedback = messages[0].metadata["rejectionFeedback"]
+    assert isinstance(serialized_feedback, dict)
+    assert "feedbackNote" not in serialized_feedback
+
+    replayed = CreatorFileServices.create(services.root)
+    assert (
+        len(
+            replayed.sessions.list_messages(
+                "project-1",
+                runtime.session.session_id,
+                after_seq=0,
+                limit=None,
+            ),
+        )
+        == 1
+    )
 
 
 def test_failed_review_decision_is_terminal_and_replays_exact_error(

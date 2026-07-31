@@ -1014,6 +1014,52 @@ describe("AgentDock origin/main visible fidelity", () => {
     expect(tool).not.toHaveTextContent('"generation": 2');
   });
 
+  it("renders rejection feedback once as a compact review card", () => {
+    useAgentDockUiStore.getState().setOpen(true);
+    const feedbackMessage = {
+      messageId: "review-feedback-first",
+      messageSeq: 1,
+      role: "user" as const,
+      source: "review_rejection_feedback",
+      content: [
+        {
+          type: "text" as const,
+          text: "【系统自动消息 · 用户审阅反馈】原始内部消息",
+        },
+      ],
+      metadata: {
+        decisionId: "decision-review-feedback",
+        rejectionFeedback: {
+          action: "UNDO_AND_REGENERATE",
+          feedbackNote: "人物仍像巅峰时期；请保持身份一致，改成落魄时期",
+        },
+        targets: [{ label: "哈兰德 · 落魄时期分镜图" }],
+      },
+      createdAt: "now",
+    };
+    useCreatorSessionStore.setState({
+      messages: [
+        feedbackMessage,
+        {
+          ...feedbackMessage,
+          messageId: "review-feedback-replay",
+          messageSeq: 2,
+        },
+      ],
+    });
+
+    renderDock();
+
+    const cards = document.querySelectorAll("[data-agent-review-feedback]");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toHaveTextContent("已撤销并安排重做");
+    expect(cards[0]).toHaveTextContent("哈兰德 · 落魄时期分镜图");
+    expect(cards[0]).toHaveTextContent(
+      "人物仍像巅峰时期；请保持身份一致，改成落魄时期",
+    );
+    expect(cards[0]).not.toHaveTextContent("原始内部消息");
+  });
+
   it("embeds the replayable Sub-agent SSE stream in one natural delegate tool card", async () => {
     useAgentDockUiStore.getState().setOpen(true);
     useAgentDockUiStore.getState().setAllowExpandDetails(true);
@@ -1424,8 +1470,8 @@ describe("AgentDock origin/main visible fidelity", () => {
             runId: "run-review-wait",
             role: "r2v_generation_director",
             targetRefs: ["element:ep22"],
-            waitingReview: true,
-            summary: "分镜图已生成；视频尚未开始，等待审阅通过后自动继续。",
+            summary:
+              "element:ep22 的分镜图已生成，视频尚未开始。请先审阅分镜图；审阅通过后将自动继续生成视频。",
           },
         },
       ]),
@@ -1437,7 +1483,11 @@ describe("AgentDock origin/main visible fidelity", () => {
       '[data-agent-tool="delegate-review-wait"]',
     )!;
     expect(tool).toHaveTextContent("等待审阅");
+    expect(tool).toHaveTextContent("视频尚未开始");
     expect(tool).not.toHaveTextContent("失败");
+    const waitingNotice = tool.querySelector("[data-agent-waiting-review]");
+    expect(waitingNotice).not.toBeNull();
+    expect(waitingNotice).not.toHaveClass("text-[var(--color-danger)]");
     expect(
       useCreatorSessionStore.getState().subagentActivities[
         "delegate-review-wait"

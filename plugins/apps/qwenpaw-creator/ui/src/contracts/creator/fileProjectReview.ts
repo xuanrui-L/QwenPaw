@@ -66,7 +66,10 @@ export type FileProjectReviewRejectionAction =
 
 export interface FileProjectReviewRejectionFeedback {
   action: FileProjectReviewRejectionAction;
+  feedbackNote?: string;
+  /** @deprecated Kept for reading requests produced by older portals. */
   problemNote?: string;
+  /** @deprecated Kept for reading requests produced by older portals. */
   regenerationInstruction?: string;
 }
 

@@ -119,8 +119,7 @@ def test_rejection_feedback_is_durable_and_idempotent(tmp_path) -> None:
     service = ProjectReviewService(store)
     feedback = ReviewRejectionFeedback(
         action=ReviewRejectionAction.UNDO_AND_REGENERATE,
-        problemNote="  人物状态不对  ",
-        regenerationInstruction="  保持身份一致后重做  ",
+        feedbackNote="  人物状态不对；保持身份一致后重做  ",
     )
 
     resolved = service.decide(
@@ -145,8 +144,7 @@ def test_rejection_feedback_is_durable_and_idempotent(tmp_path) -> None:
     assert resolved.status is ReviewStatus.PENDING
     assert journal.state is ReviewDecisionJournalState.FINALIZED
     assert journal.rejection_feedback is not None
-    assert journal.rejection_feedback.problem_note == "人物状态不对"
-    assert journal.rejection_feedback.regeneration_instruction == "保持身份一致后重做"
+    assert journal.rejection_feedback.feedback_note == "人物状态不对；保持身份一致后重做"
     assert [target.json_pointers for target in journal.rejection_targets] == [
         ["/name"],
     ]
@@ -156,6 +154,7 @@ def test_rejection_feedback_is_durable_and_idempotent(tmp_path) -> None:
     assert message is not None
     assert "明确要求重新生成" in message
     assert "人物状态不对" in message
+    assert "用户反馈与调整要求" in message
 
     replay = service.decide(
         project_id="project-1",
@@ -191,6 +190,20 @@ def test_rejection_feedback_is_durable_and_idempotent(tmp_path) -> None:
             ),
             decision_id="decision-with-feedback",
         )
+
+
+def test_legacy_rejection_feedback_fields_remain_readable() -> None:
+    feedback = ReviewRejectionFeedback(
+        action=ReviewRejectionAction.UNDO_AND_REGENERATE,
+        problemNote="  人物状态不对  ",
+        regenerationInstruction="  保持身份一致后重做  ",
+    )
+
+    assert feedback.feedback_note is None
+    assert feedback.problem_note == "人物状态不对"
+    assert feedback.regeneration_instruction == "保持身份一致后重做"
+    serialized = feedback.model_dump(mode="json", by_alias=True)
+    assert serialized["feedbackNote"] is None
 
 
 def test_rejection_targets_collapse_artifact_operations_by_variant(

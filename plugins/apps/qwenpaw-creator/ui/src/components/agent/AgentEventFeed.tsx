@@ -103,7 +103,7 @@ function originRunStatus(
     return "waiting_confirm";
   if (
     sessionStatus === "PENDING_REVIEW" ||
-    runs.some((run) => run.metadata.waitingReview === true)
+    (sessionStatus !== "IDLE" && runs.some(isReviewWaitingRun))
   )
     return "waiting_review";
   if (
@@ -120,8 +120,7 @@ function originRunStatus(
   const succeeded = runs.some((run) => run.status === "SUCCEEDED");
   const failed = runs.some(
     (run) =>
-      ["FAILED", "BLOCKED"].includes(run.status) &&
-      run.metadata.waitingReview !== true,
+      ["FAILED", "BLOCKED"].includes(run.status) && !isReviewWaitingRun(run),
   );
   if (succeeded && failed) return "partial";
   if (failed || sessionStatus === "ERROR") return "error";
@@ -132,12 +131,22 @@ function originRunStatus(
     return "cancelled";
   if (
     succeeded &&
-    runs.every((run) =>
-      ["SUCCEEDED", "STALE", "CANCELLED"].includes(run.status),
+    runs.every(
+      (run) =>
+        ["SUCCEEDED", "STALE", "CANCELLED"].includes(run.status) ||
+        isReviewWaitingRun(run),
     )
   )
     return "done";
   return "running";
+}
+
+function isReviewWaitingRun(run: SpecialistRunView): boolean {
+  return (
+    run.metadata.waitingReview === true ||
+    (run.status === "BLOCKED" &&
+      /等待(?:用户)?审阅|审阅通过后/u.test(run.finalSummaryText || ""))
+  );
 }
 
 function runStatusLabel(status: SpecialistRunView["status"]): string {
@@ -311,10 +320,7 @@ export default function AgentEventFeed() {
       (task.status === "QUEUED" || task.status === "RUNNING"),
   );
   const failedTargetRuns = runs.flatMap((run) => {
-    if (
-      !["FAILED", "BLOCKED"].includes(run.status) ||
-      run.metadata.waitingReview === true
-    )
+    if (!["FAILED", "BLOCKED"].includes(run.status) || isReviewWaitingRun(run))
       return [];
     const targetRefs = run.targetRefs.filter(
       (targetRef) =>
@@ -424,7 +430,7 @@ export default function AgentEventFeed() {
               >
                 {run.status === "SUCCEEDED" ? (
                   <CircleCheck className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-success)]" />
-                ) : run.metadata.waitingReview === true ? (
+                ) : isReviewWaitingRun(run) ? (
                   <Clock3 className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-accent)]" />
                 ) : ["FAILED", "BLOCKED"].includes(run.status) ? (
                   <CircleX className="mt-0.5 h-3 w-3 shrink-0 text-[var(--color-danger)]" />
@@ -437,7 +443,7 @@ export default function AgentEventFeed() {
                     .map((ref) => creatorTargetLabel(ref, project))
                     .join("、") || "当前项目"}{" "}
                   ·{" "}
-                  {run.metadata.waitingReview === true
+                  {isReviewWaitingRun(run)
                     ? "等待审阅"
                     : runStatusLabel(run.status)}
                 </span>
