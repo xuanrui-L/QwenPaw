@@ -16,10 +16,7 @@ import {
 import { useRouter, useSearchParams } from "@/routing/navigation";
 import ModelBadges from "@/components/creator/ModelBadges";
 import ModelConfigModal from "@/components/creator/ModelConfigModal";
-import {
-  SCENARIO_OPTIONS,
-  CONTENT_TYPE_OPTIONS,
-} from "@/components/creator/useProjectLaunch";
+import { SCENARIO_OPTIONS } from "@/components/creator/useProjectLaunch";
 import {
   SEGMENTED_TRACK_CLASS,
   segmentedItemClass,
@@ -55,15 +52,6 @@ const ProjectCard = memo(function ProjectCard({
       SCENARIO_OPTIONS.find((option) => option.key === project.scenario)
         ?.label ?? project.scenario;
   }
-  var projectContentType = "未设置";
-  if (project.contentType) {
-    projectContentType =
-      CONTENT_TYPE_OPTIONS.find((option) => option.key === project.contentType)
-        ?.label ?? project.contentType;
-  }
-  // Content type is an editing-only concept.
-  const showContentType =
-    project.scenario === "video_edit" && Boolean(project.contentType);
   const canPreview = Boolean(project.finalVideoVersionId);
   return (
     <div
@@ -99,26 +87,11 @@ const ProjectCard = memo(function ProjectCard({
           {project.description}
         </p>
       </div>
-      <div className="flex items-center justify-between gap-2 text-xs leading-[18px]">
+      <div className="flex items-center justify-between gap-2 text-xs leading-[18px] text-[var(--color-text-tertiary)]">
         <div className="flex min-w-0 items-center gap-1.5">
-          {showContentType && (
-            <>
-              <p className="min-w-0 truncate">
-                <span className="font-medium text-[var(--color-text-secondary)]">
-                  类型：
-                </span>
-                <span className="text-[var(--color-text-tertiary)]">
-                  {projectContentType}
-                </span>
-              </p>
-              <span className="h-3 w-px shrink-0 bg-[#E3E2E2]" />
-            </>
-          )}
-          <div className="flex shrink-0 items-center gap-3 text-[var(--color-text-tertiary)]">
-            <span>{projectScenarioLabel}</span>
-            <span>{project.aspectRatio}</span>
-            <span>{project.resolution}</span>
-          </div>
+          <span>{projectScenarioLabel}</span>
+          <span>{project.aspectRatio}</span>
+          <span>{project.resolution}</span>
         </div>
         <span
           className="shrink-0 text-[var(--color-text-tertiary)]"
