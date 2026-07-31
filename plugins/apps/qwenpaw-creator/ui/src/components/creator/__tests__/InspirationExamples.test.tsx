@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installMockFetch } from "@/test/mockFetch";
 
 const push = vi.fn();
@@ -19,6 +19,10 @@ const EXAMPLE = {
 };
 
 describe("InspirationExamples", () => {
+  beforeEach(() => {
+    push.mockClear();
+  });
+
   it("renders the bundled catalogue and opens an example into its project", async () => {
     const { calls } = installMockFetch([
       {
@@ -51,5 +55,28 @@ describe("InspirationExamples", () => {
     const { container } = render(<InspirationExamples />);
 
     await waitFor(() => expect(container).toBeEmptyDOMElement());
+  });
+
+  it("surfaces an error and re-enables the card when opening fails", async () => {
+    installMockFetch([
+      {
+        match: "/examples/rainy-day-umbrella/open",
+        method: "POST",
+        response: { ok: false, status: 500, json: { message: "boom" } },
+      },
+      { match: "/examples", response: { json: { items: [EXAMPLE] } } },
+    ]);
+    render(<InspirationExamples />);
+
+    const card = await screen.findByRole("button", { name: /短剧制作/ });
+    await userEvent.click(card);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("打开灵感示例失败，请稍后重试"),
+      ).toBeInTheDocument(),
+    );
+    expect(push).not.toHaveBeenCalled();
+    expect(card).toBeEnabled();
   });
 });
