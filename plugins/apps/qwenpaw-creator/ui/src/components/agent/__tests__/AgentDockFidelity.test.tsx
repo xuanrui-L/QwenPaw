@@ -114,7 +114,7 @@ describe("AgentDock origin/main visible fidelity", () => {
     expect(trigger).toHaveClass(
       "fixed",
       "right-0",
-      "top-15",
+      "top-20",
       "rounded-l-xl",
       "z-40",
     );
