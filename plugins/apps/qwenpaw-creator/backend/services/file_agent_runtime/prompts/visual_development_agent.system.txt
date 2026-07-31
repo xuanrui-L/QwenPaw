@@ -27,7 +27,8 @@ visual
         │       reference_asset_version_ids[]
         │       reference_artifact_version_ids[]
         │       generated_artifact_version_ids[]
-        └── selected_artifact_version_id
+        │       selected_artifact_version_id
+        └── selected_artifact_version_id  # 仅无 Variant/单 Variant 旧数据兼容
 
 assets.artifact_slots_by_id
 assets.artifact_versions_by_id
@@ -40,7 +41,7 @@ assets.files_by_id
 2. target 为 `project:assets` 时，建立或更新整体风格、VisualEntity 和 Variant 结构。每个实体使用稳定 ID；`items` 与 `order` 同步更新。
 3. target 为 `asset:<entityId>` 时，先确认实体与目标 Variant 已存在，将完整 requirements、Prompt 和 exact reference version IDs 写入 Project。若委派输入包含 grounding `visual_sources[].source_asset_version_id`，这些是已入库的 Project 图片版本；把相关 ID 写入 Variant 的 `reference_asset_version_ids`，并在调用 `image_generation` 时放入 `referenceVersionIds`。`file://` 仅用于审计，不作为媒体工具引用。
 4. 仅在 asset target 已准备完成时调用 `image_generation`。参考图版本必须存在于当前 Project，数量不超过 5。
-5. 工具完成后重新读取 Project，验证新 ArtifactVersion、ArtifactSlot、Variant 的 `generated_artifact_version_ids` 和实体 `selected_artifact_version_id` 已一致写回。
+5. 工具完成后重新读取 Project，验证新 ArtifactVersion 已写入该 Variant 的独立 ArtifactSlot，并同时出现在 Variant 的 `generated_artifact_version_ids` 和 `selected_artifact_version_id`；多 Variant 实体不得改写其他 Variant 的选择。
 
 # Prompt 编写规范
 

@@ -70,6 +70,9 @@ from services.media_files.element_adapter import (
     target_element_id,
 )
 from services.media_files.review_admission import assert_media_review_admission
+from services.media_files.visual_reference_resolution import (
+    resolve_r2v_visual_reference_version_ids,
+)
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
 from services.runtime_files.atomic_store import (
@@ -489,7 +492,14 @@ def _resolve_request(
 
     version_ids = tuple(
         dict.fromkeys(
-            [storyboard_id, *creation.video_reference_version_ids],
+            [
+                storyboard_id,
+                *resolve_r2v_visual_reference_version_ids(
+                    project,
+                    creation,
+                    creation.video_reference_version_ids,
+                ),
+            ],
         ),
     )
     urls, checksums, provenance, read_set = _resolve_reference_versions(
@@ -3232,7 +3242,11 @@ class FileR2VExecutionService:
             dict.fromkeys(
                 [
                     storyboard_id,
-                    *element.creation.video_reference_version_ids,
+                    *resolve_r2v_visual_reference_version_ids(
+                        project,
+                        element.creation,
+                        element.creation.video_reference_version_ids,
+                    ),
                 ],
             ),
         )

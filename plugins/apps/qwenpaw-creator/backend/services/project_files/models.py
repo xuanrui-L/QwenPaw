@@ -31,7 +31,7 @@ from pydantic import (
 )
 
 
-CURRENT_PROJECT_SCHEMA_VERSION = 2
+CURRENT_PROJECT_SCHEMA_VERSION = 3
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
@@ -413,6 +413,7 @@ class VisualVariant(StrictModel):
     generated_artifact_version_ids: list[EntityId] = Field(
         default_factory=list,
     )
+    selected_artifact_version_id: EntityId | None = None
 
 
 class VisualEntity(StrictModel):
@@ -612,6 +613,9 @@ class R2VCreation(StrictModel):
     character_refs: list[EntityId] = Field(default_factory=list)
     scene_ref: EntityId | None = None
     prop_refs: list[EntityId] = Field(default_factory=list)
+    visual_variant_refs: dict[EntityId, EntityId] = Field(
+        default_factory=dict,
+    )
     shots: EntityCollection[Shot] = Field(default_factory=EntityCollection)
     recipe: GenerationRecipe | None = None
     storyboard_prompt: str = ""
@@ -914,7 +918,7 @@ class Timeline(StrictModel):
 
 
 class Project(StrictModel):
-    schema_version: Literal[2] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[3] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime
@@ -1092,6 +1096,34 @@ class Project(StrictModel):
                     variant.generated_artifact_version_ids,
                     "visual artifact",
                 )
+                if variant.selected_artifact_version_id is not None:
+                    selected_variant_artifact = _require_key(
+                        artifact_versions,
+                        variant.selected_artifact_version_id,
+                        "selected visual variant artifact",
+                    )
+                    if (
+                        variant.selected_artifact_version_id
+                        not in variant.generated_artifact_version_ids
+                    ):
+                        raise ValueError(
+                            "selected visual variant artifact must be a "
+                            "generated version of that variant",
+                        )
+                    artifact_variant_id = (
+                        selected_variant_artifact.metadata.get(
+                            "variantId",
+                        )
+                    )
+                    if (
+                        isinstance(artifact_variant_id, str)
+                        and artifact_variant_id
+                        and artifact_variant_id != variant.variant_id
+                    ):
+                        raise ValueError(
+                            "selected visual variant artifact belongs to "
+                            "another variant",
+                        )
             if entity.selected_artifact_version_id is not None:
                 _require_key(
                     artifact_versions,
@@ -1131,6 +1163,10 @@ class Project(StrictModel):
                     "video reference",
                 )
                 _validate_visual_refs(creation, visual_ids)
+                _validate_visual_variant_refs(
+                    creation,
+                    self.visual.entities.items,
+                )
                 for shot in creation.shots.items.values():
                     _validate_visual_refs(shot, visual_ids)
             elif isinstance(creation, EditCreation):
@@ -1407,6 +1443,30 @@ def _validate_visual_refs(
     _require_all_ids(known["prop"], value.prop_refs, "prop")
     if value.scene_ref is not None and value.scene_ref not in known["scene"]:
         raise ValueError(f"scene references missing id {value.scene_ref}")
+
+
+def _validate_visual_variant_refs(
+    value: R2VCreation,
+    entities: dict[str, VisualEntity],
+) -> None:
+    referenced = {
+        *value.character_refs,
+        *value.prop_refs,
+        *([value.scene_ref] if value.scene_ref is not None else []),
+    }
+    for entity_id, variant_id in value.visual_variant_refs.items():
+        if entity_id not in referenced:
+            raise ValueError(
+                f"visual variant binding targets unreferenced entity {entity_id}",
+            )
+        entity = entities[entity_id]
+        if (
+            variant_id not in entity.variants.items
+            or variant_id not in entity.variants.order
+        ):
+            raise ValueError(
+                f"visual variant binding references missing variant {variant_id}",
+            )
 
 
 __all__ = [

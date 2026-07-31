@@ -65,6 +65,9 @@ from services.media_files.element_adapter import (
     target_element_id,
 )
 from services.media_files.review_admission import assert_media_review_admission
+from services.media_files.visual_reference_resolution import (
+    resolve_r2v_visual_reference_version_ids,
+)
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
 from services.runtime_files.atomic_store import (
@@ -271,6 +274,13 @@ def _variant_for(
     return entity.variants.items[entity.variants.order[index]]
 
 
+def _variant_display_name(variant_id: str) -> str:
+    for prefix in ("visual-variant:", "variant:", "var:"):
+        if variant_id.startswith(prefix):
+            return variant_id.removeprefix(prefix)
+    return variant_id
+
+
 def _validate_public_remote_url(
     value: str,
     *,
@@ -427,10 +437,16 @@ def _resolve_request(
             )
         if not prompt:
             raise ValidationError("生成分镜图需要 storyboard prompt")
-        version_ids = [
-            *creation.storyboard_reference_version_ids,
-            *explicit_version_ids,
-        ]
+        version_ids = list(
+            resolve_r2v_visual_reference_version_ids(
+                project,
+                creation,
+                [
+                    *creation.storyboard_reference_version_ids,
+                    *explicit_version_ids,
+                ],
+            ),
+        )
         resolved = _ResolvedRequest(
             command=command,
             target_ref=target_ref,
@@ -480,15 +496,18 @@ def _resolve_request(
             reference_version_ids=tuple(dict.fromkeys(version_ids)),
             reference_checksums=(),
             read_set=(),
-            slot_id=f"asset:{entity_id}:image",
+            slot_id=(
+                f"asset:{entity_id}:variant:{variant.variant_id}:image"
+                if variant
+                else f"asset:{entity_id}:image"
+            ),
             slot_kind="visual_asset_image",
             owner_ref=f"asset:{entity_id}",
-            # Stage variants of one entity share the slot; without the
-            # variant id in the name the UI reference picker shows
-            # indistinguishable duplicate titles.
+            # Include the Variant in both the slot and title so independently
+            # versioned looks remain distinguishable in history and pickers.
             artifact_name=(
-                f"{entity.name}"
-                f"（{variant.variant_id.removeprefix('var:')}）视觉图"
+                f"{entity.name}（{_variant_display_name(variant.variant_id)}）"
+                "视觉图"
                 if variant
                 else f"{entity.name} 视觉图"
             ),
@@ -1424,9 +1443,8 @@ class FileImageExecutionService:
             existing_file != indexed
             or existing_version != artifact
             or slot is None
+            or slot.selected_version_id != artifact.version_id
         ):
-            return False
-        if slot.selected_version_id != artifact.version_id:
             return False
         command = str(result.get("commandType") or "")
         target_ref = str(result.get("targetRef") or "")
@@ -1440,10 +1458,18 @@ class FileImageExecutionService:
             return selected is not None and selected[1] == artifact.version_id
         entity_id = _target_id(target_ref, "asset")
         entity = project.visual.entities.items.get(entity_id)
-        return (
-            entity is not None
-            and entity.selected_artifact_version_id == artifact.version_id
-        )
+        if entity is None:
+            return False
+        variant_id = result.get("variantId")
+        selected_version_id = entity.selected_artifact_version_id
+        if variant_id:
+            variant = entity.variants.items.get(str(variant_id))
+            selected_version_id = (
+                variant.selected_artifact_version_id
+                if variant is not None
+                else None
+            )
+        return selected_version_id == artifact.version_id
 
     @staticmethod
     def _apply_result(
@@ -1469,12 +1495,16 @@ class FileImageExecutionService:
         versions[artifact.version_id] = artifact_json
         raw_slot = slots.get(artifact.slot_id)
         if raw_slot is None:
+            variant_id = result.get("variantId")
             slot = ArtifactSlot(
                 slot_id=artifact.slot_id,
                 kind=artifact.kind,
                 owner_ref=artifact.owner_ref,
                 version_ids=[artifact.version_id],
                 selected_version_id=artifact.version_id,
+                metadata=(
+                    {"variantId": str(variant_id)} if variant_id else {}
+                ),
             )
             slots[artifact.slot_id] = slot.model_dump(mode="json")
         else:
@@ -1503,7 +1533,6 @@ class FileImageExecutionService:
             entity = candidate["visual"]["entities"]["items"].get(entity_id)
             if entity is None:
                 raise ConflictError("视觉 Asset 已不存在")
-            entity["selected_artifact_version_id"] = artifact.version_id
             variant_id = result.get("variantId")
             if variant_id:
                 variant = entity["variants"]["items"].get(str(variant_id))
@@ -1516,6 +1545,13 @@ class FileImageExecutionService:
                     variant["generated_artifact_version_ids"].append(
                         artifact.version_id,
                     )
+                variant["selected_artifact_version_id"] = artifact.version_id
+                if len(entity["variants"]["order"]) == 1:
+                    entity[
+                        "selected_artifact_version_id"
+                    ] = artifact.version_id
+            else:
+                entity["selected_artifact_version_id"] = artifact.version_id
 
     async def _quarantine(
         self,

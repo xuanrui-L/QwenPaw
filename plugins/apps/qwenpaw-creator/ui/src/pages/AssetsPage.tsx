@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, message, Modal, Tabs } from "antd";
 import {
   Box,
@@ -25,6 +25,7 @@ import type {
   ProjectDocument,
   SourceAssetVersionDocument,
   VisualEntityDocument,
+  VisualVariantDocument,
 } from "@/contracts/creator";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
 import {
@@ -38,6 +39,7 @@ import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
 import PageLoadError from "@/components/PageLoadError";
 import PageSkeleton from "@/components/PageSkeleton";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
+import { visualVariantLabel } from "@/lib/visualVariants";
 
 type FilterKey =
   | "all"
@@ -61,6 +63,10 @@ type AssetItem = {
   durationSeconds?: number | null;
   checksum?: string;
   ownerRef?: string;
+  entityId?: string;
+  variantId?: string;
+  variantGroupLabel?: string;
+  variantState?: "active" | "history" | "unselected";
   provenanceRefs: string[];
   metadata: Record<string, unknown>;
   raw:
@@ -134,17 +140,58 @@ function artifactMedia(
   return file;
 }
 
-// Keep only one card per underlying content (same checksum); semantic cards
-// listed earlier (e.g. visual entities) win. No ownership naming convention is
-// relied upon.
+// Keep one semantic card per Variant and underlying content. The same image
+// can legitimately be attached to two legacy Variants; keep both assignments
+// visible instead of hiding the data-quality issue.
 function dedupeByChecksum(items: AssetItem[]): AssetItem[] {
   const seen = new Set<string>();
   return items.filter((item) => {
     if (!item.checksum) return true;
-    if (seen.has(item.checksum)) return false;
-    seen.add(item.checksum);
+    const key = `${item.variantId ?? ""}:${item.checksum}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
+}
+
+function visualVariantForVersion(
+  project: ProjectDocument,
+  versionId: string,
+): {
+  entity: VisualEntityDocument;
+  variant: VisualVariantDocument;
+} | null {
+  const artifact = project.assets.artifact_versions_by_id[versionId];
+  const metadataVariantId =
+    typeof artifact?.metadata.variantId === "string"
+      ? artifact.metadata.variantId
+      : null;
+  const ownerEntityId = (artifact?.owner_ref ?? "").replace(
+    /^(?:visual-entity|asset):/,
+    "",
+  );
+  const ownerEntity = project.visual.entities.items[ownerEntityId];
+  if (
+    ownerEntity &&
+    metadataVariantId &&
+    ownerEntity.variants.items[metadataVariantId]
+  ) {
+    return {
+      entity: ownerEntity,
+      variant: ownerEntity.variants.items[metadataVariantId],
+    };
+  }
+  for (const entityId of project.visual.entities.order) {
+    const entity = project.visual.entities.items[entityId];
+    if (!entity) continue;
+    for (const variantId of entity.variants.order) {
+      const variant = entity.variants.items[variantId];
+      if (variant?.generated_artifact_version_ids.includes(versionId)) {
+        return { entity, variant };
+      }
+    }
+  }
+  return null;
 }
 
 function assetItems(project: ProjectDocument): AssetItem[] {
@@ -175,6 +222,10 @@ function assetItems(project: ProjectDocument): AssetItem[] {
   const artifacts = Object.values(project.assets.artifact_versions_by_id).map(
     (artifact): AssetItem => {
       const media = artifactMedia(project, artifact);
+      const visualVariant = visualVariantForVersion(
+        project,
+        artifact.version_id,
+      );
       return {
         id: artifact.version_id,
         ref: `artifact-version:${artifact.version_id}`,
@@ -193,31 +244,59 @@ function assetItems(project: ProjectDocument): AssetItem[] {
         durationSeconds: artifact.duration_seconds,
         checksum: artifact.checksum,
         ownerRef: artifact.owner_ref,
+        entityId: visualVariant?.entity.entity_id,
+        variantId: visualVariant?.variant.variant_id,
+        variantGroupLabel: visualVariant
+          ? `${visualVariant.entity.name} / ${visualVariantLabel(
+              visualVariant.variant,
+            )}`
+          : undefined,
+        variantState: visualVariant
+          ? visualVariant.variant.selected_artifact_version_id ===
+            artifact.version_id
+            ? "active"
+            : "history"
+          : undefined,
         provenanceRefs: artifact.provenance_refs,
         metadata: artifact.metadata,
         raw: artifact,
       };
     },
   );
-  const visuals = project.visual.entities.order
-    .map((entityId) => project.visual.entities.items[entityId])
-    .filter(Boolean)
-    .map((entity): AssetItem => {
-      const artifact = entity.selected_artifact_version_id
-        ? project.assets.artifact_versions_by_id[
-            entity.selected_artifact_version_id
-          ]
+  const visuals = project.visual.entities.order.flatMap((entityId) => {
+    const entity = project.visual.entities.items[entityId];
+    if (!entity) return [];
+    const variants = entity.variants.order.length
+      ? entity.variants.order
+          .map((variantId) => entity.variants.items[variantId])
+          .filter((variant): variant is VisualVariantDocument =>
+            Boolean(variant),
+          )
+      : [null];
+    return variants.map((variant): AssetItem => {
+      const selectedVersionId =
+        variant?.selected_artifact_version_id ??
+        (!variant ? entity.selected_artifact_version_id : null);
+      const artifact = selectedVersionId
+        ? project.assets.artifact_versions_by_id[selectedVersionId]
         : undefined;
       const media = artifact
         ? artifactMedia(project, artifact)
         : { kind: "image", type: "" };
       return {
-        id: entity.entity_id,
-        ref: `visual-entity:${entity.entity_id}`,
+        id: variant
+          ? `${entity.entity_id}@${variant.variant_id}`
+          : entity.entity_id,
+        ref: variant
+          ? `visual-variant:${entity.entity_id}@${variant.variant_id}`
+          : `visual-entity:${entity.entity_id}`,
         kind: "visual",
         name: entity.name,
         description:
-          entity.description || entity.continuity || `${entity.kind} 视觉设定`,
+          variant?.requirements ||
+          entity.description ||
+          entity.continuity ||
+          `${entity.kind} 视觉设定`,
         mediaKind: media.kind,
         mediaType: media.type,
         previewUrl: artifact
@@ -226,6 +305,16 @@ function assetItems(project: ProjectDocument): AssetItem[] {
         stale: artifact?.stale,
         checksum: artifact?.checksum,
         ownerRef: artifact?.owner_ref,
+        entityId: entity.entity_id,
+        variantId: variant?.variant_id,
+        variantGroupLabel: variant
+          ? `${entity.name} / ${visualVariantLabel(variant)}`
+          : undefined,
+        variantState: variant
+          ? artifact
+            ? "active"
+            : "unselected"
+          : undefined,
         // Surface the references the generation model actually saw — e.g. the
         // web-grounding photo a scene design was composed from. The artifact
         // is the ground truth; the variant's reference_asset_version_ids is
@@ -235,15 +324,33 @@ function assetItems(project: ProjectDocument): AssetItem[] {
           kind: entity.kind,
           continuity: entity.continuity,
           variants: entity.variants.order.length,
-          selected_artifact_version_id: entity.selected_artifact_version_id,
+          variant_id: variant?.variant_id,
+          generated_artifact_version_ids:
+            variant?.generated_artifact_version_ids ?? [],
+          selected_artifact_version_id: selectedVersionId,
         },
         raw: entity,
       };
     });
+  });
   return dedupeByChecksum([...visuals, ...sources, ...artifacts]).sort(
-    (left, right) =>
-      (right.createdAt || "").localeCompare(left.createdAt || "") ||
-      left.name.localeCompare(right.name),
+    (left, right) => {
+      if (left.variantGroupLabel || right.variantGroupLabel) {
+        const group = (left.variantGroupLabel || "\uffff").localeCompare(
+          right.variantGroupLabel || "\uffff",
+        );
+        if (group) return group;
+        const stateOrder = { active: 0, unselected: 1, history: 2 };
+        const state =
+          stateOrder[left.variantState ?? "history"] -
+          stateOrder[right.variantState ?? "history"];
+        if (state) return state;
+      }
+      return (
+        (right.createdAt || "").localeCompare(left.createdAt || "") ||
+        left.name.localeCompare(right.name)
+      );
+    },
   );
 }
 
@@ -306,7 +413,14 @@ function resolveProvenanceRef(
   if (ref.startsWith("visual-entity:")) {
     const entityId = ref.slice("visual-entity:".length);
     const entity = project.visual.entities.items[entityId];
-    const versionId = entity?.selected_artifact_version_id ?? null;
+    const versionId = entity
+      ? entity.variants.order.length === 1
+        ? entity.variants.items[entity.variants.order[0]]
+            ?.selected_artifact_version_id ?? null
+        : entity.variants.order.length === 0
+        ? entity.selected_artifact_version_id
+        : null
+      : null;
     const version = versionId
       ? project.assets.artifact_versions_by_id[versionId]
       : undefined;
@@ -314,6 +428,25 @@ function resolveProvenanceRef(
     return {
       name: entity?.name || entityId,
       url: getArtifactVersionMediaUrl(versionId!),
+      kind: "image",
+      ref,
+    };
+  }
+  if (ref.startsWith("visual-variant:")) {
+    const identity = ref.slice("visual-variant:".length);
+    const separator = identity.lastIndexOf("@");
+    if (separator < 1) return null;
+    const entityId = identity.slice(0, separator);
+    const variantId = identity.slice(separator + 1);
+    const entity = project.visual.entities.items[entityId];
+    const versionId =
+      entity?.variants.items[variantId]?.selected_artifact_version_id ?? null;
+    if (!entity || !versionId) return null;
+    return {
+      name: `${entity.name} / ${visualVariantLabel(
+        entity.variants.items[variantId],
+      )}`,
+      url: getArtifactVersionMediaUrl(versionId),
       kind: "image",
       ref,
     };
@@ -330,8 +463,12 @@ interface PromptTarget {
 function visualEntityPromptTarget(
   entity: VisualEntityDocument,
   versionId: string | null,
+  requestedVariantId?: string,
 ): PromptTarget | null {
   const variantId =
+    (requestedVariantId &&
+      entity.variants.items[requestedVariantId] &&
+      requestedVariantId) ||
     (versionId &&
       entity.variants.order.find(
         (candidate) =>
@@ -357,15 +494,29 @@ function generationPromptTarget(
     const entity = selected.raw as VisualEntityDocument;
     return visualEntityPromptTarget(
       entity,
-      entity.selected_artifact_version_id,
+      selected.variantId
+        ? entity.variants.items[selected.variantId]
+            ?.selected_artifact_version_id ?? null
+        : entity.selected_artifact_version_id,
+      selected.variantId,
     );
   }
   if (selected.kind !== "artifact") return null;
   const ownerRef = selected.ownerRef ?? "";
-  if (ownerRef.startsWith("visual-entity:")) {
+  if (ownerRef.startsWith("visual-entity:") || ownerRef.startsWith("asset:")) {
+    const visualVariant = visualVariantForVersion(project, selected.id);
     const entity =
-      project.visual.entities.items[ownerRef.slice("visual-entity:".length)];
-    return entity ? visualEntityPromptTarget(entity, selected.id) : null;
+      visualVariant?.entity ??
+      project.visual.entities.items[
+        ownerRef.replace(/^(visual-entity:|asset:)/, "")
+      ];
+    return entity
+      ? visualEntityPromptTarget(
+          entity,
+          selected.id,
+          visualVariant?.variant.variant_id,
+        )
+      : null;
   }
   if (ownerRef.startsWith("element:")) {
     const elementId = ownerRef.slice("element:".length);
@@ -500,7 +651,12 @@ export default function AssetsPage() {
     const needle = search.trim().toLocaleLowerCase();
     return allItems.filter((item) => {
       const filterMatch =
-        filter === "all" || filter === item.kind || filter === item.mediaKind;
+        filter === "all" ||
+        filter === item.kind ||
+        filter === item.mediaKind ||
+        (filter === "artifact" &&
+          item.kind === "visual" &&
+          item.variantState === "active");
       const searchMatch =
         !needle ||
         `${item.name} ${item.description} ${item.ref}`
@@ -509,7 +665,31 @@ export default function AssetsPage() {
       return filterMatch && searchMatch;
     });
   }, [allItems, filter, search]);
-  const selected = allItems.find((item) => item.id === selectedId) || null;
+  const itemGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      { label: string | null; items: AssetItem[] }
+    >();
+    for (const item of items) {
+      const key = item.variantGroupLabel ?? "__other__";
+      const group = groups.get(key) ?? {
+        label: item.variantGroupLabel ?? null,
+        items: [],
+      };
+      group.items.push(item);
+      groups.set(key, group);
+    }
+    return [...groups.values()];
+  }, [items]);
+  const selected =
+    allItems.find((item) => item.id === selectedId) ||
+    allItems.find(
+      (item) =>
+        item.kind === "visual" &&
+        item.entityId === selectedId &&
+        item.variantState === "active",
+    ) ||
+    null;
 
   useEffect(() => {
     useCreatorInteractionStore.getState().select(selected?.ref || null);
@@ -660,56 +840,87 @@ export default function AssetsPage() {
         >
           {items.length > 0 ? (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-3">
-              {items.map((item) => {
-                const Icon = mediaIcon(item.mediaKind);
-                return (
-                  <button
-                    key={`${item.kind}:${item.id}`}
-                    type="button"
-                    data-creator-module="asset-card"
-                    data-creator-module-id={item.id}
-                    onClick={() => selectItem(item)}
-                    className={`group overflow-hidden rounded-xl border bg-[var(--color-bg-card)] text-left transition ${
-                      selected?.id === item.id
-                        ? "border-[var(--color-accent)] shadow-[0_0_0_1px_var(--color-accent)]"
-                        : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:shadow-sm"
-                    }`}
-                  >
-                    <div className="relative flex h-32 items-center justify-center overflow-hidden bg-[var(--color-bg-secondary)]">
-                      <AssetMediaPreview
-                        name={item.name}
-                        mediaType={item.mediaKind}
-                        previewUrl={item.previewUrl}
-                        state={item.previewUrl ? "ready" : "unavailable"}
-                        mediaClassName="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
-                        placeholderClassName="flex flex-col items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]"
-                      />
-                      {!item.previewUrl && (
-                        <Icon className="pointer-events-none absolute h-6 w-6 -translate-y-3 text-[var(--color-text-tertiary)]" />
-                      )}
-                      <span className="absolute left-2 top-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                        {kindLabel(item)}
+              {itemGroups.map((group, groupIndex) => (
+                <Fragment key={group.label ?? `other-${groupIndex}`}>
+                  {group.label && (
+                    <div className="col-span-full flex items-center gap-2 border-b border-[var(--color-border)] pb-1 pt-1 text-xs font-semibold text-[var(--color-text-secondary)]">
+                      <span>{group.label}</span>
+                      <span className="font-normal text-[var(--color-text-tertiary)]">
+                        {group.items.length} 个版本
                       </span>
-                      {item.stale && (
-                        <span className="absolute right-2 top-2 rounded bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                          过期
-                        </span>
-                      )}
                     </div>
-                    <div className="p-3">
-                      <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                        {item.name}
-                      </h3>
-                      <p className="mt-1 line-clamp-2 min-h-8 text-[11px] leading-4 text-[var(--color-text-secondary)]">
-                        {item.description}
-                      </p>
-                      <p className="mt-2 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
-                        {item.id}
-                      </p>
-                    </div>
-                  </button>
-                );
-              })}
+                  )}
+                  {group.items.map((item) => {
+                    const Icon = mediaIcon(item.mediaKind);
+                    return (
+                      <button
+                        key={`${item.kind}:${item.id}`}
+                        type="button"
+                        data-creator-module="asset-card"
+                        data-creator-module-id={item.id}
+                        onClick={() => selectItem(item)}
+                        className={`group overflow-hidden rounded-xl border bg-[var(--color-bg-card)] text-left transition ${
+                          selected?.id === item.id
+                            ? "border-[var(--color-accent)] shadow-[0_0_0_1px_var(--color-accent)]"
+                            : "border-[var(--color-border)] hover:border-[var(--color-border-strong)] hover:shadow-sm"
+                        }`}
+                      >
+                        <div className="relative flex h-32 items-center justify-center overflow-hidden bg-[var(--color-bg-secondary)]">
+                          <AssetMediaPreview
+                            name={item.name}
+                            mediaType={item.mediaKind}
+                            previewUrl={item.previewUrl}
+                            state={item.previewUrl ? "ready" : "unavailable"}
+                            mediaClassName="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                            placeholderClassName="flex flex-col items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]"
+                          />
+                          {!item.previewUrl && (
+                            <Icon className="pointer-events-none absolute h-6 w-6 -translate-y-3 text-[var(--color-text-tertiary)]" />
+                          )}
+                          <span className="absolute left-2 top-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                            {kindLabel(item)}
+                          </span>
+                          <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
+                            {item.variantState && (
+                              <span
+                                className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                                  item.variantState === "active"
+                                    ? "bg-emerald-500 text-white"
+                                    : item.variantState === "history"
+                                    ? "bg-black/60 text-white"
+                                    : "bg-amber-500 text-white"
+                                }`}
+                              >
+                                {item.variantState === "active"
+                                  ? "使用中"
+                                  : item.variantState === "history"
+                                  ? "历史"
+                                  : "未选择"}
+                              </span>
+                            )}
+                            {item.stale && (
+                              <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                                过期
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="p-3">
+                          <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+                            {item.name}
+                          </h3>
+                          <p className="mt-1 line-clamp-2 min-h-8 text-[11px] leading-4 text-[var(--color-text-secondary)]">
+                            {item.description}
+                          </p>
+                          <p className="mt-2 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
+                            {item.id}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </Fragment>
+              ))}
             </div>
           ) : (
             <div className="flex h-full min-h-64 flex-col items-center justify-center text-center text-[var(--color-text-tertiary)]">

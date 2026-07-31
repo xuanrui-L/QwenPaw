@@ -81,7 +81,7 @@ def test_project_and_plan_use_only_timeline_element_contract(
     project_id = project["projectId"]
     snapshot = api.project_snapshot(project_id)
     document = snapshot["project"]
-    assert document["schema_version"] == 2
+    assert document["schema_version"] == 3
     assert document["timelines"]["order"] == ["timeline:main"]
     assert "sections" not in document
     assert "units" not in document

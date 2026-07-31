@@ -12,11 +12,15 @@ import pytest
 from domain.errors import ConflictError, ReviewPendingError
 from services.media_files.image_execution import FileImageExecutionService
 from services.media_files.review_admission import assert_media_review_admission
+from services.media_files.visual_reference_resolution import (
+    resolve_r2v_visual_reference_version_ids,
+)
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     ArtifactVersion,
     EntityCollection,
     Project,
+    R2VCreation,
     VisualEntity,
     VisualVariant,
 )
@@ -294,3 +298,44 @@ def test_image_execution_freezes_only_the_pending_variant(
         ].metadata["variantId"]
         == "variant:hero-fallen"
     )
+    peak_variant = snapshot.visual.entities.items["char:hero"].variants.items[
+        "variant:hero-peak"
+    ]
+    fallen_variant = snapshot.visual.entities.items[
+        "char:hero"
+    ].variants.items["variant:hero-fallen"]
+    assert peak_variant.selected_artifact_version_id == (
+        first.artifact_version_id
+    )
+    assert fallen_variant.selected_artifact_version_id == (
+        fallen.artifact_version_id
+    )
+    assert (
+        snapshot.assets.artifact_versions_by_id[
+            first.artifact_version_id
+        ].slot_id
+        != snapshot.assets.artifact_versions_by_id[
+            fallen.artifact_version_id
+        ].slot_id
+    )
+    assert (
+        snapshot.visual.entities.items[
+            "char:hero"
+        ].selected_artifact_version_id
+        is None
+    )
+
+    resolved = resolve_r2v_visual_reference_version_ids(
+        snapshot,
+        R2VCreation(
+            character_refs=["char:hero"],
+            visual_variant_refs={
+                "char:hero": "variant:hero-fallen",
+            },
+        ),
+        [
+            first.artifact_version_id,
+            fallen.artifact_version_id,
+        ],
+    )
+    assert resolved == (fallen.artifact_version_id,)

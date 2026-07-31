@@ -20,6 +20,7 @@ import {
 } from "@/api/creator";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { useProjectDraft } from "@/lib/useProjectDraft";
+import { visualVariantLabel } from "@/lib/visualVariants";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
@@ -128,6 +129,10 @@ function mediaUrlOf(
 function visualEntityName(project: ProjectDocument, ref: string): string {
   const entityId = ref.replace(/^visual-entity:/, "");
   return project.visual.entities.items[entityId]?.name ?? ref;
+}
+
+function visualEntityId(ref: string): string {
+  return ref.replace(/^visual-entity:/, "");
 }
 
 function referenceVersionName(
@@ -472,17 +477,24 @@ export default function R2VWorkbenchPage() {
       ? `visual-entity:${entityId}`
       : ref;
   };
-  const entityThumbVersionId = (entityId: string): string | null => {
+  const entityThumbVersionId = (
+    entityRef: string,
+    entityId: string,
+  ): string | null => {
     const entity = project.visual.entities.items[entityId];
     if (!entity) return null;
-    if (entity.selected_artifact_version_id)
-      return entity.selected_artifact_version_id;
-    for (const variantId of [...entity.variants.order].reverse()) {
-      const generated =
-        entity.variants.items[variantId]?.generated_artifact_version_ids ?? [];
-      if (generated.length) return generated[generated.length - 1];
+    const variantId =
+      creation.visual_variant_refs[entityRef] ??
+      creation.visual_variant_refs[entityId] ??
+      (entity.variants.order.length === 1 ? entity.variants.order[0] : null);
+    if (variantId) {
+      return (
+        entity.variants.items[variantId]?.selected_artifact_version_id ?? null
+      );
     }
-    return null;
+    return entity.variants.order.length === 0
+      ? entity.selected_artifact_version_id
+      : null;
   };
   const versionMediaKind = (versionId: string): "image" | "video" | null => {
     const artifact = project.assets.artifact_versions_by_id[versionId];
@@ -524,7 +536,7 @@ export default function R2VWorkbenchPage() {
   const refThumbInfo = (ref: string): RefThumb | null => {
     const entityId = ref.replace(/^visual-entity:/, "");
     if (project.visual.entities.items[entityId]) {
-      const versionId = entityThumbVersionId(entityId);
+      const versionId = entityThumbVersionId(ref, entityId);
       return versionId
         ? { kind: "image", url: getArtifactVersionMediaUrl(versionId) }
         : null;
@@ -642,6 +654,67 @@ export default function R2VWorkbenchPage() {
       if (draft.creation.type !== "r2v") return;
       draft.creation.storyboard_reference_version_ids = next;
       draft.creation.video_reference_version_ids = next;
+    });
+  const changeEntityReferences = (
+    field: "scene" | "characters" | "props",
+    nextRefs: string[],
+  ) =>
+    updateElement((draft) => {
+      if (draft.creation.type !== "r2v") return;
+      const nextEntityIds = nextRefs.map(visualEntityId);
+      const previousEntityIds =
+        field === "scene"
+          ? draft.creation.scene_ref
+            ? [visualEntityId(draft.creation.scene_ref)]
+            : []
+          : field === "characters"
+          ? draft.creation.character_refs.map(visualEntityId)
+          : draft.creation.prop_refs.map(visualEntityId);
+      for (const entityId of previousEntityIds) {
+        if (nextEntityIds.includes(entityId)) continue;
+        delete draft.creation.visual_variant_refs[entityId];
+        delete draft.creation.visual_variant_refs[`visual-entity:${entityId}`];
+      }
+      if (field === "scene") {
+        draft.creation.scene_ref = nextEntityIds[0] ?? null;
+      } else if (field === "characters") {
+        draft.creation.character_refs = nextEntityIds;
+      } else {
+        draft.creation.prop_refs = nextEntityIds;
+      }
+      for (const entityId of nextEntityIds) {
+        const entity = project.visual.entities.items[entityId];
+        if (
+          entity?.variants.order.length === 1 &&
+          !draft.creation.visual_variant_refs[entityId]
+        ) {
+          draft.creation.visual_variant_refs[entityId] =
+            entity.variants.order[0];
+        }
+      }
+    });
+  const referencedVisualEntities = [
+    creation.scene_ref,
+    ...creation.character_refs,
+    ...creation.prop_refs,
+  ]
+    .filter((ref): ref is string => Boolean(ref))
+    .map(visualEntityId)
+    .filter((entityId, index, all) => all.indexOf(entityId) === index)
+    .map((entityId) => project.visual.entities.items[entityId])
+    .filter((entity) => Boolean(entity));
+  const changeVariantBinding = (
+    entityId: string,
+    variantId: string | undefined,
+  ) =>
+    updateElement((draft) => {
+      if (draft.creation.type !== "r2v") return;
+      delete draft.creation.visual_variant_refs[`visual-entity:${entityId}`];
+      if (variantId) {
+        draft.creation.visual_variant_refs[entityId] = variantId;
+      } else {
+        delete draft.creation.visual_variant_refs[entityId];
+      }
     });
 
   const addShot = () => {
@@ -1032,10 +1105,7 @@ export default function R2VWorkbenchPage() {
                   value={normalizeEntityRef(creation.scene_ref)}
                   disabled={patching}
                   onChange={(value) =>
-                    updateElement((draft) => {
-                      if (draft.creation.type === "r2v")
-                        draft.creation.scene_ref = value ?? null;
-                    })
+                    changeEntityReferences("scene", value ? [value] : [])
                   }
                   allowClear
                   placeholder="选择场景"
@@ -1055,10 +1125,7 @@ export default function R2VWorkbenchPage() {
                   )}
                   disabled={patching}
                   onChange={(value) =>
-                    updateElement((draft) => {
-                      if (draft.creation.type === "r2v")
-                        draft.creation.character_refs = value;
-                    })
+                    changeEntityReferences("characters", value)
                   }
                   placeholder="选择角色"
                   options={characterOptions}
@@ -1076,16 +1143,63 @@ export default function R2VWorkbenchPage() {
                     (ref) => normalizeEntityRef(ref) ?? ref,
                   )}
                   disabled={patching}
-                  onChange={(value) =>
-                    updateElement((draft) => {
-                      if (draft.creation.type === "r2v")
-                        draft.creation.prop_refs = value;
-                    })
-                  }
+                  onChange={(value) => changeEntityReferences("props", value)}
                   placeholder="选择道具"
                   options={propOptions}
                 />
               </div>
+              {referencedVisualEntities.length > 0 && (
+                <div className="border-t border-[var(--color-border)] pt-3">
+                  <p className="mb-2 text-[11px] font-medium text-[var(--color-text-tertiary)]">
+                    视觉 Variant
+                  </p>
+                  <div className="space-y-2">
+                    {referencedVisualEntities.map((entity) => {
+                      const entityId = entity.entity_id;
+                      const selectedVariantId =
+                        creation.visual_variant_refs[entityId] ??
+                        creation.visual_variant_refs[
+                          `visual-entity:${entityId}`
+                        ] ??
+                        (entity.variants.order.length === 1
+                          ? entity.variants.order[0]
+                          : undefined);
+                      return (
+                        <div key={entityId} className="flex items-center gap-2">
+                          <span className="w-20 shrink-0 truncate text-[11px] text-[var(--color-text-secondary)]">
+                            {entity.name || entityId}
+                          </span>
+                          <Select
+                            size="small"
+                            className="min-w-0 flex-1"
+                            aria-label={`${entity.name || entityId} Variant`}
+                            value={selectedVariantId}
+                            disabled={patching}
+                            allowClear={entity.variants.order.length > 1}
+                            placeholder={
+                              entity.variants.order.length
+                                ? "选择 Variant"
+                                : "尚未定义 Variant"
+                            }
+                            onChange={(variantId) =>
+                              changeVariantBinding(entityId, variantId)
+                            }
+                            options={entity.variants.order.map((variantId) => {
+                              const variant = entity.variants.items[variantId];
+                              return {
+                                value: variantId,
+                                label: variant
+                                  ? visualVariantLabel(variant)
+                                  : variantId,
+                              };
+                            })}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <div>
                 <p className="mb-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">
                   素材

@@ -68,7 +68,7 @@ function ingestRoutes(
   ];
 }
 
-describe("AssetsPage schema-v2 Project projection", () => {
+describe("AssetsPage Project projection", () => {
   beforeEach(() => {
     useProjectSnapshotStore.getState().reset();
     useCreatorTaskViewStore.getState().reset();
@@ -109,6 +109,47 @@ describe("AssetsPage schema-v2 Project projection", () => {
       "src",
       "/api/qwenpaw-creator/media/artifacts/cat-anchor-v1",
     );
+  });
+
+  it("groups visual history by Variant and marks active versus historical versions", () => {
+    const project = cloneProject();
+    project.assets.files_by_id["file:cat-history"] = {
+      file_id: "file:cat-history",
+      kind: "artifact",
+      relative_uri: "artifacts/cat-history.png",
+      sha256: "sha-cat-history",
+      size_bytes: 500,
+      media_type: "image/png",
+      created_at: "2026-07-19T00:00:00Z",
+    };
+    project.assets.artifact_slots_by_id[
+      "visual:cat:anchor"
+    ].version_ids.unshift("cat-anchor-history");
+    project.assets.artifact_versions_by_id["cat-anchor-history"] = {
+      ...project.assets.artifact_versions_by_id["cat-anchor-v1"],
+      version_id: "cat-anchor-history",
+      name: "橘猫角色锚点旧版",
+      file_id: "file:cat-history",
+      checksum: "sha-cat-history",
+      created_at: "2026-07-19T00:00:00Z",
+      metadata: { variantId: "variant:cat:default" },
+    };
+    project.visual.entities.items.cat.variants.items[
+      "variant:cat:default"
+    ].generated_artifact_version_ids.unshift("cat-anchor-history");
+    seedProject(project);
+    renderPage();
+
+    expect(
+      screen.getByText("圆润大橘猫 / 圆润体型、橘色毛发、红色项圈"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("使用中")).toBeInTheDocument();
+    expect(screen.getByText("历史")).toBeInTheDocument();
+    expect(screen.getByText("橘猫角色锚点旧版")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "生成产物" }));
+    expect(screen.getByText("使用中")).toBeInTheDocument();
+    expect(screen.getByText("历史")).toBeInTheDocument();
   });
 
   it("filters locally without requiring a separate backend asset projection", () => {

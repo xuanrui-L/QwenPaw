@@ -2,7 +2,7 @@
 # pylint: disable=too-many-branches,too-many-statements
 """Typed side effects for explicit frontend Element draft commits.
 
-User operations remain ordinary schema-v2 JSON Pointer edits.  Before the
+User operations remain ordinary Project JSON Pointer edits.  Before the
 Project commit is published, this module derives which selected artifacts no
 longer describe the edited Project and marks those immutable versions stale in
 the same transaction.  The bytes and slot history are retained.

@@ -16,6 +16,15 @@ from services.project_files import (
     project_etag,
     project_file_bytes,
 )
+from services.project_files.models import (
+    ElementLocation,
+    EntityCollection,
+    R2VCreation,
+    TimelineElement,
+    TimelineSpan,
+    VisualEntity,
+    VisualVariant,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -114,12 +123,69 @@ def test_project_new_has_complete_valid_defaults_and_utc_time():
         now=datetime(2026, 7, 15, 16, 0, tzinfo=timezone.utc),
     )
 
-    assert project.schema_version == 2
+    assert project.schema_version == 3
     assert project.generation == 0
     assert project.created_at.tzinfo == timezone.utc
     assert project.timelines.order == ["timeline:main"]
     assert project.timelines.items["timeline:main"].elements_by_id == {}
     assert project.assets.files_by_id == {}
+
+
+def _variant_project() -> Project:
+    project = Project.new(project_id="project-variants", name="Variants")
+    project.visual.entities = EntityCollection(
+        items={
+            "char:hero": VisualEntity(
+                entity_id="char:hero",
+                kind="character",
+                name="Hero",
+                variants=EntityCollection(
+                    items={
+                        "variant:peak": VisualVariant(
+                            variant_id="variant:peak",
+                        ),
+                        "variant:fallen": VisualVariant(
+                            variant_id="variant:fallen",
+                        ),
+                    },
+                    order=["variant:peak", "variant:fallen"],
+                ),
+            ),
+        },
+        order=["char:hero"],
+    )
+    project.timelines.items["timeline:main"].elements_by_id[
+        "element:hero"
+    ] = TimelineElement(
+        element_id="element:hero",
+        span=TimelineSpan(start_tick=0, duration_tick=1_000),
+        location=ElementLocation(),
+        creation=R2VCreation(
+            character_refs=["char:hero"],
+            visual_variant_refs={"char:hero": "variant:fallen"},
+        ),
+    )
+    return Project.model_validate(project.model_dump(mode="json"))
+
+
+def test_r2v_variant_binding_must_target_a_referenced_entity_and_variant():
+    project = _variant_project()
+    raw = project.model_dump(mode="json")
+    creation = raw["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "element:hero"
+    ]["creation"]
+
+    creation["visual_variant_refs"] = {
+        "char:hero": "variant:missing",
+    }
+    with pytest.raises(ValidationError, match="missing variant"):
+        Project.model_validate(raw)
+
+    creation["visual_variant_refs"] = {
+        "char:other": "variant:fallen",
+    }
+    with pytest.raises(ValidationError, match="unreferenced entity"):
+        Project.model_validate(raw)
 
 
 def test_one_edit_element_selects_exactly_one_source_range():

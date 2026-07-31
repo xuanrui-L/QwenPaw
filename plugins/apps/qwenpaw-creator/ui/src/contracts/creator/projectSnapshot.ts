@@ -1,4 +1,4 @@
-/** Canonical schema-v2 Project document from GET /projects/:id/project. */
+/** Canonical Project document from GET /projects/:id/project. */
 export type ProjectJsonRecord = Record<string, unknown>;
 
 export interface ProjectEntityCollection<T> {
@@ -119,6 +119,7 @@ export interface VisualVariantDocument extends ProjectJsonRecord {
   reference_asset_version_ids: string[];
   reference_artifact_version_ids: string[];
   generated_artifact_version_ids: string[];
+  selected_artifact_version_id: string | null;
 }
 
 export interface VisualEntityDocument extends ProjectJsonRecord {
@@ -178,6 +179,7 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   character_refs: string[];
   scene_ref: string | null;
   prop_refs: string[];
+  visual_variant_refs: Record<string, string>;
   shots: ProjectEntityCollection<ShotDocument>;
   recipe: GenerationRecipeDocument | null;
   storyboard_prompt: string;
@@ -299,7 +301,7 @@ export interface TimelineDocument extends ProjectJsonRecord {
 }
 
 export interface ProjectDocument extends ProjectJsonRecord {
-  schema_version: 2;
+  schema_version: 3;
   project_id: string;
   generation: number;
   created_at: string;

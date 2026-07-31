@@ -19,7 +19,7 @@ Project
 ├── sources.sources                   # ProjectSource 的 EntityCollection
 ├── visual                            # visual_bible、style、entities
 │   └── entities.items[entityId]      # VisualEntity：kind(character/scene/prop)、name、description、continuity
-│       └── variants.items[variantId] # VisualVariant：requirements、prompt、参考与生成版本引用
+│       └── variants.items[variantId] # VisualVariant：requirements、prompt、参考、生成版本与独立 selected_artifact_version_id
 ├── timelines                         # Timeline 的 EntityCollection
 │   └── items[timelineId].elements_by_id
 │       └── span, location, z_index, creation, outputs, render_source
@@ -30,6 +30,8 @@ Project
 
 - `EntityCollection` 始终由 `items` 和 `order` 组成；两者 ID 集合必须完全一致且顺序不重复。
 - `variants` 只存在于 `visual.entities.items[<entityId>].variants`；`visual` 顶层没有 `variants` 字段。
+- R2V Element 通过 `creation.visual_variant_refs[entityId]=variantId` 绑定本段使用的角色/场景/道具状态；引用多 Variant 实体时不得依赖实体级默认图。
+- 每个 VisualVariant 的 `selected_artifact_version_id` 只选择该 Variant 的 `generated_artifact_version_ids`；实体级选择仅用于无 Variant 或单 Variant 旧数据兼容。
 - `schema_version`、`project_id`、`generation`、`created_at` 和 `updated_at` 是受保护字段。
 - Element ID 在全部 Timeline 中唯一；时间区间统一使用整数 tick 和半开区间。
 - `location.x/y` 是内容框锚点在归一化成片画面中的位置，`anchor_x/anchor_y` 指定框内哪个点对齐到该位置并作为旋转基点；全画面内容使用 `x=0.5, y=0.5, width=1, height=1, anchor_x=0.5, anchor_y=0.5`。

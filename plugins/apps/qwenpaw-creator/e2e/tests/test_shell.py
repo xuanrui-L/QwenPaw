@@ -52,7 +52,7 @@ def test_create_snapshot_and_delete_project(api):
     try:
         snapshot = api.project_snapshot(project_id)
         assert snapshot["projectId"] == project_id
-        assert snapshot["project"]["schema_version"] == 2
+        assert snapshot["project"]["schema_version"] == 3
         assert snapshot["project"]["timelines"]["order"] == ["timeline:main"]
         session = api.get(f"/projects/{project_id}/session")
         assert session.status_code == 200
