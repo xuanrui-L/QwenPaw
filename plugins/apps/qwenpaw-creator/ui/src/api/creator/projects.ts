@@ -1,4 +1,6 @@
 import type {
+  InspirationExampleListResponse,
+  InspirationExampleOpenResponse,
   ProjectCreateRequest,
   ProjectCreateResponse,
   ProjectListResponse,
@@ -172,6 +174,22 @@ export function deleteProject(projectId: string): Promise<void> {
     method: "DELETE",
     headers: { "Idempotency-Key": newClientId("delete-project") },
   });
+}
+
+/** Plugin-bundled inspiration examples shown under the home composer. */
+export function listInspirationExamples(): Promise<InspirationExampleListResponse> {
+  return creatorRequest("/examples");
+}
+
+/** Materialize (if needed) a bundled example and return its project id. */
+export function openInspirationExample(
+  exampleId: string,
+): Promise<InspirationExampleOpenResponse> {
+  return creatorRequest(
+    `/examples/${encodeURIComponent(exampleId)}/open`,
+    { method: "POST" },
+    { timeoutMs: 120_000 },
+  );
 }
 
 function sortJson(value: unknown): unknown {
