@@ -121,10 +121,13 @@ def _public_item(entry: dict[str, Any], data_root: Path) -> dict[str, Any]:
 @router.get("")
 async def list_examples() -> dict[str, Any]:
     data_root = require_creator_data_root()
-    entries = await asyncio.to_thread(_load_manifest)
-    return {
-        "items": [_public_item(entry, data_root) for entry in entries],
-    }
+
+    def catalogue() -> list[dict[str, Any]]:
+        # Manifest parsing and per-entry installed checks are filesystem
+        # I/O, so the whole catalogue is built off the event loop.
+        return [_public_item(entry, data_root) for entry in _load_manifest()]
+
+    return {"items": await asyncio.to_thread(catalogue)}
 
 
 def _materialize_example(entry: dict[str, Any], data_root: Path) -> str:
@@ -136,6 +139,8 @@ def _materialize_example(entry: dict[str, Any], data_root: Path) -> str:
         return project_id
 
     archive_path = examples_root() / entry["archive"]
+    # Pure ZipInfo-level filesystem preflight; no request-scoped state, so
+    # it is safe to run inside asyncio.to_thread worker threads.
     _validate_import_archive(archive_path)
 
     staging_root = data_root / ".example-staging"

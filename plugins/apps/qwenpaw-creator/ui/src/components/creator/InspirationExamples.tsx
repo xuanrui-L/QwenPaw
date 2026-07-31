@@ -31,6 +31,8 @@ export default function InspirationExamples() {
     setOpeningId(example.id);
     try {
       const opened = await openInspirationExample(example.id);
+      // No reset on success: navigation unmounts the home page, and the
+      // sticky disabled state stops double-fires until that happens.
       router.push(`/project/${opened.projectId}/plan`);
     } catch {
       message.error("打开灵感示例失败，请稍后重试");

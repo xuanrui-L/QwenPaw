@@ -70,6 +70,12 @@ from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent / "backend"
+# Fail fast if the plugin layout ever changes instead of importing whatever
+# happens to shadow the backend package name on sys.path.
+if not (
+    BACKEND_ROOT / "services" / "project_files" / "serialization.py"
+).is_file():
+    raise SystemExit(f"backend not found at {BACKEND_ROOT}")
 sys.path.insert(0, str(BACKEND_ROOT))
 
 from services.project_files.serialization import (  # noqa: E402  # pylint: disable=wrong-import-position
