@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, Response, status
@@ -86,6 +87,8 @@ router = APIRouter(
     tags=["project-files"],
     route_class=CreatorErrorRoute,
 )
+
+logger = logging.getLogger("qwenpaw.creator.api.project_file_routes")
 
 _PATCH_IDEMPOTENCY_SCOPE = "PATCH /projects/{projectId}/project"
 
@@ -934,6 +937,16 @@ async def decide_project_review(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
+    decisions_summary = ",".join(
+        f"{item.operation_id}={item.decision}" for item in request.decisions
+    )
+    logger.info(
+        "review decided: project=%s review=%s decisions=%s feedback=%s",
+        project_id,
+        review_id,
+        decisions_summary,
+        "yes" if request.rejection_feedback is not None else "no",
+    )
     key = resolve_idempotency_key(
         idempotency_key,
         stable_client_id=request.decision_id,

@@ -397,11 +397,17 @@ async def post_message(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
+    parts, intent = _message_parts(request)
+    logger.info(
+        "agent dock message: conversation=%s client_message_id=%s content=%s",
+        request.conversation_id,
+        request.client_message_id,
+        intent,
+    )
     key = resolve_idempotency_key(
         idempotency_key,
         stable_client_id=request.client_message_id,
     )
-    parts, intent = _message_parts(request)
     store = _store(services)
     try:
         session = await asyncio.to_thread(

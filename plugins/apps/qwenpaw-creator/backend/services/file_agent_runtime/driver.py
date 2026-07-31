@@ -1520,6 +1520,16 @@ class FileCreatorAgentRuntime:
                 tool_failed = False
                 malformed_budget_exhausted = False
                 self._assert_epoch(project_id, run_id, epoch)
+                logger.info(
+                    "tool: project=%s run=%s tool=%s call_id=%s args=%s",
+                    project_id,
+                    run_id,
+                    call.name,
+                    call.call_id,
+                    _prompt_preview(call.arguments, limit=200)
+                    if call.name != DELEGATE_TOOL_NAME
+                    else call.arguments.get("task"),
+                )
                 await self._event(
                     project_id,
                     session_id,
@@ -2505,6 +2515,15 @@ class FileCreatorAgentRuntime:
 
                 call = turn.tool_calls[0]
                 tool_call_count += 1
+                logger.info(
+                    "tool: project=%s run=%s role=%s tool=%s call_id=%s args=%s",
+                    project_id,
+                    specialist_run_id,
+                    role_name,
+                    call.name,
+                    call.call_id,
+                    _prompt_preview(call.arguments, limit=200),
+                )
                 await self._event(
                     project_id,
                     session_id,
@@ -2607,6 +2626,17 @@ class FileCreatorAgentRuntime:
                     if isinstance(exc, ReviewPendingError):
                         waiting_review = exc
                         review_id = exc.details.get("reviewId")
+                        logger.info(
+                            "review required: project=%s run=%s role=%s "
+                            "tool=%s call_id=%s review_id=%s target=%s",
+                            project_id,
+                            specialist_run_id,
+                            role_name,
+                            call.name,
+                            call.call_id,
+                            review_id,
+                            exc.details.get("targetRef"),
+                        )
                         if (
                             isinstance(review_id, str)
                             and review_id
@@ -3053,6 +3083,18 @@ class FileCreatorAgentRuntime:
             if authorization.status is ExecutionAuthorizationStatus.APPROVED:
                 continue
             if authorization.status is ExecutionAuthorizationStatus.PENDING:
+                logger.info(
+                    "approval required: project=%s run=%s role=%s tool=%s "
+                    "phase=%s call_id=%s operation=%s summary=%s",
+                    project_id,
+                    specialist_run_id,
+                    common.get("role"),
+                    spec.name,
+                    phase,
+                    call_id,
+                    authorization.operation,
+                    authorization.summary,
+                )
                 await self._event(
                     project_id,
                     session_id,
@@ -3084,6 +3126,17 @@ class FileCreatorAgentRuntime:
                     authorization=authorization,
                     decided_event="creation.checkpoint_decided",
                     decided_payload={"checkpointPhase": phase},
+                )
+                logger.info(
+                    "approval decided: project=%s run=%s role=%s "
+                    "tool=%s phase=%s call_id=%s status=%s",
+                    project_id,
+                    specialist_run_id,
+                    common.get("role"),
+                    spec.name,
+                    phase,
+                    call_id,
+                    authorization.status.value,
                 )
             if (
                 authorization.status
@@ -3334,6 +3387,20 @@ class FileCreatorAgentRuntime:
                 "toolCallId": call_id,
             },
         )
+        logger.info(
+            "approval required: project=%s run=%s role=%s tool=%s call_id=%s "
+            "operation=%s target=%s provider=%s/%s summary=%s",
+            project_id,
+            specialist_run_id,
+            common.get("role"),
+            spec.name,
+            call_id,
+            authorization.operation,
+            target_ref,
+            provider,
+            model,
+            authorization.summary,
+        )
         authorization = await self._await_authorization_decision(
             project_id=project_id,
             session_id=session_id,
@@ -3344,6 +3411,15 @@ class FileCreatorAgentRuntime:
             common=common,
             call_id=call_id,
             authorization=authorization,
+        )
+        logger.info(
+            "approval decided: project=%s run=%s role=%s tool=%s call_id=%s status=%s",
+            project_id,
+            specialist_run_id,
+            common.get("role"),
+            spec.name,
+            call_id,
+            authorization.status.value,
         )
         if authorization.status is not ExecutionAuthorizationStatus.APPROVED:
             raise FileAgentRuntimeError(

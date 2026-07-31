@@ -655,9 +655,11 @@ class ProjectExecutionStore:
             created = store.try_create(candidate)
             if created is not None:
                 logger.info(
-                    "task created: project=%s task=%s status=%s",
+                    "task created: project=%s task=%s kind=%s run=%s status=%s",
                     project_id,
                     task_id,
+                    candidate.kind.value,
+                    candidate.run_id,
                     candidate.status.value,
                 )
                 return created.value
@@ -1460,9 +1462,11 @@ class ProjectExecutionStore:
             .value
         )
         logger.info(
-            "task transition: project=%s task=%s %s -> %s",
+            "task transition: project=%s task=%s kind=%s run=%s %s -> %s",
             project_id,
             task_id,
+            candidate.kind.value,
+            candidate.run_id,
             current.status.value,
             target.value,
         )
