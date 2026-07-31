@@ -391,6 +391,11 @@ def test_model_config_is_single_file_native_and_idempotent(
     config_path = tmp_path / "config" / "model_config.json"
     secrets_path = tmp_path / "config" / "model_config.secrets.json"
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    # Secrets are encrypted at rest when the QwenPaw secret store is
+    # available; verify that, then decrypt before comparing the round-trip.
+    if model_routes.QWENPAW_SECRET_AVAILABLE:
+        assert persisted["llm"]["api_key"] != "secret"
+    model_routes._decrypt_secret_fields(persisted)
     assert persisted["llm"]["api_key"] == "secret"
     assert persisted["oss"] == {
         "enabled": False,
@@ -484,6 +489,8 @@ def test_concurrent_single_file_save_is_atomic_and_last_writer_wins(
             encoding="utf-8",
         ),
     )
+    # Same as the single-file test: decrypt at-rest secrets before comparing.
+    model_routes._decrypt_secret_fields(persisted)
     assert persisted["llm"]["api_key"] == "second-api-key"
     assert persisted["oss"]["access_key_secret"] == "second-oss-secret"
     assert persisted["oss"]["policy_api_key"] == "second-policy-secret"

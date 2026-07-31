@@ -428,11 +428,18 @@ async def export_project(
     resolve_idempotency_key(idempotency_key)
     try:
         safe_id = _safe_project_id(project_id)
+        # The archive is built on disk first; knowing its exact size lets the
+        # download UI show a real percentage instead of an indeterminate bar.
+        archive_size, archive_chunks = await asyncio.to_thread(
+            services.projects.export,
+            project_id,
+        )
         return StreamingResponse(
-            content=services.projects.export(project_id),
+            content=archive_chunks,
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": f'attachment; filename="{safe_id}.zip"',
+                "Content-Length": str(archive_size),
             },
         )
     except Exception as e:
@@ -499,7 +506,8 @@ async def _save_upload_to(upload, saved_zip: Path) -> None:
                     )
                 f.write(chunk)
         logger.info(
-            f"zip file size of {saved_zip}: {saved_zip.stat().st_size}",
+            f"zip file size of {_log_safe(saved_zip)}: "
+            f"{saved_zip.stat().st_size}",
         )
     except BadRequestError:
         raise
@@ -530,7 +538,7 @@ def _resolve_extracted_project(extract_dir: Path) -> tuple[Path, str]:
             "project.json not found in the uploaded data.",
         )
 
-    logger.info(f"loading project obj from {project_json_path}")
+    logger.info(f"loading project obj from {_log_safe(project_json_path)}")
     try:
         project = load_project_json(project_json_path.read_bytes())
         project_id = str(project.project_id)
@@ -542,7 +550,8 @@ def _resolve_extracted_project(extract_dir: Path) -> tuple[Path, str]:
         raise BadRequestError(f"Invalid Project object: {str(e)}") from e
 
     logger.info(
-        f"found project id in {project_json_path}: {project_id}",
+        f"found project id in {_log_safe(project_json_path)}: "
+        f"{_log_safe(project_id)}",
     )
     if project_id != dirs[0].name:
         raise BadRequestError(
@@ -575,7 +584,9 @@ async def _run_import(upload) -> str:
                 extract_dir=extract_dir,
                 format="zip",
             )
-            logger.info(f"unpacked zip file {saved_zip} to {extract_dir}")
+            logger.info(
+                f"unpacked zip file {_log_safe(saved_zip)} to {extract_dir}",
+            )
         except Exception as e:
             raise BadRequestError(
                 f"failed to unpack zip file {saved_zip}: {str(e)}",
@@ -591,13 +602,16 @@ async def _run_import(upload) -> str:
         # move the unpacked project-*** folder into creator data root so the
         # Project directory is published under its real project_id.
         await asyncio.to_thread(shutil.move, project_dir, data_root)
-        logger.info(f"moved project folder {project_dir} to {data_root}")
+        logger.info(
+            f"moved project folder {_log_safe(project_dir)} to {data_root}",
+        )
         return project_id
     finally:
         saved_zip.unlink(missing_ok=True)
         shutil.rmtree(extract_dir, ignore_errors=True)
         logger.info(
-            f"deleted temporary importing file and folder {saved_zip}, {extract_dir}",
+            "deleted temporary importing file and folder "
+            f"{_log_safe(saved_zip)}, {extract_dir}",
         )
 
 

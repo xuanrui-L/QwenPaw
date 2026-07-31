@@ -1,19 +1,11 @@
 import { useEffect, useState, useCallback, memo } from "react";
-import { Dropdown, Modal, message } from "antd";
-import {
-  Film,
-  ArrowUp,
-  ArrowDown,
-  CircleHelp,
-  FileOutput,
-  Trash2,
-} from "lucide-react";
+import { Modal, message } from "antd";
+import { Film, ArrowUp, ArrowDown, CircleHelp, Trash2 } from "lucide-react";
 import logoMarkUrl from "@/assets/design/logo-mark.png";
 import tabCreateIcon from "@/assets/design/icon-tab-create.svg";
 import tabProjectsIcon from "@/assets/design/icon-tab-projects.svg";
 import previewEyeIcon from "@/assets/design/icon-eye-preview.svg";
 import importProjectIcon from "@/assets/design/icon-import-project.svg";
-import cardMoreIcon from "@/assets/design/icon-card-more.svg";
 import type { ModelConfigData, ProjectSummary } from "@/contracts/creator";
 import {
   deleteProject,
@@ -21,7 +13,7 @@ import {
   listProjects,
   getArtifactVersionMediaUrl,
 } from "@/api/creator";
-import { useRouter } from "@/routing/navigation";
+import { useRouter, useSearchParams } from "@/routing/navigation";
 import ModelBadges from "@/components/creator/ModelBadges";
 import ModelConfigModal from "@/components/creator/ModelConfigModal";
 import {
@@ -39,17 +31,13 @@ import HeroTitle from "@/components/creator/HeroTitle";
 import InspirationExamples from "@/components/creator/InspirationExamples";
 import { HomeTour } from "@/components/onboarding";
 import { useOnboardingStore } from "@/store/onboardingStore";
-import {
-  ProjectImporter,
-  saveExportFile,
-} from "@/components/creator/ProjectImportExport";
+import { ProjectImporter } from "@/components/creator/ProjectImportExport";
 
 interface ProjectCardProps {
   project: ProjectSummary;
   onOpen: (id: string) => void;
   onDelete: (project: ProjectSummary) => void;
   onPreview: (project: ProjectSummary) => void;
-  onExport: (project: ProjectSummary) => void;
   formatDate: (dateStr: string) => string;
 }
 
@@ -59,7 +47,6 @@ const ProjectCard = memo(function ProjectCard({
   onOpen,
   onDelete,
   onPreview,
-  onExport,
   formatDate,
 }: ProjectCardProps) {
   var projectScenarioLabel = "未设置";
@@ -134,47 +121,24 @@ const ProjectCard = memo(function ProjectCard({
           </div>
         </div>
         <span
-          className="shrink-0 text-[var(--color-text-tertiary)] group-hover:hidden"
+          className="shrink-0 text-[var(--color-text-tertiary)]"
           title={`创建于 ${formatDate(project.createdAt)}`}
         >
           {formatDate(project.updatedAt)}
         </span>
-        {/* Hovering swaps the timestamp for the actions menu, per the draft. */}
-        <Dropdown
-          trigger={["click"]}
-          menu={{
-            items: [
-              {
-                key: "export",
-                label: "导出项目",
-                icon: <FileOutput className="h-3.5 w-3.5" />,
-                onClick: ({ domEvent }) => {
-                  domEvent.stopPropagation();
-                  onExport(project);
-                },
-              },
-              {
-                key: "delete",
-                label: "删除",
-                danger: true,
-                icon: <Trash2 className="h-3.5 w-3.5" />,
-                onClick: ({ domEvent }) => {
-                  domEvent.stopPropagation();
-                  onDelete(project);
-                },
-              },
-            ],
+        {/* Export moved to the plan page; the only card action left is a
+            muted always-visible delete icon that reddens on hover only. */}
+        <button
+          type="button"
+          aria-label={`删除 ${project.name}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(project);
           }}
+          className="flex h-[18px] w-[18px] shrink-0 cursor-pointer items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-danger)]"
         >
-          <button
-            type="button"
-            aria-label={`${project.name} 更多操作`}
-            onClick={(e) => e.stopPropagation()}
-            className="hidden h-[18px] w-[18px] shrink-0 cursor-pointer items-center justify-center text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] group-hover:flex"
-          >
-            <MaskIcon src={cardMoreIcon} size={18} />
-          </button>
-        </Dropdown>
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
       </div>
     </div>
   );
@@ -197,6 +161,7 @@ const HOME_VIEWS: { key: HomeView; label: string; icon: string }[] = [
 
 export default function HomePage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [view, setView] = useState<HomeView>("create");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -243,6 +208,21 @@ export default function HomePage() {
     void fetchProjects();
   }, [fetchProjects]);
 
+  // Set which view to display based on a search parameter. Strip the param
+  // after consuming it, but bail when it's absent so the strip-induced
+  // searchParams change doesn't re-run setView a second time.
+  useEffect(() => {
+    const raw = searchParams.get("view");
+    if (raw === null) return;
+    const viewParam: HomeView = raw === "projects" ? "projects" : "create";
+    setView(viewParam);
+    const next = new URLSearchParams(searchParams);
+    next.delete("view");
+    const query = next.toString();
+    router.replace(query ? `/?${query}` : "/");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   const handleOpen = useCallback(
     (id: string) => {
       router.push(`/project/${id}/plan`);
@@ -271,29 +251,6 @@ export default function HomePage() {
     },
     [fetchProjects],
   );
-
-  const handleExport = useCallback(async (project: ProjectSummary) => {
-    const key = `export-${project.projectId}`;
-    message.loading({
-      content: `正在导出「${project.name}」…`,
-      key,
-      duration: 0,
-    });
-    try {
-      await saveExportFile(project.projectId);
-      message.success({
-        content: `「${project.name}」导出完成`,
-        key,
-        duration: 5,
-      });
-    } catch (err) {
-      message.error({
-        content: err instanceof Error ? err.message : "导出失败",
-        key,
-        duration: 10,
-      });
-    }
-  }, []);
 
   const handleSortChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -512,7 +469,6 @@ export default function HomePage() {
                     onOpen={handleOpen}
                     onDelete={handleDelete}
                     onPreview={setPreviewProject}
-                    onExport={handleExport}
                     formatDate={formatDate}
                   />
                 ))}

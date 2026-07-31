@@ -11,7 +11,6 @@ import {
   Music2,
   Paperclip,
   Search,
-  Sparkles,
   Upload,
   Wand2,
 } from "lucide-react";
@@ -32,7 +31,6 @@ import {
   useReviewFieldFocus,
   useReviewMediaFocus,
 } from "@/routing/reviewFocus";
-import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -524,16 +522,6 @@ export default function AssetsPage() {
         : `/project/${id}/assets`,
     );
   };
-  const openAgent = (item: AssetItem) => {
-    useCreatorInteractionStore.getState().select(item.ref);
-    useAgentDockUiStore.getState().setOpen(true);
-    useAgentDockUiStore.getState().setTab("conversation");
-    useAgentDockUiStore
-      .getState()
-      .setDraft(
-        `请检查并完善「${item.name}」(${item.ref})，先读取 Project 中的现状和引用关系再行动。`,
-      );
-  };
   const refreshAfterIngest = async () => {
     await Promise.allSettled([pollOnce(id), refreshTasks(id)]);
   };
@@ -972,14 +960,9 @@ export default function AssetsPage() {
                       下载
                     </Button>
                   )}
-                  <Button
-                    className="flex-1"
-                    icon={<Sparkles className="h-3.5 w-3.5" />}
-                    onClick={() => openAgent(selected)}
-                  >
-                    交给 Agent
+                  <Button className="flex-1" onClick={() => selectItem(null)}>
+                    关闭
                   </Button>
-                  <Button onClick={() => selectItem(null)}>关闭</Button>
                 </div>
               </div>
             </div>

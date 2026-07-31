@@ -142,12 +142,16 @@ describe("origin/main visible shell fidelity", () => {
       .find((button) => button.className.includes("fixed"));
     expect(floatingEntry).toBeDefined();
     expect(floatingEntry).toHaveClass("bg-[#FF9D4D]", "rounded-full");
-    // Card actions live in the per-card dropdown menu.
-    fireEvent.click(screen.getByRole("button", { name: "雪夜短片 更多操作" }));
+    // Export moved to the plan page; the card keeps a muted always-visible
+    // delete icon instead of a hover dropdown.
     expect(
-      await screen.findByRole("menuitem", { name: /导出项目/ }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /删除/ })).toBeInTheDocument();
+      screen.queryByRole("button", { name: "雪夜短片 更多操作" }),
+    ).not.toBeInTheDocument();
+    const deleteButton = screen.getByRole("button", { name: "删除 雪夜短片" });
+    expect(deleteButton).toHaveClass(
+      "text-[var(--color-text-tertiary)]",
+      "hover:text-[var(--color-danger)]",
+    );
     expect(container.querySelector("header")).toHaveClass(
       "border-b",
       "bg-[var(--color-bg-primary)]",

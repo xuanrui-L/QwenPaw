@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -49,6 +50,23 @@ from services.runtime_files.models import IdempotencyStatus
 from services.file_agent_runtime import get_creator_agent_runtime
 from services.storage_root import require_creator_data_root
 
+# QwenPaw secret store for reading encrypted provider API keys
+try:
+    from qwenpaw.security.secret_store import (
+        decrypt as qwenpaw_decrypt,
+        encrypt as qwenpaw_encrypt,
+        is_encrypted as qwenpaw_is_encrypted,
+    )
+    from qwenpaw.constant import SECRET_DIR as QWENPAW_SECRET_DIR
+
+    QWENPAW_SECRET_AVAILABLE = True
+except ImportError:
+    QWENPAW_SECRET_AVAILABLE = False
+    qwenpaw_decrypt = None
+    qwenpaw_encrypt = None
+    qwenpaw_is_encrypted = None
+    QWENPAW_SECRET_DIR = None
+
 from .dependencies import (
     CreatorErrorRoute,
     resolve_idempotency_key,
@@ -57,6 +75,12 @@ from .dependencies import (
 from utils.logger import setup_logger
 
 logger = setup_logger("model_routes")
+
+
+def _log_safe(value: object) -> str:
+    """Neutralize CR/LF in user-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
 
 router = APIRouter(
     prefix="/models",
@@ -335,8 +359,13 @@ def _assemble_model_config(
     if isinstance(checkpoints, dict):
         base["creation_checkpoints"].update(checkpoints)
     if base["vlm"].get("use_llm"):
-        for field in ("base_url", "api_key", "model_name", "protocol"):
-            base["vlm"][field] = base["llm"].get(field, "")
+        for field in ("base_url", "api_key", "model_name"):
+            if not base["vlm"].get(field):
+                base["vlm"][field] = base["llm"].get(field, "")
+
+    # Decrypt secret fields when the QwenPaw secret store is available.
+    _decrypt_secret_fields(base)
+
     return ModelConfigData.model_validate(base)
 
 
@@ -355,10 +384,112 @@ def load_model_config(*, include_environment: bool = True) -> ModelConfigData:
     )
 
 
+# ---------------------------------------------------------------------------
+# Host Provider API Key Sync
+# ---------------------------------------------------------------------------
+
+
+def get_host_provider_api_key(provider_id: str) -> str | None:
+    """Read a provider's API key from the QwenPaw encrypted store.
+
+    Lookup order:
+    1. builtin providers: ~/.qwenpaw.secret/providers/builtin/{provider_id}.json
+    2. custom providers: ~/.qwenpaw.secret/providers/custom/{provider_id}.json
+
+    Returns:
+        str: the decrypted API key, or None when missing or undecryptable
+    """
+    if not QWENPAW_SECRET_AVAILABLE or QWENPAW_SECRET_DIR is None:
+        logger.debug("QwenPaw secret store not available")
+        return None
+
+    # provider_id lands in a filesystem path; reject anything that could
+    # escape the providers directory.
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", provider_id):
+        logger.warning(
+            f"Rejected invalid provider id {_log_safe(provider_id)}",
+        )
+        return None
+
+    for subdir in ["builtin", "custom"]:
+        provider_file = (
+            QWENPAW_SECRET_DIR / "providers" / subdir / f"{provider_id}.json"
+        )
+        if provider_file.exists():
+            try:
+                with open(provider_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    encrypted_key = data.get("api_key", "")
+                    if not encrypted_key:
+                        continue
+                    # Decrypt values in the ENC: format.
+                    if encrypted_key.startswith("ENC:"):
+                        decrypted = qwenpaw_decrypt(encrypted_key)
+                        # On failure decrypt returns the original value
+                        # (still carrying the ENC: prefix).
+                        if decrypted.startswith("ENC:"):
+                            logger.warning(
+                                "Failed to decrypt API key for provider "
+                                f"{_log_safe(provider_id)}",
+                            )
+                            continue
+                        return decrypted
+                    # Plaintext value (legacy versions or test environments).
+                    return encrypted_key
+            except Exception as e:
+                logger.warning(
+                    f"Failed to read provider {_log_safe(provider_id)} "
+                    f"from {_log_safe(provider_file)}: {e}",
+                )
+                continue
+
+    return None
+
+
 # Placeholder returned instead of persisted secrets; a submitted placeholder
 # means "keep the stored value".
 SECRET_MASK = "__CREATOR_SECRET__"
 _SECRET_FIELDS = ("api_key", "access_key_secret", "policy_api_key")
+
+
+def _decrypt_secret_fields(data: dict) -> dict:
+    """Decrypt the secret fields inside the config data."""
+    if not (QWENPAW_SECRET_AVAILABLE and qwenpaw_decrypt is not None):
+        return data
+
+    for section_data in data.values():
+        if not isinstance(section_data, dict):
+            continue
+        for field in _SECRET_FIELDS:
+            value = section_data.get(field)
+            if not (
+                value
+                and isinstance(value, str)
+                and qwenpaw_is_encrypted(value)
+            ):
+                continue
+            section_data[field] = qwenpaw_decrypt(value)
+    return data
+
+
+def _encrypt_secret_fields(data: dict) -> dict:
+    """Encrypt the secret fields inside the config data."""
+    if not (QWENPAW_SECRET_AVAILABLE and qwenpaw_encrypt is not None):
+        return data
+
+    for section_data in data.values():
+        if not isinstance(section_data, dict):
+            continue
+        for field in _SECRET_FIELDS:
+            value = section_data.get(field)
+            if not (
+                value
+                and isinstance(value, str)
+                and not qwenpaw_is_encrypted(value)
+            ):
+                continue
+            section_data[field] = qwenpaw_encrypt(value)
+    return data
 
 
 def _mask_secrets(data: ModelConfigData) -> ModelConfigData:
@@ -404,9 +535,14 @@ def mutate_model_config(
             include_environment=False,
         )
         updated = mutator(persisted)
+
+        # Encrypt secret fields when the QwenPaw secret store is available.
+        updated_dict = updated.model_dump()
+        _encrypt_secret_fields(updated_dict)
+
         atomic_replace_bytes(
             config_path,
-            canonical_json_bytes(updated.model_dump()) + b"\n",
+            canonical_json_bytes(updated_dict) + b"\n",
         )
         os.chmod(config_path, 0o600)
     _invalidate_raw_config_cache()
@@ -1152,3 +1288,42 @@ async def test_oss_connection(
                 error="无法连接到 OSS 服务，请检查 Endpoint 和网络",
             )
         return ConnectionTestResponse(ok=False, error=exc_str)
+
+
+# ---------------------------------------------------------------------------
+# Real API Key Retrieval (for testing)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/real-api-key/{section}")
+async def get_real_api_key(section: str) -> dict[str, str]:
+    """Return the real API key of the given config section (for testing).
+
+    When VLM/Grounding/ASR reuse the LLM config, the frontend needs the real
+    API key to run connection tests, because it only stores the mask
+    "__CREATOR_SECRET__".
+    """
+    valid_sections = {"llm", "vlm", "asr", "image", "video", "grounding"}
+    if section not in valid_sections:
+        raise ValidationError(
+            f"不支持的配置项: {section}，必须是 {', '.join(valid_sections)} 之一",
+        )
+
+    config = load_model_config()
+    item = getattr(config, section)
+    return {"api_key": item.api_key}
+
+
+# ---------------------------------------------------------------------------
+# Host Provider API Key Sync
+# ---------------------------------------------------------------------------
+
+
+@router.get("/host-provider/{provider_id}/api-key")
+async def get_host_provider_key(provider_id: str) -> dict[str, str | None]:
+    """Fetch the API key of the given provider from the QwenPaw host.
+
+    Used to auto-sync the API key when picking an LLM/VLM provider in Creator.
+    """
+    api_key = get_host_provider_api_key(provider_id)
+    return {"api_key": api_key}

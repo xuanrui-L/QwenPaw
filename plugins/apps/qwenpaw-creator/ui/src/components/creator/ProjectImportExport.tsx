@@ -209,7 +209,7 @@ export function ProjectImporter({
 
 export async function saveExportFile(
   projectId: string,
-  onChunk?: (byteLength: number) => void,
+  onProgress?: (receivedBytes: number, totalBytes: number | null) => void,
 ) {
   const response = await creatorFetch(
     `/projects/${encodeURIComponent(projectId)}/export`,
@@ -234,14 +234,23 @@ export async function saveExportFile(
     }
   }
 
+  // The backend advertises the archive size; without it the UI can still
+  // report the downloaded byte count.
+  const lengthHeader = Number(response.headers.get("Content-Length"));
+  const totalBytes =
+    Number.isFinite(lengthHeader) && lengthHeader > 0 ? lengthHeader : null;
+
   const reader = response.body.getReader();
   const chunks: BlobPart[] = [];
+  let receivedBytes = 0;
+  onProgress?.(0, totalBytes);
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     chunks.push(value as BlobPart);
-    onChunk?.(value.byteLength);
+    receivedBytes += value.byteLength;
+    onProgress?.(receivedBytes, totalBytes);
   }
 
   const blob = new Blob(chunks);
@@ -254,4 +263,89 @@ export async function saveExportFile(
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+export interface ExportProgressState {
+  receivedBytes: number;
+  totalBytes: number | null;
+  status: "running" | "done";
+}
+
+export function formatBytes(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = Math.max(0, bytes);
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${index === 0 ? Math.round(value) : value.toFixed(1)} ${
+    units[index]
+  }`;
+}
+
+interface ExportProgressCardProps {
+  projectName: string;
+  progress: ExportProgressState;
+  onDismiss: () => void;
+}
+
+/**
+ * Floating card reporting export percent and byte size while the archive
+ * streams down. Pinned bottom-left so it never fights the AgentDock capsule.
+ */
+export function ExportProgressCard({
+  projectName,
+  progress,
+  onDismiss,
+}: ExportProgressCardProps) {
+  const done = progress.status === "done";
+  const percent = done
+    ? 100
+    : progress.totalBytes
+    ? Math.min(
+        99,
+        Math.floor((progress.receivedBytes / progress.totalBytes) * 100),
+      )
+    : null;
+  const sizeText = progress.totalBytes
+    ? `${formatBytes(progress.receivedBytes)} / ${formatBytes(
+        progress.totalBytes,
+      )}`
+    : formatBytes(progress.receivedBytes);
+  return (
+    <div
+      data-export-progress
+      className="fixed bottom-5 left-5 z-50 w-[300px] rounded-lg border border-[#EAE9E7] bg-white px-4 py-3 shadow-[0_8px_24px_rgba(0,0,0,0.12)]"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium text-[var(--color-text-primary)]">
+          {done ? "项目导出完成" : "正在导出项目"}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="关闭导出进度"
+          className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded text-[var(--color-text-secondary)] transition-colors hover:bg-[rgba(43,27,0,0.04)]"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      <p className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]">
+        {projectName}
+      </p>
+      <Progress
+        percent={percent ?? 100}
+        status={done ? "success" : "active"}
+        showInfo={percent !== null}
+        strokeColor="var(--color-accent)"
+      />
+      <div
+        data-export-progress-size
+        className="text-xs text-[var(--color-text-secondary)]"
+      >
+        {sizeText}
+      </div>
+    </div>
+  );
 }

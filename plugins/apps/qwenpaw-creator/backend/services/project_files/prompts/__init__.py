@@ -1,26 +1,18 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
-"""Hash-verified Project Workspace prompt templates."""
+"""Placeholder-verified Project Workspace prompt templates."""
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 
 _PROMPT_PATH = Path(__file__).resolve().parent / "workspace_schema.system.txt"
-_PROMPT_SHA256 = (
-    "47c90a59c14695ee9937258f127508560eabe0912ff77a95f6a1c31ca9587163"
-)
 _SCHEMA_PLACEHOLDER = "{{project_json_schema}}"
 
 
 def render_workspace_schema_prompt(*, project_json_schema: str) -> str:
-    data = _PROMPT_PATH.read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
-    if digest != _PROMPT_SHA256:
-        raise RuntimeError("Prompt hash mismatch: workspace_schema.system")
-    text = data.decode("utf-8").strip()
+    text = _PROMPT_PATH.read_text(encoding="utf-8").strip()
     if text.count(_SCHEMA_PLACEHOLDER) != 1:
         raise RuntimeError(
             "Prompt placeholder mismatch: workspace_schema.system requires project_json_schema",

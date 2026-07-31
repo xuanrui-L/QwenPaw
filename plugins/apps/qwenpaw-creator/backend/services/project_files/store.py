@@ -512,10 +512,11 @@ class ProjectStore:
                     f"Project was removed but tombstone cleanup failed: {safe_id}",
                 ) from exc
 
-    def export(self, project_id: str) -> Iterator[bytes]:
+    def export(self, project_id: str) -> tuple[int, Iterator[bytes]]:
         """Compress the whole Project folder into a zip under ``CREATOR_DATA_ROOT``/exports/.
-        Yields the archive contents in 8192-byte chunks so
-        callers can stream the bytes without loading the whole file into memory.
+        Returns the archive byte size plus an iterator yielding the contents
+        in 8192-byte chunks, so HTTP callers can advertise Content-Length for
+        download progress without loading the whole file into memory.
 
         This is a best-effort snapshot of the on-disk tree: it does not take
         the lifecycle lock, so a concurrent mutation may be partially captured.
@@ -548,6 +549,12 @@ class ProjectStore:
                     f"failed to create export file for project {safe_id}",
                 ) from e
 
+        return (
+            Path(archive_path).stat().st_size,
+            self._stream_export_archive(archive_path),
+        )
+
+    def _stream_export_archive(self, archive_path: str) -> Iterator[bytes]:
         try:
             with open(archive_path, "rb") as archive_file:
                 while True:
@@ -562,9 +569,8 @@ class ProjectStore:
             )
             raise ProjectStoreError("failed to export project bytes") from e
         finally:
-            if archive_path:
-                Path(archive_path).unlink(missing_ok=True)
-                logger.info(f"deleted project export zip file {archive_path}")
+            Path(archive_path).unlink(missing_ok=True)
+            logger.info(f"deleted project export zip file {archive_path}")
 
     def lifecycle_lock(self, project_id: str) -> CrossProcessFileLock:
         """Serialize creation/deletion with all Project-scoped mutations."""
