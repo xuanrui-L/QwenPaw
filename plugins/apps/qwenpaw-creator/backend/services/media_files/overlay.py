@@ -88,9 +88,21 @@ def _placement_values(
         values[key] = value if math.isfinite(value) else fallback
     values["width"] = max(1 / video_width, values["width"])
     values["height"] = max(1 / video_height, values["height"])
+    values["width"] = min(1.0, values["width"])
+    values["height"] = min(1.0, values["height"])
     values["anchor_x"] = min(1.0, max(0.0, values["anchor_x"]))
     values["anchor_y"] = min(1.0, max(0.0, values["anchor_y"]))
     values["opacity"] = min(1.0, max(0.0, values["opacity"]))
+    left = values["x"] - values["anchor_x"] * values["width"]
+    top = values["y"] - values["anchor_y"] * values["height"]
+    if left < 0.0:
+        values["x"] -= left
+    elif left + values["width"] > 1.0:
+        values["x"] -= left + values["width"] - 1.0
+    if top < 0.0:
+        values["y"] -= top
+    elif top + values["height"] > 1.0:
+        values["y"] -= top + values["height"] - 1.0
     return {
         **values,
         "box_width": max(1, round(video_width * values["width"])),
@@ -163,10 +175,12 @@ def _render_placed_text_box(
     box_width = int(values["box_width"])
     box_height = int(values["box_height"])
     canvas = Image.new("RGBA", (video_width, video_height), (0, 0, 0, 0))
-    layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
-    padding = max(3, round(min(box_width, box_height) * 0.1))
+    font_path = _find_cjk_font()
+
     if bubble:
+        layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        padding = max(3, round(min(box_width, box_height) * 0.1))
         border = max(1, round(box_height * 0.035))
         draw.rounded_rectangle(
             (border, border, box_width - border - 1, box_height - border - 1),
@@ -175,14 +189,78 @@ def _render_placed_text_box(
             outline=(20, 20, 20, 255),
             width=border,
         )
-    font_path = _find_cjk_font()
-    font_size = max(
-        10,
-        min(
-            round(box_height * 0.42),
-            round(box_width / max(4, len(text)) * 1.55),
-        ),
-    )
+        font_size = max(
+            10,
+            min(
+                round(box_height * 0.34),
+                round(box_width / max(4, len(text)) * 1.55),
+            ),
+        )
+    else:
+        target_font_size = max(16, round(video_width / 1280 * 34))
+        max_box_w = min(box_width, round(video_width * 0.7))
+        max_box_h = min(box_height, round(video_height * 0.25))
+        try:
+            _probe = (
+                ImageFont.truetype(font_path, target_font_size)
+                if font_path
+                else ImageFont.load_default()
+            )
+        except Exception:
+            _probe = ImageFont.load_default()
+        _tmp = ImageDraw.Draw(canvas)
+        _probe_lines: list[str] = []
+        _cur = ""
+        for _ch in text.strip():
+            _cand = _cur + _ch
+            if (
+                _cur
+                and _tmp.textbbox((0, 0), _cand, font=_probe)[2]
+                > max_box_w - 40
+            ):
+                _probe_lines.append(_cur)
+                _cur = _ch
+            else:
+                _cur = _cand
+        if _cur:
+            _probe_lines.append(_cur)
+        _probe_text = "\n".join(_probe_lines[:2])
+        _pb = _tmp.multiline_textbbox(
+            (0, 0),
+            _probe_text,
+            font=_probe,
+            spacing=4,
+        )
+        _tw = _pb[2] - _pb[0]
+        _th = _pb[3] - _pb[1]
+        actual_w = min(_tw + 40, max_box_w)
+        actual_h = min(_th + 24, max_box_h)
+        font_size = target_font_size
+        if _tw + 40 > max_box_w or _th + 24 > max_box_h:
+            font_size = max(
+                10,
+                round(
+                    target_font_size
+                    * min(
+                        max_box_w / max(_tw + 40, 1),
+                        max_box_h / max(_th + 24, 1),
+                    ),
+                ),
+            )
+        padding = max(8, round(min(actual_w, actual_h) * 0.12))
+        border = max(2, round(min(actual_w, actual_h) * 0.04))
+        box_width = actual_w
+        box_height = actual_h
+        layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        draw.rounded_rectangle(
+            (0, 0, box_width - 1, box_height - 1),
+            radius=max(4, round(min(box_width, box_height) * 0.18)),
+            fill=(0, 0, 0, 153),
+            outline=(255, 255, 255, 51),
+            width=border,
+        )
+
     try:
         font = (
             ImageFont.truetype(font_path, font_size)
@@ -191,41 +269,89 @@ def _render_placed_text_box(
         )
     except Exception:
         font = ImageFont.load_default()
-    available_width = max(1, box_width - padding * 2)
-    lines: list[str] = []
-    current = ""
-    for character in text.strip():
-        candidate = current + character
-        bounds = draw.textbbox((0, 0), candidate, font=font)
-        if current and bounds[2] - bounds[0] > available_width:
+
+    if bubble:
+        available_width = max(1, box_width - padding * 2)
+        lines: list[str] = []
+        current = ""
+        for character in text.strip():
+            candidate = current + character
+            bounds = draw.textbbox((0, 0), candidate, font=font)
+            if current and bounds[2] - bounds[0] > available_width:
+                lines.append(current)
+                current = character
+            else:
+                current = candidate
+        if current:
             lines.append(current)
-            current = character
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    display_text = "\n".join(lines[:2])
-    bounds = draw.multiline_textbbox(
-        (0, 0),
-        display_text,
-        font=font,
-        spacing=2,
-        align="center",
-    )
-    text_width = bounds[2] - bounds[0]
-    text_height = bounds[3] - bounds[1]
-    text_x = (box_width - text_width) / 2
-    text_y = (box_height - text_height) / 2 - bounds[1]
-    draw.multiline_text(
-        (text_x, text_y),
-        display_text,
-        font=font,
-        spacing=2,
-        align="center",
-        fill="#111111" if bubble else "#FFFFFF",
-        stroke_width=0 if bubble else max(1, round(font_size * 0.08)),
-        stroke_fill="#000000",
-    )
+        display_text = "\n".join(lines[:2])
+        bounds = draw.multiline_textbbox(
+            (0, 0),
+            display_text,
+            font=font,
+            spacing=2,
+            align="center",
+        )
+        text_width = bounds[2] - bounds[0]
+        text_height = bounds[3] - bounds[1]
+        try:
+            descent = font.getmetrics()[1]
+        except AttributeError:
+            descent = 0
+        text_x = (box_width - text_width) / 2
+        text_y = (box_height - text_height + descent) / 2 - bounds[1]
+        draw.multiline_text(
+            (text_x, text_y),
+            display_text,
+            font=font,
+            spacing=2,
+            align="center",
+            fill="#111111",
+            stroke_width=0,
+            stroke_fill="#000000",
+        )
+    else:
+        available_width = max(1, box_width - padding * 2)
+        lines = []
+        current = ""
+        for character in text.strip():
+            candidate = current + character
+            bounds = draw.textbbox((0, 0), candidate, font=font)
+            if current and bounds[2] - bounds[0] > available_width:
+                lines.append(current)
+                current = character
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        lines = lines[:2]
+        display_text = "\n".join(lines)
+        bounds = draw.multiline_textbbox(
+            (0, 0),
+            display_text,
+            font=font,
+            spacing=4,
+            align="center",
+        )
+        text_width = bounds[2] - bounds[0]
+        text_height = bounds[3] - bounds[1]
+        try:
+            descent = font.getmetrics()[1]
+        except AttributeError:
+            descent = 0
+        text_x = (box_width - text_width) / 2
+        text_y = (box_height - text_height + descent) / 2 - bounds[1]
+        draw.multiline_text(
+            (text_x, text_y),
+            display_text,
+            font=font,
+            spacing=4,
+            align="center",
+            fill="#FFFFFF",
+            stroke_width=max(1, round(font_size * 0.08)),
+            stroke_fill="#000000",
+        )
+
     _place_layer(canvas, layer, location)
     try:
         canvas.save(output_path, "PNG")

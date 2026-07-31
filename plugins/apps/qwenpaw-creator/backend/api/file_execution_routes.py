@@ -532,6 +532,13 @@ async def render_timeline(
             except BaseException:
                 # The execution service persists terminal failure details on
                 # the durable Task; clients observe them through task polling.
+                _logger.error(
+                    "compose failed project=%s timeline=%s task=%s",
+                    project_id,
+                    timeline_id,
+                    task_id,
+                    exc_info=True,
+                )
                 return
 
         background = asyncio.create_task(

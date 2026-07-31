@@ -157,9 +157,11 @@ function PlaceholderLayer({ layer }: { layer: ElementPlayback }) {
 function TextOverlayLayer({
   layer,
   stageWidth,
+  stageHeight,
 }: {
   layer: ElementPlayback;
   stageWidth: number;
+  stageHeight: number;
 }) {
   const { element } = layer;
   if (element.creation.type !== "overlay") return null;
@@ -178,7 +180,11 @@ function TextOverlayLayer({
           stageWidth={stageWidth}
         />
       ) : (
-        <InterviewSummaryBox text={element.creation.text} />
+        <InterviewSummaryBox
+          text={element.creation.text}
+          stageWidth={stageWidth}
+          stageHeight={stageHeight}
+        />
       )}
     </div>
   );
@@ -346,6 +352,7 @@ export default function TimelineLivePreview({
   const lastEmittedTick = useRef(playheadTick);
   const stageRef = useRef<HTMLDivElement>(null);
   const [stageWidth, setStageWidth] = useState(1280);
+  const [stageHeight, setStageHeight] = useState(720);
   const [visualRevision, setVisualRevision] = useState(0);
   const [readyMotionKeys, setReadyMotionKeys] = useState<Set<string>>(
     () => new Set(),
@@ -370,7 +377,10 @@ export default function TimelineLivePreview({
   useLayoutEffect(() => {
     const node = stageRef.current;
     if (!node) return;
-    const update = () => setStageWidth(Math.max(1, node.clientWidth));
+    const update = () => {
+      setStageWidth(Math.max(1, node.clientWidth));
+      setStageHeight(Math.max(1, node.clientHeight));
+    };
     update();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(update);
@@ -683,6 +693,7 @@ export default function TimelineLivePreview({
                 key={elementId}
                 layer={layer}
                 stageWidth={stageWidth}
+                stageHeight={stageHeight}
               />
             );
           }
