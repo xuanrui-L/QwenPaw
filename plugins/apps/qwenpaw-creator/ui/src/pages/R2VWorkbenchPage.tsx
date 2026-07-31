@@ -672,6 +672,8 @@ export default function R2VWorkbenchPage() {
           : draft.creation.prop_refs.map(visualEntityId);
       for (const entityId of previousEntityIds) {
         if (nextEntityIds.includes(entityId)) continue;
+        // Schema v3 persists bare entity IDs. Also clean prefixed keys from
+        // pre-validation UI drafts so they cannot survive a reference edit.
         delete draft.creation.visual_variant_refs[entityId];
         delete draft.creation.visual_variant_refs[`visual-entity:${entityId}`];
       }

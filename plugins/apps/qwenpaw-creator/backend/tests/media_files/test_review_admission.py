@@ -9,7 +9,7 @@ import logging
 
 import pytest
 
-from domain.errors import ConflictError, ReviewPendingError
+from domain.errors import ConflictError, ReviewPendingError, ValidationError
 from services.media_files.image_execution import FileImageExecutionService
 from services.media_files.review_admission import assert_media_review_admission
 from services.media_files.visual_reference_resolution import (
@@ -339,3 +339,17 @@ def test_image_execution_freezes_only_the_pending_variant(
         ],
     )
     assert resolved == (fallen.artifact_version_id,)
+
+
+def test_visual_reference_resolution_fails_closed_for_missing_entity() -> None:
+    broken = Project.new(
+        project_id="project-missing-visual",
+        name="Missing visual",
+    )
+
+    with pytest.raises(ValidationError, match="视觉引用实体不存在"):
+        resolve_r2v_visual_reference_version_ids(
+            broken,
+            R2VCreation(character_refs=["char:hero"]),
+            [],
+        )

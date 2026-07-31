@@ -496,6 +496,8 @@ def _resolve_request(
             reference_version_ids=tuple(dict.fromkeys(version_ids)),
             reference_checksums=(),
             read_set=(),
+            # ArtifactSlot IDs are opaque. Entity and Variant IDs may already
+            # contain colons, so consumers must not parse this by splitting.
             slot_id=(
                 f"asset:{entity_id}:variant:{variant.variant_id}:image"
                 if variant

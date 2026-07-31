@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from domain.errors import ValidationError
 from services.project_files.models import Project, R2VCreation, VisualEntity
 
 
@@ -107,7 +108,14 @@ def resolve_r2v_visual_reference_version_ids(
     entities: list[tuple[VisualEntity, str | None]] = []
     selected: list[str] = []
     for entity_id in _entity_ids(creation):
-        entity = project.visual.entities.items[entity_id]
+        entity = project.visual.entities.items.get(entity_id)
+        if entity is None:
+            # A validated Project guarantees this invariant. Keep a controlled
+            # failure for callers holding a manually mutated in-memory model;
+            # silently skipping would generate without a required identity.
+            raise ValidationError(
+                f"R2V 视觉引用实体不存在: {entity_id}",
+            )
         variant_id = _resolved_variant_id(
             project,
             creation,

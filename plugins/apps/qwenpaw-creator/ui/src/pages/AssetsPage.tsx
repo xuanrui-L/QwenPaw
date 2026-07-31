@@ -413,6 +413,8 @@ function resolveProvenanceRef(
   if (ref.startsWith("visual-entity:")) {
     const entityId = ref.slice("visual-entity:".length);
     const entity = project.visual.entities.items[entityId];
+    // A multi-Variant entity has no safe implicit selection. Legacy entity
+    // provenance therefore stays unresolved until it names visual-variant:.
     const versionId = entity
       ? entity.variants.order.length === 1
         ? entity.variants.items[entity.variants.order[0]]
