@@ -75,7 +75,8 @@ function useBoxSize(ref: React.RefObject<HTMLDivElement>) {
 const lineHeightOf = (fontSize: number) => Math.round(fontSize * 1.15) + 2;
 
 /** Mirrors backend _render_placed_pet_os_box: white bubble with black border +
- * tail + vibe emoji. */
+ * tail + vibe emoji. Auto-sizes to fit text content, centered in the location
+ * box. */
 export function PetOsBubble({
   text,
   vibe,
@@ -89,70 +90,85 @@ export function PetOsBubble({
   const size = useBoxSize(boxRef);
   let content: React.ReactNode = null;
   if (size && size.width > 4 && size.height > 4) {
-    const { width, height } = size;
-    const border = Math.max(2, Math.round(Math.min(width, height) * 0.018));
-    const padding = Math.max(5, Math.round(Math.min(width, height) * 0.06));
-    const tailHeight = Math.max(8, Math.round(height * 0.09));
-    const emojiSize = Math.max(18, Math.round(height * 0.2));
-    const emojiGap = Math.max(2, Math.round(height * 0.025));
-    const bubbleHeight = Math.max(
-      16,
-      height - tailHeight - emojiSize - emojiGap - border,
-    );
-    const bubbleRight = Math.max(border + 2, width - border - 1);
+    const { width: containerW, height: containerH } = size;
+    const targetFontSize = Math.max(10, Math.round((stageWidth / 1280) * 30));
+    const maxBubbleW = Math.round(containerW * 0.9);
+
+    const tailHeight = Math.max(8, Math.round(containerH * 0.09));
+    const emojiSize = Math.max(18, Math.round(containerH * 0.2));
+    const emojiGap = Math.max(2, Math.round(containerH * 0.025));
+
+    let fontSize = targetFontSize;
+    let lines: string[] = [];
+    let textW = 0;
+    let textH = 0;
+    let border = 2;
+    let padding = 5;
+    let bubbleW = 0;
+    let bubbleH = 0;
+
+    while (fontSize >= 10) {
+      border = Math.max(2, Math.round(containerH * 0.018));
+      padding = Math.max(5, Math.round(containerH * 0.06));
+      const availW = Math.max(1, maxBubbleW - padding * 2 - border * 2);
+      lines = wrapGreedy(text, fontSize, availW);
+      textW = Math.max(...lines.map((l) => measureWidth(l, fontSize)), 1);
+      textH = lines.length * lineHeightOf(fontSize) - 2;
+      bubbleW = Math.min(textW + padding * 2 + border * 2, maxBubbleW);
+      bubbleH =
+        textH + padding * 2 + border * 2 + tailHeight + emojiSize + emojiGap;
+      if (bubbleW <= maxBubbleW) break;
+      fontSize -= 1;
+    }
+
+    const bubbleX = Math.max(0, (containerW - bubbleW) / 2);
+    const bubbleY = Math.max(0, (containerH - bubbleH) / 2);
+
+    const lineHeight = lineHeightOf(fontSize);
+    const actualTextH = lines.length * lineHeight - 2;
+    const textAreaH =
+      bubbleH - tailHeight - emojiSize - emojiGap - border - padding * 2;
+    const textTop =
+      bubbleY + border + padding + Math.max(0, (textAreaH - actualTextH) / 2);
+
+    const bubbleBottom = bubbleY + bubbleH - border;
+    const bubbleRight = bubbleX + bubbleW - border;
     const radius = Math.max(
       5,
-      Math.round(Math.min(width, bubbleHeight) * 0.09),
+      Math.round(Math.min(bubbleW, bubbleH - tailHeight) * 0.09),
     );
-    const tailX = Math.min(
-      bubbleRight - tailHeight * 2,
-      Math.max(border + tailHeight * 2, Math.round(width * 0.28)),
+
+    const tailRelX = Math.min(
+      bubbleW - border - tailHeight * 2,
+      Math.max(border + tailHeight * 2, Math.round(bubbleW * 0.28)),
     );
+    const tailX = bubbleX + tailRelX;
     const tailTip: [number, number] = [
       tailX - Math.round(tailHeight * 0.55),
-      bubbleHeight + tailHeight,
+      bubbleBottom + tailHeight,
     ];
-    const availableWidth = Math.max(1, width - padding * 2 - border * 2);
-    const availableHeight = Math.max(
-      1,
-      bubbleHeight - padding * 2 - border * 2,
-    );
-    let fontSize = Math.max(
-      10,
+
+    const emojiX = Math.max(
+      bubbleX,
       Math.min(
-        Math.round((stageWidth / 1280) * 30),
-        Math.round(availableHeight / 3.5),
+        bubbleX + bubbleW - emojiSize,
+        tailTip[0] - Math.floor(emojiSize / 2),
       ),
     );
-    let lines = wrapGreedy(text, fontSize, availableWidth);
-    while (
-      fontSize > 10 &&
-      lines.length * lineHeightOf(fontSize) - 2 > availableHeight
-    ) {
-      fontSize -= 1;
-      lines = wrapGreedy(text, fontSize, availableWidth);
-    }
-    const lineHeight = lineHeightOf(fontSize);
-    const textHeight = lines.length * lineHeight - 2;
-    const textTop =
-      border + padding + Math.max(0, (availableHeight - textHeight) / 2);
-    const emojiX = Math.max(
-      0,
-      Math.min(width - emojiSize, tailTip[0] - Math.floor(emojiSize / 2)),
-    );
-    const emojiY = Math.min(height - emojiSize, tailTip[1] + emojiGap);
+    const emojiY = Math.min(containerH - emojiSize, tailTip[1] + emojiGap);
+
     content = (
       <svg
-        viewBox={`0 0 ${width} ${height}`}
+        viewBox={`0 0 ${containerW} ${containerH}`}
         width="100%"
         height="100%"
         aria-hidden
       >
         <rect
-          x={border}
-          y={border}
-          width={bubbleRight - border}
-          height={bubbleHeight - border}
+          x={bubbleX + border / 2}
+          y={bubbleY + border / 2}
+          width={bubbleW - border}
+          height={bubbleBottom - bubbleY - border}
           rx={radius}
           fill="#ffffff"
           fillOpacity={238 / 255}
@@ -160,14 +176,14 @@ export function PetOsBubble({
           strokeWidth={border}
         />
         <polygon
-          points={`${tailX},${bubbleHeight} ${tailTip[0]},${tailTip[1]} ${
+          points={`${tailX},${bubbleBottom} ${tailTip[0]},${tailTip[1]} ${
             tailX + tailHeight
-          },${bubbleHeight}`}
+          },${bubbleBottom}`}
           fill="#ffffff"
         />
         <line
           x1={tailX}
-          y1={bubbleHeight}
+          y1={bubbleBottom}
           x2={tailTip[0]}
           y2={tailTip[1]}
           stroke="#000000"
@@ -177,14 +193,14 @@ export function PetOsBubble({
           x1={tailTip[0]}
           y1={tailTip[1]}
           x2={tailX + tailHeight}
-          y2={bubbleHeight}
+          y2={bubbleBottom}
           stroke="#000000"
           strokeWidth={border}
         />
         {lines.map((line, index) => (
           <text
             key={index}
-            x={border + padding}
+            x={bubbleX + border + padding}
             y={textTop + index * lineHeight + fontSize * 0.86}
             fontSize={fontSize}
             fontFamily={CJK_FONT_STACK}
@@ -227,10 +243,7 @@ export function InterviewSummaryBox({
   const maxBoxW = Math.round(stageWidth * 0.7);
   const maxBoxH = Math.round(stageHeight * 0.25);
   const padBase = Math.max(8, Math.round(stageWidth * 0.01));
-  const lines = wrapGreedy(text, targetFontSize, maxBoxW - padBase * 2).slice(
-    0,
-    2,
-  );
+  const lines = wrapGreedy(text, targetFontSize, maxBoxW - padBase * 2);
   const lineHeight = lineHeightOf(targetFontSize);
   const textW = Math.max(
     ...lines.map((l) => measureWidth(l, targetFontSize)),

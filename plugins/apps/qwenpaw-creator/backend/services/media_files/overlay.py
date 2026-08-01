@@ -224,7 +224,7 @@ def _render_placed_text_box(
                 _cur = _cand
         if _cur:
             _probe_lines.append(_cur)
-        _probe_text = "\n".join(_probe_lines[:2])
+        _probe_text = "\n".join(_probe_lines)
         _pb = _tmp.multiline_textbbox(
             (0, 0),
             _probe_text,
@@ -324,7 +324,6 @@ def _render_placed_text_box(
                 current = candidate
         if current:
             lines.append(current)
-        lines = lines[:2]
         display_text = "\n".join(lines)
         bounds = draw.multiline_textbbox(
             (0, 0),
@@ -370,7 +369,7 @@ def _render_placed_pet_os_box(
     output_path: Path,
     location: Mapping[str, Any],
 ) -> bool:
-    """Render the original speech-bubble, tail, and emoji inside location."""
+    """Render the speech-bubble, tail, and emoji auto-sized to text content."""
 
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -378,63 +377,47 @@ def _render_placed_pet_os_box(
         return False
 
     values = _placement_values(location, video_width, video_height)
-    box_width = int(values["box_width"])
-    box_height = int(values["box_height"])
+    max_box_w = int(values["box_width"])
+    max_box_h = int(values["box_height"])
     canvas = Image.new("RGBA", (video_width, video_height), (0, 0, 0, 0))
-    layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(layer)
-
-    border = max(2, round(min(box_width, box_height) * 0.018))
-    padding = max(5, round(min(box_width, box_height) * 0.06))
-    tail_height = max(8, round(box_height * 0.09))
-    emoji_size = max(18, round(box_height * 0.2))
-    emoji_gap = max(2, round(box_height * 0.025))
-    bubble_height = max(
-        16,
-        box_height - tail_height - emoji_size - emoji_gap - border,
-    )
-    bubble_right = max(border + 2, box_width - border - 1)
-    draw.rounded_rectangle(
-        (border, border, bubble_right, bubble_height),
-        radius=max(5, round(min(box_width, bubble_height) * 0.09)),
-        fill="white",
-        outline="black",
-        width=border,
-    )
-    tail_x = min(
-        bubble_right - tail_height * 2,
-        max(border + tail_height * 2, round(box_width * 0.28)),
-    )
-    tail_tip = (
-        tail_x - round(tail_height * 0.55),
-        bubble_height + tail_height,
-    )
-    draw.polygon(
-        [
-            (tail_x, bubble_height),
-            tail_tip,
-            (tail_x + tail_height, bubble_height),
-        ],
-        fill="white",
-    )
-    draw.line(
-        [(tail_x, bubble_height), tail_tip],
-        fill="black",
-        width=border,
-    )
-    draw.line(
-        [tail_tip, (tail_x + tail_height, bubble_height)],
-        fill="black",
-        width=border,
-    )
 
     font_path = _find_cjk_font()
-    available_width = max(1, box_width - padding * 2 - border * 2)
-    available_height = max(1, bubble_height - padding * 2 - border * 2)
-    font_size = max(
-        10,
-        min(round(video_width / 1280 * 30), round(available_height / 3.5)),
-    )
+    target_font_size = max(10, round(video_width / 1280 * 30))
+    max_bubble_w = max(1, round(max_box_w * 0.9))
+
+    tail_height = max(8, round(max_box_h * 0.09))
+    emoji_size = max(18, round(max_box_h * 0.2))
+    emoji_gap = max(2, round(max_box_h * 0.025))
+
+    def _wrap_text(draw_ref, font_ref, max_w):
+        result: list[str] = []
+        cur = ""
+        for ch in text.strip():
+            cand = cur + ch
+            if (
+                cur
+                and draw_ref.textbbox((0, 0), cand, font=font_ref)[2] > max_w
+            ):
+                result.append(cur)
+                cur = ch
+            else:
+                cur = cand
+        if cur:
+            result.append(cur)
+        return result
+
+    probe = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    probe_draw = ImageDraw.Draw(probe)
+
+    font_size = target_font_size
+    lines: list[str] = []
+    text_w = 0
+    text_h = 0
+    border = 2
+    padding = 5
+    box_width = 1
+    box_height = 1
+
     while font_size >= 10:
         try:
             font = (
@@ -444,48 +427,113 @@ def _render_placed_pet_os_box(
             )
         except Exception:
             font = ImageFont.load_default()
-        lines: list[str] = []
-        current = ""
-        for character in text.strip():
-            candidate = current + character
-            bounds = draw.textbbox((0, 0), candidate, font=font)
-            if current and bounds[2] - bounds[0] > available_width:
-                lines.append(current)
-                current = character
-            else:
-                current = candidate
-        if current:
-            lines.append(current)
+        border = max(2, round(max_box_h * 0.018))
+        padding = max(5, round(max_box_h * 0.06))
+        avail_w = max(1, max_bubble_w - padding * 2 - border * 2)
+        lines = _wrap_text(probe_draw, font, avail_w)
         display_text = "\n".join(lines)
-        bounds = draw.multiline_textbbox(
+        bounds = probe_draw.multiline_textbbox(
             (0, 0),
             display_text,
             font=font,
             spacing=2,
         )
-        if bounds[3] - bounds[1] <= available_height:
+        text_w = bounds[2] - bounds[0]
+        text_h = bounds[3] - bounds[1]
+        box_width = min(text_w + padding * 2 + border * 2, max_bubble_w)
+        box_height = (
+            text_h
+            + padding * 2
+            + border * 2
+            + tail_height
+            + emoji_size
+            + emoji_gap
+        )
+        if box_width <= max_bubble_w:
             break
         font_size -= 1
-    text_height = bounds[3] - bounds[1]
+
+    box_width = max(box_width, 1)
+    box_height = max(box_height, 1)
+
+    layer = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+
+    bubble_x = 0
+    bubble_y = 0
+
+    text_h = bounds[3] - bounds[1]
+    text_area_h = (
+        box_height
+        - tail_height
+        - emoji_size
+        - emoji_gap
+        - border
+        - padding * 2
+    )
+    text_y = (
+        bubble_y + border + padding + (text_area_h - text_h) / 2 - bounds[1]
+    )
     draw.multiline_text(
-        (
-            border + padding,
-            border
-            + padding
-            + (available_height - text_height) / 2
-            - bounds[1],
-        ),
+        (bubble_x + border + padding, text_y),
         display_text,
         font=font,
         spacing=2,
         fill="#111111",
     )
 
+    bubble_bottom = bubble_y + box_height - border
+    bubble_right = bubble_x + box_width - border
+    bubble_radius = max(
+        5,
+        round(min(box_width, box_height - tail_height) * 0.09),
+    )
+    draw.rounded_rectangle(
+        (
+            bubble_x + border / 2,
+            bubble_y + border / 2,
+            bubble_right,
+            bubble_bottom,
+        ),
+        radius=bubble_radius,
+        fill="white",
+        outline="black",
+        width=border,
+    )
+
+    tail_rel_x = min(
+        box_width - border - tail_height * 2,
+        max(border + tail_height * 2, round(box_width * 0.28)),
+    )
+    tail_x = bubble_x + tail_rel_x
+    tail_tip = (
+        tail_x - round(tail_height * 0.55),
+        bubble_bottom + tail_height,
+    )
+    draw.polygon(
+        [
+            (tail_x, bubble_bottom),
+            tail_tip,
+            (tail_x + tail_height, bubble_bottom),
+        ],
+        fill="white",
+    )
+    draw.line(
+        [(tail_x, bubble_bottom), tail_tip],
+        fill="black",
+        width=border,
+    )
+    draw.line(
+        [tail_tip, (tail_x + tail_height, bubble_bottom)],
+        fill="black",
+        width=border,
+    )
+
     emoji_font_path = _find_emoji_font()
     try:
         bitmap_sizes = [160, 96, 64, 48, 40, 32, 20]
         render_size = next(
-            (size for size in bitmap_sizes if size >= emoji_size),
+            (s for s in bitmap_sizes if s >= emoji_size),
             bitmap_sizes[0],
         )
         emoji_font = (
@@ -507,8 +555,11 @@ def _render_placed_pet_os_box(
                 Image.Resampling.LANCZOS,
             )
             emoji_x = max(
-                0,
-                min(box_width - emoji_size, tail_tip[0] - emoji_size // 2),
+                bubble_x,
+                min(
+                    bubble_x + box_width - emoji_size,
+                    tail_tip[0] - emoji_size // 2,
+                ),
             )
             emoji_y = min(box_height - emoji_size, tail_tip[1] + emoji_gap)
             layer.alpha_composite(emoji_image, (emoji_x, emoji_y))
