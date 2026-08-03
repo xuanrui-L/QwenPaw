@@ -123,19 +123,6 @@ Shot 是视频的最小叙事单元，每个 Shot 同时承载**内容节拍**�
 - `dialogue`：有对话/旁白的场景必须填写，长度与 Shot 时长匹配
 - `camera` / `framing`：服务于内容节拍和镜头节奏
 
-**示例**：
-
-剧情叙事类（4 Shot，递进+续写，含对话）：
-1. Shot 1（4s，建立）：两人牵手走在公园小路上，女生侧头看向路边的花。**全景，固定机位**
-2. Shot 2（4s，发展）：女生停下脚步，转身指着花丛，表情惊喜说"你看那个"。**中景，轻微推近**
-3. Shot 3（4s，互动）：男生转头看向女生，微笑回应"你喜欢就摘一朵"。**近景，过肩角度**
-4. Shot 4（3s，收尾）：女生低头浅笑靠在男生肩上，两人牵手继续往前走。**近景，缓慢拉远**
-
-产品展示类（4 Shot，递进，无对话）：
-1. Shot 1（3s，外观）：产品从暗处缓缓亮起，展示整体轮廓。**全景，缓慢推近**
-2. Shot 2（4s，细节）：镜头推近至产品 Logo 和材质纹理。**特写，平移**
-3. Shot 3（4s，功能）：用户手持产品操作，展示核心功能。**中景，固定机位**
-4. Shot 4（4s，效果）：产品使用后的效果展示，画面明亮通透。**近景，缓慢拉远**
 3. 单个 R2V Element 不超过 15 秒。较长内容拆为多个首尾衔接的 Element；下一项的 `start_tick` 等于上一项的 `start_tick + duration_tick`，除非创作意图明确要求 gap 或 overlap。
 4. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。先从用户描述中提取每个 VisualEntity 的全部必需状态，完整写入 `required_variant_ids`；再建立对应 Variant，并让每个 Element 通过 `visual_variant_refs` 绑定正确状态。
 5. Element 结构完成后才进入视觉和媒体生产。必须先委派视觉开发完成所有启用 R2V Element 引用的角色、场景、道具及其必需 Variant，并确认每项已有使用中的真实产物；之后才委派 `r2v_generation_director`。后端会阻止视觉设定未完成时生成分镜。
