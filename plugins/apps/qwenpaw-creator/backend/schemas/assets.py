@@ -22,7 +22,12 @@ class TextOrUrlAssetRequest(StrictModel):
 
 
 CoverageMode = Literal["available", "unavailable", "not_applicable"]
-CoverageProducer = Literal["model_native", "runtime_existing", "user_provided"]
+CoverageProducer = Literal[
+    "model_native",
+    "runtime_existing",
+    "user_provided",
+    "document_reader",
+]
 
 
 class SourceCoverage(StrictModel):
@@ -57,6 +62,13 @@ class SourceModelRunRef(StrictModel):
         return value
 
 
+class DocumentMetadata(StrictModel):
+    """Document facts produced by the document reader (format + pages)."""
+
+    format: str = Field(min_length=1)
+    page_count: int = Field(alias="pageCount", strict=True, ge=1)
+
+
 class SourceMediaMetadata(StrictModel):
     media_kind: Literal[
         "image",
@@ -83,6 +95,15 @@ class SourceMediaMetadata(StrictModel):
         gt=0,
     )
     channels: int | None = Field(None, strict=True, gt=0)
+    document: DocumentMetadata | None = None
+
+    @model_validator(mode="after")
+    def validate_document_metadata(self) -> "SourceMediaMetadata":
+        if self.document is not None and self.media_kind != "document":
+            raise ValueError(
+                "document metadata is only valid for document media",
+            )
+        return self
 
 
 class SourceEvidenceRecord(StrictModel):
@@ -284,6 +305,7 @@ class SourceAgentModuleResultRefs(StrictModel):
     """Opaque Runtime-owned modality results selected by the outer VLM."""
 
     asr: str | None = None
+    document: str | None = None
 
 
 class SourceAgentIntelligenceInput(StrictModel):
