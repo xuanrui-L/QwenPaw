@@ -282,6 +282,20 @@ def test_dedup_sentences_keeps_genuine_repeat_after_boundary() -> None:
     ]
 
 
+def test_dedup_sentences_keeps_consecutive_repeats_when_prev_also_repeats() -> (
+    None
+):
+    # prev already ends with the sentence twice and curr repeats it twice:
+    # a concatenated longest-match would strip both, deleting a genuine
+    # occurrence. Only one re-heard copy may be removed.
+    prev = ["谢谢观看。", "谢谢观看。"]
+    curr = ["谢谢观看。", "谢谢观看。", "接下来。"]
+    assert asr_model._dedup_sentences(prev, curr) == [
+        "谢谢观看。",
+        "接下来。",
+    ]
+
+
 def test_dedup_sentences_ignores_incidental_short_match() -> None:
     # A one-character coincidence ('好') must not trim unrelated speech.
     prev = ["天气很好"]

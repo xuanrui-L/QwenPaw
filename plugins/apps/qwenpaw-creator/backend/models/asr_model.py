@@ -646,33 +646,27 @@ def _dedup_sentences(
 ) -> list[str]:
     """Trim only the overlap the next chunk re-heard from the previous one.
 
-    Removes at most one overlap span (never loops over repeats) and requires a
-    meaningful match length, so a sentence the speaker genuinely repeats after
-    the boundary is preserved.
+    The re-heard boundary region lands in the *first* sentence of the next
+    chunk, so only that sentence is trimmed (a prefix) or dropped (if wholly
+    re-heard) -- at most one occurrence. A sentence the speaker genuinely
+    repeats after the boundary is therefore always preserved, even when the
+    previous chunk already ended with the same sentence twice.
     """
     if not prev_sentences or not curr_sentences:
         return list(curr_sentences)
     prev_tail = "".join(prev_sentences)[-max_chars:]
-    curr_head = "".join(curr_sentences)
+    first = curr_sentences[0]
     strip = _overlap_prefix_length(
         prev_tail,
-        curr_head,
+        first,
         max_chars=max_chars,
         min_chars=min_chars,
     )
     if strip <= 0:
         return list(curr_sentences)
-    result: list[str] = []
-    remaining = strip
-    for sentence in curr_sentences:
-        if remaining <= 0:
-            result.append(sentence)
-        elif len(sentence) <= remaining:
-            remaining -= len(sentence)
-        else:
-            result.append(sentence[remaining:])
-            remaining = 0
-    return result
+    if strip >= len(first):
+        return list(curr_sentences[1:])
+    return [first[strip:], *curr_sentences[1:]]
 
 
 def _extract_chunk_window(
