@@ -15,7 +15,10 @@ import type {
   TimelineDocument,
   TimelineElementDocument,
 } from "@/contracts/creator";
-import { getArtifactVersionMediaUrl } from "@/api/creator";
+import {
+  getArtifactVersionMediaUrl,
+  getAssetVersionMediaUrl,
+} from "@/api/creator";
 import {
   TRANSITION_KIND_LABEL,
   resolveElementOutputs,
@@ -716,16 +719,116 @@ export default function ElementDetail({
               </p>
             </div>
           )}
-          {creation.type === "audio" && (
-            <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
-              音频素材：
-              {project.assets.source_versions_by_id[
-                creation.source_asset_version_id
-              ]?.name || "当前音频"}
-              <br />
-              音量 {creation.gain_db} dB · 声像 {creation.pan}
-            </div>
-          )}
+          {creation.type === "audio" &&
+            (() => {
+              const audioVersion =
+                project.assets.source_versions_by_id[
+                  creation.source_asset_version_id
+                ];
+              const audioMeta = (audioVersion?.metadata ?? {}) as Record<
+                string,
+                unknown
+              >;
+              const textPreview = String(audioMeta.textPreview ?? "");
+              const voiceName = String(audioMeta.voice ?? "");
+              const ttsModel = String(audioMeta.model ?? "");
+              // Streaming WAV headers can claim absurd durations (hours); hide
+              // anything implausible instead of showing a broken number.
+              const plausibleDuration =
+                audioVersion?.duration_seconds != null &&
+                audioVersion.duration_seconds > 0 &&
+                audioVersion.duration_seconds < 4 * 3600
+                  ? audioVersion.duration_seconds
+                  : null;
+              return (
+                <div className="space-y-3">
+                  <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
+                    <div className="flex items-center justify-between gap-2">
+                      <b className="text-[var(--color-text-primary)]">
+                        {audioVersion?.name || "音频素材"}
+                      </b>
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                        {plausibleDuration != null
+                          ? `${plausibleDuration.toFixed(1)}s`
+                          : "时长以试听为准"}
+                      </span>
+                    </div>
+                    {textPreview && (
+                      <p className="mt-1.5 whitespace-pre-wrap leading-5">
+                        “{textPreview}”
+                      </p>
+                    )}
+                    {(voiceName || ttsModel) && (
+                      <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">
+                        {voiceName && `音色 ${voiceName}`}
+                        {voiceName && ttsModel && " · "}
+                        {ttsModel && `模型 ${ttsModel}`}
+                      </p>
+                    )}
+                    {audioVersion && (
+                      <audio
+                        src={getAssetVersionMediaUrl(audioVersion.version_id)}
+                        controls
+                        preload="metadata"
+                        className="mt-2 h-8 w-full"
+                      />
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label
+                      data-creator-field={`element:${element.element_id}/creation/gain_db`}
+                      data-creator-path={pointer("creation", "gain_db")}
+                      className="block"
+                    >
+                      <FieldLabel>音量增益（dB）</FieldLabel>
+                      <InputNumber
+                        value={creation.gain_db}
+                        step={1}
+                        min={-30}
+                        max={12}
+                        disabled={applying}
+                        className="w-full"
+                        onChange={(value) =>
+                          onChange((draft) => {
+                            if (draft.creation.type === "audio")
+                              draft.creation.gain_db = Number(value ?? 0);
+                          })
+                        }
+                      />
+                      <InlineReviewDiff
+                        pointer={pointer("creation", "gain_db")}
+                      />
+                    </label>
+                    <label
+                      data-creator-field={`element:${element.element_id}/creation/pan`}
+                      data-creator-path={pointer("creation", "pan")}
+                      className="block"
+                    >
+                      <FieldLabel>声像（-1 左 – 1 右）</FieldLabel>
+                      <InputNumber
+                        value={creation.pan}
+                        step={0.1}
+                        min={-1}
+                        max={1}
+                        disabled={applying}
+                        className="w-full"
+                        onChange={(value) =>
+                          onChange((draft) => {
+                            if (draft.creation.type === "audio")
+                              draft.creation.pan = Number(value ?? 0);
+                          })
+                        }
+                      />
+                      <InlineReviewDiff pointer={pointer("creation", "pan")} />
+                    </label>
+                  </div>
+                  <p className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                    合成时该音频按 span
+                    混入成片；旁白播放区间内会自动压低画面原声，避免互相干扰。
+                  </p>
+                </div>
+              );
+            })()}
         </section>
 
         {creation.type === "r2v" && (

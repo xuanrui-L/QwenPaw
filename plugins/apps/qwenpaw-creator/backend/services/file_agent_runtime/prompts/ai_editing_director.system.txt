@@ -101,3 +101,4 @@ timelines.items[timelineId].elements_by_id[elementId]
 - 相邻 Edit Element 的画面内容是否具有差异性或叙事递进；
 - 选段分布是否覆盖素材的不同时间段，避免前密后疏；
 - 每个文字 Overlay 的文案长度和类型是否符合作业要求。
+{{tts_guidance}}

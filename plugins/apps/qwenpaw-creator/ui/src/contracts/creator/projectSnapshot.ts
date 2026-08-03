@@ -121,6 +121,15 @@ export interface VisualVariantDocument extends ProjectJsonRecord {
   generated_artifact_version_ids: string[];
 }
 
+export interface CharacterVoiceDocument extends ProjectJsonRecord {
+  voice_id: string;
+  target_model: string;
+  preferred_name: string;
+  sample_source_version_id: string | null;
+  enrollment_key: string;
+  created_at: string;
+}
+
 export interface VisualEntityDocument extends ProjectJsonRecord {
   entity_id: string;
   kind: "character" | "scene" | "prop";
@@ -129,6 +138,7 @@ export interface VisualEntityDocument extends ProjectJsonRecord {
   continuity: string;
   variants: ProjectEntityCollection<VisualVariantDocument>;
   selected_artifact_version_id: string | null;
+  voice?: CharacterVoiceDocument | null;
 }
 
 export interface VisualDevelopmentDocument extends ProjectJsonRecord {

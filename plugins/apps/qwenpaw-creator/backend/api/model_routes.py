@@ -89,7 +89,16 @@ router = APIRouter(
 )
 
 
-_SECTIONS = ("llm", "vlm", "grounding", "asr", "image", "video", "oss")
+_SECTIONS = (
+    "llm",
+    "vlm",
+    "grounding",
+    "asr",
+    "tts",
+    "image",
+    "video",
+    "oss",
+)
 _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
     "llm": {
         "base_url": ("TEXT_BASE_URL",),
@@ -136,6 +145,13 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
         "base_url": ("ASR_BASE_URL",),
         "api_key": ("ASR_API_KEY",),
         "model_name": ("ASR_MODEL_NAME",),
+    },
+    "tts": {
+        "base_url": ("TTS_BASE_URL",),
+        "api_key": ("TTS_API_KEY",),
+        "model_name": ("TTS_MODEL_NAME",),
+        "voice": ("TTS_VOICE",),
+        "vc_model_name": ("TTS_VC_MODEL_NAME",),
     },
     "image": {
         "base_url": (
@@ -650,6 +666,14 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
                     "reuse_llm_key": item.reuse_llm_key,
                 },
             )
+        if section == "tts":
+            tool_config.update(
+                {
+                    "voice": item.voice,
+                    "vc_model_name": item.vc_model_name,
+                    "reuse_llm_key": item.reuse_llm_key,
+                },
+            )
         if section == "image" and "dashscope" in item.protocol.casefold():
             tool_config["_image_backend"] = "DASHSCOPE"
         if section == "video":
@@ -802,7 +826,7 @@ async def _validate_section_connectivity(
         return
 
     api_key = item.get("api_key", "")
-    if section == "asr" and item.get("reuse_llm_key") and not api_key:
+    if section in ("asr", "tts") and item.get("reuse_llm_key") and not api_key:
         api_key = config.get("llm", {}).get("api_key", "")
     if not item.get("base_url") or not api_key:
         raise ValidationError(f"{section}: 缺少 Base URL 或 API Key，请检查配置")
@@ -1096,6 +1120,21 @@ def _probe_payload(
         if provider == "whisper":
             return _openai_model_probe(body, headers)
         return _dashscope_policy_probe(body, headers)
+    if body.type == "tts":
+        # The upload-policy probe accepts any model string, so it cannot catch a
+        # mistyped model name. Synthesizing one character costs a fraction of a
+        # cent and actually validates the model/voice pair.
+        parsed = urlparse(body.base_url)
+        return (
+            f"{parsed.scheme}://{parsed.netloc}"
+            "/api/v1/services/aigc/multimodal-generation/generation",
+            headers,
+            {
+                "model": body.model_name,
+                "input": {"text": "嗨", "voice": body.voice or "Cherry"},
+                "parameters": {},
+            },
+        )
     if body.type in {"llm", "vlm"}:
         content: Any = "Reply with pong only."
         if body.type == "vlm":
@@ -1141,7 +1180,11 @@ async def test_model_connection(
     loaded = await asyncio.to_thread(load_model_config)
     item = getattr(loaded, body.type)
     fallback_api_key = item.api_key
-    if body.type == "asr" and item.reuse_llm_key and not fallback_api_key:
+    if (
+        body.type in ("asr", "tts")
+        and getattr(item, "reuse_llm_key", False)
+        and not fallback_api_key
+    ):
         fallback_api_key = loaded.llm.api_key
     request_api_key = "" if body.api_key == SECRET_MASK else body.api_key
     selected = body.model_copy(
@@ -1151,6 +1194,7 @@ async def test_model_connection(
             "model_name": body.model_name or item.model_name,
             "protocol": body.protocol or item.protocol,
             "provider": body.provider or getattr(item, "provider", None),
+            "voice": body.voice or getattr(item, "voice", ""),
         },
     )
     if (

@@ -123,3 +123,4 @@ Specialist 返回后读取最新 Project，逐项核对：
 - Specialist 返回后是否已重新读取 Project 并验证了产物；
 - 已有合格结果的是否直接复用、未重复委派；
 - 当前 Project 状态是否已用自然语言总结，是否包含了仍需用户决定的事项。
+{{tts_guidance}}

@@ -177,6 +177,28 @@ export function resolveElementPlayback(
   if (element.creation.type === "transition") {
     return { element, status: "ready", media: null };
   }
+  // Audio Elements reference their source version directly on the creation;
+  // there is no render_source/output indirection to resolve.
+  if (element.creation.type === "audio") {
+    const resolvedAudio = resolveSourceVersionRef(
+      project,
+      element.creation.source_asset_version_id,
+    );
+    if (resolvedAudio) {
+      return {
+        element,
+        status: "ready",
+        media: {
+          ...resolvedAudio,
+          sourceInSeconds: 0,
+          sourceOutSeconds: null,
+          playbackRate: 1,
+          loop: false,
+        },
+      };
+    }
+    return { element, status: "pending", media: null };
+  }
   const ticksPerSecond = timeline.ticks_per_second || 1;
   const renderSource = element.render_source;
   const fromRender = renderSource

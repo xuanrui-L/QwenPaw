@@ -58,6 +58,49 @@ _ROLE_PROMPT_IDS = {
 # in those spellings. They map onto exactly one canonical asset ref.
 _VISUAL_ENTITY_ALIAS_KINDS = frozenset({"char", "scene", "prop"})
 
+# TTS sections are injected only when the capability is configured, mirroring
+# the dynamic tool registration: the prompt never mentions absent tools.
+_TTS_GUIDANCE = {
+    SpecialistRole.VISUAL_DEVELOPMENT: (
+        "\n# 语音与角色音色\n\n"
+        "- `tts_generation` 把台词或旁白合成为音频 SourceAssetVersion 并返回"
+        " exact version id；单次文本不超过约 512 token，超长文案按句子拆分"
+        "分次生成。\n"
+        "- `create_character_voice` 为 character 实体复刻专属音色，属可选增强："
+        "characterRef 传目标角色的 exact asset:<entityId>；样本用已存在的"
+        " exact 音频 version，或用 sampleText 先试音；绑定后该角色的"
+        " tts_generation 传 characterRef 即自动沿用其音色，重新复刻会"
+        "替换旧绑定。\n"
+        "- 生成后用 read_project 验证音频 version 已写入 Asset Index、音色已"
+        "绑定到目标实体。"
+    ),
+    SpecialistRole.AI_EDITING_DIRECTOR: (
+        "\n# 旁白与配音\n\n"
+        "- `tts_generation` 把旁白文本合成为音频 SourceAssetVersion 并返回"
+        " exact version id；需要角色声线时传 characterRef（已绑定音色的"
+        " character 实体）。\n"
+        "- 旁白必须按镜头或语义段落拆分：每段单独调一次 tts_generation，"
+        "对应一个独立的 audio Element，span 只覆盖它解说的画面区间；"
+        "禁止用一条音频贯穿整条 Timeline。每段文本长度要与画面时长匹配"
+        "（中文语速约每秒 4–5 字），生成后用返回的 durationSeconds 校准"
+        " span，避免音频被截断或留白过长。\n"
+        "- 音频上片：用 jq_project 在目标 Timeline 创建 creation.type=audio 的"
+        " Element，引用对应 version id；音频 Element 不需要 location，"
+        "gain_db 调音量、pan 调声像。\n"
+        "- 合成时旁白按 span 混入成片，旁白播放区间内画面原声会自动压低，"
+        "两者不会互相干扰；若某段原声本身是内容重点（台词、现场声），"
+        "该段不要安排旁白。"
+    ),
+}
+
+
+def _tts_guidance(role: SpecialistRole) -> str:
+    if role not in _TTS_GUIDANCE:
+        return ""
+    if not model_config.is_tts_configured():
+        return ""
+    return _TTS_GUIDANCE[role]
+
 
 def _normalize_asset_target_ref(target_ref: str) -> str:
     kind, separator, identifier = target_ref.partition(":")
@@ -171,6 +214,8 @@ def specialist_system_prompt(
         "workspace_schema": workspace_schema
         or build_project_schema_prompt().text,
     }
+    if role in _TTS_GUIDANCE:
+        values["tts_guidance"] = _tts_guidance(role)
     if role is SpecialistRole.R2V_GENERATION_DIRECTOR:
         # Model-specific prompt rules (e.g. HappyHorse [Image N] citations)
         # are injected from the runtime-resolved video model so the static

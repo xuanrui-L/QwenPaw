@@ -8,6 +8,7 @@ import {
   Film,
   Image as ImageIcon,
   Link2,
+  Mic,
   Music2,
   Paperclip,
   Search,
@@ -22,6 +23,7 @@ import {
 } from "@/api/creator";
 import type {
   ArtifactVersionDocument,
+  CharacterVoiceDocument,
   ProjectDocument,
   SourceAssetVersionDocument,
   VisualEntityDocument,
@@ -256,6 +258,14 @@ function kindLabel(item: AssetItem): string {
     : entity.kind === "scene"
     ? "场景"
     : "道具";
+}
+
+/** Enrolled voice binding of a character visual entity, if any. */
+function characterVoice(item: AssetItem): CharacterVoiceDocument | null {
+  if (item.kind !== "visual") return null;
+  const entity = item.raw as VisualEntityDocument;
+  if (entity.kind !== "character") return null;
+  return entity.voice ?? null;
 }
 
 function mediaIcon(kind: string) {
@@ -695,6 +705,15 @@ export default function AssetsPage() {
                           过期
                         </span>
                       )}
+                      {characterVoice(item) && (
+                        <span
+                          title="已绑定专属音色"
+                          className="absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white"
+                        >
+                          <Mic className="h-3 w-3" />
+                          音色
+                        </span>
+                      )}
                     </div>
                     <div className="p-3">
                       <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
@@ -761,6 +780,12 @@ export default function AssetsPage() {
                     {selected.stale && (
                       <span className="text-[10px] font-semibold text-amber-600">
                         已过期
+                      </span>
+                    )}
+                    {characterVoice(selected) && (
+                      <span className="flex items-center gap-1 rounded bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent)]">
+                        <Mic className="h-3 w-3" />
+                        已绑定音色
                       </span>
                     )}
                   </div>
@@ -852,6 +877,57 @@ export default function AssetsPage() {
                           );
                         })}
                       </div>
+                    </div>
+                  );
+                })()}
+                {(() => {
+                  const voice = characterVoice(selected);
+                  if (!voice) return null;
+                  const sampleUrl = voice.sample_source_version_id
+                    ? getAssetVersionMediaUrl(voice.sample_source_version_id)
+                    : null;
+                  return (
+                    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3">
+                      <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-[var(--color-text-secondary)]">
+                        <Mic className="h-3.5 w-3.5" />
+                        专属音色
+                      </div>
+                      <dl className="space-y-1.5 text-xs">
+                        {[
+                          ["音色名", voice.preferred_name || "—"],
+                          ["合成模型", voice.target_model],
+                          [
+                            "创建时间",
+                            voice.created_at
+                              ? new Date(voice.created_at).toLocaleString(
+                                  "zh-CN",
+                                )
+                              : "—",
+                          ],
+                        ].map(([label, value]) => (
+                          <div
+                            key={label}
+                            className="grid grid-cols-[64px_minmax(0,1fr)] gap-2"
+                          >
+                            <dt className="text-[var(--color-text-tertiary)]">
+                              {label}
+                            </dt>
+                            <dd className="break-all font-mono text-[11px] text-[var(--color-text-secondary)]">
+                              {value}
+                            </dd>
+                          </div>
+                        ))}
+                      </dl>
+                      {sampleUrl && (
+                        <audio
+                          src={sampleUrl}
+                          controls
+                          className="mt-2 h-8 w-full"
+                        />
+                      )}
+                      <p className="mt-2 text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                        在对话中要求重新复刻可替换该音色；后续该角色的台词配音会自动沿用。
+                      </p>
                     </div>
                   );
                 })()}

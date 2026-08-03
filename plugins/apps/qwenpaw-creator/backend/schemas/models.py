@@ -33,6 +33,19 @@ class AsrConfig(ModelConfigItem):
     reuse_llm_key: bool = True
 
 
+class TtsConfig(ModelConfigItem):
+    """Speech synthesis and voice cloning configuration.
+
+    ``voice`` is the default system timbre for narration; character-specific
+    cloned voices live on the VisualEntity and take precedence when bound.
+    """
+
+    protocol: str = "DashScope（百炼）"
+    voice: str = ""
+    vc_model_name: str = ""
+    reuse_llm_key: bool = True
+
+
 def validation_source_from_reuse_llm(reuse_llm: bool) -> str:
     """Map the legacy ``reuse_llm`` flag onto ``validation_source``."""
 
@@ -129,6 +142,7 @@ class ModelConfigData(StrictModel):
     vlm: VlmConfig
     grounding: GroundingConfig = Field(default_factory=GroundingConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)
+    tts: TtsConfig = Field(default_factory=TtsConfig)
     image: ModelConfigItem
     video: ModelConfigItem
     oss: OssConfig = Field(default_factory=OssConfig)
@@ -143,12 +157,13 @@ class ModelConfigData(StrictModel):
 
 
 class ModelConnectionTestRequest(StrictModel):
-    type: Literal["llm", "vlm", "asr", "image", "video"]
+    type: Literal["llm", "vlm", "asr", "tts", "image", "video"]
     base_url: str = ""
     api_key: str = ""
     model_name: str = ""
     protocol: str = ""
     provider: Literal["whisper", "fun-asr"] | None = None
+    voice: str = ""
 
 
 class ConnectionTestResponse(StrictModel):

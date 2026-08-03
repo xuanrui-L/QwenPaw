@@ -235,6 +235,17 @@ describe("new Creator API contract", () => {
         language: "",
         reuse_llm_key: true,
       },
+      tts: {
+        enabled: false,
+        model_name: "qwen3-tts-flash",
+        api_key: "",
+        base_url: "https://dashscope.aliyuncs.com/api/v1",
+        protocol: "DashScope（百炼）",
+        custom_protocol: "",
+        voice: "",
+        reuse_llm_key: true,
+        vc_model_name: "",
+      },
       image: {
         enabled: false,
         model_name: "",
