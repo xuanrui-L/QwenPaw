@@ -114,6 +114,9 @@ async def generate_image(
     prompt: str,
     aspect_ratio: str = "16:9",
     reference_image_urls: list[str] | None = None,
+    mode: str = "generate",
+    source_lang: str = "",
+    target_lang: str = "",
 ) -> str:
     """Generate an image and return a /generated/... URL."""
     model = get_image_model()
@@ -121,4 +124,7 @@ async def generate_image(
         prompt,
         aspect_ratio=aspect_ratio,
         reference_image_urls=reference_image_urls,
+        mode=mode,
+        source_lang=source_lang,
+        target_lang=target_lang,
     )

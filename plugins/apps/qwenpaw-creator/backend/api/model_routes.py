@@ -26,6 +26,7 @@ from schemas.models import (
     AsrConfig,
     ExecutionAuthorizationConfig,
     GroundingConfig,
+    ImageConfig,
     LlmConfig,
     ModelConfigData,
     ModelConfigItem,
@@ -169,6 +170,7 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
             "OPENAI_IMAGE_MODEL_NAME",
             "IMAGE_MODEL_NAME",
         ),
+        "translate_model": ("IMAGE_TRANSLATE_MODEL_NAME",),
     },
     "video": {
         "base_url": ("VIDEO_BASE_URL",),
@@ -228,7 +230,7 @@ def _defaults() -> ModelConfigData:
             protocol="DashScope Fun-ASR",
             reuse_llm_key=True,
         ),
-        image=ModelConfigItem(
+        image=ImageConfig(
             enabled=False,
             protocol="OpenAI 协议",
         ),
@@ -676,6 +678,8 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
             )
         if section == "image" and "dashscope" in item.protocol.casefold():
             tool_config["_image_backend"] = "DASHSCOPE"
+        if section == "image" and item.translate_model:
+            tool_config["translate_model"] = item.translate_model
         if section == "video":
             tool_config["_video_backend"] = (
                 "seedance2"

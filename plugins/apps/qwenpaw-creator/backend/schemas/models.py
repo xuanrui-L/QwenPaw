@@ -46,6 +46,17 @@ class TtsConfig(ModelConfigItem):
     reuse_llm_key: bool = True
 
 
+class ImageConfig(ModelConfigItem):
+    """Image generation configuration.
+
+    ``translate_model`` is the optional in-image text translation model used
+    by image_generation mode=translate; it rides the same DashScope
+    credential and defaults to ``qwen-mt-image`` when left empty.
+    """
+
+    translate_model: str = ""
+
+
 def validation_source_from_reuse_llm(reuse_llm: bool) -> str:
     """Map the legacy ``reuse_llm`` flag onto ``validation_source``."""
 
@@ -143,7 +154,7 @@ class ModelConfigData(StrictModel):
     grounding: GroundingConfig = Field(default_factory=GroundingConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)
     tts: TtsConfig = Field(default_factory=TtsConfig)
-    image: ModelConfigItem
+    image: ImageConfig
     video: ModelConfigItem
     oss: OssConfig = Field(default_factory=OssConfig)
     execution_authorization: ExecutionAuthorizationConfig = Field(

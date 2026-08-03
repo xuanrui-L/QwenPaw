@@ -78,6 +78,7 @@ const baseConfig: ModelConfigData = {
     base_url: "",
     protocol: "OpenAI 协议",
     custom_protocol: "",
+    translate_model: "",
   },
   video: {
     enabled: false,

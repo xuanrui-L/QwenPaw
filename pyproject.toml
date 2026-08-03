@@ -126,6 +126,7 @@ test = [
     "pytest-timeout>=2.3.0",
     "pytest-xdist>=3.5.0",
     "hypothesis>=6.0.0",
+    "respx>=0.21.0",
     "qoder-agent-sdk==1.0.9",
 ]
 dev = [

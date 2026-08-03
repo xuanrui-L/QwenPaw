@@ -177,6 +177,34 @@ def _tool_schema(arguments: Mapping[str, Any]) -> dict[str, Any]:
 _IMAGE_ARGUMENTS = _arguments_schema(
     {
         "prompt": {"type": "string", "minLength": 1},
+        "mode": {
+            "type": "string",
+            "enum": ["generate", "edit", "translate"],
+            "description": (
+                "图像操作模式，缺省 generate（文生图，可附参考图）。"
+                "edit：按 prompt 指令编辑 referenceImageRefs 指定的 1–3 张图；"
+                "translate：翻译图内文字并保留排版（仅需 1 张图，prompt 不参与"
+                "生成）。edit/translate 仅 DashScope qwen-image provider 支持。"
+            ),
+        },
+        "referenceImageRefs": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "maxItems": 3,
+            "uniqueItems": True,
+            "description": (
+                "edit/translate 模式的输入图：传本 Project 已存在的 exact "
+                "version id（edit 1–3 张，translate 恰 1 张）。"
+            ),
+        },
+        "sourceLang": {
+            "type": "string",
+            "description": "translate 模式的源语种（如 zh/en），缺省 auto 自动检测。",
+        },
+        "targetLang": {
+            "type": "string",
+            "description": "translate 模式的目标语种（如 zh/en），缺省 en。",
+        },
         "aspectRatio": {
             "type": "string",
             "enum": ["16:9", "9:16", "1:1", "4:3", "3:4"],
@@ -444,7 +472,8 @@ _SPECS = (
     SpecialistToolSpec(
         name="image_generation",
         description=(
-            "生成视觉资产或 R2V 分镜图片。只传 Project 中已存在的 exact version id；"
+            "生成、编辑或翻译视觉资产 / R2V 分镜图片（mode 选择 generate/edit/"
+            "translate）。只传 Project 中已存在的 exact version id；"
             "生成结果由文件媒体服务写入 Asset Index 与 project.json。"
         ),
         roles=frozenset(

@@ -109,6 +109,8 @@ _IMAGE_COMMANDS = frozenset(
         CreatorCommandType.GENERATE_STORYBOARD_IMAGE,
     },
 )
+_IMAGE_MODES = ("generate", "edit", "translate")
+_EDIT_MAX_REFERENCES = 3
 _MAX_IMAGE_BYTES = 64 * 1024 * 1024
 _SAFE_SUFFIX = re.compile(r"^\.[A-Za-z0-9]{1,10}$")
 
@@ -122,6 +124,9 @@ class ImageProvider(Protocol):
         prompt: str,
         aspect_ratio: str,
         reference_image_urls: Sequence[str],
+        mode: str = "generate",
+        source_lang: str = "",
+        target_lang: str = "",
     ) -> Mapping[str, Any]:
         ...
 
@@ -139,6 +144,9 @@ class ExistingImageProvider:
         prompt: str,
         aspect_ratio: str,
         reference_image_urls: Sequence[str],
+        mode: str = "generate",
+        source_lang: str = "",
+        target_lang: str = "",
     ) -> Mapping[str, Any]:
         from models.image import generate_image
 
@@ -146,6 +154,9 @@ class ExistingImageProvider:
             prompt,
             aspect_ratio=aspect_ratio,
             reference_image_urls=list(reference_image_urls),
+            mode=mode,
+            source_lang=source_lang,
+            target_lang=target_lang,
         )
         return {"url": url, "media_type": "image/png"}
 
@@ -187,6 +198,9 @@ class _ResolvedRequest:
     role: SpecialistRole
     target_id: str
     variant_id: str | None = None
+    mode: str = "generate"
+    source_lang: str = ""
+    target_lang: str = ""
 
 
 def _stable_id(prefix: str, project_id: str, idempotency_key: str) -> str:
@@ -405,13 +419,50 @@ def _resolve_request(
 ) -> _ResolvedRequest:
     project = snapshot.project
     explicit_prompt = str(arguments.get("prompt") or "").strip()
+    mode = (
+        str(arguments.get("mode") or "generate").strip().casefold()
+        or "generate"
+    )
+    if mode not in _IMAGE_MODES:
+        raise ValidationError(
+            f"mode 必须是 {', '.join(_IMAGE_MODES)} 之一",
+        )
+    source_lang = str(arguments.get("sourceLang") or "").strip()
+    target_lang = str(arguments.get("targetLang") or "").strip()
+    reference_image_refs = _list_of_strings(
+        arguments.get("referenceImageRefs"),
+        label="referenceImageRefs",
+    )
+    if len(reference_image_refs) > _EDIT_MAX_REFERENCES:
+        raise ValidationError(
+            f"referenceImageRefs 最多 {_EDIT_MAX_REFERENCES} 个",
+        )
+    # Each entry is either a bare exact version id or an
+    # asset://... / artifact://...@<versionId> reference.
+    reference_image_ref_ids = [
+        _exact_version_from_ref(item) or item for item in reference_image_refs
+    ]
     explicit_version_ids = _list_of_strings(
         arguments.get("referenceVersionIds")
         or arguments.get("referenceAssetVersionIds"),
         label="referenceVersionIds",
     )
     explicit_urls, exact_ref_version_ids = _explicit_references(arguments)
-    explicit_version_ids = [*explicit_version_ids, *exact_ref_version_ids]
+    if mode == "translate":
+        if len(reference_image_ref_ids) != 1:
+            raise ValidationError(
+                "translate 模式需要且仅需要 1 个 referenceImageRefs"
+                "（图内文字翻译的输入图 exact version id）",
+            )
+        if explicit_urls:
+            raise ValidationError(
+                "translate 模式仅接受 referenceImageRefs，不接受 referenceImageUrls",
+            )
+    explicit_version_ids = [
+        *explicit_version_ids,
+        *exact_ref_version_ids,
+        *reference_image_ref_ids,
+    ]
 
     if command is CreatorCommandType.GENERATE_STORYBOARD_IMAGE:
         element_id = target_element_id(
@@ -524,19 +575,35 @@ def _resolve_request(
     else:  # pragma: no cover - public entry validates this first
         raise ValidationError(f"不支持的图片命令: {command.value}")
 
+    # In translate mode the provider input is exactly the referenced image;
+    # variant/creation references would pollute the single-image contract.
+    active_version_ids = (
+        tuple(dict.fromkeys(reference_image_ref_ids))
+        if mode == "translate"
+        else resolved.reference_version_ids
+    )
     local_urls, checksums, read_set = _resolve_version_references(
         project=project,
         project_root=project_root,
-        version_ids=resolved.reference_version_ids,
+        version_ids=active_version_ids,
     )
-    urls = tuple(dict.fromkeys([*local_urls, *explicit_urls]))
+    urls = tuple(
+        dict.fromkeys(
+            [*local_urls, *([] if mode == "translate" else explicit_urls)],
+        ),
+    )
+    if mode == "edit" and not 1 <= len(urls) <= _EDIT_MAX_REFERENCES:
+        raise ValidationError(
+            f"edit 模式需要 1–{_EDIT_MAX_REFERENCES} 张参考图，"
+            f"当前解析到 {len(urls)} 张；用 referenceImageRefs 指定要编辑的图",
+        )
     return _ResolvedRequest(
         command=resolved.command,
         target_ref=resolved.target_ref,
         prompt=resolved.prompt,
         aspect_ratio=resolved.aspect_ratio,
         reference_image_urls=urls,
-        reference_version_ids=resolved.reference_version_ids,
+        reference_version_ids=active_version_ids,
         reference_checksums=tuple(checksums),
         read_set=tuple(read_set),
         slot_id=resolved.slot_id,
@@ -546,6 +613,9 @@ def _resolve_request(
         role=resolved.role,
         target_id=resolved.target_id,
         variant_id=resolved.variant_id,
+        mode=mode,
+        source_lang=source_lang,
+        target_lang=target_lang,
     )
 
 
@@ -831,19 +901,28 @@ class FileImageExecutionService:
             target_ref=target_ref,
             arguments=dict(arguments),
         )
-        request_fingerprint = _fingerprint(
-            {
-                "command": command_value.value,
-                "targetRef": resolved.target_ref,
-                "prompt": resolved.prompt,
-                "aspectRatio": resolved.aspect_ratio,
-                "referenceImageUrls": list(resolved.reference_image_urls),
-                "referenceVersionIds": list(resolved.reference_version_ids),
-                "referenceChecksums": list(resolved.reference_checksums),
-                "inputGeneration": base.generation,
-                "inputEtag": base.etag,
-            },
-        )
+        fingerprint_payload: dict[str, Any] = {
+            "command": command_value.value,
+            "targetRef": resolved.target_ref,
+            "prompt": resolved.prompt,
+            "aspectRatio": resolved.aspect_ratio,
+            "referenceImageUrls": list(resolved.reference_image_urls),
+            "referenceVersionIds": list(resolved.reference_version_ids),
+            "referenceChecksums": list(resolved.reference_checksums),
+            "inputGeneration": base.generation,
+            "inputEtag": base.etag,
+        }
+        if resolved.mode != "generate":
+            # Only non-default modes join the fingerprint so legacy generate
+            # requests keep their replay identity across the upgrade.
+            fingerprint_payload.update(
+                {
+                    "mode": resolved.mode,
+                    "sourceLang": resolved.source_lang,
+                    "targetLang": resolved.target_lang,
+                },
+            )
+        request_fingerprint = _fingerprint(fingerprint_payload)
         reviews = await asyncio.to_thread(
             self.services.reviews.all_pending,
             project_id,
@@ -892,10 +971,20 @@ class FileImageExecutionService:
             # No Project/Runtime lock spans this await.  The ContextVar only
             # scopes compatibility scratch emitted by the existing provider.
             with media_task_scope(task.task_id, project_id=project_id):
+                extra_arguments: dict[str, Any] = {}
+                if resolved.mode != "generate":
+                    # Passed only for explicit modes so injected test
+                    # providers with the legacy signature keep working.
+                    extra_arguments = {
+                        "mode": resolved.mode,
+                        "source_lang": resolved.source_lang,
+                        "target_lang": resolved.target_lang,
+                    }
                 provider_output = await self.provider.generate(
                     prompt=resolved.prompt,
                     aspect_ratio=resolved.aspect_ratio,
                     reference_image_urls=resolved.reference_image_urls,
+                    **extra_arguments,
                 )
             published_result = await self._materialize_and_publish(
                 base=base,

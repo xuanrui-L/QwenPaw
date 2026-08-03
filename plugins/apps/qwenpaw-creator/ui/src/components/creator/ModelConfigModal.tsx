@@ -249,6 +249,7 @@ const DEFAULT_CONFIG: ModelConfigData = {
     base_url: "",
     protocol: "OpenAI 协议",
     custom_protocol: "",
+    translate_model: "",
   },
   video: {
     enabled: false,
@@ -1207,6 +1208,41 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             </p>
           </div>
         )}
+        {type === "image" &&
+          (item.protocol.toLowerCase().includes("dashscope") ||
+            item.protocol.includes("百炼")) && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "0 16px",
+              }}
+            >
+              <div>
+                <label className="field-label">图内文字翻译模型（可选）</label>
+                <Input
+                  placeholder="qwen-mt-image"
+                  value={config.image.translate_model}
+                  onChange={(e) =>
+                    updateItem("image", "translate_model", e.target.value)
+                  }
+                />
+              </div>
+              <p
+                style={{
+                  gridColumn: "1 / -1",
+                  margin: "2px 0 0",
+                  fontSize: 11,
+                  lineHeight: 1.6,
+                  color: "var(--color-text-tertiary)",
+                }}
+              >
+                image_generation 的 translate
+                模式用此模型翻译图内文字并保留排版； 留空时使用默认的
+                qwen-mt-image，与图像模型共用同一个 API Key。
+              </p>
+            </div>
+          )}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <Button
             className="test-btn"

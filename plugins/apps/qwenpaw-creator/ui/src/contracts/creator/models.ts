@@ -44,7 +44,11 @@ export interface ModelConfigData {
     vc_model_name: string;
     reuse_llm_key: boolean;
   };
-  image: ModelConfigItem;
+  image: ModelConfigItem & {
+    // Optional in-image text translation model (mode=translate), DashScope
+    // provider only; empty means the backend default qwen-mt-image.
+    translate_model: string;
+  };
   video: ModelConfigItem;
   oss: OssConfig;
   executionAuthorization: {

@@ -11,24 +11,37 @@ Reference images must be publicly reachable URLs; local/generated images are
 uploaded through DashScope's model-bound temporary storage (official Bailian
 temporary-file upload, 48h TTL) and referenced as ``oss://`` URLs resolved by
 the ``X-DashScope-OssResourceResolve: enable`` header.
+
+Text-to-image and instruction editing share this endpoint (qwen-image puts
+reference image blocks first and the text instruction last); in-image text
+translation is a separate async task on
+``/services/aigc/image2image/image-synthesis`` served by ``qwen-mt-image``
+and polled through the generic ``/tasks/{task_id}`` API.
 """
+
+import asyncio
 
 import httpx
 
 import os
 
+from models import config as model_config
 from models.media_transport import (
     read_reference_media,
     upload_reference_bytes_to_dashscope_temp,
     validate_reference_image_bytes,
 )
 from utils.exceptions import ModelError
+from utils.logger import setup_logger
 from models.image.base import (
     BaseImageModel,
     _configured_int,
     _configured_value,
     download_remote_image,
+    format_http_error_detail,
 )
+
+logger = setup_logger("model.image.dashscope")
 
 
 # Map aspect ratio → DashScope multimodal size string (WIDTH*HEIGHT).
@@ -46,11 +59,16 @@ DASHSCOPE_SIZE_MAP = {
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 DEFAULT_MODEL_NAME = "qwen-image-2.0-pro"
 
+_GENERATION_SUFFIX = "/services/aigc/multimodal-generation/generation"
+_TRANSLATE_SUBMIT_SUFFIX = "/services/aigc/image2image/image-synthesis"
+_TRANSLATE_POLL_INTERVAL_SECONDS = 3.0
+
 
 class DashScopeImageModel(BaseImageModel):
     """DashScope multimodal-generation format, used by qwen-image-2.0-pro."""
 
     backend_name = "dashscope-multimodal"
+    supported_modes = frozenset({"generate", "edit", "translate"})
 
     def __init__(
         self,
@@ -130,6 +148,41 @@ class DashScopeImageModel(BaseImageModel):
         suffix = "/services/aigc/multimodal-generation/generation"
         return base if base.endswith(suffix) else f"{base}{suffix}"
 
+    @property
+    def api_root(self) -> str:
+        """The /api/v1 root shared by task submission and polling URLs."""
+
+        base = self.base_url.rstrip("/")
+        if base.endswith(_GENERATION_SUFFIX):
+            return base[: -len(_GENERATION_SUFFIX)]
+        return base
+
+    async def _public_reference_url(self, raw_url: str) -> str | None:
+        """Return a provider-resolvable URL for one reference image.
+
+        Public HTTP(S) URLs pass through; local/generated media is uploaded
+        to DashScope model-bound temporary storage (``oss://`` + resolve
+        header). Corrupt local references return ``None`` so a stale project
+        file cannot fail the whole request.
+        """
+
+        url = raw_url.strip()
+        if not url:
+            return None
+        if url.startswith(("http://", "https://", "oss://")):
+            return url
+        media_bytes, filename = await read_reference_media(url)
+        try:
+            validate_reference_image_bytes(media_bytes)
+        except ValueError:
+            return None
+        return await upload_reference_bytes_to_dashscope_temp(
+            media_bytes,
+            filename,
+            api_key=self.api_key,
+            model_name=self.model_name,
+        )
+
     async def _request(
         self,
         client: httpx.AsyncClient,
@@ -166,26 +219,12 @@ class DashScopeImageModel(BaseImageModel):
         # multimodal-generation endpoint.
         content: list[dict] = []
         for raw_url in dict.fromkeys(clean_reference_urls):
-            url = raw_url.strip()
-            if not url:
+            public_url = await self._public_reference_url(raw_url)
+            if public_url is None:
+                # A stale or corrupt project reference must not fail the
+                # whole generation. Continue with the remaining references,
+                # or as text-to-image when none are usable.
                 continue
-            if url.startswith(("http://", "https://")):
-                public_url = url
-            else:
-                media_bytes, filename = await read_reference_media(url)
-                try:
-                    validate_reference_image_bytes(media_bytes)
-                except ValueError:
-                    # A stale or corrupt project reference must not fail the
-                    # whole generation. Continue with the remaining references,
-                    # or as text-to-image when none are usable.
-                    continue
-                public_url = await upload_reference_bytes_to_dashscope_temp(
-                    media_bytes,
-                    filename,
-                    api_key=self.api_key,
-                    model_name=self.model_name,
-                )
             content.append({"image": public_url})
         content.append({"text": prompt})
 
@@ -201,6 +240,9 @@ class DashScopeImageModel(BaseImageModel):
             },
             "parameters": {
                 "size": DASHSCOPE_SIZE_MAP.get(aspect_ratio, "1328*1328"),
+                # Upstream qwen-image sends watermark: false for both t2i
+                # and edit; Creator media is watermark-free by default.
+                "watermark": False,
             },
         }
 
@@ -234,3 +276,120 @@ class DashScopeImageModel(BaseImageModel):
             f"No image in DashScope response: {data}",
             model_name=self.model_name,
         )
+
+    async def _translate(
+        self,
+        image_url: str,
+        *,
+        source_lang: str,
+        target_lang: str,
+    ) -> str:
+        """Translate in-image text with qwen-mt-image (async task + poll).
+
+        Protocol (verified against the Bailian qwen-mt-image API reference
+        and the upstream ``qwen_image.py`` tool): submit with
+        ``X-DashScope-Async: enable`` to ``image2image/image-synthesis``,
+        then poll ``/tasks/{task_id}`` until SUCCEEDED and download
+        ``output.image_url`` (24h TTL).
+        """
+
+        translate_model = model_config.get_image_translate_model_name()
+        public_url = await self._public_reference_url(image_url)
+        if public_url is None:
+            raise ModelError(
+                f"Image translate input is not a readable image: {image_url[:120]}",
+                model_name=translate_model,
+            )
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+            "X-DashScope-Async": "enable",
+            "X-DashScope-OssResourceResolve": "enable",
+        }
+        body = {
+            "model": translate_model,
+            "input": {
+                "image_url": public_url,
+                "source_lang": source_lang,
+                "target_lang": target_lang,
+                "ext": {"config": {"imageSegment": False}},
+            },
+        }
+        logger.info(
+            "Submitting image translate task | model=%s, %s->%s",
+            translate_model,
+            source_lang,
+            target_lang,
+        )
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.api_root}{_TRANSLATE_SUBMIT_SUFFIX}",
+                headers=headers,
+                json=body,
+            )
+            response.raise_for_status()
+            submitted = response.json()
+            output = (
+                submitted.get("output")
+                if isinstance(submitted.get("output"), dict)
+                else {}
+            )
+            task_id = str(output.get("task_id") or "").strip()
+            if not task_id or len(task_id) > 128:
+                raise ModelError(
+                    f"Image translate returned no task_id: {submitted}",
+                    model_name=translate_model,
+                )
+            deadline = asyncio.get_running_loop().time() + max(
+                self.timeout,
+                30,
+            )
+            while True:
+                poll = await client.get(
+                    f"{self.api_root}/tasks/{task_id}",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                if poll.status_code >= 400:
+                    raise ModelError(
+                        f"Image translate poll failed with status "
+                        f"{poll.status_code}: {format_http_error_detail(poll)[:400]}",
+                        model_name=translate_model,
+                    )
+                payload = poll.json()
+                status_output = (
+                    payload.get("output")
+                    if isinstance(payload.get("output"), dict)
+                    else {}
+                )
+                status = str(status_output.get("task_status") or "").upper()
+                if status == "SUCCEEDED":
+                    translated_url = str(
+                        status_output.get("image_url") or "",
+                    ).strip()
+                    if not translated_url:
+                        raise ModelError(
+                            f"Image translate succeeded without image_url: {status_output}",
+                            model_name=translate_model,
+                        )
+                    return await download_remote_image(
+                        translated_url,
+                        translate_model,
+                    )
+                if status in {"FAILED", "CANCELED", "UNKNOWN"}:
+                    detail = (
+                        status_output.get("message")
+                        or status_output.get("code")
+                        or payload.get("message")
+                        or status
+                    )
+                    raise ModelError(
+                        f"Image translate task {status}: {detail}",
+                        model_name=translate_model,
+                    )
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise ModelError(
+                        f"Image translate timed out after {self.timeout}s "
+                        f"(task_id={task_id})",
+                        model_name=translate_model,
+                    )
+                await asyncio.sleep(_TRANSLATE_POLL_INTERVAL_SECONDS)

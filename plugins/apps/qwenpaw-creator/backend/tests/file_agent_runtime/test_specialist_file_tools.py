@@ -135,6 +135,35 @@ def test_project_assets_scope_admits_image_asset_children(tmp_path) -> None:
     )
 
 
+def test_image_generation_arguments_expose_modes(tmp_path) -> None:
+    registry = FileSpecialistToolRegistry(
+        CreatorFileServices.create(tmp_path.resolve()),
+    )
+    manifest = registry.manifest_for(
+        SpecialistRole.VISUAL_DEVELOPMENT,
+        admitted_target_refs=["asset:hero"],
+    )
+    tool = next(
+        item
+        for item in manifest
+        if item["function"]["name"] == "image_generation"
+    )["function"]
+    arguments = tool["parameters"]["properties"]["arguments"]
+
+    assert arguments["properties"]["mode"]["enum"] == [
+        "generate",
+        "edit",
+        "translate",
+    ]
+    refs = arguments["properties"]["referenceImageRefs"]
+    assert refs["maxItems"] == 3
+    assert refs["items"]["minLength"] == 1
+    assert "sourceLang" in arguments["properties"]
+    assert "targetLang" in arguments["properties"]
+    # mode stays optional so existing generate callers keep working.
+    assert arguments["required"] == ["prompt"]
+
+
 def test_project_assets_scope_does_not_expand_for_r2v_image_tool(
     tmp_path,
 ) -> None:

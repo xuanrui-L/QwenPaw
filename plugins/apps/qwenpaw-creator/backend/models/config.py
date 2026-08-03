@@ -978,6 +978,21 @@ def get_image_concurrency() -> int:
     return _image_provider().concurrency
 
 
+def get_image_translate_model_name() -> str:
+    """Model used by image_generation mode=translate (Bailian qwen-mt-image).
+
+    Optional field on the image config tree; no dedicated tree is needed
+    because translation always rides the DashScope image credential.
+    """
+
+    return _configured_value(
+        CREATOR_IMAGE_CONFIG_TOOL,
+        "translate_model",
+        "IMAGE_TRANSLATE_MODEL_NAME",
+        "qwen-mt-image",
+    )
+
+
 def get_video_api_key() -> str:
     return _configured_value(
         CREATOR_VIDEO_CONFIG_TOOL,

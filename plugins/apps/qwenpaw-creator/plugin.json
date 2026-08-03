@@ -254,6 +254,15 @@
             "placeholder": "gpt-image-2"
           },
           {
+            "name": "translate_model",
+            "label": "Image Translate Model",
+            "type": "text",
+            "required": false,
+            "default": "qwen-mt-image",
+            "placeholder": "qwen-mt-image",
+            "help": "Optional in-image text translation model (DashScope provider only). Environment fallback: IMAGE_TRANSLATE_MODEL_NAME."
+          },
+          {
             "name": "quality",
             "label": "Image Quality",
             "type": "select",

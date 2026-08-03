@@ -39,6 +39,14 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 10  # seconds
 MIN_IMAGE_BYTES = int(os.environ.get("IMAGE_MIN_BYTES", "10000"))
 
+# Tool-level image operation modes. ``generate`` keeps the historical
+# behaviour (text-to-image, optionally guided by references); ``edit`` and
+# ``translate`` are explicit qwen-image capabilities only the DashScope
+# provider implements.
+IMAGE_GENERATION_MODES = ("generate", "edit", "translate")
+EDIT_MIN_REFERENCE_IMAGES = 1
+EDIT_MAX_REFERENCE_IMAGES = 3
+
 
 def format_http_error_detail(response: httpx.Response) -> str:
     body_text = response.text.strip()
@@ -160,6 +168,49 @@ def _configured_int(
     )
 
 
+def _validated_mode(
+    mode: str,
+    *,
+    reference_count: int,
+    supported_modes: frozenset[str],
+    backend_name: str,
+    model_name: str,
+) -> str:
+    """Normalize and validate the requested image operation mode."""
+
+    active_mode = (mode or "generate").strip().casefold() or "generate"
+    if active_mode not in IMAGE_GENERATION_MODES:
+        raise ModelError(
+            f"Unknown image mode {mode!r}; supported modes: "
+            f"{', '.join(IMAGE_GENERATION_MODES)}",
+            model_name=model_name,
+        )
+    if active_mode not in supported_modes:
+        raise ModelError(
+            f"The {backend_name} image provider does not support "
+            f"mode '{active_mode}'; switch creator_image_model to the "
+            "DashScope (Bailian) qwen-image provider for edit/translate",
+            model_name=model_name,
+        )
+    if active_mode == "edit" and not (
+        EDIT_MIN_REFERENCE_IMAGES
+        <= reference_count
+        <= EDIT_MAX_REFERENCE_IMAGES
+    ):
+        raise ModelError(
+            "Image edit mode requires 1-3 reference images, got "
+            f"{reference_count}",
+            model_name=model_name,
+        )
+    if active_mode == "translate" and reference_count != 1:
+        raise ModelError(
+            "Image translate mode requires exactly 1 reference image, "
+            f"got {reference_count}",
+            model_name=model_name,
+        )
+    return active_mode
+
+
 class BaseImageModel(ABC):
     """Common image-generation envelope shared by every backend.
 
@@ -170,6 +221,9 @@ class BaseImageModel(ABC):
     """
 
     backend_name: str = "base"
+    # Providers opt into extra modes explicitly; the base contract is plain
+    # generation so a new backend never silently accepts edit/translate.
+    supported_modes: frozenset[str] = frozenset({"generate"})
 
     def __init__(
         self,
@@ -198,8 +252,17 @@ class BaseImageModel(ABC):
         prompt: str,
         aspect_ratio: str = "16:9",
         reference_image_urls: list[str] | None = None,
+        mode: str = "generate",
+        source_lang: str = "",
+        target_lang: str = "",
     ) -> str:
-        """Generate an image, persist it, and return a /generated/... URL."""
+        """Generate an image, persist it, and return a /generated/... URL.
+
+        ``mode`` selects the qwen-image operation: ``generate`` (default),
+        ``edit`` (instruction editing over 1-3 reference images) or
+        ``translate`` (in-image text translation; ``source_lang`` /
+        ``target_lang`` apply to this mode only).
+        """
         if not self.api_key:
             raise ModelError(
                 "creator_image_model.api_key or IMAGE_API_KEY is required",
@@ -211,13 +274,29 @@ class BaseImageModel(ABC):
             for url in (reference_image_urls or [])
             if url and url.strip()
         ]
+        active_mode = _validated_mode(
+            mode,
+            reference_count=len(clean_reference_urls),
+            supported_modes=self.supported_modes,
+            backend_name=self.backend_name,
+            model_name=self.model_name,
+        )
 
         logger.info(
-            f"Generating image | model={self.model_name}, backend={self.backend_name}, "
-            f"prompt_length={len(prompt)}, references={len(clean_reference_urls)}",
+            f"Generating image | model={self.model_name}, "
+            f"backend={self.backend_name}, mode={active_mode}, "
+            f"prompt_length={len(prompt)}, "
+            f"references={len(clean_reference_urls)}",
         )
 
         try:
+            if active_mode == "translate":
+                async with model_slot("image"):
+                    return await self._translate(
+                        clean_reference_urls[0],
+                        source_lang=(source_lang or "auto").strip() or "auto",
+                        target_lang=(target_lang or "en").strip() or "en",
+                    )
             data = None
             async with model_slot("image"):
                 for attempt in range(MAX_RETRIES):
@@ -286,6 +365,21 @@ class BaseImageModel(ABC):
                 f"Image generation failed: {str(e)}",
                 model_name=self.model_name,
             )
+
+    async def _translate(
+        self,
+        image_url: str,
+        *,
+        source_lang: str,
+        target_lang: str,
+    ) -> str:
+        """In-image text translation; only DashScope implements this."""
+
+        raise ModelError(
+            f"The {self.backend_name} image provider does not implement "
+            "translate",
+            model_name=self.model_name,
+        )
 
     @abstractmethod
     async def _request(

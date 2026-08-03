@@ -71,6 +71,7 @@ const config: ModelConfigData = {
     base_url: "https://example.test/image",
     protocol: "DashScope（百炼）",
     custom_protocol: "",
+    translate_model: "",
   },
   video: {
     enabled: true,

@@ -253,6 +253,7 @@ describe("new Creator API contract", () => {
         base_url: "",
         protocol: "OpenAI 协议",
         custom_protocol: "",
+        translate_model: "",
       },
       video: {
         enabled: false,
