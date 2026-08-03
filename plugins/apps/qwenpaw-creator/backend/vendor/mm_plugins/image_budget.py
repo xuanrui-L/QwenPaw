@@ -36,7 +36,14 @@ def smart_resize(
     max_pixels: int,
     factor: int = TOKEN_SIZE,
 ) -> tuple[int, int]:
-    """Resize (h, w) into [min_pixels, max_pixels], snapped to a multiple of `factor` (the patch grid)."""
+    """Resize (h, w) into [min_pixels, max_pixels], snapped to a multiple of `factor` (the patch grid).
+
+    Creator modification: the upstream copy rounded to the patch grid after
+    scaling, which can overshoot max_pixels by up to one row/column of
+    patches. This version floors the over-budget branch (matching the
+    canonical qwen_vl_utils smart_resize) so the result never exceeds the
+    budget.
+    """
     if min_pixels > max_pixels:
         logging.warning(
             "min_pixels (%d) > max_pixels (%d), clamping max_pixels to min_pixels",
@@ -45,16 +52,24 @@ def smart_resize(
         )
         max_pixels = min_pixels
 
-    if height * width < min_pixels:
-        scale = math.sqrt(min_pixels / (height * width))
-        height = int(height * scale)
-        width = int(width * scale)
-
-    if height * width > max_pixels:
-        scale = math.sqrt(max_pixels / (height * width))
-        height = int(height * scale)
-        width = int(width * scale)
-
     height = max(factor, round(height / factor) * factor)
     width = max(factor, round(width / factor) * factor)
+
+    def _floor_into_budget(h: int, w: int) -> tuple[int, int]:
+        beta = math.sqrt((h * w) / max_pixels)
+        return (
+            max(factor, math.floor(h / beta / factor) * factor),
+            max(factor, math.floor(w / beta / factor) * factor),
+        )
+
+    if height * width > max_pixels:
+        height, width = _floor_into_budget(height, width)
+    elif height * width < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        height = math.ceil(height * beta / factor) * factor
+        width = math.ceil(width * beta / factor) * factor
+        if height * width > max_pixels:
+            # min and max budgets can coincide (the small preset); the hard
+            # max budget wins over the soft minimum.
+            height, width = _floor_into_budget(height, width)
     return height, width

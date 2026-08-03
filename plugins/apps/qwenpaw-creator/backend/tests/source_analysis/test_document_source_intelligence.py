@@ -181,6 +181,38 @@ def test_read_document_tool_renders_pages_and_boundaries(tmp_path) -> None:
     )
     assert resolved is not None and resolved[1] == 1
 
+    # The rendered pages are browsable through the HTTP doc-page route.
+    from api.file_source_intelligence_routes import document_page_image
+    from domain.errors import NotFoundError
+
+    response = asyncio.run(
+        document_page_image(
+            project_id="project-1",
+            checksum=checksum,
+            page=1,
+            services=services,
+        ),
+    )
+    assert response.media_type == "image/png"
+    with pytest.raises(NotFoundError):
+        asyncio.run(
+            document_page_image(
+                project_id="project-1",
+                checksum=checksum,
+                page=99,
+                services=services,
+            ),
+        )
+    with pytest.raises(NotFoundError):
+        asyncio.run(
+            document_page_image(
+                project_id="project-1",
+                checksum="../escape",
+                page=1,
+                services=services,
+            ),
+        )
+
 
 def test_read_document_rejects_out_of_boundary_file_ref(tmp_path) -> None:
     services, asset_id, _version_id = _services_with_document(tmp_path)

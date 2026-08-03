@@ -166,8 +166,19 @@ def resolve_ffprobe(*, ffmpeg_path: str | None = None) -> str | None:
 
 
 # Optional office-document conversion backend (no auto-install; same
-# optional-tool policy as jq).
-_MACOS_SOFFICE = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+# optional-tool policy as jq). Server processes often start with a minimal
+# PATH, so well-known install locations are probed explicitly.
+_SOFFICE_CANDIDATES = (
+    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    os.path.expanduser(
+        "~/Applications/LibreOffice.app/Contents/MacOS/soffice",
+    ),
+    "/opt/homebrew/bin/soffice",
+    "/usr/local/bin/soffice",
+    "/usr/bin/soffice",
+    "/usr/bin/libreoffice",
+    "/snap/bin/libreoffice",
+)
 
 
 def resolve_libreoffice() -> str | None:
@@ -178,8 +189,9 @@ def resolve_libreoffice() -> str | None:
         system = shutil.which(name)
         if system:
             return system
-    if _is_executable(_MACOS_SOFFICE):
-        return _MACOS_SOFFICE
+    for candidate in _SOFFICE_CANDIDATES:
+        if _is_executable(candidate):
+            return candidate
     return None
 
 

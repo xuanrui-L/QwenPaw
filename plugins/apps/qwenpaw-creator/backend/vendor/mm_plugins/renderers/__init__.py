@@ -116,6 +116,41 @@ def fig_to_image(fig, pad_inches: float = 0.1):
     return Image.open(buf)
 
 
+# CJK-capable sans families across macOS / Linux / Windows, best first.
+_CJK_FONT_CANDIDATES = (
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Heiti SC",
+    "Arial Unicode MS",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "WenQuanYi Zen Hei",
+    "Microsoft YaHei",
+    "SimHei",
+)
+
+
+def configure_matplotlib_cjk() -> None:
+    """Prefer an installed CJK font so table images keep non-Latin text.
+
+    Creator addition: matplotlib's default DejaVu Sans has no CJK glyphs,
+    which turns Chinese spreadsheet content into tofu boxes.
+    """
+    try:
+        from matplotlib import font_manager, rcParams
+    except ImportError:
+        return
+    installed = {font.name for font in font_manager.fontManager.ttflist}
+    chosen = [name for name in _CJK_FONT_CANDIDATES if name in installed]
+    if not chosen:
+        return
+    current = [
+        name for name in rcParams["font.sans-serif"] if name not in chosen
+    ]
+    rcParams["font.sans-serif"] = chosen + current
+    rcParams["axes.unicode_minus"] = False
+
+
 def parse_pages(pages_str: str, total_pages: int) -> list[int]:
     """Parse a page range string into 0-based page indices.
 

@@ -8,4 +8,7 @@ __pycache__/
 data/
 generated/
 backend/data/
+# manual_real acceptance outputs (open the rendered pages by hand)
+backend/tests/manual/.manual-doc-reader/
+backend/tests/manual/fixtures/
 backend/generated/

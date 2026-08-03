@@ -36,6 +36,7 @@ import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
+import DocumentUnderstanding from "@/components/assets/DocumentUnderstanding";
 import PageLoadError from "@/components/PageLoadError";
 import PageSkeleton from "@/components/PageSkeleton";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
@@ -448,7 +449,8 @@ function visualItemGroups(
 }
 
 function kindLabel(item: AssetItem): string {
-  if (item.kind === "source") return "来源";
+  if (item.kind === "source")
+    return item.mediaKind === "document" ? "来源 · 文档" : "来源";
   if (item.kind === "artifact") return "产物";
   const entity = item.raw as VisualEntityDocument;
   return entity.kind === "character"
@@ -1132,6 +1134,16 @@ export default function AssetsPage() {
                     </div>
                   ))}
                 </dl>
+                {selected.kind === "source" &&
+                  selected.mediaKind === "document" && (
+                    <DocumentUnderstanding
+                      projectId={id}
+                      assetId={
+                        (selected.raw as SourceAssetVersionDocument)
+                          .logical_asset_id
+                      }
+                    />
+                  )}
                 {(() => {
                   if (!project) return null;
                   const resolved = selected.provenanceRefs

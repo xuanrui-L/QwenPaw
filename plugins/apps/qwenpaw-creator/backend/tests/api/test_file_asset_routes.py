@@ -16,6 +16,7 @@ from api.content_disposition import inline_content_disposition
 from api import file_asset_routes, file_media_routes
 from api.dependencies import creator_error_handler, project_file_services
 from api.file_asset_routes import (
+    _assert_supported_source_upload,
     _media_kind,
     _remote_asset_max_bytes,
     _validate_local_video_upload,
@@ -65,6 +66,22 @@ def test_media_kind_classifies_readable_documents_by_extension() -> None:
     assert _media_kind("image/svg+xml", "icon.svg") == "image"
     assert _media_kind("text/x-unknown", "blob.unknownext") == "text"
     assert _media_kind("application/zip", "bundle.zip") == "other"
+
+
+def test_source_upload_rejects_unreadable_binary_formats() -> None:
+    # Opaque blobs (e.g. 3D models) cannot enter Source Intelligence and
+    # must be refused at the upload boundary with a readable hint.
+    with pytest.raises(ValidationError) as excinfo:
+        _assert_supported_source_upload(
+            "unsupported.glb",
+            "model/gltf-binary",
+        )
+    assert "不支持的来源素材格式" in str(excinfo.value)
+    assert "unsupported.glb" in str(excinfo.value)
+    # Readable creative material passes untouched.
+    _assert_supported_source_upload("script.pdf", "application/pdf")
+    _assert_supported_source_upload("budget.csv", "text/csv")
+    _assert_supported_source_upload("clip.mp4", "video/mp4")
 
 
 def _install_remote_transport(

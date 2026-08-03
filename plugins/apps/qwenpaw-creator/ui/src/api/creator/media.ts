@@ -46,3 +46,16 @@ export function getGeneratedMediaUrl(url: string): string {
   if (url.startsWith("/generated/")) return creatorAuthenticatedUrl(url);
   return url;
 }
+
+/** Rendered document page image (doc-page:// evidence ref). */
+export function getDocumentPageUrl(
+  projectId: string,
+  checksum: string,
+  page: number,
+): string {
+  return creatorAuthenticatedUrl(
+    `/projects/${encodeURIComponent(projectId)}/doc-pages/${encodeURIComponent(
+      checksum,
+    )}/${page}`,
+  );
+}

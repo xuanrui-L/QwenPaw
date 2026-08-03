@@ -142,6 +142,10 @@ def _dataframe_to_image(df, title: str):
     except ImportError:
         return None
 
+    from vendor.mm_plugins.renderers import configure_matplotlib_cjk
+
+    configure_matplotlib_cjk()
+
     display_df = df.head(50)
     n_rows, n_cols = display_df.shape
     col_width = max(1.5, min(3.0, 18.0 / max(n_cols, 1)))

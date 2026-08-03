@@ -48,7 +48,9 @@ def convert_to_pdf(path: str, soffice: str, dest_pdf: str) -> None:
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            # First-ever launch on macOS includes the Gatekeeper scan of the
+            # whole app bundle, which alone can take >80s.
+            timeout=180,
             check=False,
         )
         if proc.returncode != 0:

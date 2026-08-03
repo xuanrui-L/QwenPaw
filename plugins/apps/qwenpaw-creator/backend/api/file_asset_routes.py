@@ -407,6 +407,16 @@ def _media_kind(media_type: str, name: str = "") -> str:
     return "other"
 
 
+def _assert_supported_source_upload(name: str, media_type: str) -> None:
+    """Source uploads must be analyzable creative material, not opaque blobs."""
+    if _media_kind(media_type, name) != "other":
+        return
+    raise ValidationError(
+        f"不支持的来源素材格式: {name}（{media_type}）。"
+        "支持图片、视频、音频，以及 PDF/Office/表格/字幕/纯文本等可读文档。",
+    )
+
+
 def _extension(name: str, media_type: str) -> str:
     suffix = Path(name).suffix[:20]
     if suffix and suffix.replace(".", "").isalnum():
@@ -1247,6 +1257,8 @@ async def ingest_asset(
             media_type=media_type,
             size_bytes=upload.size,
         )
+        if post_action == "ATTACH_SOURCE":
+            _assert_supported_source_upload(name, media_type)
         upload_store = await _upload_file_store(services, project_id)
         input_item: _AssetInput | _StagedAssetInput = await _stage_upload(
             upload,
@@ -1405,6 +1417,8 @@ async def import_assets(
                 media_type=media_type,
                 size_bytes=upload.size,
             )
+            if post_action == "ATTACH_SOURCE":
+                _assert_supported_source_upload(name, media_type)
             item = await _stage_upload(
                 upload,
                 name=name,

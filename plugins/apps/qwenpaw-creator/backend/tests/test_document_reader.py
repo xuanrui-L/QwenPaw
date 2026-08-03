@@ -15,7 +15,13 @@ from services.document_reader import (
     is_supported_document,
     read_document,
 )
-from vendor.mm_plugins.image_budget import TOKEN_SIZE
+from vendor.mm_plugins.image_budget import (
+    IMAGE_BUDGET_TOKENS,
+    IMAGE_MIN_PIXELS,
+    TOKEN_SIZE,
+    budget_to_pixels,
+    smart_resize,
+)
 
 
 def _make_pdf(path: Path, pages: int = 3) -> None:
@@ -53,6 +59,23 @@ def test_supported_extension_probe() -> None:
     assert not is_supported_document("archive.zip")
 
 
+def test_smart_resize_never_exceeds_budget() -> None:
+    # The grid snap must not push the result over the pixel budget
+    # (acceptance A3: every tier stays within budget).
+    cases = [(1754, 1240), (1216, 864), (3000, 2000), (100, 80), (4000, 50)]
+    for budget in ("small", "normal", "large"):
+        max_pixels = budget_to_pixels(budget, IMAGE_BUDGET_TOKENS)
+        for height, width in cases:
+            new_h, new_w = smart_resize(
+                height,
+                width,
+                IMAGE_MIN_PIXELS,
+                max_pixels,
+            )
+            assert new_h % TOKEN_SIZE == 0 and new_w % TOKEN_SIZE == 0
+            assert new_h * new_w <= max_pixels
+
+
 def test_pdf_renders_pages_text_layer_and_grid_alignment(tmp_path) -> None:
     source = tmp_path / "script.pdf"
     _make_pdf(source, pages=3)
@@ -62,12 +85,14 @@ def test_pdf_renders_pages_text_layer_and_grid_alignment(tmp_path) -> None:
     assert result.page_count == 3
     assert result.pages_rendered == (1, 2, 3)
     assert len(result.page_images) == 3
+    normal_budget = budget_to_pixels("normal", IMAGE_BUDGET_TOKENS)
     for page, image_path in zip(result.pages_rendered, result.page_images):
         assert image_path.name == f"page-{page:04d}.png"
         assert image_path.is_file()
         width, height = _png_size(image_path)
         assert width % TOKEN_SIZE == 0
         assert height % TOKEN_SIZE == 0
+        assert width * height <= normal_budget
     assert "Creator Doc Page 1: storyboard beats" in result.text_excerpt
     assert len(result.text_excerpt) <= MAX_TEXT_EXCERPT_CHARS
 
