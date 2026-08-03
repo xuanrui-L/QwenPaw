@@ -53,15 +53,21 @@ interface TimelineCanvasProps {
   onPreviewOpenChange: (open: boolean) => void;
   onPlayheadChange: (tick: number) => void;
   onSelectElement: (elementId: string) => void;
-  onActiveElementIdsChange: (ids: string[]) => void;
+  onActiveElementIdsChange: (ids: string[] | null) => void;
 }
 
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 4;
+/** Undo history depth for immediate write-back span edits. */
+const HISTORY_LIMIT = 50;
 const ZOOM_STEP = 0.5;
 
-function seconds(tick: number, ticksPerSecond: number, digits = 1): string {
-  return (tick / ticksPerSecond).toFixed(digits).replace(/\.0$/, "");
+function seconds(tick: number, ticksPerSecond: number): string {
+  // Match TimelineTracks: two decimals, trimmed, so 4.95s never reads as 5s.
+  return (tick / ticksPerSecond)
+    .toFixed(2)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "");
 }
 
 /** NLE-style timecode `MM:SS.t`, matching the reference transport display. */
@@ -109,6 +115,14 @@ export default function TimelineCanvas({
   const patch = useProjectSnapshotStore((state) => state.patch);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const commitChain = useRef<Promise<void>>(Promise.resolve());
+  // Undo/redo stacks hold the inverse span sets of committed edits; both
+  // replay through the same serialized commit chain.
+  const undoStack = useRef<SpanChange[][]>([]);
+  const redoStack = useRef<SpanChange[][]>([]);
+  useEffect(() => {
+    undoStack.current = [];
+    redoStack.current = [];
+  }, [project.project_id, timeline.timeline_id]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewScrubberRef = useRef<HTMLDivElement>(null);
   const previewScrub = useRef<{
@@ -229,7 +243,7 @@ export default function TimelineCanvas({
   // project.json immediately (default-apply), serialized so consecutive drags
   // never race each other's base generation.
   // ------------------------------------------------------------------
-  const commitSpans = (changes: SpanChange[]) => {
+  const commitSpans = (changes: SpanChange[], history?: "undo" | "redo") => {
     commitChain.current = commitChain.current.then(async () => {
       const snapshot = useProjectSnapshotStore.getState();
       const latestTimeline =
@@ -258,8 +272,24 @@ export default function TimelineCanvas({
         clearCommitted();
         return;
       }
+      // Inverse spans captured before the patch make the edit undoable.
+      const inverseChanges: SpanChange[] = allChanges
+        .filter((change) => latestTimeline.elements_by_id[change.elementId])
+        .map((change) => ({
+          elementId: change.elementId,
+          span: { ...latestTimeline.elements_by_id[change.elementId].span },
+        }));
       try {
         const response = await patch(project.project_id, operations);
+        if (history === "undo") {
+          redoStack.current.push(inverseChanges);
+        } else {
+          undoStack.current.push(inverseChanges);
+          if (undoStack.current.length > HISTORY_LIMIT) {
+            undoStack.current.shift();
+          }
+          if (!history) redoStack.current = [];
+        }
         clearCommitted();
         if (response.editImpact?.regenerationRequired) {
           message.success("时间调整已应用；相关生成结果已标记为需要重新生成");
@@ -460,6 +490,16 @@ export default function TimelineCanvas({
   };
   const togglePlaybackRef = useRef(togglePlayback);
   togglePlaybackRef.current = togglePlayback;
+  const undoRef = useRef(() => {});
+  undoRef.current = () => {
+    const entry = undoStack.current.pop();
+    if (entry) commitSpans(entry, "undo");
+  };
+  const redoRef = useRef(() => {});
+  redoRef.current = () => {
+    const entry = redoStack.current.pop();
+    if (entry) commitSpans(entry, "redo");
+  };
   const seekByRef = useRef((deltaTick: number) => {
     onPlayheadChange(
       Math.min(timelineDuration, Math.max(0, playheadTick + deltaTick)),
@@ -483,6 +523,16 @@ export default function TimelineCanvas({
       )
         return;
       const tps = Math.max(1, timeline.ticks_per_second);
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        (event.key === "z" || event.key === "Z")
+      ) {
+        // Standard NLE history: ⌘/Ctrl+Z undo, ⌘/Ctrl+Shift+Z redo.
+        event.preventDefault();
+        if (event.shiftKey) redoRef.current();
+        else undoRef.current();
+        return;
+      }
       if (event.key === " " || event.code === "Space") {
         if (target?.closest("button, a")) return;
         event.preventDefault();

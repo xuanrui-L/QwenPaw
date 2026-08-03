@@ -807,4 +807,45 @@ describe("PlanPage Timeline/Element frontend", () => {
       ].elements_by_id["r2v-window"].label,
     ).toBe("新的午饭名场面");
   });
+
+  it("derives the playhead panel content from timeline + playheadTick", async () => {
+    seedProject();
+    renderPage();
+    const header = () =>
+      (screen.getByText(/^时间点:/).textContent ?? "").replace(/\s+/g, "");
+    // 0s: the opening clip and BGM are active without any click.
+    expect(header()).toContain("时间点:0s");
+    const atZero = header();
+    expect(atZero).not.toContain("0项内容");
+
+    // Keyboard End moves the playhead; the panel must follow (this used to
+    // keep showing the stale click-time list).
+    fireEvent.keyDown(document.body, { key: "End" });
+    await waitFor(() => expect(header()).toContain("时间点:20s"));
+    expect(header()).toContain("0项内容");
+
+    fireEvent.keyDown(document.body, { key: "Home" });
+    await waitFor(() => expect(header()).toBe(atZero));
+    // Rendered once on the track and once in the playhead content list.
+    expect(screen.getAllByText("开场 · 晨光中的小猫")).toHaveLength(2);
+
+    // A span edit landing in the snapshot re-derives the same panel: after
+    // shrinking the opening clip to 0–3s, the 5s playhead no longer lists it.
+    for (let step = 0; step < 5; step += 1) {
+      fireEvent.keyDown(document.body, { key: "ArrowRight" });
+    }
+    await waitFor(() => expect(header()).toContain("时间点:5s"));
+    expect(screen.getAllByText("开场 · 晨光中的小猫")).toHaveLength(2);
+    act(() => {
+      const project = cloneProject();
+      project.timelines.items["timeline:main"].elements_by_id[
+        "edit-opening"
+      ].span.duration_tick = 3000;
+      useProjectSnapshotStore.setState({ project });
+    });
+    // The track block stays; the stale entry leaves the playhead list.
+    await waitFor(() =>
+      expect(screen.getAllByText("开场 · 晨光中的小猫")).toHaveLength(1),
+    );
+  });
 });

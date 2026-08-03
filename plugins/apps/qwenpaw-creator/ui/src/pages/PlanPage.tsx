@@ -13,6 +13,7 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { getArtifactVersionMediaUrl, renderTimeline } from "@/api/creator";
 import {
+  elementsAtTick,
   overlayContentKind,
   resolveTimelineRender,
   selectPrimaryTimeline,
@@ -82,7 +83,12 @@ export default function PlanPage() {
   const composeAttemptedGeneration = useRef<number | null>(null);
   const handledComposeTask = useRef<string | null>(null);
   const generation = useProjectSnapshotStore((state) => state.generation);
-  const [activeElementIds, setActiveElementIds] = useState<string[]>([]);
+  // Explicit selection (range drag, block/lane clicks) pins a list; when
+  // null, "content at the playhead" derives from timeline + playheadTick so
+  // keyboard seeks, playback and span edits can never show stale elements.
+  const [explicitActiveIds, setExplicitActiveIds] = useState<string[] | null>(
+    null,
+  );
   const durationTick = timelineEndTick(timeline);
   const displayDurationTick = timeline
     ? durationTick ||
@@ -91,6 +97,17 @@ export default function PlanPage() {
           timeline.ticks_per_second,
       )
     : 1;
+  const clampedPlayheadTick = Math.min(playheadTick, displayDurationTick);
+  const activeElementIds = useMemo(
+    () =>
+      explicitActiveIds ??
+      (timeline
+        ? elementsAtTick(timeline, clampedPlayheadTick).map(
+            (element) => element.element_id,
+          )
+        : []),
+    [explicitActiveIds, timeline, clampedPlayheadTick],
+  );
   const reviewMode = query.get("review") === "1";
   const reviewField = query.get("field");
   const reviewPulse = query.get("reviewPulse");
@@ -666,7 +683,7 @@ export default function PlanPage() {
         project={project}
         timeline={timeline}
         durationTick={displayDurationTick}
-        playheadTick={Math.min(playheadTick, displayDurationTick)}
+        playheadTick={clampedPlayheadTick}
         selectedElementId={selectedElementId}
         activeElementIds={activeElementIds}
         previewOpen={previewOpen}
@@ -676,7 +693,7 @@ export default function PlanPage() {
           setPlayheadTick(Math.max(0, Math.min(displayDurationTick, tick)))
         }
         onSelectElement={selectElement}
-        onActiveElementIdsChange={setActiveElementIds}
+        onActiveElementIdsChange={setExplicitActiveIds}
       />
 
       <main

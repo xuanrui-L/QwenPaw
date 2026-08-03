@@ -64,7 +64,11 @@ interface TimelineTracksProps {
   agentWorking: boolean;
   onPlayheadChange: (tick: number) => void;
   onSelectElement: (elementId: string) => void;
-  onActiveElementIdsChange: (ids: string[]) => void;
+  /**
+   * null asks the page to derive "content at the playhead" from
+   * timeline + playheadTick instead of pinning a stale explicit list.
+   */
+  onActiveElementIdsChange: (ids: string[] | null) => void;
   onDragOverridesChange: (
     overrides: Map<string, TimelineSpanDocument> | null,
   ) => void;
@@ -94,8 +98,13 @@ const TRACK_DECOR: Record<
 /** Diagonal-stripe overlays mark copy/motion overlays like the design mock. */
 const STRIPED_TRACKS = new Set<TimelineTrackType>(["subtitle", "motion"]);
 
-function seconds(tick: number, ticksPerSecond: number, digits = 1): string {
-  return (tick / ticksPerSecond).toFixed(digits).replace(/\.0$/, "");
+function seconds(tick: number, ticksPerSecond: number): string {
+  // Two decimals, trailing zeros trimmed: 4.95 stays "4.95" (never "5"),
+  // so block labels always match the persisted tick boundary.
+  return (tick / ticksPerSecond)
+    .toFixed(2)
+    .replace(/0+$/, "")
+    .replace(/\.$/, "");
 }
 
 function percent(tick: number, durationTick: number): number {
@@ -366,13 +375,15 @@ export default function TimelineTracks({
           : { kind: "point", startTick, endTick: startTick },
       );
       setPointCandidates([]);
-      const selectedElements =
-        endTick > startTick
-          ? elementsOverlappingRange(timeline, startTick, endTick)
-          : elementsAtTick(timeline, startTick);
-      onActiveElementIdsChange(
-        selectedElements.map((element) => element.element_id),
-      );
+      if (endTick > startTick) {
+        onActiveElementIdsChange(
+          elementsOverlappingRange(timeline, startTick, endTick).map(
+            (element) => element.element_id,
+          ),
+        );
+      } else {
+        onActiveElementIdsChange(null);
+      }
       return;
     }
 
@@ -380,7 +391,7 @@ export default function TimelineTracks({
     const candidates = elementsAtTick(timeline, tick);
     setSelection({ kind: "point", startTick: tick, endTick: tick });
     setPointCandidates(collapsed ? candidates : []);
-    onActiveElementIdsChange(candidates.map((element) => element.element_id));
+    onActiveElementIdsChange(null);
   };
 
   const addSelectionToConversation = () => {
@@ -540,9 +551,7 @@ export default function TimelineTracks({
         authorityTimeline,
         drag.lastChanges.slice(0, 1),
       );
-      message.warning(
-        follow.ok === false ? follow.reason : "该调整无法应用",
-      );
+      message.warning(follow.ok === false ? follow.reason : "该调整无法应用");
       onDragOverridesChange(null);
       return;
     }
@@ -586,9 +595,7 @@ export default function TimelineTracks({
     const tick = tickAt(event.clientX);
     setSelection({ kind: "point", startTick: tick, endTick: tick });
     setPointCandidates(collapsed ? elementsAtTick(timeline, tick) : []);
-    onActiveElementIdsChange(
-      elementsAtTick(timeline, tick).map((element) => element.element_id),
-    );
+    onActiveElementIdsChange(null);
   };
 
   // Ctrl/⌘ + wheel zooms around the pointer (NLE standard). Native listener:
@@ -601,8 +608,7 @@ export default function TimelineTracks({
       event.preventDefault();
       const rect = chart.getBoundingClientRect();
       const scrollLeft = scrollRef.current?.scrollLeft ?? 0;
-      const offsetPx =
-        event.clientX - rect.left - CHART_PADDING - LABEL_WIDTH;
+      const offsetPx = event.clientX - rect.left - CHART_PADDING - LABEL_WIDTH;
       const innerBefore = Math.max(
         1,
         (rect.width - LABEL_WIDTH - CHART_PADDING * 2) * Math.max(1, zoom),
@@ -716,7 +722,6 @@ export default function TimelineTracks({
     }
     return {
       ticks,
-      labelDigits: majorStepSeconds < 1 ? 1 : 0,
     };
   }, [timeline.ticks_per_second, timelineDuration, zoom]);
 
@@ -765,7 +770,11 @@ export default function TimelineTracks({
           playbackState === "ready"
             ? ""
             : ` · ${ELEMENT_PLAYBACK_STATUS_LABEL[playbackState]}`
-        }${editable ? " · 可拖拽移动，选中后拖动两端裁剪；Shift+拖动选取时间段" : ""}`}
+        }${
+          editable
+            ? " · 可拖拽移动，选中后拖动两端裁剪；Shift+拖动选取时间段"
+            : ""
+        }`}
         onPointerDown={(event) => {
           const trim = (event.target as HTMLElement)
             .closest("[data-element-trim]")
@@ -866,8 +875,7 @@ export default function TimelineTracks({
               {element.label || "时间线内容"}
             </span>
             <span className="pointer-events-none truncate whitespace-nowrap text-[9px] font-medium opacity-75">
-              {seconds(element.span.start_tick, timeline.ticks_per_second)}
-              s –{" "}
+              {seconds(element.span.start_tick, timeline.ticks_per_second)}s –{" "}
               {seconds(
                 element.span.start_tick + element.span.duration_tick,
                 timeline.ticks_per_second,
@@ -952,17 +960,10 @@ export default function TimelineTracks({
                       <b
                         className="absolute top-[3px] whitespace-nowrap text-[9px] font-medium text-[var(--color-text-tertiary)]"
                         style={
-                          tick >= timelineDuration
-                            ? { right: 4 }
-                            : { left: 4 }
+                          tick >= timelineDuration ? { right: 4 } : { left: 4 }
                         }
                       >
-                        {seconds(
-                          tick,
-                          timeline.ticks_per_second,
-                          scale.labelDigits,
-                        )}
-                        s
+                        {seconds(tick, timeline.ticks_per_second)}s
                       </b>
                     )}
                   </span>
@@ -1115,8 +1116,7 @@ export default function TimelineTracks({
                             transition.creation.type === "transition"
                               ? transition.creation.transition_kind
                               : "";
-                          const kindLabel =
-                            TRANSITION_KIND_LABEL[kind] ?? kind;
+                          const kindLabel = TRANSITION_KIND_LABEL[kind] ?? kind;
                           const junctionSelected =
                             selectedElementId === transition.element_id;
                           const leftStyle = `${percent(
@@ -1144,9 +1144,7 @@ export default function TimelineTracks({
                               )}
                               <button
                                 type="button"
-                                data-transition-junction={
-                                  transition.element_id
-                                }
+                                data-transition-junction={transition.element_id}
                                 title={`${
                                   transition.label || "转场"
                                 } · ${kindLabel} · ${seconds(
@@ -1187,9 +1185,7 @@ export default function TimelineTracks({
                                   junctionSelected
                                     ? "border-[var(--color-accent)] text-[var(--color-accent)] shadow-[0_0_0_2px_rgba(255,127,22,0.18)]"
                                     : "border-[#6844bd] text-[#6844bd] shadow-[0_2px_7px_rgba(36,31,26,0.16)] hover:border-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
-                                } ${
-                                  !transition.enabled ? "opacity-45" : ""
-                                }`}
+                                } ${!transition.enabled ? "opacity-45" : ""}`}
                                 style={{
                                   left: leftStyle,
                                   top: centerTop,
@@ -1262,8 +1258,7 @@ export default function TimelineTracks({
                     percent(selection.startTick, timelineDuration) / 100
                   })`,
                   width: `calc((100% - 68px) * ${
-                    (selection.endTick - selection.startTick) /
-                    timelineDuration
+                    (selection.endTick - selection.startTick) / timelineDuration
                   })`,
                 }}
               />
