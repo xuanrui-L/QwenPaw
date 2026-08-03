@@ -15,7 +15,12 @@
   },
   "dependencies": [
     "oss2",
-    "imageio-ffmpeg"
+    "imageio-ffmpeg",
+    "pypdfium2",
+    "pandas",
+    "matplotlib",
+    "openpyxl",
+    "tabulate"
   ],
   "qwenpaw_version": {
     "min": "2.0.1"
@@ -47,6 +52,12 @@
         "required": false,
         "path_env": "CREATOR_FFPROBE_PATH",
         "fallback": "ffmpeg metadata probing"
+      },
+      "libreoffice": {
+        "required": false,
+        "required_for": "office document (doc/docx/ppt/pptx/vsdx) rendering in read_document",
+        "path_env": "CREATOR_LIBREOFFICE_PATH",
+        "fallback": "xlsx renders via the data renderer; other office formats return a readable install hint"
       }
     },
     "category": "video-creation",

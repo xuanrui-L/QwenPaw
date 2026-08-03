@@ -33,6 +33,7 @@ CREATOR_FFMPEG_PATH_ENV = "CREATOR_FFMPEG_PATH"
 CREATOR_FFPROBE_PATH_ENV = "CREATOR_FFPROBE_PATH"
 CREATOR_AUTO_INSTALL_BINARIES_ENV = "CREATOR_AUTO_INSTALL_BINARIES"
 CREATOR_JQ_BASE_URL_ENV = "CREATOR_JQ_BASE_URL"
+CREATOR_LIBREOFFICE_PATH_ENV = "CREATOR_LIBREOFFICE_PATH"
 
 JQ_VERSION = "1.8.2"
 _JQ_RELEASE_BASE_URL = (
@@ -161,6 +162,24 @@ def resolve_ffprobe(*, ffmpeg_path: str | None = None) -> str | None:
         sibling = ffmpeg.with_name(f"ffprobe{suffix}")
         if _is_executable(sibling):
             return os.fspath(sibling)
+    return None
+
+
+# Optional office-document conversion backend (no auto-install; same
+# optional-tool policy as jq).
+_MACOS_SOFFICE = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+
+
+def resolve_libreoffice() -> str | None:
+    configured = _configured_executable(CREATOR_LIBREOFFICE_PATH_ENV)
+    if configured:
+        return configured
+    for name in ("libreoffice", "soffice"):
+        system = shutil.which(name)
+        if system:
+            return system
+    if _is_executable(_MACOS_SOFFICE):
+        return _MACOS_SOFFICE
     return None
 
 

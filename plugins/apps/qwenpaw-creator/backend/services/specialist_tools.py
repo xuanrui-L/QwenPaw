@@ -305,6 +305,29 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
     ("summary", "shots", "entities", "semanticEntries"),
 )
 
+_READ_DOCUMENT_ARGUMENTS = _arguments_schema(
+    {
+        "fileRef": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "当前 Source 选中的 exact asset-version:<versionId>，逐字使用；"
+                "超出本 Run 准入边界的引用会被拒绝。"
+            ),
+        },
+        "pages": {
+            "type": "string",
+            "description": ('1-based 页范围，如 "1-5" 或 "1,3,5-8"；省略时渲染前 20 页。'),
+        },
+        "budget": {
+            "type": "string",
+            "enum": ["small", "normal", "large"],
+            "description": "页图分辨率预算，缺省 normal。",
+        },
+    },
+    ("fileRef",),
+)
+
 _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
     {
         "brief": {
@@ -406,6 +429,18 @@ _SPECS = (
         long_running=True,
         provider_kind="vlm",
     ),
+    SpecialistToolSpec(
+        name="read_document",
+        description=(
+            "把当前 exact 文档 Source（PDF/Office/表格/字幕/纯文本等）渲染为"
+            "逐页页图与文本摘要。页图由 Runtime 落盘并在下一条消息中以原生图片"
+            "送入你的上下文；返回的 resultRef 是工具权威结果，提交素材理解时通过 "
+            "moduleResultRefs.document 引用，不要重写或伪造页图内容。"
+        ),
+        roles=frozenset({SpecialistRole.SOURCE_INTELLIGENCE}),
+        parameters=_tool_schema(_READ_DOCUMENT_ARGUMENTS),
+        provider_kind="document",
+    ),
 )
 
 _SPECS_BY_NAME = {item.name: item for item in _SPECS}
@@ -502,7 +537,11 @@ class FileSpecialistToolRegistry:
         if not isinstance(payload, Mapping):
             raise ValidationError("Specialist tool arguments 必须是 object")
 
-        if name in {"transcribe_source_audio", "commit_source_intelligence"}:
+        if name in {
+            "transcribe_source_audio",
+            "commit_source_intelligence",
+            "read_document",
+        }:
             if context is None:
                 raise ValidationError(
                     f"{name} requires Runtime-owned outer VLM context",
@@ -525,6 +564,17 @@ class FileSpecialistToolRegistry:
                 project_id=project_id,
                 target_ref=target_ref,
                 command_id=idempotency_key,
+                arguments=payload,
+                context=context,
+            )
+            return SpecialistToolResult(payload=dict(result))
+
+        if name == "read_document":
+            result = await source_analysis_service(
+                self.services,
+            ).read_source_document(
+                project_id=project_id,
+                target_ref=target_ref,
                 arguments=payload,
                 context=context,
             )

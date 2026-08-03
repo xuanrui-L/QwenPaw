@@ -48,11 +48,16 @@ from domain.errors import (
 from models import config as model_config
 from models import asr_model
 from schemas.assets import (
+    DocumentMetadata,
     SourceAgentIntelligenceInput,
     SourceIndexQueryResult,
     SourceIntelligenceIndex,
     SourceMediaMetadata,
     SourceModelRunRef,
+)
+from services.document_reader import (
+    is_supported_document,
+    read_document,
 )
 from services.project_files.assets import (
     AssetAlreadyExists,
@@ -255,6 +260,13 @@ def _probe_media(
     path: Path,
     version: SourceAssetVersion,
 ) -> SourceMediaMetadata:
+    if version.media_kind == "document":
+        # Documents carry no probeable AV streams; page facts arrive later
+        # from the document reader module result.
+        return SourceMediaMetadata(
+            mediaKind="document",
+            mediaType=version.media_type,
+        )
     try:
         probe = probe_media(os.fspath(path))
     except MediaProbeUnavailable as error:
@@ -295,6 +307,50 @@ def _source_module_result_ref(
         ),
     ).hex
     return f"source-module-result:{identity}"
+
+
+# One pseudo-page occupies this many milliseconds on the document timeline:
+# page N maps to the half-open range [(N-1)*1000, N*1000).
+DOCUMENT_PAGE_INTERVAL_MS = 1000
+
+
+def document_page_ref(source_checksum: str, page: int) -> str:
+    """Stable evidence ref for one rendered document page image."""
+    return f"doc-page://{source_checksum}/{page:04d}"
+
+
+def document_pages_dir(project_root: Path, source_checksum: str) -> Path:
+    return project_root / "runtime" / "doc-pages" / source_checksum[:16]
+
+
+def document_page_path(
+    project_root: Path,
+    source_checksum: str,
+    page: int,
+) -> Path:
+    return (
+        document_pages_dir(
+            project_root,
+            source_checksum,
+        )
+        / f"page-{page:04d}.png"
+    )
+
+
+def resolve_document_page_ref(
+    project_root: Path,
+    ref: str,
+) -> tuple[str, int, Path] | None:
+    """Parse a doc-page:// evidence ref into (checksum, page, local path)."""
+    text = str(ref or "").strip()
+    if not text.startswith("doc-page://"):
+        return None
+    remainder = text.removeprefix("doc-page://")
+    checksum, _, page_text = remainder.partition("/")
+    if not checksum or not page_text.isdigit():
+        return None
+    page = int(page_text)
+    return checksum, page, document_page_path(project_root, checksum, page)
 
 
 def _covered_ratio(
@@ -495,6 +551,92 @@ class SourceMediaAnalysisService:
             "transcript": transcript,
         }
 
+    async def read_source_document(
+        self,
+        *,
+        project_id: str,
+        target_ref: str,
+        arguments: Mapping[str, Any],
+        context: SourceAgentToolContext,
+    ) -> dict[str, Any]:
+        """Render the admitted document Source into page images + text."""
+
+        file_ref = str(arguments.get("fileRef") or "").strip()
+        pages = arguments.get("pages")
+        pages = str(pages).strip() if pages is not None else None
+        budget = str(arguments.get("budget") or "normal")
+        if budget not in {"small", "normal", "large"}:
+            raise ValidationError(
+                "read_document budget 必须是 small/normal/large",
+            )
+        (
+            _snapshot,
+            _source,
+            version,
+            _indexed,
+            local_path,
+            _source_url,
+            _media,
+        ) = await asyncio.to_thread(
+            self._resolve_agent_source_sync,
+            project_id,
+            target_ref,
+        )
+        if version.media_kind not in {"document", "text"}:
+            raise ValidationError(
+                "read_document 只适用于文档/文本 Source，当前类型为 "
+                f"{version.media_kind}",
+            )
+        expected_ref = f"asset-version:{version.version_id}"
+        if file_ref != expected_ref:
+            raise ValidationError(
+                "fileRef 超出本 Run 准入边界：必须逐字使用当前 Source 选中的 " f"{expected_ref}",
+            )
+        if local_path is None:
+            raise ValidationError(
+                "文档尚未缓存到本地，无法渲染页图；请等待缓存任务完成后重试",
+            )
+        if not is_supported_document(version.name or local_path.name):
+            raise ValidationError(
+                f"不支持的文档格式: {version.name or local_path.name}",
+            )
+        result_ref = _source_module_result_ref(context, "document")
+        project_root = self.services.projects.project_root(project_id)
+        output_dir = document_pages_dir(project_root, version.checksum)
+        source_path = local_path
+        suffix = Path(version.name or "").suffix
+        if suffix and source_path.suffix.lower() != suffix.lower():
+            # Renderer dispatch is extension-based; give cached blobs their
+            # declared extension via a hard link/copy next to the pages.
+            output_dir.mkdir(parents=True, exist_ok=True)
+            aliased = output_dir / f"source{suffix.lower()}"
+            if not aliased.exists():
+                shutil.copyfile(source_path, aliased)
+            source_path = aliased
+        rendered = await read_document(
+            source_path,
+            output_dir=output_dir,
+            pages=pages,
+            budget=budget,  # type: ignore[arg-type]
+        )
+        page_refs = [
+            document_page_ref(version.checksum, page)
+            for page in rendered.pages_rendered
+        ]
+        return {
+            "ok": True,
+            "module": "document",
+            "resultRef": result_ref,
+            "sourceAssetVersionId": version.version_id,
+            "sourceChecksum": version.checksum,
+            "format": rendered.format,
+            "pageCount": rendered.page_count,
+            "pagesRendered": list(rendered.pages_rendered),
+            "pageImageRefs": page_refs,
+            "textExcerpt": rendered.text_excerpt,
+            "notes": list(rendered.notes),
+        }
+
     def _module_result_sync(
         self,
         *,
@@ -549,6 +691,13 @@ class SourceMediaAnalysisService:
                 raise ValidationError(
                     "视频素材理解必须包含带时间范围的 semanticEntries",
                 )
+        elif kind == "document":
+            # Page-analog shots are validated against the read_document
+            # module result inside commit_agent_intelligence.
+            if not payload.shots:
+                raise ValidationError(
+                    "文档素材理解必须为每个已渲染页提交一条 shot（页伪时间线）",
+                )
         elif payload.shots:
             raise ValidationError("非视频素材不得提交 shots 时间线")
 
@@ -573,9 +722,10 @@ class SourceMediaAnalysisService:
                 raise ValidationError(
                     f"semanticEntries[{number}] 缺少 startMs/endMs",
                 )
-            if kind == "image" and item.start_ms is not None:
+            if kind in {"image", "document"} and item.start_ms is not None:
                 raise ValidationError(
-                    f"图片 semanticEntries[{number}] 不得包含时间范围",
+                    f"{'图片' if kind == 'image' else '文档'} "
+                    f"semanticEntries[{number}] 不得包含时间范围",
                 )
             if item.start_ms is not None:
                 assert_range(
@@ -705,14 +855,101 @@ class SourceMediaAnalysisService:
                     )
                     transcript.append(item)
 
-        visual_available = media.media_kind in {"image", "video"}
+        visual_available = media.media_kind in {"image", "video", "document"}
         asr_applicable = media.media_kind in {"video", "audio"}
+
+        is_document = media.media_kind == "document"
+        document_page_refs: list[str] = []
+        document_ratio: float | None = None
+        document_ref = agent_payload.module_result_refs.document
+        if is_document:
+            if not document_ref:
+                raise ValidationError(
+                    "文档素材理解必须先调用 read_document，并在 "
+                    "moduleResultRefs.document 引用其 resultRef",
+                )
+            module = await asyncio.to_thread(
+                self._module_result_sync,
+                project_id=project_id,
+                context=context,
+                result_ref=document_ref,
+                tool_name="read_document",
+            )
+            if (
+                module.get("sourceAssetVersionId") != version.version_id
+                or module.get("sourceChecksum") != version.checksum
+            ):
+                raise ValidationError(
+                    "read_document 结果不属于当前 SourceAssetVersion",
+                )
+            try:
+                document_pages = [
+                    int(item) for item in module.get("pagesRendered") or ()
+                ]
+                document_page_refs = [
+                    str(item) for item in module.get("pageImageRefs") or ()
+                ]
+                page_count = int(module.get("pageCount") or 0)
+                document_format = str(module.get("format") or "")
+            except (TypeError, ValueError) as error:
+                raise ValidationError(
+                    f"read_document 结果结构不合法: {error}",
+                ) from error
+            if (
+                not document_pages
+                or len(document_pages) != len(document_page_refs)
+                or page_count < len(document_pages)
+                or not document_format
+            ):
+                raise ValidationError(
+                    "read_document 结果缺少可用页图，无法产出文档素材理解",
+                )
+            expected_intervals = [
+                (
+                    (page - 1) * DOCUMENT_PAGE_INTERVAL_MS,
+                    page * DOCUMENT_PAGE_INTERVAL_MS,
+                )
+                for page in document_pages
+            ]
+            actual_intervals = [
+                (item.start_ms, item.end_ms) for item in agent_payload.shots
+            ]
+            if actual_intervals != expected_intervals:
+                raise ValidationError(
+                    "文档 shots 必须按 pagesRendered 页序每页恰好一条，并使用页伪"
+                    "时间区间 [(页号-1)*1000, 页号*1000)；期望 "
+                    f"{expected_intervals}，实际 {actual_intervals}",
+                )
+            document_ratio = len(document_pages) / page_count
+            media = media.model_copy(
+                update={
+                    "document": DocumentMetadata.model_validate(
+                        {
+                            "format": document_format,
+                            "pageCount": page_count,
+                        },
+                    ),
+                },
+            )
+        elif document_ref:
+            raise ValidationError(
+                "moduleResultRefs.document 只适用于文档 Source",
+            )
+
         coverage = {
             "visual": {
                 "mode": "available" if visual_available else "not_applicable",
-                "producer": "model_native" if visual_available else None,
+                "producer": (
+                    "document_reader"
+                    if is_document
+                    else "model_native"
+                    if visual_available
+                    else None
+                ),
                 "ratio": (
-                    visual_ratio
+                    document_ratio
+                    if is_document
+                    else visual_ratio
                     if media.media_kind == "video"
                     else 1.0
                     if media.media_kind == "image"
@@ -750,10 +987,20 @@ class SourceMediaAnalysisService:
                 "endMs": item.end_ms,
                 "description": item.description.strip(),
                 "events": [value.strip() for value in item.events],
-                "keyframeRef": evidence_ref,
+                "keyframeRef": (
+                    document_page_refs[number - 1]
+                    if is_document
+                    else evidence_ref
+                ),
                 "confidence": item.confidence,
                 "modelRunId": visual_run.id,
-                "evidenceFrameRefs": [evidence_ref],
+                "evidenceFrameRefs": [
+                    (
+                        document_page_refs[number - 1]
+                        if is_document
+                        else evidence_ref
+                    ),
+                ],
             }
             for number, item in enumerate(agent_payload.shots, 1)
         ]
@@ -818,7 +1065,7 @@ class SourceMediaAnalysisService:
             created_at=created_at.isoformat().replace("+00:00", "Z"),
             media=media,
             coverage_policy=coverage,
-            provenance_refs=(evidence_ref,),
+            provenance_refs=(evidence_ref, *document_page_refs),
         )
         job = SourceAnalysisJob(
             project_id=project_id,
