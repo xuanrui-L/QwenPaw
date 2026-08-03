@@ -886,6 +886,14 @@ describe("PlanPage Timeline/Element frontend", () => {
         /\s+/g,
         "",
       );
+    const summary = () =>
+      (
+        container.querySelector("[data-timeline-playhead-summary]")
+          ?.textContent ?? ""
+      ).replace(/\s+/g, "");
+    // The canvas summary always derives from the playhead (0s here).
+    const derivedAtZero = summary();
+    expect(derivedAtZero).toContain("0s·该时刻有");
 
     // Whole-lane click: pinned selection semantics, not "active at 0s".
     fireEvent.click(
@@ -893,6 +901,9 @@ describe("PlanPage Timeline/Element frontend", () => {
     );
     await waitFor(() => expect(header()).toContain("已选择"));
     expect(header()).not.toContain("时间点");
+    // The top summary must keep the derived playhead count on the same
+    // screen — never adopt the pinned selection count.
+    expect(summary()).toBe(derivedAtZero);
     const dot = document.querySelector('[title="已选择"]');
     expect(dot).toBeInTheDocument();
     expect(document.querySelector('[title="当前时刻活跃"]')).toBeNull();
@@ -907,9 +918,11 @@ describe("PlanPage Timeline/Element frontend", () => {
     fireEvent.pointerUp(chart, { pointerId: 9, clientX: x2 });
     await waitFor(() => expect(header()).toContain("已选择"));
     expect(header()).not.toContain("时间点");
+    expect(summary()).toBe(derivedAtZero);
 
     // Any playhead motion falls back to derived playhead content.
     fireEvent.keyDown(document.body, { key: "Home" });
     await waitFor(() => expect(header()).toContain("时间点:0s"));
+    expect(summary()).toBe(derivedAtZero);
   });
 });

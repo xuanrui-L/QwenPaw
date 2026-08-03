@@ -12,7 +12,6 @@ describe("TimelineCanvas preview scrubber", () => {
       timeline,
       durationTick: 20000,
       selectedElementId: null,
-      activeElementIds: [],
       previewOpen: true,
       tasks: [],
       onPreviewOpenChange: vi.fn(),
@@ -47,7 +46,6 @@ describe("TimelineCanvas preview scrubber", () => {
         durationTick={20000}
         playheadTick={2000}
         selectedElementId={null}
-        activeElementIds={[]}
         previewOpen
         tasks={[]}
         onPreviewOpenChange={vi.fn()}
@@ -105,7 +103,6 @@ describe("TimelineCanvas preview scrubber", () => {
         durationTick={20000}
         playheadTick={2000}
         selectedElementId={null}
-        activeElementIds={[]}
         previewOpen={false}
         tasks={[]}
         onPreviewOpenChange={vi.fn()}
@@ -141,7 +138,6 @@ describe("TimelineCanvas preview scrubber", () => {
         durationTick={20000}
         playheadTick={2000}
         selectedElementId={null}
-        activeElementIds={[]}
         previewOpen
         tasks={[]}
         onPreviewOpenChange={vi.fn()}
@@ -200,7 +196,6 @@ describe("TimelineCanvas preview scrubber", () => {
         durationTick={20000}
         playheadTick={2000}
         selectedElementId={null}
-        activeElementIds={[]}
         previewOpen
         tasks={[]}
         onPreviewOpenChange={vi.fn()}
@@ -231,7 +226,6 @@ describe("TimelineCanvas preview scrubber", () => {
         durationTick={20000}
         playheadTick={2000}
         selectedElementId={null}
-        activeElementIds={[]}
         previewOpen
         tasks={[]}
         onPreviewOpenChange={vi.fn()}
@@ -275,7 +269,6 @@ describe("TimelineCanvas preview scrubber", () => {
         durationTick={20000}
         playheadTick={0}
         selectedElementId={null}
-        activeElementIds={[]}
         previewOpen
         tasks={[]}
         onPreviewOpenChange={vi.fn()}
@@ -314,7 +307,6 @@ describe("TimelineCanvas preview scrubber", () => {
       timeline,
       durationTick: 20000,
       selectedElementId: null,
-      activeElementIds: [],
       previewOpen: true,
       tasks: [],
       onPreviewOpenChange: vi.fn(),

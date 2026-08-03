@@ -48,7 +48,6 @@ interface TimelineCanvasProps {
   durationTick: number;
   playheadTick: number;
   selectedElementId: string | null;
-  activeElementIds: string[];
   previewOpen: boolean;
   tasks: TaskView[];
   onPreviewOpenChange: (open: boolean) => void;
@@ -110,7 +109,6 @@ export default function TimelineCanvas({
   durationTick,
   playheadTick,
   selectedElementId,
-  activeElementIds,
   previewOpen,
   tasks,
   onPreviewOpenChange,
@@ -634,9 +632,14 @@ export default function TimelineCanvas({
       <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <b className="text-[var(--color-text-primary)]">时间轴</b>
-          <span className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 font-semibold text-[var(--color-accent)]">
+          <span
+            data-timeline-playhead-summary
+            className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 font-semibold text-[var(--color-accent)]"
+          >
+            {/* Pure playhead semantics: derived from the timeline at the
+                playhead tick, never from an explicit selection. */}
             {seconds(playheadTick, timeline.ticks_per_second)}s · 该时刻有
-            {activeElementIds.length}项内容
+            {active.length}项内容
           </span>
           <span
             className={`rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 ${

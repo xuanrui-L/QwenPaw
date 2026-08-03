@@ -56,7 +56,6 @@ function setup() {
     durationTick: 20000,
     playheadTick: 0,
     selectedElementId: "edit-opening",
-    activeElementIds: [] as string[],
     previewOpen: false,
     tasks: [],
     onPreviewOpenChange: vi.fn(),

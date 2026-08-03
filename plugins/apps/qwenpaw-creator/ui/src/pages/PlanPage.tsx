@@ -699,7 +699,6 @@ export default function PlanPage() {
         durationTick={displayDurationTick}
         playheadTick={clampedPlayheadTick}
         selectedElementId={selectedElementId}
-        activeElementIds={activeElementIds}
         previewOpen={previewOpen}
         tasks={tasks}
         onPreviewOpenChange={setPreviewOpen}
