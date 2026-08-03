@@ -16,6 +16,7 @@ from api.content_disposition import inline_content_disposition
 from api import file_asset_routes, file_media_routes
 from api.dependencies import creator_error_handler, project_file_services
 from api.file_asset_routes import (
+    _media_kind,
     _remote_asset_max_bytes,
     _validate_local_video_upload,
     _validate_public_remote_url,
@@ -38,6 +39,32 @@ class _ChunkStream(httpx.SyncByteStream):
         for chunk in self._chunks:
             self.yield_count += 1
             yield chunk
+
+
+def test_media_kind_classifies_readable_documents_by_extension() -> None:
+    # Required first-batch document formats must classify as documents even
+    # when the browser reports text/* or legacy Office MIME types.
+    assert _media_kind("application/pdf", "script.pdf") == "document"
+    assert _media_kind("text/csv", "budget.csv") == "document"
+    assert _media_kind("text/plain", "notes.txt") == "document"
+    assert _media_kind("application/x-subrip", "dialogue.srt") == "document"
+    assert _media_kind("text/vtt", "dialogue.vtt") == "document"
+    assert (
+        _media_kind("application/vnd.ms-powerpoint", "deck.ppt") == "document"
+    )
+    assert (
+        _media_kind(
+            "application/vnd.openxmlformats-officedocument"
+            ".spreadsheetml.sheet",
+            "plan.xlsx",
+        )
+        == "document"
+    )
+    # AV prefixes always win, and unreadable payloads keep legacy kinds.
+    assert _media_kind("video/mp4", "clip.mp4") == "video"
+    assert _media_kind("image/svg+xml", "icon.svg") == "image"
+    assert _media_kind("text/x-unknown", "blob.unknownext") == "text"
+    assert _media_kind("application/zip", "bundle.zip") == "other"
 
 
 def _install_remote_transport(

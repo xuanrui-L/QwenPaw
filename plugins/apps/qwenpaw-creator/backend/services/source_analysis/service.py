@@ -260,11 +260,16 @@ def _probe_media(
     path: Path,
     version: SourceAssetVersion,
 ) -> SourceMediaMetadata:
-    if version.media_kind == "document":
-        # Documents carry no probeable AV streams; page facts arrive later
-        # from the document reader module result.
+    if version.media_kind in {"document", "text"}:
+        # Documents and text files carry no probeable AV streams; ffprobe
+        # would reject them before read_document ever runs. Page facts
+        # arrive later from the document reader module result. Legacy
+        # "text" sources with a readable extension analyze as documents.
+        readable = version.media_kind == "document" or is_supported_document(
+            version.name or "",
+        )
         return SourceMediaMetadata(
-            mediaKind="document",
+            mediaKind="document" if readable else "other",
             mediaType=version.media_type,
         )
     try:
@@ -351,6 +356,31 @@ def resolve_document_page_ref(
         return None
     page = int(page_text)
     return checksum, page, document_page_path(project_root, checksum, page)
+
+
+# Deterministic document-text semantic entries are bounded per chunk so the
+# canonical index stays line-oriented and retrievable.
+DOCUMENT_TEXT_CHUNK_CHARS = 2000
+
+
+def _document_text_chunks(text: str) -> list[str]:
+    """Split extracted document text into bounded, paragraph-aligned chunks."""
+    chunks: list[str] = []
+    current = ""
+    for paragraph in text.split("\n\n"):
+        candidate = f"{current}\n\n{paragraph}" if current else paragraph
+        if len(candidate) <= DOCUMENT_TEXT_CHUNK_CHARS:
+            current = candidate
+            continue
+        if current.strip():
+            chunks.append(current.strip())
+        while len(paragraph) > DOCUMENT_TEXT_CHUNK_CHARS:
+            chunks.append(paragraph[:DOCUMENT_TEXT_CHUNK_CHARS].strip())
+            paragraph = paragraph[DOCUMENT_TEXT_CHUNK_CHARS:]
+        current = paragraph
+    if current.strip():
+        chunks.append(current.strip())
+    return [chunk for chunk in chunks if chunk]
 
 
 def _covered_ratio(
@@ -696,7 +726,8 @@ class SourceMediaAnalysisService:
             # module result inside commit_agent_intelligence.
             if not payload.shots:
                 raise ValidationError(
-                    "文档素材理解必须为每个已渲染页提交一条 shot（页伪时间线）",
+                    "文档素材理解必须提交页伪时间线 shots：有页图时每渲染页"
+                    "一条，无页图的文本型文档恰好一条 [0,1000)",
                 )
         elif payload.shots:
             raise ValidationError("非视频素材不得提交 shots 时间线")
@@ -861,6 +892,8 @@ class SourceMediaAnalysisService:
         is_document = media.media_kind == "document"
         document_page_refs: list[str] = []
         document_ratio: float | None = None
+        document_run: SourceModelRunRef | None = None
+        document_text_excerpt = ""
         document_ref = agent_payload.module_result_refs.document
         if is_document:
             if not document_ref:
@@ -896,31 +929,45 @@ class SourceMediaAnalysisService:
                     f"read_document 结果结构不合法: {error}",
                 ) from error
             if (
-                not document_pages
-                or len(document_pages) != len(document_page_refs)
-                or page_count < len(document_pages)
+                len(document_pages) != len(document_page_refs)
+                or page_count < max(1, len(document_pages))
                 or not document_format
             ):
                 raise ValidationError(
-                    "read_document 结果缺少可用页图，无法产出文档素材理解",
+                    "read_document 结果结构不合法，无法产出文档素材理解",
                 )
-            expected_intervals = [
-                (
-                    (page - 1) * DOCUMENT_PAGE_INTERVAL_MS,
-                    page * DOCUMENT_PAGE_INTERVAL_MS,
-                )
-                for page in document_pages
-            ]
+            if document_pages:
+                expected_intervals = [
+                    (
+                        (page - 1) * DOCUMENT_PAGE_INTERVAL_MS,
+                        page * DOCUMENT_PAGE_INTERVAL_MS,
+                    )
+                    for page in document_pages
+                ]
+                document_ratio = len(document_pages) / page_count
+            else:
+                # Text-flavored documents (subtitles, plain text, code)
+                # render no page images; the whole extracted text maps to a
+                # single pseudo-page shot.
+                expected_intervals = [(0, DOCUMENT_PAGE_INTERVAL_MS)]
+                document_ratio = 1.0
             actual_intervals = [
                 (item.start_ms, item.end_ms) for item in agent_payload.shots
             ]
             if actual_intervals != expected_intervals:
                 raise ValidationError(
-                    "文档 shots 必须按 pagesRendered 页序每页恰好一条，并使用页伪"
-                    "时间区间 [(页号-1)*1000, 页号*1000)；期望 "
-                    f"{expected_intervals}，实际 {actual_intervals}",
+                    "文档 shots 必须使用页伪时间区间 [(页号-1)*1000, 页号*1000)："
+                    "有页图时按 pagesRendered 页序每页恰好一条，无页图的文本型文档"
+                    f"恰好一条 [0,1000)；期望 {expected_intervals}，"
+                    f"实际 {actual_intervals}",
                 )
-            document_ratio = len(document_pages) / page_count
+            document_text_excerpt = str(module.get("textExcerpt") or "")
+            document_run = SourceModelRunRef(
+                id=f"docreader-{uuid5(NAMESPACE_URL, document_ref).hex}",
+                provider="document_reader",
+                model=document_format,
+            )
+            additional_runs.append(document_run)
             media = media.model_copy(
                 update={
                     "document": DocumentMetadata.model_validate(
@@ -989,7 +1036,7 @@ class SourceMediaAnalysisService:
                 "events": [value.strip() for value in item.events],
                 "keyframeRef": (
                     document_page_refs[number - 1]
-                    if is_document
+                    if is_document and document_page_refs
                     else evidence_ref
                 ),
                 "confidence": item.confidence,
@@ -997,7 +1044,7 @@ class SourceMediaAnalysisService:
                 "evidenceFrameRefs": [
                     (
                         document_page_refs[number - 1]
-                        if is_document
+                        if is_document and document_page_refs
                         else evidence_ref
                     ),
                 ],
@@ -1037,6 +1084,24 @@ class SourceMediaAnalysisService:
             }
             for number, item in enumerate(agent_payload.semantic_entries, 1)
         ]
+        if document_run is not None:
+            # The extracted document text enters the index deterministically:
+            # retrieval must not depend on the model re-typing the content.
+            offset = len(semantic)
+            semantic.extend(
+                {
+                    "id": f"semantic-{offset + number:06d}",
+                    "text": chunk,
+                    "tags": ["document-text", f"chunk-{number}"],
+                    "confidence": 1.0,
+                    "modelRunId": document_run.id,
+                    "evidenceFrameRefs": [evidence_ref],
+                }
+                for number, chunk in enumerate(
+                    _document_text_chunks(document_text_excerpt),
+                    1,
+                )
+            )
         raw = {
             "summary": agent_payload.summary.strip(),
             "coverage": coverage,

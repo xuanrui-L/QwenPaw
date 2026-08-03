@@ -30,6 +30,7 @@ from services.source_analysis.service import (
     document_page_ref,
     resolve_document_page_ref,
 )
+from services.specialist_tools import FileSpecialistToolRegistry
 
 
 def _pdf_bytes(pages: int = 3) -> bytes:
@@ -51,8 +52,12 @@ def _pdf_bytes(pages: int = 3) -> bytes:
     return buffer.getvalue()
 
 
-def _services_with_document(
+def _services_with_source(
     tmp_path: Path,
+    *,
+    name: str,
+    content: bytes,
+    media_type: str,
 ) -> tuple[CreatorFileServices, str, str]:
     services = CreatorFileServices.create(tmp_path.resolve())
     services.projects.create(Project.new(project_id="project-1", name="One"))
@@ -62,9 +67,9 @@ def _services_with_document(
         key="doc-asset-1",
         inputs=[
             _AssetInput(
-                name="script.pdf",
-                content=_pdf_bytes(pages=3),
-                media_type="application/pdf",
+                name=name,
+                content=content,
+                media_type=media_type,
             ),
         ],
         attach_source=True,
@@ -72,6 +77,17 @@ def _services_with_document(
     )
     item = result["items"][0]
     return services, item["assetId"], item["assetVersionId"]
+
+
+def _services_with_document(
+    tmp_path: Path,
+) -> tuple[CreatorFileServices, str, str]:
+    return _services_with_source(
+        tmp_path,
+        name="script.pdf",
+        content=_pdf_bytes(pages=3),
+        media_type="application/pdf",
+    )
 
 
 def _running_context(
@@ -276,6 +292,21 @@ def test_document_commit_produces_document_index(tmp_path) -> None:
         (2000, 3000),
     ]
 
+    # Extracted document text is indexed deterministically alongside the
+    # model-authored entries, attributed to the document reader module run.
+    doc_text_entries = [
+        item for item in index.semantic_entries if "document-text" in item.tags
+    ]
+    assert doc_text_entries
+    assert any("Scene beats 2" in item.text for item in doc_text_entries)
+    assert "document_reader" in {run.provider for run in index.model_runs}
+    model_entries = [
+        item
+        for item in index.semantic_entries
+        if "document-text" not in item.tags
+    ]
+    assert len(model_entries) == 1
+
     # The canonical text workspace round-trips document metadata.
     files = render_source_intelligence_files(index)
     assert "documentFormat\tpdf" in files["index.txt"]
@@ -355,6 +386,239 @@ def test_document_commit_rejects_wrong_page_intervals(tmp_path) -> None:
             arguments={
                 "summary": "页区间错误的提交。",
                 "shots": [_document_shot(1, "只有一页的提交")],
+                "entities": [],
+                "semanticEntries": [],
+                "moduleResultRefs": {"document": read_result["resultRef"]},
+            },
+        )
+
+    with pytest.raises(ValidationError) as excinfo:
+        asyncio.run(scenario())
+    assert "页伪" in str(excinfo.value)
+
+
+def test_commit_tool_contract_admits_document_module_ref(tmp_path) -> None:
+    registry = FileSpecialistToolRegistry(
+        CreatorFileServices.create(tmp_path.resolve()),
+    )
+    manifest = registry.manifest_for(
+        SpecialistRole.SOURCE_INTELLIGENCE,
+        admitted_target_refs=["asset:doc-1"],
+    )
+    tools = {item["function"]["name"]: item["function"] for item in manifest}
+    assert "read_document" in tools
+    module_refs = tools["commit_source_intelligence"]["parameters"][
+        "properties"
+    ]["arguments"]["properties"]["moduleResultRefs"]
+    assert set(module_refs["properties"]) == {"asr", "document"}
+    assert module_refs["additionalProperties"] is False
+
+
+def test_csv_source_enters_document_flow_end_to_end(tmp_path) -> None:
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="budget.csv",
+        content=b"scene,cost\nopening,120\nfinale,340\n",
+        media_type="text/csv",
+    )
+    snapshot = services.projects.read("project-1")
+    version = snapshot.project.assets.source_versions_by_id[version_id]
+    assert version.media_kind == "document"
+    service = SourceMediaAnalysisService(services)
+    read_context = _running_context(
+        service,
+        services,
+        asset_id,
+        tool_call_id="csv-read",
+    )
+
+    async def scenario():
+        read_result = await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": f"asset-version:{version_id}"},
+            context=read_context,
+        )
+        service.executions.append_specialist_message(
+            "project-1",
+            read_context.specialist_run_id,
+            message_id="tool-csv-result",
+            role="tool",
+            content_parts=[
+                {"type": "text", "text": json.dumps(read_result)},
+            ],
+            metadata={"tool": "read_document", "toolCallId": "csv-read"},
+        )
+        commit_context = _running_context(
+            service,
+            services,
+            asset_id,
+            tool_call_id="csv-commit",
+        )
+        committed = await service.commit_agent_intelligence(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            command_id="csv-commit-1",
+            context=commit_context,
+            arguments={
+                "summary": "预算表：两场戏的成本对比。",
+                "shots": [_document_shot(1, "预算数据表：场次与成本。")],
+                "entities": [],
+                "semanticEntries": [],
+                "moduleResultRefs": {"document": read_result["resultRef"]},
+            },
+        )
+        return read_result, committed
+
+    read_result, committed = asyncio.run(scenario())
+
+    assert read_result["format"] == "csv"
+    assert read_result["pageCount"] == 1
+    assert read_result["pagesRendered"] == [1]
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    assert index.media.media_kind == "document"
+    assert index.media.document is not None
+    assert index.media.document.format == "csv"
+    assert index.shots[0].keyframe_ref == read_result["pageImageRefs"][0]
+    doc_text = [
+        item for item in index.semantic_entries if "document-text" in item.tags
+    ]
+    assert any("finale" in item.text for item in doc_text)
+
+
+def test_srt_text_only_document_flow(tmp_path) -> None:
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="dialogue.srt",
+        content=(
+            "1\n00:00:01,000 --> 00:00:02,500\n猫走进画面\n\n"
+            "2\n00:00:03,000 --> 00:00:04,000\n镜头拉远\n"
+        ).encode("utf-8"),
+        media_type="application/x-subrip",
+    )
+    snapshot = services.projects.read("project-1")
+    version = snapshot.project.assets.source_versions_by_id[version_id]
+    assert version.media_kind == "document"
+    service = SourceMediaAnalysisService(services)
+    read_context = _running_context(
+        service,
+        services,
+        asset_id,
+        tool_call_id="srt-read",
+    )
+
+    async def scenario():
+        read_result = await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": f"asset-version:{version_id}"},
+            context=read_context,
+        )
+        service.executions.append_specialist_message(
+            "project-1",
+            read_context.specialist_run_id,
+            message_id="tool-srt-result",
+            role="tool",
+            content_parts=[
+                {"type": "text", "text": json.dumps(read_result)},
+            ],
+            metadata={"tool": "read_document", "toolCallId": "srt-read"},
+        )
+        commit_context = _running_context(
+            service,
+            services,
+            asset_id,
+            tool_call_id="srt-commit",
+        )
+        committed = await service.commit_agent_intelligence(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            command_id="srt-commit-1",
+            context=commit_context,
+            arguments={
+                "summary": "字幕全文：猫入画与镜头拉远两条台词。",
+                "shots": [_document_shot(1, "字幕全文概括。")],
+                "entities": [],
+                "semanticEntries": [],
+                "moduleResultRefs": {"document": read_result["resultRef"]},
+            },
+        )
+        return read_result, committed
+
+    read_result, committed = asyncio.run(scenario())
+
+    assert read_result["format"] == "srt"
+    assert read_result["pagesRendered"] == []
+    assert read_result["pageImageRefs"] == []
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    assert index.media.media_kind == "document"
+    assert index.media.document is not None
+    assert index.media.document.format == "srt"
+    assert index.media.document.page_count == 1
+    assert [(item.start_ms, item.end_ms) for item in index.shots] == [
+        (0, 1000),
+    ]
+    assert index.shots[0].keyframe_ref == f"asset://{asset_id}@{version_id}"
+    visual = index.coverage["visual"]
+    assert visual.producer == "document_reader"
+    assert visual.ratio == 1.0
+    doc_text = [
+        item for item in index.semantic_entries if "document-text" in item.tags
+    ]
+    assert any("猫走进画面" in item.text for item in doc_text)
+
+
+def test_srt_text_only_commit_rejects_page_image_intervals(tmp_path) -> None:
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="dialogue.srt",
+        content=b"1\n00:00:01,000 --> 00:00:02,500\nhello\n",
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    read_context = _running_context(
+        service,
+        services,
+        asset_id,
+        tool_call_id="srt-read-bad",
+    )
+
+    async def scenario():
+        read_result = await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": f"asset-version:{version_id}"},
+            context=read_context,
+        )
+        service.executions.append_specialist_message(
+            "project-1",
+            read_context.specialist_run_id,
+            message_id="tool-srt-result-bad",
+            role="tool",
+            content_parts=[
+                {"type": "text", "text": json.dumps(read_result)},
+            ],
+            metadata={"tool": "read_document", "toolCallId": "srt-read-bad"},
+        )
+        commit_context = _running_context(
+            service,
+            services,
+            asset_id,
+            tool_call_id="srt-commit-bad",
+        )
+        return await service.commit_agent_intelligence(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            command_id="srt-commit-bad",
+            context=commit_context,
+            arguments={
+                "summary": "页区间错误的文本型提交。",
+                "shots": [
+                    _document_shot(1, "第一页"),
+                    _document_shot(2, "不存在的第二页"),
+                ],
                 "entities": [],
                 "semanticEntries": [],
                 "moduleResultRefs": {"document": read_result["resultRef"]},

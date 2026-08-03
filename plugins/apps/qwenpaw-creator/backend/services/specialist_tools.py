@@ -277,7 +277,9 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
             "type": "array",
             "items": _SOURCE_SHOT_SCHEMA,
             "description": (
-                "视频必须覆盖至少 90% 完整时间线；图片和音频传空数组。" "每段使用整数毫秒半开区间 [startMs,endMs)。"
+                "视频必须覆盖至少 90% 完整时间线；图片和音频传空数组；"
+                "文档按页伪时间线提交（有页图时每渲染页恰好一条）。"
+                "每段使用整数毫秒半开区间 [startMs,endMs)。"
             ),
         },
         "entities": {
@@ -297,6 +299,11 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
                     "type": "string",
                     "minLength": 1,
                     "description": "transcribe_source_audio 返回的 opaque resultRef。",
+                },
+                "document": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "read_document 返回的 opaque resultRef；文档 Source 提交时必填。",
                 },
             },
             "additionalProperties": False,
