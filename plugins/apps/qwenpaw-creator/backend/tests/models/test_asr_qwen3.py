@@ -254,20 +254,39 @@ def test_plan_chunks_single_window_when_short() -> None:
 
 
 def test_dedup_sentences_strips_reheard_overlap_seam() -> None:
-    # Hard-cut split the word 验证 across chunks; the overlap re-heard
-    # "用于验" in the next chunk head, which must be stripped so the joined
-    # text reads "用于验证..." exactly once.
-    prev = ["这是第三十二句测试语音，用于验"]
-    curr = ["用于验证长音频分块转写。", "第三十三段。"]
-    deduped = asr_model._dedup_sentences(prev, curr, max_chars=20)
-    assert deduped == ["证长音频分块转写。", "第三十三段。"]
-    assert (prev[-1] + deduped[0]).endswith("用于验证长音频分块转写。")
+    # The overlap re-heard "重听部分文字" (6 chars, >= min match) at the next
+    # chunk head; only that duplicated prefix is stripped so the joined text
+    # reads it exactly once.
+    prev = ["前半句内容，重听部分文字"]
+    curr = ["重听部分文字后面是新内容。", "下一句。"]
+    deduped = asr_model._dedup_sentences(prev, curr)
+    assert deduped == ["后面是新内容。", "下一句。"]
+    assert (prev[-1] + deduped[0]).endswith("重听部分文字后面是新内容。")
 
 
 def test_dedup_sentences_drops_fully_duplicated_leading_sentence() -> None:
     prev = ["完整重复的一句话。"]
     curr = ["完整重复的一句话。", "新的内容。"]
     assert asr_model._dedup_sentences(prev, curr) == ["新的内容。"]
+
+
+def test_dedup_sentences_keeps_genuine_repeat_after_boundary() -> None:
+    # The overlap re-heard "谢谢观看。" once, but the speaker genuinely repeats
+    # it in the new chunk. Only the single re-heard copy is removed; the
+    # genuine repeat must survive (the old while-loop deleted both).
+    prev = ["谢谢观看。"]
+    curr = ["谢谢观看。", "谢谢观看。", "接下来。"]
+    assert asr_model._dedup_sentences(prev, curr) == [
+        "谢谢观看。",
+        "接下来。",
+    ]
+
+
+def test_dedup_sentences_ignores_incidental_short_match() -> None:
+    # A one-character coincidence ('好') must not trim unrelated speech.
+    prev = ["天气很好"]
+    curr = ["好，我们开始"]
+    assert asr_model._dedup_sentences(prev, curr) == ["好，我们开始"]
 
 
 def test_silence_cut_points_parses_ffmpeg_midpoints(monkeypatch) -> None:

@@ -352,7 +352,8 @@ async def _fun_asr(media_url: str) -> ASRResult:
 _QWEN3_CHUNK_SECONDS = 270
 _QWEN3_MIN_CHUNK_SECONDS = 10
 _QWEN3_OVERLAP_SECONDS = 3.0
-_QWEN3_OVERLAP_DEDUP_MAX_CHARS = 20
+_QWEN3_OVERLAP_DEDUP_MAX_CHARS = 40
+_QWEN3_OVERLAP_DEDUP_MIN_CHARS = 4
 _QWEN3_SILENCE_NOISE_DB = 30
 _QWEN3_SILENCE_MIN_SECONDS = 0.2
 _QWEN3_RETRY_BASE_SECONDS = 2.0
@@ -615,14 +616,25 @@ def _plan_chunks(
     return plans
 
 
-def _dedup_overlap(prev_text: str, curr_text: str, max_chars: int) -> str:
-    """Strip the longest prefix of *curr_text* (<= max_chars) that also ends
-    *prev_text*, removing content the overlap window re-heard."""
-    limit = min(len(prev_text), len(curr_text), max_chars)
-    for length in range(limit, 0, -1):
-        if prev_text[-length:] == curr_text[:length]:
-            return curr_text[length:]
-    return curr_text
+def _overlap_prefix_length(
+    prev_tail: str,
+    curr_head: str,
+    *,
+    max_chars: int,
+    min_chars: int,
+) -> int:
+    """Chars at the start of *curr_head* that re-hear the end of *prev_tail*.
+
+    Returns 0 unless a contiguous match of at least *min_chars* exists, so an
+    incidental short coincidence (e.g. a shared single character) never trims
+    real speech; the search is capped at *max_chars* (the overlap window) so a
+    genuine repetition that follows the boundary is never consumed.
+    """
+    limit = min(len(prev_tail), len(curr_head), max_chars)
+    for length in range(limit, min_chars - 1, -1):
+        if prev_tail[-length:] == curr_head[:length]:
+            return length
+    return 0
 
 
 def _dedup_sentences(
@@ -630,19 +642,36 @@ def _dedup_sentences(
     curr_sentences: list[str],
     *,
     max_chars: int = _QWEN3_OVERLAP_DEDUP_MAX_CHARS,
+    min_chars: int = _QWEN3_OVERLAP_DEDUP_MIN_CHARS,
 ) -> list[str]:
-    """Drop overlap duplication at the seam between two chunks' sentences."""
+    """Trim only the overlap the next chunk re-heard from the previous one.
+
+    Removes at most one overlap span (never loops over repeats) and requires a
+    meaningful match length, so a sentence the speaker genuinely repeats after
+    the boundary is preserved.
+    """
     if not prev_sentences or not curr_sentences:
-        return curr_sentences
-    result = list(curr_sentences)
-    while result and result[0] == prev_sentences[-1]:
-        result = result[1:]
-    if result:
-        seam = _dedup_overlap(prev_sentences[-1], result[0], max_chars)
-        if seam:
-            result[0] = seam
+        return list(curr_sentences)
+    prev_tail = "".join(prev_sentences)[-max_chars:]
+    curr_head = "".join(curr_sentences)
+    strip = _overlap_prefix_length(
+        prev_tail,
+        curr_head,
+        max_chars=max_chars,
+        min_chars=min_chars,
+    )
+    if strip <= 0:
+        return list(curr_sentences)
+    result: list[str] = []
+    remaining = strip
+    for sentence in curr_sentences:
+        if remaining <= 0:
+            result.append(sentence)
+        elif len(sentence) <= remaining:
+            remaining -= len(sentence)
         else:
-            result = result[1:]
+            result.append(sentence[remaining:])
+            remaining = 0
     return result
 
 
@@ -690,10 +719,12 @@ def _prepare_qwen3_chunks(
     source: Path,
     directory: Path,
 ) -> list[tuple[Path, _ChunkPlan]]:
-    """Split audio into <=270s chunks on silence boundaries for qwen3-asr.
+    """Split audio into silence-aligned chunks for qwen3-asr.
 
-    Returns (chunk_path, plan) pairs whose logical (owned) spans are contiguous,
-    so cross-chunk offsets never drift; hard-cut boundaries carry an overlap.
+    Each chunk's logical (owned) span is <=270s and contiguous, so cross-chunk
+    offsets never drift; a hard-cut boundary extends its next chunk back by the
+    overlap, so the extracted/uploaded span can reach 270s + overlap (still
+    under the 5min endpoint limit). Returns (chunk_path, plan) pairs.
     """
     ffmpeg = resolve_ffmpeg()
     if not ffmpeg:
@@ -842,9 +873,11 @@ async def _qwen3_asr(media_url: str) -> ASRResult:
                     directory,
                 )
                 logger.info(
-                    "qwen3-asr: split into %d chunks of <=%ds",
+                    "qwen3-asr: split into %d chunks "
+                    "(owned <=%ds, +%gs overlap re-heard on hard cuts)",
                     len(chunks),
                     _QWEN3_CHUNK_SECONDS,
+                    _QWEN3_OVERLAP_SECONDS,
                 )
                 offset_ms = 0
                 prev_sentences: list[str] = []
