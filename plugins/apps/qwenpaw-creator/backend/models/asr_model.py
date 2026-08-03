@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import mimetypes
 import random
 import re
@@ -350,6 +351,8 @@ async def _fun_asr(media_url: str) -> ASRResult:
 
 _QWEN3_CHUNK_SECONDS = 270
 _QWEN3_MIN_CHUNK_SECONDS = 10
+_QWEN3_OVERLAP_SECONDS = 3.0
+_QWEN3_OVERLAP_DEDUP_MAX_CHARS = 20
 _QWEN3_SILENCE_NOISE_DB = 30
 _QWEN3_SILENCE_MIN_SECONDS = 0.2
 _QWEN3_RETRY_BASE_SECONDS = 2.0
@@ -498,6 +501,9 @@ def _silence_cut_points(
             [
                 ffmpeg,
                 "-hide_banner",
+                "-vn",
+                "-sn",
+                "-dn",
                 "-i",
                 str(source),
                 "-af",
@@ -521,31 +527,123 @@ def _silence_cut_points(
     ]
 
 
-def _plan_chunk_windows(
+@dataclass(frozen=True, slots=True)
+class _ChunkPlan:
+    """One audio chunk to transcribe.
+
+    ``ext_*`` is the audio actually extracted (may reach back over a hard-cut
+    boundary so the split word is heard in full); ``own_duration_ms`` is the
+    logical, contiguous span used for timestamp spreading; ``dedup_prev`` marks
+    that this chunk's head re-hears the previous chunk and must be deduped.
+    """
+
+    ext_start_s: float
+    ext_duration_s: float
+    own_duration_ms: int
+    dedup_prev: bool
+
+
+def _plan_chunk_boundaries(
     duration_s: float,
     cut_points: list[float],
     *,
     max_s: float = _QWEN3_CHUNK_SECONDS,
     min_s: float = _QWEN3_MIN_CHUNK_SECONDS,
-) -> list[tuple[float, float]]:
-    """Plan contiguous (start, duration) windows no longer than *max_s*.
+) -> tuple[list[float], list[bool]]:
+    """Return logical cut boundaries plus a hard-cut flag per internal boundary.
 
-    Prefer the latest silence within a window so chunks stay large (fewer
-    billed calls); fall back to a fixed *max_s* cut when no silence is found.
+    Chunks are balanced (``ceil`` count, near-equal length) so every span is in
+    ``[min_s, max_s]`` with no degenerate tail, and each target is snapped to the
+    nearest silence. A boundary with no nearby silence is flagged ``hard`` so the
+    caller can protect it with an overlap instead of dropping the split word.
     """
-    ordered = sorted(point for point in cut_points if point > 0)
-    windows: list[tuple[float, float]] = []
-    position = 0.0
-    while duration_s - position > max_s:
-        limit = position + max_s
-        candidates = [
-            point for point in ordered if position + min_s < point <= limit
-        ]
-        cut = candidates[-1] if candidates else limit
-        windows.append((position, cut - position))
-        position = cut
-    windows.append((position, duration_s - position))
-    return windows
+    silences = sorted(point for point in cut_points if 0 < point < duration_s)
+    boundaries = [0.0]
+    hard_flags: list[bool] = []
+    while duration_s - boundaries[-1] > max_s:
+        position = boundaries[-1]
+        remaining = math.ceil((duration_s - position) / max_s)
+        target = position + (duration_s - position) / remaining
+        low = position + min_s
+        high = min(position + max_s, duration_s - min_s)
+        if high < low:
+            high = min(position + max_s, duration_s)
+            low = min(low, high)
+        window = [point for point in silences if low <= point <= high]
+        if window:
+            cut = min(window, key=lambda point: (abs(point - target), point))
+            hard_flags.append(False)
+        else:
+            cut = min(max(target, low), high)
+            hard_flags.append(True)
+        boundaries.append(cut)
+    boundaries.append(duration_s)
+    return boundaries, hard_flags
+
+
+def _plan_chunks(
+    duration_s: float,
+    cut_points: list[float],
+    *,
+    max_s: float = _QWEN3_CHUNK_SECONDS,
+    min_s: float = _QWEN3_MIN_CHUNK_SECONDS,
+    overlap_s: float = _QWEN3_OVERLAP_SECONDS,
+) -> list[_ChunkPlan]:
+    """Build extraction plans from balanced, silence-snapped boundaries."""
+    boundaries, hard_flags = _plan_chunk_boundaries(
+        duration_s,
+        cut_points,
+        max_s=max_s,
+        min_s=min_s,
+    )
+    plans: list[_ChunkPlan] = []
+    for index in range(len(boundaries) - 1):
+        own_start = boundaries[index]
+        own_end = boundaries[index + 1]
+        dedup_prev = index > 0 and hard_flags[index - 1]
+        ext_start = own_start
+        if dedup_prev:
+            ext_start = max(boundaries[index - 1], own_start - overlap_s)
+        plans.append(
+            _ChunkPlan(
+                ext_start_s=ext_start,
+                ext_duration_s=own_end - ext_start,
+                own_duration_ms=round((own_end - own_start) * 1000),
+                dedup_prev=dedup_prev,
+            ),
+        )
+    return plans
+
+
+def _dedup_overlap(prev_text: str, curr_text: str, max_chars: int) -> str:
+    """Strip the longest prefix of *curr_text* (<= max_chars) that also ends
+    *prev_text*, removing content the overlap window re-heard."""
+    limit = min(len(prev_text), len(curr_text), max_chars)
+    for length in range(limit, 0, -1):
+        if prev_text[-length:] == curr_text[:length]:
+            return curr_text[length:]
+    return curr_text
+
+
+def _dedup_sentences(
+    prev_sentences: list[str],
+    curr_sentences: list[str],
+    *,
+    max_chars: int = _QWEN3_OVERLAP_DEDUP_MAX_CHARS,
+) -> list[str]:
+    """Drop overlap duplication at the seam between two chunks' sentences."""
+    if not prev_sentences or not curr_sentences:
+        return curr_sentences
+    result = list(curr_sentences)
+    while result and result[0] == prev_sentences[-1]:
+        result = result[1:]
+    if result:
+        seam = _dedup_overlap(prev_sentences[-1], result[0], max_chars)
+        if seam:
+            result[0] = seam
+        else:
+            result = result[1:]
+    return result
 
 
 def _extract_chunk_window(
@@ -591,11 +689,11 @@ def _extract_chunk_window(
 def _prepare_qwen3_chunks(
     source: Path,
     directory: Path,
-) -> list[tuple[Path, int]]:
+) -> list[tuple[Path, _ChunkPlan]]:
     """Split audio into <=270s chunks on silence boundaries for qwen3-asr.
 
-    Returns (chunk_path, planned_duration_ms) pairs; planned durations are
-    contiguous so cross-chunk offsets never drift.
+    Returns (chunk_path, plan) pairs whose logical (owned) spans are contiguous,
+    so cross-chunk offsets never drift; hard-cut boundaries carry an overlap.
     """
     ffmpeg = resolve_ffmpeg()
     if not ffmpeg:
@@ -605,15 +703,21 @@ def _prepare_qwen3_chunks(
         )
     duration_s = _probe_duration_ms(str(source)) / 1000
     cut_points = _silence_cut_points(ffmpeg, source)
-    windows = _plan_chunk_windows(duration_s, cut_points)
-    chunks: list[tuple[Path, int]] = []
-    for index, (start_s, chunk_s) in enumerate(windows):
-        output_path = directory / f"qwen3-chunk-{index:04d}.mp3"
-        _extract_chunk_window(ffmpeg, source, start_s, chunk_s, output_path)
-        chunks.append((output_path, round(chunk_s * 1000)))
-    if not chunks:
+    plans = _plan_chunks(duration_s, cut_points)
+    if not plans:
         raise RuntimeError("qwen3-asr chunking produced no audio chunks")
-    return chunks
+    prepared: list[tuple[Path, _ChunkPlan]] = []
+    for index, plan in enumerate(plans):
+        output_path = directory / f"qwen3-chunk-{index:04d}.mp3"
+        _extract_chunk_window(
+            ffmpeg,
+            source,
+            plan.ext_start_s,
+            plan.ext_duration_s,
+            output_path,
+        )
+        prepared.append((output_path, plan))
+    return prepared
 
 
 def _qwen3_sentences(body: Mapping[str, Any]) -> list[str]:
@@ -743,7 +847,8 @@ async def _qwen3_asr(media_url: str) -> ASRResult:
                     _QWEN3_CHUNK_SECONDS,
                 )
                 offset_ms = 0
-                for chunk, chunk_ms in chunks:
+                prev_sentences: list[str] = []
+                for chunk, plan in chunks:
                     chunk_url = await upload_local_file_to_dashscope_temp(
                         chunk,
                         api_key=key,
@@ -757,10 +862,17 @@ async def _qwen3_asr(media_url: str) -> ASRResult:
                         model,
                         chunk_url,
                     )
+                    if plan.dedup_prev:
+                        sentences = _dedup_sentences(prev_sentences, sentences)
                     segments.extend(
-                        _spread_segments(sentences, offset_ms, chunk_ms),
+                        _spread_segments(
+                            sentences,
+                            offset_ms,
+                            plan.own_duration_ms,
+                        ),
                     )
-                    offset_ms += chunk_ms
+                    offset_ms += plan.own_duration_ms
+                    prev_sentences = sentences
     result = ASRResult("fun-asr", model, tuple(segments))
     logger.info(
         "qwen3-asr completed: %d segments from model=%s",

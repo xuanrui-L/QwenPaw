@@ -146,11 +146,13 @@ def test_qwen3_chunking_applies_cumulative_offsets(
     tmp_path,
 ) -> None:
     _bind_qwen3(monkeypatch)
+    plan_a = asr_model._ChunkPlan(0.0, 270.0, 270_000, False)
+    plan_b = asr_model._ChunkPlan(270.0, 270.0, 270_000, False)
     chunks = [
-        (tmp_path / "qwen3-chunk-0000.mp3", 270_000),
-        (tmp_path / "qwen3-chunk-0001.mp3", 270_000),
+        (tmp_path / "qwen3-chunk-0000.mp3", plan_a),
+        (tmp_path / "qwen3-chunk-0001.mp3", plan_b),
     ]
-    for chunk, _ms in chunks:
+    for chunk, _plan in chunks:
         chunk.write_bytes(b"audio")
     monkeypatch.setattr(
         asr_model,
@@ -196,37 +198,76 @@ def test_qwen3_chunking_applies_cumulative_offsets(
     assert all(seg.confidence == 0.0 for seg in result.segments)
 
 
-def test_plan_chunk_windows_cuts_on_latest_silence_in_window() -> None:
-    # Each window cuts at the latest silence within its 270s limit, keeping
-    # chunks large and never landing mid-speech. 540s needs two cuts.
-    windows = asr_model._plan_chunk_windows(
+def test_plan_chunks_snaps_to_silence_near_balanced_target() -> None:
+    # 530s -> 2 balanced ~265s targets; the boundary snaps to the nearest
+    # silence (264s) and no chunk lands mid-speech (all soft cuts).
+    plans = asr_model._plan_chunks(
+        530.0,
+        [120.0, 264.0, 400.0],
+        max_s=270.0,
+        min_s=10.0,
+    )
+    assert [p.own_duration_ms for p in plans] == [264_000, 266_000]
+    assert all(p.dedup_prev is False for p in plans)
+    assert all(p.ext_duration_s <= 270.0 for p in plans)
+
+
+def test_plan_chunks_no_silence_uses_overlap_not_lossy_hard_cut() -> None:
+    # No silence anywhere: cuts are balanced (never the full 270s hard split)
+    # and every internal boundary is protected by an overlap so no word drops.
+    plans = asr_model._plan_chunks(
         540.0,
-        [120.0, 250.0, 265.0, 400.0, 520.0],
+        [],
         max_s=270.0,
         min_s=10.0,
+        overlap_s=3.0,
     )
-    assert windows == [(0.0, 265.0), (265.0, 255.0), (520.0, 20.0)]
-    assert sum(duration for _start, duration in windows) == 540.0
-    assert all(duration <= 270.0 for _start, duration in windows)
+    assert len(plans) == 2
+    # balanced, not a 270 + 270 mid-phoneme fixed cut recreation
+    assert plans[0].own_duration_ms == 270_000
+    assert plans[1].own_duration_ms == 270_000
+    # second chunk re-hears the boundary and is marked for dedup
+    assert plans[0].dedup_prev is False
+    assert plans[1].dedup_prev is True
+    assert plans[1].ext_start_s == 267.0  # 270 - 3s overlap
+    assert plans[1].ext_duration_s == 273.0
 
 
-def test_plan_chunk_windows_falls_back_to_fixed_cut() -> None:
-    # No silence inside the first window -> fixed max_s cut is used.
-    windows = asr_model._plan_chunk_windows(
-        500.0,
-        [300.0],
-        max_s=270.0,
-        min_s=10.0,
-    )
-    assert windows[0] == (0.0, 270.0)
-    assert windows[-1][0] + windows[-1][1] == 500.0
-    assert all(duration <= 270.0 for _start, duration in windows)
+def test_plan_chunks_has_no_sub_minimum_tail() -> None:
+    # Near multiples of max_s must not leave a degenerate final chunk.
+    for duration in (270.1, 540.001, 271.0):
+        plans = asr_model._plan_chunks(duration, [], max_s=270.0, min_s=10.0)
+        seconds = [p.own_duration_ms / 1000 for p in plans]
+        assert abs(sum(seconds) - duration) < 0.01  # ms rounding tolerance
+        assert all(value >= 10.0 for value in seconds), (duration, seconds)
+        assert all(value <= 270.0 + 1e-9 for value in seconds), (
+            duration,
+            seconds,
+        )
 
 
-def test_plan_chunk_windows_single_window_when_short() -> None:
-    assert asr_model._plan_chunk_windows(120.0, [], max_s=270.0) == [
-        (0.0, 120.0),
-    ]
+def test_plan_chunks_single_window_when_short() -> None:
+    plans = asr_model._plan_chunks(120.0, [], max_s=270.0)
+    assert len(plans) == 1
+    assert plans[0].own_duration_ms == 120_000
+    assert plans[0].dedup_prev is False
+
+
+def test_dedup_sentences_strips_reheard_overlap_seam() -> None:
+    # Hard-cut split the word 验证 across chunks; the overlap re-heard
+    # "用于验" in the next chunk head, which must be stripped so the joined
+    # text reads "用于验证..." exactly once.
+    prev = ["这是第三十二句测试语音，用于验"]
+    curr = ["用于验证长音频分块转写。", "第三十三段。"]
+    deduped = asr_model._dedup_sentences(prev, curr, max_chars=20)
+    assert deduped == ["证长音频分块转写。", "第三十三段。"]
+    assert (prev[-1] + deduped[0]).endswith("用于验证长音频分块转写。")
+
+
+def test_dedup_sentences_drops_fully_duplicated_leading_sentence() -> None:
+    prev = ["完整重复的一句话。"]
+    curr = ["完整重复的一句话。", "新的内容。"]
+    assert asr_model._dedup_sentences(prev, curr) == ["新的内容。"]
 
 
 def test_silence_cut_points_parses_ffmpeg_midpoints(monkeypatch) -> None:
@@ -242,17 +283,21 @@ def test_silence_cut_points_parses_ffmpeg_midpoints(monkeypatch) -> None:
             ],
         )
 
-    monkeypatch.setattr(
-        asr_model.subprocess,
-        "run",
-        lambda *_a, **_k: _Completed(),
-    )
+    captured = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return _Completed()
+
+    monkeypatch.setattr(asr_model.subprocess, "run", fake_run)
     from pathlib import Path
 
     assert asr_model._silence_cut_points("/opt/ffmpeg", Path("a.mp3")) == [
         12.5,
         41.0,
     ]
+    # video decoding disabled during the full-file scan (P2)
+    assert "-vn" in captured["cmd"]
 
 
 @respx.mock
