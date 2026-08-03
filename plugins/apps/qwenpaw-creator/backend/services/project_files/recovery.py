@@ -55,7 +55,7 @@ from .commit import (
     is_protected_pointer,
 )
 from .json_pointer import JsonChange, diff_json, pointers_overlap
-from .models import Project
+from .models import CURRENT_PROJECT_SCHEMA_VERSION, Project
 from .serialization import project_etag
 from .store import ProjectSnapshot, ProjectStore
 
@@ -307,6 +307,66 @@ class ProjectCommitRecoveryCoordinator:
                 raise _IntegrityProblem(
                     "journal.json must be a regular non-symlink file",
                 )
+
+            # Pre-migration terminal transactions: their snapshots were
+            # written by an older Project schema and can no longer be
+            # re-validated verbatim. They publish nothing anymore, so skip
+            # them instead of fail-closing the whole Project after an
+            # upgrade; live (PREPARED) transactions still go through the
+            # full audit below.
+            probe_store = AtomicJsonRecordStore(
+                transaction_root / "journal.json",
+                ProjectCommitJournal,
+            )
+            probe_snapshot = probe_store.read_snapshot()
+            probe_journal = probe_snapshot.value
+            if probe_journal.state in (
+                CommitJournalState.ABORTED,
+                CommitJournalState.PROJECT_REPLACED,
+                CommitJournalState.RUNTIME_FINALIZED,
+            ):
+                probe_base = AtomicJsonRecordStore(
+                    transaction_root / "base.json",
+                ).read_or_none()
+                if (
+                    isinstance(probe_base, Mapping)
+                    and probe_base.get("schema_version")
+                    != CURRENT_PROJECT_SCHEMA_VERSION
+                ):
+                    state_after = probe_journal.state
+                    if (
+                        probe_journal.state
+                        is CommitJournalState.PROJECT_REPLACED
+                    ):
+                        # Advance the journal so the commit-time pending-
+                        # publication guard stops demanding recovery for a
+                        # transaction that already published under the old
+                        # schema; its Runtime metadata was completed then.
+                        promoted = probe_journal.model_copy(
+                            update={
+                                "state": (
+                                    CommitJournalState.RUNTIME_FINALIZED
+                                ),
+                                "updated_at": _now(),
+                            },
+                        )
+                        probe_store.compare_and_swap(
+                            expected_checksum=probe_snapshot.checksum,
+                            value=promoted,
+                        )
+                        state_after = CommitJournalState.RUNTIME_FINALIZED
+                    return TransactionRecoveryOutcome(
+                        transaction_id=probe_journal.transaction_id,
+                        action=(
+                            RecoveryAction.SKIPPED_ABORTED
+                            if probe_journal.state
+                            is CommitJournalState.ABORTED
+                            else RecoveryAction.ALREADY_FINALIZED
+                        ),
+                        state_before=probe_journal.state,
+                        state_after=state_after,
+                        detail="legacy-schema terminal transaction",
+                    )
 
             inputs = self._load_inputs(
                 project_id,
