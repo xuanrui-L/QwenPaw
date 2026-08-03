@@ -147,6 +147,9 @@ class R2VProvider(Protocol):
         resolution: str,
         watermark: bool,
         generate_audio: bool,
+        mode: str = "r2v",
+        first_frame_url: str | None = None,
+        video_url: str | None = None,
     ) -> str:
         ...
 
@@ -172,6 +175,9 @@ class ExistingR2VProvider:
         resolution: str,
         watermark: bool,
         generate_audio: bool,
+        mode: str = "r2v",
+        first_frame_url: str | None = None,
+        video_url: str | None = None,
     ) -> str:
         from models.video_model import submit_video_task
 
@@ -183,6 +189,9 @@ class ExistingR2VProvider:
             resolution=resolution,
             watermark=watermark,
             generate_audio=generate_audio,
+            mode=mode,
+            first_frame_url=first_frame_url,
+            video_url=video_url,
         )
 
     async def poll(self, provider_task_id: str) -> Mapping[str, Any]:
@@ -275,6 +284,11 @@ class _ResolvedR2V:
     slot_id: str
     slot_kind: str
     owner_ref: str
+    mode: str = "r2v"
+    first_frame_version_id: str = ""
+    first_frame_url: str = ""
+    video_version_id: str = ""
+    video_url: str = ""
 
 
 def _stable_id(prefix: str, project_id: str, key: str) -> str:
@@ -434,6 +448,105 @@ def _resolve_reference_versions(
     return urls, checksums, provenance, read_set
 
 
+def _resolve_single_media_version(
+    *,
+    project: Project,
+    project_root: Path,
+    version_id: str,
+    media_prefix: str,
+    label: str,
+) -> tuple[str, str, str, dict[str, Any]]:
+    """Resolve one exact version id into ``(url, checksum, ref, read_entry)``.
+
+    Same integrity rules as ``_resolve_reference_versions`` but with a
+    caller-selected media kind, so i2v first frames stay images and
+    video_edit inputs stay videos.
+    """
+
+    source = project.assets.source_versions_by_id.get(version_id)
+    artifact = project.assets.artifact_versions_by_id.get(version_id)
+    version = source or artifact
+    if version is None:
+        raise NotFoundError(f"{label} version 不存在: {version_id}")
+    remote_url = public_source_url(source) if source is not None else None
+    if remote_url is not None:
+        if not version.media_type.casefold().startswith(media_prefix):
+            raise ValidationError(
+                f"{label} 必须是 {media_prefix}* 媒体: {version_id}",
+            )
+        ref = f"asset-version:{version_id}"
+        return (
+            remote_url,
+            version.checksum,
+            ref,
+            {
+                "ref": ref,
+                "versionId": version_id,
+                "fileId": None,
+                "checksum": version.checksum,
+                "sourceUrl": remote_url,
+            },
+        )
+    indexed = project.assets.files_by_id.get(version.file_id)
+    if indexed is None:
+        raise StorageIntegrityError(
+            f"{label} 缺少 IndexedFile: {version_id}",
+        )
+    if indexed.sha256 != version.checksum:
+        raise StorageIntegrityError(
+            f"{label} checksum/index 不一致: {version_id}",
+        )
+    if not indexed.media_type.casefold().startswith(media_prefix):
+        raise ValidationError(
+            f"{label} 必须是 {media_prefix}* 媒体: {version_id}",
+        )
+    inspection = AssetFileStore(project_root).inspect(indexed)
+    if not inspection.available:
+        raise StorageIntegrityError(
+            f"{label} 文件不可用: {version_id} ({inspection.status.value})",
+        )
+    ref = (
+        f"asset-version:{version_id}"
+        if source is not None
+        else f"artifact-version:{version_id}"
+    )
+    return (
+        _indexed_path(project_root, indexed).resolve().as_uri(),
+        version.checksum,
+        ref,
+        {
+            "ref": ref,
+            "versionId": version_id,
+            "fileId": indexed.file_id,
+            "checksum": version.checksum,
+        },
+    )
+
+
+def _validated_request_mode(arguments: Mapping[str, Any]) -> str:
+    """Normalize the requested mode against the runtime capability matrix."""
+
+    from models import config as model_config
+    from models.video_capabilities import (
+        validate_video_mode,
+        video_backend_key,
+    )
+
+    model_name = model_config.get_video_model_name()
+    backend_key = video_backend_key(
+        model_name,
+        model_config.get_video_backend(),
+    )
+    try:
+        return validate_video_mode(
+            backend_key,
+            model_name,
+            str(arguments.get("mode") or "r2v"),
+        )
+    except ValueError as error:
+        raise ValidationError(str(error)) from error
+
+
 def _resolve_request(
     *,
     snapshot: ProjectSnapshot,
@@ -447,21 +560,45 @@ def _resolve_request(
     creation = element.creation
     if not isinstance(creation, R2VCreation):
         raise ValidationError("仅 R2V Element 可以生成 R2V 视频")
-    selected_storyboard = selected_element_output(
-        project,
-        element,
-        "storyboard",
-    )
-    storyboard_id = (
-        selected_storyboard[1] if selected_storyboard is not None else None
-    )
-    if not storyboard_id:
-        raise ValidationError("R2V Element 尚未选择 storyboard ArtifactVersion")
-    storyboard = project.assets.artifact_versions_by_id.get(storyboard_id)
-    if storyboard is None:
-        raise StorageIntegrityError("selected storyboard ArtifactVersion 不存在")
-    if storyboard.owner_ref != f"element:{element_id}":
-        raise StorageIntegrityError("selected storyboard 不属于目标 Element")
+    mode = _validated_request_mode(arguments)
+    first_frame_ref = str(arguments.get("firstFrameRef") or "").strip()
+    video_ref = str(arguments.get("videoRef") or "").strip()
+    if mode == "i2v" and not first_frame_ref:
+        raise ValidationError(
+            "i2v 模式必须提供 firstFrameRef（exact 图片 version id）",
+        )
+    if mode == "video_edit" and not video_ref:
+        raise ValidationError(
+            "video_edit 模式必须提供 videoRef（exact 视频 version id）",
+        )
+    if first_frame_ref and mode != "i2v":
+        raise ValidationError("firstFrameRef 仅用于 i2v 模式")
+    if video_ref and mode != "video_edit":
+        raise ValidationError("videoRef 仅用于 video_edit 模式")
+
+    storyboard_id: str | None = None
+    if mode == "r2v":
+        # Only r2v consumes the storyboard + reference stack; the other
+        # modes take their exact inputs from firstFrameRef / videoRef.
+        selected_storyboard = selected_element_output(
+            project,
+            element,
+            "storyboard",
+        )
+        storyboard_id = (
+            selected_storyboard[1] if selected_storyboard is not None else None
+        )
+        if not storyboard_id:
+            raise ValidationError(
+                "R2V Element 尚未选择 storyboard ArtifactVersion",
+            )
+        storyboard = project.assets.artifact_versions_by_id.get(storyboard_id)
+        if storyboard is None:
+            raise StorageIntegrityError(
+                "selected storyboard ArtifactVersion 不存在",
+            )
+        if storyboard.owner_ref != f"element:{element_id}":
+            raise StorageIntegrityError("selected storyboard 不属于目标 Element")
 
     prompt = str(arguments.get("prompt") or creation.video_prompt).strip()
     if not prompt:
@@ -487,23 +624,55 @@ def _resolve_request(
     if not isinstance(watermark, bool) or not isinstance(generate_audio, bool):
         raise ValidationError("R2V watermark/generateAudio 必须是 boolean")
 
-    version_ids = tuple(
-        dict.fromkeys(
-            [
-                storyboard_id,
-                *resolve_r2v_visual_reference_version_ids(
-                    project,
-                    creation,
-                    creation.video_reference_version_ids,
-                ),
-            ],
-        ),
-    )
-    urls, checksums, provenance, read_set = _resolve_reference_versions(
-        project=project,
-        project_root=project_root,
-        version_ids=version_ids,
-    )
+    if mode == "r2v":
+        version_ids = tuple(
+            dict.fromkeys(
+                [
+                    storyboard_id,
+                    *resolve_r2v_visual_reference_version_ids(
+                        project,
+                        creation,
+                        creation.video_reference_version_ids,
+                    ),
+                ],
+            ),
+        )
+        urls, checksums, provenance, read_set = _resolve_reference_versions(
+            project=project,
+            project_root=project_root,
+            version_ids=version_ids,
+        )
+    else:
+        version_ids = ()
+        urls, checksums, provenance, read_set = [], [], [], []
+
+    first_frame_url = ""
+    video_url = ""
+    if mode == "i2v":
+        first_frame_url, checksum, ref, entry = _resolve_single_media_version(
+            project=project,
+            project_root=project_root,
+            version_id=first_frame_ref,
+            media_prefix="image/",
+            label="firstFrameRef",
+        )
+        version_ids = (first_frame_ref,)
+        checksums = [checksum]
+        provenance = [ref]
+        read_set = [entry]
+    elif mode == "video_edit":
+        video_url, checksum, ref, entry = _resolve_single_media_version(
+            project=project,
+            project_root=project_root,
+            version_id=video_ref,
+            media_prefix="video/",
+            label="videoRef",
+        )
+        version_ids = (video_ref,)
+        checksums = [checksum]
+        provenance = [ref]
+        read_set = [entry]
+
     return _ResolvedR2V(
         target_ref=target_ref,
         element_id=element_id,
@@ -522,6 +691,11 @@ def _resolve_request(
         slot_id=f"element:{element_id}:main",
         slot_kind="element_video",
         owner_ref=f"element:{element_id}",
+        mode=mode,
+        first_frame_version_id=first_frame_ref if mode == "i2v" else "",
+        first_frame_url=first_frame_url,
+        video_version_id=video_ref if mode == "video_edit" else "",
+        video_url=video_url,
     )
 
 
@@ -1058,7 +1232,7 @@ class FileR2VExecutionService:
         resolved: _ResolvedR2V,
         stable: Mapping[str, str],
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "targetRef": resolved.target_ref,
             "elementId": resolved.element_id,
             "elementLabel": resolved.element_label,
@@ -1082,6 +1256,19 @@ class FileR2VExecutionService:
             "artifactVersionId": stable["artifact_version_id"],
             "transactionId": stable["transaction_id"],
         }
+        if resolved.mode != "r2v":
+            # Only non-default modes join the frozen request so legacy r2v
+            # tasks keep their fingerprint identity across the upgrade.
+            payload.update(
+                {
+                    "mode": resolved.mode,
+                    "firstFrameVersionId": resolved.first_frame_version_id,
+                    "firstFrameUrl": resolved.first_frame_url,
+                    "videoVersionId": resolved.video_version_id,
+                    "videoUrl": resolved.video_url,
+                },
+            )
+        return payload
 
     async def _admit(
         self,
@@ -1911,6 +2098,24 @@ class FileR2VExecutionService:
                     task.task_id,
                     project_id=task.project_id,
                 ):
+                    request_mode = str(request.get("mode") or "r2v")
+                    extra_arguments: dict[str, Any] = {}
+                    if request_mode != "r2v":
+                        # Passed only for explicit modes so injected test
+                        # providers with the legacy signature keep working.
+                        extra_arguments = {
+                            "mode": request_mode,
+                            "first_frame_url": (
+                                str(request["firstFrameUrl"])
+                                if request.get("firstFrameUrl")
+                                else None
+                            ),
+                            "video_url": (
+                                str(request["videoUrl"])
+                                if request.get("videoUrl")
+                                else None
+                            ),
+                        }
                     return await self.provider.submit(
                         prompt=str(request["prompt"]),
                         reference_image_urls=tuple(request["referenceUrls"]),
@@ -1919,6 +2124,7 @@ class FileR2VExecutionService:
                         resolution=str(request["resolution"]),
                         watermark=bool(request["watermark"]),
                         generate_audio=bool(request["generateAudio"]),
+                        **extra_arguments,
                     )
 
             provider_task_id = await asyncio.wait_for(

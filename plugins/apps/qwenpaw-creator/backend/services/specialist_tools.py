@@ -230,6 +230,33 @@ _IMAGE_ARGUMENTS = _arguments_schema(
 _R2V_ARGUMENTS = _arguments_schema(
     {
         "prompt": {"type": "string", "minLength": 1},
+        "mode": {
+            "type": "string",
+            "enum": ["r2v", "t2v", "i2v", "video_edit"],
+            "description": (
+                "视频生成模式，缺省 r2v（storyboard + 参考图，保持现状）。"
+                "t2v：纯文本生视频；i2v：首帧生视频（需 firstFrameRef）；"
+                "video_edit：按 prompt 指令编辑已有视频（需 videoRef，仅 "
+                "HappyHorse 模型）。支持的组合以当前模型的能力矩阵为准，"
+                "不支持时会返回可读错误并提示替代。"
+            ),
+        },
+        "firstFrameRef": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "i2v 模式必传：首帧图的 exact version id（可用已选定的 "
+                "storyboard 版本）；画幅跟随首帧。"
+            ),
+        },
+        "videoRef": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "video_edit 模式必传：输入视频的 exact version id。输入需 "
+                "3–60 秒，超过 15 秒时上游自动只取前 15 秒，输出时长跟随输入。"
+            ),
+        },
         "durationSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
         "ratio": {
             "type": "string",
@@ -490,8 +517,10 @@ _SPECS = (
     SpecialistToolSpec(
         name="r2v_generation",
         description=(
-            "为已选择真实 storyboard ArtifactVersion 的 R2V Element 提交视频生成；"
-            "Runtime 文件任务完成后结果自动写回 Asset Index 与 project.json。"
+            "视频生成（多模式）：默认为已选择真实 storyboard ArtifactVersion 的 "
+            "R2V Element 提交参考生视频；mode 可切换 t2v / i2v / video_edit"
+            "（视当前视频模型能力矩阵而定）。Runtime 文件任务完成后结果自动"
+            "写回 Asset Index 与 project.json。"
         ),
         roles=frozenset({SpecialistRole.R2V_GENERATION_DIRECTOR}),
         parameters=_tool_schema(_R2V_ARGUMENTS),
