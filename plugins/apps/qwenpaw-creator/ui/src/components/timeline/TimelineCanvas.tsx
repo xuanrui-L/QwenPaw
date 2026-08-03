@@ -138,11 +138,9 @@ export default function TimelineCanvas({
   // replay patch succeeded, so a failed request never loses history.
   const undoStack = useRef<SpanHistoryEntry[]>([]);
   const redoStack = useRef<SpanHistoryEntry[]>([]);
-  const historyBusy = useRef(false);
   useEffect(() => {
     undoStack.current = [];
     redoStack.current = [];
-    historyBusy.current = false;
   }, [project.project_id, timeline.timeline_id]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewScrubberRef = useRef<HTMLDivElement>(null);
@@ -264,90 +262,123 @@ export default function TimelineCanvas({
   // project.json immediately (default-apply), serialized so consecutive drags
   // never race each other's base generation.
   // ------------------------------------------------------------------
-  const commitSpans = (
+  const performSpanCommit = async (
     changes: SpanChange[],
     history?: { kind: "undo" | "redo"; entry: SpanHistoryEntry },
   ) => {
+    const snapshot = useProjectSnapshotStore.getState();
+    const latestTimeline =
+      snapshot.projectId === project.project_id
+        ? snapshot.project?.timelines.items[timeline.timeline_id]
+        : null;
+    const clearCommitted = () =>
+      setDragOverrides((previous) => {
+        if (!previous) return null;
+        const next = new Map(previous);
+        changes.forEach((change) => next.delete(change.elementId));
+        return next.size ? next : null;
+      });
+    if (!latestTimeline) {
+      clearCommitted();
+      return;
+    }
+    const rippleChanges = computeRippleChanges(latestTimeline, changes);
+    const allChanges = [...changes, ...rippleChanges];
+    const operations = buildSpanOperations(
+      latestTimeline,
+      timeline.timeline_id,
+      allChanges,
+    );
+    if (!operations.length) {
+      clearCommitted();
+      return;
+    }
+    // Inverse spans captured before the patch make the edit undoable.
+    const applied = allChanges.filter(
+      (change) => latestTimeline.elements_by_id[change.elementId],
+    );
+    const inverseChanges: SpanChange[] = applied.map((change) => ({
+      elementId: change.elementId,
+      span: { ...latestTimeline.elements_by_id[change.elementId].span },
+    }));
+    try {
+      const response = await patch(project.project_id, operations);
+      if (history?.kind === "undo") {
+        redoStack.current.push(history.entry);
+      } else if (history?.kind === "redo") {
+        undoStack.current.push(history.entry);
+      } else {
+        undoStack.current.push({
+          undoChanges: inverseChanges,
+          redoChanges: applied.map((change) => ({
+            elementId: change.elementId,
+            span: { ...change.span },
+          })),
+        });
+        if (undoStack.current.length > HISTORY_LIMIT) {
+          undoStack.current.shift();
+        }
+        redoStack.current = [];
+      }
+      clearCommitted();
+      if (response.editImpact?.regenerationRequired) {
+        message.success("时间调整已应用；相关生成结果已标记为需要重新生成");
+      } else if (response.editImpact?.renderTimelineIds.length) {
+        message.success("时间调整已应用；正在重新合成成片");
+        // Auto-trigger recompose so the final render stays in sync
+        void renderTimeline(project.project_id, timeline.timeline_id).catch(
+          () => undefined,
+        );
+      } else {
+        message.success("时间调整已应用");
+      }
+    } catch (error) {
+      // A failed replay must not lose history: the entry goes back onto
+      // the stack it came from.
+      if (history?.kind === "undo") undoStack.current.push(history.entry);
+      if (history?.kind === "redo") redoStack.current.push(history.entry);
+      clearCommitted();
+      message.error(`应用时间调整失败：${(error as Error).message}`);
+      void pollOnce(project.project_id);
+    }
+  };
+
+  const commitSpans = (changes: SpanChange[]) => {
+    commitChain.current = commitChain.current.then(() =>
+      performSpanCommit(changes),
+    );
+  };
+
+  /**
+   * Undo/redo run entirely inside the serialized commit chain: the stack is
+   * only read after every queued edit has settled, and the collaboration
+   * guard re-checks the freshest snapshot right before the patch. This
+   * prevents a queued undo from reverting past an edit that was still
+   * committing when the key was pressed.
+   */
+  const replayHistory = (kind: "undo" | "redo") => {
     commitChain.current = commitChain.current.then(async () => {
+      const stack = kind === "undo" ? undoStack.current : redoStack.current;
+      const entry = stack.pop();
+      if (!entry) return;
       const snapshot = useProjectSnapshotStore.getState();
-      const latestTimeline =
+      const latest =
         snapshot.projectId === project.project_id
           ? snapshot.project?.timelines.items[timeline.timeline_id]
           : null;
-      const clearCommitted = () =>
-        setDragOverrides((previous) => {
-          if (!previous) return null;
-          const next = new Map(previous);
-          changes.forEach((change) => next.delete(change.elementId));
-          return next.size ? next : null;
-        });
-      if (!latestTimeline) {
-        clearCommitted();
-        if (history) historyBusy.current = false;
+      const expected = kind === "undo" ? entry.redoChanges : entry.undoChanges;
+      if (!spansMatch(latest, expected)) {
+        message.warning(
+          kind === "undo"
+            ? "时间线已被其他修改更新，已取消撤销以免覆盖新内容"
+            : "时间线已被其他修改更新，已取消重做以免覆盖新内容",
+        );
         return;
       }
-      const rippleChanges = computeRippleChanges(latestTimeline, changes);
-      const allChanges = [...changes, ...rippleChanges];
-      const operations = buildSpanOperations(
-        latestTimeline,
-        timeline.timeline_id,
-        allChanges,
+      await performSpanCommit(
+        kind === "undo" ? entry.undoChanges : entry.redoChanges,
+        { kind, entry },
       );
-      if (!operations.length) {
-        clearCommitted();
-        if (history) historyBusy.current = false;
-        return;
-      }
-      // Inverse spans captured before the patch make the edit undoable.
-      const applied = allChanges.filter(
-        (change) => latestTimeline.elements_by_id[change.elementId],
-      );
-      const inverseChanges: SpanChange[] = applied.map((change) => ({
-        elementId: change.elementId,
-        span: { ...latestTimeline.elements_by_id[change.elementId].span },
-      }));
-      try {
-        const response = await patch(project.project_id, operations);
-        if (history?.kind === "undo") {
-          redoStack.current.push(history.entry);
-        } else if (history?.kind === "redo") {
-          undoStack.current.push(history.entry);
-        } else {
-          undoStack.current.push({
-            undoChanges: inverseChanges,
-            redoChanges: applied.map((change) => ({
-              elementId: change.elementId,
-              span: { ...change.span },
-            })),
-          });
-          if (undoStack.current.length > HISTORY_LIMIT) {
-            undoStack.current.shift();
-          }
-          redoStack.current = [];
-        }
-        clearCommitted();
-        if (response.editImpact?.regenerationRequired) {
-          message.success("时间调整已应用；相关生成结果已标记为需要重新生成");
-        } else if (response.editImpact?.renderTimelineIds.length) {
-          message.success("时间调整已应用；正在重新合成成片");
-          // Auto-trigger recompose so the final render stays in sync
-          void renderTimeline(project.project_id, timeline.timeline_id).catch(
-            () => undefined,
-          );
-        } else {
-          message.success("时间调整已应用");
-        }
-      } catch (error) {
-        // A failed replay must not lose history: the entry goes back onto
-        // the stack it came from.
-        if (history?.kind === "undo") undoStack.current.push(history.entry);
-        if (history?.kind === "redo") redoStack.current.push(history.entry);
-        clearCommitted();
-        message.error(`应用时间调整失败：${(error as Error).message}`);
-        void pollOnce(project.project_id);
-      } finally {
-        if (history) historyBusy.current = false;
-      }
     });
   };
 
@@ -532,42 +563,9 @@ export default function TimelineCanvas({
   const togglePlaybackRef = useRef(togglePlayback);
   togglePlaybackRef.current = togglePlayback;
   const undoRef = useRef(() => {});
-  undoRef.current = () => {
-    if (historyBusy.current) return;
-    const entry = undoStack.current.pop();
-    if (!entry) return;
-    // Collaboration guard: only revert when the timeline still holds the
-    // values this edit applied; otherwise an Agent or another page wrote
-    // in between and reverting would silently overwrite their change.
-    const snapshot = useProjectSnapshotStore.getState();
-    const latest =
-      snapshot.projectId === project.project_id
-        ? snapshot.project?.timelines.items[timeline.timeline_id]
-        : null;
-    if (!spansMatch(latest, entry.redoChanges)) {
-      message.warning("时间线已被其他修改更新，已取消撤销以免覆盖新内容");
-      return;
-    }
-    historyBusy.current = true;
-    commitSpans(entry.undoChanges, { kind: "undo", entry });
-  };
+  undoRef.current = () => replayHistory("undo");
   const redoRef = useRef(() => {});
-  redoRef.current = () => {
-    if (historyBusy.current) return;
-    const entry = redoStack.current.pop();
-    if (!entry) return;
-    const snapshot = useProjectSnapshotStore.getState();
-    const latest =
-      snapshot.projectId === project.project_id
-        ? snapshot.project?.timelines.items[timeline.timeline_id]
-        : null;
-    if (!spansMatch(latest, entry.undoChanges)) {
-      message.warning("时间线已被其他修改更新，已取消重做以免覆盖新内容");
-      return;
-    }
-    historyBusy.current = true;
-    commitSpans(entry.redoChanges, { kind: "redo", entry });
-  };
+  redoRef.current = () => replayHistory("redo");
   const seekByRef = useRef((deltaTick: number) => {
     onPlayheadChange(
       Math.min(timelineDuration, Math.max(0, playheadTick + deltaTick)),

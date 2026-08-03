@@ -50,20 +50,47 @@ const tl = {
     "edit-riverbed-jump": el("edit-riverbed-jump", "edit", 31000, 10000),
     "edit-railway-explore": el("edit-railway-explore", "edit", 40000, 10000),
     "edit-van-drink": el("edit-van-drink", "edit", 49000, 11000),
-    "xf-roof-to-pond": xf("xf-roof-to-pond", 13570, "edit-roof-climb", "edit-pond-drink"),
-    "xf-pond-to-face": xf("xf-pond-to-face", 22000, "edit-pond-drink", "edit-cat-face"),
-    "xf-face-to-riverbed": xf("xf-face-to-riverbed", 31000, "edit-cat-face", "edit-riverbed-jump"),
-    "xf-riverbed-to-railway": xf("xf-riverbed-to-railway", 40000, "edit-riverbed-jump", "edit-railway-explore"),
-    "xf-railway-to-van": xf("xf-railway-to-van", 49000, "edit-railway-explore", "edit-van-drink"),
+    "xf-roof-to-pond": xf(
+      "xf-roof-to-pond",
+      13570,
+      "edit-roof-climb",
+      "edit-pond-drink",
+    ),
+    "xf-pond-to-face": xf(
+      "xf-pond-to-face",
+      22000,
+      "edit-pond-drink",
+      "edit-cat-face",
+    ),
+    "xf-face-to-riverbed": xf(
+      "xf-face-to-riverbed",
+      31000,
+      "edit-cat-face",
+      "edit-riverbed-jump",
+    ),
+    "xf-riverbed-to-railway": xf(
+      "xf-riverbed-to-railway",
+      40000,
+      "edit-riverbed-jump",
+      "edit-railway-explore",
+    ),
+    "xf-railway-to-van": xf(
+      "xf-railway-to-van",
+      49000,
+      "edit-railway-explore",
+      "edit-van-drink",
+    ),
   },
 } as unknown as TimelineDocument;
 
 describe("cross-neighbour move with transition follow", () => {
   it("moves roof back to 0 with xf follow", () => {
     const element = tl.elements_by_id["edit-roof-climb"];
-    const snapTicks = collectSnapTicks(tl, new Set(["edit-roof-climb"]), [
-      0, 0, 60000,
-    ]);
+    const snapTicks = collectSnapTicks(
+      tl,
+      new Set(["edit-roof-climb"]),
+      [0, 0, 60000],
+    );
     const result = resolveSpanDrag({
       timeline: tl,
       element,

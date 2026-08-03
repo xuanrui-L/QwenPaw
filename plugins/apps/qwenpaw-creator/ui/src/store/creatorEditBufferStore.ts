@@ -1,5 +1,8 @@
 import { create } from "zustand";
-import type { ProjectDocument, TimelineSpanDocument } from "@/contracts/creator";
+import type {
+  ProjectDocument,
+  TimelineSpanDocument,
+} from "@/contracts/creator";
 import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
 
 export interface EditTargetInfo {
@@ -84,7 +87,11 @@ function describeTarget(
   tokens: string[],
   project: ProjectDocument | null,
 ): EditTargetInfo {
-  if (tokens[0] === "timelines" && tokens[3] === "elements_by_id" && tokens[4]) {
+  if (
+    tokens[0] === "timelines" &&
+    tokens[3] === "elements_by_id" &&
+    tokens[4]
+  ) {
     const timeline = project?.timelines.items[tokens[2]];
     const element = timeline?.elements_by_id[tokens[4]];
     return {
@@ -97,7 +104,11 @@ function describeTarget(
     return { kind: "timeline", id: tokens[2], label: tokens[2] };
   }
   if (tokens[0] === "assets" && tokens[1] === "artifact_slots_by_id") {
-    return { kind: "artifact-slot", id: tokens[2] ?? null, label: tokens[2] ?? null };
+    return {
+      kind: "artifact-slot",
+      id: tokens[2] ?? null,
+      label: tokens[2] ?? null,
+    };
   }
   if (tokens[0] === "visual" && tokens[1] === "entities" && tokens[3]) {
     const entity = project?.visual.entities.items[tokens[3]];
@@ -107,8 +118,10 @@ function describeTarget(
       label: entity?.name || tokens[3],
     };
   }
-  if (tokens[0] === "strategy") return { kind: "strategy", id: null, label: null };
-  if (tokens[0] === "settings") return { kind: "settings", id: null, label: null };
+  if (tokens[0] === "strategy")
+    return { kind: "strategy", id: null, label: null };
+  if (tokens[0] === "settings")
+    return { kind: "settings", id: null, label: null };
   if (tokens[0] === "sources") {
     return { kind: "source", id: tokens[2] ?? null, label: tokens[2] ?? null };
   }
@@ -165,10 +178,7 @@ function collectAffectedRanges(
   operations: ProjectEditOperation[],
   project: ProjectDocument | null,
 ): Array<{ timelineId: string; range: AffectedRange }> {
-  const perElement = new Map<
-    string,
-    { timelineId: string; ticks: number[] }
-  >();
+  const perElement = new Map<string, { timelineId: string; ticks: number[] }>();
   for (const operation of operations) {
     const tokens = parsePointer(operation.path);
     if (tokens[0] !== "timelines" || tokens[3] !== "elements_by_id") continue;
@@ -210,7 +220,10 @@ function collectAffectedRanges(
         (operation.value as Record<string, unknown> | undefined)?.span,
       );
       if (added)
-        bucket.ticks.push(added.start_tick, added.start_tick + added.duration_tick);
+        bucket.ticks.push(
+          added.start_tick,
+          added.start_tick + added.duration_tick,
+        );
       const removed = spanFromRecord(
         (operation.before as Record<string, unknown> | undefined)?.span,
       );
@@ -266,9 +279,7 @@ export const useCreatorEditBufferStore = create<CreatorEditBufferState>(
           ...(sameProject ? state.entries : []),
           ...nextEntries,
         ].slice(-MAX_ENTRIES);
-        const ranges = sameProject
-          ? { ...state.affectedRangesByTimeline }
-          : {};
+        const ranges = sameProject ? { ...state.affectedRangesByTimeline } : {};
         affected.forEach(({ timelineId, range }) => {
           ranges[timelineId] = mergeRange(ranges[timelineId] ?? [], range);
         });

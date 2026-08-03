@@ -853,7 +853,10 @@ describe("PlanPage Timeline/Element frontend", () => {
     seedProject();
     const { container } = renderPage();
     const header = () =>
-      (screen.getByText(/^时间点:/).textContent ?? "").replace(/\s+/g, "");
+      (screen.getByText(/^(时间点:|已选择)/).textContent ?? "").replace(
+        /\s+/g,
+        "",
+      );
 
     // Clicking a clip pins an explicit selection and seeks to its start.
     fireEvent.click(
@@ -861,16 +864,52 @@ describe("PlanPage Timeline/Element frontend", () => {
         '[data-element-block="r2v-window"]',
       ) as HTMLButtonElement,
     );
-    await waitFor(() => expect(header()).toContain("时间点:5s"));
+    await waitFor(() => expect(header()).toContain("已选择"));
     expect(header()).toContain("1项内容");
 
     // Home must clear the pinned list and re-derive 0s content — the panel
     // can never keep describing the previously clicked clip.
     fireEvent.keyDown(document.body, { key: "Home" });
     await waitFor(() => expect(header()).toContain("时间点:0s"));
+    expect(header()).not.toContain("已选择");
     expect(header()).not.toContain("1项内容");
     expect(screen.getAllByText("开场 · 晨光中的小猫").length).toBeGreaterThan(
       1,
     );
+  });
+
+  it("labels lane and range selections as selections, never as playhead content", async () => {
+    seedProject();
+    const { container } = renderPage();
+    const header = () =>
+      (screen.getByText(/^(时间点:|已选择)/).textContent ?? "").replace(
+        /\s+/g,
+        "",
+      );
+
+    // Whole-lane click: pinned selection semantics, not "active at 0s".
+    fireEvent.click(
+      container.querySelector('[title*="点击选取整行"]') as HTMLElement,
+    );
+    await waitFor(() => expect(header()).toContain("已选择"));
+    expect(header()).not.toContain("时间点");
+    const dot = document.querySelector('[title="已选择"]');
+    expect(dot).toBeInTheDocument();
+    expect(document.querySelector('[title="当前时刻活跃"]')).toBeNull();
+
+    // Shift range selection keeps the same selection semantics.
+    const chart = container.querySelector("[data-timeline-chart]")!;
+    installTimelineRect(chart);
+    const x1 = 80 + ((1000 - 92) * 2) / 20;
+    const x2 = 80 + ((1000 - 92) * 9) / 20;
+    fireEvent.pointerDown(chart, { pointerId: 9, clientX: x1, shiftKey: true });
+    fireEvent.pointerMove(chart, { pointerId: 9, clientX: x2 });
+    fireEvent.pointerUp(chart, { pointerId: 9, clientX: x2 });
+    await waitFor(() => expect(header()).toContain("已选择"));
+    expect(header()).not.toContain("时间点");
+
+    // Any playhead motion falls back to derived playhead content.
+    fireEvent.keyDown(document.body, { key: "Home" });
+    await waitFor(() => expect(header()).toContain("时间点:0s"));
   });
 });

@@ -129,9 +129,7 @@ describe("TimelineTracks direct manipulation", () => {
     ) as HTMLButtonElement;
     expect(badge.style.top).toBe("66px");
     expect(
-      container.querySelector(
-        '[data-transition-junction-link="transition-2"]',
-      ),
+      container.querySelector('[data-transition-junction-link="transition-2"]'),
     ).not.toBeInTheDocument();
   });
 
@@ -250,7 +248,10 @@ describe("TimelineTracks direct manipulation", () => {
     });
     fireEvent.pointerUp(block, { button: 0, pointerId: 5, clientX: 130 });
     expect(props.onCommitSpans).toHaveBeenCalledWith([
-      { elementId: "edit-opening", span: { start_tick: 1000, duration_tick: 8000 } },
+      {
+        elementId: "edit-opening",
+        span: { start_tick: 1000, duration_tick: 8000 },
+      },
     ]);
     // The click fired after a drag must not change the selection.
     fireEvent.click(block);
@@ -276,8 +277,14 @@ describe("TimelineTracks direct manipulation", () => {
     // Trimming the from-clip to 7000 shrinks the transition overlap window to
     // [5000,7000]; the transition auto-follows into the new junction.
     expect(props.onCommitSpans).toHaveBeenCalledWith([
-      { elementId: "edit-opening", span: { start_tick: 0, duration_tick: 7000 } },
-      { elementId: "transition", span: { start_tick: 6000, duration_tick: 1000 } },
+      {
+        elementId: "edit-opening",
+        span: { start_tick: 0, duration_tick: 7000 },
+      },
+      {
+        elementId: "transition",
+        span: { start_tick: 6000, duration_tick: 1000 },
+      },
     ]);
   });
 
@@ -412,7 +419,10 @@ describe("TimelineTracks direct manipulation", () => {
     fireEvent.pointerMove(badge, { pointerId: 8, clientX: 520 });
     fireEvent.pointerUp(badge, { button: 0, pointerId: 8, clientX: 520 });
     expect(props.onCommitSpans).toHaveBeenCalledWith([
-      { elementId: "transition", span: { start_tick: 7000, duration_tick: 1000 } },
+      {
+        elementId: "transition",
+        span: { start_tick: 7000, duration_tick: 1000 },
+      },
     ]);
   });
 });

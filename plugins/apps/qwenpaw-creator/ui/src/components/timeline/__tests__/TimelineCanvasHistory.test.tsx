@@ -79,7 +79,20 @@ function setup() {
     height: 200,
     toJSON: () => ({}),
   });
-  return { ...utils, patchMock };
+  // PlanPage re-renders the canvas with each snapshot; mirror that here so
+  // multi-edit tests operate on the latest committed timeline.
+  const refresh = () => {
+    const latest = useProjectSnapshotStore.getState()
+      .project as ProjectDocument;
+    utils.rerender(
+      <TimelineCanvas
+        {...props}
+        project={latest}
+        timeline={latest.timelines.items["timeline:main"]}
+      />,
+    );
+  };
+  return { ...utils, patchMock, refresh };
 }
 
 function editOpeningSpan() {
@@ -169,6 +182,51 @@ describe("TimelineCanvas span edit history", () => {
       expect(editOpeningSpan()).toEqual({
         start_tick: 0,
         duration_tick: 8000,
+      }),
+    );
+  });
+
+  it("undoes only the newest edit when pressed while a commit is pending", async () => {
+    const { container, patchMock, refresh } = setup();
+    const block = container.querySelector(
+      '[data-element-block="edit-opening"]',
+    ) as HTMLButtonElement;
+    const handle = () =>
+      container.querySelector(
+        '[data-element-block="edit-opening"] [data-element-trim="start"]',
+      ) as HTMLElement;
+
+    // First trim A(0/8000) -> B(1000/7000) commits normally.
+    fireEvent.pointerDown(handle(), { button: 0, pointerId: 8, clientX: 100 });
+    fireEvent.pointerMove(block, { pointerId: 8, clientX: 131.2 });
+    fireEvent.pointerUp(block, { button: 0, pointerId: 8, clientX: 131.2 });
+    await waitFor(() => expect(patchMock).toHaveBeenCalledTimes(1));
+    refresh();
+
+    // Second trim B -> C(2000/6000), but its PATCH hangs until released.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = patchMock.getMockImplementation()!;
+    patchMock.mockImplementationOnce(async (...args) => {
+      await gate;
+      return original(...(args as Parameters<typeof original>)) as never;
+    });
+    fireEvent.pointerDown(handle(), { button: 0, pointerId: 9, clientX: 200 });
+    fireEvent.pointerMove(block, { pointerId: 9, clientX: 231.2 });
+    fireEvent.pointerUp(block, { button: 0, pointerId: 9, clientX: 231.2 });
+    await waitFor(() => expect(patchMock).toHaveBeenCalledTimes(2));
+
+    // Undo pressed while the second commit is still in flight: it must wait
+    // for the queue and then revert C -> B, never jumping back to A.
+    fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    release();
+    await waitFor(() => expect(patchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(editOpeningSpan()).toEqual({
+        start_tick: 1000,
+        duration_tick: 7000,
       }),
     );
   });

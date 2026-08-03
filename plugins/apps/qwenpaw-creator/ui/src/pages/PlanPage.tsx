@@ -721,6 +721,7 @@ export default function PlanPage() {
           timeline={timeline}
           playheadTick={playheadTick}
           activeElementIds={activeElementIds}
+          selectionPinned={explicitActiveIds !== null}
           selectedElementId={selectedElementId}
           tasks={tasks}
           onSelect={selectElement}

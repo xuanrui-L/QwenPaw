@@ -39,11 +39,7 @@ describe("timelineEditing span drags", () => {
   it("snaps a moved block edge onto a neighbour edge", () => {
     const timeline = fixtureTimeline();
     const element = timeline.elements_by_id["overlay-os"];
-    const snapTicks = collectSnapTicks(
-      timeline,
-      new Set(["overlay-os"]),
-      [0],
-    );
+    const snapTicks = collectSnapTicks(timeline, new Set(["overlay-os"]), [0]);
     // Origin start 6000; drag towards edit-opening's end (8000).
     const result = resolveSpanDrag({
       timeline,
@@ -85,9 +81,9 @@ describe("timelineEditing span drags", () => {
       snapThresholdTick: 0,
     });
     expect(trimmedStart.span.duration_tick).toBe(floor);
-    expect(
-      trimmedStart.span.start_tick + trimmedStart.span.duration_tick,
-    ).toBe(element.span.start_tick + element.span.duration_tick);
+    expect(trimmedStart.span.start_tick + trimmedStart.span.duration_tick).toBe(
+      element.span.start_tick + element.span.duration_tick,
+    );
   });
 
   it("keeps a transition inside its from/to overlap window", () => {
@@ -118,9 +114,9 @@ describe("timelineEditing span drags", () => {
       snapTicks: [],
       snapThresholdTick: 0,
     });
-    expect(
-      draggedRight.span.start_tick + draggedRight.span.duration_tick,
-    ).toBe(8000);
+    expect(draggedRight.span.start_tick + draggedRight.span.duration_tick).toBe(
+      8000,
+    );
   });
 
   it("snapAdjust ignores candidates beyond the threshold", () => {
