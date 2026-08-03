@@ -1470,8 +1470,23 @@ describe("AgentDock origin/main visible fidelity", () => {
             runId: "run-review-wait",
             role: "r2v_generation_director",
             targetRefs: ["element:ep22"],
+            waitingReview: true,
             summary:
               "element:ep22 的分镜图已生成，视频尚未开始。请先审阅分镜图；审阅通过后将自动继续生成视频。",
+          },
+        },
+        {
+          eventId: "delegate-review-wait-completed",
+          seq: 3,
+          type: "agent.tool_completed",
+          projectId: "p1",
+          creatorSessionId: "session-1",
+          at: "now",
+          data: {
+            actionId: "delegate-review-wait",
+            runId: "parent-run",
+            tool: "delegate_to_agent",
+            failed: false,
           },
         },
       ]),
