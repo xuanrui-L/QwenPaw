@@ -848,4 +848,29 @@ describe("PlanPage Timeline/Element frontend", () => {
       expect(screen.getAllByText("开场 · 晨光中的小猫")).toHaveLength(1),
     );
   });
+
+  it("drops an explicit selection as soon as the playhead moves", async () => {
+    seedProject();
+    const { container } = renderPage();
+    const header = () =>
+      (screen.getByText(/^时间点:/).textContent ?? "").replace(/\s+/g, "");
+
+    // Clicking a clip pins an explicit selection and seeks to its start.
+    fireEvent.click(
+      container.querySelector(
+        '[data-element-block="r2v-window"]',
+      ) as HTMLButtonElement,
+    );
+    await waitFor(() => expect(header()).toContain("时间点:5s"));
+    expect(header()).toContain("1项内容");
+
+    // Home must clear the pinned list and re-derive 0s content — the panel
+    // can never keep describing the previously clicked clip.
+    fireEvent.keyDown(document.body, { key: "Home" });
+    await waitFor(() => expect(header()).toContain("时间点:0s"));
+    expect(header()).not.toContain("1项内容");
+    expect(screen.getAllByText("开场 · 晨光中的小猫").length).toBeGreaterThan(
+      1,
+    );
+  });
 });

@@ -137,4 +137,69 @@ describe("TimelineCanvas span edit history", () => {
     fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
     expect(patchMock).not.toHaveBeenCalled();
   });
+
+  it("keeps the history entry when the undo patch fails", async () => {
+    const { container, patchMock } = setup();
+    const handle = container.querySelector(
+      '[data-element-block="edit-opening"] [data-element-trim="start"]',
+    ) as HTMLElement;
+    const block = container.querySelector(
+      '[data-element-block="edit-opening"]',
+    ) as HTMLButtonElement;
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 6, clientX: 100 });
+    fireEvent.pointerMove(block, { pointerId: 6, clientX: 131.2 });
+    fireEvent.pointerUp(block, { button: 0, pointerId: 6, clientX: 131.2 });
+    await waitFor(() => expect(patchMock).toHaveBeenCalledTimes(1));
+
+    // First undo attempt hits a transient failure (409/network/503).
+    patchMock.mockImplementationOnce(async () => {
+      throw new Error("瞬时失败");
+    });
+    fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(patchMock).toHaveBeenCalledTimes(2));
+    expect(editOpeningSpan()).toEqual({
+      start_tick: 1000,
+      duration_tick: 7000,
+    });
+
+    // The entry went back onto the stack: the retry succeeds and reverts.
+    fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(patchMock).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(editOpeningSpan()).toEqual({
+        start_tick: 0,
+        duration_tick: 8000,
+      }),
+    );
+  });
+
+  it("refuses to undo over a change written by someone else", async () => {
+    const { container, patchMock } = setup();
+    const handle = container.querySelector(
+      '[data-element-block="edit-opening"] [data-element-trim="start"]',
+    ) as HTMLElement;
+    const block = container.querySelector(
+      '[data-element-block="edit-opening"]',
+    ) as HTMLButtonElement;
+    fireEvent.pointerDown(handle, { button: 0, pointerId: 7, clientX: 100 });
+    fireEvent.pointerMove(block, { pointerId: 7, clientX: 131.2 });
+    fireEvent.pointerUp(block, { button: 0, pointerId: 7, clientX: 131.2 });
+    await waitFor(() => expect(patchMock).toHaveBeenCalledTimes(1));
+
+    // An Agent (or another page) rewrites the same span in between.
+    const state = useProjectSnapshotStore.getState();
+    const next = structuredClone(state.project) as ProjectDocument;
+    next.timelines.items["timeline:main"].elements_by_id["edit-opening"].span =
+      { start_tick: 2000, duration_tick: 6000 };
+    useProjectSnapshotStore.setState({ project: next });
+
+    fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    // Undo is refused: no patch fired and the foreign value survives.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    expect(editOpeningSpan()).toEqual({
+      start_tick: 2000,
+      duration_tick: 6000,
+    });
+  });
 });

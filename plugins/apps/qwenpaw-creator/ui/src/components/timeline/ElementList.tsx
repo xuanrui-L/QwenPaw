@@ -12,6 +12,7 @@ import {
   resolveElementVisualMeta,
 } from "@/selectors/timelineElementSelectors";
 import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
+import { formatSeconds } from "@/lib/timecode";
 
 interface ElementListProps {
   timeline: TimelineDocument;
@@ -70,7 +71,7 @@ function statusOf(
 }
 
 function sec(tick: number, ticksPerSecond: number): string {
-  return (tick / ticksPerSecond).toFixed(1).replace(/\.0$/, "");
+  return formatSeconds(tick, ticksPerSecond);
 }
 
 export default function ElementList({

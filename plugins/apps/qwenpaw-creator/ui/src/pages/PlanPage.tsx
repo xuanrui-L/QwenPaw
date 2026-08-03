@@ -98,6 +98,16 @@ export default function PlanPage() {
       )
     : 1;
   const clampedPlayheadTick = Math.min(playheadTick, displayDurationTick);
+  // Any playhead motion (transport keys, scrub, playback, seeks) returns the
+  // panel to follow mode so it can never describe a stale selection.
+  const movePlayhead = useCallback((tick: number) => {
+    setPlayheadTick(tick);
+    setExplicitActiveIds(null);
+  }, []);
+  useEffect(() => {
+    // Never carry one project's selection into another.
+    setExplicitActiveIds(null);
+  }, [id]);
   const activeElementIds = useMemo(
     () =>
       explicitActiveIds ??
@@ -152,6 +162,7 @@ export default function PlanPage() {
     )
       return;
     setPlayheadTick(selectedElement.span.start_tick);
+    setExplicitActiveIds(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedElement]);
 
@@ -188,6 +199,9 @@ export default function PlanPage() {
               ? currentTick
               : startTick;
           });
+          // Follow mode by default; a track block click re-pins its own
+          // explicit selection right after this handler in the same batch.
+          setExplicitActiveIds(null);
         }
         navigate(
           selectedElementId === elementId
@@ -690,7 +704,7 @@ export default function PlanPage() {
         tasks={tasks}
         onPreviewOpenChange={setPreviewOpen}
         onPlayheadChange={(tick) =>
-          setPlayheadTick(Math.max(0, Math.min(displayDurationTick, tick)))
+          movePlayhead(Math.max(0, Math.min(displayDurationTick, tick)))
         }
         onSelectElement={selectElement}
         onActiveElementIdsChange={setExplicitActiveIds}

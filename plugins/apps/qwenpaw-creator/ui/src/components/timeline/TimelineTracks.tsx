@@ -35,6 +35,7 @@ import {
   type SpanChange,
   type SpanDragMode,
 } from "@/lib/timelineEditing";
+import { formatSeconds } from "@/lib/timecode";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -99,12 +100,7 @@ const TRACK_DECOR: Record<
 const STRIPED_TRACKS = new Set<TimelineTrackType>(["subtitle", "motion"]);
 
 function seconds(tick: number, ticksPerSecond: number): string {
-  // Two decimals, trailing zeros trimmed: 4.95 stays "4.95" (never "5"),
-  // so block labels always match the persisted tick boundary.
-  return (tick / ticksPerSecond)
-    .toFixed(2)
-    .replace(/0+$/, "")
-    .replace(/\.$/, "");
+  return formatSeconds(tick, ticksPerSecond);
 }
 
 function percent(tick: number, durationTick: number): number {
@@ -1068,12 +1064,15 @@ export default function TimelineTracks({
                                   event.stopPropagation()
                                 }
                                 onClick={() => {
+                                  // Seek first: playhead motion resets the
+                                  // page to follow mode, then the explicit
+                                  // whole-lane selection pins on top of it.
+                                  onPlayheadChange(0);
                                   onActiveElementIdsChange(
                                     lane.elements.map(
                                       (element) => element.element_id,
                                     ),
                                   );
-                                  onPlayheadChange(0);
                                 }}
                                 className="sticky left-0 z-40 flex w-[68px] shrink-0 cursor-pointer items-center gap-1.5 border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] pl-2.5 pr-1 text-[10px] hover:bg-[var(--color-bg-secondary)]"
                               >
