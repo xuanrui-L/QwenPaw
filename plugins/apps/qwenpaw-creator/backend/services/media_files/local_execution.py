@@ -305,11 +305,18 @@ class FfmpegLocalMediaRunner:
                         freeze_duration = target_duration - source_duration
 
                 segment = segment_dir / f"{index:06d}.mp4"
+                # apad references [0:a]; sources without an audio stream
+                # (common for generated R2V footage) must keep the optional
+                # 0:a? mapping or ffmpeg rejects the whole filtergraph.
+                freeze_audio = freeze_duration > 0 and self._probe_has_audio(
+                    item.path,
+                )
                 placement_filter = self._placement_filter(
                     item.location,
                     canvas_size=spec.canvas_size,
                     duration_seconds=segment_duration,
                     freeze_duration=freeze_duration,
+                    freeze_audio=freeze_audio,
                 )
 
                 # Build FFmpeg arguments
@@ -334,7 +341,7 @@ class FfmpegLocalMediaRunner:
                 ]
 
                 # Map audio if present
-                if freeze_duration > 0:
+                if freeze_audio:
                     ffmpeg_args.extend(["-map", "[a]"])
                 else:
                     ffmpeg_args.extend(["-map", "0:a?"])
@@ -551,6 +558,7 @@ class FfmpegLocalMediaRunner:
         canvas_size: tuple[int, int],
         duration_seconds: float,
         freeze_duration: float = 0.0,
+        freeze_audio: bool = False,
     ) -> str:
         """Build one anchor-based placement graph shared with the UI preview."""
 
@@ -618,8 +626,8 @@ class FfmpegLocalMediaRunner:
             f"[bg][fg]overlay={overlay_x}:{overlay_y}:shortest=1,format=yuv420p[outv]"
         )
 
-        # Only add audio filter chain when freezing (apad needed)
-        if freeze_duration > 0:
+        # Only pad audio when freezing a source that actually has a stream.
+        if freeze_audio:
             filter_chain += f";[0:a]apad=pad_dur={freeze_duration:.6f}[a]"
 
         return filter_chain
