@@ -5,9 +5,10 @@
 # Modified for QwenPaw Creator. See backend/vendor/NOTICE.md.
 """Render source code files as markdown-fenced text blocks.
 
-Creator modifications: the leading block is a meta block, and the line cap
-is overridable via the ``max_lines`` option (full-text indexing needs more
-than the upstream context-oriented default).
+Creator modifications: the leading block is a meta block, the line cap is
+overridable via the ``max_lines`` option, and the complete file content is
+emitted as a ``full_text`` block for deterministic indexing regardless of
+the display cap.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
         lines = f.readlines()
 
     total_lines = len(lines)
+    full = "".join(lines)
     truncated = False
     if total_lines > max_lines:
         lines = lines[:max_lines]
@@ -81,7 +83,12 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
     if truncated:
         parts.append(f"... ({total_lines - max_lines} more lines truncated)")
 
-    return [
+    blocks = [
         meta_block(ext.lstrip(".") or "text", 1, []),
         {"type": "text", "text": "\n\n".join(parts)},
     ]
+    if truncated:
+        # The display block above is line-capped; indexing gets the whole
+        # file (the reader applies its own character bound).
+        blocks.append({"type": "full_text", "text": f"{summary}\n{full}"})
+    return blocks

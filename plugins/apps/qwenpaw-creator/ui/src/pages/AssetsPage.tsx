@@ -448,6 +448,31 @@ function visualItemGroups(
   ];
 }
 
+/**
+ * Intelligence version bound to one exact SourceAssetVersion. Repeated
+ * analyses keep every record, so the Source's current pointer wins and
+ * older versions fall back to their newest analysis by created_at.
+ */
+function intelligenceVersionForSource(
+  project: ProjectDocument,
+  version: SourceAssetVersionDocument,
+): string | null {
+  const records = Object.values(
+    project.assets.intelligence_versions_by_id,
+  ).filter((record) => record.source_asset_version_id === version.version_id);
+  if (!records.length) return null;
+  const current = Object.values(project.sources.sources.items).find(
+    (source) => source.logical_asset_id === version.logical_asset_id,
+  )?.current_intelligence_version_id;
+  const pinned = records.find(
+    (record) => record.intelligence_version_id === current,
+  );
+  if (pinned) return pinned.intelligence_version_id;
+  return [...records].sort((left, right) =>
+    right.created_at.localeCompare(left.created_at),
+  )[0].intelligence_version_id;
+}
+
 function kindLabel(item: AssetItem): string {
   if (item.kind === "source")
     return item.mediaKind === "document" ? "来源 · 文档" : "来源";
@@ -1173,12 +1198,10 @@ export default function AssetsPage() {
                         // Bind the panel to this exact source version; the
                         // versionless endpoint would show the current
                         // version's understanding on older cards.
-                        Object.values(
-                          project.assets.intelligence_versions_by_id,
-                        ).find(
-                          (record) =>
-                            record.source_asset_version_id === selected.id,
-                        )?.intelligence_version_id ?? null
+                        intelligenceVersionForSource(
+                          project,
+                          selected.raw as SourceAssetVersionDocument,
+                        )
                       }
                     />
                   )}

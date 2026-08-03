@@ -41,11 +41,6 @@ MAX_TEXT_EXCERPT_CHARS = 20_000
 # larger than the model excerpt but still finite for disk/index hygiene.
 MAX_FULL_TEXT_CHARS = 500_000
 
-# Renderer-level extraction limits used for the full text (the upstream
-# defaults are context-oriented and much smaller).
-FULL_TEXT_MAX_CODE_LINES = 20_000
-FULL_TEXT_MAX_TABLE_ROWS = 2_000
-
 # Web/HTML rendering needs Playwright; keep it off unless explicitly enabled.
 DOC_READER_WEB_ENABLED_ENV = "CREATOR_DOC_READER_WEB_ENABLED"
 
@@ -130,13 +125,7 @@ def _read_document_sync(
             "to enable it",
         )
 
-    opts: dict[str, Any] = {
-        "budget": budget,
-        "max_pages": max_pages,
-        # Full-text extraction limits; the model excerpt is capped later.
-        "max_lines": FULL_TEXT_MAX_CODE_LINES,
-        "max_rows": FULL_TEXT_MAX_TABLE_ROWS,
-    }
+    opts: dict[str, Any] = {"budget": budget, "max_pages": max_pages}
     if pages:
         opts["pages"] = pages
     if module_name == "office":
@@ -154,6 +143,7 @@ def _read_document_sync(
     pages_rendered: list[int] = []
     notes: list[str] = []
     text_parts: list[str] = []
+    full_text_parts: list[str] = []
     page_images: list[Path] = []
 
     max_pixels = budget_to_pixels(budget, IMAGE_BUDGET_TOKENS)
@@ -182,6 +172,10 @@ def _read_document_sync(
             text = str(block.get("text") or "").strip()
             if text:
                 text_parts.append(text)
+        elif block_type == "full_text":
+            text = str(block.get("text") or "").strip()
+            if text:
+                full_text_parts.append(text)
 
     if not pages_rendered:
         pages_rendered = sorted(
@@ -197,7 +191,11 @@ def _read_document_sync(
         )
 
     text_excerpt = "\n\n".join(text_parts)
-    full_text = text_excerpt
+    # Renderers emitting dedicated full_text blocks decouple indexing from
+    # the rendered/display scope; others index exactly what was rendered.
+    full_text = (
+        "\n\n".join(full_text_parts) if full_text_parts else text_excerpt
+    )
     if len(full_text) > MAX_FULL_TEXT_CHARS:
         full_text = full_text[:MAX_FULL_TEXT_CHARS]
         notes.append(

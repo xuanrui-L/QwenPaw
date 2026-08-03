@@ -120,6 +120,39 @@ def test_pdf_page_range_selection(tmp_path) -> None:
     assert any(
         "request more via the pages parameter" in n for n in result.notes
     )
+    # Full text is decoupled from the rendered page subset: pages outside
+    # the range still contribute their text layer to full_text.
+    assert "Creator Doc Page 3: storyboard beats" in result.full_text
+    assert "Creator Doc Page 3: storyboard beats" not in result.text_excerpt
+
+
+def test_pdf_full_text_covers_pages_beyond_render_cap(tmp_path) -> None:
+    # CR repro: a 21-page PDF renders only 20 pages by default, but the
+    # 21st page's unique text must still reach the indexed full text.
+    source = tmp_path / "long.pdf"
+    _make_pdf(source, pages=21)
+    result = _read(source, tmp_path / "pages")
+
+    assert result.page_count == 21
+    assert result.pages_rendered == tuple(range(1, 21))
+    marker = "Creator Doc Page 21: storyboard beats"
+    assert marker not in result.text_excerpt
+    assert marker in result.full_text
+
+
+def test_csv_full_text_covers_rows_beyond_display_cap(tmp_path) -> None:
+    # CR repro: a 2002-row CSV keeps its last row in the indexed full text
+    # even though the display table caps far earlier.
+    source = tmp_path / "big.csv"
+    rows = ["scene,cost"]
+    rows += [f"scene-{number},{number}" for number in range(1, 2002)]
+    rows.append("final-unique-scene,9999")
+    source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    result = _read(source, tmp_path / "pages")
+
+    assert result.format == "csv"
+    assert "final-unique-scene" not in result.text_excerpt
+    assert "final-unique-scene" in result.full_text
 
 
 def test_csv_renders_table_image_and_markdown(tmp_path) -> None:

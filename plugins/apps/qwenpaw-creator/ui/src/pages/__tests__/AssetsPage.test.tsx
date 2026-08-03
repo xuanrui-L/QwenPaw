@@ -406,6 +406,27 @@ describe("AssetsPage Project projection", () => {
       coverage: {},
       created_at: "2026-07-21T01:00:00Z",
     };
+    // A repeated analysis of the same source version: the Source's current
+    // pointer references the newer record, which must win over the older
+    // one that happens to appear first in the map.
+    project.assets.intelligence_versions_by_id["intel-v1b"] = {
+      intelligence_version_id: "intel-v1b",
+      source_asset_version_id: "script-v1",
+      file_id: "file:intel-v1b",
+      source_checksum: "sha-script-v1",
+      model_run_ids: [],
+      coverage: {},
+      created_at: "2026-07-21T02:00:00Z",
+    };
+    project.sources.sources.items["src-script"] = {
+      source_id: "src-script",
+      display_name: "剧本",
+      logical_asset_id: "asset:script",
+      selected_asset_version_id: "script-v1",
+      current_intelligence_version_id: "intel-v1b",
+      user_notes: "",
+    };
+    project.sources.sources.order.push("src-script");
     seedProject(project);
     const understanding = (summary: string) => ({
       media: {
@@ -420,21 +441,25 @@ describe("AssetsPage Project projection", () => {
     const { calls } = installMockFetch(
       ingestRoutes([
         {
-          match: "understanding/intel-v1",
-          response: { json: understanding("旧版剧本的理解摘要") },
+          match: "understanding/intel-v1b",
+          response: { json: understanding("重分析后的理解摘要") },
         },
       ]),
     );
     renderPage();
 
-    // The analyzed old version loads exactly its own intelligence version.
+    // The analyzed version loads the current (newest) analysis of that
+    // exact source version, not the first record in the map.
     fireEvent.click(screen.getByText("剧本旧版"));
     expect(
-      (await screen.findByText("旧版剧本的理解摘要")).textContent,
-    ).toContain("旧版");
+      (await screen.findByText("重分析后的理解摘要")).textContent,
+    ).toContain("重分析");
     expect(
-      calls.some((call) => call.url.includes("understanding/intel-v1")),
+      calls.some((call) => call.url.includes("understanding/intel-v1b")),
     ).toBe(true);
+    expect(
+      calls.some((call) => call.url.endsWith("understanding/intel-v1")),
+    ).toBe(false);
 
     // The unanalyzed new version must not fall back to another version's
     // understanding: no request fires and an empty state renders.
@@ -446,7 +471,7 @@ describe("AssetsPage Project projection", () => {
       calls.some(
         (call) =>
           call.url.includes("/understanding") &&
-          !call.url.includes("understanding/intel-v1"),
+          !call.url.includes("understanding/intel-v1b"),
       ),
     ).toBe(false);
   });

@@ -7,8 +7,10 @@
 
 Creator modifications: image blocks carry PIL images tagged with a 1-based
 sheet ordinal as the page number; the leading block is a meta block; the
-markdown row cap is overridable via the ``max_rows`` option (full-text
-indexing needs more than the upstream context-oriented default).
+markdown row cap is overridable via the ``max_rows`` option. Full-text
+extraction is decoupled from the display blocks: every sheet's complete
+rows (up to ``FULL_TEXT_ROW_CAP``) are emitted as ``full_text`` blocks for
+deterministic indexing.
 """
 
 from __future__ import annotations
@@ -18,9 +20,23 @@ from typing import Any
 
 MAX_ROWS = 100
 
+# Row bound for the indexing-oriented full text (not the display table).
+FULL_TEXT_ROW_CAP = 100_000
+
 _PANDAS_HINT = (
     "Missing dependency pandas — install with: pip install pandas openpyxl"
 )
+
+
+def _full_text_block(df, title: str) -> dict[str, Any]:
+    """Complete rows of one sheet as a CSV-formatted full_text block."""
+    truncated = len(df) > FULL_TEXT_ROW_CAP
+    if truncated:
+        df = df.head(FULL_TEXT_ROW_CAP)
+    text = df.fillna("").to_csv(index=False)
+    if truncated:
+        text += f"\n... (full text capped at {FULL_TEXT_ROW_CAP} rows)"
+    return {"type": "full_text", "text": f"[{title}]\n{text}"}
 
 
 def render(path: str, **opts: Any) -> list[dict[str, Any]]:
@@ -41,16 +57,17 @@ def _render_csv(path: str, **opts: Any) -> list[dict[str, Any]]:
 
     from vendor.mm_plugins.renderers import meta_block
 
-    df = pd.read_csv(path, nrows=max_rows + 1)
+    df_full = pd.read_csv(path, nrows=FULL_TEXT_ROW_CAP + 1)
     blocks = [meta_block("csv", 1, [1])]
     blocks.extend(
         _dataframe_to_blocks(
-            df,
+            df_full.head(max_rows + 1),
             os.path.basename(path),
             page=1,
             max_rows=max_rows,
         ),
     )
+    blocks.append(_full_text_block(df_full, os.path.basename(path)))
     return blocks
 
 
@@ -87,6 +104,19 @@ def _render_xlsx(path: str, **opts: Any) -> list[dict[str, Any]]:
                 f"{os.path.basename(path)} [{names[i]}]",
                 page=i + 1,
                 max_rows=max_rows,
+            ),
+        )
+    # Full text covers every sheet, independent of the displayed subset.
+    for i, name in enumerate(names):
+        df_full = pd.read_excel(
+            xls,
+            sheet_name=name,
+            nrows=FULL_TEXT_ROW_CAP + 1,
+        )
+        result.append(
+            _full_text_block(
+                df_full,
+                f"{os.path.basename(path)} [Sheet {i + 1}: {name}]",
             ),
         )
     return result

@@ -7,7 +7,10 @@
 
 Creator modifications: page images are returned as PIL images tagged with
 1-based page numbers; base64 encoding, budget resizing and response-size
-capping moved to ``services/document_reader.py``.
+capping moved to ``services/document_reader.py``. Full-text extraction is
+decoupled from the rendered page range: every page's text layer (up to
+``max_text_pages``) is emitted as ``full_text`` blocks for deterministic
+indexing regardless of which pages were rasterized.
 """
 
 from __future__ import annotations
@@ -19,6 +22,10 @@ from vendor.mm_plugins.renderers import (
     meta_block,
     parse_pages,
 )
+
+# Text-layer extraction covers the whole document independently from the
+# rasterized page subset, bounded for pathological page counts.
+DEFAULT_MAX_TEXT_PAGES = 500
 
 
 def render(path: str, **opts: Any) -> list[dict[str, Any]]:
@@ -32,6 +39,7 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
 
     dpi = opts.get("dpi", 150)
     max_pages = opts.get("max_pages", DEFAULT_MAX_PAGES)
+    max_text_pages = opts.get("max_text_pages", DEFAULT_MAX_TEXT_PAGES)
 
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     doc_type = opts.get("doc_type") or ext.upper() or "DOC"
@@ -46,7 +54,10 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
         else:
             page_indices = list(range(min(total, max_pages)))
 
-        page_texts = _extract_page_texts(doc, page_indices)
+        text_indices = sorted(
+            set(page_indices) | set(range(min(total, max_text_pages))),
+        )
+        page_texts = _extract_page_texts(doc, text_indices)
 
         blocks: list[dict[str, Any]] = [
             meta_block(
@@ -83,6 +94,26 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
                         "page": idx + 1,
                     },
                 )
+        for idx in text_indices:
+            page_text = page_texts.get(idx, "").strip()
+            if page_text:
+                blocks.append(
+                    {
+                        "type": "full_text",
+                        "text": f"[Page {idx + 1}]\n{page_text}",
+                        "page": idx + 1,
+                    },
+                )
+        if total > max_text_pages:
+            blocks.append(
+                {
+                    "type": "full_text",
+                    "text": (
+                        f"(text extraction capped at {max_text_pages} of "
+                        f"{total} pages)"
+                    ),
+                },
+            )
         return blocks
     finally:
         doc.close()
