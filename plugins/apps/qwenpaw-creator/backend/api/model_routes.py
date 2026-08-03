@@ -902,6 +902,33 @@ async def get_resolved_models() -> dict[str, Any]:
     }
 
 
+@router.get("/tts-capabilities")
+async def get_tts_capabilities() -> dict[str, Any]:
+    """Speech models this build supports, and what each of them can do.
+
+    The UI renders its model choices from this list so the two never disagree
+    about which models exist, which have system voices, and which companion
+    models a created voice binds to (users never name those).
+    """
+
+    from models.tts_capabilities import DEFAULT_TTS_MODEL, supported_models
+
+    return {
+        "default": DEFAULT_TTS_MODEL,
+        "models": [
+            {
+                "model": item.model,
+                "label": item.label,
+                "family": item.family,
+                "transport": item.transport,
+                "systemVoices": list(item.system_voices),
+                "supportsDesign": item.supports_design,
+            }
+            for item in supported_models()
+        ],
+    }
+
+
 @router.post("/config")
 async def update_model_config(
     data: ModelConfigData,
@@ -1123,15 +1150,39 @@ def _probe_payload(
     if body.type == "tts":
         # The upload-policy probe accepts any model string, so it cannot catch a
         # mistyped model name. Synthesizing one character costs a fraction of a
-        # cent and actually validates the model/voice pair.
+        # cent and actually validates the model/voice pair. Models without
+        # system voices cannot synthesize at all until a character voice
+        # exists, so for those verify the credential against the voice-listing
+        # surface instead.
+        from models.tts_capabilities import require_capability
+
         parsed = urlparse(body.base_url)
+        capability = require_capability(body.model_name)
+        if not capability.has_system_voices:
+            action = (
+                "list_voice" if capability.family == "cosyvoice" else "list"
+            )
+            management = (
+                "voice-enrollment"
+                if capability.family == "cosyvoice"
+                else "qwen-voice-enrollment"
+            )
+            return (
+                f"{parsed.scheme}://{parsed.netloc}"
+                "/api/v1/services/audio/tts/customization",
+                headers,
+                {"model": management, "input": {"action": action}},
+            )
         return (
             f"{parsed.scheme}://{parsed.netloc}"
             "/api/v1/services/aigc/multimodal-generation/generation",
             headers,
             {
                 "model": body.model_name,
-                "input": {"text": "嗨", "voice": body.voice or "Cherry"},
+                "input": {
+                    "text": "嗨",
+                    "voice": body.voice or capability.system_voices[0],
+                },
                 "parameters": {},
             },
         )
