@@ -9,6 +9,7 @@ import asyncio
 import json
 import mimetypes
 import random
+import re
 import subprocess
 import tempfile
 import logging
@@ -348,6 +349,9 @@ async def _fun_asr(media_url: str) -> ASRResult:
 # ── qwen3-asr (DashScope multimodal-generation endpoint) ─────────────────────────
 
 _QWEN3_CHUNK_SECONDS = 270
+_QWEN3_MIN_CHUNK_SECONDS = 10
+_QWEN3_SILENCE_NOISE_DB = 30
+_QWEN3_SILENCE_MIN_SECONDS = 0.2
 _QWEN3_RETRY_BASE_SECONDS = 2.0
 _QWEN3_THROTTLE_BASE_SECONDS = 2.0
 _QWEN3_THROTTLE_JITTER_SECONDS = 1.0
@@ -473,21 +477,94 @@ def _probe_duration_ms(source: str) -> int:
     return round(probe.duration_seconds * 1000)
 
 
-def _split_audio_chunks(source: Path, directory: Path) -> list[Path]:
-    """Split audio into <=270s mp3 chunks for the qwen3-asr 5min limit."""
-    ffmpeg = resolve_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError(
-            "ffmpeg is required for qwen3-asr chunking; set "
-            "CREATOR_FFMPEG_PATH, install ffmpeg, or install imageio-ffmpeg",
+_SILENCE_START_RE = re.compile(r"silence_start:\s*([0-9.]+)")
+_SILENCE_END_RE = re.compile(r"silence_end:\s*([0-9.]+)")
+
+
+def _silence_cut_points(
+    ffmpeg: str,
+    source: Path,
+    *,
+    timeout: float = 600,
+) -> list[float]:
+    """Return silence midpoints (seconds) via ffmpeg silencedetect.
+
+    Cutting a chunk inside a silence keeps every syllable intact, avoiding the
+    dropped character a hard mid-word cut produces. Failures degrade to an
+    empty list so the caller falls back to fixed-step cutting.
+    """
+    try:
+        completed = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-i",
+                str(source),
+                "-af",
+                f"silencedetect=noise=-{_QWEN3_SILENCE_NOISE_DB}dB:"
+                f"d={_QWEN3_SILENCE_MIN_SECONDS}",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
-    pattern = directory / "qwen3-chunk-%04d.mp3"
+    except (OSError, subprocess.SubprocessError):
+        return []
+    diagnostic = completed.stderr or completed.stdout or ""
+    starts = [float(value) for value in _SILENCE_START_RE.findall(diagnostic)]
+    ends = [float(value) for value in _SILENCE_END_RE.findall(diagnostic)]
+    return [
+        (start + end) / 2.0 for start, end in zip(starts, ends) if end > start
+    ]
+
+
+def _plan_chunk_windows(
+    duration_s: float,
+    cut_points: list[float],
+    *,
+    max_s: float = _QWEN3_CHUNK_SECONDS,
+    min_s: float = _QWEN3_MIN_CHUNK_SECONDS,
+) -> list[tuple[float, float]]:
+    """Plan contiguous (start, duration) windows no longer than *max_s*.
+
+    Prefer the latest silence within a window so chunks stay large (fewer
+    billed calls); fall back to a fixed *max_s* cut when no silence is found.
+    """
+    ordered = sorted(point for point in cut_points if point > 0)
+    windows: list[tuple[float, float]] = []
+    position = 0.0
+    while duration_s - position > max_s:
+        limit = position + max_s
+        candidates = [
+            point for point in ordered if position + min_s < point <= limit
+        ]
+        cut = candidates[-1] if candidates else limit
+        windows.append((position, cut - position))
+        position = cut
+    windows.append((position, duration_s - position))
+    return windows
+
+
+def _extract_chunk_window(
+    ffmpeg: str,
+    source: Path,
+    start_s: float,
+    duration_s: float,
+    output_path: Path,
+) -> None:
     command = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
+        "-ss",
+        f"{start_s:.3f}",
+        "-t",
+        f"{duration_s:.3f}",
         "-i",
         str(source),
         "-vn",
@@ -497,13 +574,7 @@ def _split_audio_chunks(source: Path, directory: Path) -> list[Path]:
         "16000",
         "-b:a",
         "128k",
-        "-f",
-        "segment",
-        "-segment_time",
-        str(_QWEN3_CHUNK_SECONDS),
-        "-reset_timestamps",
-        "1",
-        str(pattern),
+        str(output_path),
     ]
     result = subprocess.run(
         command,
@@ -513,9 +584,33 @@ def _split_audio_chunks(source: Path, directory: Path) -> list[Path]:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"ffmpeg audio chunking failed: {(result.stderr or result.stdout)[-500:]}",
+            f"ffmpeg chunk extraction failed: {(result.stderr or result.stdout)[-500:]}",
         )
-    chunks = sorted(directory.glob("qwen3-chunk-*.mp3"))
+
+
+def _prepare_qwen3_chunks(
+    source: Path,
+    directory: Path,
+) -> list[tuple[Path, int]]:
+    """Split audio into <=270s chunks on silence boundaries for qwen3-asr.
+
+    Returns (chunk_path, planned_duration_ms) pairs; planned durations are
+    contiguous so cross-chunk offsets never drift.
+    """
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError(
+            "ffmpeg is required for qwen3-asr chunking; set "
+            "CREATOR_FFMPEG_PATH, install ffmpeg, or install imageio-ffmpeg",
+        )
+    duration_s = _probe_duration_ms(str(source)) / 1000
+    cut_points = _silence_cut_points(ffmpeg, source)
+    windows = _plan_chunk_windows(duration_s, cut_points)
+    chunks: list[tuple[Path, int]] = []
+    for index, (start_s, chunk_s) in enumerate(windows):
+        output_path = directory / f"qwen3-chunk-{index:04d}.mp3"
+        _extract_chunk_window(ffmpeg, source, start_s, chunk_s, output_path)
+        chunks.append((output_path, round(chunk_s * 1000)))
     if not chunks:
         raise RuntimeError("qwen3-asr chunking produced no audio chunks")
     return chunks
@@ -638,7 +733,7 @@ async def _qwen3_asr(media_url: str) -> ASRResult:
                     directory,
                 )
                 chunks = await asyncio.to_thread(
-                    _split_audio_chunks,
+                    _prepare_qwen3_chunks,
                     source,
                     directory,
                 )
@@ -648,11 +743,7 @@ async def _qwen3_asr(media_url: str) -> ASRResult:
                     _QWEN3_CHUNK_SECONDS,
                 )
                 offset_ms = 0
-                for chunk in chunks:
-                    chunk_ms = await asyncio.to_thread(
-                        _probe_duration_ms,
-                        str(chunk),
-                    )
+                for chunk, chunk_ms in chunks:
                     chunk_url = await upload_local_file_to_dashscope_temp(
                         chunk,
                         api_key=key,

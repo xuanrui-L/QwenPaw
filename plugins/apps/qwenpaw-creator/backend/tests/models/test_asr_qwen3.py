@@ -147,29 +147,20 @@ def test_qwen3_chunking_applies_cumulative_offsets(
 ) -> None:
     _bind_qwen3(monkeypatch)
     chunks = [
-        tmp_path / "qwen3-chunk-0000.mp3",
-        tmp_path / "qwen3-chunk-0001.mp3",
+        (tmp_path / "qwen3-chunk-0000.mp3", 270_000),
+        (tmp_path / "qwen3-chunk-0001.mp3", 270_000),
     ]
-    for chunk in chunks:
+    for chunk, _ms in chunks:
         chunk.write_bytes(b"audio")
-    durations = {
-        "source.mp3": 540_000,
-        "qwen3-chunk-0000.mp3": 270_000,
-        "qwen3-chunk-0001.mp3": 270_000,
-    }
-    monkeypatch.setattr(
-        asr_model,
-        "_probe_duration_ms",
-        lambda source: durations[source.rsplit("/", 1)[-1]],
-    )
     monkeypatch.setattr(
         asr_model,
         "_local_media_path",
         lambda *_args: tmp_path / "source.mp3",
     )
+    monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 540_000)
     monkeypatch.setattr(
         asr_model,
-        "_split_audio_chunks",
+        "_prepare_qwen3_chunks",
         lambda *_args: chunks,
     )
 
@@ -203,6 +194,65 @@ def test_qwen3_chunking_applies_cumulative_offsets(
         (270_000, 540_000, "第二块。"),
     ]
     assert all(seg.confidence == 0.0 for seg in result.segments)
+
+
+def test_plan_chunk_windows_cuts_on_latest_silence_in_window() -> None:
+    # Each window cuts at the latest silence within its 270s limit, keeping
+    # chunks large and never landing mid-speech. 540s needs two cuts.
+    windows = asr_model._plan_chunk_windows(
+        540.0,
+        [120.0, 250.0, 265.0, 400.0, 520.0],
+        max_s=270.0,
+        min_s=10.0,
+    )
+    assert windows == [(0.0, 265.0), (265.0, 255.0), (520.0, 20.0)]
+    assert sum(duration for _start, duration in windows) == 540.0
+    assert all(duration <= 270.0 for _start, duration in windows)
+
+
+def test_plan_chunk_windows_falls_back_to_fixed_cut() -> None:
+    # No silence inside the first window -> fixed max_s cut is used.
+    windows = asr_model._plan_chunk_windows(
+        500.0,
+        [300.0],
+        max_s=270.0,
+        min_s=10.0,
+    )
+    assert windows[0] == (0.0, 270.0)
+    assert windows[-1][0] + windows[-1][1] == 500.0
+    assert all(duration <= 270.0 for _start, duration in windows)
+
+
+def test_plan_chunk_windows_single_window_when_short() -> None:
+    assert asr_model._plan_chunk_windows(120.0, [], max_s=270.0) == [
+        (0.0, 120.0),
+    ]
+
+
+def test_silence_cut_points_parses_ffmpeg_midpoints(monkeypatch) -> None:
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = "\n".join(
+            [
+                "[silencedetect @ 0x1] silence_start: 12.0",
+                "[silencedetect @ 0x1] silence_end: 13.0 | silence_duration: 1.0",
+                "[silencedetect @ 0x1] silence_start: 40.5",
+                "[silencedetect @ 0x1] silence_end: 41.5 | silence_duration: 1.0",
+            ],
+        )
+
+    monkeypatch.setattr(
+        asr_model.subprocess,
+        "run",
+        lambda *_a, **_k: _Completed(),
+    )
+    from pathlib import Path
+
+    assert asr_model._silence_cut_points("/opt/ffmpeg", Path("a.mp3")) == [
+        12.5,
+        41.0,
+    ]
 
 
 @respx.mock
