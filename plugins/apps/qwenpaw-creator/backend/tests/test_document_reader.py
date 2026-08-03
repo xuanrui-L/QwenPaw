@@ -61,8 +61,16 @@ def test_supported_extension_probe() -> None:
 
 def test_smart_resize_never_exceeds_budget() -> None:
     # The grid snap must not push the result over the pixel budget
-    # (acceptance A3: every tier stays within budget).
-    cases = [(1754, 1240), (1216, 864), (3000, 2000), (100, 80), (4000, 50)]
+    # (acceptance A3: every tier stays within budget), including extreme
+    # aspect ratios where the short side is clamped up to one patch.
+    import itertools
+    import random
+
+    rng = random.Random(7)
+    dims = [1, 2, 10, 31, 32, 33, 100, 864, 1216, 4096, 10000, 50000]
+    cases = list(itertools.product(dims, dims)) + [
+        (rng.randint(1, 60000), rng.randint(1, 60000)) for _ in range(500)
+    ]
     for budget in ("small", "normal", "large"):
         max_pixels = budget_to_pixels(budget, IMAGE_BUDGET_TOKENS)
         for height, width in cases:
@@ -73,7 +81,8 @@ def test_smart_resize_never_exceeds_budget() -> None:
                 max_pixels,
             )
             assert new_h % TOKEN_SIZE == 0 and new_w % TOKEN_SIZE == 0
-            assert new_h * new_w <= max_pixels
+            assert new_h >= TOKEN_SIZE and new_w >= TOKEN_SIZE
+            assert new_h * new_w <= max_pixels, (budget, height, width)
 
 
 def test_pdf_renders_pages_text_layer_and_grid_alignment(tmp_path) -> None:

@@ -42,7 +42,7 @@ function ingestRoutes(
   extra: Array<{
     match: string;
     method?: string;
-    response: { json?: unknown; status?: number };
+    response: { json?: unknown; status?: number; ok?: boolean };
   }> = [],
 ) {
   return [
@@ -318,5 +318,136 @@ describe("AssetsPage Project projection", () => {
       value: "https://example.com/cat.mp4",
       postIngestAction: "ATTACH_SOURCE",
     });
+  });
+
+  it("keeps the rejection reason visible when an unsupported source is uploaded", async () => {
+    installMockFetch(
+      ingestRoutes([
+        {
+          match: "/projects/p1/assets",
+          method: "POST",
+          response: {
+            ok: false,
+            status: 422,
+            json: {
+              code: "VALIDATION_ERROR",
+              message:
+                "不支持的来源素材格式: unsupported.glb（model/gltf-binary）。" +
+                "支持图片、视频、音频，以及 PDF/Office/表格/字幕/纯文本等可读文档。",
+              retryable: false,
+              details: {},
+            },
+          },
+        },
+      ]),
+    );
+    const { container } = renderPage();
+    const file = new File(["glb"], "unsupported.glb", {
+      type: "model/gltf-binary",
+    });
+    fireEvent.change(container.querySelector('input[type="file"]')!, {
+      target: { files: [file] },
+    });
+
+    // A persistent inline alert keeps the readable reason on screen even
+    // after the transient toast disappears (acceptance B6).
+    const banner = await waitFor(() => {
+      const found = container.querySelector(
+        '[data-creator-module="asset-upload-error"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    expect(banner.textContent).toContain("不支持的来源素材格式");
+    expect(banner.textContent).toContain("unsupported.glb");
+    fireEvent.click(screen.getByRole("button", { name: "关闭错误提示" }));
+    expect(
+      container.querySelector('[data-creator-module="asset-upload-error"]'),
+    ).toBeNull();
+  });
+
+  it("binds document understanding to the selected source version", async () => {
+    const project = cloneProject();
+    const documentVersion = (
+      versionId: string,
+      name: string,
+      checksum: string,
+    ) => ({
+      version_id: versionId,
+      logical_asset_id: "asset:script",
+      name,
+      file_id: "file:source-video",
+      checksum,
+      media_kind: "document" as const,
+      media_type: "application/pdf",
+      provenance_refs: [],
+      thumbnail_file_id: null,
+      duration_seconds: null,
+      native_model_file_id: null,
+      created_at: "2026-07-21T00:00:00Z",
+      metadata: {},
+    });
+    project.assets.source_versions_by_id["script-v1"] = documentVersion(
+      "script-v1",
+      "剧本旧版",
+      "sha-script-v1",
+    );
+    project.assets.source_versions_by_id["script-v2"] = documentVersion(
+      "script-v2",
+      "剧本新版",
+      "sha-script-v2",
+    );
+    project.assets.intelligence_versions_by_id["intel-v1"] = {
+      intelligence_version_id: "intel-v1",
+      source_asset_version_id: "script-v1",
+      file_id: "file:intel-v1",
+      source_checksum: "sha-script-v1",
+      model_run_ids: [],
+      coverage: {},
+      created_at: "2026-07-21T01:00:00Z",
+    };
+    seedProject(project);
+    const understanding = (summary: string) => ({
+      media: {
+        mediaKind: "document",
+        mediaType: "application/pdf",
+        document: { format: "pdf", pageCount: 2 },
+      },
+      summary,
+      shots: [],
+      semanticEntries: [],
+    });
+    const { calls } = installMockFetch(
+      ingestRoutes([
+        {
+          match: "understanding/intel-v1",
+          response: { json: understanding("旧版剧本的理解摘要") },
+        },
+      ]),
+    );
+    renderPage();
+
+    // The analyzed old version loads exactly its own intelligence version.
+    fireEvent.click(screen.getByText("剧本旧版"));
+    expect(
+      (await screen.findByText("旧版剧本的理解摘要")).textContent,
+    ).toContain("旧版");
+    expect(
+      calls.some((call) => call.url.includes("understanding/intel-v1")),
+    ).toBe(true);
+
+    // The unanalyzed new version must not fall back to another version's
+    // understanding: no request fires and an empty state renders.
+    fireEvent.click(screen.getByText("剧本新版"));
+    expect(
+      await screen.findByText(/该版本尚未完成素材理解/),
+    ).toBeInTheDocument();
+    expect(
+      calls.some(
+        (call) =>
+          call.url.includes("/understanding") &&
+          !call.url.includes("understanding/intel-v1"),
+      ),
+    ).toBe(false);
   });
 });

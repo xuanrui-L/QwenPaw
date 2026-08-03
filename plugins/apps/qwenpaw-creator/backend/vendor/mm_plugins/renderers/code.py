@@ -5,7 +5,9 @@
 # Modified for QwenPaw Creator. See backend/vendor/NOTICE.md.
 """Render source code files as markdown-fenced text blocks.
 
-Creator modifications: the leading block is a meta block.
+Creator modifications: the leading block is a meta block, and the line cap
+is overridable via the ``max_lines`` option (full-text indexing needs more
+than the upstream context-oriented default).
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ MAX_LINES = 500
 
 
 def render(path: str, **opts: Any) -> list[dict[str, Any]]:
-    del opts
+    max_lines = int(opts.get("max_lines") or MAX_LINES)
     ext = os.path.splitext(path)[1].lower()
     lang = _EXT_TO_LANG.get(ext, "")
 
@@ -63,8 +65,8 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
 
     total_lines = len(lines)
     truncated = False
-    if total_lines > MAX_LINES:
-        lines = lines[:MAX_LINES]
+    if total_lines > max_lines:
+        lines = lines[:max_lines]
         truncated = True
 
     code = "".join(lines)
@@ -77,7 +79,7 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
 
     parts = [summary, f"```{lang}\n{code}\n```"]
     if truncated:
-        parts.append(f"... ({total_lines - MAX_LINES} more lines truncated)")
+        parts.append(f"... ({total_lines - max_lines} more lines truncated)")
 
     return [
         meta_block(ext.lstrip(".") or "text", 1, []),

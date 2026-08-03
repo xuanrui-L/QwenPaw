@@ -48,13 +48,19 @@ function parseDocumentIndex(
 /**
  * Document flavor of the Source Intelligence result: format + page count
  * plus browsable per-page entries with their rendered page images.
+ *
+ * `intelligenceVersionId` binds the panel to the understanding of the
+ * selected SourceAssetVersion; without it (version not yet analyzed) the
+ * panel shows an empty state instead of another version's result.
  */
 export default function DocumentUnderstanding({
   projectId,
   assetId,
+  intelligenceVersionId,
 }: {
   projectId: string;
   assetId: string;
+  intelligenceVersionId: string | null;
 }) {
   const [view, setView] = useState<DocumentIndexView | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "empty">("loading");
@@ -63,7 +69,11 @@ export default function DocumentUnderstanding({
     let cancelled = false;
     setState("loading");
     setView(null);
-    getAssetUnderstanding(projectId, assetId)
+    if (!intelligenceVersionId) {
+      setState("empty");
+      return undefined;
+    }
+    getAssetUnderstanding(projectId, assetId, intelligenceVersionId)
       .then((raw) => {
         if (cancelled) return;
         const parsed = parseDocumentIndex(raw);
@@ -76,7 +86,7 @@ export default function DocumentUnderstanding({
     return () => {
       cancelled = true;
     };
-  }, [projectId, assetId]);
+  }, [projectId, assetId, intelligenceVersionId]);
 
   if (state === "loading") {
     return (
@@ -88,7 +98,7 @@ export default function DocumentUnderstanding({
   if (state === "empty" || !view) {
     return (
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-tertiary)]">
-        文档尚未完成素材理解；在会话中让 Agent
+        该版本尚未完成素材理解；在会话中让 Agent
         阅读该文档后，这里会出现页级条目。
       </div>
     );

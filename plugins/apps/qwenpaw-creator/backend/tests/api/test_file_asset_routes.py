@@ -61,9 +61,12 @@ def test_media_kind_classifies_readable_documents_by_extension() -> None:
         )
         == "document"
     )
-    # AV prefixes always win, and unreadable payloads keep legacy kinds.
+    # AV prefixes win for raster media, SVG routes to the document reader,
+    # and unreadable payloads keep legacy kinds.
     assert _media_kind("video/mp4", "clip.mp4") == "video"
-    assert _media_kind("image/svg+xml", "icon.svg") == "image"
+    assert _media_kind("image/png", "frame.png") == "image"
+    assert _media_kind("image/svg+xml", "icon.svg") == "document"
+    assert _media_kind("application/octet-stream", "logo.svg") == "document"
     assert _media_kind("text/x-unknown", "blob.unknownext") == "text"
     assert _media_kind("application/zip", "bundle.zip") == "other"
 

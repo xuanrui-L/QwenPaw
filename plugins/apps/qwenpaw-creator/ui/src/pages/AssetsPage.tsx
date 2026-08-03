@@ -718,6 +718,7 @@ export default function AssetsPage() {
   const [filter, setFilter] = useState<FilterKey>("all");
   const [search, setSearch] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [inputKind, setInputKind] = useState<"url" | "text">("url");
   const [inputName, setInputName] = useState("");
@@ -798,12 +799,17 @@ export default function AssetsPage() {
   };
   const uploadFile = async (file: File) => {
     setUploading(true);
+    setUploadError(null);
     try {
       await ingestAssetFile(id, file, "ATTACH_SOURCE");
       message.success("素材已提交，入库完成后会自动出现在这里");
       await refreshAfterIngest();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "上传失败");
+      // Keep a persistent inline banner besides the transient toast so the
+      // rejection reason stays readable (acceptance B6).
+      const text = error instanceof Error ? error.message : "上传失败";
+      setUploadError(text);
+      message.error(text, 6);
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -815,6 +821,7 @@ export default function AssetsPage() {
       return;
     }
     setUploading(true);
+    setUploadError(null);
     try {
       await ingestAssetValue(id, {
         kind: inputKind,
@@ -830,7 +837,9 @@ export default function AssetsPage() {
       setInputValue("");
       await refreshAfterIngest();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "添加失败");
+      const text = error instanceof Error ? error.message : "添加失败";
+      setUploadError(text);
+      message.error(text, 6);
     } finally {
       setUploading(false);
     }
@@ -889,6 +898,24 @@ export default function AssetsPage() {
           </Button>
         </div>
       </header>
+
+      {uploadError && (
+        <div
+          role="alert"
+          data-creator-module="asset-upload-error"
+          className="flex shrink-0 items-start justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700"
+        >
+          <span className="leading-5">{uploadError}</span>
+          <button
+            type="button"
+            aria-label="关闭错误提示"
+            onClick={() => setUploadError(null)}
+            className="shrink-0 font-semibold text-red-500 hover:text-red-700"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <div
         data-onboarding-id="assets-filters"
@@ -1141,6 +1168,17 @@ export default function AssetsPage() {
                       assetId={
                         (selected.raw as SourceAssetVersionDocument)
                           .logical_asset_id
+                      }
+                      intelligenceVersionId={
+                        // Bind the panel to this exact source version; the
+                        // versionless endpoint would show the current
+                        // version's understanding on older cards.
+                        Object.values(
+                          project.assets.intelligence_versions_by_id,
+                        ).find(
+                          (record) =>
+                            record.source_asset_version_id === selected.id,
+                        )?.intelligence_version_id ?? null
                       }
                     />
                   )}

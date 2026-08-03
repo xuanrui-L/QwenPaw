@@ -390,6 +390,10 @@ _DOCUMENT_MIME_MARKERS = (
 
 def _media_kind(media_type: str, name: str = "") -> str:
     normalized = media_type.casefold()
+    # SVG is a renderable document (vendored resvg renderer), not a raster
+    # image: the image/* prefix would lock it out of read_document.
+    if normalized == "image/svg+xml" or name.casefold().endswith(".svg"):
+        return "document"
     for prefix, kind in _AV_MIME_PREFIXES:
         if normalized.startswith(prefix):
             return kind

@@ -6,7 +6,9 @@
 """Render tabular data (CSV, XLSX) as markdown table text + a table image.
 
 Creator modifications: image blocks carry PIL images tagged with a 1-based
-sheet ordinal as the page number; the leading block is a meta block.
+sheet ordinal as the page number; the leading block is a meta block; the
+markdown row cap is overridable via the ``max_rows`` option (full-text
+indexing needs more than the upstream context-oriented default).
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
 
 
 def _render_csv(path: str, **opts: Any) -> list[dict[str, Any]]:
-    del opts
+    max_rows = int(opts.get("max_rows") or MAX_ROWS)
     try:
         import pandas as pd
     except ImportError as error:
@@ -39,13 +41,21 @@ def _render_csv(path: str, **opts: Any) -> list[dict[str, Any]]:
 
     from vendor.mm_plugins.renderers import meta_block
 
-    df = pd.read_csv(path, nrows=MAX_ROWS + 1)
+    df = pd.read_csv(path, nrows=max_rows + 1)
     blocks = [meta_block("csv", 1, [1])]
-    blocks.extend(_dataframe_to_blocks(df, os.path.basename(path), page=1))
+    blocks.extend(
+        _dataframe_to_blocks(
+            df,
+            os.path.basename(path),
+            page=1,
+            max_rows=max_rows,
+        ),
+    )
     return blocks
 
 
 def _render_xlsx(path: str, **opts: Any) -> list[dict[str, Any]]:
+    max_rows = int(opts.get("max_rows") or MAX_ROWS)
     try:
         import pandas as pd
     except ImportError as error:
@@ -70,12 +80,13 @@ def _render_xlsx(path: str, **opts: Any) -> list[dict[str, Any]]:
         meta_block("xlsx", len(names), [i + 1 for i in indices]),
     ]
     for i in indices:
-        df = pd.read_excel(xls, sheet_name=names[i], nrows=MAX_ROWS + 1)
+        df = pd.read_excel(xls, sheet_name=names[i], nrows=max_rows + 1)
         result.extend(
             _dataframe_to_blocks(
                 df,
                 f"{os.path.basename(path)} [{names[i]}]",
                 page=i + 1,
+                max_rows=max_rows,
             ),
         )
     return result
@@ -86,12 +97,16 @@ def _dataframe_to_blocks(
     title: str,
     *,
     page: int,
+    max_rows: int = MAX_ROWS,
 ) -> list[dict[str, Any]]:
     """Return markdown table text + matplotlib table image as content blocks."""
     total_rows = len(df)
-    truncated = total_rows > MAX_ROWS
+    truncated = total_rows > max_rows
     if truncated:
-        df = df.head(MAX_ROWS)
+        df = df.head(max_rows)
+    # Empty cells would otherwise render as a literal "nan" in both the
+    # markdown table and the table image.
+    df = df.fillna("")
 
     n_rows, n_cols = df.shape
     header = (
@@ -108,7 +123,7 @@ def _dataframe_to_blocks(
 
     parts = [header, table_md]
     if truncated:
-        parts.append(f"... (showing first {MAX_ROWS} rows)")
+        parts.append(f"... (showing first {max_rows} rows)")
     text_block = {
         "type": "text",
         "text": "\n\n".join(parts),

@@ -37,6 +37,15 @@ DocumentBudget = Literal["small", "normal", "large"]
 # Bounded text payload returned to the model alongside page images.
 MAX_TEXT_EXCERPT_CHARS = 20_000
 
+# Bound for the full extracted text kept for deterministic indexing; far
+# larger than the model excerpt but still finite for disk/index hygiene.
+MAX_FULL_TEXT_CHARS = 500_000
+
+# Renderer-level extraction limits used for the full text (the upstream
+# defaults are context-oriented and much smaller).
+FULL_TEXT_MAX_CODE_LINES = 20_000
+FULL_TEXT_MAX_TABLE_ROWS = 2_000
+
 # Web/HTML rendering needs Playwright; keep it off unless explicitly enabled.
 DOC_READER_WEB_ENABLED_ENV = "CREATOR_DOC_READER_WEB_ENABLED"
 
@@ -50,6 +59,7 @@ class DocumentReadResult:
     pages_rendered: tuple[int, ...]
     page_images: tuple[Path, ...]
     text_excerpt: str
+    full_text: str
     notes: tuple[str, ...]
 
 
@@ -120,7 +130,13 @@ def _read_document_sync(
             "to enable it",
         )
 
-    opts: dict[str, Any] = {"budget": budget, "max_pages": max_pages}
+    opts: dict[str, Any] = {
+        "budget": budget,
+        "max_pages": max_pages,
+        # Full-text extraction limits; the model excerpt is capped later.
+        "max_lines": FULL_TEXT_MAX_CODE_LINES,
+        "max_rows": FULL_TEXT_MAX_TABLE_ROWS,
+    }
     if pages:
         opts["pages"] = pages
     if module_name == "office":
@@ -181,10 +197,17 @@ def _read_document_sync(
         )
 
     text_excerpt = "\n\n".join(text_parts)
+    full_text = text_excerpt
+    if len(full_text) > MAX_FULL_TEXT_CHARS:
+        full_text = full_text[:MAX_FULL_TEXT_CHARS]
+        notes.append(
+            f"full text truncated to {MAX_FULL_TEXT_CHARS} characters",
+        )
     if len(text_excerpt) > MAX_TEXT_EXCERPT_CHARS:
         text_excerpt = text_excerpt[:MAX_TEXT_EXCERPT_CHARS]
         notes.append(
-            f"text excerpt truncated to {MAX_TEXT_EXCERPT_CHARS} characters",
+            f"text excerpt truncated to {MAX_TEXT_EXCERPT_CHARS} characters"
+            "; the full extracted text still enters the semantic index",
         )
 
     return DocumentReadResult(
@@ -193,6 +216,7 @@ def _read_document_sync(
         pages_rendered=tuple(pages_rendered),
         page_images=tuple(page_images),
         text_excerpt=text_excerpt,
+        full_text=full_text,
         notes=tuple(notes),
     )
 
@@ -220,6 +244,7 @@ __all__ = [
     "DOC_READER_WEB_ENABLED_ENV",
     "DocumentBudget",
     "DocumentReadResult",
+    "MAX_FULL_TEXT_CHARS",
     "MAX_TEXT_EXCERPT_CHARS",
     "SUPPORTED_DOCUMENT_EXTENSIONS",
     "is_supported_document",

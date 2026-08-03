@@ -602,6 +602,82 @@ def test_srt_text_only_document_flow(tmp_path) -> None:
     assert any("猫走进画面" in item.text for item in doc_text)
 
 
+def test_full_document_text_reaches_index_beyond_excerpt(tmp_path) -> None:
+    # A text source larger than the 20k model excerpt: the deterministic
+    # semantic index must still contain content past the excerpt boundary.
+    marker = "结尾彩蛋：星光电影院重新亮灯。"
+    body = "\n\n".join(
+        f"段落 {number}：" + "剧情推进。" * 120 for number in range(1, 50)
+    )
+    content = f"{body}\n\n{marker}\n"
+    assert len(content) > 25_000
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="long-script.txt",
+        content=content.encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    read_context = _running_context(
+        service,
+        services,
+        asset_id,
+        tool_call_id="long-read",
+    )
+
+    async def scenario():
+        read_result = await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": f"asset-version:{version_id}"},
+            context=read_context,
+        )
+        service.executions.append_specialist_message(
+            "project-1",
+            read_context.specialist_run_id,
+            message_id="tool-long-result",
+            role="tool",
+            content_parts=[
+                {"type": "text", "text": json.dumps(read_result)},
+            ],
+            metadata={"tool": "read_document", "toolCallId": "long-read"},
+        )
+        commit_context = _running_context(
+            service,
+            services,
+            asset_id,
+            tool_call_id="long-commit",
+        )
+        committed = await service.commit_agent_intelligence(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            command_id="long-commit-1",
+            context=commit_context,
+            arguments={
+                "summary": "超长文本剧本的理解。",
+                "shots": [_document_shot(1, "全文概括。")],
+                "entities": [],
+                "semanticEntries": [],
+                "moduleResultRefs": {"document": read_result["resultRef"]},
+            },
+        )
+        return read_result, committed
+
+    read_result, committed = asyncio.run(scenario())
+
+    # The tool result stays bounded for model context, while the full text
+    # is persisted separately and fully indexed.
+    assert len(read_result["textExcerpt"]) <= 20_000
+    assert read_result["fullTextChars"] > 25_000
+    assert marker not in read_result["textExcerpt"]
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    doc_text = [
+        item for item in index.semantic_entries if "document-text" in item.tags
+    ]
+    assert any(marker in item.text for item in doc_text)
+
+
 def test_srt_text_only_commit_rejects_page_image_intervals(tmp_path) -> None:
     services, asset_id, version_id = _services_with_source(
         tmp_path,

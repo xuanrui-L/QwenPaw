@@ -195,6 +195,58 @@ def test_a6_text_formats_match_source() -> None:
     assert "场景 1" in code_result.text_excerpt
 
 
+def test_a8_out_of_boundary_file_ref_rejected(tmp_path) -> None:
+    """Acceptance A8: refs outside the admitted asset boundary are refused."""
+    from api.file_asset_routes import _AssetInput, _ingest_many_sync
+    from domain.errors import ValidationError
+    from services.project_files.facade import CreatorFileServices
+    from services.project_files.models import Project
+    from services.source_analysis import (
+        SourceAgentToolContext,
+        SourceMediaAnalysisService,
+    )
+
+    services = CreatorFileServices.create(tmp_path.resolve())
+    services.projects.create(Project.new(project_id="p-a8", name="A8"))
+    result, _ = _ingest_many_sync(
+        services,
+        project_id="p-a8",
+        key="a8-doc",
+        inputs=[
+            _AssetInput(
+                name="script.pdf",
+                content=_script_pdf().read_bytes(),
+                media_type="application/pdf",
+            ),
+        ],
+        attach_source=True,
+        scope="manual-a8",
+    )
+    asset_id = result["items"][0]["assetId"]
+    service = SourceMediaAnalysisService(services)
+    context = SourceAgentToolContext(
+        specialist_run_id="manual-a8-run",
+        tool_call_id="manual-a8-call",
+        assistant_message_id="manual-a8-assistant",
+        provider_message_id="manual-a8-provider",
+        provider="manual",
+        model="manual",
+    )
+
+    async def scenario():
+        return await service.read_source_document(
+            project_id="p-a8",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": "asset-version:outside-boundary"},
+            context=context,
+        )
+
+    with pytest.raises(ValidationError) as excinfo:
+        asyncio.run(scenario())
+    assert "准入边界" in str(excinfo.value)
+    print(f"[a8] rejection message: {excinfo.value}")
+
+
 def test_a9_missing_libreoffice_degrades_readably(monkeypatch) -> None:
     from domain.errors import ValidationError
 

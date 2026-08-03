@@ -363,6 +363,19 @@ def resolve_document_page_ref(
 DOCUMENT_TEXT_CHUNK_CHARS = 2000
 
 
+def document_full_text_path(
+    project_root: Path,
+    source_checksum: str,
+    result_ref: str,
+) -> Path:
+    """Runtime file holding the full extracted text of one read_document."""
+    identity = uuid5(NAMESPACE_URL, result_ref).hex[:16]
+    return (
+        document_pages_dir(project_root, source_checksum)
+        / f"text-{identity}.txt"
+    )
+
+
 def _document_text_chunks(text: str) -> list[str]:
     """Split extracted document text into bounded, paragraph-aligned chunks."""
     chunks: list[str] = []
@@ -653,6 +666,20 @@ class SourceMediaAnalysisService:
             document_page_ref(version.checksum, page)
             for page in rendered.pages_rendered
         ]
+        # Persist the full extracted text as a Runtime file: the bounded
+        # excerpt below is for model context only, while commit indexes
+        # the complete text deterministically.
+        full_text_path = document_full_text_path(
+            project_root,
+            version.checksum,
+            result_ref,
+        )
+        full_text_path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            full_text_path.write_text,
+            rendered.full_text,
+            "utf-8",
+        )
         return {
             "ok": True,
             "module": "document",
@@ -664,6 +691,7 @@ class SourceMediaAnalysisService:
             "pagesRendered": list(rendered.pages_rendered),
             "pageImageRefs": page_refs,
             "textExcerpt": rendered.text_excerpt,
+            "fullTextChars": len(rendered.full_text),
             "notes": list(rendered.notes),
         }
 
@@ -893,7 +921,7 @@ class SourceMediaAnalysisService:
         document_page_refs: list[str] = []
         document_ratio: float | None = None
         document_run: SourceModelRunRef | None = None
-        document_text_excerpt = ""
+        document_full_text = ""
         document_ref = agent_payload.module_result_refs.document
         if is_document:
             if not document_ref:
@@ -961,7 +989,20 @@ class SourceMediaAnalysisService:
                     f"恰好一条 [0,1000)；期望 {expected_intervals}，"
                     f"实际 {actual_intervals}",
                 )
-            document_text_excerpt = str(module.get("textExcerpt") or "")
+            # Prefer the persisted full text (the tool-result excerpt is
+            # bounded for model context); fall back for legacy results.
+            full_text_path = document_full_text_path(
+                self.services.projects.project_root(project_id),
+                version.checksum,
+                document_ref,
+            )
+            if full_text_path.is_file():
+                document_full_text = await asyncio.to_thread(
+                    full_text_path.read_text,
+                    "utf-8",
+                )
+            else:
+                document_full_text = str(module.get("textExcerpt") or "")
             document_run = SourceModelRunRef(
                 id=f"docreader-{uuid5(NAMESPACE_URL, document_ref).hex}",
                 provider="document_reader",
@@ -1098,7 +1139,7 @@ class SourceMediaAnalysisService:
                     "evidenceFrameRefs": [evidence_ref],
                 }
                 for number, chunk in enumerate(
-                    _document_text_chunks(document_text_excerpt),
+                    _document_text_chunks(document_full_text),
                     1,
                 )
             )

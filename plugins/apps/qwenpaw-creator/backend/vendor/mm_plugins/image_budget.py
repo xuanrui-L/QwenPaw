@@ -57,10 +57,16 @@ def smart_resize(
 
     def _floor_into_budget(h: int, w: int) -> tuple[int, int]:
         beta = math.sqrt((h * w) / max_pixels)
-        return (
-            max(factor, math.floor(h / beta / factor) * factor),
-            max(factor, math.floor(w / beta / factor) * factor),
-        )
+        h = max(factor, math.floor(h / beta / factor) * factor)
+        w = max(factor, math.floor(w / beta / factor) * factor)
+        # Clamping an extreme-aspect short side back up to one patch can
+        # re-exceed the budget; shrink the long side to compensate.
+        if h * w > max_pixels:
+            if h >= w:
+                h = max(factor, max_pixels // w // factor * factor)
+            else:
+                w = max(factor, max_pixels // h // factor * factor)
+        return h, w
 
     if height * width > max_pixels:
         height, width = _floor_into_budget(height, width)
