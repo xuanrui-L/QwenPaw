@@ -1,0 +1,13 @@
+{
+  "case": "historical-drama",
+  "source": "historical final render (creative-generation pipeline), project-bd901788 file-8ba61fa4, re-encoded to 360x640",
+  "plan_context": {
+    "content_type": "drama",
+    "target_duration_seconds": 90,
+    "expects_voiceover": true,
+    "expects_subtitles": false
+  },
+  "expected_failures": [],
+  "acceptable_extra_failures": [],
+  "notes": "90s four-friends dinner drama, continuous dialogue audio, no burned subtitles; annotated all-pass by human review."
+}

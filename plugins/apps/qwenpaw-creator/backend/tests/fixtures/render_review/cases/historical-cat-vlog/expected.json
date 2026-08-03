@@ -1,0 +1,13 @@
+{
+  "case": "historical-cat-vlog",
+  "source": "historical final render (material-editing pipeline), project-e48aa791 file-627fb329, re-encoded to 480x270",
+  "plan_context": {
+    "content_type": "vlog",
+    "target_duration_seconds": 75,
+    "expects_voiceover": false,
+    "expects_subtitles": true
+  },
+  "expected_failures": [],
+  "acceptable_extra_failures": ["visual_quality", "pacing"],
+  "notes": "75s cat POV vlog cut from real footage with bubble captions and ambient audio only; some source shots are motion-blurred/dark by nature, and the closing shot holds nearly static for ~10s (t=65s-75s), so single visual_quality or pacing flags are tolerated (verified against the actual frames)."
+}

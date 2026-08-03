@@ -1,0 +1,13 @@
+{
+  "case": "defect-av-desync",
+  "source": "24s slice of historical-drama with the full audio track delayed by 1.5s (video unchanged, tail speech truncated)",
+  "plan_context": {
+    "content_type": "drama",
+    "target_duration_seconds": 24,
+    "expects_voiceover": true,
+    "expects_subtitles": false
+  },
+  "expected_failures": ["voiceover"],
+  "acceptable_extra_failures": ["engineering"],
+  "notes": "Opening ~1.7s is silent while the picture is already mid-dialogue; speech runs late against the picture for the whole clip."
+}

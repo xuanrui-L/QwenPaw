@@ -1,0 +1,13 @@
+{
+  "case": "defect-black-frames",
+  "source": "24s slice of historical-drama (40s-64s) with a hard 1.5s black segment injected at 8.0s-9.5s (audio untouched)",
+  "plan_context": {
+    "content_type": "drama",
+    "target_duration_seconds": 24,
+    "expects_voiceover": true,
+    "expects_subtitles": false
+  },
+  "expected_failures": ["engineering"],
+  "acceptable_extra_failures": ["visual_quality"],
+  "notes": "Interior pure-black frames around t=8000-9500ms while dialogue continues."
+}

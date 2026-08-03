@@ -1,0 +1,13 @@
+{
+  "case": "defect-missing-voiceover",
+  "source": "24s slice of historical-drama with the audio track muted to digital silence (track still present)",
+  "plan_context": {
+    "content_type": "drama",
+    "target_duration_seconds": 24,
+    "expects_voiceover": true,
+    "expects_subtitles": false
+  },
+  "expected_failures": ["voiceover"],
+  "acceptable_extra_failures": ["engineering"],
+  "notes": "The plan expects voiceover but the whole clip is silent (integrated loudness -70 LUFS)."
+}

@@ -1,0 +1,13 @@
+{
+  "case": "defect-pacing-drag",
+  "source": "24s slice of historical-drama with the frame at 8.0s frozen for 7.2s (8.0s-15.2s) while audio continues",
+  "plan_context": {
+    "content_type": "drama",
+    "target_duration_seconds": 24,
+    "expects_voiceover": true,
+    "expects_subtitles": false
+  },
+  "expected_failures": ["pacing"],
+  "acceptable_extra_failures": ["visual_quality", "voiceover"],
+  "notes": "About 8 consecutive evidence frames (t=8000-15000ms) are identical: a frozen shot dragging the middle of the piece."
+}

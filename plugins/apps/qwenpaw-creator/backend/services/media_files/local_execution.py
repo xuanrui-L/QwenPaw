@@ -46,6 +46,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from models.config import is_self_review_enabled
 from services.media_files.overlay import (
     PET_OS_VIBES,
     render_interview_summary_overlay,
@@ -84,6 +85,7 @@ from services.media_files.element_adapter import (
     selected_element_output,
 )
 from services.media_files.review_admission import assert_media_review_admission
+from services.render_review.review import schedule_render_review
 from services.project_files.remote_cache import (
     public_source_url,
     resolve_remote_cache,
@@ -2036,7 +2038,26 @@ class FileLocalMediaExecutionService:
                     run_status=SpecialistRunStatus.CANCELLED,
                 )
                 raise ConflictError("本地媒体 Task 已取消，迟到结果已隔离")
-            return await self._converge(task=task, ids=ids, replayed=False)
+            converged = await self._converge(
+                task=task,
+                ids=ids,
+                replayed=False,
+            )
+            # Self-review hook (single point): advisory only, detached, never
+            # blocks the compose result path. Runs only after the final
+            # composition converged into the Project (a stale/quarantined
+            # result must not be reviewed). Disabled unless the code-level
+            # CREATOR_SELF_REVIEW_ENABLED switch is on.
+            if (
+                resolved.command is CreatorCommandType.COMPOSE_FINAL_VIDEO
+                and is_self_review_enabled()
+            ):
+                schedule_render_review(
+                    self.services,
+                    project_id=project_id,
+                    published_result=published_result,
+                )
+            return converged
         except (ConflictError, ValidationError, StorageIntegrityError) as exc:
             await self._fail_if_running(
                 project_id,
