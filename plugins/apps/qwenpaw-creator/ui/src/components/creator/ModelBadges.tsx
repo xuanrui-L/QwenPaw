@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { GlobalOutlined, SoundOutlined } from "@ant-design/icons";
+import { GlobalOutlined, SoundOutlined, UserOutlined } from "@ant-design/icons";
 import { getModelConfig } from "@/api/creator";
 import type { ModelConfigData, ModelConfigItem } from "@/contracts/creator";
 import modelLlmIcon from "@/assets/design/model-llm.svg";
@@ -15,6 +15,7 @@ type ModelType =
   | "grounding"
   | "asr"
   | "tts"
+  | "s2v"
   | "image"
   | "video";
 type ModelStatus = "on" | "off" | "none";
@@ -45,6 +46,12 @@ const BADGE_META: {
     icon: null,
     label: "语音合成模型",
     fallbackIcon: SoundOutlined,
+  },
+  {
+    type: "s2v",
+    icon: null,
+    label: "数字人模型",
+    fallbackIcon: UserOutlined,
   },
   { type: "image", icon: modelImageIcon, label: "图像模型" },
   { type: "video", icon: modelVideoIcon, label: "视频模型" },

@@ -57,6 +57,19 @@ class ImageConfig(ModelConfigItem):
     translate_model: str = ""
 
 
+class S2vConfig(ModelConfigItem):
+    """Digital-human (wan2.2-s2v) configuration.
+
+    ``detect_model_name`` is the free face-detect companion that always runs
+    before a billed submission; left empty it defaults to
+    ``wan2.2-s2v-detect``.
+    """
+
+    protocol: str = "DashScope（百炼）"
+    detect_model_name: str = ""
+    reuse_llm_key: bool = True
+
+
 def validation_source_from_reuse_llm(reuse_llm: bool) -> str:
     """Map the legacy ``reuse_llm`` flag onto ``validation_source``."""
 
@@ -154,6 +167,7 @@ class ModelConfigData(StrictModel):
     grounding: GroundingConfig = Field(default_factory=GroundingConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)
     tts: TtsConfig = Field(default_factory=TtsConfig)
+    s2v: S2vConfig = Field(default_factory=S2vConfig)
     image: ImageConfig
     video: ModelConfigItem
     oss: OssConfig = Field(default_factory=OssConfig)
@@ -168,7 +182,7 @@ class ModelConfigData(StrictModel):
 
 
 class ModelConnectionTestRequest(StrictModel):
-    type: Literal["llm", "vlm", "asr", "tts", "image", "video"]
+    type: Literal["llm", "vlm", "asr", "tts", "s2v", "image", "video"]
     base_url: str = ""
     api_key: str = ""
     model_name: str = ""

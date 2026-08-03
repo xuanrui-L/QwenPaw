@@ -307,6 +307,18 @@
         ]
       },
       {
+        "name": "creator_s2v_model",
+        "description": "QwenPaw Creator digital-human lip-sync (Wan2.2-S2V) configuration",
+        "icon": "🧍",
+        "requires_config": false,
+        "config_fields": [
+          {"name": "api_key", "label": "S2V API Key", "type": "password", "required": false, "placeholder": "sk-...", "help": "Optional capability. The s2v_generation tool appears only when a key is resolvable. Environment fallback: S2V_API_KEY."},
+          {"name": "base_url", "label": "S2V Base URL", "type": "text", "required": false, "default": "https://dashscope.aliyuncs.com/api/v1"},
+          {"name": "model", "label": "S2V Model", "type": "text", "required": false, "default": "wan2.2-s2v"},
+          {"name": "detect_model", "label": "Face Detect Model", "type": "text", "required": false, "default": "wan2.2-s2v-detect", "help": "Free portrait suitability check that always runs before the billed submission."}
+        ]
+      },
+      {
         "name": "creator_video_model",
         "description": "QwenPaw Creator reference-to-video configuration",
         "icon": "🎬",

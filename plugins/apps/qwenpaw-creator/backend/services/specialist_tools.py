@@ -22,14 +22,17 @@ from typing import Any
 
 from domain.enums import CreatorCommandType, SpecialistRole
 from domain.errors import PermissionDeniedError, ValidationError
-from models.config import is_tts_configured
+from models.config import is_s2v_configured, is_tts_configured
 from services.media_files.audio_execution import (
     execute_file_tts_command,
     execute_file_voice_enrollment_command,
 )
 from services.media_files.image_execution import execute_file_image_command
 from services.media_files.motion_design import design_motion_overlays
-from services.media_files.r2v_execution import execute_file_r2v_command
+from services.media_files.r2v_execution import (
+    execute_file_r2v_command,
+    execute_file_s2v_command,
+)
 from services.project_files.agent_tools import (
     AgentProjectTools,
     agent_project_tool_manifest,
@@ -441,6 +444,35 @@ _VOICE_ENROLLMENT_ARGUMENTS = _arguments_schema(
     (),
 )
 
+_S2V_ARGUMENTS = _arguments_schema(
+    {
+        "characterImageRef": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "人像图的 exact version id（单人、正脸、清晰，单边 400–7000px，"
+                "支持真人/卡通）。工具会先跑免费的人像检测，未通过时直接返回"
+                "原因且不产生费用。"
+            ),
+        },
+        "audioAssetRef": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "驱动音频的 exact 音频 version id，可直接使用 tts_generation "
+                "产出的 audio version（含复刻音色合成）；建议 ≤20 秒人声。"
+            ),
+        },
+        "resolution": {
+            "type": "string",
+            "enum": ["480P", "720P"],
+            "description": "输出分辨率，缺省 480P（更快更便宜）。",
+        },
+    },
+    ("characterImageRef", "audioAssetRef"),
+)
+
+
 _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
     {
         "brief": {
@@ -530,6 +562,21 @@ _SPECS = (
         provider_kind="video",
     ),
     SpecialistToolSpec(
+        name="s2v_generation",
+        description=(
+            "数字人口型视频（wan2.2-s2v）：用一张角色人像图 + 一段音频生成"
+            "对口型说话视频，写回目标 R2V Element 的主视频槽。提交前自动先跑"
+            "免费人像检测（未通过不产生任何费用）；audioAssetRef 直接消费 "
+            "tts_generation 产出的 audio version。"
+        ),
+        roles=frozenset({SpecialistRole.R2V_GENERATION_DIRECTOR}),
+        parameters=_tool_schema(_S2V_ARGUMENTS),
+        requires_execution_authorization=True,
+        long_running=True,
+        wait=SpecialistToolWait.TASK,
+        provider_kind="s2v",
+    ),
+    SpecialistToolSpec(
         name="design_motion_overlays",
         description=(
             "让视觉设计模型观察目标 Timeline 的真实画面帧做两件事："
@@ -583,9 +630,20 @@ _SPECS = (
 
 _SPECS_BY_NAME = {item.name: item for item in _SPECS}
 _TTS_TOOL_NAMES = frozenset({"tts_generation", "create_character_voice"})
+_S2V_TOOL_NAMES = frozenset({"s2v_generation"})
 _PROJECT_TOOL_NAMES = frozenset(
     item["function"]["name"] for item in agent_project_tool_manifest()
 )
+
+
+def _tool_available(name: str) -> bool:
+    """Config-gated dynamic registration: unconfigured keys hide tools."""
+
+    if name in _TTS_TOOL_NAMES:
+        return is_tts_configured()
+    if name in _S2V_TOOL_NAMES:
+        return is_s2v_configured()
+    return True
 
 
 class FileSpecialistToolRegistry:
@@ -602,9 +660,10 @@ class FileSpecialistToolRegistry:
         spec = _SPECS_BY_NAME.get(name)
         if spec is None:
             return None
-        if name in _TTS_TOOL_NAMES and not is_tts_configured():
-            # TTS tools are registered dynamically: without a configured key
-            # they are absent from every manifest, so treat them as unknown.
+        if not _tool_available(name):
+            # Key-gated tools are registered dynamically: without a
+            # configured key they are absent from every manifest, so treat
+            # them as unknown.
             return None
         if role not in spec.roles:
             raise PermissionDeniedError(f"{role.value} 无权调用 {name}")
@@ -625,8 +684,7 @@ class FileSpecialistToolRegistry:
         business_tools = [
             spec.manifest(role=role, admitted_target_refs=admitted_target_refs)
             for spec in _SPECS
-            if role in spec.roles
-            and (spec.name not in _TTS_TOOL_NAMES or is_tts_configured())
+            if role in spec.roles and _tool_available(spec.name)
         ]
         names = [
             item["function"]["name"]
@@ -738,6 +796,25 @@ class FileSpecialistToolRegistry:
 
         if name == "r2v_generation":
             execution = await execute_file_r2v_command(
+                self.services,
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments=payload,
+                idempotency_key=idempotency_key,
+            )
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": "QUEUED",
+                    "taskId": execution.task_id,
+                    "runId": execution.run_id,
+                    "replayed": execution.replayed,
+                },
+                task_id=execution.task_id,
+            )
+
+        if name == "s2v_generation":
+            execution = await execute_file_s2v_command(
                 self.services,
                 project_id=project_id,
                 target_ref=target_ref,

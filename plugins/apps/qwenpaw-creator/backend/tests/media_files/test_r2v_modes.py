@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=unused-argument
 """r2v_generation mode plumbing through the durable execution service."""
 from __future__ import annotations
 
@@ -61,6 +62,13 @@ class _CapturingR2VProvider:
             "media_type": "video/mp4",
             "durationSeconds": 4,
         }
+
+    async def submit_s2v(self, **kwargs) -> str:
+        self.submits.append({"s2v": True, **kwargs})
+        return f"provider-s2v-{len(self.submits)}"
+
+    async def poll_s2v(self, provider_task_id: str):
+        return await self.poll(provider_task_id)
 
 
 def _r2v_element() -> TimelineElement:
@@ -139,6 +147,7 @@ def _run_video(
     *,
     arguments: dict,
     idempotency_key: str,
+    s2v: bool = False,
 ):
     async def scenario():
         worker = FileR2VExecutionService(
@@ -152,6 +161,7 @@ def _run_video(
             target_ref=f"element:{ELEMENT_ID}",
             arguments=arguments,
             idempotency_key=idempotency_key,
+            s2v=s2v,
         )
         task = await worker.wait_for_task(
             PROJECT_ID,
@@ -299,3 +309,136 @@ def test_i2v_requires_first_frame_ref(tmp_path, monkeypatch) -> None:
             arguments={"mode": "i2v", "durationSeconds": 5},
             idempotency_key="video-i2v-missing",
         )
+
+
+def _register_tts_audio(services: CreatorFileServices, monkeypatch) -> str:
+    """Land one fake TTS audio SourceAssetVersion and return its id."""
+
+    from models import tts_model
+    from services.media_files.audio_execution import execute_file_tts_command
+
+    async def fake_synthesize(
+        text,
+        *,
+        voice=None,
+        voice_id=None,
+        voice_model=None,
+    ):
+        return tts_model.TTSSynthesis(
+            audio_bytes=b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 2048,
+            media_type="audio/wav",
+            model="qwen3-tts-flash",
+            voice="Cherry",
+            characters=len(text),
+        )
+
+    monkeypatch.setattr(tts_model, "synthesize", fake_synthesize)
+    result = asyncio.run(
+        execute_file_tts_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"element:{ELEMENT_ID}",
+            arguments={"text": "你好，数字人"},
+            idempotency_key="tts-s2v-1",
+        ),
+    )
+    return result.source_asset_version_id
+
+
+def test_s2v_dispatch_consumes_tts_audio_and_character_image(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """s2v rides the same durable poller with exact image + audio versions."""
+
+    services = _services(tmp_path, monkeypatch)
+    image_version_id = _generate_storyboard(services)
+    audio_version_id = _register_tts_audio(services, monkeypatch)
+    provider = _CapturingR2VProvider()
+    task = _run_video(
+        services,
+        provider,
+        arguments={
+            "characterImageRef": image_version_id,
+            "audioAssetRef": audio_version_id,
+            "resolution": "480P",
+        },
+        idempotency_key="s2v-1",
+        s2v=True,
+    )
+
+    assert task.status.value == "SUCCEEDED"
+    submitted = provider.submits[-1]
+    assert submitted["s2v"] is True
+    assert submitted["image_url"].startswith("file://")
+    assert submitted["audio_url"].startswith("file://")
+    assert submitted["resolution"] == "480P"
+    finished = services.projects.read(PROJECT_ID).project
+    element = finished.timelines.items["timeline:main"].elements_by_id[
+        ELEMENT_ID
+    ]
+    assert element.outputs["main"].slot_id == f"element:{ELEMENT_ID}:main"
+
+
+def test_s2v_dispatch_requires_audio_ref(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path, monkeypatch)
+    image_version_id = _generate_storyboard(services)
+    with pytest.raises(ValidationError, match="audioAssetRef"):
+        _run_video(
+            services,
+            _CapturingR2VProvider(),
+            arguments={"characterImageRef": image_version_id},
+            idempotency_key="s2v-missing-audio",
+            s2v=True,
+        )
+
+
+def test_s2v_preflight_blocks_failed_face_detect(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from models import s2v_model
+    from services.media_files.r2v_execution import preflight_s2v_face_detect
+
+    services = _services(tmp_path, monkeypatch)
+    image_version_id = _generate_storyboard(services)
+
+    async def failing_detect(image_url: str):
+        assert image_url.startswith("file://")
+        return s2v_model.FaceDetectResult(
+            passed=False,
+            reason="[InvalidFace.SideFace] side face detected",
+        )
+
+    monkeypatch.setattr(s2v_model, "detect_face", failing_detect)
+    with pytest.raises(ValidationError, match="人像检测未通过"):
+        asyncio.run(
+            preflight_s2v_face_detect(
+                services,
+                project_id=PROJECT_ID,
+                arguments={"characterImageRef": image_version_id},
+            ),
+        )
+
+
+def test_s2v_preflight_passes_suitable_portrait(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from models import s2v_model
+    from services.media_files.r2v_execution import preflight_s2v_face_detect
+
+    services = _services(tmp_path, monkeypatch)
+    image_version_id = _generate_storyboard(services)
+
+    async def passing_detect(image_url: str):
+        return s2v_model.FaceDetectResult(passed=True, humanoid=True)
+
+    monkeypatch.setattr(s2v_model, "detect_face", passing_detect)
+    asyncio.run(
+        preflight_s2v_face_detect(
+            services,
+            project_id=PROJECT_ID,
+            arguments={"characterImageRef": image_version_id},
+        ),
+    )

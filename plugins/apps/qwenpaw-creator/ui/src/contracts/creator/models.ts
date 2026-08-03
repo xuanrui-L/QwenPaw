@@ -44,6 +44,12 @@ export interface ModelConfigData {
     vc_model_name: string;
     reuse_llm_key: boolean;
   };
+  s2v: ModelConfigItem & {
+    // Free face-detect companion model; empty means the backend default
+    // wan2.2-s2v-detect.
+    detect_model_name: string;
+    reuse_llm_key: boolean;
+  };
   image: ModelConfigItem & {
     // Optional in-image text translation model (mode=translate), DashScope
     // provider only; empty means the backend default qwen-mt-image.
@@ -57,7 +63,7 @@ export interface ModelConfigData {
 }
 
 export interface ModelConnectionTestRequest {
-  type: "llm" | "vlm" | "asr" | "tts" | "image" | "video";
+  type: "llm" | "vlm" | "asr" | "tts" | "s2v" | "image" | "video";
   base_url: string;
   api_key: string;
   model_name: string;

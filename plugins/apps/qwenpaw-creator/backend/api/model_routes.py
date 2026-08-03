@@ -96,6 +96,7 @@ _SECTIONS = (
     "grounding",
     "asr",
     "tts",
+    "s2v",
     "image",
     "video",
     "oss",
@@ -153,6 +154,12 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
         "model_name": ("TTS_MODEL_NAME",),
         "voice": ("TTS_VOICE",),
         "vc_model_name": ("TTS_VC_MODEL_NAME",),
+    },
+    "s2v": {
+        "base_url": ("S2V_BASE_URL",),
+        "api_key": ("S2V_API_KEY",),
+        "model_name": ("S2V_MODEL_NAME",),
+        "detect_model_name": ("S2V_DETECT_MODEL_NAME",),
     },
     "image": {
         "base_url": (
@@ -1236,7 +1243,7 @@ async def test_model_connection(
     item = getattr(loaded, body.type)
     fallback_api_key = item.api_key
     if (
-        body.type in ("asr", "tts")
+        body.type in ("asr", "tts", "s2v")
         and getattr(item, "reuse_llm_key", False)
         and not fallback_api_key
     ):

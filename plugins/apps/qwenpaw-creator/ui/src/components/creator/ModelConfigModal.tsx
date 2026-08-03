@@ -16,6 +16,7 @@ import {
   DownOutlined,
   EyeOutlined,
   PictureOutlined,
+  UserOutlined,
   VideoCameraOutlined,
   AudioOutlined,
   SoundOutlined,
@@ -81,6 +82,7 @@ const VLM_PROTOCOLS = [
 ];
 const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
 const TTS_PROTOCOLS = ["DashScope（百炼）"];
+const S2V_PROTOCOLS = ["DashScope（百炼）"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
 
@@ -133,6 +135,14 @@ const TTS_PRESETS: Record<string, ProtocolPreset> = {
   },
 };
 
+const S2V_PRESETS: Record<string, ProtocolPreset> = {
+  "DashScope（百炼）": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    freeze_url: true,
+    models: ["wan2.2-s2v"],
+  },
+};
+
 const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
@@ -180,7 +190,7 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   },
 };
 
-type ModelType = "llm" | "vlm" | "asr" | "tts" | "image" | "video";
+type ModelType = "llm" | "vlm" | "asr" | "tts" | "s2v" | "image" | "video";
 type TabType = ModelType | "grounding";
 const DEFAULT_CONFIG: ModelConfigData = {
   llm: {
@@ -240,6 +250,16 @@ const DEFAULT_CONFIG: ModelConfigData = {
     custom_protocol: "",
     voice: "Cherry",
     vc_model_name: "qwen3-tts-vc-2026-01-22",
+    reuse_llm_key: true,
+  },
+  s2v: {
+    enabled: false,
+    model_name: "wan2.2-s2v",
+    api_key: "",
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    protocol: "DashScope（百炼）",
+    custom_protocol: "",
+    detect_model_name: "",
     reuse_llm_key: true,
   },
   image: {
@@ -378,6 +398,16 @@ const CARD_META: {
     label: "TTS 语音合成模型",
     icon: (
       <SoundOutlined
+        style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
+      />
+    ),
+    required: false,
+  },
+  {
+    type: "s2v",
+    label: "数字人模型",
+    icon: (
+      <UserOutlined
         style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
       />
     ),
@@ -737,7 +767,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       }
       const hasKey =
         (type === "asr" && config.asr.reuse_llm_key) ||
-        (type === "tts" && config.tts.reuse_llm_key)
+        (type === "tts" && config.tts.reuse_llm_key) ||
+        (type === "s2v" && config.s2v.reuse_llm_key)
           ? hasUsableApiKey(config.llm)
           : hasUsableApiKey(item);
       if (!item.base_url || !hasKey || !item.model_name) {
@@ -753,9 +784,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         let testApiKey: string;
         if (
           (type === "asr" && config.asr.reuse_llm_key) ||
-          (type === "tts" && config.tts.reuse_llm_key)
+          (type === "tts" && config.tts.reuse_llm_key) ||
+          (type === "s2v" && config.s2v.reuse_llm_key)
         ) {
-          // ASR/TTS can reuse the LLM API key (same DashScope credential).
+          // ASR/TTS/S2V can reuse the LLM API key (same DashScope credential).
           testApiKey = await resolveRealApiKey("llm", config.llm);
         } else if (type === "vlm" && config.vlm.use_llm) {
           // VLM reuses the LLM config.
@@ -934,6 +966,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       ? ASR_PROTOCOLS
       : type === "tts"
       ? TTS_PROTOCOLS
+      : type === "s2v"
+      ? S2V_PROTOCOLS
       : type === "image"
       ? IMAGE_PROTOCOLS
       : VIDEO_PROTOCOLS;
@@ -958,6 +992,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       };
     }
     if (type === "asr") return ASR_PRESETS[protocol] || null;
+    if (type === "s2v") return S2V_PRESETS[protocol] || null;
     if (type === "tts") {
       const preset = TTS_PRESETS[protocol];
       if (!preset) return null;
@@ -1205,6 +1240,29 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 ? "该模型没有系统音色：Agent 会先根据角色设定设计专属音色，再用它合成台词与旁白。"
                 : "开启后可为成片生成旁白，并为角色设计或复刻专属音色；默认音色用于旁白，角色已绑定的音色优先生效。"}
               {"复刻/设计所用的配套模型由后端自动选择，无需配置。"}
+            </p>
+          </div>
+        )}
+        {type === "s2v" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <Checkbox
+              checked={config.s2v.reuse_llm_key}
+              onChange={(e) =>
+                updateItem("s2v", "reuse_llm_key", e.target.checked)
+              }
+            >
+              复用 LLM API Key
+            </Checkbox>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 11,
+                lineHeight: 1.6,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              用一张角色人像图 + 一段音频生成对口型说话视频（wan2.2-s2v）；
+              提交前会先跑免费的人像检测，未通过不产生费用。
             </p>
           </div>
         )}

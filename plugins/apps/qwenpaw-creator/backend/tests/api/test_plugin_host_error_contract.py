@@ -125,6 +125,7 @@ def test_plugin_manifest_declares_every_creator_config_tool(
         "creator_web_grounding",
         "creator_asr_model",
         "creator_tts_model",
+        "creator_s2v_model",
         "creator_image_model",
         "creator_video_model",
         "creator_media_oss",
@@ -137,6 +138,16 @@ def test_plugin_manifest_declares_every_creator_config_tool(
     assert tts_fields["api_key"]["type"] == "password"
     # TTS is optional: the manifest must not force configuration.
     assert tools["creator_tts_model"]["requires_config"] is False
+    s2v_fields = {
+        item["name"]: item
+        for item in tools["creator_s2v_model"]["config_fields"]
+    }
+    assert set(s2v_fields) == {"api_key", "base_url", "model", "detect_model"}
+    assert s2v_fields["api_key"]["type"] == "password"
+    assert s2v_fields["model"]["default"] == "wan2.2-s2v"
+    assert s2v_fields["detect_model"]["default"] == "wan2.2-s2v-detect"
+    # The digital-human provider is optional: no forced configuration.
+    assert tools["creator_s2v_model"]["requires_config"] is False
     oss_fields = {
         item["name"]: item
         for item in tools["creator_media_oss"]["config_fields"]

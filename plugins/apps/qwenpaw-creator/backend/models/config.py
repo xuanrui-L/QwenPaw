@@ -35,6 +35,7 @@ CREATOR_VLM_CONFIG_TOOL = "creator_vlm_model"
 CREATOR_GROUNDING_CONFIG_TOOL = "creator_web_grounding"
 CREATOR_ASR_CONFIG_TOOL = "creator_asr_model"
 CREATOR_TTS_CONFIG_TOOL = "creator_tts_model"
+CREATOR_S2V_CONFIG_TOOL = "creator_s2v_model"
 CREATOR_OSS_CONFIG_TOOL = "creator_media_oss"
 EXECUTION_AUTHORIZATION_REQUIRED = "required"
 EXECUTION_AUTHORIZATION_ALLOW_ALL = "allow_all"
@@ -48,6 +49,7 @@ CREATOR_CONFIG_TOOLS = (
     CREATOR_GROUNDING_CONFIG_TOOL,
     CREATOR_ASR_CONFIG_TOOL,
     CREATOR_TTS_CONFIG_TOOL,
+    CREATOR_S2V_CONFIG_TOOL,
     CREATOR_OSS_CONFIG_TOOL,
 )
 
@@ -310,6 +312,7 @@ def _map_tool_to_section(tool_name: str) -> str:
         CREATOR_GROUNDING_CONFIG_TOOL: "grounding",
         CREATOR_ASR_CONFIG_TOOL: "asr",
         CREATOR_TTS_CONFIG_TOOL: "tts",
+        CREATOR_S2V_CONFIG_TOOL: "s2v",
         CREATOR_IMAGE_CONFIG_TOOL: "image",
         CREATOR_VIDEO_CONFIG_TOOL: "video",
     }.get(tool_name, "")
@@ -406,6 +409,21 @@ TTS_VC_MODEL_NAME = os.environ.get(
     "qwen3-tts-vc-2026-01-22",
 )
 TTS_TIMEOUT_SECONDS = _positive_int_env("TTS_TIMEOUT_SECONDS", 300)
+
+
+# ── S2V Digital-Human Model (DashScope Wan2.2-S2V) ─────────────────────────
+S2V_BASE_URL = os.environ.get(
+    "S2V_BASE_URL",
+    "https://dashscope.aliyuncs.com/api/v1",
+)
+S2V_API_KEY = os.environ.get("S2V_API_KEY", "")
+S2V_MODEL_NAME = os.environ.get("S2V_MODEL_NAME", "wan2.2-s2v")
+# The face-detect companion is free and always runs before submission.
+S2V_DETECT_MODEL_NAME = os.environ.get(
+    "S2V_DETECT_MODEL_NAME",
+    "wan2.2-s2v-detect",
+)
+S2V_TIMEOUT_SECONDS = _positive_int_env("S2V_TIMEOUT_SECONDS", 120)
 
 
 # ── Image Model ──────────────────────────────────────────────────────────────
@@ -947,6 +965,70 @@ def is_tts_configured() -> bool:
     """
 
     return bool(get_tts_api_key())
+
+
+def get_s2v_api_key() -> str:
+    configured = _explicit_configured_value(
+        CREATOR_S2V_CONFIG_TOOL,
+        "api_key",
+        ("S2V_API_KEY",),
+    )
+    if configured:
+        return configured
+    # wan2.2-s2v runs on the same DashScope credential as the text model,
+    # so reuse it by default instead of asking for the key twice.
+    section = _get_user_config().get("s2v", {})
+    reuse = not isinstance(section, dict) or section.get(
+        "reuse_llm_key",
+        True,
+    )
+    return get_text_api_key() if reuse else ""
+
+
+def get_s2v_base_url() -> str:
+    return _configured_value(
+        CREATOR_S2V_CONFIG_TOOL,
+        ("base_url", "endpoint"),
+        "S2V_BASE_URL",
+        S2V_BASE_URL,
+    )
+
+
+def get_s2v_model_name() -> str:
+    return _configured_value(
+        CREATOR_S2V_CONFIG_TOOL,
+        "model",
+        "S2V_MODEL_NAME",
+        S2V_MODEL_NAME,
+    )
+
+
+def get_s2v_detect_model_name() -> str:
+    return _configured_value(
+        CREATOR_S2V_CONFIG_TOOL,
+        "detect_model",
+        "S2V_DETECT_MODEL_NAME",
+        S2V_DETECT_MODEL_NAME,
+    )
+
+
+def get_s2v_timeout_seconds() -> int:
+    return _configured_int(
+        CREATOR_S2V_CONFIG_TOOL,
+        "timeout_seconds",
+        "S2V_TIMEOUT_SECONDS",
+        S2V_TIMEOUT_SECONDS,
+    )
+
+
+def is_s2v_configured() -> bool:
+    """True when the digital-human provider can run: a key is resolvable.
+
+    Gates the s2v specialist tool the same way ``is_tts_configured`` gates
+    the TTS tools, so an unconfigured deployment never exposes it.
+    """
+
+    return bool(get_s2v_api_key())
 
 
 def _image_provider():

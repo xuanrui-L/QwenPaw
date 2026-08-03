@@ -156,6 +156,18 @@ class R2VProvider(Protocol):
     async def poll(self, provider_task_id: str) -> Mapping[str, Any]:
         ...
 
+    async def submit_s2v(
+        self,
+        *,
+        image_url: str,
+        audio_url: str,
+        resolution: str,
+    ) -> str:
+        ...
+
+    async def poll_s2v(self, provider_task_id: str) -> Mapping[str, Any]:
+        ...
+
 
 class ExistingR2VProvider:
     """Lazy adapter over the configured video model.
@@ -198,6 +210,26 @@ class ExistingR2VProvider:
         from models.video_model import check_task_status
 
         return await check_task_status(provider_task_id)
+
+    async def submit_s2v(
+        self,
+        *,
+        image_url: str,
+        audio_url: str,
+        resolution: str,
+    ) -> str:
+        from models.s2v_model import submit_s2v_task
+
+        return await submit_s2v_task(
+            image_url=image_url,
+            audio_url=audio_url,
+            resolution=resolution,
+        )
+
+    async def poll_s2v(self, provider_task_id: str) -> Mapping[str, Any]:
+        from models.s2v_model import check_s2v_task_status
+
+        return await check_s2v_task_status(provider_task_id)
 
 
 class R2VTaskState(StrictModel):
@@ -289,6 +321,14 @@ class _ResolvedR2V:
     first_frame_url: str = ""
     video_version_id: str = ""
     video_url: str = ""
+    # "video" (default) drives the configured video model; "s2v" drives the
+    # wan2.2-s2v digital-human provider through the same durable machinery.
+    provider: str = "video"
+    s2v_image_version_id: str = ""
+    s2v_image_url: str = ""
+    s2v_audio_version_id: str = ""
+    s2v_audio_url: str = ""
+    s2v_resolution: str = ""
 
 
 def _stable_id(prefix: str, project_id: str, key: str) -> str:
@@ -696,6 +736,100 @@ def _resolve_request(
         first_frame_url=first_frame_url,
         video_version_id=video_ref if mode == "video_edit" else "",
         video_url=video_url,
+    )
+
+
+def _resolve_s2v_request(
+    *,
+    snapshot: ProjectSnapshot,
+    project_root: Path,
+    target_ref: str,
+    arguments: Mapping[str, Any],
+) -> _ResolvedR2V:
+    """Resolve one s2v_generation call onto the R2V durable machinery.
+
+    The digital-human video publishes into the same element main slot as an
+    r2v render; inputs are exact versions (character image + TTS audio).
+    """
+
+    from models.s2v_model import normalize_s2v_resolution
+
+    project = snapshot.project
+    element_id = _target_element_id(target_ref)
+    _, element = find_timeline_element(project, element_id)
+    if not isinstance(element.creation, R2VCreation):
+        raise ValidationError("仅 R2V Element 可以生成数字人视频")
+    image_ref = str(arguments.get("characterImageRef") or "").strip()
+    audio_ref = str(arguments.get("audioAssetRef") or "").strip()
+    if not image_ref:
+        raise ValidationError(
+            "s2v_generation 需要 characterImageRef（exact 人像图 version id）",
+        )
+    if not audio_ref:
+        raise ValidationError(
+            "s2v_generation 需要 audioAssetRef（exact 音频 version id，"
+            "可直接使用 tts_generation 产出的 version）",
+        )
+    resolution = normalize_s2v_resolution(
+        str(arguments.get("resolution") or "480P"),
+    )
+    (
+        image_url,
+        image_checksum,
+        image_prov,
+        image_entry,
+    ) = _resolve_single_media_version(
+        project=project,
+        project_root=project_root,
+        version_id=image_ref,
+        media_prefix="image/",
+        label="characterImageRef",
+    )
+    (
+        audio_url,
+        audio_checksum,
+        audio_prov,
+        audio_entry,
+    ) = _resolve_single_media_version(
+        project=project,
+        project_root=project_root,
+        version_id=audio_ref,
+        media_prefix="audio/",
+        label="audioAssetRef",
+    )
+    # Task duration metadata follows the (header-corrected) audio duration
+    # recorded on the TTS source version; the provider derives the real one.
+    audio_version = project.assets.source_versions_by_id.get(audio_ref)
+    audio_duration = (
+        audio_version.duration_seconds
+        if audio_version is not None and audio_version.duration_seconds
+        else 5.0
+    )
+    duration_seconds = max(1, min(60, round(audio_duration)))
+    return _ResolvedR2V(
+        target_ref=target_ref,
+        element_id=element_id,
+        element_label=element.label,
+        prompt=f"数字人口型合成：{element.label or element_id}",
+        ratio=project.settings.aspect_ratio,
+        duration_seconds=duration_seconds,
+        resolution=resolution,
+        watermark=False,
+        generate_audio=True,
+        reference_version_ids=(image_ref, audio_ref),
+        reference_urls=(),
+        reference_checksums=(image_checksum, audio_checksum),
+        provenance_refs=(image_prov, audio_prov),
+        read_set=(image_entry, audio_entry),
+        slot_id=f"element:{element_id}:main",
+        slot_kind="element_video",
+        owner_ref=f"element:{element_id}",
+        provider="s2v",
+        s2v_image_version_id=image_ref,
+        s2v_image_url=image_url,
+        s2v_audio_version_id=audio_ref,
+        s2v_audio_url=audio_url,
+        s2v_resolution=resolution,
     )
 
 
@@ -1125,6 +1259,7 @@ class FileR2VExecutionService:
         idempotency_key: str,
         expected_object_versions: Sequence[str] = (),
         start: bool = True,
+        s2v: bool = False,
     ) -> FileR2VDispatch:
         stable = _ids(project_id, idempotency_key)
         command_hash = _fingerprint(
@@ -1188,7 +1323,7 @@ class FileR2VExecutionService:
         if conflicts:
             raise ConflictError("R2V 命令目标已被其他写者修改")
         resolved = await asyncio.to_thread(
-            _resolve_request,
+            _resolve_s2v_request if s2v else _resolve_request,
             snapshot=base,
             project_root=self.services.projects.project_root(project_id),
             target_ref=target_ref,
@@ -1266,6 +1401,17 @@ class FileR2VExecutionService:
                     "firstFrameUrl": resolved.first_frame_url,
                     "videoVersionId": resolved.video_version_id,
                     "videoUrl": resolved.video_url,
+                },
+            )
+        if resolved.provider == "s2v":
+            payload.update(
+                {
+                    "provider": "s2v",
+                    "s2vImageVersionId": resolved.s2v_image_version_id,
+                    "s2vImageUrl": resolved.s2v_image_url,
+                    "s2vAudioVersionId": resolved.s2v_audio_version_id,
+                    "s2vAudioUrl": resolved.s2v_audio_url,
+                    "s2vResolution": resolved.s2v_resolution,
                 },
             )
         return payload
@@ -2098,6 +2244,14 @@ class FileR2VExecutionService:
                     task.task_id,
                     project_id=task.project_id,
                 ):
+                    if str(request.get("provider") or "") == "s2v":
+                        return await self.provider.submit_s2v(
+                            image_url=str(request["s2vImageUrl"]),
+                            audio_url=str(request["s2vAudioUrl"]),
+                            resolution=str(
+                                request.get("s2vResolution") or "480P",
+                            ),
+                        )
                     request_mode = str(request.get("mode") or "r2v")
                     extra_arguments: dict[str, Any] = {}
                     if request_mode != "r2v":
@@ -2500,6 +2654,10 @@ class FileR2VExecutionService:
                     task.task_id,
                     project_id=task.project_id,
                 ):
+                    if str(claim.request.get("provider") or "") == "s2v":
+                        return await self.provider.poll_s2v(
+                            claim.provider_task_id,
+                        )
                     return await self.provider.poll(claim.provider_task_id)
 
             raw = await asyncio.wait_for(
@@ -4120,6 +4278,63 @@ async def execute_file_r2v_command(
     )
 
 
+async def execute_file_s2v_command(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    target_ref: str,
+    arguments: Mapping[str, Any],
+    idempotency_key: str,
+    expected_object_versions: Sequence[str] = (),
+) -> FileR2VDispatch:
+    """Digital-human (wan2.2-s2v) dispatch through the R2V durable poller."""
+
+    return await file_r2v_execution_service(services).dispatch(
+        project_id=project_id,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+        expected_object_versions=expected_object_versions,
+        s2v=True,
+    )
+
+
+async def preflight_s2v_face_detect(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    arguments: Mapping[str, Any],
+) -> None:
+    """Free wan2.2-s2v-detect gate that runs before execution authorization.
+
+    A failed portrait check raises a readable ``ValidationError`` so the
+    agent can pick another image without any authorization being created.
+    """
+
+    from models.s2v_model import detect_face
+
+    image_ref = str(arguments.get("characterImageRef") or "").strip()
+    if not image_ref:
+        raise ValidationError(
+            "s2v_generation 需要 characterImageRef（exact 人像图 version id）",
+        )
+    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    image_url, _, _, _ = _resolve_single_media_version(
+        project=snapshot.project,
+        project_root=services.projects.project_root(project_id),
+        version_id=image_ref,
+        media_prefix="image/",
+        label="characterImageRef",
+    )
+    result = await detect_face(image_url)
+    if not result.passed:
+        raise ValidationError(
+            f"数字人人像检测未通过（免费 detect，未创建执行授权）："
+            f"{result.reason or '未知原因'}。常见原因：多人/侧脸/模糊/遮挡/"
+            "风格不支持；请换一张单人、正脸、清晰的角色图后重试",
+        )
+
+
 __all__ = [
     "ExistingR2VProvider",
     "FileR2VDispatch",
@@ -4128,7 +4343,9 @@ __all__ = [
     "R2VTaskState",
     "clear_file_media_execution_registry_for_tests",
     "execute_file_r2v_command",
+    "execute_file_s2v_command",
     "file_r2v_execution_service",
+    "preflight_s2v_face_detect",
     "recover_interrupted_image_tasks",
     "shutdown_file_media_execution_services",
     "start_file_media_execution_services",

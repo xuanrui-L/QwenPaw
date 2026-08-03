@@ -2907,6 +2907,25 @@ class FileCreatorAgentRuntime:
                 role=role,
                 tools=tools,
             )
+        if spec is not None and spec.name == "s2v_generation":
+            # Free wan2.2-s2v-detect gate: an unsuitable portrait must fail
+            # with a readable error before the billed submission — and, in
+            # required-authorization mode, before any execution
+            # authorization is created (the detect call itself is free).
+            from services.media_files.r2v_execution import (
+                preflight_s2v_face_detect,
+            )
+
+            inner_arguments = arguments.get("arguments")
+            await preflight_s2v_face_detect(
+                self.services,
+                project_id=project_id,
+                arguments=(
+                    inner_arguments
+                    if isinstance(inner_arguments, Mapping)
+                    else {}
+                ),
+            )
         if (
             spec is not None
             and spec.requires_execution_authorization
@@ -4599,12 +4618,17 @@ def _execution_provider_model(spec: SpecialistToolSpec) -> tuple[str, str]:
         from models.config import get_tts_model_name
 
         return "dashscope", get_tts_model_name()
+    if spec.provider_kind == "s2v":
+        from models.config import get_s2v_model_name
+
+        return "dashscope", get_s2v_model_name()
     return str(spec.provider_kind or "creator-tool"), "configured"
 
 
 _AUTHORIZATION_OPERATION_LABELS = {
     "image_generation": "生成图片",
     "r2v_generation": "生成视频",
+    "s2v_generation": "生成数字人视频",
     "tts_generation": "生成语音",
     "create_character_voice": "复刻角色音色",
 }

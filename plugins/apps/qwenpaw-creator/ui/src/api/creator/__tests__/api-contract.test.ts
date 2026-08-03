@@ -246,6 +246,16 @@ describe("new Creator API contract", () => {
         reuse_llm_key: true,
         vc_model_name: "",
       },
+      s2v: {
+        enabled: false,
+        model_name: "",
+        api_key: "",
+        base_url: "",
+        protocol: "DashScope（百炼）",
+        custom_protocol: "",
+        detect_model_name: "",
+        reuse_llm_key: true,
+      },
       image: {
         enabled: false,
         model_name: "",
