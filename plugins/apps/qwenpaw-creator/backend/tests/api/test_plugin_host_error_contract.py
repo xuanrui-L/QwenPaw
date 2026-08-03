@@ -124,6 +124,7 @@ def test_plugin_manifest_declares_every_creator_config_tool(
         "creator_vlm_model",
         "creator_web_grounding",
         "creator_asr_model",
+        "creator_embedding_model",
         "creator_image_model",
         "creator_video_model",
         "creator_media_oss",

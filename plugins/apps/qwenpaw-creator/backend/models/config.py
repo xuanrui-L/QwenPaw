@@ -34,6 +34,7 @@ CREATOR_VIDEO_CONFIG_TOOL = "creator_video_model"
 CREATOR_VLM_CONFIG_TOOL = "creator_vlm_model"
 CREATOR_GROUNDING_CONFIG_TOOL = "creator_web_grounding"
 CREATOR_ASR_CONFIG_TOOL = "creator_asr_model"
+CREATOR_EMBEDDING_CONFIG_TOOL = "creator_embedding_model"
 CREATOR_OSS_CONFIG_TOOL = "creator_media_oss"
 EXECUTION_AUTHORIZATION_REQUIRED = "required"
 EXECUTION_AUTHORIZATION_ALLOW_ALL = "allow_all"
@@ -46,6 +47,7 @@ CREATOR_CONFIG_TOOLS = (
     CREATOR_VLM_CONFIG_TOOL,
     CREATOR_GROUNDING_CONFIG_TOOL,
     CREATOR_ASR_CONFIG_TOOL,
+    CREATOR_EMBEDDING_CONFIG_TOOL,
     CREATOR_OSS_CONFIG_TOOL,
 )
 
@@ -307,6 +309,7 @@ def _map_tool_to_section(tool_name: str) -> str:
         CREATOR_VLM_CONFIG_TOOL: "vlm",
         CREATOR_GROUNDING_CONFIG_TOOL: "grounding",
         CREATOR_ASR_CONFIG_TOOL: "asr",
+        CREATOR_EMBEDDING_CONFIG_TOOL: "embedding",
         CREATOR_IMAGE_CONFIG_TOOL: "image",
         CREATOR_VIDEO_CONFIG_TOOL: "video",
     }.get(tool_name, "")
@@ -386,6 +389,18 @@ ASR_MODEL_NAME = os.environ.get("ASR_MODEL_NAME", "fun-asr")
 ASR_PROVIDER = os.environ.get("ASR_PROVIDER", "fun-asr")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 ASR_TIMEOUT_SECONDS = _positive_int_env("ASR_TIMEOUT_SECONDS", 1800)
+
+
+# ── Embedding Model (DashScope native multimodal-embedding) ─────────────────
+EMBEDDING_BASE_URL = os.environ.get(
+    "EMBEDDING_BASE_URL",
+    "https://dashscope.aliyuncs.com/api/v1",
+)
+EMBEDDING_API_KEY = os.environ.get("EMBEDDING_API_KEY", "")
+EMBEDDING_MODEL_NAME = os.environ.get(
+    "EMBEDDING_MODEL_NAME",
+    "qwen3-vl-embedding",
+)
 
 
 # ── Image Model ──────────────────────────────────────────────────────────────
@@ -812,6 +827,62 @@ def get_asr_timeout_seconds() -> int:
         "ASR_TIMEOUT_SECONDS",
         ASR_TIMEOUT_SECONDS,
     )
+
+
+def get_embedding_api_key() -> str:
+    """Embedding key: explicit value first, else optionally reuse VLM."""
+
+    configured = _explicit_configured_value(
+        CREATOR_EMBEDDING_CONFIG_TOOL,
+        "api_key",
+        ("EMBEDDING_API_KEY",),
+    )
+    if configured:
+        return configured
+    section = _get_user_config().get("embedding", {})
+    reuse = not isinstance(section, dict) or section.get(
+        "reuse_vlm_key",
+        True,
+    )
+    return get_vlm_api_key() if reuse else ""
+
+
+def get_embedding_base_url() -> str:
+    return _configured_value(
+        CREATOR_EMBEDDING_CONFIG_TOOL,
+        ("base_url", "endpoint"),
+        "EMBEDDING_BASE_URL",
+        EMBEDDING_BASE_URL,
+    )
+
+
+def get_embedding_model_name() -> str:
+    return _configured_value(
+        CREATOR_EMBEDDING_CONFIG_TOOL,
+        "model",
+        "EMBEDDING_MODEL_NAME",
+        EMBEDDING_MODEL_NAME,
+    )
+
+
+def is_embedding_enabled() -> bool:
+    if get_request_tool_config(CREATOR_EMBEDDING_CONFIG_TOOL):
+        return True
+    section = _get_user_config().get("embedding")
+    if isinstance(section, dict) and section.get("enabled") is True:
+        return True
+    return os.environ.get("EMBEDDING_ENABLED", "").casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def is_embedding_configured() -> bool:
+    """Memory builds require an enabled section with a resolvable key."""
+
+    return is_embedding_enabled() and bool(get_embedding_api_key())
 
 
 def is_asr_enabled() -> bool:

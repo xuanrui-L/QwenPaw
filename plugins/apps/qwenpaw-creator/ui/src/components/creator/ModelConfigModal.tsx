@@ -18,6 +18,7 @@ import {
   PictureOutlined,
   VideoCameraOutlined,
   AudioOutlined,
+  NodeIndexOutlined,
   GlobalOutlined,
   ReloadOutlined,
   CloseOutlined,
@@ -78,6 +79,7 @@ const VLM_PROTOCOLS = [
   "自定义",
 ];
 const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
+const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
 
@@ -117,6 +119,14 @@ const ASR_PRESETS: Record<string, ProtocolPreset> = {
     base_url: "https://api.openai.com/v1",
     freeze_url: true,
     models: ["whisper-1"],
+  },
+};
+
+const EMBEDDING_PRESETS: Record<string, ProtocolPreset> = {
+  "DashScope（百炼）": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    freeze_url: true,
+    models: ["qwen3-vl-embedding"],
   },
 };
 
@@ -167,7 +177,7 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   },
 };
 
-type ModelType = "llm" | "vlm" | "asr" | "image" | "video";
+type ModelType = "llm" | "vlm" | "asr" | "embedding" | "image" | "video";
 type TabType = ModelType | "grounding";
 const DEFAULT_CONFIG: ModelConfigData = {
   llm: {
@@ -217,6 +227,15 @@ const DEFAULT_CONFIG: ModelConfigData = {
     provider: "fun-asr",
     language: "",
     reuse_llm_key: true,
+  },
+  embedding: {
+    enabled: false,
+    model_name: "qwen3-vl-embedding",
+    api_key: "",
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    protocol: "DashScope（百炼）",
+    custom_protocol: "",
+    reuse_vlm_key: true,
   },
   image: {
     enabled: false,
@@ -349,6 +368,16 @@ const CARD_META: {
     required: false,
   },
   {
+    type: "embedding",
+    label: "Embedding 模型",
+    icon: (
+      <NodeIndexOutlined
+        style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
+      />
+    ),
+    required: false,
+  },
+  {
     type: "image",
     label: "图片生成模型",
     icon: (
@@ -439,6 +468,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         merged.vlm.protocol = VLM_PROTOCOLS[0];
       if (!ASR_PROTOCOLS.includes(merged.asr.protocol))
         merged.asr.protocol = ASR_PROTOCOLS[0];
+      if (!EMBEDDING_PROTOCOLS.includes(merged.embedding.protocol))
+        merged.embedding.protocol = EMBEDDING_PROTOCOLS[0];
       if (!IMAGE_PROTOCOLS.includes(merged.image.protocol))
         merged.image.protocol = IMAGE_PROTOCOLS[0];
       if (!VIDEO_PROTOCOLS.includes(merged.video.protocol))
@@ -678,6 +709,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       const hasKey =
         type === "asr" && config.asr.reuse_llm_key
           ? hasUsableApiKey(config.llm)
+          : type === "embedding" && config.embedding.reuse_vlm_key
+          ? hasUsableApiKey(config.vlm.use_llm ? config.llm : config.vlm) ||
+            hasUsableApiKey(config.llm)
           : hasUsableApiKey(item);
       if (!item.base_url || !hasKey || !item.model_name) {
         message.warning(
@@ -693,6 +727,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         if (type === "asr" && config.asr.reuse_llm_key) {
           // ASR reuses the LLM API key.
           testApiKey = await resolveRealApiKey("llm", config.llm);
+        } else if (type === "embedding" && config.embedding.reuse_vlm_key) {
+          // Embedding reuses the VLM key (which may itself reuse the LLM).
+          const vlmSection = config.vlm.use_llm ? "llm" : "vlm";
+          const vlmItem = config.vlm.use_llm ? config.llm : config.vlm;
+          testApiKey =
+            (await resolveRealApiKey(vlmSection, vlmItem)) ||
+            (await resolveRealApiKey("llm", config.llm));
         } else if (type === "vlm" && config.vlm.use_llm) {
           // VLM reuses the LLM config.
           testApiKey = await resolveRealApiKey("llm", config.llm);
@@ -818,6 +859,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         "vlm",
         "grounding",
         "asr",
+        "embedding",
         "image",
         "video",
       ] as TabType[]) {
@@ -866,6 +908,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       ? VLM_PROTOCOLS
       : type === "asr"
       ? ASR_PROTOCOLS
+      : type === "embedding"
+      ? EMBEDDING_PROTOCOLS
       : type === "image"
       ? IMAGE_PROTOCOLS
       : VIDEO_PROTOCOLS;
@@ -890,6 +934,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       };
     }
     if (type === "asr") return ASR_PRESETS[protocol] || null;
+    if (type === "embedding") return EMBEDDING_PRESETS[protocol] || null;
     if (type === "image") return IMAGE_PRESETS[protocol] || null;
     if (type === "video") return VIDEO_PRESETS[protocol] || null;
     return null;
@@ -1073,6 +1118,26 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               value={config.asr.language}
               onChange={(e) => updateItem("asr", "language", e.target.value)}
             />
+          </div>
+        )}
+        {type === "embedding" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+            <Checkbox
+              checked={config.embedding.reuse_vlm_key}
+              onChange={(e) =>
+                updateItem("embedding", "reuse_vlm_key", e.target.checked)
+              }
+            >
+              复用 VLM API Key
+            </Checkbox>
+            <span
+              style={{
+                fontSize: 11,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              用于长素材层次记忆的节点向量化与语义检索
+            </span>
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>

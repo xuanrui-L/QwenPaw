@@ -9,6 +9,7 @@ const TASK_KIND_LABELS: Record<TaskView["kind"], string> = {
   asset_ingest: "素材入库",
   asset_import: "素材导入",
   source_intelligence: "素材理解",
+  source_memory_build: "长素材记忆构建",
   image_generation: "画面生成",
   r2v_generation: "视频生成",
   ai_edit_plan: "剪辑规划",

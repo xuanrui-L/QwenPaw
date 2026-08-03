@@ -15,7 +15,8 @@
   },
   "dependencies": [
     "oss2",
-    "imageio-ffmpeg"
+    "imageio-ffmpeg",
+    "numpy"
   ],
   "qwenpaw_version": {
     "min": "2.0.1"
@@ -282,6 +283,38 @@
           {"name": "base_url", "label": "ASR Base URL", "type": "text", "required": true, "default": "https://dashscope.aliyuncs.com/api/v1"},
           {"name": "model", "label": "ASR Model", "type": "text", "required": true, "default": "fun-asr"},
           {"name": "language", "label": "Language", "type": "text", "required": false}
+        ]
+      },
+      {
+        "name": "creator_embedding_model",
+        "description": "QwenPaw Creator text embedding configuration for long-source graph memory",
+        "icon": "🧠",
+        "requires_config": false,
+        "config_fields": [
+          {
+            "name": "api_key",
+            "label": "Embedding API Key",
+            "type": "password",
+            "required": false,
+            "help": "Optional. May reuse creator_vlm_model when enabled in Creator settings. Environment fallback: EMBEDDING_API_KEY."
+          },
+          {
+            "name": "model",
+            "label": "Embedding Model",
+            "type": "text",
+            "required": false,
+            "default": "qwen3-vl-embedding",
+            "placeholder": "qwen3-vl-embedding"
+          },
+          {
+            "name": "base_url",
+            "label": "Embedding Base URL",
+            "type": "text",
+            "required": false,
+            "default": "https://dashscope.aliyuncs.com/api/v1",
+            "placeholder": "https://dashscope.aliyuncs.com/api/v1",
+            "help": "DashScope native multimodal-embedding endpoint root. Note the per-request batch cap."
+          }
         ]
       },
       {

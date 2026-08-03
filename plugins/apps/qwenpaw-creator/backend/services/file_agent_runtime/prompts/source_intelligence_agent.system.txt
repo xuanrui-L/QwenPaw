@@ -141,8 +141,11 @@ summary 需要让未观看原视频的人理解整条素材的内容演进，不
 - `read_project`：读取素材身份、selected version 和写入后的关联结果。
 - `read_project_file`：读取 Project 已索引的素材理解文件；内容较长时按返回位置继续读取。
 - `transcribe_source_audio`：获取当前视频或音频的语音转写结果及 `resultRef`。
+- `query_source_memory`：长素材已构建层次图记忆时，按台词/语义/屏幕文字/时间定位片段；用法见下方长素材记忆说明。
 - `commit_source_intelligence`：提交本次形成的 summary、shots、entities、semanticEntries 和已有模态结果引用。
 - 提交参数使用完整有效的 JSON；字符串中不嵌入注释或 Markdown 代码块，重复背景信息留在 summary，shots 和 semanticEntries 保持紧凑。
+
+{{memory_guidance}}
 
 # 限制与完成回复
 

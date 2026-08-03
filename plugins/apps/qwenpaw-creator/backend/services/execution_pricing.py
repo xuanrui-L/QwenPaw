@@ -368,6 +368,54 @@ def estimate_video_cost(
     )
 
 
+# ── Long-source memory build (Creator source-memory pipeline) ──────────────
+# Cost drivers: one VLM subgraph call per macro scene (macro count ≈
+# duration / 3–8 min; 5 min used as the planning midpoint) plus text
+# embedding for every graph node. Unit prices are conservative local
+# approximations for the qwen3.7 VLM tier and qwen3-vl-embedding; the
+# estimate is always flagged approximate.
+_MEMORY_MACRO_TARGET_SEC = 300
+_MEMORY_VLM_UNIT_CNY = 0.15
+_MEMORY_NODES_PER_MACRO = 30
+_MEMORY_EMBED_UNIT_CNY = 0.002
+_MEMORY_SOURCE = "本地经验估算（VLM 段落抽取 + 节点向量化）"
+
+
+def estimate_source_memory_cost(
+    *,
+    duration_ms: int,
+    vlm_model: str,
+    embedding_model: str,
+) -> CostEstimate:
+    """Duration-linear estimate for one long-source memory build."""
+
+    duration_sec = max(1, int(duration_ms) // 1000)
+    macros = max(1, round(duration_sec / _MEMORY_MACRO_TARGET_SEC))
+    vlm_cost = macros * _MEMORY_VLM_UNIT_CNY
+    embed_cost = macros * _MEMORY_NODES_PER_MACRO * _MEMORY_EMBED_UNIT_CNY
+    total = round(vlm_cost + embed_cost, 4)
+    return CostEstimate(
+        estimated_cost=total,
+        currency="CNY",
+        unit_price_text=(
+            f"≈{_MEMORY_VLM_UNIT_CNY}元/场景段（{vlm_model}） + "
+            f"≈{_MEMORY_EMBED_UNIT_CNY}元/节点（{embedding_model}）"
+        ),
+        formula=(
+            f"{macros}段 × {_MEMORY_VLM_UNIT_CNY}元 + "
+            f"{macros * _MEMORY_NODES_PER_MACRO}节点 × "
+            f"{_MEMORY_EMBED_UNIT_CNY}元 = ¥{total:.2f}"
+        ),
+        pricing_model="source-memory-build",
+        pricing_source=_MEMORY_SOURCE,
+        approximate=True,
+        notes=(
+            _DISCLAIMER,
+            "场景段数以实际镜头切割为准，估算按每 5 分钟一段计",
+        ),
+    )
+
+
 def estimate_execution_cost(
     *,
     provider_kind: str | None,
@@ -415,5 +463,6 @@ __all__ = [
     "CostEstimate",
     "estimate_execution_cost",
     "estimate_image_cost",
+    "estimate_source_memory_cost",
     "estimate_video_cost",
 ]

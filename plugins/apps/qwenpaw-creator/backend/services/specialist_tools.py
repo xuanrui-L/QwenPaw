@@ -22,6 +22,10 @@ from typing import Any
 
 from domain.enums import CreatorCommandType, SpecialistRole
 from domain.errors import PermissionDeniedError, ValidationError
+from services.media.source_memory import (
+    QUERY_TYPES as _MEMORY_QUERY_TYPES,
+    source_memory_service,
+)
 from services.media_files.image_execution import execute_file_image_command
 from services.media_files.motion_design import design_motion_overlays
 from services.media_files.r2v_execution import execute_file_r2v_command
@@ -305,6 +309,51 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
     ("summary", "shots", "entities", "semanticEntries"),
 )
 
+_MEMORY_QUERY_ARGUMENTS = _arguments_schema(
+    {
+        "queryType": {
+            "type": "string",
+            "enum": list(_MEMORY_QUERY_TYPES),
+            "description": (
+                "summary/super_events/macro_events 看层次概览；"
+                "subgraph 下钻单个 macro；search_nodes/search_ocr/"
+                "search_asr 语义与文本检索；by_time 按时间窗；"
+                "enumerate 计数/枚举候选。"
+            ),
+        },
+        "query": {
+            "type": "string",
+            "minLength": 1,
+            "description": "search_*/enumerate 必传的检索文本。",
+        },
+        "nodeTypes": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "entity",
+                    "event",
+                    "on_screen_text",
+                    "asr_text",
+                ],
+            },
+            "uniqueItems": True,
+        },
+        "macroId": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "subgraph 必传目标 macro_id；macro_events 可传 "
+                "super_XX 只列该 SuperEvent 下的 macros。"
+            ),
+        },
+        "startMs": {"type": "integer", "minimum": 0},
+        "endMs": {"type": "integer", "minimum": 1},
+        "topK": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+    ("queryType",),
+)
+
 _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
     {
         "brief": {
@@ -389,6 +438,17 @@ _SPECS = (
         long_running=True,
         wait=SpecialistToolWait.TASK,
         provider_kind="video",
+    ),
+    SpecialistToolSpec(
+        name="query_source_memory",
+        description=(
+            "查询当前 exact Source 已构建的长素材层次图记忆，按台词/"
+            "语义/屏幕文字/时间定位片段。返回 JSON 结果与命中 macro 的 "
+            "hitWindowsMs 时间窗；结论必须回到原片对应窄窗核验。未构建"
+            "记忆时返回 available=false。"
+        ),
+        roles=frozenset({SpecialistRole.SOURCE_INTELLIGENCE}),
+        parameters=_tool_schema(_MEMORY_QUERY_ARGUMENTS),
     ),
     SpecialistToolSpec(
         name="design_motion_overlays",
@@ -527,6 +587,51 @@ class FileSpecialistToolRegistry:
                 command_id=idempotency_key,
                 arguments=payload,
                 context=context,
+            )
+            return SpecialistToolResult(payload=dict(result))
+
+        if name == "query_source_memory":
+            if not target_ref.startswith("asset:") or not target_ref[6:]:
+                raise ValidationError(
+                    "query_source_memory 只接受 asset:<logicalAssetId>",
+                )
+            result = await source_memory_service(
+                self.services,
+            ).query_memory(
+                project_id=project_id,
+                logical_asset_id=target_ref[6:],
+                query_type=str(payload.get("queryType") or ""),
+                query=(
+                    str(payload["query"])
+                    if payload.get("query") is not None
+                    else None
+                ),
+                node_types=(
+                    [str(item) for item in payload["nodeTypes"]]
+                    if isinstance(payload.get("nodeTypes"), Sequence)
+                    and not isinstance(payload.get("nodeTypes"), str)
+                    else None
+                ),
+                macro_id=(
+                    str(payload["macroId"])
+                    if payload.get("macroId") is not None
+                    else None
+                ),
+                start_ms=(
+                    int(payload["startMs"])
+                    if payload.get("startMs") is not None
+                    else None
+                ),
+                end_ms=(
+                    int(payload["endMs"])
+                    if payload.get("endMs") is not None
+                    else None
+                ),
+                top_k=(
+                    int(payload["topK"])
+                    if payload.get("topK") is not None
+                    else None
+                ),
             )
             return SpecialistToolResult(payload=dict(result))
 

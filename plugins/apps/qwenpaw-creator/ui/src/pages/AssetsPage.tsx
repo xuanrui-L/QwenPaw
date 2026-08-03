@@ -24,6 +24,7 @@ import type {
   ArtifactVersionDocument,
   ProjectDocument,
   SourceAssetVersionDocument,
+  TaskView,
   VisualEntityDocument,
 } from "@/contracts/creator";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
@@ -117,6 +118,25 @@ function downloadName(name: string, mediaType: string): string {
   const ext =
     MIME_EXTENSION_MAP[mediaType.split(";")[0].trim().toLowerCase()] ?? "";
   return ext ? `${base}${ext}` : base;
+}
+
+// Logical asset ids whose long-source graph memory finished building
+// (SUCCEEDED source_memory_build task targeting asset:<logicalAssetId>).
+function memoryBuiltAssetIds(tasks: TaskView[]): Set<string> {
+  const built = new Set<string>();
+  for (const task of tasks) {
+    if (task.kind !== "source_memory_build") continue;
+    if (task.status !== "SUCCEEDED") continue;
+    if (!task.targetRef.startsWith("asset:")) continue;
+    built.add(task.targetRef.slice("asset:".length));
+  }
+  return built;
+}
+
+function itemLogicalAssetId(item: AssetItem): string | null {
+  if (item.kind !== "source") return null;
+  const raw = item.raw as SourceAssetVersionDocument;
+  return raw.logical_asset_id || null;
 }
 
 function artifactMedia(
@@ -466,6 +486,7 @@ export default function AssetsPage() {
   const patchProject = useProjectSnapshotStore((state) => state.patch);
   const patching = useProjectSnapshotStore((state) => state.patching);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
+  const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [search, setSearch] = useState("");
@@ -510,6 +531,7 @@ export default function AssetsPage() {
     });
   }, [allItems, filter, search]);
   const selected = allItems.find((item) => item.id === selectedId) || null;
+  const memoryBuilt = useMemo(() => memoryBuiltAssetIds(tasks), [tasks]);
 
   useEffect(() => {
     useCreatorInteractionStore.getState().select(selected?.ref || null);
@@ -695,6 +717,17 @@ export default function AssetsPage() {
                           过期
                         </span>
                       )}
+                      {(() => {
+                        const logicalId = itemLogicalAssetId(item);
+                        return logicalId && memoryBuilt.has(logicalId) ? (
+                          <span
+                            data-creator-memory-badge={logicalId}
+                            className="absolute bottom-2 right-2 rounded bg-emerald-600/90 px-1.5 py-0.5 text-[10px] font-bold text-white"
+                          >
+                            记忆已构建
+                          </span>
+                        ) : null;
+                      })()}
                     </div>
                     <div className="p-3">
                       <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .common import StrictModel
 
@@ -301,6 +301,28 @@ class SourceAgentIntelligenceInput(StrictModel):
     )
 
 
+class SourceMemoryRef(StrictModel):
+    """Pointer to the built long-source graph memory artifacts.
+
+    Hydrated at read time from ``runtime/source-intelligence/<index-id>/
+    memory``; never persisted inside the immutable index JSON, so the
+    canonical payload of existing indexes stays byte-stable.
+    """
+
+    graph_path: str = Field(alias="graphPath", min_length=1)
+    embeddings_path: str = Field(alias="embeddingsPath", min_length=1)
+    built_at: str = Field(alias="builtAt", min_length=1)
+    macro_count: int = Field(alias="macroCount", ge=0)
+
+    @field_validator("built_at")
+    @classmethod
+    def timezone_aware_built_at(cls, value: str) -> str:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("builtAt must include a timezone")
+        return value
+
+
 class SourceIntelligenceIndex(StrictModel):
     id: str
     asset_id: str = Field(alias="assetId")
@@ -318,6 +340,17 @@ class SourceIntelligenceIndex(StrictModel):
     entities: list[SourceEntity]
     semantic_entries: list[SemanticIndexEntry] = Field(alias="semanticEntries")
     created_at: str = Field(alias="createdAt")
+    memory_ref: SourceMemoryRef | None = Field(None, alias="memoryRef")
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_memory_ref(self, handler: Any) -> dict[str, Any]:
+        # Keep persisted/canonical dumps byte-identical to pre-memory
+        # indexes: the hydrated-only field is emitted only when present.
+        data = handler(self)
+        if self.memory_ref is None:
+            data.pop("memoryRef", None)
+            data.pop("memory_ref", None)
+        return data
 
     @field_validator("created_at")
     @classmethod
