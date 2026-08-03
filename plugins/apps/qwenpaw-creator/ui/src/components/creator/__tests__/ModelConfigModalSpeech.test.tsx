@@ -123,9 +123,17 @@ const capabilities = {
 
 function mount(config: ModelConfigData = baseConfig) {
   installMockFetch([
-    { match: "/models/tts-capabilities", method: "GET", response: { json: capabilities } },
+    {
+      match: "/models/tts-capabilities",
+      method: "GET",
+      response: { json: capabilities },
+    },
     { match: "/models/config", method: "GET", response: { json: config } },
-    { match: "/host-providers", method: "GET", response: { json: { providers: [] } } },
+    {
+      match: "/host-providers",
+      method: "GET",
+      response: { json: { providers: [] } },
+    },
   ]);
   render(<ModelConfigModal open onClose={() => {}} />);
 }
@@ -172,7 +180,9 @@ describe("ModelConfigModal speech section", () => {
     await openSpeechCard();
     await waitFor(() => {
       expect(
-        screen.getByText(/该模型没有系统音色：Agent 会先根据角色设定设计专属音色/),
+        screen.getByText(
+          /该模型没有系统音色：Agent 会先根据角色设定设计专属音色/,
+        ),
       ).toBeInTheDocument();
     });
     expect(screen.queryByText("默认旁白音色")).not.toBeInTheDocument();

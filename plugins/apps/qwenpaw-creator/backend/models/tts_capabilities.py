@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# flake8: noqa: E501
 """Capability table for the supported DashScope speech-synthesis models.
 
 The provider exposes two families that share nothing but the credential:

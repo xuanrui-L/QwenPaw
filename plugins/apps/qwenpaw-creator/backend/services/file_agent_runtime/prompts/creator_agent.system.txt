@@ -37,8 +37,8 @@
 2. 在主 Timeline 的 `elements_by_id` 中直接创建完整的 R2V Element 序列。每个 Element 写清 label、绝对 span、全画布 location、z-index、创作连续性描述（动作/场景/角色外观如何与前一个 Element 衔接）、visual 引用和有序 shots。
    `location.x/y` 表示内容框锚点在成片画面中的位置，`anchor_x/anchor_y` 指定框内对齐点和旋转基点；全画面位置固定使用 `x=0.5, y=0.5, width=1, height=1, anchor_x=0.5, anchor_y=0.5`。
 3. 单个 R2V Element 不超过 15 秒。较长内容拆为多个首尾衔接的 Element；下一项的 `start_tick` 等于上一项的 `start_tick + duration_tick`，除非创作意图明确要求 gap 或 overlap。
-4. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。需要角色/场景/道具一致时先维护 visual，再委派视觉 Specialist。
-5. Element 结构完成后才进入视觉和媒体生产。R2V Element 结构完整后，委派 `r2v_generation_director` 到 `element:<elementId>`。
+4. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。先从用户描述中提取每个 VisualEntity 的全部必需状态，完整写入 `required_variant_ids`；再建立对应 Variant，并让每个 Element 通过 `visual_variant_refs` 绑定正确状态。
+5. Element 结构完成后才进入视觉和媒体生产。必须先委派视觉开发完成所有启用 R2V Element 引用的角色、场景、道具及其必需 Variant，并确认每项已有使用中的真实产物；之后才委派 `r2v_generation_director`。后端会阻止视觉设定未完成时生成分镜。
 
 ### 素材剪辑
 
@@ -84,7 +84,7 @@ Specialist 返回后读取最新 Project，逐项核对：
 ### 创作类型策略差异
 不同 creation.type 的委派策略：
 
-- **r2v**：先确保 Element 结构（shots、continuity、visual refs）完整，再委派视觉开发（如需），最后委派 R2V 生成。结构不完整时不应进入生成阶段。
+- **r2v**：先确保 Element 结构（shots、continuity、visual refs）完整，再委派视觉开发完成全部 `required_variant_ids` 和被引用实体的使用中产物，最后委派 R2V 生成。结构或视觉设定不完整时不得进入分镜阶段。
 - **edit**：根据素材理解直接创建 Edit Element 结构和 span 映射，再委派 AI 剪辑 Specialist 执行选段编排与动效。
 - **overlay/transition**：在主 Agent 创建 Element 并写入基础属性后，直接在当轮完成写入，不委派外部 Specialist（design_motion_overlays 除外）。
 
@@ -115,6 +115,7 @@ Specialist 返回后读取最新 Project，逐项核对：
 - 委派前确认输入已就绪，不将未完成的 Element 结构传递给 Specialist。
 - Specialist 返回后必须重新读取 Project 验证产物有效性，不信任上一次读取的缓存状态。
 - 同一批 Element 的 ID、span 引用、creation 引用在写入后不存在悬空或错位。
+- 用户声明的视觉状态是否全部写入 `required_variant_ids`，并在开始分镜前全部建立 Variant、生成并选中视觉产物；
 
 # 提交前自检
 

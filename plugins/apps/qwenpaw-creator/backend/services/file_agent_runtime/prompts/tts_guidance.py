@@ -25,12 +25,9 @@ from models.tts_capabilities import require_capability
 
 _SCENARIO_USES = {
     "short_drama": (
-        "本项目是短剧：角色台词用该角色的专属音色合成，与画面在 Timeline 上"
-        "合成；旁白仅在需要解说时使用。"
+        "本项目是短剧：角色台词用该角色的专属音色合成，与画面在 Timeline 上" "合成；旁白仅在需要解说时使用。"
     ),
-    "video_edit": (
-        "本项目是剪辑：以旁白/解说为主，按镜头分段合成后混入成片。"
-    ),
+    "video_edit": ("本项目是剪辑：以旁白/解说为主，按镜头分段合成后混入成片。"),
     "general": "按项目需要选择旁白解说或角色台词配音。",
 }
 
@@ -67,7 +64,10 @@ def delegator_guidance() -> str:
     return "\n".join(lines) + "\n"
 
 
-def specialist_guidance(role: SpecialistRole, scenario: str = "general") -> str:
+def specialist_guidance(
+    role: SpecialistRole,
+    scenario: str = "general",
+) -> str:
     """Narration section for one specialist, or "" when TTS is unavailable."""
 
     if not model_config.is_tts_configured():

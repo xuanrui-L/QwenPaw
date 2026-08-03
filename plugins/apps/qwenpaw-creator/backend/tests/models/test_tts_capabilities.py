@@ -63,7 +63,12 @@ def test_unknown_model_falls_back_to_the_default() -> None:
             "qwen3-tts-vd-2026-01-26",
             True,
         ),
-        ("cosyvoice-v3.5-plus", "cosyvoice-v3.5-plus", "cosyvoice-v3.5-plus", False),
+        (
+            "cosyvoice-v3.5-plus",
+            "cosyvoice-v3.5-plus",
+            "cosyvoice-v3.5-plus",
+            False,
+        ),
     ],
 )
 def test_companion_models_are_derived_not_configured(

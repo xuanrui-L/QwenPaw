@@ -561,6 +561,7 @@ def test_character_voice_binding_is_runtime_only(tmp_path) -> None:
         "description": "",
         "continuity": "",
         "variants": {"items": {}, "order": []},
+        "required_variant_ids": [],
         "selected_artifact_version_id": None,
         "voice": None,
     }

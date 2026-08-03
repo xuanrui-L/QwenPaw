@@ -226,6 +226,7 @@ function subagentActivityBase(
       ? event.seq
       : existing?.firstEventSeq ?? event.seq,
     completed: runChanged ? false : existing?.completed ?? false,
+    waitingReview: runChanged ? undefined : existing?.waitingReview,
     terminalKind: runChanged ? undefined : existing?.terminalKind,
     summaryText: runChanged ? undefined : existing?.summaryText,
     terminalEventSeq: runChanged ? undefined : existing?.terminalEventSeq,

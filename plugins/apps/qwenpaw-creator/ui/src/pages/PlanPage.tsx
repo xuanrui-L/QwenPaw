@@ -26,12 +26,14 @@ import ElementList from "@/components/timeline/ElementList";
 import ElementDetail from "@/components/timeline/ElementDetail";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
+import VisualCoverageCheckpoint from "@/components/creator/VisualCoverageCheckpoint";
 import {
   ExportProgressCard,
   saveExportFile,
   type ExportProgressState,
 } from "@/components/creator/ProjectImportExport";
 import type { TimelineElementDocument } from "@/contracts/creator";
+import { selectVisualVariantCoverage } from "@/selectors/visualVariantCoverage";
 
 function sec(tick: number, ticksPerSecond: number): string {
   return (tick / ticksPerSecond).toFixed(1).replace(/\.0$/, "");
@@ -51,6 +53,10 @@ export default function PlanPage() {
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const timeline = useMemo(() => selectPrimaryTimeline(project), [project]);
+  const visualCoverage = useMemo(
+    () => (project ? selectVisualVariantCoverage(project) : null),
+    [project],
+  );
   const selectedElementId = query.get("element");
   const selectedElement =
     selectedElementId && timeline
@@ -648,6 +654,8 @@ export default function PlanPage() {
           {syncError ? ` ${syncError}` : ""}
         </div>
       )}
+
+      {visualCoverage && <VisualCoverageCheckpoint report={visualCoverage} />}
 
       <TimelineCanvas
         project={project}

@@ -131,6 +131,63 @@ describe("PlanPage Timeline/Element frontend", () => {
     ).toEqual(["edit-opening", "audio-bgm"]);
   });
 
+  it("shows visual Variant and artifact coverage for referenced entities", () => {
+    renderPage();
+
+    expect(screen.getByText("视觉覆盖 1/1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("视觉覆盖 1/1"));
+    expect(screen.getByText("圆润大橘猫")).toBeInTheDocument();
+    expect(screen.getByText("覆盖完成")).toBeInTheDocument();
+    expect(screen.getByText(/使用中 · 1 个产物/)).toBeInTheDocument();
+  });
+
+  it("exposes ambiguous multi-Variant bindings before storyboard admission", () => {
+    const project = cloneProject();
+    const cat = project.visual.entities.items.cat;
+    cat.variants.items["variant:cat:winter"] = {
+      variant_id: "variant:cat:winter",
+      requirements: "冬季围巾造型",
+      prompt: "圆润大橘猫，佩戴红色围巾",
+      reference_asset_version_ids: [],
+      reference_artifact_version_ids: [],
+      generated_artifact_version_ids: [],
+      selected_artifact_version_id: null,
+    };
+    cat.variants.order.push("variant:cat:winter");
+    cat.required_variant_ids.push("variant:cat:winter");
+    const element =
+      project.timelines.items["timeline:main"].elements_by_id["r2v-window"];
+    if (element.creation.type !== "r2v") {
+      throw new Error("fixture R2V Element missing");
+    }
+    element.creation.visual_variant_refs = {};
+    seedProject(project);
+    renderPage();
+
+    expect(screen.getByText("视觉覆盖 0/1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("视觉覆盖 0/1"));
+    expect(screen.getByText("Element 未绑定 Variant")).toBeInTheDocument();
+    expect(screen.getByText("1 个 Element 未指定 Variant")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "下载 / 导出" }),
+    ).toBeInTheDocument();
+  });
+
+  it("exposes required Variant states that have not been materialized", () => {
+    const project = cloneProject();
+    project.visual.entities.items.cat.required_variant_ids.push(
+      "variant:cat:winter",
+    );
+    seedProject(project);
+    renderPage();
+
+    expect(screen.getByText("视觉覆盖 0/1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("视觉覆盖 0/1"));
+    expect(screen.getByText("必需 Variant 尚未定义")).toBeInTheDocument();
+    expect(screen.getByText("必需 Variant 1/2")).toBeInTheDocument();
+    expect(screen.getByText("缺少：variant:cat:winter")).toBeInTheDocument();
+  });
+
   it("keeps an empty Timeline guided through the Agent without an add-content button", () => {
     const project = cloneProject();
     project.timelines.items["timeline:main"].elements_by_id = {};
@@ -749,7 +806,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getByRole("button", { name: "应用修改" })).toBeDisabled();
   });
 
-  it("commits detail edits through the schema-v2 Project CAS Patch endpoint", async () => {
+  it("commits detail edits through the Project CAS Patch endpoint", async () => {
     const updated = cloneProject();
     updated.generation = 4;
     updated.timelines.items["timeline:main"].elements_by_id[

@@ -1401,9 +1401,20 @@ function projectRefItems(
       ref: `visual-entity:${entity.entity_id}`,
       name: entity.name || entity.entity_id,
       type: "visual",
-      thumbnailUrl: entity.selected_artifact_version_id
-        ? getArtifactVersionMediaUrl(entity.selected_artifact_version_id)
-        : undefined,
+      thumbnailUrl:
+        entity.variants.order.length === 1
+          ? (() => {
+              const variant = entity.variants.items[entity.variants.order[0]];
+              return variant?.selected_artifact_version_id
+                ? getArtifactVersionMediaUrl(
+                    variant.selected_artifact_version_id,
+                  )
+                : undefined;
+            })()
+          : entity.variants.order.length === 0 &&
+            entity.selected_artifact_version_id
+          ? getArtifactVersionMediaUrl(entity.selected_artifact_version_id)
+          : undefined,
       uiLocator: { page: "assets", assetId: entity.entity_id },
     }),
   );
