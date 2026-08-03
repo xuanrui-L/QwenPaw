@@ -31,8 +31,9 @@ import {
   getHostProviders,
   getHostProviderApiKey,
   getRealApiKey,
+  getTtsCapabilities,
 } from "@/api/creator";
-import type { HostProviderInfo } from "@/api/creator";
+import type { HostProviderInfo, TtsCapabilities } from "@/api/creator";
 import type {
   GroundingConfig,
   ModelConfigData,
@@ -126,26 +127,11 @@ const TTS_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
     freeze_url: true,
-    models: ["qwen3-tts-flash", "qwen3-tts-instruct-flash"],
+    // Filled from the backend capability table so the UI never offers a model
+    // this build cannot drive.
+    models: [],
   },
 };
-
-// Voice-cloning synthesis runs on a dedicated model; cloned character voices
-// are only usable through it.
-const TTS_VC_MODELS = ["qwen3-tts-vc-2026-01-22"];
-
-const TTS_VOICES = [
-  "Cherry",
-  "Serena",
-  "Ethan",
-  "Chelsie",
-  "Dylan",
-  "Jada",
-  "Sunny",
-  "Nofish",
-  "Marcus",
-  "Roy",
-];
 
 const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
@@ -432,9 +418,20 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [hostProviders, setHostProviders] = useState<HostProviderInfo[]>([]);
+  const [ttsCapabilities, setTtsCapabilities] =
+    useState<TtsCapabilities | null>(null);
+  // A stale or partial response must not break the whole modal, so the list is
+  // normalized once and every consumer reads this instead of the raw payload.
+  const ttsModels = ttsCapabilities?.models ?? [];
+  const ttsCapability = ttsModels.find(
+    (item) => item.model === config.tts.model_name,
+  );
 
   useEffect(() => {
     getHostProviders().then(setHostProviders);
+    getTtsCapabilities()
+      .then(setTtsCapabilities)
+      .catch(() => setTtsCapabilities(null));
   }, []);
 
   // Resolve the real API key (for connection tests).
@@ -533,6 +530,18 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     (type: ModelType, field: string, value: unknown) => {
       setConfig((prev) => {
         const updated = { ...prev, [type]: { ...prev[type], [field]: value } };
+        if (type === "tts" && field === "model_name") {
+          // Speech models disagree about voices: those without system voices
+          // reject any preset name, and the valid names differ per family, so
+          // realign the default voice in the same update.
+          const capability = ttsModels.find((item) => item.model === value);
+          const voices = capability?.systemVoices ?? [];
+          const keep = voices.includes(prev.tts.voice) ? prev.tts.voice : "";
+          updated.tts = {
+            ...updated.tts,
+            voice: keep || voices[0] || "",
+          };
+        }
         if (type === "llm" && prev.vlm.use_llm) {
           updated.vlm = { ...updated.vlm, use_llm: false, enabled: false };
         }
@@ -560,7 +569,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         }
       }
     },
-    [config.grounding.search_reuse_llm],
+    [config.grounding.search_reuse_llm, ttsModels],
   );
 
   const updateGrounding = useCallback(
@@ -948,7 +957,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       };
     }
     if (type === "asr") return ASR_PRESETS[protocol] || null;
-    if (type === "tts") return TTS_PRESETS[protocol] || null;
+    if (type === "tts") {
+      const preset = TTS_PRESETS[protocol];
+      if (!preset) return null;
+      // Supported speech models come from the backend capability table.
+      return {
+        ...preset,
+        models: ttsModels.map((item) => item.model),
+      };
+    }
     if (type === "image") return IMAGE_PRESETS[protocol] || null;
     if (type === "video") return VIDEO_PRESETS[protocol] || null;
     return null;
@@ -967,6 +984,14 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         ...provider.models.map((m) => ({ value: m.id, label: m.id })),
         ...provider.extra_models.map((m) => ({ value: m.id, label: m.id })),
       ];
+    }
+    if (type === "tts") {
+      // Label each speech model with what it can do, so the choice between
+      // "has system voices" and "must design a voice first" is visible.
+      return ttsModels.map((item) => ({
+        value: item.model,
+        label: item.label,
+      }));
     }
     const preset = getPresetForType(type, protocol);
     if (!preset?.models.length) return [];
@@ -1152,24 +1177,20 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 复用 LLM API Key
               </Checkbox>
             </div>
-            <div>
-              <label className="field-label">默认旁白音色</label>
-              <AutoComplete
-                value={config.tts.voice}
-                onChange={(v) => updateItem("tts", "voice", v)}
-                options={TTS_VOICES.map((v) => ({ value: v, label: v }))}
-                placeholder="如 Cherry"
-              />
-            </div>
-            <div>
-              <label className="field-label">声音复刻模型（可选）</label>
-              <AutoComplete
-                value={config.tts.vc_model_name}
-                onChange={(v) => updateItem("tts", "vc_model_name", v)}
-                options={TTS_VC_MODELS.map((v) => ({ value: v, label: v }))}
-                placeholder="留空使用默认复刻模型"
-              />
-            </div>
+            {(ttsCapability?.systemVoices.length ?? 0) > 0 && (
+              <div>
+                <label className="field-label">默认旁白音色</label>
+                <AutoComplete
+                  value={config.tts.voice}
+                  onChange={(v) => updateItem("tts", "voice", v)}
+                  options={(ttsCapability?.systemVoices ?? []).map((v) => ({
+                    value: v,
+                    label: v,
+                  }))}
+                  placeholder="如 Cherry"
+                />
+              </div>
+            )}
             <p
               style={{
                 gridColumn: "1 / -1",
@@ -1179,8 +1200,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 color: "var(--color-text-tertiary)",
               }}
             >
-              开启后可为成片生成旁白，并为角色复刻专属音色；默认音色用于旁白，
-              角色已绑定的复刻音色优先生效。
+              {ttsCapability && ttsCapability.systemVoices.length === 0
+                ? "该模型没有系统音色：Agent 会先根据角色设定设计专属音色，再用它合成台词与旁白。"
+                : "开启后可为成片生成旁白，并为角色设计或复刻专属音色；默认音色用于旁白，角色已绑定的音色优先生效。"}
+              {"复刻/设计所用的配套模型由后端自动选择，无需配置。"}
             </p>
           </div>
         )}

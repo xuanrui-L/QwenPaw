@@ -14,6 +14,8 @@ import asyncio
 import contextlib
 import hashlib
 import io
+import os
+import subprocess
 import tempfile
 import wave
 from dataclasses import dataclass
@@ -68,6 +70,8 @@ class FileVoiceEnrollmentResult:
     project_etag: str
     project_generation: int
     replayed: bool
+    # "design" when built from a description, "clone" from an audio sample.
+    origin: str = "clone"
 
 
 def _stable_id(prefix: str, project_id: str, idempotency_key: str) -> str:
@@ -105,6 +109,53 @@ def _wav_duration_seconds(content: bytes) -> float | None:
     return None
 
 
+def _ffprobe_duration_seconds(content: bytes, media_type: str) -> float | None:
+    """Duration of any audio payload, via ffprobe on a temporary file.
+
+    The WebSocket family streams MP3, which carries no frame count in a
+    parsable header the way WAV does.
+    """
+
+    extension = _MEDIA_TYPE_EXTENSIONS.get(media_type, ".mp3")
+    with contextlib.suppress(Exception):
+        with tempfile.TemporaryDirectory(prefix="creator-audio-") as directory:
+            probe_path = Path(directory) / f"probe{extension}"
+            probe_path.write_bytes(content)
+            completed = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "csv=p=0",
+                    os.fspath(probe_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+            value = float(completed.stdout.strip())
+            if value > 0:
+                return round(value, 3)
+    return None
+
+
+def _audio_duration_seconds(
+    content: bytes,
+    media_type: str,
+) -> float | None:
+    """Duration of synthesized audio, whichever container it arrives in."""
+
+    if media_type in {"audio/wav", "audio/x-wav"}:
+        wav_duration = _wav_duration_seconds(content)
+        if wav_duration is not None:
+            return wav_duration
+    return _ffprobe_duration_seconds(content, media_type)
+
+
 def _entity_id_from_ref(ref: str) -> str:
     """Accept ``asset:<entityId>`` or a bare visual entity id."""
 
@@ -113,6 +164,20 @@ def _entity_id_from_ref(ref: str) -> str:
     if not value:
         raise ValidationError(f"invalid character ref: {ref!r}")
     return value
+
+
+def _default_preview_text(entity: Any) -> str:
+    """Audition script for a designed voice when the agent supplies none.
+
+    The provider requires a minimum length, so pad with the character's own
+    description before falling back to a generic line.
+    """
+
+    parts = [entity.name, entity.description or "", entity.continuity or ""]
+    sentence = "，".join(part.strip() for part in parts if part.strip())
+    if len(sentence) >= tts_model.VOICE_PREVIEW_MIN_CHARS:
+        return sentence[:180]
+    return f"你好，我是{entity.name}。这是一段用于试听的角色音色预览。"
 
 
 def _require_character(project: Any, entity_id: str) -> Any:
@@ -265,6 +330,7 @@ async def execute_file_tts_command(
     label = str(arguments.get("label") or "").strip()
 
     voice_id: str | None = None
+    voice_model = ""
     character_entity_id = ""
     if character_ref:
         character_entity_id = _entity_id_from_ref(character_ref)
@@ -272,13 +338,19 @@ async def execute_file_tts_command(
         entity = _require_character(snapshot.project, character_entity_id)
         if entity.voice is not None:
             voice_id = entity.voice.voice_id
+            # A created voice only speaks through the model it is bound to.
+            voice_model = entity.voice.target_model
 
     synthesis = await tts_model.synthesize(
         text,
         voice=voice or None,
         voice_id=voice_id,
+        voice_model=voice_model or None,
     )
-    duration = _wav_duration_seconds(synthesis.audio_bytes)
+    duration = _audio_duration_seconds(
+        synthesis.audio_bytes,
+        synthesis.media_type,
+    )
     metadata: dict[str, Any] = {
         "sourceKind": "tts_generation",
         "model": synthesis.model,
@@ -357,57 +429,77 @@ async def execute_file_voice_enrollment_command(
             project_etag=snapshot.etag,
             project_generation=snapshot.generation,
             replayed=True,
+            origin=(
+                "design"
+                if entity.voice.sample_source_version_id is None
+                else "clone"
+            ),
         )
 
     sample_version_id = str(
         arguments.get("sampleSourceVersionId") or "",
     ).strip()
     sample_text = str(arguments.get("sampleText") or "").strip()
+    voice_prompt = str(arguments.get("voicePrompt") or "").strip()
     preferred_name = (
         str(arguments.get("preferredName") or "").strip() or entity.name
     )
 
-    if sample_version_id:
-        sample_bytes, sample_media_type = await asyncio.to_thread(
-            _sample_bytes_for_version,
-            services,
-            project_id=project_id,
-            version_id=sample_version_id,
-        )
-    elif sample_text:
-        # Audition path: synthesize a system-voice sample, keep it as an
-        # audio asset so the binding stays reproducible, then enroll from it.
-        audition = await execute_file_tts_command(
-            services,
-            project_id=project_id,
-            target_ref=target_ref,
-            arguments={
-                "text": sample_text,
-                "voice": str(arguments.get("voice") or ""),
-                "label": f"Voice sample: {entity.name}"[:60],
-            },
-            idempotency_key=f"{idempotency_key}:sample",
-        )
-        sample_version_id = audition.source_asset_version_id
-        sample_bytes, sample_media_type = await asyncio.to_thread(
-            _sample_bytes_for_version,
-            services,
-            project_id=project_id,
-            version_id=sample_version_id,
-        )
-    else:
-        raise ValidationError(
-            "create_character_voice requires sampleSourceVersionId or sampleText",
-        )
-
-    extension = _MEDIA_TYPE_EXTENSIONS.get(sample_media_type, ".wav")
-    with tempfile.TemporaryDirectory(prefix="creator-voice-") as directory:
-        sample_path = Path(directory) / f"sample{extension}"
-        sample_path.write_bytes(sample_bytes)
-        enrollment = await tts_model.enroll_voice(
-            sample_path.as_uri(),
+    if voice_prompt:
+        # Design path: no audio sample at all, the timbre comes from the
+        # character's own description.
+        preview_text = str(arguments.get("previewText") or "").strip()
+        if len(preview_text) < tts_model.VOICE_PREVIEW_MIN_CHARS:
+            preview_text = _default_preview_text(entity)
+        enrollment = await tts_model.design_voice(
+            voice_prompt=voice_prompt,
+            preview_text=preview_text,
             preferred_name=preferred_name,
         )
+        sample_version_id = ""
+    else:
+        if sample_version_id:
+            sample_bytes, sample_media_type = await asyncio.to_thread(
+                _sample_bytes_for_version,
+                services,
+                project_id=project_id,
+                version_id=sample_version_id,
+            )
+        elif sample_text:
+            # Audition path: synthesize a system-voice sample, keep it as an
+            # audio asset so the binding stays reproducible, then clone it.
+            audition = await execute_file_tts_command(
+                services,
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments={
+                    "text": sample_text,
+                    "voice": str(arguments.get("voice") or ""),
+                    "label": f"Voice sample: {entity.name}"[:60],
+                },
+                idempotency_key=f"{idempotency_key}:sample",
+            )
+            sample_version_id = audition.source_asset_version_id
+            sample_bytes, sample_media_type = await asyncio.to_thread(
+                _sample_bytes_for_version,
+                services,
+                project_id=project_id,
+                version_id=sample_version_id,
+            )
+        else:
+            raise ValidationError(
+                "create_character_voice requires voicePrompt (design) or "
+                "sampleSourceVersionId / sampleText (clone)",
+            )
+
+        extension = _MEDIA_TYPE_EXTENSIONS.get(sample_media_type, ".wav")
+        with tempfile.TemporaryDirectory(prefix="creator-voice-") as directory:
+            sample_path = Path(directory) / f"sample{extension}"
+            sample_path.write_bytes(sample_bytes)
+            enrollment = await tts_model.enroll_voice(
+                sample_path.as_uri(),
+                preferred_name=preferred_name,
+            )
 
     binding = CharacterVoice(
         voice_id=enrollment.voice_id,
@@ -452,17 +544,23 @@ async def execute_file_voice_enrollment_command(
             project_etag=commit.snapshot.etag,
             project_generation=commit.snapshot.generation,
             replayed=False,
+            origin=enrollment.origin,
         )
 
     result = await asyncio.to_thread(_commit_binding)
-    previous_voice = (
-        entity.voice.voice_id
+    previous = (
+        entity.voice
         if entity.voice is not None
         and entity.voice.voice_id != result.voice_id
-        else ""
+        else None
     )
-    if previous_voice:
-        await tts_model.delete_voice(previous_voice)
+    if previous is not None:
+        # Route the delete by the model the old voice was bound to; the three
+        # voice namespaces each only accept their own management surface.
+        await tts_model.delete_voice(
+            previous.voice_id,
+            target_model=previous.target_model,
+        )
     return result
 
 

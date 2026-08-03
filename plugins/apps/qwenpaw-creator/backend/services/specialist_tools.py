@@ -346,19 +346,33 @@ _VOICE_ENROLLMENT_ARGUMENTS = _arguments_schema(
                 "实体时（如 project:assets 场景）必填。"
             ),
         },
+        "voicePrompt": {
+            "type": "string",
+            "maxLength": 300,
+            "description": (
+                "根据角色设定写的音色描述（如「低沉沙哑的中年男声，语速缓慢」），"
+                "无需音频样本即可设计专属音色。与 sampleSourceVersionId / "
+                "sampleText 三选一；三者都未传时报错。"
+            ),
+        },
+        "previewText": {
+            "type": "string",
+            "maxLength": 200,
+            "description": (
+                "voicePrompt 设计时的试听文本，至少 15 个字；省略时自动用角色" "名与描述拼一句。"
+            ),
+        },
         "sampleSourceVersionId": {
             "type": "string",
             "description": (
                 "可选；已存在的 exact 音频 SourceAssetVersion id 作为 10–20 秒"
-                "音色样本。与 sampleText 二选一。"
+                "音色样本（复刻路径）。"
             ),
         },
         "sampleText": {
             "type": "string",
             "maxLength": 200,
-            "description": (
-                "可选；先用系统音色合成这段试音文本作为样本再复刻。" "与 sampleSourceVersionId 二选一。"
-            ),
+            "description": ("可选；先用系统音色合成这段试音文本作为样本再复刻；仅当前" "模型有系统音色时可用。"),
         },
         "voice": {
             "type": "string",
@@ -496,9 +510,10 @@ _SPECS = (
     SpecialistToolSpec(
         name="create_character_voice",
         description=(
-            "为目标 character 实体复刻专属音色并绑定到该实体（可选增强，非必需）。"
-            "样本来自已存在的 exact 音频 version 或一段试音文本；绑定后该角色的"
-            " tts_generation 自动沿用此音色，重新复刻会替换旧绑定。"
+            "为目标 character 实体创建专属音色并绑定到该实体。两条路径：传 "
+            "voicePrompt 根据角色设定直接设计音色（无需样本），或传 "
+            "sampleSourceVersionId / sampleText 从音频样本复刻。绑定后该角色的"
+            " tts_generation 自动沿用此音色，重新创建会替换旧绑定。"
         ),
         roles=frozenset({SpecialistRole.VISUAL_DEVELOPMENT}),
         parameters=_tool_schema(_VOICE_ENROLLMENT_ARGUMENTS),
@@ -718,6 +733,7 @@ class FileSpecialistToolRegistry:
                     "status": "SUCCEEDED",
                     "entityId": enrollment.entity_id,
                     "voiceBound": True,
+                    "voiceOrigin": enrollment.origin,
                     "sampleSourceVersionId": enrollment.sample_source_version_id,
                     "generation": enrollment.project_generation,
                     "etag": enrollment.project_etag,

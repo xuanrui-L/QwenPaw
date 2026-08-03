@@ -894,12 +894,40 @@ def get_tts_voice() -> str:
 
 
 def get_tts_vc_model_name() -> str:
-    return _configured_value(
+    """Model that cloned voices bind to, derived from the synthesis model.
+
+    Voice cloning/design run on companion models the user should never have to
+    name: the capability table maps each synthesis model to its own, so the
+    configuration surface stays "key + model".
+    """
+
+    from models.tts_capabilities import require_capability
+
+    override = _configured_value(
         CREATOR_TTS_CONFIG_TOOL,
         "vc_model",
         "TTS_VC_MODEL_NAME",
-        TTS_VC_MODEL_NAME,
+        "",
     )
+    if override:
+        return override
+    return require_capability(get_tts_model_name()).clone_model()
+
+
+def get_tts_vd_model_name() -> str:
+    """Model that designed voices bind to, derived the same way."""
+
+    from models.tts_capabilities import require_capability
+
+    return require_capability(get_tts_model_name()).design_model()
+
+
+def tts_has_system_voices() -> bool:
+    """False when the configured model can only speak with created voices."""
+
+    from models.tts_capabilities import require_capability
+
+    return require_capability(get_tts_model_name()).has_system_voices
 
 
 def get_tts_timeout_seconds() -> int:
