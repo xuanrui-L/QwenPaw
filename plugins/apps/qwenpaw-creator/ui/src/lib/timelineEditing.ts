@@ -289,7 +289,9 @@ export function transitionFollowChanges(
     if (!window) {
       return {
         ok: false,
-        reason: `调整后「${element.label || element.element_id}」转场的前后画面不再重叠，请先调整或停用该转场`,
+        reason: `调整后「${
+          element.label || element.element_id
+        }」转场的前后画面不再重叠，请先调整或停用该转场`,
       };
     }
     const minTick = minDurationTick(timeline.ticks_per_second);
@@ -401,4 +403,14 @@ export function splitTransitionsForDisplay(timeline: TimelineDocument): {
     }
   }
   return { junctions, orphanTransitionIds };
+}
+
+/**
+ * Compute ripple changes: disabled. Elements stay in their original positions.
+ */
+export function computeRippleChanges(
+  _timeline: TimelineDocument,
+  _primaryChanges: SpanChange[],
+): SpanChange[] {
+  return [];
 }

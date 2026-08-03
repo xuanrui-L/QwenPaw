@@ -568,6 +568,18 @@ export default function PlanPage() {
               重试合成
             </button>
           )}
+          <button
+            type="button"
+            title="点击合成成片"
+            disabled={isComposing}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)] transition hover:border-[var(--color-accent)] disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={() => void composeNow()}
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${isComposing ? "animate-spin" : ""}`}
+            />
+            {isComposing ? "合成中..." : "合成成片"}
+          </button>
           {/* Download-final-cut and export-project share one split entry. */}
           <Dropdown
             trigger={["click"]}

@@ -291,41 +291,65 @@ class FfmpegLocalMediaRunner:
                     1 / 30,
                     end_seconds - start_seconds - tail_trim,
                 )
+
+                # Calculate freeze duration if target exceeds source
+                freeze_duration = 0.0
+                if (
+                    item.duration_seconds is not None
+                    and item.start_seconds is not None
+                    and item.end_seconds is not None
+                ):
+                    source_duration = item.duration_seconds
+                    target_duration = item.end_seconds - item.start_seconds
+                    if target_duration > source_duration:
+                        freeze_duration = target_duration - source_duration
+
                 segment = segment_dir / f"{index:06d}.mp4"
                 placement_filter = self._placement_filter(
                     item.location,
                     canvas_size=spec.canvas_size,
                     duration_seconds=segment_duration,
+                    freeze_duration=freeze_duration,
                 )
-                self._run(
+
+                # Build FFmpeg arguments
+                ffmpeg_args = [
+                    "-y",
+                    "-ss",
+                    f"{start_seconds:.6f}",
+                    "-t",
+                    f"{segment_duration:.6f}",
+                    "-i",
+                    os.fspath(item.path),
+                    "-filter_complex",
+                    placement_filter,
+                    "-map",
+                    "[outv]",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+
+                # Map audio if present
+                if freeze_duration > 0:
+                    ffmpeg_args.extend(["-map", "[a]"])
+                else:
+                    ffmpeg_args.extend(["-map", "0:a?"])
+
+                ffmpeg_args.extend(
                     [
-                        "-y",
-                        "-ss",
-                        f"{start_seconds:.6f}",
-                        "-t",
-                        f"{segment_duration:.6f}",
-                        "-i",
-                        os.fspath(item.path),
-                        "-filter_complex",
-                        placement_filter,
-                        "-map",
-                        "[outv]",
-                        "-map",
-                        "0:a?",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-pix_fmt",
-                        "yuv420p",
                         "-c:a",
                         "aac",
                         "-movflags",
                         "+faststart",
                         os.fspath(segment),
                     ],
-                    cwd=spec.work_dir,
                 )
+
+                self._run(ffmpeg_args, cwd=spec.work_dir)
                 for warning in self._apply_overlay(item, segment):
                     overlay_warnings.append(
                         f"{item.source_ref or item.version_id}: {warning}",
@@ -526,6 +550,7 @@ class FfmpegLocalMediaRunner:
         *,
         canvas_size: tuple[int, int],
         duration_seconds: float,
+        freeze_duration: float = 0.0,
     ) -> str:
         """Build one anchor-based placement graph shared with the UI preview."""
 
@@ -566,17 +591,38 @@ class FfmpegLocalMediaRunner:
         )
         overlay_x = round(location["x"] * canvas_width - rotated_width / 2)
         overlay_y = round(location["y"] * canvas_height - rotated_height / 2)
-        return (
+
+        # Build the video filter chain
+        video_filters = (
             f"[0:v]scale={box_width}:{box_height}:force_original_aspect_ratio=increase,"
             f"crop={box_width}:{box_height},setsar=1,format=rgba,"
             f"colorchannelmixer=aa={location['opacity']:.6f},"
             f"pad={padded_width}:{padded_height}:{pad_x}:{pad_y}:color=0x00000000,"
             f"rotate={location['rotation_degrees']:.6f}*PI/180:"
-            f"ow={rotated_width}:oh={rotated_height}:c=none[fg];"
+            f"ow={rotated_width}:oh={rotated_height}:c=none"
+        )
+
+        # Add tpad filter to freeze the last frame if needed
+        if freeze_duration > 0:
+            video_filters += (
+                f",tpad=stop_mode=clone:stop_duration={freeze_duration:.6f}"
+            )
+
+        video_filters += "[fg]"
+
+        # Build the filter chain
+        filter_chain = (
+            f"{video_filters};"
             f"color=c=black:s={canvas_width}x{canvas_height}:r=30:"
             f"d={duration_seconds:.6f}[bg];"
             f"[bg][fg]overlay={overlay_x}:{overlay_y}:shortest=1,format=yuv420p[outv]"
         )
+
+        # Only add audio filter chain when freezing (apad needed)
+        if freeze_duration > 0:
+            filter_chain += f";[0:a]apad=pad_dur={freeze_duration:.6f}[a]"
+
+        return filter_chain
 
     def _apply_overlay(
         self,
@@ -1514,6 +1560,12 @@ def _timeline_execution(
             )
             end_seconds = (
                 render_source.source_out_tick / timeline.ticks_per_second
+            )
+        elif isinstance(element.creation, R2VCreation):
+            # For R2V elements, use the span duration to allow length adjustment
+            start_seconds = 0.0
+            end_seconds = (
+                element.span.duration_tick / timeline.ticks_per_second
             )
         inputs.append(
             _FrozenInput(

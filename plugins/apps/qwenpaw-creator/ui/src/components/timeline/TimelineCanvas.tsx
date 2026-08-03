@@ -22,6 +22,7 @@ import type {
   TimelineSpanDocument,
 } from "@/contracts/creator";
 import { getArtifactVersionMediaUrl } from "@/api/creator";
+import { renderTimeline } from "@/api/creator/tasks";
 import {
   elementsAtTick,
   groupDisplayTracks,
@@ -31,7 +32,11 @@ import type { ElementPlaybackStatus } from "@/selectors/elementPlaybackSelectors
 import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
 import TimelineLivePreview from "@/components/timeline/TimelineLivePreview";
 import TimelineTracks from "@/components/timeline/TimelineTracks";
-import { buildSpanOperations, type SpanChange } from "@/lib/timelineEditing";
+import {
+  buildSpanOperations,
+  computeRippleChanges,
+  type SpanChange,
+} from "@/lib/timelineEditing";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useCreatorEditBufferStore } from "@/store/creatorEditBufferStore";
 import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
@@ -242,10 +247,12 @@ export default function TimelineCanvas({
         clearCommitted();
         return;
       }
+      const rippleChanges = computeRippleChanges(latestTimeline, changes);
+      const allChanges = [...changes, ...rippleChanges];
       const operations = buildSpanOperations(
         latestTimeline,
         timeline.timeline_id,
-        changes,
+        allChanges,
       );
       if (!operations.length) {
         clearCommitted();
@@ -257,7 +264,11 @@ export default function TimelineCanvas({
         if (response.editImpact?.regenerationRequired) {
           message.success("时间调整已应用；相关生成结果已标记为需要重新生成");
         } else if (response.editImpact?.renderTimelineIds.length) {
-          message.success("时间调整已应用；实时预览已更新，成片将重新合成");
+          message.success("时间调整已应用；正在重新合成成片");
+          // Auto-trigger recompose so the final render stays in sync
+          void renderTimeline(project.project_id, timeline.timeline_id).catch(
+            () => undefined,
+          );
         } else {
           message.success("时间调整已应用");
         }

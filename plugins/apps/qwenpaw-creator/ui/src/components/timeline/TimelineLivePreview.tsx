@@ -91,13 +91,22 @@ function mediaTargetSeconds(
   const localSeconds =
     Math.max(0, playheadTick - layer.element.span.start_tick) / ticksPerSecond;
   let offset = localSeconds * media.playbackRate;
-  const windowSeconds =
+
+  const sourceWindowSeconds =
     media.sourceOutSeconds != null
       ? media.sourceOutSeconds - media.sourceInSeconds
       : media.durationSeconds;
-  if (media.loop && windowSeconds && windowSeconds > 0) {
-    offset %= windowSeconds;
+  const effectiveWindowSeconds = Math.min(
+    sourceWindowSeconds ?? Infinity,
+    media.durationSeconds ?? Infinity,
+  );
+
+  if (media.loop && effectiveWindowSeconds && effectiveWindowSeconds > 0) {
+    offset %= effectiveWindowSeconds;
+  } else if (effectiveWindowSeconds && offset > effectiveWindowSeconds) {
+    offset = Math.max(0, effectiveWindowSeconds - 0.033);
   }
+
   return media.sourceInSeconds + offset;
 }
 
@@ -465,12 +474,35 @@ export default function TimelineLivePreview({
       if (!media) return;
       const target = mediaTargetSeconds(layer, playheadTick, ticksPerSecond);
       const visible = visibleIds.has(layer.element.element_id);
+
+      // Check if playhead is beyond source material duration
+      const sourceWindowSeconds =
+        layer.media.sourceOutSeconds != null
+          ? layer.media.sourceOutSeconds - layer.media.sourceInSeconds
+          : layer.media.durationSeconds;
+      const effectiveWindowSeconds = Math.min(
+        sourceWindowSeconds ?? Infinity,
+        layer.media.durationSeconds ?? Infinity,
+      );
+      const localSeconds =
+        Math.max(0, playheadTick - layer.element.span.start_tick) /
+        ticksPerSecond;
+      const isBeyondSource = localSeconds > effectiveWindowSeconds;
+
       if (media.playbackRate !== layer.media.playbackRate) {
         media.playbackRate = layer.media.playbackRate;
       }
-      if (!visible || !playing) {
+
+      if (!visible || !playing || isBeyondSource) {
+        // Pause when beyond source duration, out of view, or not playing
         if (!media.paused) media.pause();
-        if (
+        if (visible && isBeyondSource && Number.isFinite(media.duration)) {
+          // Freeze on last frame when beyond source
+          media.currentTime = Math.min(
+            media.duration,
+            effectiveWindowSeconds - 0.033,
+          );
+        } else if (
           !playing &&
           visible &&
           Math.abs(media.currentTime - target) > DRIFT_TOLERANCE_SECONDS
@@ -527,7 +559,10 @@ export default function TimelineLivePreview({
 
   const anyVisible = visibleIds.size > 0;
   const semanticIncompleteLayers = useMemo(
-    () => visibleLayers.filter((layer) => layer.status !== "ready"),
+    () =>
+      visibleLayers.filter(
+        (layer) => layer.status !== "ready" && layer.status !== "stale",
+      ),
     [visibleLayers],
   );
   const visualIncompleteLayers = useMemo(

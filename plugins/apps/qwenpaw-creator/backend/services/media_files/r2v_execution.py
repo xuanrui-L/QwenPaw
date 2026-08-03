@@ -468,10 +468,7 @@ def _resolve_request(
             "R2V reference 只能来自 project.json 的 exact version 列表",
         )
     duration_seconds = _duration(
-        arguments.get(
-            "durationSeconds",
-            element.span.duration_tick / timeline.ticks_per_second,
-        ),
+        element.span.duration_tick / timeline.ticks_per_second,
     )
     ratio = str(
         arguments.get("ratio") or project.settings.aspect_ratio,
