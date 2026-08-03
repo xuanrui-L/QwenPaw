@@ -275,6 +275,30 @@ def _migrate_v2_to_v3(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[2] = _migrate_v2_to_v3
 
 
+def _migrate_v3_to_v4(document: dict[str, Any]) -> dict[str, Any]:
+    """Record existing visual Variants as the entity's required set.
+
+    Schema v3 had no separate statement of intended Variant coverage, so the
+    migration preserves exactly what is known instead of guessing additional
+    states from free text. New plans can declare required IDs before all
+    corresponding Variant records have been materialized.
+    """
+
+    for entity in _visual_entities(document).values():
+        if not isinstance(entity, dict):
+            continue
+        variants = _dict_field(entity, "variants")
+        order = variants.get("order")
+        entity["required_variant_ids"] = (
+            list(order) if isinstance(order, list) else []
+        )
+    document["schema_version"] = 4
+    return document
+
+
+PROJECT_MIGRATIONS[3] = _migrate_v3_to_v4
+
+
 def migrate_project_document(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Return a detached document at the current Project schema version.
 

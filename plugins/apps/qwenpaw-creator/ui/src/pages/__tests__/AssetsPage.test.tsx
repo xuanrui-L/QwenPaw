@@ -111,7 +111,7 @@ describe("AssetsPage Project projection", () => {
     );
   });
 
-  it("groups visual history by Variant and marks active versus historical versions", () => {
+  it("groups visual settings by entity and keeps active versus historical state in flat artifact views", () => {
     const project = cloneProject();
     project.assets.files_by_id["file:cat-history"] = {
       file_id: "file:cat-history",
@@ -138,18 +138,78 @@ describe("AssetsPage Project projection", () => {
       "variant:cat:default"
     ].generated_artifact_version_ids.unshift("cat-anchor-history");
     seedProject(project);
-    renderPage();
+    const { container } = renderPage();
 
-    expect(
-      screen.getByText("圆润大橘猫 / 圆润体型、橘色毛发、红色项圈"),
-    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "视觉设定" }));
+    expect(screen.getByText("圆润大橘猫")).toBeInTheDocument();
+    expect(screen.getByText("1 个造型")).toBeInTheDocument();
     expect(screen.getByText("使用中")).toBeInTheDocument();
-    expect(screen.getByText("历史")).toBeInTheDocument();
-    expect(screen.getByText("橘猫角色锚点旧版")).toBeInTheDocument();
+    expect(screen.queryByText("历史")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "生成产物" }));
     expect(screen.getByText("使用中")).toBeInTheDocument();
     expect(screen.getByText("历史")).toBeInTheDocument();
+    expect(screen.getByText("橘猫角色锚点旧版")).toBeInTheDocument();
+    expect(container.querySelectorAll("[data-asset-group]")).toHaveLength(0);
+  });
+
+  it("keeps character Variants under one entity and separates ungenerated scenes and props", () => {
+    const project = cloneProject();
+    project.visual.entities.items.cat.variants.order.push("variant:cat:night");
+    project.visual.entities.items.cat.required_variant_ids.push(
+      "variant:cat:night",
+    );
+    project.visual.entities.items.cat.variants.items["variant:cat:night"] = {
+      variant_id: "variant:cat:night",
+      requirements: "夜间造型：蓝色围巾、红色项圈",
+      prompt: "夜间的圆润大橘猫",
+      reference_asset_version_ids: [],
+      reference_artifact_version_ids: [],
+      generated_artifact_version_ids: [],
+      selected_artifact_version_id: null,
+    };
+    project.visual.entities.order.push("scene:alley", "prop:bell");
+    project.visual.entities.items["scene:alley"] = {
+      entity_id: "scene:alley",
+      kind: "scene",
+      name: "雨夜小巷",
+      description: "湿润路面与暖色路灯",
+      continuity: "保持同一街区结构",
+      required_variant_ids: [],
+      variants: { order: [], items: {} },
+      selected_artifact_version_id: null,
+    };
+    project.visual.entities.items["prop:bell"] = {
+      entity_id: "prop:bell",
+      kind: "prop",
+      name: "红色铃铛",
+      description: "主角项圈上的铃铛",
+      continuity: "所有画面保持红色",
+      required_variant_ids: [],
+      variants: { order: [], items: {} },
+      selected_artifact_version_id: null,
+    };
+    seedProject(project);
+    const { container } = renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "视觉设定" }));
+
+    const groupLabels = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-asset-group]"),
+    ).map((node) => node.textContent);
+    expect(groupLabels).toEqual([
+      expect.stringContaining("圆润大橘猫"),
+      expect.stringContaining("场景"),
+      expect.stringContaining("道具"),
+    ]);
+    expect(groupLabels[0]).toContain("2 个造型");
+    expect(screen.getByText("夜间造型")).toBeInTheDocument();
+    expect(screen.getByText("雨夜小巷")).toBeInTheDocument();
+    expect(screen.getByText("红色铃铛")).toBeInTheDocument();
+    expect(screen.getAllByText("待生成")).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole("button", { name: "图片" }));
+    expect(container.querySelectorAll("[data-asset-group]")).toHaveLength(0);
   });
 
   it("filters locally without requiring a separate backend asset projection", () => {

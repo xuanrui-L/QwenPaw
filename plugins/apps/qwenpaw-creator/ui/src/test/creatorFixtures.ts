@@ -22,9 +22,9 @@ const defaultLocation = {
   opacity: 1,
 };
 
-/** Schema-v3 Project fixture used by the Timeline/Element frontend. */
+/** Schema-v4 Project fixture used by the Timeline/Element frontend. */
 export const projectDocument: ProjectDocument = {
-  schema_version: 3,
+  schema_version: 4,
   project_id: "p1",
   generation: 3,
   created_at: "2026-07-20T00:00:00Z",
@@ -74,6 +74,7 @@ export const projectDocument: ProjectDocument = {
           name: "圆润大橘猫",
           description: "主角，佩戴红色项圈",
           continuity: "所有画面保持同一项圈与毛色",
+          required_variant_ids: ["variant:cat:default"],
           variants: {
             order: ["variant:cat:default"],
             items: {

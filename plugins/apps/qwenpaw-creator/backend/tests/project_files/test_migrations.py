@@ -50,7 +50,7 @@ def test_registered_migration_runs_before_strict_project_validation() -> None:
         PROJECT_MIGRATIONS.pop(0, None)
         PROJECT_MIGRATIONS.pop(1, None)
 
-    assert project.schema_version == 3
+    assert project.schema_version == 4
     assert project.name == "Project"
     assert project.timelines.order == ["timeline:main"]
 
@@ -61,7 +61,7 @@ def test_unregistered_or_future_schema_fails_closed() -> None:
     with pytest.raises(CanonicalJsonError):
         load_project_json(json.dumps(raw))
 
-    raw["schema_version"] = 4
+    raw["schema_version"] = 5
     with pytest.raises(CanonicalJsonError):
         load_project_json(json.dumps(raw))
 
@@ -88,6 +88,38 @@ def test_unregistered_v1_requires_explicit_import() -> None:
     with pytest.raises(CanonicalJsonError) as caught:
         load_project_json(json.dumps(raw))
     assert "no Project migration is registered" in str(caught.value.__cause__)
+
+
+def test_v3_migration_declares_existing_variants_as_required() -> None:
+    raw = _raw_project()
+    raw["schema_version"] = 3
+    raw["visual"]["entities"] = {
+        "order": ["char:hero"],
+        "items": {
+            "char:hero": {
+                "entity_id": "char:hero",
+                "kind": "character",
+                "name": "Hero",
+                "description": "",
+                "continuity": "",
+                "variants": {
+                    "order": ["variant:peak", "variant:fallen"],
+                    "items": {
+                        "variant:peak": {"variant_id": "variant:peak"},
+                        "variant:fallen": {"variant_id": "variant:fallen"},
+                    },
+                },
+                "selected_artifact_version_id": None,
+            },
+        },
+    }
+
+    migrated = migrate_project_document(raw)
+
+    assert migrated["schema_version"] == 4
+    assert migrated["visual"]["entities"]["items"]["char:hero"][
+        "required_variant_ids"
+    ] == ["variant:peak", "variant:fallen"]
 
 
 def test_v2_variant_selections_and_bindings_migrate_deterministically() -> (
@@ -221,6 +253,11 @@ def test_v2_variant_selections_and_bindings_migrate_deterministically() -> (
     migrated = migrate_project_document(raw)
 
     hero = migrated["visual"]["entities"]["items"]["char:hero"]
+    assert hero["required_variant_ids"] == [
+        "var:peak",
+        "var:fallen",
+        "var:ambiguous",
+    ]
     assert (
         hero["variants"]["items"]["var:peak"]["selected_artifact_version_id"]
         == "artifact:peak-1"

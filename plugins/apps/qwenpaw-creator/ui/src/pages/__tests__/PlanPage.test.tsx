@@ -141,7 +141,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getByText(/使用中 · 1 个产物/)).toBeInTheDocument();
   });
 
-  it("exposes ambiguous multi-Variant Element bindings without blocking the plan", () => {
+  it("exposes ambiguous multi-Variant bindings before storyboard admission", () => {
     const project = cloneProject();
     const cat = project.visual.entities.items.cat;
     cat.variants.items["variant:cat:winter"] = {
@@ -154,6 +154,7 @@ describe("PlanPage Timeline/Element frontend", () => {
       selected_artifact_version_id: null,
     };
     cat.variants.order.push("variant:cat:winter");
+    cat.required_variant_ids.push("variant:cat:winter");
     const element =
       project.timelines.items["timeline:main"].elements_by_id["r2v-window"];
     if (element.creation.type !== "r2v") {
@@ -170,6 +171,21 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(
       screen.getByRole("button", { name: "下载 / 导出" }),
     ).toBeInTheDocument();
+  });
+
+  it("exposes required Variant states that have not been materialized", () => {
+    const project = cloneProject();
+    project.visual.entities.items.cat.required_variant_ids.push(
+      "variant:cat:winter",
+    );
+    seedProject(project);
+    renderPage();
+
+    expect(screen.getByText("视觉覆盖 0/1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("视觉覆盖 0/1"));
+    expect(screen.getByText("必需 Variant 尚未定义")).toBeInTheDocument();
+    expect(screen.getByText("必需 Variant 1/2")).toBeInTheDocument();
+    expect(screen.getByText("缺少：variant:cat:winter")).toBeInTheDocument();
   });
 
   it("keeps an empty Timeline guided through the Agent without an add-content button", () => {

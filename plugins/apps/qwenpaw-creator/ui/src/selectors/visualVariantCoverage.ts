@@ -7,7 +7,7 @@ import type {
 
 export type VisualCoverageStatus =
   | "covered"
-  | "missing_variant"
+  | "missing_required_variant"
   | "unassigned_variant"
   | "missing_artifact";
 
@@ -23,6 +23,9 @@ export interface VisualEntityCoverage {
   entity: VisualEntityDocument;
   referencedElementIds: string[];
   unassignedElementIds: string[];
+  missingVariantIds: string[];
+  definedRequiredCount: number;
+  entitySelectedAvailable: boolean;
   variants: VisualVariantCoverage[];
   status: VisualCoverageStatus;
 }
@@ -142,22 +145,38 @@ export function selectVisualVariantCoverage(
         } satisfies VisualVariantCoverage,
       ];
     });
-    const referencedVariants = variants.filter(
-      (variant) => variant.referencedElementIds.length > 0,
+    const missingVariantIds = entry.entity.required_variant_ids.filter(
+      (variantId) => !entry.entity.variants.items[variantId],
+    );
+    const requiredVariants = variants.filter((variant) =>
+      entry.entity.required_variant_ids.includes(variant.variant.variant_id),
+    );
+    const entitySelectedVersionId = entry.entity.selected_artifact_version_id;
+    const entitySelectedAvailable = Boolean(
+      entitySelectedVersionId &&
+        project.assets.artifact_versions_by_id[entitySelectedVersionId],
     );
     const status: VisualCoverageStatus =
-      entry.entity.variants.order.length === 0
-        ? "missing_variant"
+      missingVariantIds.length > 0
+        ? "missing_required_variant"
         : entry.unassignedElementIds.size > 0
         ? "unassigned_variant"
-        : referencedVariants.some((variant) => !variant.selectedAvailable)
-        ? "missing_artifact"
-        : "covered";
+        : entry.entity.required_variant_ids.length > 0
+        ? requiredVariants.some((variant) => !variant.selectedAvailable)
+          ? "missing_artifact"
+          : "covered"
+        : entitySelectedAvailable
+        ? "covered"
+        : "missing_artifact";
     return [
       {
         entity: entry.entity,
         referencedElementIds: [...entry.elementIds],
         unassignedElementIds: [...entry.unassignedElementIds],
+        missingVariantIds,
+        definedRequiredCount:
+          entry.entity.required_variant_ids.length - missingVariantIds.length,
+        entitySelectedAvailable,
         variants,
         status,
       } satisfies VisualEntityCoverage,

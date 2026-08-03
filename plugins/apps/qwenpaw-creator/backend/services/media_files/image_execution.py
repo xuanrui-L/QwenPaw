@@ -68,6 +68,9 @@ from services.media_files.review_admission import assert_media_review_admission
 from services.media_files.visual_reference_resolution import (
     resolve_r2v_visual_reference_version_ids,
 )
+from services.media_files.visual_design_readiness import (
+    assert_visual_design_ready_for_storyboards,
+)
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
 from services.runtime_files.atomic_store import (
@@ -419,6 +422,7 @@ def _resolve_request(
         creation = element.creation
         if not isinstance(creation, R2VCreation):
             raise ValidationError("仅 R2V Element 可以生成分镜图")
+        assert_visual_design_ready_for_storyboards(project)
         prompt = explicit_prompt or creation.storyboard_prompt.strip()
         if not prompt:
             shot_text = "；".join(

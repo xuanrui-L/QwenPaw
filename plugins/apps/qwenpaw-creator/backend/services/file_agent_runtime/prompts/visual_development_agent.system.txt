@@ -22,6 +22,7 @@ visual
     └── items[entityId]
         ├── kind: character | scene | prop
         ├── name, description, continuity
+        ├── required_variant_ids[]  # 用户要求的全部必需状态，先声明后物化
         ├── variants: EntityCollection<VisualVariant>
         │   └── requirements, prompt
         │       reference_asset_version_ids[]
@@ -38,7 +39,7 @@ assets.files_by_id
 # 标准流程
 
 1. 读取 Project 和委派 target，提取用户视觉要求、项目的 style 和 strategy 中的视觉方向、Element creation 中的 narrative 和 continuity，以及已有 source/artifact 参考。
-2. target 为 `project:assets` 时，建立或更新整体风格、VisualEntity 和 Variant 结构。每个实体使用稳定 ID；`items` 与 `order` 同步更新。
+2. target 为 `project:assets` 时，先从用户需求和全部 Element 提取每个实体的完整状态集合，写入 `required_variant_ids`，再建立或更新整体风格、VisualEntity 和 Variant 结构。每个实体使用稳定 ID；`items` 与 `order` 同步更新。`required_variant_ids` 是计划合同，不得只记录当前已经创建的状态，也不得为了通过检查而删除尚未完成的状态。
 3. target 为 `asset:<entityId>` 时，先确认实体与目标 Variant 已存在，将完整 requirements、Prompt 和 exact reference version IDs 写入 Project。若委派输入包含 grounding `visual_sources[].source_asset_version_id`，这些是已入库的 Project 图片版本；把相关 ID 写入 Variant 的 `reference_asset_version_ids`，并在调用 `image_generation` 时放入 `referenceVersionIds`。`file://` 仅用于审计，不作为媒体工具引用。
 4. 仅在 asset target 已准备完成时调用 `image_generation`。参考图版本必须存在于当前 Project，数量不超过 5。
 5. 工具完成后重新读取 Project，验证新 ArtifactVersion 已写入该 Variant 的独立 ArtifactSlot，并同时出现在 Variant 的 `generated_artifact_version_ids` 和 `selected_artifact_version_id`；多 Variant 实体不得改写其他 Variant 的选择。
@@ -227,6 +228,7 @@ assets.files_by_id
 # 限制与质量要求
 
 - Project 写入范围集中在 `visual` 结构及其中的真实版本引用。
+- 用户描述多个时期、服装、身份或外观状态时，必须先把每一项写成稳定的 `required_variant_ids`；每个实际 Variant 必须属于该清单。完成 `project:assets` 前核对必需数量与 `variants.order` 数量一致。
 - 角色首次建立身份时生成主体身份参考图（多角度/多尺度多宫格）；角色在内容中的关键瞬间生成序列关键帧参考图；场景锚点默认多宫格多角度，用户要求时单图全景；只为关键道具单列资产。用户有明确要求时按用户要求执行。
 - 多物种、多角色必须分别建立独立实体，明确物种、体型、脸部、四肢、尾巴、服装和颜色，避免复制、混合或身份漂移。
 - Variant 的参考 ID 只能来自 `assets.source_versions_by_id` 或 `assets.artifact_versions_by_id`；生成前不填写 generated/selected 占位 ID。
@@ -235,6 +237,7 @@ assets.files_by_id
 # 提交前自检
 
 - 每个 VisualEntity 的 continuity 是否覆盖了必要的稳定性描述；
+- `required_variant_ids` 是否完整覆盖用户声明的全部状态，且每一项都已物化为 Variant 并选中真实产物；
 - 同一实体的多个 Variant 之间的核心身份特征是否一致；
 - Variant 的 Prompt 是否使用了四维结构（主体/姿态/环境/风格）；
 - 参考图是否已绑定真实版本 ID，且不同实体的参考不互相矛盾；

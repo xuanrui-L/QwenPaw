@@ -16,6 +16,7 @@ from services.project_files.store import ProjectSnapshot
 
 def _snapshot(*, variants: dict | None) -> ProjectSnapshot:
     now = datetime.now(timezone.utc).isoformat()
+    variant_collection = variants or {"items": {}, "order": []}
     project = Project.model_validate(
         {
             "project_id": "project-naming",
@@ -30,7 +31,10 @@ def _snapshot(*, variants: dict | None) -> ProjectSnapshot:
                             "kind": "character",
                             "name": "Erling Haaland (Pixar卡通版)",
                             "description": "Pixar 风格哈兰德",
-                            "variants": variants or {"items": {}, "order": []},
+                            "required_variant_ids": list(
+                                variant_collection["order"],
+                            ),
+                            "variants": variant_collection,
                         },
                     },
                     "order": ["char:haaland"],

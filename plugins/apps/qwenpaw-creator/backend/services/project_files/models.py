@@ -31,7 +31,7 @@ from pydantic import (
 )
 
 
-CURRENT_PROJECT_SCHEMA_VERSION = 3
+CURRENT_PROJECT_SCHEMA_VERSION = 4
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
@@ -422,10 +422,27 @@ class VisualEntity(StrictModel):
     name: str = Field(min_length=1)
     description: str = ""
     continuity: str = ""
+    required_variant_ids: list[EntityId]
     variants: EntityCollection[VisualVariant] = Field(
         default_factory=EntityCollection,
     )
     selected_artifact_version_id: EntityId | None = None
+
+    @model_validator(mode="after")
+    def _validate_required_variants(self) -> VisualEntity:
+        if len(self.required_variant_ids) != len(
+            set(self.required_variant_ids),
+        ):
+            raise ValueError("required_variant_ids cannot contain duplicates")
+        undeclared = set(self.variants.order) - set(
+            self.required_variant_ids,
+        )
+        if undeclared:
+            raise ValueError(
+                "visual variants must be declared in required_variant_ids: "
+                + ", ".join(sorted(undeclared)),
+            )
+        return self
 
 
 class VisualDevelopment(StrictModel):
@@ -918,7 +935,7 @@ class Timeline(StrictModel):
 
 
 class Project(StrictModel):
-    schema_version: Literal[3] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[4] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime

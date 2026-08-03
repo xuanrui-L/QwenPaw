@@ -54,6 +54,7 @@ type AssetItem = {
   ref: string;
   kind: "source" | "artifact" | "visual";
   name: string;
+  cardName?: string;
   description: string;
   mediaKind: string;
   mediaType: string;
@@ -65,7 +66,8 @@ type AssetItem = {
   ownerRef?: string;
   entityId?: string;
   variantId?: string;
-  variantGroupLabel?: string;
+  variantOrder?: number;
+  variantLabel?: string;
   variantState?: "active" | "history" | "unselected";
   provenanceRefs: string[];
   metadata: Record<string, unknown>;
@@ -73,6 +75,14 @@ type AssetItem = {
     | SourceAssetVersionDocument
     | ArtifactVersionDocument
     | VisualEntityDocument;
+};
+
+type AssetItemGroup = {
+  key: string;
+  label: string | null;
+  badge?: string;
+  countLabel?: string;
+  items: AssetItem[];
 };
 
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
@@ -194,6 +204,11 @@ function visualVariantForVersion(
   return null;
 }
 
+function visualVariantCardName(variant: VisualVariantDocument): string {
+  const label = visualVariantLabel(variant, 36);
+  return label.split(/[：:]/, 1)[0]?.trim() || label;
+}
+
 function assetItems(project: ProjectDocument): AssetItem[] {
   const sources = Object.values(project.assets.source_versions_by_id).map(
     (source): AssetItem => ({
@@ -246,8 +261,8 @@ function assetItems(project: ProjectDocument): AssetItem[] {
         ownerRef: artifact.owner_ref,
         entityId: visualVariant?.entity.entity_id,
         variantId: visualVariant?.variant.variant_id,
-        variantGroupLabel: visualVariant
-          ? `${visualVariant.entity.name} / ${visualVariantLabel(
+        variantLabel: visualVariant
+          ? `${visualVariant.entity.name} · ${visualVariantCardName(
               visualVariant.variant,
             )}`
           : undefined,
@@ -263,95 +278,173 @@ function assetItems(project: ProjectDocument): AssetItem[] {
       };
     },
   );
-  const visuals = project.visual.entities.order.flatMap((entityId) => {
-    const entity = project.visual.entities.items[entityId];
-    if (!entity) return [];
-    const variants = entity.variants.order.length
-      ? entity.variants.order
-          .map((variantId) => entity.variants.items[variantId])
-          .filter((variant): variant is VisualVariantDocument =>
-            Boolean(variant),
-          )
-      : [null];
-    return variants.map((variant): AssetItem => {
-      const selectedVersionId =
-        variant?.selected_artifact_version_id ??
-        (!variant ? entity.selected_artifact_version_id : null);
-      const artifact = selectedVersionId
-        ? project.assets.artifact_versions_by_id[selectedVersionId]
-        : undefined;
-      const media = artifact
-        ? artifactMedia(project, artifact)
-        : { kind: "image", type: "" };
-      return {
-        id: variant
-          ? `${entity.entity_id}@${variant.variant_id}`
-          : entity.entity_id,
-        ref: variant
-          ? `visual-variant:${entity.entity_id}@${variant.variant_id}`
-          : `visual-entity:${entity.entity_id}`,
-        kind: "visual",
-        name: entity.name,
-        description:
-          variant?.requirements ||
-          entity.description ||
-          entity.continuity ||
-          `${entity.kind} 视觉设定`,
-        mediaKind: media.kind,
-        mediaType: media.type,
-        previewUrl: artifact
-          ? getArtifactVersionMediaUrl(artifact.version_id)
-          : undefined,
-        stale: artifact?.stale,
-        checksum: artifact?.checksum,
-        ownerRef: artifact?.owner_ref,
-        entityId: entity.entity_id,
-        variantId: variant?.variant_id,
-        variantGroupLabel: variant
-          ? `${entity.name} / ${visualVariantLabel(variant)}`
-          : undefined,
-        variantState: variant
-          ? artifact
-            ? "active"
-            : "unselected"
-          : undefined,
-        // Surface the references the generation model actually saw — e.g. the
-        // web-grounding photo a scene design was composed from. The artifact
-        // is the ground truth; the variant's reference_asset_version_ids is
-        // the configured intent, which the provenance_refs mirror at run time.
-        provenanceRefs: artifact?.provenance_refs ?? [],
-        metadata: {
-          kind: entity.kind,
-          continuity: entity.continuity,
-          variants: entity.variants.order.length,
-          variant_id: variant?.variant_id,
-          generated_artifact_version_ids:
-            variant?.generated_artifact_version_ids ?? [],
-          selected_artifact_version_id: selectedVersionId,
-        },
-        raw: entity,
-      };
-    });
-  });
+  const visuals = project.visual.entities.order.flatMap(
+    (entityId): AssetItem[] => {
+      const entity = project.visual.entities.items[entityId];
+      if (!entity) return [];
+      const variants = entity.variants.order.length
+        ? entity.variants.order
+            .map((variantId) => entity.variants.items[variantId])
+            .filter((variant): variant is VisualVariantDocument =>
+              Boolean(variant),
+            )
+        : [null];
+      return variants.map((variant, variantIndex): AssetItem => {
+        const selectedVersionId =
+          variant?.selected_artifact_version_id ??
+          (!variant ? entity.selected_artifact_version_id : null);
+        const artifact = selectedVersionId
+          ? project.assets.artifact_versions_by_id[selectedVersionId]
+          : undefined;
+        const media = artifact
+          ? artifactMedia(project, artifact)
+          : { kind: "image", type: "" };
+        return {
+          id: variant
+            ? `${entity.entity_id}@${variant.variant_id}`
+            : entity.entity_id,
+          ref: variant
+            ? `visual-variant:${entity.entity_id}@${variant.variant_id}`
+            : `visual-entity:${entity.entity_id}`,
+          kind: "visual",
+          name: entity.name,
+          cardName: variant ? visualVariantCardName(variant) : entity.name,
+          description:
+            variant?.requirements ||
+            entity.description ||
+            entity.continuity ||
+            `${entity.kind} 视觉设定`,
+          mediaKind: media.kind,
+          mediaType: media.type,
+          previewUrl: artifact
+            ? getArtifactVersionMediaUrl(artifact.version_id)
+            : undefined,
+          stale: artifact?.stale,
+          checksum: artifact?.checksum,
+          ownerRef: artifact?.owner_ref,
+          entityId: entity.entity_id,
+          variantId: variant?.variant_id,
+          variantOrder: variantIndex,
+          variantLabel: variant ? visualVariantCardName(variant) : undefined,
+          variantState: variant
+            ? artifact
+              ? "active"
+              : "unselected"
+            : undefined,
+          // Surface the references the generation model actually saw — e.g. the
+          // web-grounding photo a scene design was composed from. The artifact
+          // is the ground truth; the variant's reference_asset_version_ids is
+          // the configured intent, which the provenance_refs mirror at run time.
+          provenanceRefs: artifact?.provenance_refs ?? [],
+          metadata: {
+            kind: entity.kind,
+            continuity: entity.continuity,
+            variants: entity.variants.order.length,
+            variant_id: variant?.variant_id,
+            generated_artifact_version_ids:
+              variant?.generated_artifact_version_ids ?? [],
+            selected_artifact_version_id: selectedVersionId,
+          },
+          raw: entity,
+        };
+      });
+    },
+  );
   return dedupeByChecksum([...visuals, ...sources, ...artifacts]).sort(
     (left, right) => {
-      if (left.variantGroupLabel || right.variantGroupLabel) {
-        const group = (left.variantGroupLabel || "\uffff").localeCompare(
-          right.variantGroupLabel || "\uffff",
-        );
-        if (group) return group;
-        const stateOrder = { active: 0, unselected: 1, history: 2 };
-        const state =
-          stateOrder[left.variantState ?? "history"] -
-          stateOrder[right.variantState ?? "history"];
-        if (state) return state;
-      }
       return (
         (right.createdAt || "").localeCompare(left.createdAt || "") ||
         left.name.localeCompare(right.name)
       );
     },
   );
+}
+
+function visualItemGroups(
+  project: ProjectDocument,
+  items: AssetItem[],
+): AssetItemGroup[] {
+  const itemsByEntity = new Map<string, AssetItem[]>();
+  const unassigned: AssetItem[] = [];
+  for (const item of items) {
+    if (!item.entityId) {
+      unassigned.push(item);
+      continue;
+    }
+    const entityItems = itemsByEntity.get(item.entityId) ?? [];
+    entityItems.push(item);
+    itemsByEntity.set(item.entityId, entityItems);
+  }
+
+  const characterGroups: AssetItemGroup[] = [];
+  const sceneItems: AssetItem[] = [];
+  const propItems: AssetItem[] = [];
+  for (const entityId of project.visual.entities.order) {
+    const entity = project.visual.entities.items[entityId];
+    const entityItems = itemsByEntity.get(entityId);
+    if (!entity || !entityItems?.length) continue;
+    entityItems.sort(
+      (left, right) =>
+        (left.variantOrder ?? 0) - (right.variantOrder ?? 0) ||
+        (left.cardName || left.name).localeCompare(
+          right.cardName || right.name,
+        ),
+    );
+    if (entity.kind === "character") {
+      const requiredCount = entity.required_variant_ids.length;
+      const definedCount = entity.variants.order.length;
+      characterGroups.push({
+        key: `character:${entityId}`,
+        label: entity.name,
+        badge: "角色",
+        countLabel:
+          requiredCount > 0
+            ? definedCount === requiredCount
+              ? `${definedCount} 个造型`
+              : `${definedCount}/${requiredCount} 个造型`
+            : "1 项设定",
+        items: entityItems,
+      });
+    } else if (entity.kind === "scene") {
+      sceneItems.push(...entityItems);
+    } else {
+      propItems.push(...entityItems);
+    }
+  }
+
+  return [
+    ...characterGroups,
+    ...(sceneItems.length
+      ? [
+          {
+            key: "visual-scenes",
+            label: "场景",
+            countLabel: `${sceneItems.length} 项设定`,
+            items: sceneItems,
+          },
+        ]
+      : []),
+    ...(propItems.length
+      ? [
+          {
+            key: "visual-props",
+            label: "道具",
+            countLabel: `${propItems.length} 项设定`,
+            items: propItems,
+          },
+        ]
+      : []),
+    ...(unassigned.length
+      ? [
+          {
+            key: "visual-other",
+            label: "其他设定",
+            countLabel: `${unassigned.length} 项设定`,
+            items: unassigned,
+          },
+        ]
+      : []),
+  ];
 }
 
 function kindLabel(item: AssetItem): string {
@@ -668,21 +761,15 @@ export default function AssetsPage() {
     });
   }, [allItems, filter, search]);
   const itemGroups = useMemo(() => {
-    const groups = new Map<
-      string,
-      { label: string | null; items: AssetItem[] }
-    >();
-    for (const item of items) {
-      const key = item.variantGroupLabel ?? "__other__";
-      const group = groups.get(key) ?? {
-        label: item.variantGroupLabel ?? null,
-        items: [],
-      };
-      group.items.push(item);
-      groups.set(key, group);
-    }
-    return [...groups.values()];
-  }, [items]);
+    if (filter === "visual") return visualItemGroups(project, items);
+    return [
+      {
+        key: `flat:${filter}`,
+        label: null,
+        items,
+      },
+    ];
+  }, [filter, items, project]);
   const selected =
     allItems.find((item) => item.id === selectedId) ||
     allItems.find(
@@ -842,14 +929,24 @@ export default function AssetsPage() {
         >
           {items.length > 0 ? (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(190px,1fr))] gap-3">
-              {itemGroups.map((group, groupIndex) => (
-                <Fragment key={group.label ?? `other-${groupIndex}`}>
+              {itemGroups.map((group) => (
+                <Fragment key={group.key}>
                   {group.label && (
-                    <div className="col-span-full flex items-center gap-2 border-b border-[var(--color-border)] pb-1 pt-1 text-xs font-semibold text-[var(--color-text-secondary)]">
+                    <div
+                      data-asset-group={group.key}
+                      className="col-span-full flex items-center gap-2 border-b border-[var(--color-border)] pb-1.5 pt-1 text-xs font-semibold text-[var(--color-text-secondary)]"
+                    >
+                      {group.badge && (
+                        <span className="rounded bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-text-tertiary)]">
+                          {group.badge}
+                        </span>
+                      )}
                       <span>{group.label}</span>
-                      <span className="font-normal text-[var(--color-text-tertiary)]">
-                        {group.items.length} 个版本
-                      </span>
+                      {group.countLabel && (
+                        <span className="font-normal text-[var(--color-text-tertiary)]">
+                          {group.countLabel}
+                        </span>
+                      )}
                     </div>
                   )}
                   {group.items.map((item) => {
@@ -872,7 +969,13 @@ export default function AssetsPage() {
                             name={item.name}
                             mediaType={item.mediaKind}
                             previewUrl={item.previewUrl}
-                            state={item.previewUrl ? "ready" : "unavailable"}
+                            state={
+                              item.previewUrl
+                                ? "ready"
+                                : item.kind === "visual"
+                                ? "planned"
+                                : "unavailable"
+                            }
                             mediaClassName="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
                             placeholderClassName="flex flex-col items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]"
                           />
@@ -909,11 +1012,18 @@ export default function AssetsPage() {
                         </div>
                         <div className="p-3">
                           <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                            {item.name}
+                            {item.kind === "visual" && filter === "visual"
+                              ? item.cardName || item.name
+                              : item.name}
                           </h3>
                           <p className="mt-1 line-clamp-2 min-h-8 text-[11px] leading-4 text-[var(--color-text-secondary)]">
                             {item.description}
                           </p>
+                          {item.kind === "artifact" && item.variantLabel && (
+                            <p className="mt-2 truncate text-[10px] font-medium text-[var(--color-text-secondary)]">
+                              {item.variantLabel}
+                            </p>
+                          )}
                           <p className="mt-2 truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">
                             {item.id}
                           </p>
@@ -958,7 +1068,13 @@ export default function AssetsPage() {
                     name={selected.name}
                     mediaType={selected.mediaKind}
                     previewUrl={selected.previewUrl}
-                    state={selected.previewUrl ? "ready" : "unavailable"}
+                    state={
+                      selected.previewUrl
+                        ? "ready"
+                        : selected.kind === "visual"
+                        ? "planned"
+                        : "unavailable"
+                    }
                     controls
                     mediaClassName="h-full w-full object-contain"
                     placeholderClassName="text-xs text-white/55"

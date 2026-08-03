@@ -238,6 +238,10 @@ def test_image_execution_freezes_only_the_pending_variant(
         entity_id="char:hero",
         kind="character",
         name="Hero",
+        required_variant_ids=[
+            "variant:hero-peak",
+            "variant:hero-fallen",
+        ],
         variants=variants,
     )
     project.visual.entities.order.append("char:hero")

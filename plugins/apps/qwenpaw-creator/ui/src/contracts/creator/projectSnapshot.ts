@@ -128,6 +128,7 @@ export interface VisualEntityDocument extends ProjectJsonRecord {
   name: string;
   description: string;
   continuity: string;
+  required_variant_ids: string[];
   variants: ProjectEntityCollection<VisualVariantDocument>;
   selected_artifact_version_id: string | null;
 }
@@ -301,7 +302,7 @@ export interface TimelineDocument extends ProjectJsonRecord {
 }
 
 export interface ProjectDocument extends ProjectJsonRecord {
-  schema_version: 3;
+  schema_version: 4;
   project_id: string;
   generation: number;
   created_at: string;

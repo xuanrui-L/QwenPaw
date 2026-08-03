@@ -123,7 +123,7 @@ def test_project_new_has_complete_valid_defaults_and_utc_time():
         now=datetime(2026, 7, 15, 16, 0, tzinfo=timezone.utc),
     )
 
-    assert project.schema_version == 3
+    assert project.schema_version == 4
     assert project.generation == 0
     assert project.created_at.tzinfo == timezone.utc
     assert project.timelines.order == ["timeline:main"]
@@ -139,6 +139,7 @@ def _variant_project() -> Project:
                 entity_id="char:hero",
                 kind="character",
                 name="Hero",
+                required_variant_ids=["variant:peak", "variant:fallen"],
                 variants=EntityCollection(
                     items={
                         "variant:peak": VisualVariant(
@@ -199,6 +200,44 @@ def test_multi_variant_entity_rejects_legacy_entity_selection():
         match="cannot use the legacy entity-level selected artifact",
     ):
         Project.model_validate(raw)
+
+
+def test_visual_variants_must_be_declared_but_required_states_may_be_pending():
+    pending = VisualEntity(
+        entity_id="char:hero",
+        kind="character",
+        name="Hero",
+        required_variant_ids=["variant:peak", "variant:fallen"],
+        variants=EntityCollection(
+            items={
+                "variant:peak": VisualVariant(variant_id="variant:peak"),
+            },
+            order=["variant:peak"],
+        ),
+    )
+    assert pending.required_variant_ids == ["variant:peak", "variant:fallen"]
+
+    with pytest.raises(
+        ValidationError,
+        match="must be declared in required_variant_ids",
+    ):
+        VisualEntity(
+            entity_id="char:hero",
+            kind="character",
+            name="Hero",
+            required_variant_ids=[],
+            variants=EntityCollection(
+                items={
+                    "variant:peak": VisualVariant(variant_id="variant:peak"),
+                },
+                order=["variant:peak"],
+            ),
+        )
+
+    raw = pending.model_dump(mode="json")
+    raw.pop("required_variant_ids")
+    with pytest.raises(ValidationError, match="required_variant_ids"):
+        VisualEntity.model_validate(raw)
 
 
 def test_one_edit_element_selects_exactly_one_source_range():

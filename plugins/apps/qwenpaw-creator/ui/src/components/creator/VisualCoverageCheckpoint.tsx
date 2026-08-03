@@ -7,9 +7,9 @@ import { visualVariantLabel } from "@/lib/visualVariants";
 
 const STATUS_LABEL: Record<VisualCoverageStatus, string> = {
   covered: "覆盖完成",
-  missing_variant: "尚未定义 Variant",
+  missing_required_variant: "必需 Variant 尚未定义",
   unassigned_variant: "Element 未绑定 Variant",
-  missing_artifact: "Variant 尚无使用中产物",
+  missing_artifact: "视觉设定尚无使用中产物",
 };
 
 function kindLabel(kind: "character" | "scene" | "prop"): string {
@@ -61,6 +61,12 @@ export default function VisualCoverageCheckpoint({
                   {kindLabel(item.entity.kind)} ·{" "}
                   {item.referencedElementIds.length} 个 Element 引用
                 </div>
+                {item.entity.required_variant_ids.length > 0 && (
+                  <div className="text-[var(--color-text-tertiary)]">
+                    必需 Variant {item.definedRequiredCount}/
+                    {item.entity.required_variant_ids.length}
+                  </div>
+                )}
               </div>
               <span
                 className={`shrink-0 rounded-full px-2 py-0.5 ${
@@ -75,6 +81,11 @@ export default function VisualCoverageCheckpoint({
             {item.unassignedElementIds.length > 0 && (
               <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-700">
                 {item.unassignedElementIds.length} 个 Element 未指定 Variant
+              </div>
+            )}
+            {item.missingVariantIds.length > 0 && (
+              <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-700">
+                缺少：{item.missingVariantIds.join("、")}
               </div>
             )}
             {item.variants.length > 0 && (
