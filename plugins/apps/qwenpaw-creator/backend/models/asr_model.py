@@ -21,10 +21,8 @@ import httpx
 
 from models import config
 from models.media_transport import upload_local_file_to_dashscope_temp
-from services.runtime_files.runtime_dependencies import (
-    resolve_ffmpeg,
-    resolve_ffprobe,
-)
+from services.runtime_files.media_probe import probe_media
+from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 from utils.logger import setup_logger
 from utils.paths import local_path_from_file_url
 from utils.remote_download import download_remote_file
@@ -463,34 +461,16 @@ def _qwen3_endpoint(base_url: str) -> str:
 
 
 def _probe_duration_ms(source: str) -> int:
-    ffprobe = resolve_ffprobe()
-    if not ffprobe:
-        raise RuntimeError(
-            "ffprobe is required for qwen3-asr chunking; set "
-            "CREATOR_FFMPEG_PATH, install ffmpeg, or install imageio-ffmpeg",
-        )
-    result = subprocess.run(
-        [
-            ffprobe,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "json",
-            source,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"ffprobe failed: {(result.stderr or result.stdout)[-500:]}",
-        )
-    payload = json.loads(result.stdout or "{}")
-    duration = float(payload.get("format", {}).get("duration") or 0)
-    return round(duration * 1000)
+    """Probe media duration, reusing the shared ffprobe/ffmpeg helper.
+
+    ffprobe is optional in Creator: probe_media falls back to parsing bundled
+    ffmpeg metadata when no ffprobe is available, so a clean install without a
+    sibling ffprobe still works.
+    """
+    probe = probe_media(source, timeout=120)
+    if probe.duration_seconds is None:
+        raise RuntimeError(f"could not determine media duration: {source}")
+    return round(probe.duration_seconds * 1000)
 
 
 def _split_audio_chunks(source: Path, directory: Path) -> list[Path]:

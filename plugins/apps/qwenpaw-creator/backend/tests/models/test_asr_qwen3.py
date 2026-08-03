@@ -299,6 +299,74 @@ def test_qwen3_retries_transient_errors_linearly(monkeypatch) -> None:
 
 
 @respx.mock
+def test_qwen3_transient_backoff_is_linear_two_then_four(monkeypatch) -> None:
+    _bind_qwen3(monkeypatch)
+    monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 5_000)
+
+    async def fake_file_url(*_args):
+        return "oss://dashscope-instant/audio.mp3"
+
+    monkeypatch.setattr(asr_model, "_fun_asr_file_url", fake_file_url)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asr_model.asyncio, "sleep", fake_sleep)
+    responses = iter(
+        [
+            httpx.Response(503, json={"message": "unavailable"}),
+            httpx.Response(500, json={"message": "boom"}),
+            httpx.Response(200, json=_response(["终于成功。"])),
+        ],
+    )
+    route = respx.post(ENDPOINT).mock(
+        side_effect=lambda _request: next(responses),
+    )
+
+    result = asyncio.run(asr_model._qwen3_asr("https://cdn.test/a.mp3"))
+
+    assert [seg.text for seg in result.segments] == ["终于成功。"]
+    assert route.call_count == 3
+    assert sleeps == [2.0, 4.0]
+
+
+@respx.mock
+def test_qwen3_throttling_in_http_200_body_is_retried(monkeypatch) -> None:
+    _bind_qwen3(monkeypatch)
+    monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 5_000)
+
+    async def fake_file_url(*_args):
+        return "oss://dashscope-instant/audio.mp3"
+
+    monkeypatch.setattr(asr_model, "_fun_asr_file_url", fake_file_url)
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asr_model.asyncio, "sleep", fake_sleep)
+    responses = iter(
+        [
+            httpx.Response(
+                200,
+                json={"code": "Throttling.RateQuota", "message": "slow"},
+            ),
+            httpx.Response(200, json=_response(["成功。"])),
+        ],
+    )
+    route = respx.post(ENDPOINT).mock(
+        side_effect=lambda _request: next(responses),
+    )
+
+    result = asyncio.run(asr_model._qwen3_asr("https://cdn.test/a.mp3"))
+
+    assert [seg.text for seg in result.segments] == ["成功。"]
+    assert route.call_count == 2
+    assert len(sleeps) == 1 and sleeps[0] >= 2.0
+
+
+@respx.mock
 def test_qwen3_client_errors_do_not_retry(monkeypatch) -> None:
     _bind_qwen3(monkeypatch)
     monkeypatch.setattr(asr_model, "_probe_duration_ms", lambda _s: 5_000)
@@ -378,3 +446,34 @@ def test_spread_segments_marks_estimates_and_clamps() -> None:
     assert all(seg.end_ms > seg.start_ms for seg in segments)
     assert segments[0].start_ms == 1_000
     assert not asr_model._spread_segments([], 0, 1_000)
+
+
+def test_probe_duration_falls_back_to_ffmpeg_without_ffprobe(
+    monkeypatch,
+) -> None:
+    """qwen3-asr chunking must work when only bundled ffmpeg is present.
+
+    Creator treats ffprobe as optional; probe_media parses ffmpeg's stderr
+    metadata when no ffprobe binary exists (imageio-ffmpeg ships no ffprobe).
+    """
+    from services.runtime_files import media_probe
+
+    monkeypatch.setattr(media_probe, "resolve_ffprobe", lambda **_kw: None)
+    monkeypatch.setattr(media_probe, "resolve_ffmpeg", lambda: "/opt/ffmpeg")
+
+    class _Completed:
+        returncode = 1
+        stdout = ""
+        stderr = (
+            "Input #0, mp3, from 'a.mp3':\n"
+            "  Duration: 00:04:35.10, start: 0.000000, bitrate: 128 kb/s\n"
+            "  Stream #0:0: Audio: mp3, 16000 Hz, mono, fltp, 128 kb/s\n"
+        )
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd[0] == "/opt/ffmpeg"
+        return _Completed()
+
+    monkeypatch.setattr(media_probe.subprocess, "run", fake_run)
+
+    assert asr_model._probe_duration_ms("a.mp3") == 275_100
