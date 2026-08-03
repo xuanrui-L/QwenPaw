@@ -4203,6 +4203,7 @@ def _message_text(message: CreatorMessageRecord) -> str:
             "extraRefs",
             "targetRef",
             "targetRefs",
+            "userEdits",
         )
         structured = {
             key: context[key]
@@ -4212,7 +4213,9 @@ def _message_text(message: CreatorMessageRecord) -> str:
         if structured:
             chunks.append(
                 "[Creator UI 结构化上下文；path 是 project.json 的 RFC 6901 "
-                "字段指针，field/ref 是语义定位。修改前读取对应字段核验]\n"
+                "字段指针，field/ref 是语义定位。userEdits 是用户自上条消息以来"
+                "在编辑台手动应用且已生效的 project.json 修改记录，不需要重新"
+                "执行；评估这些修改对方案依赖的影响。修改前读取对应字段核验]\n"
                 + json.dumps(
                     structured,
                     ensure_ascii=False,

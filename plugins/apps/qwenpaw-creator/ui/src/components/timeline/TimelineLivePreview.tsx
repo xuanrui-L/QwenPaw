@@ -19,7 +19,10 @@ import {
   playbackLayersInWindow,
   transitionOpacityAtTick,
 } from "@/selectors/elementPlaybackSelectors";
-import { resolveElementVisualMeta } from "@/selectors/timelineElementSelectors";
+import {
+  overlayContentKind,
+  resolveElementVisualMeta,
+} from "@/selectors/timelineElementSelectors";
 import {
   InterviewSummaryBox,
   PetOsBubble,
@@ -173,7 +176,7 @@ function TextOverlayLayer({
       className="absolute"
       style={locationBoxStyle(element.location)}
     >
-      {element.creation.overlay_kind === "pet_os" ? (
+      {element.creation.overlay_kind !== "interview_summary" ? (
         <PetOsBubble
           text={element.creation.text}
           vibe={element.creation.vibe}
@@ -264,7 +267,7 @@ function MotionOverlayLayer({
     element.creation.type === "overlay" ? element.creation.motion : null;
   const isTextOverlay =
     element.creation.type === "overlay" &&
-    ["pet_os", "interview_summary"].includes(element.creation.overlay_kind);
+    overlayContentKind(element.creation) === "copy";
   const localTimeMs =
     (Math.max(0, playheadTick - element.span.start_tick) / ticksPerSecond) *
     1000;

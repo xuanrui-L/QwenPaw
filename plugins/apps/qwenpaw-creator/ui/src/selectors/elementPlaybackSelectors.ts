@@ -10,7 +10,10 @@ import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
 } from "@/api/creator";
-import { elementsAtTick } from "@/selectors/timelineElementSelectors";
+import {
+  elementsAtTick,
+  overlayContentKind,
+} from "@/selectors/timelineElementSelectors";
 
 export type ElementPlaybackStatus =
   | "ready"
@@ -226,8 +229,7 @@ export function resolveElementPlayback(
   // and the live preview draws the same spec directly, so they count as ready.
   if (
     element.creation.type === "overlay" &&
-    (element.creation.overlay_kind === "pet_os" ||
-      element.creation.overlay_kind === "interview_summary") &&
+    overlayContentKind(element.creation) === "copy" &&
     element.creation.text
   ) {
     return { element, status: "ready", media: null };

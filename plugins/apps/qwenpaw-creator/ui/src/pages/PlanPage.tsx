@@ -13,6 +13,7 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { getArtifactVersionMediaUrl, renderTimeline } from "@/api/creator";
 import {
+  overlayContentKind,
   resolveTimelineRender,
   selectPrimaryTimeline,
   timelineEndTick,
@@ -193,7 +194,7 @@ export default function PlanPage() {
         (element.creation.type === "r2v" ||
           element.creation.type === "edit" ||
           (element.creation.type === "overlay" &&
-            ["motion", "media"].includes(element.creation.overlay_kind))),
+            overlayContentKind(element.creation) !== "copy")),
     );
     return {
       total: items.length,
@@ -485,7 +486,7 @@ export default function PlanPage() {
     if (!draft || !elementDraft.operations.length) return;
     if (
       draft.creation.type === "overlay" &&
-      ["pet_os", "interview_summary"].includes(draft.creation.overlay_kind) &&
+      overlayContentKind(draft.creation) === "copy" &&
       !draft.creation.text.trim()
     ) {
       message.error("文案类 Overlay 的文本不能为空");

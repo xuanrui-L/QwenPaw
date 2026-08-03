@@ -303,6 +303,53 @@ def test_message_text_includes_exact_project_json_selection_locator() -> None:
     )
 
 
+def test_message_text_includes_buffered_user_edits() -> None:
+    from services.file_agent_runtime.driver import _message_text
+
+    message = CreatorMessageRecord(
+        message_id="message-user-edits",
+        project_id=PROJECT_ID,
+        creator_session_id=SESSION_ID,
+        conversation_id=CONVERSATION_ID,
+        message_seq=2,
+        role="user",
+        content_parts=[{"type": "text", "text": "继续优化节奏"}],
+        metadata={
+            "context": {
+                "userEdits": {
+                    "count": 1,
+                    "truncated": 0,
+                    "edits": [
+                        {
+                            "at": "2026-07-31T03:00:00Z",
+                            "op": "replace",
+                            "path": (
+                                "/timelines/items/timeline:main"
+                                "/elements_by_id/edit-1/span/start_tick"
+                            ),
+                            "target": {
+                                "kind": "element",
+                                "id": "edit-1",
+                                "label": "开场",
+                            },
+                            "field": "span/start_tick",
+                            "before": 0,
+                            "after": 2000,
+                        },
+                    ],
+                },
+            },
+        },
+    )
+
+    rendered = _message_text(message)
+
+    assert "userEdits" in rendered
+    assert "手动应用且已生效" in rendered
+    assert '"field":"span/start_tick"' in rendered
+    assert '"after":2000' in rendered
+
+
 def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
     from services.file_agent_runtime.driver import (
         _specialist_tool_invocation_id,

@@ -96,7 +96,8 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getAllByText("20s").length).toBeGreaterThan(0);
     expect(screen.getByText("16:9")).toBeInTheDocument();
     expect(screen.getByText("6 项内容")).toBeInTheDocument();
-    expect(screen.getByText(/6 轨/)).toHaveTextContent("可上下滚动");
+    // The transition now renders as a junction badge, so only 5 track rows remain.
+    expect(screen.getByText(/5 轨/)).toHaveTextContent("可上下滚动");
     expect(
       container.querySelector('[class~="max-h-[320px]"]'),
     ).toBeInTheDocument();
@@ -347,7 +348,7 @@ describe("PlanPage Timeline/Element frontend", () => {
       ) as HTMLButtonElement,
     );
     await waitFor(() =>
-      expect(playhead.style.left).toBe("calc(80px + 0.05 * (100% - 92px))"),
+      expect(playhead.style.left).toBe("calc(68px + 0.05 * (100% - 68px))"),
     );
   });
 
@@ -672,7 +673,11 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(container.querySelector("[data-compose-progress]")).toHaveStyle({
       width: "0%",
     });
-    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+    // The zoom control legitimately shows "100%"; only the compose button must
+    // avoid inventing a percentage.
+    expect(
+      screen.getByRole("button", { name: "合成中 · 0/10" }),
+    ).not.toHaveTextContent(/%/);
     unmount();
   });
 
