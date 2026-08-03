@@ -99,11 +99,58 @@ function previewText(value: unknown, limit = 26): string {
 
 /** One-line change preview so users know what changed without navigating;
  * the full diff is shown in place at the original content. */
-function operationPreview(operation: FileProjectReviewOperation): string {
-  if (operation.kind === "create")
-    return `新增：${previewText(operation.after)}`;
-  if (operation.kind === "delete")
-    return `删除：${previewText(operation.before)}`;
+const CREATION_TYPE_LABELS: Record<string, string> = {
+  r2v: "R2V 画面",
+  edit: "剪辑片段",
+  overlay: "文字/装饰",
+  transition: "转场",
+  audio: "音频",
+};
+
+/** Structured summary for a whole Timeline Element value; null when the value
+ * is not an element (falls back to the raw-text preview). */
+function describeElementValue(
+  value: unknown,
+  ticksPerSecond: number,
+): string | null {
+  if (!value || typeof value !== "object") return null;
+  const el = value as Record<string, any>;
+  const creation = el.creation;
+  if (!creation || typeof creation !== "object" || !creation.type) return null;
+  const parts: string[] = [
+    CREATION_TYPE_LABELS[creation.type] ?? String(creation.type),
+  ];
+  if (el.label) parts.push(`「${el.label}」`);
+  const span = el.span;
+  if (
+    span &&
+    typeof span.start_tick === "number" &&
+    typeof span.duration_tick === "number" &&
+    ticksPerSecond > 0
+  ) {
+    const start = span.start_tick / ticksPerSecond;
+    const end = (span.start_tick + span.duration_tick) / ticksPerSecond;
+    parts.push(`${start.toFixed(0)}s–${end.toFixed(0)}s`);
+  }
+  if (creation.type === "audio") {
+    parts.push(`音量 ${creation.gain_db ?? 0}dB`);
+    if (creation.pan) parts.push(`声像 ${creation.pan}`);
+  }
+  return parts.join(" · ");
+}
+
+function operationPreview(
+  operation: FileProjectReviewOperation,
+  ticksPerSecond = 1000,
+): string {
+  if (operation.kind === "create") {
+    const described = describeElementValue(operation.after, ticksPerSecond);
+    return `新增：${described ?? previewText(operation.after)}`;
+  }
+  if (operation.kind === "delete") {
+    const described = describeElementValue(operation.before, ticksPerSecond);
+    return `删除：${described ?? previewText(operation.before)}`;
+  }
   return `${previewText(operation.before)} → ${previewText(operation.after)}`;
 }
 
@@ -180,6 +227,8 @@ export default function FileProjectReviewPanel({
     }
     return names;
   })();
+  const ticksPerSecond =
+    selectPrimaryTimeline(project)?.ticks_per_second ?? 1000;
   const assetName = (assetId: string): string =>
     project?.visual.entities.items[assetId]?.name || assetId;
   const mediaOwnerLine = (locator: Record<string, string>): string => {
@@ -354,9 +403,9 @@ export default function FileProjectReviewPanel({
                     </p>
                     <p
                       className="mt-0.5 truncate text-[9px] text-[var(--color-text-secondary)]"
-                      title={operationPreview(operation)}
+                      title={operationPreview(operation, ticksPerSecond)}
                     >
-                      {operationPreview(operation)}
+                      {operationPreview(operation, ticksPerSecond)}
                     </p>
                   </div>
                   <div className="flex shrink-0 gap-1">

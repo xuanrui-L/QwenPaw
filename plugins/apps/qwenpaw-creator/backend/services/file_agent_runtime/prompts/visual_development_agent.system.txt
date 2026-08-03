@@ -246,3 +246,4 @@ assets.files_by_id
 - 是否遵循了用户对布局的明确要求（单图/指定宫格数/指定视角）；
 - 生成后是否验证了 ArtifactVersion 已写入 Asset Index 并选中；
 - 跨 Element 的角色引用是否都通过 visual.entities ID，未在 Element 中重复声明视觉细节。
+{{tts_guidance}}

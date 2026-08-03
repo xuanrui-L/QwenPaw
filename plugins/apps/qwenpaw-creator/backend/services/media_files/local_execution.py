@@ -68,6 +68,7 @@ from services.project_files.models import (
     ArtifactSlot,
     ArtifactVersion,
     ArtifactVersionRenderSource,
+    AudioCreation,
     EditCreation,
     ElementOutputRenderSource,
     IndexedFile,
@@ -138,6 +139,23 @@ _LOCAL_MEDIA_COMMANDS = frozenset(
 _MAX_VIDEO_BYTES = 4 * 1024 * 1024 * 1024
 _DEFAULT_FFMPEG_TIMEOUT_SECONDS = 15 * 60.0
 _DEFAULT_FFMPEG_TERMINATION_GRACE_SECONDS = 5.0
+# Original-footage volume while a Timeline audio Element (narration) plays;
+# ~-9dB keeps ambience audible without competing with the voice.
+_DUCK_VOLUME = 0.35
+
+
+def _merge_windows(
+    windows: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Merge overlapping [start, end) windows so ducking applies once."""
+
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted(windows):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +188,7 @@ class LocalMediaExecutionSpec:
     expected_duration_seconds: float | None
     canvas_size: tuple[int, int]
     on_element_done: Callable[[int, int], None] | None = None
+    audio_tracks: tuple[Mapping[str, Any], ...] = ()
 
 
 def _input_render_element_ids(item: LocalMediaInput) -> frozenset[str]:
@@ -398,6 +417,8 @@ class FfmpegLocalMediaRunner:
                 spec.output_path,
                 work_dir=spec.work_dir,
             )
+        if spec.audio_tracks:
+            self._mix_audio_tracks(spec)
         return overlay_warnings
 
     @staticmethod
@@ -451,6 +472,92 @@ class FfmpegLocalMediaRunner:
             )
             for index in range(1, len(spec.inputs))
         ]
+
+    def _mix_audio_tracks(self, spec: LocalMediaExecutionSpec) -> None:
+        """Mix Timeline audio Elements into the composed video.
+
+        The video stream is stream-copied; each track is trimmed to its span,
+        gain/pan adjusted, delayed to its Timeline offset, then mixed with the
+        composed video's own audio (when present) without renormalization.
+        While a narration track plays, the original footage audio is ducked so
+        the two never fight for attention.
+        """
+
+        premix = spec.work_dir / "premix.mp4"
+        os.replace(spec.output_path, premix)
+        arguments: list[str] = ["-y", "-i", os.fspath(premix)]
+        filters: list[str] = []
+        labels: list[str] = []
+        duck_windows: list[tuple[float, float]] = []
+        for index, track in enumerate(spec.audio_tracks):
+            arguments += ["-i", os.fspath(track["path"])]
+            chain = [f"[{index + 1}:a]aformat=channel_layouts=stereo"]
+            duration = float(track.get("max_duration_seconds") or 0.0)
+            if duration > 0:
+                chain.append(f"atrim=0:{duration:.6f}")
+            gain = float(track.get("gain_db") or 0.0)
+            if gain:
+                chain.append(f"volume={gain:.3f}dB")
+            pan = float(track.get("pan") or 0.0)
+            if pan:
+                left = max(0.0, min(1.0, 1.0 - pan))
+                right = max(0.0, min(1.0, 1.0 + pan))
+                chain.append(
+                    f"pan=stereo|c0={left:.3f}*c0|c1={right:.3f}*c1",
+                )
+            offset = float(track.get("offset_seconds") or 0.0)
+            delay_ms = int(round(offset * 1000))
+            if delay_ms > 0:
+                chain.append(f"adelay={delay_ms}:all=1")
+            if duration > 0:
+                duck_windows.append((offset, offset + duration))
+            label = f"[mix{index}]"
+            filters.append(",".join(chain) + label)
+            labels.append(label)
+        if self._probe_has_audio(premix):
+            base_chain = ["[0:a]aformat=channel_layouts=stereo"]
+            for start, end in _merge_windows(duck_windows):
+                base_chain.append(
+                    f"volume={_DUCK_VOLUME}:enable="
+                    f"'between(t,{start:.3f},{end:.3f})'",
+                )
+            filters.append(",".join(base_chain) + "[base]")
+            labels.insert(0, "[base]")
+        if len(labels) == 1:
+            mixed = labels[0]
+        else:
+            filters.append(
+                f"{''.join(labels)}amix=inputs={len(labels)}"
+                ":duration=longest:normalize=0[aout]",
+            )
+            mixed = "[aout]"
+        # Cap audio at the composed video duration so a long narration cannot
+        # extend the container past the final frame.
+        final_label = mixed
+        if spec.expected_duration_seconds:
+            filters.append(
+                f"{mixed}atrim=0:{spec.expected_duration_seconds:.6f}[afinal]",
+            )
+            final_label = "[afinal]"
+        self._run(
+            [
+                *arguments,
+                "-filter_complex",
+                ";".join(filters),
+                "-map",
+                "0:v",
+                "-map",
+                final_label,
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                os.fspath(spec.output_path),
+            ],
+            cwd=spec.work_dir,
+        )
 
     def _probe_has_audio(self, path: Path) -> bool:
         try:
@@ -1057,6 +1164,22 @@ class _FrozenInput:
 
 
 @dataclass(frozen=True, slots=True)
+class _FrozenAudioTrack:
+    """One enabled Timeline audio Element resolved to its source version."""
+
+    element_id: str
+    version_id: str
+    indexed: IndexedFile | None
+    checksum: str
+    media_type: str
+    source_url: str | None
+    offset_seconds: float
+    max_duration_seconds: float
+    gain_db: float
+    pan: float
+
+
+@dataclass(frozen=True, slots=True)
 class _ResolvedExecution:
     command: CreatorCommandType
     target_ref: str
@@ -1072,6 +1195,7 @@ class _ResolvedExecution:
     artifact_name: str
     read_set: tuple[dict[str, Any], ...]
     source_selections: tuple[dict[str, Any], ...]
+    audio_tracks: tuple[_FrozenAudioTrack, ...] = ()
 
 
 def _stable_id(prefix: str, project_id: str, key: str) -> str:
@@ -1654,6 +1778,57 @@ def _timeline_execution(
         if all(item is not None for item in durations)
         else None
     )
+    audio_tracks: list[_FrozenAudioTrack] = []
+    for element in sorted(
+        (
+            item
+            for item in timeline.elements_by_id.values()
+            if item.enabled and isinstance(item.creation, AudioCreation)
+        ),
+        key=lambda item: (item.span.start_tick, item.element_id),
+    ):
+        creation = element.creation
+        assert isinstance(creation, AudioCreation)
+        version = project.assets.source_versions_by_id[
+            creation.source_asset_version_id
+        ]
+        indexed = (
+            project.assets.files_by_id.get(version.file_id)
+            if version.file_id is not None
+            else None
+        )
+        audio_tracks.append(
+            _FrozenAudioTrack(
+                element_id=element.element_id,
+                version_id=version.version_id,
+                indexed=indexed,
+                checksum=version.checksum,
+                media_type=(
+                    indexed.media_type
+                    if indexed is not None
+                    else version.media_type
+                ),
+                source_url=(
+                    public_source_url(version) if indexed is None else None
+                ),
+                offset_seconds=(
+                    element.span.start_tick / timeline.ticks_per_second
+                ),
+                max_duration_seconds=(
+                    element.span.duration_tick / timeline.ticks_per_second
+                ),
+                gain_db=creation.gain_db,
+                pan=creation.pan,
+            ),
+        )
+        read_set.append(
+            _read_set_item(
+                "asset-version",
+                version.version_id,
+                indexed,
+                version.checksum,
+            ),
+        )
     return _ResolvedExecution(
         command=command,
         target_ref=target_ref,
@@ -1680,6 +1855,7 @@ def _timeline_execution(
         ),
         read_set=tuple(read_set),
         source_selections=tuple(selections),
+        audio_tracks=tuple(audio_tracks),
     )
 
 
@@ -1750,6 +1926,25 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             "transitions": list(resolved.transitions),
             "audioPlan": resolved.audio_plan,
             "canvasSize": list(resolved.canvas_size),
+            # Only present when the Timeline has audio Elements so historical
+            # audio-free fingerprints (and their reusable renders) survive.
+            **(
+                {
+                    "audioTracks": [
+                        {
+                            "versionId": track.version_id,
+                            "checksum": track.checksum,
+                            "offset": track.offset_seconds,
+                            "maxDuration": track.max_duration_seconds,
+                            "gainDb": track.gain_db,
+                            "pan": track.pan,
+                        }
+                        for track in resolved.audio_tracks
+                    ],
+                }
+                if resolved.audio_tracks
+                else {}
+            ),
         },
     )
 
@@ -2411,6 +2606,45 @@ class FileLocalMediaExecutionService:
         if output_path.exists():
             raise StorageIntegrityError("Task output scratch 已存在")
 
+        audio_dir: Path | None = None
+        local_audio_tracks: list[dict[str, Any]] = []
+        for track_index, track in enumerate(resolved.audio_tracks):
+            if audio_dir is None:
+                audio_dir = _ensure_real_directory_chain(work_dir, "audio")
+            suffix = mimetypes.guess_extension(track.media_type) or ".wav"
+            if not suffix.startswith(".") or len(suffix) > 12:
+                suffix = ".wav"
+            destination = audio_dir / (
+                f"{track_index:06d}-{track.version_id}{suffix}"
+            )
+            if destination.exists():
+                raise StorageIntegrityError("Task audio scratch 已存在")
+            if track.indexed is not None:
+                with (
+                    file_store.open_verified(track.indexed) as source,
+                    destination.open("xb") as target,
+                ):
+                    shutil.copyfileobj(source, target, length=1024 * 1024)
+                    target.flush()
+                    os.fsync(target.fileno())
+            elif track.source_url is not None:
+                download_remote_file(track.source_url, str(destination))
+            else:
+                raise StorageIntegrityError(
+                    f"音频输入缺少本地文件与公网 URL: {track.version_id}",
+                )
+            local_audio_tracks.append(
+                {
+                    "element_id": track.element_id,
+                    "version_id": track.version_id,
+                    "path": destination,
+                    "offset_seconds": track.offset_seconds,
+                    "max_duration_seconds": track.max_duration_seconds,
+                    "gain_db": track.gain_db,
+                    "pan": track.pan,
+                },
+            )
+
         def on_element_done(done: int, total: int) -> None:
             if total <= 0:
                 return
@@ -2446,6 +2680,7 @@ class FileLocalMediaExecutionService:
             expected_duration_seconds=resolved.expected_duration_seconds,
             canvas_size=resolved.canvas_size,
             on_element_done=on_element_done,
+            audio_tracks=tuple(local_audio_tracks),
         )
         AtomicJsonRecordStore(work_dir / "spec.json").write(
             {
@@ -2471,6 +2706,20 @@ class FileLocalMediaExecutionService:
                 ],
                 "outputPath": output_path.relative_to(project_root).as_posix(),
                 "canvasSize": list(resolved.canvas_size),
+                "audioTracks": [
+                    {
+                        "elementId": item["element_id"],
+                        "versionId": item["version_id"],
+                        "path": item["path"]
+                        .relative_to(project_root)
+                        .as_posix(),
+                        "offset": item["offset_seconds"],
+                        "maxDuration": item["max_duration_seconds"],
+                        "gainDb": item["gain_db"],
+                        "pan": item["pan"],
+                    }
+                    for item in local_audio_tracks
+                ],
             },
         )
         return spec

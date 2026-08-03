@@ -38,6 +38,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "creator_agent.system.txt",
             "project_id",
             "workspace_schema",
+            "tts_guidance",
         ),
         _spec(
             "source_intelligence_agent.system",
@@ -50,6 +51,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "visual_development_agent.system.txt",
             "project_id",
             "workspace_schema",
+            "tts_guidance",
         ),
         _spec(
             "r2v_generation_director.system",
@@ -65,6 +67,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "workspace_schema",
             "content_type",
             "target_duration_seconds",
+            "tts_guidance",
         ),
     )
 }
@@ -115,10 +118,29 @@ def render_creator_system_prompt(
         )
 
         workspace_schema = build_project_schema_prompt().text
+    from models.config import is_tts_configured
+
+    # Mirrors the specialist-side dynamic injection: the delegator must know
+    # narration/voice delegation exists exactly when the tools do.
+    tts_guidance = (
+        (
+            "\n# 旁白与配音能力\n\n"
+            "- ai_editing_director 具备旁白生成能力：可把旁白文本合成为音频"
+            "资产、创建 creation.type=audio 的 Element 并重新合成成片。"
+            "旁白/配音需求直接委派它到 timeline:<timelineId>，在任务中写明"
+            "旁白文案要求，并要求按镜头/语义分段生成、每段 span 对齐对应"
+            "画面；不需要用户提供音频文件。\n"
+            "- visual_development_agent 可为 character 实体复刻专属音色（可选）；"
+            "需要角色专属声线时先委派它完成音色绑定，再委派旁白生成。"
+        )
+        if is_tts_configured()
+        else ""
+    )
     return render_file_agent_prompt(
         "creator_agent.system",
         project_id=project_id,
         workspace_schema=workspace_schema,
+        tts_guidance=tts_guidance,
     )
 
 

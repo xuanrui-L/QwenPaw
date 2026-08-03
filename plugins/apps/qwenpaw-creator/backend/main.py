@@ -236,6 +236,7 @@ async def _startup() -> None:
             "TEXT_API_KEY",
             "VLM_API_KEY",
             "ASR_API_KEY",
+            "TTS_API_KEY",
             "IMAGE_API_KEY",
             "VIDEO_API_KEY",
             "OSS_POLICY_API_KEY",

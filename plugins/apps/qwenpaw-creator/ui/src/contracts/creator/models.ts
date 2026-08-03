@@ -39,6 +39,11 @@ export interface ModelConfigData {
     language: string;
     reuse_llm_key: boolean;
   };
+  tts: ModelConfigItem & {
+    voice: string;
+    vc_model_name: string;
+    reuse_llm_key: boolean;
+  };
   image: ModelConfigItem;
   video: ModelConfigItem;
   oss: OssConfig;
@@ -48,12 +53,13 @@ export interface ModelConfigData {
 }
 
 export interface ModelConnectionTestRequest {
-  type: "llm" | "vlm" | "asr" | "image" | "video";
+  type: "llm" | "vlm" | "asr" | "tts" | "image" | "video";
   base_url: string;
   api_key: string;
   model_name: string;
   protocol: string;
   provider?: "whisper" | "fun-asr";
+  voice?: string;
 }
 
 export interface ConnectionTestResponse {

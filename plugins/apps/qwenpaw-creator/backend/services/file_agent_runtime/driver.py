@@ -4595,12 +4595,18 @@ def _execution_provider_model(spec: SpecialistToolSpec) -> tuple[str, str]:
         return get_image_backend().casefold(), get_image_model_name()
     if spec.provider_kind == "video":
         return get_video_backend(), get_video_model_name()
+    if spec.provider_kind == "tts":
+        from models.config import get_tts_model_name
+
+        return "dashscope", get_tts_model_name()
     return str(spec.provider_kind or "creator-tool"), "configured"
 
 
 _AUTHORIZATION_OPERATION_LABELS = {
     "image_generation": "生成图片",
     "r2v_generation": "生成视频",
+    "tts_generation": "生成语音",
+    "create_character_voice": "复刻角色音色",
 }
 
 

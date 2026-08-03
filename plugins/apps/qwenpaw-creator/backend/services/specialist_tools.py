@@ -22,6 +22,11 @@ from typing import Any
 
 from domain.enums import CreatorCommandType, SpecialistRole
 from domain.errors import PermissionDeniedError, ValidationError
+from models.config import is_tts_configured
+from services.media_files.audio_execution import (
+    execute_file_tts_command,
+    execute_file_voice_enrollment_command,
+)
 from services.media_files.image_execution import execute_file_image_command
 from services.media_files.motion_design import design_motion_overlays
 from services.media_files.r2v_execution import execute_file_r2v_command
@@ -66,7 +71,7 @@ class SpecialistToolSpec:
         """Let a visual Project-assets run address its Asset children."""
 
         return (
-            self.name == "image_generation"
+            self.name in {"image_generation", "create_character_voice"}
             and role is SpecialistRole.VISUAL_DEVELOPMENT
             and _PROJECT_ASSETS_TARGET_REF in admitted_target_refs
         )
@@ -305,6 +310,68 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
     ("summary", "shots", "entities", "semanticEntries"),
 )
 
+_TTS_ARGUMENTS = _arguments_schema(
+    {
+        "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 800,
+            "description": ("要合成的台词或旁白文本；单次上限约 512 token，超长文案按句子" "拆分后分次生成。"),
+        },
+        "voice": {
+            "type": "string",
+            "description": "可选系统音色名；省略时使用已配置的默认音色。",
+        },
+        "characterRef": {
+            "type": "string",
+            "description": (
+                "可选；传已存在的 exact asset:<entityId>（character 实体）。"
+                "该角色已绑定音色时自动改用其复刻音色合成。"
+            ),
+        },
+        "label": {
+            "type": "string",
+            "description": "可选的音频资产名称。",
+        },
+    },
+    ("text",),
+)
+
+_VOICE_ENROLLMENT_ARGUMENTS = _arguments_schema(
+    {
+        "characterRef": {
+            "type": "string",
+            "description": (
+                "目标 character 实体的 exact asset:<entityId>；targetRef 不是角色"
+                "实体时（如 project:assets 场景）必填。"
+            ),
+        },
+        "sampleSourceVersionId": {
+            "type": "string",
+            "description": (
+                "可选；已存在的 exact 音频 SourceAssetVersion id 作为 10–20 秒"
+                "音色样本。与 sampleText 二选一。"
+            ),
+        },
+        "sampleText": {
+            "type": "string",
+            "maxLength": 200,
+            "description": (
+                "可选；先用系统音色合成这段试音文本作为样本再复刻。" "与 sampleSourceVersionId 二选一。"
+            ),
+        },
+        "voice": {
+            "type": "string",
+            "description": "可选；sampleText 试音时使用的系统音色。",
+        },
+        "preferredName": {
+            "type": "string",
+            "description": "可选的音色名称前缀；省略时使用角色名。",
+        },
+    },
+    (),
+)
+
 _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
     {
         "brief": {
@@ -406,9 +473,43 @@ _SPECS = (
         long_running=True,
         provider_kind="vlm",
     ),
+    SpecialistToolSpec(
+        name="tts_generation",
+        description=(
+            "把一段台词或旁白文本合成为语音，结果作为不可变音频 SourceAssetVersion "
+            "写入 Asset Index，返回 exact version id 与 durationSeconds。长旁白"
+            "按镜头/语义分段多次调用，每段对应一个独立 audio Element。传 "
+            "characterRef 且该角色已绑定音色时自动使用其复刻音色；上 Timeline "
+            "需再用 jq_project 创建引用该 version 的 audio Element。"
+        ),
+        roles=frozenset(
+            {
+                SpecialistRole.VISUAL_DEVELOPMENT,
+                SpecialistRole.AI_EDITING_DIRECTOR,
+            },
+        ),
+        parameters=_tool_schema(_TTS_ARGUMENTS),
+        requires_execution_authorization=True,
+        long_running=True,
+        provider_kind="tts",
+    ),
+    SpecialistToolSpec(
+        name="create_character_voice",
+        description=(
+            "为目标 character 实体复刻专属音色并绑定到该实体（可选增强，非必需）。"
+            "样本来自已存在的 exact 音频 version 或一段试音文本；绑定后该角色的"
+            " tts_generation 自动沿用此音色，重新复刻会替换旧绑定。"
+        ),
+        roles=frozenset({SpecialistRole.VISUAL_DEVELOPMENT}),
+        parameters=_tool_schema(_VOICE_ENROLLMENT_ARGUMENTS),
+        requires_execution_authorization=True,
+        long_running=True,
+        provider_kind="tts",
+    ),
 )
 
 _SPECS_BY_NAME = {item.name: item for item in _SPECS}
+_TTS_TOOL_NAMES = frozenset({"tts_generation", "create_character_voice"})
 _PROJECT_TOOL_NAMES = frozenset(
     item["function"]["name"] for item in agent_project_tool_manifest()
 )
@@ -427,6 +528,10 @@ class FileSpecialistToolRegistry:
     ) -> SpecialistToolSpec | None:
         spec = _SPECS_BY_NAME.get(name)
         if spec is None:
+            return None
+        if name in _TTS_TOOL_NAMES and not is_tts_configured():
+            # TTS tools are registered dynamically: without a configured key
+            # they are absent from every manifest, so treat them as unknown.
             return None
         if role not in spec.roles:
             raise PermissionDeniedError(f"{role.value} 无权调用 {name}")
@@ -448,6 +553,7 @@ class FileSpecialistToolRegistry:
             spec.manifest(role=role, admitted_target_refs=admitted_target_refs)
             for spec in _SPECS
             if role in spec.roles
+            and (spec.name not in _TTS_TOOL_NAMES or is_tts_configured())
         ]
         names = [
             item["function"]["name"]
@@ -574,6 +680,49 @@ class FileSpecialistToolRegistry:
                     "replayed": execution.replayed,
                 },
                 task_id=execution.task_id,
+            )
+
+        if name == "tts_generation":
+            execution = await execute_file_tts_command(
+                self.services,
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments=payload,
+                idempotency_key=idempotency_key,
+            )
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": "SUCCEEDED",
+                    "sourceAssetVersionId": execution.source_asset_version_id,
+                    "logicalAssetId": execution.logical_asset_id,
+                    "durationSeconds": execution.duration_seconds,
+                    "voice": execution.voice,
+                    "generation": execution.project_generation,
+                    "etag": execution.project_etag,
+                    "replayed": execution.replayed,
+                },
+            )
+
+        if name == "create_character_voice":
+            enrollment = await execute_file_voice_enrollment_command(
+                self.services,
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments=payload,
+                idempotency_key=idempotency_key,
+            )
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": "SUCCEEDED",
+                    "entityId": enrollment.entity_id,
+                    "voiceBound": True,
+                    "sampleSourceVersionId": enrollment.sample_source_version_id,
+                    "generation": enrollment.project_generation,
+                    "etag": enrollment.project_etag,
+                    "replayed": enrollment.replayed,
+                },
             )
 
         if name == "design_motion_overlays":

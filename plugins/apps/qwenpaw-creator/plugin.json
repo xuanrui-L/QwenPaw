@@ -286,6 +286,18 @@
         ]
       },
       {
+        "name": "creator_tts_model",
+        "description": "QwenPaw Creator text-to-speech configuration for narration and character voices",
+        "icon": "🔊",
+        "requires_config": false,
+        "config_fields": [
+          {"name": "api_key", "label": "TTS API Key", "type": "password", "required": false, "placeholder": "sk-...", "help": "Optional capability. TTS tools appear only when a key is configured. Environment fallback: TTS_API_KEY."},
+          {"name": "base_url", "label": "TTS Base URL", "type": "text", "required": false, "default": "https://dashscope.aliyuncs.com/api/v1"},
+          {"name": "model", "label": "TTS Model", "type": "text", "required": false, "default": "qwen3-tts-flash"},
+          {"name": "voice", "label": "Default Voice", "type": "select", "required": false, "default": "Cherry", "options": ["Cherry", "Serena", "Ethan", "Chelsie", "Dylan", "Sunny", "Jada", "Nofish"], "help": "System voice used when a request does not pick one. Custom enrolled voices are selected per character."}
+        ]
+      },
+      {
         "name": "creator_video_model",
         "description": "QwenPaw Creator reference-to-video configuration",
         "icon": "🎬",

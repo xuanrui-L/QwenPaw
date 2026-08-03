@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { GlobalOutlined } from "@ant-design/icons";
+import { GlobalOutlined, SoundOutlined } from "@ant-design/icons";
 import { getModelConfig } from "@/api/creator";
 import type { ModelConfigData, ModelConfigItem } from "@/contracts/creator";
 import modelLlmIcon from "@/assets/design/model-llm.svg";
@@ -9,7 +9,14 @@ import modelImageIcon from "@/assets/design/model-image.svg";
 import modelVideoIcon from "@/assets/design/model-video.svg";
 import ModelConfigModal, { supportsQwenNativeSearch } from "./ModelConfigModal";
 
-type ModelType = "llm" | "vlm" | "grounding" | "asr" | "image" | "video";
+type ModelType =
+  | "llm"
+  | "vlm"
+  | "grounding"
+  | "asr"
+  | "tts"
+  | "image"
+  | "video";
 type ModelStatus = "on" | "off" | "none";
 
 const READY_COLOR = "#14B8A6";
@@ -21,11 +28,24 @@ const BADGE_META: {
   type: ModelType;
   icon: string | null;
   label: string;
+  // Rendered when no masked SVG glyph exists for the type.
+  fallbackIcon?: React.ComponentType<{ style?: React.CSSProperties }>;
 }[] = [
   { type: "llm", icon: modelLlmIcon, label: "文本模型" },
   { type: "vlm", icon: modelVlmIcon, label: "视觉理解模型" },
-  { type: "grounding", icon: null, label: "Grounding" },
+  {
+    type: "grounding",
+    icon: null,
+    label: "Grounding",
+    fallbackIcon: GlobalOutlined,
+  },
   { type: "asr", icon: modelAsrIcon, label: "语音识别模型" },
+  {
+    type: "tts",
+    icon: null,
+    label: "语音合成模型",
+    fallbackIcon: SoundOutlined,
+  },
   { type: "image", icon: modelImageIcon, label: "图像模型" },
   { type: "video", icon: modelVideoIcon, label: "视频模型" },
 ];
@@ -151,9 +171,9 @@ export default function ModelBadges() {
                     WebkitMaskRepeat: "no-repeat",
                   }}
                 />
-              ) : (
-                <GlobalOutlined style={{ fontSize: 18, color: tint }} />
-              )}
+              ) : meta.fallbackIcon ? (
+                <meta.fallbackIcon style={{ fontSize: 18, color: tint }} />
+              ) : null}
             </span>
           );
         })}

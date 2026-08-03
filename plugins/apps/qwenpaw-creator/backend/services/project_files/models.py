@@ -416,6 +416,22 @@ class VisualVariant(StrictModel):
     selected_artifact_version_id: EntityId | None = None
 
 
+class CharacterVoice(StrictModel):
+    """An enrolled (cloned) voice bound to one character VisualEntity.
+
+    Optional enhancement: characters work without a voice.  Once enrolled the
+    binding travels with the entity; re-enrolling replaces it.  The record
+    keeps the full rebuild inputs so a lapsed cloud voice can be re-enrolled.
+    """
+
+    voice_id: str = Field(min_length=1)
+    target_model: str = Field(min_length=1)
+    preferred_name: str = ""
+    sample_source_version_id: EntityId | None = None
+    enrollment_key: str = ""
+    created_at: UtcDateTime
+
+
 class VisualEntity(StrictModel):
     entity_id: EntityId
     kind: Literal["character", "scene", "prop"]
@@ -427,6 +443,13 @@ class VisualEntity(StrictModel):
         default_factory=EntityCollection,
     )
     selected_artifact_version_id: EntityId | None = None
+    voice: CharacterVoice | None = None
+
+    @model_validator(mode="after")
+    def _validate_voice_owner(self) -> VisualEntity:
+        if self.voice is not None and self.kind != "character":
+            raise ValueError("only character entities can bind a voice")
+        return self
 
     @model_validator(mode="after")
     def _validate_required_variants(self) -> VisualEntity:
@@ -1155,6 +1178,15 @@ class Project(StrictModel):
                     entity.selected_artifact_version_id,
                     "selected visual artifact",
                 )
+            if (
+                entity.voice is not None
+                and entity.voice.sample_source_version_id is not None
+            ):
+                _require_key(
+                    source_versions,
+                    entity.voice.sample_source_version_id,
+                    "character voice sample version",
+                )
 
         _require_collection_identity(
             self.timelines,
@@ -1500,6 +1532,7 @@ __all__ = [
     "DEFAULT_TIMELINE_TICKS_PER_SECOND",
     "ArtifactVersionRenderSource",
     "AudioCreation",
+    "CharacterVoice",
     "ArtifactSlot",
     "ArtifactVersion",
     "AssetIndex",

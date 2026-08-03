@@ -34,6 +34,7 @@ CREATOR_VIDEO_CONFIG_TOOL = "creator_video_model"
 CREATOR_VLM_CONFIG_TOOL = "creator_vlm_model"
 CREATOR_GROUNDING_CONFIG_TOOL = "creator_web_grounding"
 CREATOR_ASR_CONFIG_TOOL = "creator_asr_model"
+CREATOR_TTS_CONFIG_TOOL = "creator_tts_model"
 CREATOR_OSS_CONFIG_TOOL = "creator_media_oss"
 EXECUTION_AUTHORIZATION_REQUIRED = "required"
 EXECUTION_AUTHORIZATION_ALLOW_ALL = "allow_all"
@@ -46,6 +47,7 @@ CREATOR_CONFIG_TOOLS = (
     CREATOR_VLM_CONFIG_TOOL,
     CREATOR_GROUNDING_CONFIG_TOOL,
     CREATOR_ASR_CONFIG_TOOL,
+    CREATOR_TTS_CONFIG_TOOL,
     CREATOR_OSS_CONFIG_TOOL,
 )
 
@@ -307,6 +309,7 @@ def _map_tool_to_section(tool_name: str) -> str:
         CREATOR_VLM_CONFIG_TOOL: "vlm",
         CREATOR_GROUNDING_CONFIG_TOOL: "grounding",
         CREATOR_ASR_CONFIG_TOOL: "asr",
+        CREATOR_TTS_CONFIG_TOOL: "tts",
         CREATOR_IMAGE_CONFIG_TOOL: "image",
         CREATOR_VIDEO_CONFIG_TOOL: "video",
     }.get(tool_name, "")
@@ -386,6 +389,23 @@ ASR_MODEL_NAME = os.environ.get("ASR_MODEL_NAME", "fun-asr")
 ASR_PROVIDER = os.environ.get("ASR_PROVIDER", "fun-asr")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "")
 ASR_TIMEOUT_SECONDS = _positive_int_env("ASR_TIMEOUT_SECONDS", 1800)
+
+
+# ── TTS Model (DashScope Qwen3-TTS) ─────────────────────────────────────────
+TTS_BASE_URL = os.environ.get(
+    "TTS_BASE_URL",
+    "https://dashscope.aliyuncs.com/api/v1",
+)
+TTS_API_KEY = os.environ.get("TTS_API_KEY", "")
+TTS_MODEL_NAME = os.environ.get("TTS_MODEL_NAME", "qwen3-tts-flash")
+TTS_VOICE = os.environ.get("TTS_VOICE", "Cherry")
+# Voice-cloned synthesis requires a dedicated VC model; enrollment binds the
+# custom voice to this model and synthesis with a voice_id must reuse it.
+TTS_VC_MODEL_NAME = os.environ.get(
+    "TTS_VC_MODEL_NAME",
+    "qwen3-tts-vc-2026-01-22",
+)
+TTS_TIMEOUT_SECONDS = _positive_int_env("TTS_TIMEOUT_SECONDS", 300)
 
 
 # ── Image Model ──────────────────────────────────────────────────────────────
@@ -826,6 +846,79 @@ def is_asr_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def get_tts_api_key() -> str:
+    configured = _explicit_configured_value(
+        CREATOR_TTS_CONFIG_TOOL,
+        "api_key",
+        ("TTS_API_KEY",),
+    )
+    if configured:
+        return configured
+    # Speech synthesis runs on the same DashScope credential as the text
+    # model, so reuse it by default instead of asking for the key twice.
+    section = _get_user_config().get("tts", {})
+    reuse = not isinstance(section, dict) or section.get(
+        "reuse_llm_key",
+        True,
+    )
+    return get_text_api_key() if reuse else ""
+
+
+def get_tts_base_url() -> str:
+    return _configured_value(
+        CREATOR_TTS_CONFIG_TOOL,
+        ("base_url", "endpoint"),
+        "TTS_BASE_URL",
+        TTS_BASE_URL,
+    )
+
+
+def get_tts_model_name() -> str:
+    return _configured_value(
+        CREATOR_TTS_CONFIG_TOOL,
+        "model",
+        "TTS_MODEL_NAME",
+        TTS_MODEL_NAME,
+    )
+
+
+def get_tts_voice() -> str:
+    return _configured_value(
+        CREATOR_TTS_CONFIG_TOOL,
+        "voice",
+        "TTS_VOICE",
+        TTS_VOICE,
+    )
+
+
+def get_tts_vc_model_name() -> str:
+    return _configured_value(
+        CREATOR_TTS_CONFIG_TOOL,
+        "vc_model",
+        "TTS_VC_MODEL_NAME",
+        TTS_VC_MODEL_NAME,
+    )
+
+
+def get_tts_timeout_seconds() -> int:
+    return _configured_int(
+        CREATOR_TTS_CONFIG_TOOL,
+        "timeout_seconds",
+        "TTS_TIMEOUT_SECONDS",
+        TTS_TIMEOUT_SECONDS,
+    )
+
+
+def is_tts_configured() -> bool:
+    """True when TTS synthesis can run: an API key is resolvable.
+
+    Gates the TTS specialist tools and the TTS prompt sections, so an
+    unconfigured deployment exposes neither.
+    """
+
+    return bool(get_tts_api_key())
 
 
 def _image_provider():
