@@ -300,6 +300,137 @@ class DashScopeImageModel(BaseImageModel):
             model_name=self.model_name,
         )
 
+    async def submit_translate_task(
+        self,
+        image_url: str,
+        *,
+        source_lang: str,
+        target_lang: str,
+    ) -> str:
+        """Submit one qwen-mt-image translation and return its task id.
+
+        The task is billed on acceptance, so the id is recorded in the
+        paying Task's durable ledger before this returns: recovery resumes
+        polling from there after a restart.
+        """
+
+        translate_model = model_config.get_image_translate_model_name()
+        # The temporary upload must be bound to the model that resolves it.
+        public_url = await self._public_reference_url(
+            image_url,
+            model_name=translate_model,
+        )
+        if public_url is None:
+            raise ModelError(
+                f"Image translate input is not a readable image: {image_url[:120]}",
+                model_name=translate_model,
+            )
+        logger.info(
+            "Submitting image translate task | model=%s, %s->%s",
+            translate_model,
+            source_lang,
+            target_lang,
+        )
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.api_root}{_TRANSLATE_SUBMIT_SUFFIX}",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                    "X-DashScope-Async": "enable",
+                    "X-DashScope-OssResourceResolve": "enable",
+                },
+                json={
+                    "model": translate_model,
+                    "input": {
+                        "image_url": public_url,
+                        "source_lang": source_lang,
+                        "target_lang": target_lang,
+                        "ext": {"config": {"imageSegment": False}},
+                    },
+                },
+            )
+            response.raise_for_status()
+            submitted = response.json()
+        output = (
+            submitted.get("output")
+            if isinstance(submitted.get("output"), dict)
+            else {}
+        )
+        task_id = str(output.get("task_id") or "").strip()
+        if not task_id or len(task_id) > 128:
+            raise ModelError(
+                f"Image translate returned no task_id: {submitted}",
+                model_name=translate_model,
+            )
+        note_provider_task(
+            provider_task_id=task_id,
+            model=translate_model,
+            kind="image_translate",
+        )
+        return task_id
+
+    async def poll_translate_task(self, task_id: str) -> dict:
+        """One poll of a translation task.
+
+        Returns ``{"status": ..., "image_url": ..., "error": ...}`` where
+        status is ``RUNNING`` / ``SUCCEEDED`` / ``FAILED``; transient
+        transport failures surface as ``RUNNING`` with ``transient`` set, so
+        a caller (in-process wait or restart recovery) never abandons a paid
+        task because of a rate limit.
+        """
+
+        translate_model = model_config.get_image_translate_model_name()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            try:
+                poll = await client.get(
+                    f"{self.api_root}/tasks/{task_id}",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+            except httpx.TransportError as exc:
+                return {
+                    "status": "RUNNING",
+                    "transient": f"{type(exc).__name__}: {exc}",
+                }
+            if poll.status_code in _TRANSLATE_RETRY_STATUS:
+                return {
+                    "status": "RUNNING",
+                    "transient": (
+                        f"HTTP {poll.status_code} "
+                        f"{format_http_error_detail(poll)[:200]}"
+                    ),
+                }
+            if poll.status_code >= 400:
+                raise ModelError(
+                    f"Image translate poll failed with status "
+                    f"{poll.status_code} (task_id={task_id}): "
+                    f"{format_http_error_detail(poll)[:400]}",
+                    model_name=translate_model,
+                )
+            payload = poll.json()
+        output = (
+            payload.get("output")
+            if isinstance(payload.get("output"), dict)
+            else {}
+        )
+        status = str(output.get("task_status") or "").upper()
+        if status == "SUCCEEDED":
+            return {
+                "status": "SUCCEEDED",
+                "image_url": str(output.get("image_url") or "").strip(),
+            }
+        if status in {"FAILED", "CANCELED", "UNKNOWN"}:
+            return {
+                "status": "FAILED",
+                "error": str(
+                    output.get("message")
+                    or output.get("code")
+                    or payload.get("message")
+                    or status,
+                ),
+            }
+        return {"status": "RUNNING"}
+
     async def _translate(
         self,
         image_url: str,
@@ -315,155 +446,50 @@ class DashScopeImageModel(BaseImageModel):
         then poll ``/tasks/{task_id}`` until SUCCEEDED and download
         ``output.image_url`` (24h TTL).
 
-        The task is billed on acceptance, so its id is reported to the
-        execution layer through :func:`note_provider_task` the moment it is
-        known (durable, survives this process) and transient poll failures
-        are retried instead of abandoning a paid task.
+        Submission and polling are separate operations so restart recovery
+        can resume the same paid task from the durable ledger.
         """
 
         translate_model = model_config.get_image_translate_model_name()
-        # The temporary upload must be bound to the model that resolves it.
-        public_url = await self._public_reference_url(
+        task_id = await self.submit_translate_task(
             image_url,
-            model_name=translate_model,
+            source_lang=source_lang,
+            target_lang=target_lang,
         )
-        if public_url is None:
-            raise ModelError(
-                f"Image translate input is not a readable image: {image_url[:120]}",
-                model_name=translate_model,
-            )
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-            "X-DashScope-Async": "enable",
-            "X-DashScope-OssResourceResolve": "enable",
-        }
-        body = {
-            "model": translate_model,
-            "input": {
-                "image_url": public_url,
-                "source_lang": source_lang,
-                "target_lang": target_lang,
-                "ext": {"config": {"imageSegment": False}},
-            },
-        }
-        logger.info(
-            "Submitting image translate task | model=%s, %s->%s",
-            translate_model,
-            source_lang,
-            target_lang,
-        )
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.api_root}{_TRANSLATE_SUBMIT_SUFFIX}",
-                headers=headers,
-                json=body,
-            )
-            response.raise_for_status()
-            submitted = response.json()
-            output = (
-                submitted.get("output")
-                if isinstance(submitted.get("output"), dict)
-                else {}
-            )
-            task_id = str(output.get("task_id") or "").strip()
-            if not task_id or len(task_id) > 128:
+        deadline = asyncio.get_running_loop().time() + max(self.timeout, 30)
+        while True:
+            result = await self.poll_translate_task(task_id)
+            status = str(result.get("status") or "")
+            if status == "SUCCEEDED":
+                translated_url = str(result.get("image_url") or "")
+                if not translated_url:
+                    raise ModelError(
+                        "Image translate succeeded without image_url "
+                        f"(task_id={task_id})",
+                        model_name=translate_model,
+                    )
+                return await download_remote_image(
+                    translated_url,
+                    translate_model,
+                )
+            if status == "FAILED":
                 raise ModelError(
-                    f"Image translate returned no task_id: {submitted}",
+                    f"Image translate task failed: {result.get('error')}",
                     model_name=translate_model,
                 )
-            # Record the billed task before the first poll: an interruption
-            # after this point leaves a durable, retrievable reference
-            # instead of a silently lost paid result.
-            note_provider_task(
-                provider_task_id=task_id,
-                model=translate_model,
-                kind="image_translate",
-            )
-            deadline = asyncio.get_running_loop().time() + max(
-                self.timeout,
-                30,
-            )
-            poll_failures = 0
-            while True:
-                transient = ""
-                try:
-                    poll = await client.get(
-                        f"{self.api_root}/tasks/{task_id}",
-                        headers={"Authorization": f"Bearer {self.api_key}"},
-                    )
-                except httpx.TransportError as exc:
-                    transient = f"{type(exc).__name__}: {exc}"
-                else:
-                    if poll.status_code in _TRANSLATE_RETRY_STATUS:
-                        transient = (
-                            f"HTTP {poll.status_code} "
-                            f"{format_http_error_detail(poll)[:200]}"
-                        )
-                    elif poll.status_code >= 400:
-                        raise ModelError(
-                            f"Image translate poll failed with status "
-                            f"{poll.status_code} (task_id={task_id}): "
-                            f"{format_http_error_detail(poll)[:400]}",
-                            model_name=translate_model,
-                        )
-                if transient:
-                    # Polling is free and the task is already paid for, so a
-                    # rate limit or a 5xx must never end the wait.
-                    poll_failures += 1
-                    logger.warning(
-                        "Image translate poll failed (%d), retrying | "
-                        "task_id=%s: %s",
-                        poll_failures,
-                        task_id,
-                        transient,
-                    )
-                    if asyncio.get_running_loop().time() >= deadline:
-                        raise ModelError(
-                            f"Image translate polling kept failing until the "
-                            f"{self.timeout}s budget expired (task_id="
-                            f"{task_id}); the task is billed and its result "
-                            "stays retrievable for 24h",
-                            model_name=translate_model,
-                        )
-                    await asyncio.sleep(_TRANSLATE_POLL_INTERVAL_SECONDS)
-                    continue
-                payload = poll.json()
-                status_output = (
-                    payload.get("output")
-                    if isinstance(payload.get("output"), dict)
-                    else {}
+            transient = result.get("transient")
+            if transient:
+                logger.warning(
+                    "Image translate poll failed, retrying | task_id=%s: %s",
+                    task_id,
+                    transient,
                 )
-                status = str(status_output.get("task_status") or "").upper()
-                if status == "SUCCEEDED":
-                    translated_url = str(
-                        status_output.get("image_url") or "",
-                    ).strip()
-                    if not translated_url:
-                        raise ModelError(
-                            f"Image translate succeeded without image_url: {status_output}",
-                            model_name=translate_model,
-                        )
-                    return await download_remote_image(
-                        translated_url,
-                        translate_model,
-                    )
-                if status in {"FAILED", "CANCELED", "UNKNOWN"}:
-                    detail = (
-                        status_output.get("message")
-                        or status_output.get("code")
-                        or payload.get("message")
-                        or status
-                    )
-                    raise ModelError(
-                        f"Image translate task {status}: {detail}",
-                        model_name=translate_model,
-                    )
-                if asyncio.get_running_loop().time() >= deadline:
-                    raise ModelError(
-                        f"Image translate timed out after {self.timeout}s "
-                        f"(task_id={task_id}); the task is billed and its "
-                        "result stays retrievable for 24h",
-                        model_name=translate_model,
-                    )
-                await asyncio.sleep(_TRANSLATE_POLL_INTERVAL_SECONDS)
+            if asyncio.get_running_loop().time() >= deadline:
+                raise ModelError(
+                    f"Image translate did not finish within {self.timeout}s "
+                    f"(task_id={task_id}); the task is billed, stays "
+                    "retrievable for 24h, and Creator resumes polling it on "
+                    "restart",
+                    model_name=translate_model,
+                )
+            await asyncio.sleep(_TRANSLATE_POLL_INTERVAL_SECONDS)

@@ -575,8 +575,41 @@ def media_version_duration_seconds(
     return None if version is None else version.duration_seconds
 
 
+def _probed_media_duration_seconds(
+    project: Project,
+    project_root: Path,
+    version_id: str,
+) -> float | None:
+    """Probe the indexed local file of one version for its real duration.
+
+    Older assets (and anything imported before duration probing) carry no
+    recorded duration, so the file itself is the fallback source of truth.
+    """
+
+    version = project.assets.source_versions_by_id.get(
+        version_id,
+    ) or project.assets.artifact_versions_by_id.get(version_id)
+    if version is None or version.file_id is None:
+        return None
+    indexed = project.assets.files_by_id.get(version.file_id)
+    if indexed is None:
+        return None
+    path = _indexed_path(project_root, indexed)
+    if not path.is_file():
+        return None
+    from services.runtime_files.media_probe import MediaProbeError, probe_media
+
+    try:
+        probe = probe_media(os.fspath(path))
+    except (MediaProbeError, OSError, ValueError):
+        return None
+    duration = getattr(probe, "duration_seconds", None)
+    return float(duration) if duration else None
+
+
 def _assert_video_edit_input_duration(
     project: Project,
+    project_root: Path,
     version_id: str,
 ) -> None:
     """Fail before a billed submission when the input length is unusable.
@@ -584,19 +617,31 @@ def _assert_video_edit_input_duration(
     video_edit takes its duration from the input video (3-60s, with the
     provider keeping only the first 15s), and the tool's durationSeconds is
     not sent for this mode, so the input itself is the only thing to check.
+    An unknown duration is never waved through: the local file is probed,
+    and a still-unknown length is rejected rather than billed blindly.
     """
 
     duration = media_version_duration_seconds(project, version_id)
     if duration is None:
-        # Older versions may carry no probe result; the provider still
-        # enforces its own contract in that case.
-        return
+        duration = _probed_media_duration_seconds(
+            project,
+            project_root,
+            version_id,
+        )
     from models.video_capabilities import (
         HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
         HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS,
         HAPPYHORSE_VIDEO_EDIT_MIN_INPUT_SECONDS,
     )
 
+    if duration is None:
+        raise ValidationError(
+            f"无法确定 videoRef 的时长，而 video_edit 输入必须在 "
+            f"{HAPPYHORSE_VIDEO_EDIT_MIN_INPUT_SECONDS}–"
+            f"{HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS} 秒之间：该版本既未记录"
+            " duration_seconds，本地文件也探测不到（缺失、不可读或无 "
+            "ffprobe/ffmpeg）。请重新引入该视频以补齐元数据后重试",
+        )
     if (
         duration < HAPPYHORSE_VIDEO_EDIT_MIN_INPUT_SECONDS
         or duration > HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS
@@ -756,7 +801,7 @@ def _resolve_request(
             media_prefix="video/",
             label="videoRef",
         )
-        _assert_video_edit_input_duration(project, video_ref)
+        _assert_video_edit_input_duration(project, project_root, video_ref)
         version_ids = (video_ref,)
         checksums = [checksum]
         provenance = [ref]
@@ -4213,6 +4258,22 @@ async def recover_interrupted_image_tasks(
                 recovered += 1
                 continue
             if task.status is TaskStatus.RUNNING:
+                # A server-side provider job (qwen-mt-image translation) is
+                # billed on acceptance and its id is durable, so resume it
+                # instead of discarding a paid result. Only the one-shot
+                # synchronous calls stay fail-closed below.
+                try:
+                    outcome = await worker.resume_provider_task(task)
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(
+                        "image provider task resume failed | task=%s: %s",
+                        task.task_id,
+                        error,
+                    )
+                    outcome = "unsupported"
+                if outcome in {"published", "failed", "pending"}:
+                    recovered += 1
+                    continue
                 await worker._fail_if_running(  # noqa: SLF001
                     project_id,
                     stable,
@@ -4220,7 +4281,10 @@ async def recover_interrupted_image_tasks(
                     message=(
                         "image provider call was interrupted; refusing automatic "
                         "non-idempotent resubmission"
-                        + _accepted_provider_tasks_note(task.task_id, project_id)
+                        + _accepted_provider_tasks_note(
+                            task.task_id,
+                            project_id,
+                        )
                     ),
                 )
             else:

@@ -149,6 +149,28 @@ def derive_video_model_name(model_name: str, mode: str) -> str:
     return f"{base}-{suffix}"
 
 
+def effective_video_model_name(
+    model_name: str,
+    mode: str,
+    backend_key: str,
+) -> str:
+    """The model name a submission will actually carry.
+
+    Single source of truth for both the submit path and the execution
+    authorization snapshot: HappyHorse names every mode (so even the default
+    r2v derives ``-r2v``), other Bailian families only need derivation for
+    the non-default modes, and seedance2 uses the configured name as-is.
+    """
+
+    configured = model_name.strip()
+    if backend_key == "seedance2":
+        return configured
+    normalized_mode = (mode or "r2v").strip().casefold() or "r2v"
+    if backend_key == "happyhorse" or normalized_mode != "r2v":
+        return derive_video_model_name(configured, normalized_mode)
+    return configured
+
+
 def _mode_guidance(model_name: str) -> str:
     """One prompt block describing the mode matrix for the active model."""
 
@@ -224,6 +246,7 @@ __all__ = [
     "VIDEO_MODES",
     "VIDEO_MODE_MATRIX",
     "derive_video_model_name",
+    "effective_video_model_name",
     "is_happyhorse_model",
     "validate_video_mode",
     "video_backend_key",

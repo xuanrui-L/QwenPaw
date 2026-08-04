@@ -30,7 +30,7 @@ from models.video_capabilities import (
     HAPPYHORSE_RATIOS,
     HAPPYHORSE_RESOLUTIONS,
     HAPPYHORSE_VIDEO_EDIT_MAX_REFERENCE_IMAGES,
-    derive_video_model_name,
+    effective_video_model_name,
     validate_video_mode,
     video_backend_key,
 )
@@ -396,12 +396,11 @@ async def submit_video_task(
     # HappyHorse names models per mode: derive from the configured base or
     # full name (decided upstream-compatible naming). Wan follows the same
     # rule for the new modes while r2v keeps the configured name untouched.
-    effective_model = model_name
-    if not uses_seedance and (uses_happyhorse or normalized_mode != "r2v"):
-        effective_model = derive_video_model_name(
-            model_name,
-            normalized_mode,
-        )
+    effective_model = effective_video_model_name(
+        model_name,
+        normalized_mode,
+        backend_key if not uses_seedance else "seedance2",
+    )
 
     happyhorse_resolution = ""
     if uses_happyhorse and normalized_mode == "r2v":

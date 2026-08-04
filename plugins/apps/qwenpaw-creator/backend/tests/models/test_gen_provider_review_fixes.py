@@ -398,7 +398,10 @@ def test_billed_submit_is_not_retried_on_server_error(s2v_env) -> None:
 
 
 @respx.mock
-def test_billed_submit_still_retries_a_rate_limit(s2v_env, monkeypatch) -> None:
+def test_billed_submit_still_retries_a_rate_limit(
+    s2v_env,
+    monkeypatch,
+) -> None:
     """429 is an outright rejection, so retrying cannot double-bill."""
 
     monkeypatch.setattr(s2v_model, "_RETRY_BACKOFF_SECONDS", 0.0)
@@ -545,7 +548,13 @@ def test_authorization_snapshots_the_effective_model(monkeypatch) -> None:
             image_spec,
             {"mode": "translate"},
         ) == ("dashscope", "qwen-mt-image")
+        # HappyHorse derives even for the default r2v, exactly like the
+        # submit path, so the approval names the billed model.
         assert _execution_provider_model(video_spec, {}) == (
+            "wan",
+            "happyhorse-1.1-r2v",
+        )
+        assert _execution_provider_model(video_spec, {"mode": "r2v"}) == (
             "wan",
             "happyhorse-1.1-r2v",
         )
@@ -586,7 +595,7 @@ def test_video_edit_pricing_follows_the_input_video(monkeypatch) -> None:
 # ── video_edit input duration ────────────────────────────────────────────────
 
 
-def test_video_edit_input_duration_is_validated() -> None:
+def test_video_edit_input_duration_is_validated(tmp_path) -> None:
     from domain.errors import ValidationError
     from services.media_files.r2v_execution import (
         _assert_video_edit_input_duration,
@@ -628,13 +637,87 @@ def test_video_edit_input_duration_is_validated() -> None:
     register("v-long", 75.0)
     register("v-unknown", None)
 
-    _assert_video_edit_input_duration(project, "v-ok")
-    # An unknown duration cannot be judged locally; the provider still does.
-    _assert_video_edit_input_duration(project, "v-unknown")
+    _assert_video_edit_input_duration(project, tmp_path, "v-ok")
     with pytest.raises(ValidationError, match="3–60"):
-        _assert_video_edit_input_duration(project, "v-short")
+        _assert_video_edit_input_duration(project, tmp_path, "v-short")
     with pytest.raises(ValidationError, match="3–60"):
-        _assert_video_edit_input_duration(project, "v-long")
+        _assert_video_edit_input_duration(project, tmp_path, "v-long")
+    # An unknown duration is never waved through to a billed submission:
+    # the file is probed, and here it does not exist on disk at all.
+    with pytest.raises(ValidationError, match="无法确定"):
+        _assert_video_edit_input_duration(project, tmp_path, "v-unknown")
+
+
+def test_unknown_duration_is_probed_from_the_local_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A version without recorded metadata is probed, not trusted blindly."""
+
+    from datetime import UTC, datetime
+
+    from domain.errors import ValidationError
+    from services.media_files import r2v_execution
+    from services.project_files.models import (
+        IndexedFile,
+        Project,
+        SourceAssetVersion,
+    )
+
+    project = Project.new(project_id="p-probe", name="probe")
+    created = datetime.now(UTC)
+    relative = "assets/sources/clip.mp4"
+    project.assets.files_by_id["file-probe"] = IndexedFile(
+        file_id="file-probe",
+        kind="source_original",
+        relative_uri=relative,
+        sha256="0" * 64,
+        size_bytes=2048,
+        media_type="video/mp4",
+        created_at=created,
+    )
+    project.assets.source_versions_by_id["v-probe"] = SourceAssetVersion(
+        version_id="v-probe",
+        logical_asset_id="asset-probe",
+        name="clip",
+        file_id="file-probe",
+        checksum="0" * 64,
+        media_kind="video",
+        media_type="video/mp4",
+        duration_seconds=None,
+        created_at=created,
+    )
+    media_path = tmp_path / relative
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"probe" * 64)
+
+    class _Probe:
+        duration_seconds = 90.0
+
+    monkeypatch.setattr(
+        "services.runtime_files.media_probe.probe_media",
+        lambda *args, **kwargs: _Probe(),
+    )
+    # Probed 90s exceeds the 60s input contract, so it is rejected.
+    with pytest.raises(ValidationError, match="3–60"):
+        r2v_execution._assert_video_edit_input_duration(
+            project,
+            tmp_path,
+            "v-probe",
+        )
+
+    class _ShortProbe:
+        duration_seconds = 12.0
+
+    monkeypatch.setattr(
+        "services.runtime_files.media_probe.probe_media",
+        lambda *args, **kwargs: _ShortProbe(),
+    )
+    r2v_execution._assert_video_edit_input_duration(
+        project,
+        tmp_path,
+        "v-probe",
+    )
 
 
 def test_video_submit_records_the_billed_task(monkeypatch, tmp_path) -> None:
@@ -671,10 +754,15 @@ def test_video_submit_records_the_billed_task(monkeypatch, tmp_path) -> None:
         async def __aexit__(self, *exc) -> bool:
             return False
 
-        async def post(self, url, headers=None, json=None):
+        async def post(self, url, headers=None, json=None):  # noqa: A002
+            # pylint: disable=redefined-outer-name
             return _Response()
 
-    monkeypatch.setattr(video_model.httpx, "AsyncClient", lambda timeout: _Client())
+    monkeypatch.setattr(
+        video_model.httpx,
+        "AsyncClient",
+        lambda timeout: _Client(),
+    )
 
     with media_task_scope("task-video-1", project_id="project-video"):
         task_id = asyncio.run(
@@ -691,3 +779,114 @@ def test_video_submit_records_the_billed_task(monkeypatch, tmp_path) -> None:
     # The ledger records the derived model that was actually submitted.
     assert entries[0]["model"] == "happyhorse-1.1-t2v"
     assert entries[0]["kind"] == "video_t2v"
+
+
+def test_authorized_model_matches_the_submitted_model(monkeypatch) -> None:
+    """The approval snapshot and submit_video_task must never disagree.
+
+    A configured base name (happyhorse-1.1) is the case the review caught:
+    submission derived -r2v while the approval kept the base.
+    """
+
+    from services.file_agent_runtime.driver import _execution_provider_model
+    from services.specialist_tools import SpecialistToolSpec
+
+    video_spec = SpecialistToolSpec(
+        name="r2v_generation",
+        description="d",
+        roles=frozenset(),
+        parameters={},
+        provider_kind="video",
+    )
+    captured: dict = {}
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"output": {"task_id": "task-identity"}}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+        async def post(self, url, headers=None, json=None):  # noqa: A002
+            # pylint: disable=redefined-outer-name
+            captured["model"] = json["model"]
+            return _Response()
+
+    for configured, backend, mode in (
+        ("happyhorse-1.1", "wan", None),
+        ("happyhorse-1.1", "wan", "r2v"),
+        ("happyhorse-1.1", "wan", "t2v"),
+        ("wan2.7-r2v", "wan", None),
+        ("wan2.7-r2v", "wan", "i2v"),
+    ):
+        monkeypatch.setattr(
+            model_config,
+            "get_video_model_name",
+            lambda value=configured: value,
+        )
+        monkeypatch.setattr(
+            model_config,
+            "get_video_backend",
+            lambda value=backend: value,
+        )
+        monkeypatch.setattr(
+            model_config,
+            "get_video_api_key",
+            lambda: "sk-test",
+        )
+        monkeypatch.setattr(
+            model_config,
+            "get_video_submit_url",
+            lambda: "https://bailian.example/api/v1/services/aigc/video-generation/video-synthesis",
+        )
+        monkeypatch.setattr(
+            model_config,
+            "get_video_submit_timeout",
+            lambda: 5,
+        )
+        monkeypatch.setattr(
+            "services.file_agent_runtime.driver.get_video_backend",
+            lambda value=backend: value,
+        )
+        monkeypatch.setattr(
+            "services.file_agent_runtime.driver.get_video_model_name",
+            lambda value=configured: value,
+        )
+
+        async def fake_resolve(url: str, upload_backend: str):
+            return "oss://dashscope-instant/frame.png", "image"
+
+        monkeypatch.setattr(
+            video_model,
+            "_resolve_reference_media_url",
+            fake_resolve,
+        )
+        monkeypatch.setattr(
+            video_model.httpx,
+            "AsyncClient",
+            lambda timeout: _Client(),
+        )
+        arguments = {} if mode is None else {"mode": mode}
+        _, authorized = _execution_provider_model(video_spec, arguments)
+        kwargs: dict = {"duration": 5, "resolution": "720P"}
+        if mode == "i2v":
+            kwargs["first_frame_url"] = "/generated/frame.png"
+        elif mode in (None, "r2v"):
+            kwargs["reference_image_url"] = "/generated/frame.png"
+        asyncio.run(
+            video_model.submit_video_task(
+                "prompt",
+                mode=mode or "r2v",
+                **kwargs,
+            ),
+        )
+        assert authorized == captured["model"], (configured, mode)

@@ -98,9 +98,13 @@ from services.runtime_files.safe_remote_download import (
 from utils.paths import media_path_from_url, media_task_scope
 
 # pylint: enable=no-name-in-module
+from utils.logger import setup_logger
 
 if TYPE_CHECKING:
     from services.project_files.facade import CreatorFileServices
+
+
+logger = setup_logger("services.media_files.image_execution")
 
 
 _IMAGE_COMMANDS = frozenset(
@@ -812,6 +816,56 @@ def _image_suffix(media_type: str) -> str:
     return guessed if _SAFE_SUFFIX.fullmatch(guessed) else ".png"
 
 
+def _publish_snapshot(resolved: _ResolvedRequest) -> dict[str, Any]:
+    """The subset of a resolved request needed to publish its output."""
+
+    return {
+        "command": resolved.command.value,
+        "targetRef": resolved.target_ref,
+        "mode": resolved.mode,
+        "prompt": resolved.prompt,
+        "aspectRatio": resolved.aspect_ratio,
+        "referenceVersionIds": list(resolved.reference_version_ids),
+        "readSet": [dict(item) for item in resolved.read_set],
+        "slotId": resolved.slot_id,
+        "slotKind": resolved.slot_kind,
+        "ownerRef": resolved.owner_ref,
+        "artifactName": resolved.artifact_name,
+        "role": resolved.role.value,
+        "targetId": resolved.target_id,
+        "variantId": resolved.variant_id,
+    }
+
+
+def _resolved_from_publish_snapshot(
+    snapshot: Mapping[str, Any],
+) -> _ResolvedRequest:
+    """Rebuild the publish-relevant resolved request after a restart."""
+
+    return _ResolvedRequest(
+        command=CreatorCommandType(str(snapshot["command"])),
+        target_ref=str(snapshot["targetRef"]),
+        prompt=str(snapshot.get("prompt") or ""),
+        aspect_ratio=str(snapshot.get("aspectRatio") or "16:9"),
+        reference_image_urls=(),
+        reference_version_ids=tuple(
+            str(item) for item in snapshot.get("referenceVersionIds") or ()
+        ),
+        reference_checksums=(),
+        read_set=tuple(dict(item) for item in snapshot.get("readSet") or ()),
+        slot_id=str(snapshot["slotId"]),
+        slot_kind=str(snapshot["slotKind"]),
+        owner_ref=str(snapshot["ownerRef"]),
+        artifact_name=str(snapshot.get("artifactName") or ""),
+        role=SpecialistRole(str(snapshot["role"])),
+        target_id=str(snapshot.get("targetId") or ""),
+        variant_id=(
+            str(snapshot["variantId"]) if snapshot.get("variantId") else None
+        ),
+        mode=str(snapshot.get("mode") or "generate"),
+    )
+
+
 class FileImageExecutionService:
     """Convergent P0 image worker over Project and Runtime files."""
 
@@ -1166,6 +1220,10 @@ class FileImageExecutionService:
                 "slotId": resolved.slot_id,
                 "artifactVersionId": ids["artifact_version_id"],
                 "fileId": ids["file_id"],
+                # Frozen publish inputs, so an interrupted provider task can
+                # be resumed and published after a restart without
+                # re-resolving (and possibly re-billing) anything.
+                "requestSnapshot": _publish_snapshot(resolved),
             },
         )
         try:
@@ -1386,6 +1444,129 @@ class FileImageExecutionService:
             "artifactVersion": artifact.model_dump(mode="json"),
             "outputRef": f"artifact-version:{artifact.version_id}",
         }
+
+    async def resume_provider_task(
+        self,
+        task: TaskRecord,
+        *,
+        poll_interval_seconds: float = 3.0,
+        poll_budget_seconds: float = 120.0,
+    ) -> str:
+        """Resume an interrupted asynchronous provider task, then publish.
+
+        Only tasks whose provider work is a *server-side* job can be
+        resumed: the accepted (billed) id lives in the paying Task's durable
+        ledger, so a restart continues polling, downloads the result and
+        publishes it through the normal commit boundary instead of throwing
+        the paid output away.
+
+        Returns ``"published"`` / ``"failed"`` / ``"pending"``; ``pending``
+        leaves the Task active so the next recovery pass resumes again.
+        """
+
+        from models.provider_tasks import read_provider_tasks
+
+        entries = [
+            entry
+            for entry in read_provider_tasks(task.task_id, task.project_id)
+            if str(entry.get("kind") or "") == "image_translate"
+            and entry.get("providerTaskId")
+        ]
+        if not entries:
+            return "unsupported"
+        snapshot = task.metadata.get("requestSnapshot")
+        if not isinstance(snapshot, Mapping):
+            return "unsupported"
+        provider_task_id = str(entries[-1]["providerTaskId"])
+        from models.image import poll_image_translate_task
+
+        deadline = asyncio.get_running_loop().time() + poll_budget_seconds
+        while True:
+            result = await poll_image_translate_task(provider_task_id)
+            status = str(result.get("status") or "")
+            if status in {"SUCCEEDED", "FAILED"}:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                logger.info(
+                    "image translate task still running after restart; "
+                    "will resume again | task=%s provider_task=%s",
+                    task.task_id,
+                    provider_task_id,
+                )
+                return "pending"
+            await asyncio.sleep(poll_interval_seconds)
+
+        ids = self._ids(
+            task.project_id,
+            str(task.idempotency_key or task.task_id),
+        )
+        if status == "FAILED":
+            await self._fail_if_running(
+                task.project_id,
+                ids,
+                "IMAGE_PROVIDER_FAILED",
+                message=(
+                    "resumed image translate task failed: "
+                    f"{result.get('error')} (provider_task={provider_task_id})"
+                ),
+            )
+            return "failed"
+
+        translated_url = str(result.get("image_url") or "")
+        if not translated_url:
+            await self._fail_if_running(
+                task.project_id,
+                ids,
+                "IMAGE_PROVIDER_FAILED",
+                message=(
+                    "resumed image translate task succeeded without an image "
+                    f"url (provider_task={provider_task_id})"
+                ),
+            )
+            return "failed"
+        base = await asyncio.to_thread(
+            self.services.projects.read,
+            task.project_id,
+        )
+        resolved = _resolved_from_publish_snapshot(snapshot)
+        with media_task_scope(task.task_id, project_id=task.project_id):
+            from models.image.base import download_remote_image
+
+            generated_url = await download_remote_image(
+                translated_url,
+                str(entries[-1].get("model") or "qwen-mt-image"),
+            )
+            published_result = await self._materialize_and_publish(
+                base=base,
+                resolved=resolved,
+                task=task,
+                ids=ids,
+                output={"url": generated_url, "media_type": "image/png"},
+            )
+        # Record the immutable result on the Task, then converge it exactly
+        # like the in-process path does, so the Task reaches SUCCEEDED and
+        # the Project commit becomes visible.
+        task = await asyncio.to_thread(
+            self.executions.transition_task,
+            task.project_id,
+            task.task_id,
+            expected_status=TaskStatus.RUNNING,
+            status=TaskStatus.RUNNING,
+            updates={
+                "progress": 0.9,
+                "result": published_result,
+                "output_refs": [
+                    f"artifact-version:{ids['artifact_version_id']}",
+                ],
+            },
+        )
+        await self._converge(task=task, ids=ids, replayed=True)
+        logger.info(
+            "resumed image translate task published | task=%s provider_task=%s",
+            task.task_id,
+            provider_task_id,
+        )
+        return "published"
 
     async def _converge(
         self,

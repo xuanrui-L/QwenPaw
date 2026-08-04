@@ -3396,16 +3396,25 @@ class FileCreatorAgentRuntime:
         target_ref = str(arguments.get("targetRef") or "project:unknown")
         tool_arguments = dict(arguments.get("arguments") or {})
         provider, model = _execution_provider_model(spec, tool_arguments)
+        # What the provider will actually bill: video_edit follows its input
+        # video, not the requested durationSeconds. The user must approve
+        # those effective terms, so summary/scope/pricing all read them.
+        billing_arguments = await self._billing_arguments(
+            spec,
+            project_id=project_id,
+            tool_arguments=tool_arguments,
+        )
         estimate = estimate_execution_cost(
             provider_kind=spec.provider_kind,
             provider=provider,
             model=model,
-            arguments=await self._billing_arguments(
-                spec,
-                project_id=project_id,
-                tool_arguments=tool_arguments,
-            ),
+            arguments=billing_arguments,
         )
+        adjusted_parameters = {
+            key: value
+            for key, value in billing_arguments.items()
+            if tool_arguments.get(key) != value
+        }
         record = ExecutionAuthorizationRecord(
             authorization_id=authorization_id,
             project_id=project_id,
@@ -3420,13 +3429,21 @@ class FileCreatorAgentRuntime:
                 target_ref=target_ref,
                 provider=provider,
                 model=model,
-                tool_arguments=tool_arguments,
+                tool_arguments=billing_arguments,
                 estimate=estimate,
             ),
             scope={
                 "operation": spec.name,
                 "targetRefs": [target_ref],
-                "parameters": tool_arguments,
+                "parameters": billing_arguments,
+                # Keep the literal tool request when it differs, so the
+                # approval record shows both what was asked and what is
+                # billed.
+                **(
+                    {"requestedParameters": tool_arguments}
+                    if adjusted_parameters
+                    else {}
+                ),
                 "promptPreview": _prompt_preview(tool_arguments, limit=200),
                 "billing": estimate.as_payload() if estimate else None,
             },
@@ -4688,13 +4705,21 @@ def _execution_provider_model(
             return "dashscope", get_image_translate_model_name()
         return get_image_backend().casefold(), get_image_model_name()
     if spec.provider_kind == "video":
-        from models.video_capabilities import derive_video_model_name
+        from models.video_capabilities import (
+            effective_video_model_name,
+            video_backend_key,
+        )
 
         backend = get_video_backend()
-        model = get_video_model_name()
-        if mode and mode != "r2v" and backend != "seedance2":
-            model = derive_video_model_name(model, mode)
-        return backend, model
+        configured = get_video_model_name()
+        # Same rule as the submit path, so the approval can never name a
+        # different model than the billed request (HappyHorse derives even
+        # for the default r2v).
+        return backend, effective_video_model_name(
+            configured,
+            mode,
+            video_backend_key(configured, backend),
+        )
     if spec.provider_kind == "tts":
         from models.config import get_tts_model_name
 
@@ -4739,9 +4764,16 @@ def _authorization_summary(
         ratio = str(tool_arguments.get("aspectRatio") or "16:9")
         parts.append(f"画幅 {ratio}")
     elif spec.provider_kind == "video":
+        mode = str(tool_arguments.get("mode") or "r2v").strip().casefold()
         duration = tool_arguments.get("durationSeconds")
         if duration:
-            parts.append(f"{duration}秒")
+            # video_edit follows its input video, so name the source of the
+            # number the price is computed from.
+            parts.append(
+                f"{duration}秒（按输入视频计费）"
+                if mode == "video_edit"
+                else f"{duration}秒",
+            )
         resolution = tool_arguments.get("resolution")
         if resolution:
             parts.append(str(resolution).upper())
