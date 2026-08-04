@@ -698,6 +698,7 @@ def _read_then_commit(
     shots: list[dict],
     between_read_and_commit=None,
     strip_text_coverage: bool = False,
+    mutate_stored=None,
 ):
     """Shared read -> (mutate) -> commit flow for coverage-integrity tests."""
     read_context = _running_context(
@@ -717,6 +718,8 @@ def _read_then_commit(
         stored = dict(read_result)
         if strip_text_coverage:
             stored.pop("textCoverage", None)
+        if mutate_stored is not None:
+            mutate_stored(stored)
         service.executions.append_specialist_message(
             "project-1",
             read_context.specialist_run_id,
@@ -808,6 +811,100 @@ def test_document_commit_rejects_missing_or_tampered_indexed_text(
             between_read_and_commit=tamper_runtime_text,
         )
     assert "不一致" in str(tampered.value)
+
+
+def test_document_commit_rejects_partial_text_coverage(tmp_path) -> None:
+    # CR P1 (fail-closed): a textCoverage missing its sha256 must reject
+    # the commit outright — otherwise a same-length content swap of the
+    # Runtime file would pass the remaining length-only check.
+    body = "剧情推进。" * 2000
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="notes.txt",
+        content=body.encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    project_root = services.projects.project_root("project-1")
+    snapshot = services.projects.read("project-1")
+    checksum = snapshot.project.assets.source_versions_by_id[
+        version_id
+    ].checksum
+
+    def drop_sha(stored):
+        stored["textCoverage"] = {
+            key: value
+            for key, value in stored["textCoverage"].items()
+            if key != "sha256"
+        }
+
+    def swap_same_length_content(read_result):
+        path = document_indexed_text_path(
+            project_root,
+            checksum,
+            read_result["resultRef"],
+        )
+        original = path.read_text(encoding="utf-8")
+        path.write_text("Z" * len(original), encoding="utf-8")
+
+    with pytest.raises(ValidationError) as excinfo:
+        _read_then_commit(
+            service,
+            services,
+            asset_id,
+            version_id,
+            tag="doc-partial-coverage",
+            shots=[_document_shot(1, "全文概括。")],
+            between_read_and_commit=swap_same_length_content,
+            mutate_stored=drop_sha,
+        )
+    assert "textCoverage 不合法" in str(excinfo.value)
+
+
+def test_unknown_ratio_is_confined_to_document_ocr() -> None:
+    # CR P2: the honest-unknown ratio must not weaken every modality's
+    # frozen invariant.
+    from schemas.assets import SourceCoverage
+
+    with pytest.raises(ValueError):
+        SourceCoverage.model_validate(
+            {"mode": "available", "producer": "model_native", "ratio": None},
+        )
+    SourceCoverage.model_validate(
+        {"mode": "available", "producer": "document_reader", "ratio": None},
+    )
+
+
+def test_index_rejects_unknown_ratio_outside_document_ocr(tmp_path) -> None:
+    # Index-level gate: tampering the canonical index.txt so a non-ocr
+    # modality declares an unknown available ratio must fail to parse.
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="notes.txt",
+        content="第一幕：猫信使出发。".encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    _read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="doc-scope-gate",
+        shots=[_document_shot(1, "全文概括。")],
+    )
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    files = render_source_intelligence_files(index)
+    tampered = dict(files)
+    tampered["index.txt"] = tampered["index.txt"].replace(
+        "coverage\tvisual\tavailable\tdocument_reader\t1",
+        "coverage\tvisual\tavailable\tdocument_reader\t-",
+    )
+    assert tampered["index.txt"] != files["index.txt"]
+    with pytest.raises(Exception) as excinfo:
+        parse_source_intelligence_files(tampered)
+    assert "document ocr" in str(excinfo.value)
 
 
 def test_legacy_result_without_text_coverage_falls_back(tmp_path) -> None:

@@ -49,6 +49,7 @@ from models import config as model_config
 from models import asr_model
 from schemas.assets import (
     DocumentMetadata,
+    DocumentTextCoverage,
     SourceAgentIntelligenceInput,
     SourceIndexQueryResult,
     SourceIntelligenceIndex,
@@ -1008,16 +1009,21 @@ class SourceMediaAnalysisService:
                 version.checksum,
                 document_ref,
             )
-            text_coverage = module.get("textCoverage")
-            if isinstance(text_coverage, Mapping):
-                extracted_chars = int(
-                    text_coverage.get("extractedChars") or 0,
-                )
-                indexed_chars = int(text_coverage.get("indexedChars") or 0)
-                if not 0 <= indexed_chars <= extracted_chars:
-                    raise ValidationError(
-                        "read_document textCoverage 数值不合法",
+            raw_text_coverage = module.get("textCoverage")
+            if raw_text_coverage is not None:
+                # New-format results carry a strict integrity contract: any
+                # missing or malformed field rejects the commit instead of
+                # silently degrading the checks (fail-closed).
+                try:
+                    text_coverage = DocumentTextCoverage.model_validate(
+                        raw_text_coverage,
                     )
+                except ValueError as error:
+                    raise ValidationError(
+                        f"read_document textCoverage 不合法: {error}",
+                    ) from error
+                indexed_chars = text_coverage.indexed_chars
+                extracted_chars = text_coverage.extracted_chars
                 if not indexed_text_path.is_file():
                     raise ValidationError(
                         "文档索引文本的 Runtime 文件缺失，无法提交；请重新调用 "
@@ -1027,12 +1033,12 @@ class SourceMediaAnalysisService:
                     indexed_text_path.read_text,
                     "utf-8",
                 )
-                expected_sha = str(text_coverage.get("sha256") or "")
                 actual_sha = sha256(
                     document_indexed_text.encode("utf-8"),
                 ).hexdigest()
-                if len(document_indexed_text) != indexed_chars or (
-                    expected_sha and actual_sha != expected_sha
+                if (
+                    len(document_indexed_text) != indexed_chars
+                    or actual_sha != text_coverage.sha256
                 ):
                     raise ValidationError(
                         "文档索引文本与 read_document 的 textCoverage 不一致"
@@ -1047,14 +1053,13 @@ class SourceMediaAnalysisService:
                     if extracted_chars > 0
                     else None
                 )
-                if text_coverage.get("extractionComplete", True):
+                if text_coverage.extraction_complete:
                     document_text_ratio = char_ratio
                 else:
-                    fraction = text_coverage.get("extractionFraction")
+                    fraction = text_coverage.extraction_fraction
                     document_text_ratio = (
-                        min(1.0, char_ratio * float(fraction))
-                        if char_ratio is not None
-                        and isinstance(fraction, (int, float))
+                        min(1.0, char_ratio * fraction)
+                        if char_ratio is not None and fraction is not None
                         else None
                     )
             else:
