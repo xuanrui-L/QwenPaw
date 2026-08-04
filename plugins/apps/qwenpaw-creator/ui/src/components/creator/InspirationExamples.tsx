@@ -47,7 +47,7 @@ export default function InspirationExamples() {
       <p className="mb-2 text-sm leading-6 tracking-[0.4px] text-[#808080]">
         灵感示例
       </p>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {examples.map((example) => (
           <button
             key={example.id}
