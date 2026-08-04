@@ -205,6 +205,7 @@ def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
         "read_project",
         "read_project_file",
         "jq_project",
+        "patch_project",
         "elements_at",
     )
     file_parameters = schemas["read_project_file"]["parameters"]
@@ -242,6 +243,7 @@ def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
         "read_project",
         "read_project_file",
         "jq_project",
+        "patch_project",
         "elements_at",
     ]
     assert (

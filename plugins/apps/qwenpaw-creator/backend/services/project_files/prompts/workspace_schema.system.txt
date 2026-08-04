@@ -54,6 +54,7 @@ Project
 
 ### jq_project 输出约束
 
+- 日常结构化写入（新建/更新实体、Variant、Element、改字段）优先使用 `patch_project`：扁平 op 列表、逐 op 定位错误、无需输出完整 Project；`upsert_entity` 会自动同步 EntityCollection 的 items/order。只有需要计算或批量条件修改时才用 `jq_project`。
 - jq 的唯一输出必须仍是完整 Project 根对象；不得以 `.timelines...`、`$timeline`、`$element` 等子对象选择结束 program。
 - 受保护根字段必须与刚读取的 Project 完全一致。批量新增内容时把对象集合放进 `jsonArgs`，program 只做结构化赋值并自然返回 Project 根对象。
 - `jsonArgs` 中的 object 已经是 jq object，直接赋值或合并；仅对真正的 `[{"key":...,"value":...}]` 数组使用 `from_entries`。
