@@ -56,10 +56,13 @@ logger = setup_logger("creator.render_review")
 _TRACE_COMPONENT = "render_review"
 _VLM_ATTEMPTS = 2
 _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
-# Lease identity of this process: a claim from another (crashed) process is
-# abandoned and immediately reclaimable regardless of its age.
+# Lease identity: claims are owned by one event loop of one process. A
+# claim whose owner is gone (crashed process OR a shut-down loop whose
+# cleanup callbacks never ran) is reclaimed immediately by the next
+# schedule, independent of any asyncio cleanup having executed.
 _PROCESS_TOKEN = uuid4().hex
-# A same-process claim older than this is treated as hung and reclaimable.
+_LOOP_TOKEN_ATTR = "_render_review_owner_token"
+# A same-owner claim older than this is treated as hung and reclaimable.
 _CLAIM_TTL_SECONDS = 30 * 60
 # Bounded dedup history of already-reviewed artifact versions per chain file.
 _REVIEWED_HISTORY_LIMIT = 50
@@ -108,14 +111,35 @@ def _chain_lock(reports_root: Path, target_ref: str) -> CrossProcessFileLock:
     )
 
 
-def _claim_is_live(claim: Mapping[str, Any]) -> bool:
-    """Whether an existing claim still belongs to a live in-process review.
+def _owner_token() -> str:
+    """Lease token for the current scheduling context.
 
-    A claim leased by another process token is a crash leftover: the loop
-    that wrote it cannot complete anymore, so replay scheduling after a
-    restart reclaims it immediately instead of waiting for the TTL.
+    Bound to the running event loop (falling back to the bare process token
+    in synchronous contexts): a claim written on a loop that has since shut
+    down carries a token no future caller can present, so it is treated as
+    abandoned even though the worker thread persisted it after every
+    asyncio cleanup path was cancelled.
     """
-    if str(claim.get("owner") or "") != _PROCESS_TOKEN:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return _PROCESS_TOKEN
+    token = getattr(loop, _LOOP_TOKEN_ATTR, None)
+    if not isinstance(token, str):
+        token = f"{_PROCESS_TOKEN}-{uuid4().hex[:8]}"
+        setattr(loop, _LOOP_TOKEN_ATTR, token)
+    return token
+
+
+def _claim_is_live(claim: Mapping[str, Any], *, owner: str) -> bool:
+    """Whether an existing claim still belongs to a live review.
+
+    A claim leased by another owner token (crashed process or a dead event
+    loop) is a leftover: the loop that wrote it cannot complete anymore, so
+    the next schedule reclaims it immediately instead of waiting for the
+    TTL.
+    """
+    if str(claim.get("owner") or "") != owner:
         return False
     raw = str(claim.get("claimed_at") or "")
     try:
@@ -131,14 +155,17 @@ def _admit_round(
     *,
     target_ref: str,
     video_id: str,
+    owner: str | None = None,
 ) -> tuple[int, str] | None:
     """Atomically claim the next round, or return ``None`` when not due.
 
     The claim is persisted before any review work starts so concurrent
     schedules cannot double-book a round; a claim for an older video is
     superseded by the newer composition, and the superseded loop drops its
-    findings at finalization.
+    findings at finalization. ``owner`` is the caller's lease token (this
+    function runs in a worker thread, so the scheduling loop resolves it).
     """
+    owner = owner or _owner_token()
     chain_path = _chain_path(reports_root, target_ref)
     with _chain_lock(reports_root, target_ref):
         state = _read_json(chain_path) or {}
@@ -150,7 +177,10 @@ def _admit_round(
         ):
             return None
         claim = state.get("claim") or {}
-        if claim.get("video_id") == video_id and _claim_is_live(claim):
+        if claim.get("video_id") == video_id and _claim_is_live(
+            claim,
+            owner=owner,
+        ):
             # The same video is already being reviewed (replayed schedule).
             return None
         if state.get("status") == "open":
@@ -178,7 +208,7 @@ def _admit_round(
                 "claim": {
                     "video_id": video_id,
                     "round": round_number,
-                    "owner": _PROCESS_TOKEN,
+                    "owner": owner,
                     "claimed_at": now,
                 },
                 "updated_at": now,
@@ -193,14 +223,23 @@ def _release_claim(
     *,
     target_ref: str,
     video_id: str,
+    owner: str | None = None,
 ) -> None:
-    """Best-effort claim release after a failed review round."""
+    """Best-effort claim release after a failed review round.
+
+    Only the matching claim is cleared: a claim for a different video or a
+    different owner belongs to another (possibly newer) review.
+    """
+    owner = owner or _owner_token()
     chain_path = _chain_path(reports_root, target_ref)
     try:
         with _chain_lock(reports_root, target_ref):
             state = _read_json(chain_path) or {}
             claim = state.get("claim") or {}
-            if claim.get("video_id") != video_id:
+            if (
+                claim.get("video_id") != video_id
+                or str(claim.get("owner") or "") != owner
+            ):
                 return
             state["claim"] = None
             state["updated_at"] = datetime.now(UTC).isoformat()
@@ -241,6 +280,7 @@ def _finalize_round(
     video_id: str,
     slot_id: str | None,
     report: RenderReviewReport,
+    owner: str | None = None,
 ) -> tuple[str, bool]:
     """Re-validate freshness and admit feedback atomically.
 
@@ -256,6 +296,7 @@ def _finalize_round(
     never mutate the current timeline and never consume a chain round.
     """
     chain_path = _chain_path(reports_root, target_ref)
+    owner = owner or _owner_token()
     with _chain_lock(reports_root, target_ref):
         state = _read_json(chain_path) or {}
         claim = state.get("claim") or {}
@@ -266,7 +307,10 @@ def _finalize_round(
         if video_id not in reviewed:
             reviewed.append(video_id)
         reviewed = reviewed[-_REVIEWED_HISTORY_LIMIT:]
-        if claim.get("video_id") != video_id:
+        if (
+            claim.get("video_id") != video_id
+            or str(claim.get("owner") or "") != owner
+        ):
             state["reviewed_video_ids"] = reviewed
             state["updated_at"] = now
             _write_json(chain_path, state)
@@ -605,19 +649,27 @@ def _settle_cancelled_admission(
     *,
     target_ref: str,
     video_id: str,
+    owner: str,
 ) -> None:
     """Release whatever claim a cancelled loop may have persisted.
 
     ``asyncio.to_thread`` keeps running after the awaiting task is
     cancelled, so the admission worker can write a claim while ``admitted``
-    is still ``None`` in the coroutine. The release must therefore follow
-    the worker's real outcome: it runs immediately when the result is
-    already known and as a done-callback otherwise, so a same-process
-    replay is never blocked until the claim TTL expires. Process death is
-    covered separately by the claim lease.
+    is still ``None`` in the coroutine. The release therefore follows the
+    worker's real outcome: immediately when known, via a done-callback
+    otherwise. This is best-effort promptness only — during event-loop
+    shutdown even the shielded task gets cancelled and the callback never
+    learns the worker's result; correctness is then carried by the
+    per-loop lease: the dead loop's claim token can never be presented
+    again, so the next schedule reclaims the claim immediately.
     """
     if admitted is not None:
-        _release_claim(reports_root, target_ref=target_ref, video_id=video_id)
+        _release_claim(
+            reports_root,
+            target_ref=target_ref,
+            video_id=video_id,
+            owner=owner,
+        )
         return
     if admission is None:
         return
@@ -633,6 +685,7 @@ def _settle_cancelled_admission(
                     reports_root,
                     target_ref=target_ref,
                     video_id=video_id,
+                    owner=owner,
                 )
         except Exception:
             logger.exception(
@@ -656,6 +709,11 @@ async def run_review_loop(
 ) -> RenderReviewReport | None:
     """Run one advisory review round for a freshly published final render."""
     reports_root = _reports_root(services, project_id)
+    # The lease token is bound to this event loop: if shutdown cancels
+    # every task (including the shielded admission) and the worker still
+    # persists a claim afterwards, no future scheduling context can carry
+    # this token, so the claim is reclaimed on the next schedule.
+    owner = _owner_token()
     admitted: tuple[int, str] | None = None
     admission: "asyncio.Task[tuple[int, str] | None] | None" = None
     try:
@@ -668,6 +726,7 @@ async def run_review_loop(
                 reports_root,
                 target_ref=target_ref,
                 video_id=video_id,
+                owner=owner,
             ),
         )
         admitted = await asyncio.shield(admission)
@@ -708,6 +767,7 @@ async def run_review_loop(
             video_id=video_id,
             slot_id=slot_id,
             report=report,
+            owner=owner,
         )
         if feedback_sent:
             # Lazy import: the runtime registry pulls in the driver and
@@ -732,13 +792,15 @@ async def run_review_loop(
         return report
     except asyncio.CancelledError:
         # Shutdown/cancellation must not leave a live-looking claim behind;
-        # the crash-lease covers process death, this covers task cancel.
+        # the per-loop lease covers process death and loop shutdown, this
+        # covers ordinary task cancellation promptly.
         _settle_cancelled_admission(
             admission,
             admitted,
             reports_root,
             target_ref=target_ref,
             video_id=video_id,
+            owner=owner,
         )
         raise
     except Exception as exc:
@@ -750,6 +812,7 @@ async def run_review_loop(
                 reports_root,
                 target_ref=target_ref,
                 video_id=video_id,
+                owner=owner,
             )
         trace_event(
             "render_review.failed",

@@ -605,6 +605,77 @@ def test_cancel_during_admission_releases_persisted_claim(
     assert report is not None and report.verdict == "pass"
 
 
+def test_shutdown_cancelling_all_tasks_does_not_strand_claim(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+) -> None:
+    """Loop shutdown cancels the shielded admission task itself.
+
+    Both the outer review task and the inner admission task are cancelled
+    (as ``asyncio.run`` shutdown does), so no done-callback ever learns the
+    worker's outcome while the ``to_thread`` worker still persists the
+    claim afterwards. The per-loop lease must make the very next schedule
+    — running on a new event loop in the same process — reclaim the claim
+    immediately instead of waiting for the 30-minute TTL.
+    """
+    _stub_vlm(monkeypatch, [_vlm_response(verdict_major_failure=False)])
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    chain_path = review_module._chain_path(reports_root, TARGET_REF)
+    claim_written = threading.Event()
+    release_gate = threading.Event()
+    real_admit = review_module._admit_round
+
+    def slow_admit(*args, **kwargs):
+        result = real_admit(*args, **kwargs)
+        claim_written.set()
+        # Persist past both cancellations before returning.
+        release_gate.wait(5)
+        return result
+
+    monkeypatch.setattr(review_module, "_admit_round", slow_admit)
+
+    async def scenario() -> None:
+        video_path = (
+            services.projects.project_root(PROJECT_ID)
+            / "assets"
+            / "artifacts"
+            / "video-shutdown-1.mp4"
+        )
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"stub")
+        task = asyncio.create_task(
+            review_module.run_review_loop(
+                services,
+                project_id=PROJECT_ID,
+                video_path=video_path,
+                video_id="video-shutdown-1",
+                target_ref=TARGET_REF,
+                slot_id=SLOT_ID,
+            ),
+        )
+        await asyncio.to_thread(claim_written.wait, 5)
+        # Simulate event-loop shutdown: cancel every pending task,
+        # including the shielded admission task, before the worker returns.
+        current = asyncio.current_task()
+        for pending in asyncio.all_tasks():
+            if pending is not current:
+                pending.cancel()
+        release_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    # The worker persisted the claim before any cleanup path could learn
+    # its outcome; only the dead loop's lease token guards it now.
+    state = json.loads(chain_path.read_text(encoding="utf-8"))
+    assert state.get("claim")
+    monkeypatch.setattr(review_module, "_admit_round", real_admit)
+    # Replay in a fresh scheduling context reclaims immediately (no TTL).
+    report = _run_round(services, "video-shutdown-1")
+    assert report is not None and report.verdict == "pass"
+
+
 def test_claim_from_dead_process_is_reclaimed(services) -> None:
     """A crash-leftover claim must not suppress the recovery schedule."""
     reports_root = review_module._reports_root(services, PROJECT_ID)
