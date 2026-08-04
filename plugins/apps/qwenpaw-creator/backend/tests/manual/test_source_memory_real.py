@@ -138,11 +138,26 @@ def test_real_build_produces_queryable_memory(
     hits = toolkit.search_nodes("scene transition", top_k=5)
     assert hits, "hybrid retrieval must return candidates"
 
-    # The 25-minute trim should segment into a plausible macro count
-    # (MIN/MAX scene bounds are 30s/300s, so 5–50; broadcast material
-    # lands near 8).
+    # The fixed 25-minute KPL trim stably segments into 8 macros; a
+    # narrow band around that catches segmentation-quality regressions
+    # that the raw 30s/300s algorithm bounds (5–50) would let through.
     macros = toolkit.memory.macro_events
-    assert 5 <= len(macros) <= 50, f"unexpected macro count {len(macros)}"
+    assert 7 <= len(macros) <= 9, f"unexpected macro count {len(macros)}"
+    # Windows must be strictly monotonic, non-overlapping and cover the
+    # trimmed duration without gaps larger than a scene-cut tolerance.
+    windows = [
+        (float(macro.time_range[0]), float(macro.time_range[1]))
+        for macro in macros
+    ]
+    assert windows == sorted(windows), "macro windows must be ordered"
+    for (_, prev_end), (next_start, _) in zip(windows, windows[1:]):
+        assert next_start >= prev_end, "macro windows must not overlap"
+        assert next_start - prev_end <= 2.0, "gap between macros too large"
+    assert windows[0][0] <= 1.0, "coverage must start at the beginning"
+    covered = windows[-1][1] - windows[0][0]
+    assert (
+        covered >= duration_sec * 0.98
+    ), f"macros cover only {covered:.1f}s of {duration_sec:.1f}s"
 
     # Export mid-window frames for two macros so a human reviewer can
     # check the located windows against the source (kept outside tmp

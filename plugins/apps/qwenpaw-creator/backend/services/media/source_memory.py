@@ -154,13 +154,16 @@ PROJECTION_REVIEW_MAX_TOKENS = 4096
 PROJECTION_REVIEW_PROMPT = """You are the Source Intelligence reviewer.
 Below are draft catalog entries projected from a hierarchical memory of
 a long video: one overall summary plus per-super-event semantic entries
-with millisecond time windows.
+with millisecond time windows. Each entry carries an immutable
+"entryId".
 
 Review the drafts: fix wording, drop entries that are vague, redundant
-or internally inconsistent, and keep time windows unchanged. Do not
-invent new facts. Return ONLY a JSON object:
-{"summary": str, "semanticEntries": [{"text": str, "tags": [str],
-"startMs": int, "endMs": int, "confidence": float}]}
+or internally inconsistent. You may only edit text, tags and
+confidence; keep each kept entry's entryId exactly as given, never
+invent new entries and never change startMs/endMs. Do not invent new
+facts. Return ONLY a JSON object:
+{"summary": str, "semanticEntries": [{"entryId": str, "text": str,
+"tags": [str], "startMs": int, "endMs": int, "confidence": float}]}
 
 Drafts:
 """
@@ -1305,11 +1308,22 @@ class SourceMemoryService:
         the drafts are kept without a review verdict and are therefore
         never merged into the index surfaces (fail-close).
         """
+        # Stable per-draft IDs let the server, not the model, own the
+        # authoritative time windows: the reviewer may only edit text,
+        # tags and confidence or drop entries. Unknown/duplicated IDs or
+        # any startMs/endMs drift fail the review closed.
+        drafts_by_id = {
+            f"entry-{position}": entry
+            for position, entry in enumerate(draft.semantic_entries)
+        }
         payload = {
             "summary": draft.summary,
             "semanticEntries": [
-                entry.model_dump(mode="json", by_alias=True)
-                for entry in draft.semantic_entries
+                {
+                    "entryId": entry_id,
+                    **entry.model_dump(mode="json", by_alias=True),
+                }
+                for entry_id, entry in drafts_by_id.items()
             ],
         }
         prompt = PROJECTION_REVIEW_PROMPT + json.dumps(
@@ -1323,11 +1337,42 @@ class SourceMemoryService:
                 max_tokens=PROJECTION_REVIEW_MAX_TOKENS,
             )
             candidate = extract_json(response)
+            reviewed_entries: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for raw in candidate["semanticEntries"]:
+                entry_id = str(raw.get("entryId") or "")
+                original = drafts_by_id.get(entry_id)
+                if original is None:
+                    raise ValueError(
+                        f"review invented an unknown entry: {entry_id!r}",
+                    )
+                if entry_id in seen_ids:
+                    raise ValueError(
+                        f"review duplicated entry {entry_id!r}",
+                    )
+                seen_ids.add(entry_id)
+                if (
+                    int(raw.get("startMs", -1)) != original.start_ms
+                    or int(raw.get("endMs", -1)) != original.end_ms
+                ):
+                    raise ValueError(
+                        f"review changed the time window of {entry_id!r}",
+                    )
+                reviewed_entries.append(
+                    {
+                        "text": raw["text"],
+                        "tags": raw["tags"],
+                        # The draft owns the authoritative window.
+                        "startMs": original.start_ms,
+                        "endMs": original.end_ms,
+                        "confidence": raw["confidence"],
+                    },
+                )
             reviewed = SourceMemoryProjection.model_validate(
                 {
                     "indexId": draft.index_id,
                     "summary": candidate["summary"],
-                    "semanticEntries": candidate["semanticEntries"],
+                    "semanticEntries": reviewed_entries,
                     "review": {
                         "status": "approved",
                         "model": model_config.get_vlm_model_name(),

@@ -218,4 +218,77 @@ describe("AssetsPage schema-v2 Project projection", () => {
       postIngestAction: "ATTACH_SOURCE",
     });
   });
+
+  it("scopes the memory badge to the selected, built version of a logical asset", () => {
+    // v1 built (SUCCEEDED task + current intelligence points at v1).
+    const built = cloneProject();
+    built.assets.intelligence_versions_by_id["intel-v1"] = {
+      intelligence_version_id: "intel-v1",
+      source_asset_version_id: "cat-video-v1",
+      file_id: "file:source-video",
+      source_checksum: "sha-source",
+      model_run_ids: [],
+      coverage: {},
+      created_at: "2026-07-20T00:03:00Z",
+    };
+    built.sources.sources.items[
+      "source:cat-video"
+    ].current_intelligence_version_id = "intel-v1";
+    seedProject(built);
+    useCreatorTaskViewStore.setState({
+      projectId: "p1",
+      tasks: [
+        {
+          id: "task:memory",
+          kind: "source_memory_build",
+          status: "SUCCEEDED",
+          targetRef: "asset:asset:cat-video",
+        } as never,
+      ],
+    });
+    const { container, unmount } = renderPage();
+    expect(
+      container.querySelector('[data-creator-memory-badge="cat-video-v1"]'),
+    ).toBeInTheDocument();
+    unmount();
+
+    // Same logical asset replaced by v2: selected but unbuilt. The old
+    // SUCCEEDED task must not decorate the new version.
+    const replaced = cloneProject();
+    replaced.assets.source_versions_by_id["cat-video-v2"] = {
+      ...replaced.assets.source_versions_by_id["cat-video-v1"],
+      version_id: "cat-video-v2",
+      checksum: "sha-source-v2",
+      created_at: "2026-07-21T00:00:00Z",
+    };
+    replaced.assets.intelligence_versions_by_id["intel-v1"] = {
+      intelligence_version_id: "intel-v1",
+      source_asset_version_id: "cat-video-v1",
+      file_id: "file:source-video",
+      source_checksum: "sha-source",
+      model_run_ids: [],
+      coverage: {},
+      created_at: "2026-07-20T00:03:00Z",
+    };
+    const source = replaced.sources.sources.items["source:cat-video"];
+    source.selected_asset_version_id = "cat-video-v2";
+    // Stale pointer still referencing the v1 intelligence.
+    source.current_intelligence_version_id = "intel-v1";
+    seedProject(replaced);
+    useCreatorTaskViewStore.setState({
+      projectId: "p1",
+      tasks: [
+        {
+          id: "task:memory",
+          kind: "source_memory_build",
+          status: "SUCCEEDED",
+          targetRef: "asset:asset:cat-video",
+        } as never,
+      ],
+    });
+    const second = renderPage();
+    expect(
+      second.container.querySelector("[data-creator-memory-badge]"),
+    ).not.toBeInTheDocument();
+  });
 });

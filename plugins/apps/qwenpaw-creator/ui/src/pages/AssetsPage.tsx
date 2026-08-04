@@ -120,23 +120,41 @@ function downloadName(name: string, mediaType: string): string {
   return ext ? `${base}${ext}` : base;
 }
 
-// Logical asset ids whose long-source graph memory finished building
-// (SUCCEEDED source_memory_build task targeting asset:<logicalAssetId>).
-function memoryBuiltAssetIds(tasks: TaskView[]): Set<string> {
-  const built = new Set<string>();
+// Source version ids whose long-source graph memory is built FOR THE
+// CURRENTLY SELECTED VERSION. A SUCCEEDED source_memory_build task alone
+// is not enough: after a same-logical-asset version replacement the old
+// task must not decorate the new, unbuilt version. The badge therefore
+// requires the ProjectSource's current intelligence version to point at
+// this exact selected version with a matching source checksum (the
+// backend memoryRef itself is checksum-gated on load).
+function memoryBuiltVersionIds(
+  project: ProjectDocument,
+  tasks: TaskView[],
+): Set<string> {
+  const builtLogicalIds = new Set<string>();
   for (const task of tasks) {
     if (task.kind !== "source_memory_build") continue;
     if (task.status !== "SUCCEEDED") continue;
     if (!task.targetRef.startsWith("asset:")) continue;
-    built.add(task.targetRef.slice("asset:".length));
+    builtLogicalIds.add(task.targetRef.slice("asset:".length));
   }
-  return built;
-}
-
-function itemLogicalAssetId(item: AssetItem): string | null {
-  if (item.kind !== "source") return null;
-  const raw = item.raw as SourceAssetVersionDocument;
-  return raw.logical_asset_id || null;
+  const badged = new Set<string>();
+  if (!builtLogicalIds.size) return badged;
+  for (const source of Object.values(project.sources.sources.items)) {
+    if (!builtLogicalIds.has(source.logical_asset_id)) continue;
+    const intelligenceId = source.current_intelligence_version_id;
+    if (!intelligenceId) continue;
+    const intelligence =
+      project.assets.intelligence_versions_by_id[intelligenceId];
+    if (!intelligence) continue;
+    const versionId = intelligence.source_asset_version_id;
+    if (versionId !== source.selected_asset_version_id) continue;
+    const version = project.assets.source_versions_by_id[versionId];
+    if (!version) continue;
+    if (version.checksum !== intelligence.source_checksum) continue;
+    badged.add(versionId);
+  }
+  return badged;
 }
 
 function artifactMedia(
@@ -531,7 +549,10 @@ export default function AssetsPage() {
     });
   }, [allItems, filter, search]);
   const selected = allItems.find((item) => item.id === selectedId) || null;
-  const memoryBuilt = useMemo(() => memoryBuiltAssetIds(tasks), [tasks]);
+  const memoryBuilt = useMemo(
+    () => (project ? memoryBuiltVersionIds(project, tasks) : new Set<string>()),
+    [project, tasks],
+  );
 
   useEffect(() => {
     useCreatorInteractionStore.getState().select(selected?.ref || null);
@@ -717,17 +738,14 @@ export default function AssetsPage() {
                           过期
                         </span>
                       )}
-                      {(() => {
-                        const logicalId = itemLogicalAssetId(item);
-                        return logicalId && memoryBuilt.has(logicalId) ? (
-                          <span
-                            data-creator-memory-badge={logicalId}
-                            className="absolute bottom-2 right-2 rounded bg-emerald-600/90 px-1.5 py-0.5 text-[10px] font-bold text-white"
-                          >
-                            记忆已构建
-                          </span>
-                        ) : null;
-                      })()}
+                      {item.kind === "source" && memoryBuilt.has(item.id) && (
+                        <span
+                          data-creator-memory-badge={item.id}
+                          className="absolute bottom-2 right-2 rounded bg-emerald-600/90 px-1.5 py-0.5 text-[10px] font-bold text-white"
+                        >
+                          记忆已构建
+                        </span>
+                      )}
                     </div>
                     <div className="p-3">
                       <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">

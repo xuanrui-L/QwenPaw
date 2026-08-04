@@ -880,6 +880,7 @@ def test_review_projection_approves_or_fails_closed(
                 "summary": "reviewed digest",
                 "semanticEntries": [
                     {
+                        "entryId": "entry-0",
                         "text": "Super event one (reviewed)",
                         "tags": ["memory"],
                         "startMs": 0,
@@ -904,6 +905,8 @@ def test_review_projection_approves_or_fails_closed(
     assert reviewed.review is not None
     assert reviewed.review.status == "approved"
     assert reviewed.summary == "reviewed digest"
+    assert reviewed.semantic_entries[0].start_ms == 0
+    assert reviewed.semantic_entries[0].end_ms == 60000
 
     async def bad_chat(_content, **_kwargs):
         raise RuntimeError("vlm unavailable")
@@ -916,3 +919,130 @@ def test_review_projection_approves_or_fails_closed(
     fallback = asyncio.run(service._review_projection(draft))
     assert fallback.review is None
     assert fallback.summary == "draft digest"
+
+
+def test_review_projection_rejects_tampered_windows_and_new_entries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A hallucinating reviewer must never earn the approved stamp.
+
+    The reviewer may only edit text/tags/confidence or drop entries;
+    moved time windows or invented entries fail the review closed and
+    the drafts stay unreviewed (never merged into the index surfaces).
+    """
+
+    service = _service(tmp_path)
+    draft = SourceMemoryProjection(
+        indexId="intel-1",
+        summary="draft digest",
+        semanticEntries=[
+            {
+                "text": "Super event one",
+                "tags": ["memory"],
+                "startMs": 0,
+                "endMs": 60000,
+                "confidence": 0.6,
+            },
+            {
+                "text": "Super event two",
+                "tags": ["memory"],
+                "startMs": 60000,
+                "endMs": 120000,
+                "confidence": 0.6,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        source_memory.model_config,
+        "get_vlm_model_name",
+        lambda: "qwen3.7-plus",
+    )
+
+    async def moved_window_chat(_content, **_kwargs):
+        return json.dumps(
+            {
+                "summary": "tampered digest",
+                "semanticEntries": [
+                    {
+                        "entryId": "entry-0",
+                        "text": "Super event one",
+                        "tags": ["memory"],
+                        "startMs": 5000,
+                        "endMs": 65000,
+                        "confidence": 0.9,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "chat_completion",
+        moved_window_chat,
+    )
+    tampered = asyncio.run(service._review_projection(draft))
+    assert tampered.review is None
+    assert tampered.summary == "draft digest"
+
+    async def invented_entry_chat(_content, **_kwargs):
+        return json.dumps(
+            {
+                "summary": "tampered digest",
+                "semanticEntries": [
+                    {
+                        "entryId": "entry-0",
+                        "text": "Super event one",
+                        "tags": ["memory"],
+                        "startMs": 0,
+                        "endMs": 60000,
+                        "confidence": 0.6,
+                    },
+                    {
+                        "entryId": "entry-999",
+                        "text": "Invented event",
+                        "tags": ["memory"],
+                        "startMs": 120000,
+                        "endMs": 180000,
+                        "confidence": 0.9,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "chat_completion",
+        invented_entry_chat,
+    )
+    invented = asyncio.run(service._review_projection(draft))
+    assert invented.review is None
+
+    async def dropping_chat(_content, **_kwargs):
+        return json.dumps(
+            {
+                "summary": "clean digest",
+                "semanticEntries": [
+                    {
+                        "entryId": "entry-1",
+                        "text": "Super event two (kept)",
+                        "tags": ["memory"],
+                        "startMs": 60000,
+                        "endMs": 120000,
+                        "confidence": 0.8,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "chat_completion",
+        dropping_chat,
+    )
+    kept = asyncio.run(service._review_projection(draft))
+    assert kept.review is not None
+    assert kept.review.status == "approved"
+    assert len(kept.semantic_entries) == 1
+    assert kept.semantic_entries[0].start_ms == 60000
+    assert kept.semantic_entries[0].end_ms == 120000

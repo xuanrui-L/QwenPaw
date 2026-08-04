@@ -715,6 +715,44 @@ macro_id?: str, start_ms?/end_ms?: int, top_k?: int})`；search_* 现场调 embe
   截断偶发（fail-close 拦截正确，需重委派）；建议后续改为运行时上下文
   绑定；SI 专家缺任意时间点抽帧工具。
 
+**CR 整改纪要（2026-08-04 第五轮，针对 A7/审校防篡改/B3/A2）**：
+- **B3 改判 blocked（更正第四轮结论）**：会话终态实际仍存在无法读取
+  指定帧的待确认项，"专家唯一阵容已收敛"表述不成立，B3 如实记为
+  blocked——SI 专家缺任意时间点抽帧工具（平台级能力缺口，非 WT6 引入），
+  在该能力补齐前 Agent 无法回原片核验完整阵容。同时更正第四轮的阵容
+  事实错误（人工地面真值，依据原片 380s BP 帧、559s 对局帧与比赛记录/
+  官方首发名单）：AG——轩染关羽、钟意杨戬、长生海月、一诺蚩奼、大帅
+  朵莉亚；狼队——清清司空震、皖皖元流之子·坦克、紫幻沈梦溪、道崽后羿、
+  信张飞。第四轮"司空震（信位）"为误记，司空震实为清清；该地面真值是
+  人工核验结论，不代表 Agent 产出。
+- **审校防篡改（服务端 fail-close）**：`_review_projection` 不再全盘
+  接受模型返回——草稿条目携带不可变 entryId，审校模型只能改文案/标签/
+  置信度或剔除条目；未知/重复 entryId（新增条目）或 startMs/endMs 与
+  草稿不一致一律判审校失败（草稿保持 unreviewed，不并入 index 表面），
+  保留条目的时间窗由服务端从草稿恢复（模型无权改写权威时间窗）。新增
+  回归测试：改时间窗 fail-close、新增条目 fail-close、合法剔除+改文案
+  仍 approved 且时间窗与草稿一致。
+- **记忆徽标版本感知**：AssetsPage 徽标不再仅按 logical asset 匹配
+  SUCCEEDED 任务——现要求 ProjectSource 的
+  current_intelligence_version_id 所指 index 恰好指向当前
+  selected_asset_version_id 且 source_checksum 与该版本 checksum 一致
+  才显示（后端 memoryRef 本身按 checksum 门控）。新增 UI 测试覆盖
+  "同 logical asset：v1 已构建有徽标；切到未构建 v2 后旧任务不得给新
+  版本亮徽标"。
+- **A2 断言收紧**：macro 数断言由算法边界（5–50）收紧为 7–9（固定
+  KPL 前 25 分钟稳定 8 个），并补窗口有序、不重叠、间隙 ≤2s、起点
+  ≤1s、覆盖率 ≥98% 断言（未重跑计费的 manual_real，断言基于既有稳定
+  观测；下次真实重跑生效）。
+- **A7 同 logical asset 版本替换（如实说明）**：上一轮实为"新
+  logical asset + 重指"，不构成同资产版本替换。核对产品入口后确认：
+  当前 ingest 通路（文件/URL/文本）每次上传都会派生新的
+  logical_asset_id，不存在"给既有 logical asset 追加新版本"的用户可达
+  UI/API 入口，故该数据形态在真实 UI 链路中暂不可达（未来由系统流或
+  版本追加入口产生时才可真实验收）。徽标缺陷本身已按版本感知修复，
+  且以确定性 UI 测试覆盖同 logical asset "v1 已构建 / v2 已选中未构建"
+  形态（旧任务不得给新版本亮徽标）；真实链路 A7 版本替换验收留待
+  版本追加入口落地后执行，如实记录而非宣称已完成。
+
 ---
 
 ### WT7 · 外置 Skill 接入机制 + edu-agent（`feat/creator-external-skills`）🔵
