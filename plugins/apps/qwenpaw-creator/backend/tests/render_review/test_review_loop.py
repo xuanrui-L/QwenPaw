@@ -31,11 +31,13 @@ from services.project_files.models import (
 from services.render_review import review as review_module
 from services.render_review.protocol import MAX_REVIEW_ROUNDS
 from services.runtime_files.media_probe import MediaProbe
+from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 
 pytestmark = pytest.mark.unit
 
 PROJECT_ID = "project-render-review"
 TARGET_REF = "timeline:main"
+SLOT_ID = "slot:render"
 
 
 def _vlm_response(*, verdict_major_failure: bool) -> str:
@@ -109,7 +111,68 @@ def _stub_vlm(monkeypatch, responses: list[str]) -> list[dict]:
     return calls
 
 
-def _run_round(services: CreatorFileServices, video_id: str):
+def _publish_selected(
+    services: CreatorFileServices,
+    video_id: str,
+    *,
+    project_id: str = PROJECT_ID,
+) -> None:
+    """Commit ``video_id`` as the selected render of the timeline slot.
+
+    Mirrors what a successful COMPOSE_FINAL_VIDEO commit leaves behind so
+    the fail-closed freshness check can prove the reviewed video is the
+    currently selected artifact.
+    """
+    snapshot = services.projects.read(project_id)
+    candidate = snapshot.project.model_dump(mode="json")
+    assets = candidate["assets"]
+    file_id = f"file-{video_id}"
+    created_at = candidate["created_at"]
+    assets["files_by_id"][file_id] = {
+        "file_id": file_id,
+        "kind": "artifact_payload",
+        "relative_uri": f"assets/artifacts/{file_id}.mp4",
+        "sha256": "0" * 64,
+        "size_bytes": 4,
+        "media_type": "video/mp4",
+        "created_at": created_at,
+    }
+    assets["artifact_versions_by_id"][video_id] = {
+        "version_id": video_id,
+        "slot_id": SLOT_ID,
+        "kind": "timeline_render",
+        "owner_ref": TARGET_REF,
+        "name": "final",
+        "file_id": file_id,
+        "checksum": "0" * 64,
+        "based_on_generation": 0,
+        "created_at": created_at,
+    }
+    slot = assets["artifact_slots_by_id"].get(SLOT_ID) or {
+        "slot_id": SLOT_ID,
+        "kind": "timeline_render",
+        "owner_ref": TARGET_REF,
+        "version_ids": [],
+        "selected_version_id": None,
+    }
+    if video_id not in slot["version_ids"]:
+        slot["version_ids"].append(video_id)
+    slot["selected_version_id"] = video_id
+    assets["artifact_slots_by_id"][SLOT_ID] = slot
+    services.commits.commit(
+        base=snapshot,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+        review_policy=ReviewPolicy.AUTO_FIX,
+    )
+
+
+def _run_round(
+    services: CreatorFileServices,
+    video_id: str,
+    *,
+    publish_selected: bool = True,
+):
     video_path = (
         services.projects.project_root(PROJECT_ID)
         / "assets"
@@ -118,6 +181,8 @@ def _run_round(services: CreatorFileServices, video_id: str):
     )
     video_path.parent.mkdir(parents=True, exist_ok=True)
     video_path.write_bytes(b"stub")
+    if publish_selected:
+        _publish_selected(services, video_id)
     return asyncio.run(
         review_module.run_review_loop(
             services,
@@ -125,6 +190,7 @@ def _run_round(services: CreatorFileServices, video_id: str):
             video_path=video_path,
             video_id=video_id,
             target_ref=TARGET_REF,
+            slot_id=SLOT_ID,
         ),
     )
 
@@ -310,6 +376,7 @@ def test_superseding_claim_drops_stale_feedback(services) -> None:
     assert outcome_a == "superseded"
     assert feedback_a is False
     assert _feedback_messages(services) == []
+    _publish_selected(services, "video-new")
     outcome_b, feedback_b = review_module._finalize_round(
         services,
         reports_root,
@@ -318,7 +385,7 @@ def test_superseding_claim_drops_stale_feedback(services) -> None:
         chain_id=admitted_b[1],
         round_number=admitted_b[0],
         video_id="video-new",
-        slot_id=None,
+        slot_id=SLOT_ID,
         report=_revise_report("video-new", admitted_b[0]),
     )
     assert outcome_b == "completed"
@@ -395,6 +462,177 @@ def test_unselected_artifact_never_receives_feedback(
     assert outcome == "stale"
     assert feedback_sent is False
     assert _feedback_messages(services) == []
+
+
+def test_unverifiable_selection_suppresses_feedback(services) -> None:
+    """No slot / unreadable Project means no proof of freshness: fail closed."""
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    admitted = review_module._admit_round(
+        reports_root,
+        target_ref=TARGET_REF,
+        video_id="video-unverified",
+    )
+    assert admitted is not None
+    outcome, feedback_sent = review_module._finalize_round(
+        services,
+        reports_root,
+        project_id=PROJECT_ID,
+        target_ref=TARGET_REF,
+        chain_id=admitted[1],
+        round_number=admitted[0],
+        video_id="video-unverified",
+        slot_id=SLOT_ID,
+        report=_revise_report("video-unverified", admitted[0]),
+    )
+    assert outcome == "unverified"
+    assert feedback_sent is False
+    assert _feedback_messages(services) == []
+
+
+def test_selection_switch_between_check_and_admit_aborts_feedback(
+    services,
+    monkeypatch,
+) -> None:
+    """The admission guard closes the check-then-admit race window."""
+    _publish_selected(services, "video-race-1")
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    admitted = review_module._admit_round(
+        reports_root,
+        target_ref=TARGET_REF,
+        video_id="video-race-1",
+    )
+    assert admitted is not None
+    real_resolver = review_module._selected_slot_version
+    calls = {"count": 0}
+
+    def racing_resolver(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            # Pre-check still sees the reviewed video as selected.
+            return real_resolver(*args, **kwargs)
+        # A concurrent compose switched the selection before the durable
+        # feedback write (the guard re-runs inside the lifecycle boundary).
+        return "video-race-2"
+
+    monkeypatch.setattr(
+        review_module,
+        "_selected_slot_version",
+        racing_resolver,
+    )
+    outcome, feedback_sent = review_module._finalize_round(
+        services,
+        reports_root,
+        project_id=PROJECT_ID,
+        target_ref=TARGET_REF,
+        chain_id=admitted[1],
+        round_number=admitted[0],
+        video_id="video-race-1",
+        slot_id=SLOT_ID,
+        report=_revise_report("video-race-1", admitted[0]),
+    )
+    assert calls["count"] >= 2
+    assert outcome == "stale"
+    assert feedback_sent is False
+    assert _feedback_messages(services) == []
+
+
+def test_claim_from_dead_process_is_reclaimed(services) -> None:
+    """A crash-leftover claim must not suppress the recovery schedule."""
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    chain_path = review_module._chain_path(reports_root, TARGET_REF)
+    review_module._write_json(
+        chain_path,
+        {
+            "chain_id": "chain-crashed",
+            "target_ref": TARGET_REF,
+            "rounds_completed": 0,
+            "status": "open",
+            "reviewed_video_ids": [],
+            "claim": {
+                "video_id": "video-crash-1",
+                "round": 1,
+                "owner": "dead-process-token",
+                "claimed_at": "2026-08-04T00:00:00+00:00",
+            },
+        },
+    )
+    admitted = review_module._admit_round(
+        reports_root,
+        target_ref=TARGET_REF,
+        video_id="video-crash-1",
+    )
+    assert admitted == (1, "chain-crashed")
+    chain = json.loads(chain_path.read_text(encoding="utf-8"))
+    assert chain["claim"]["owner"] == review_module._PROCESS_TOKEN
+
+
+def test_derive_plan_context_target_forms_and_audio_roles(services) -> None:
+    """Both target forms resolve; only narration-role audio counts."""
+    from services.project_files.models import (
+        AudioCreation,
+        SourceAssetVersion,
+        Timeline,
+        TimelineElement,
+        TimelineSpan,
+    )
+
+    project = Project.new(project_id="project-ctx", name="ctx")
+    for suffix, metadata in (
+        ("bgm", {}),
+        ("vo", {"sourceKind": "tts_generation"}),
+    ):
+        file_id = f"file-{suffix}"
+        project.assets.files_by_id[file_id] = IndexedFile(
+            file_id=file_id,
+            kind="source_original",
+            relative_uri=f"assets/sources/{file_id}.wav",
+            sha256="0" * 64,
+            size_bytes=4,
+            media_type="audio/wav",
+            created_at=project.created_at,
+        )
+        project.assets.source_versions_by_id[
+            f"asset-version-{suffix}"
+        ] = SourceAssetVersion(
+            version_id=f"asset-version-{suffix}",
+            logical_asset_id=f"asset:{suffix}",
+            name=suffix,
+            file_id=file_id,
+            checksum="0" * 64,
+            media_kind="audio",
+            media_type="audio/wav",
+            created_at=project.created_at,
+            metadata=metadata,
+        )
+
+    def timeline_with(*suffixes: str) -> Timeline:
+        elements = {
+            f"audio:{suffix}": TimelineElement(
+                element_id=f"audio:{suffix}",
+                span=TimelineSpan(start_tick=0, duration_tick=1000),
+                creation=AudioCreation(
+                    source_asset_version_id=f"asset-version-{suffix}",
+                ),
+            )
+            for suffix in suffixes
+        }
+        return Timeline(
+            timeline_id="timeline:main",
+            elements_by_id=elements,
+        )
+
+    project.timelines.items["timeline:main"] = timeline_with("bgm")
+    project.timelines.order.append("timeline:main")
+    # A plain music bed is not a narration expectation.
+    for ref in ("timeline:timeline:main", "timeline:main"):
+        context = review_module.derive_plan_context(project, ref)
+        assert context["expects_voiceover"] is False, ref
+    # A TTS-generated source marks the narration expectation, and both
+    # supported target forms resolve the same timeline.
+    project.timelines.items["timeline:main"] = timeline_with("bgm", "vo")
+    for ref in ("timeline:timeline:main", "timeline:main"):
+        context = review_module.derive_plan_context(project, ref)
+        assert context["expects_voiceover"] is True, ref
 
 
 def test_failed_round_releases_claim_for_retry(

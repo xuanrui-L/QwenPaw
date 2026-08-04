@@ -31,9 +31,11 @@ from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     AudioCreation,
     ElementLocation,
+    IndexedFile,
     OverlayCreation,
     Project,
     ProjectSettings,
+    SourceAssetVersion,
     Timeline,
     TimelineElement,
     TimelineSpan,
@@ -80,12 +82,15 @@ def _project_for_case(expected: dict) -> Project:
 
     The labels only shape the *plan* (settings + timeline elements); the
     review context itself is derived from that plan through the same
-    ``derive_plan_context`` builder used on the live compose path.
+    ``derive_plan_context`` builder used on the live compose path. A
+    voiceover expectation is expressed the way production expresses it: an
+    audio element referencing a TTS-generated source version.
     """
     labels = expected.get("plan_context") or {}
     project = Project.new(
         project_id=PROJECT_ID,
         name="Render Review Eval",
+        description=str(labels.get("project_brief") or ""),
         settings=ProjectSettings(
             content_type=labels.get("content_type"),
             target_duration_seconds=labels.get("target_duration_seconds"),
@@ -93,11 +98,33 @@ def _project_for_case(expected: dict) -> Project:
     )
     elements: dict[str, TimelineElement] = {}
     if labels.get("expects_voiceover"):
+        project.assets.files_by_id["file-eval-vo"] = IndexedFile(
+            file_id="file-eval-vo",
+            kind="source_original",
+            relative_uri="assets/sources/file-eval-vo.wav",
+            sha256="0" * 64,
+            size_bytes=4,
+            media_type="audio/wav",
+            created_at=project.created_at,
+        )
+        project.assets.source_versions_by_id[
+            "asset-version-eval-vo"
+        ] = SourceAssetVersion(
+            version_id="asset-version-eval-vo",
+            logical_asset_id="asset:eval-vo",
+            name="旁白",
+            file_id="file-eval-vo",
+            checksum="0" * 64,
+            media_kind="audio",
+            media_type="audio/wav",
+            created_at=project.created_at,
+            metadata={"sourceKind": "tts_generation"},
+        )
         elements["audio:vo1"] = TimelineElement(
             element_id="audio:vo1",
             span=TimelineSpan(start_tick=0, duration_tick=1000),
             creation=AudioCreation(
-                source_asset_version_id="artifact-version-eval-vo",
+                source_asset_version_id="asset-version-eval-vo",
             ),
         )
     if labels.get("expects_subtitles"):

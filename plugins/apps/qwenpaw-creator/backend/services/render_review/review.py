@@ -40,6 +40,7 @@ from services.render_review.protocol import (
 from services.runtime_files import (
     MessageChannel,
     MessageClassification,
+    RequestAdmissionConflict,
     RuntimeSessionNotFound,
 )
 from services.runtime_files.locking import CrossProcessFileLock
@@ -55,11 +56,17 @@ logger = setup_logger("creator.render_review")
 _TRACE_COMPONENT = "render_review"
 _VLM_ATTEMPTS = 2
 _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
-# An in-flight claim older than this is treated as abandoned (crashed loop)
-# and may be reclaimed by a later scheduling attempt for the same video.
+# Lease identity of this process: a claim from another (crashed) process is
+# abandoned and immediately reclaimable regardless of its age.
+_PROCESS_TOKEN = uuid4().hex
+# A same-process claim older than this is treated as hung and reclaimable.
 _CLAIM_TTL_SECONDS = 30 * 60
 # Bounded dedup history of already-reviewed artifact versions per chain file.
 _REVIEWED_HISTORY_LIMIT = 50
+# Audio source metadata that marks a narration/voiceover track. TTS assets
+# record sourceKind=tts_generation; explicit role labels are honoured too.
+_VOICEOVER_SOURCE_KINDS = frozenset({"tts_generation"})
+_VOICEOVER_ROLES = frozenset({"voiceover", "narration", "dialogue"})
 
 
 def _reports_root(services: "CreatorFileServices", project_id: str) -> Path:
@@ -102,6 +109,14 @@ def _chain_lock(reports_root: Path, target_ref: str) -> CrossProcessFileLock:
 
 
 def _claim_is_live(claim: Mapping[str, Any]) -> bool:
+    """Whether an existing claim still belongs to a live in-process review.
+
+    A claim leased by another process token is a crash leftover: the loop
+    that wrote it cannot complete anymore, so replay scheduling after a
+    restart reclaims it immediately instead of waiting for the TTL.
+    """
+    if str(claim.get("owner") or "") != _PROCESS_TOKEN:
+        return False
     raw = str(claim.get("claimed_at") or "")
     try:
         claimed_at = datetime.fromisoformat(raw)
@@ -163,6 +178,7 @@ def _admit_round(
                 "claim": {
                     "video_id": video_id,
                     "round": round_number,
+                    "owner": _PROCESS_TOKEN,
                     "claimed_at": now,
                 },
                 "updated_at": now,
@@ -226,13 +242,18 @@ def _finalize_round(
     slot_id: str | None,
     report: RenderReviewReport,
 ) -> tuple[str, bool]:
-    """Re-validate freshness and, still under the chain lock, admit feedback.
+    """Re-validate freshness and admit feedback atomically.
 
     Returns ``(outcome, feedback_sent)`` where outcome is ``completed``,
-    ``superseded`` (a newer composition claimed the chain while the VLM ran)
-    or ``stale`` (the reviewed video is no longer the selected artifact).
-    Superseded/stale findings never mutate the current timeline and never
-    consume a chain round.
+    ``superseded`` (a newer composition claimed the chain while the VLM ran),
+    ``stale`` (the reviewed video is no longer the selected artifact) or
+    ``unverified`` (freshness could not be proven). The final selection
+    check runs as an admission guard inside the session store's Project
+    lifecycle boundary — the same boundary every composition commit takes —
+    so the selected version cannot change between the check and the durable
+    feedback write. Feedback is fail-closed: no proof of freshness means no
+    mutation instruction. Non-``completed`` findings keep their report but
+    never mutate the current timeline and never consume a chain round.
     """
     chain_path = _chain_path(reports_root, target_ref)
     with _chain_lock(reports_root, target_ref):
@@ -250,17 +271,51 @@ def _finalize_round(
             state["updated_at"] = now
             _write_json(chain_path, state)
             return "superseded", False
-        selected: str | None = None
-        try:
-            selected = _selected_slot_version(
-                services,
-                project_id,
-                video_id=video_id,
-                slot_id=slot_id,
-            )
-        except Exception:
-            logger.exception("failed to resolve selected artifact version")
-        if selected is not None and selected != video_id:
+        needs_feedback = (
+            report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS
+        )
+        outcome = "completed"
+        feedback_sent = False
+        if needs_feedback:
+
+            def _resolve_selected() -> str | None:
+                # Fail closed: an unreadable Project or a missing slot is no
+                # proof of freshness, so no mutation instruction goes out.
+                try:
+                    return _selected_slot_version(
+                        services,
+                        project_id,
+                        video_id=video_id,
+                        slot_id=slot_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to resolve selected artifact version",
+                    )
+                    return None
+
+            selected = _resolve_selected()
+            if selected is None:
+                outcome = "unverified"
+            elif selected != video_id:
+                outcome = "stale"
+            else:
+                try:
+                    feedback_sent = _admit_feedback(
+                        services,
+                        project_id=project_id,
+                        report=report,
+                        target_ref=target_ref,
+                        chain_id=chain_id,
+                        freshness_guard=(
+                            lambda: _resolve_selected() == video_id
+                        ),
+                    )
+                except RequestAdmissionConflict:
+                    # A concurrent compose switched the selected render
+                    # between the pre-check and the durable write.
+                    outcome = "stale"
+        if outcome != "completed":
             state.update(
                 {
                     "claim": None,
@@ -269,19 +324,8 @@ def _finalize_round(
                 },
             )
             _write_json(chain_path, state)
-            return "stale", False
-        feedback_sent = False
-        if report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS:
-            feedback_sent = _admit_feedback(
-                services,
-                project_id=project_id,
-                report=report,
-                target_ref=target_ref,
-                chain_id=chain_id,
-            )
-        keep_open = (
-            report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS
-        )
+            return outcome, False
+        keep_open = needs_feedback
         state.update(
             {
                 "chain_id": chain_id,
@@ -299,12 +343,43 @@ def _finalize_round(
         return "completed", feedback_sent
 
 
+def _is_voiceover_audio(project: Any, creation: Any) -> bool:
+    """Whether an audio element is a narration track, by source authority.
+
+    ``AudioCreation`` has no role semantics (BGM and SFX use the same
+    shape), so narration is recognized from the referenced source version:
+    TTS-generated assets carry ``metadata.sourceKind="tts_generation"`` and
+    explicit role labels are honoured. Plain music beds never count.
+    """
+    version_id = str(getattr(creation, "source_asset_version_id", "") or "")
+    if not version_id:
+        return False
+    sources = getattr(
+        getattr(project, "assets", None),
+        "source_versions_by_id",
+        None,
+    )
+    source = (sources or {}).get(version_id)
+    if source is None:
+        return False
+    metadata = getattr(source, "metadata", None) or {}
+    if str(metadata.get("sourceKind") or "") in _VOICEOVER_SOURCE_KINDS:
+        return True
+    role = str(
+        metadata.get("audioRole") or metadata.get("role") or "",
+    ).casefold()
+    return role in _VOICEOVER_ROLES
+
+
 def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
     """Derive the review plan context from authoritative Project data.
 
     ``expects_voiceover`` and ``expects_subtitles`` come from the actual
-    timeline plan (audio elements / text overlays), never from annotations,
-    so the live compose path and the eval harness share one context source.
+    timeline plan (narration-role audio elements / text overlays), never
+    from annotations, so the live compose path and the eval harness share
+    one context source. ``project_brief`` carries the user's stated goal so
+    the reviewer can flag a delivery that silently dropped a requested
+    narration track.
     """
     context: dict[str, Any] = {"timeline_ref": target_ref}
     settings = getattr(project, "settings", None)
@@ -315,9 +390,16 @@ def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
             "target_duration_seconds",
             None,
         )
-    timeline_id = target_ref.partition(":")[2] or target_ref
+    brief = str(getattr(project, "description", "") or "").strip()
+    if brief:
+        context["project_brief"] = brief[:300]
     timelines = getattr(getattr(project, "timelines", None), "items", None)
-    timeline = (timelines or {}).get(timeline_id)
+    timelines = timelines or {}
+    # Canonical Timeline IDs already carry the ``timeline:`` prefix, so both
+    # ``timeline:timeline:main`` and the bare ``timeline:main`` resolve
+    # (mirrors local_execution._target_timeline).
+    stripped = target_ref.partition(":")[2] or target_ref
+    timeline = timelines.get(stripped) or timelines.get(target_ref)
     expects_voiceover = False
     expects_subtitles = False
     if timeline is not None:
@@ -327,7 +409,8 @@ def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
             creation = getattr(element, "creation", None)
             kind = getattr(creation, "type", None)
             if kind == "audio":
-                expects_voiceover = True
+                if _is_voiceover_audio(project, creation):
+                    expects_voiceover = True
             elif kind == "overlay":
                 overlay_kind = getattr(creation, "overlay_kind", "")
                 text = str(getattr(creation, "text", "") or "").strip()
@@ -466,8 +549,15 @@ def _admit_feedback(
     report: RenderReviewReport,
     target_ref: str,
     chain_id: str,
+    freshness_guard: Any = None,
 ) -> bool:
-    """Admit the findings as a durable turn message for the next editing run."""
+    """Admit the findings as a durable turn message for the next editing run.
+
+    ``freshness_guard`` re-runs inside the session store's Project lifecycle
+    boundary; a ``False`` result aborts with ``RequestAdmissionConflict`` so
+    a concurrent compose can never be mutated by findings for a superseded
+    render.
+    """
     try:
         session = services.sessions.get_project_session_snapshot(project_id)
     except RuntimeSessionNotFound:
@@ -503,6 +593,7 @@ def _admit_feedback(
         channel=MessageChannel.RUNTIME,
         classification=MessageClassification.MUTATION_INSTRUCTION,
         metadata={"renderReview": findings_feedback_payload(report)},
+        admission_guard=freshness_guard,
     )
     return True
 
@@ -585,6 +676,16 @@ async def run_review_loop(
             projectId=project_id,
         )
         return report
+    except asyncio.CancelledError:
+        # Shutdown/cancellation must not leave a live-looking claim behind;
+        # the crash-lease covers process death, this covers task cancel.
+        if admitted is not None:
+            _release_claim(
+                reports_root,
+                target_ref=target_ref,
+                video_id=video_id,
+            )
+        raise
     except Exception as exc:
         # Advisory only: a review failure must never disturb delivery.
         logger.exception("render review loop failed for %s", video_id)
