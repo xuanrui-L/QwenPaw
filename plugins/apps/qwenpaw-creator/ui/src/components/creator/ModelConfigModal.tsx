@@ -192,6 +192,17 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
 
 type ModelType = "llm" | "vlm" | "asr" | "tts" | "s2v" | "image" | "video";
 type TabType = ModelType | "grounding";
+
+// Sections whose endpoint comes from a fixed protocol preset rather than
+// from user input.
+const PRESETS_BY_TYPE: Record<string, Record<string, ProtocolPreset>> = {
+  asr: ASR_PRESETS,
+  tts: TTS_PRESETS,
+  s2v: S2V_PRESETS,
+  image: IMAGE_PRESETS,
+  video: VIDEO_PRESETS,
+};
+const PRESET_SEEDED_TYPES: ModelType[] = ["asr", "tts", "s2v"];
 const DEFAULT_CONFIG: ModelConfigData = {
   llm: {
     enabled: true,
@@ -517,10 +528,24 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         merged.asr.protocol = ASR_PROTOCOLS[0];
       if (!TTS_PROTOCOLS.includes(merged.tts.protocol))
         merged.tts.protocol = TTS_PROTOCOLS[0];
+      if (!S2V_PROTOCOLS.includes(merged.s2v.protocol))
+        merged.s2v.protocol = S2V_PROTOCOLS[0];
       if (!IMAGE_PROTOCOLS.includes(merged.image.protocol))
         merged.image.protocol = IMAGE_PROTOCOLS[0];
       if (!VIDEO_PROTOCOLS.includes(merged.video.protocol))
         merged.video.protocol = VIDEO_PROTOCOLS[0];
+      // A never-configured section arrives with empty base_url/model, and a
+      // frozen preset URL cannot be typed in. Sections with a single
+      // protocol (TTS/S2V) would therefore be unsavable, because switching
+      // protocol — the only thing that applies a preset — is impossible.
+      PRESET_SEEDED_TYPES.forEach((type) => {
+        const item = merged[type] as ModelConfigItem;
+        const preset = PRESETS_BY_TYPE[type][item.protocol];
+        if (!preset) return;
+        if (!item.base_url) item.base_url = preset.base_url;
+        if (!item.model_name && preset.models.length === 1)
+          item.model_name = preset.models[0];
+      });
       const initialTested: Record<string, boolean> = {};
       CARD_META.forEach((meta) => {
         if (meta.type === "grounding") return;

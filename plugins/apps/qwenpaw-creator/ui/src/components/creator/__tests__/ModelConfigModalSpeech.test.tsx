@@ -134,9 +134,17 @@ const capabilities = {
 
 function mount(config: ModelConfigData = baseConfig) {
   installMockFetch([
-    { match: "/models/tts-capabilities", method: "GET", response: { json: capabilities } },
+    {
+      match: "/models/tts-capabilities",
+      method: "GET",
+      response: { json: capabilities },
+    },
     { match: "/models/config", method: "GET", response: { json: config } },
-    { match: "/host-providers", method: "GET", response: { json: { providers: [] } } },
+    {
+      match: "/host-providers",
+      method: "GET",
+      response: { json: { providers: [] } },
+    },
   ]);
   render(<ModelConfigModal open onClose={() => {}} />);
 }
@@ -175,6 +183,36 @@ describe("ModelConfigModal speech section", () => {
     expect(voiceInput).toHaveValue("Cherry");
   });
 
+  it("seeds the frozen preset endpoint for a never-configured s2v section", async () => {
+    // The digital-human section has a single protocol, so switching protocol
+    // — the only thing that applies a preset — is impossible; without
+    // seeding, its frozen Base URL stays empty and the section cannot be
+    // saved at all.
+    mount({
+      ...baseConfig,
+      s2v: {
+        ...baseConfig.s2v,
+        model_name: "",
+        base_url: "",
+        detect_model_name: "",
+      },
+    });
+    // Only the active tab renders its card, and the tab label drops "模型".
+    fireEvent.click(await screen.findByText("数字人"));
+    const headers = await screen.findAllByText(/数字人模型/);
+    const card = headers
+      .map((node) => node.closest(".glass-card") ?? node.parentElement)
+      .find((node): node is HTMLElement => node instanceof HTMLElement);
+    fireEvent.click(card as HTMLElement);
+    await waitFor(() => {
+      expect(screen.getByText("人像检测模型（可选）")).toBeInTheDocument();
+    });
+    const inputs = Array.from(document.querySelectorAll("input"));
+    const values = inputs.map((node) => (node as HTMLInputElement).value);
+    expect(values).toContain("https://dashscope.aliyuncs.com/api/v1");
+    expect(values).toContain("wan2.2-s2v");
+  });
+
   it("hides the voice picker for a model without system voices", async () => {
     mount({
       ...baseConfig,
@@ -183,7 +221,9 @@ describe("ModelConfigModal speech section", () => {
     await openSpeechCard();
     await waitFor(() => {
       expect(
-        screen.getByText(/该模型没有系统音色：Agent 会先根据角色设定设计专属音色/),
+        screen.getByText(
+          /该模型没有系统音色：Agent 会先根据角色设定设计专属音色/,
+        ),
       ).toBeInTheDocument();
     });
     expect(screen.queryByText("默认旁白音色")).not.toBeInTheDocument();

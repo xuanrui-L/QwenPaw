@@ -25,6 +25,7 @@ import io
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 import httpx
@@ -50,6 +51,13 @@ _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 _SUBMIT_RETRY_STATUS = frozenset({429})
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = 2.0
+
+# wan2.2-s2v-detect expresses "this portrait is unusable" as HTTP 400 with
+# an ``InvalidFile.*`` code (NoHuman, BodyProportion, ...) rather than as a
+# 200 with ``check_pass: false``. Measured against the live endpoint; both
+# shapes are handled so the verdict never surfaces as a transport error.
+_DETECT_VERDICT_STATUS = frozenset({400})
+_DETECT_VERDICT_CODE_PREFIX = "invalidfile"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +162,7 @@ async def _post_json(
     payload: dict,
     extra_headers: dict | None = None,
     retry_statuses: frozenset[int] = _RETRY_STATUS,
+    verdict_statuses: frozenset[int] = frozenset(),
 ) -> dict:
     """POST one S2V request, retrying only the given statuses.
 
@@ -161,6 +170,10 @@ async def _post_json(
     detect may retry server errors, while a billed submission must not —
     the provider can create (and bill) the task before answering 5xx, so a
     retry would buy the same clip twice under one durable submit claim.
+
+    ``verdict_statuses`` are statuses whose body is a meaningful answer
+    rather than a failure (the detect model reports an unusable portrait as
+    HTTP 400); their parsed body is returned to the caller.
     """
 
     headers = {
@@ -190,6 +203,11 @@ async def _post_json(
                 )
                 await asyncio.sleep(wait)
                 continue
+            if response.status_code in verdict_statuses:
+                try:
+                    return dict(response.json())
+                except ValueError:
+                    pass
             if response.status_code >= 400:
                 raise ModelError(
                     f"S2V request failed (HTTP {response.status_code}): "
@@ -198,6 +216,20 @@ async def _post_json(
                 )
             return response.json()
     raise ModelError("S2V request retries exhausted", model_name=model_name)
+
+
+def _detect_verdict_from_error(data: Mapping[str, Any]) -> str | None:
+    """Reason text when an error body is really a detect rejection."""
+
+    code = str(data.get("code") or "").strip()
+    if not code:
+        return None
+    if not code.casefold().startswith(_DETECT_VERDICT_CODE_PREFIX):
+        # A genuine bad request (InvalidParameter, InvalidApiKey, ...) is a
+        # failure, not a portrait verdict.
+        return None
+    message = str(data.get("message") or "").strip()
+    return f"[{code}] {message}" if message else f"[{code}]"
 
 
 async def detect_face(image_url: str) -> FaceDetectResult:
@@ -215,7 +247,19 @@ async def detect_face(image_url: str) -> FaceDetectResult:
             "model": detect_model,
             "input": {"image_url": resolved_url},
         },
+        verdict_statuses=_DETECT_VERDICT_STATUS,
     )
+    rejection = _detect_verdict_from_error(data)
+    if rejection is not None:
+        # Unusable portrait: a verdict, not a failure. Nothing was billed.
+        logger.info("S2V face detect: passed=False reason=%s", rejection)
+        return FaceDetectResult(passed=False, reason=rejection)
+    if "output" not in data and data.get("code"):
+        raise ModelError(
+            f"S2V face detect failed: {data.get('code')} "
+            f"{str(data.get('message') or '')[:200]}",
+            model_name=detect_model,
+        )
     output = data.get("output") if isinstance(data.get("output"), dict) else {}
     passed = bool(output.get("check_pass"))
     humanoid = bool(output.get("humanoid"))

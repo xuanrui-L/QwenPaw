@@ -189,6 +189,52 @@ def test_detect_face_failure_surfaces_reason(s2v_env) -> None:
     assert "side face detected" in result.reason
 
 
+@respx.mock
+def test_detect_rejection_arrives_as_http_400(s2v_env) -> None:
+    """Measured live behaviour: an unusable portrait is a 400, not a 200.
+
+    The verdict must stay a verdict (no billing happened), never a raw
+    transport error.
+    """
+
+    for code, message in (
+        ("InvalidFile.NoHuman", "The input image has no human body."),
+        (
+            "InvalidFile.BodyProportion",
+            "The proportion of the detected person is too large or too small.",
+        ),
+    ):
+        respx.post(f"{_BASE}/services/aigc/image2video/face-detect").mock(
+            return_value=httpx.Response(
+                400,
+                json={"code": code, "message": message, "request_id": "r-1"},
+            ),
+        )
+        result = asyncio.run(
+            s2v_model.detect_face("https://cdn.test/portrait.png"),
+        )
+        assert result.passed is False
+        assert code in result.reason
+        assert message[:20] in result.reason
+
+
+@respx.mock
+def test_detect_still_raises_on_a_real_bad_request(s2v_env) -> None:
+    """A non-portrait 400 (bad key/parameter) is a failure, not a verdict."""
+
+    respx.post(f"{_BASE}/services/aigc/image2video/face-detect").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "code": "InvalidParameter",
+                "message": "image_url is required",
+            },
+        ),
+    )
+    with pytest.raises(ModelError, match="InvalidParameter"):
+        asyncio.run(s2v_model.detect_face("https://cdn.test/portrait.png"))
+
+
 # ── submit (billed, async task) ──────────────────────────────────────────────
 
 
