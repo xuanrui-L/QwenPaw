@@ -183,7 +183,11 @@ class OpenAIImageModel(BaseImageModel):
         prompt: str,
         aspect_ratio: str,
         clean_reference_urls: list[str],
+        mode: str = "generate",
     ) -> httpx.Response:
+        # Only ``generate`` reaches a provider without edit/translate support;
+        # the envelope rejects the other modes before this point.
+        del mode
         url = self._url(clean_reference_urls)
         body = {
             "model": self.model_name,

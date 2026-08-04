@@ -15,6 +15,7 @@ import httpx
 from typing import Optional
 from models.concurrency import model_slot
 from models import config as model_config
+from models.provider_tasks import note_provider_task
 from models.media_transport import (
     DASHSCOPE_TEMP_UPLOAD_MAX_BYTES,
     SEEDANCE_REFERENCE_IMAGE_MAX_BYTES,
@@ -633,6 +634,13 @@ async def submit_video_task(
                 model_name=model_name,
             )
 
+        # The provider bills on acceptance; record the id before returning so
+        # an interrupted poll leaves a retrievable reference.
+        note_provider_task(
+            provider_task_id=str(task_id),
+            model=effective_model,
+            kind=f"video_{normalized_mode}",
+        )
         logger.info(f"Video task submitted successfully | task_id={task_id}")
         return task_id
 

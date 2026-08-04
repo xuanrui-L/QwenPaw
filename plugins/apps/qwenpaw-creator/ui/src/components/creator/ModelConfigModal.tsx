@@ -1244,25 +1244,45 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           </div>
         )}
         {type === "s2v" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <Checkbox
-              checked={config.s2v.reuse_llm_key}
-              onChange={(e) =>
-                updateItem("s2v", "reuse_llm_key", e.target.checked)
-              }
-            >
-              复用 LLM API Key
-            </Checkbox>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: "0 16px",
+            }}
+          >
+            <div style={{ gridColumn: "1 / -1", marginBottom: 4 }}>
+              <Checkbox
+                checked={config.s2v.reuse_llm_key}
+                onChange={(e) =>
+                  updateItem("s2v", "reuse_llm_key", e.target.checked)
+                }
+              >
+                复用 LLM API Key
+              </Checkbox>
+            </div>
+            <div>
+              <label className="field-label">人像检测模型（可选）</label>
+              <Input
+                placeholder="wan2.2-s2v-detect"
+                value={config.s2v.detect_model_name}
+                onChange={(e) =>
+                  updateItem("s2v", "detect_model_name", e.target.value)
+                }
+              />
+            </div>
             <p
               style={{
-                margin: 0,
+                gridColumn: "1 / -1",
+                margin: "2px 0 0",
                 fontSize: 11,
                 lineHeight: 1.6,
                 color: "var(--color-text-tertiary)",
               }}
             >
               用一张角色人像图 + 一段音频生成对口型说话视频（wan2.2-s2v）；
-              提交前会先跑免费的人像检测，未通过不产生费用。
+              提交前会先跑免费的人像检测，未通过不产生费用。检测模型留空时
+              使用默认的 wan2.2-s2v-detect。
             </p>
           </div>
         )}

@@ -1004,9 +1004,17 @@ def get_s2v_model_name() -> str:
 
 
 def get_s2v_detect_model_name() -> str:
+    """Free face-detect companion model.
+
+    Both spellings are accepted: the plugin-host tool config uses
+    ``detect_model`` (plugin.json field name) while the persisted Creator
+    config and the frontend contract use ``detect_model_name``
+    (``S2vConfig`` field name).
+    """
+
     return _configured_value(
         CREATOR_S2V_CONFIG_TOOL,
-        "detect_model",
+        ("detect_model", "detect_model_name"),
         "S2V_DETECT_MODEL_NAME",
         S2V_DETECT_MODEL_NAME,
     )

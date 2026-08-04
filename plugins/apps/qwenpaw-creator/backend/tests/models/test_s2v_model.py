@@ -119,6 +119,7 @@ def test_local_media_uploads_to_dashscope_temp(
         s2v_model.resolve_s2v_media_url(
             portrait.as_uri(),
             validate_portrait=True,
+            model_name="wan2.2-s2v",
         ),
     )
     assert resolved == "oss://dashscope-instant/hero.png"
@@ -135,6 +136,7 @@ def test_local_portrait_below_bounds_is_rejected_before_upload(
             s2v_model.resolve_s2v_media_url(
                 portrait.as_uri(),
                 validate_portrait=True,
+                model_name="wan2.2-s2v",
             ),
         )
 

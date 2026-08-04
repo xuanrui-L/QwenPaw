@@ -1,0 +1,693 @@
+# -*- coding: utf-8 -*-
+# flake8: noqa: E501
+# pylint: disable=protected-access,unused-argument
+"""Regressions for the WT5 code-review findings (all HTTP stubbed)."""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+
+import httpx
+import pytest
+import respx
+from PIL import Image
+
+from models import config as model_config
+from models import s2v_model, video_model
+from models.image import dashscope_provider
+from models.image.dashscope_provider import DashScopeImageModel
+from models.provider_tasks import (
+    PROVIDER_TASK_LEDGER_NAME,
+    note_provider_task,
+    read_provider_tasks,
+)
+from utils.exceptions import ModelError
+
+# pylint: disable=no-name-in-module
+from utils.paths import media_task_scope, task_work_root
+
+# pylint: enable=no-name-in-module
+
+_IMAGE_BASE = (
+    "https://dashscope.test/api/v1"
+    "/services/aigc/multimodal-generation/generation"
+)
+_TRANSLATE_URL = (
+    "https://dashscope.test/api/v1/services/aigc/image2image/image-synthesis"
+)
+_S2V_BASE = "https://dashscope.test/api/v1"
+
+
+def _png_bytes(width: int = 480, height: int = 640) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), color="blue").save(output, format="PNG")
+    return output.getvalue()
+
+
+def _image_model() -> DashScopeImageModel:
+    return DashScopeImageModel(
+        model_name="qwen-image-2.0-pro",
+        api_key="sk-test",
+        base_url=_IMAGE_BASE,
+        timeout=30,
+    )
+
+
+@pytest.fixture(name="s2v_env")
+def _s2v_env(monkeypatch):
+    monkeypatch.setenv("S2V_API_KEY", "sk-s2v-test")
+    monkeypatch.setenv("S2V_BASE_URL", _S2V_BASE)
+    monkeypatch.delenv("S2V_MODEL_NAME", raising=False)
+    monkeypatch.delenv("S2V_DETECT_MODEL_NAME", raising=False)
+    monkeypatch.delenv("CREATOR_DATA_ROOT", raising=False)
+    monkeypatch.delenv("CREATOR_MODEL_CONFIG_PATH", raising=False)
+    token = model_config.set_request_tool_configs({})
+    yield
+    model_config.reset_request_tool_configs(token)
+
+
+# ── edit must not degrade into text-to-image ─────────────────────────────────
+
+
+def test_edit_fails_when_a_reference_cannot_be_read(tmp_path) -> None:
+    """A paid edit must not silently become an unrelated t2i render."""
+
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"not-an-image")
+
+    with pytest.raises(ModelError, match="edit reference cannot be read"):
+        asyncio.run(
+            _image_model()._build_body(
+                "把围巾改成蓝色",
+                "1:1",
+                [corrupt.as_uri()],
+                "edit",
+            ),
+        )
+
+
+def test_generate_still_tolerates_a_corrupt_reference(tmp_path) -> None:
+    """Plain generation keeps its lenient behaviour (unchanged)."""
+
+    corrupt = tmp_path / "corrupt.png"
+    corrupt.write_bytes(b"not-an-image")
+
+    body = asyncio.run(
+        _image_model()._build_body(
+            "橘猫",
+            "1:1",
+            [corrupt.as_uri()],
+            "generate",
+        ),
+    )
+    assert body["input"]["messages"][0]["content"] == [{"text": "橘猫"}]
+
+
+# ── translate: model-bound upload + billed-task ledger ───────────────────────
+
+
+@respx.mock
+def test_translate_uploads_bound_to_the_translate_model(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A temp upload only resolves for the model its policy was issued for."""
+
+    monkeypatch.delenv("IMAGE_TRANSLATE_MODEL_NAME", raising=False)
+    poster = tmp_path / "poster.png"
+    poster.write_bytes(_png_bytes())
+    uploaded: dict = {}
+
+    async def fake_upload(content, filename, *, api_key, model_name):
+        uploaded["model_name"] = model_name
+        return "oss://dashscope-instant/poster.png"
+
+    monkeypatch.setattr(
+        dashscope_provider,
+        "upload_reference_bytes_to_dashscope_temp",
+        fake_upload,
+    )
+    respx.post(_TRANSLATE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"output": {"task_id": "task-mt-bound"}},
+        ),
+    )
+    respx.get("https://dashscope.test/api/v1/tasks/task-mt-bound").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "image_url": "https://oss.test/out.png",
+                },
+            },
+        ),
+    )
+
+    async def fake_download(url: str, model: str) -> str:
+        return "/generated/out.png"
+
+    monkeypatch.setattr(
+        dashscope_provider,
+        "download_remote_image",
+        fake_download,
+    )
+    token = model_config.set_request_tool_configs({})
+    try:
+        asyncio.run(
+            _image_model().generate(
+                "translate",
+                mode="translate",
+                reference_image_urls=[poster.as_uri()],
+            ),
+        )
+    finally:
+        model_config.reset_request_tool_configs(token)
+    assert uploaded["model_name"] == "qwen-mt-image"
+
+
+@respx.mock
+def test_translate_retries_transient_polls_instead_of_losing_the_task(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("IMAGE_TRANSLATE_MODEL_NAME", raising=False)
+    monkeypatch.setattr(
+        dashscope_provider,
+        "_TRANSLATE_POLL_INTERVAL_SECONDS",
+        0.0,
+    )
+    respx.post(_TRANSLATE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"output": {"task_id": "task-mt-flaky"}},
+        ),
+    )
+    respx.get("https://dashscope.test/api/v1/tasks/task-mt-flaky").mock(
+        side_effect=[
+            httpx.Response(429, json={"message": "throttled"}),
+            httpx.Response(503, json={"message": "unavailable"}),
+            httpx.Response(
+                200,
+                json={
+                    "output": {
+                        "task_status": "SUCCEEDED",
+                        "image_url": "https://oss.test/late.png",
+                    },
+                },
+            ),
+        ],
+    )
+
+    async def fake_download(url: str, model: str) -> str:
+        return "/generated/late.png"
+
+    monkeypatch.setattr(
+        dashscope_provider,
+        "download_remote_image",
+        fake_download,
+    )
+    token = model_config.set_request_tool_configs({})
+    try:
+        result = asyncio.run(
+            _image_model().generate(
+                "translate",
+                mode="translate",
+                reference_image_urls=["https://cdn.test/poster.png"],
+            ),
+        )
+    finally:
+        model_config.reset_request_tool_configs(token)
+    assert result == "/generated/late.png"
+
+
+@respx.mock
+def test_translate_timeout_names_the_billed_task(monkeypatch) -> None:
+    monkeypatch.delenv("IMAGE_TRANSLATE_MODEL_NAME", raising=False)
+    monkeypatch.setattr(
+        dashscope_provider,
+        "_TRANSLATE_POLL_INTERVAL_SECONDS",
+        0.0,
+    )
+    respx.post(_TRANSLATE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"output": {"task_id": "task-mt-slow"}},
+        ),
+    )
+    respx.get("https://dashscope.test/api/v1/tasks/task-mt-slow").mock(
+        return_value=httpx.Response(
+            200,
+            json={"output": {"task_status": "RUNNING"}},
+        ),
+    )
+    model = DashScopeImageModel(
+        model_name="qwen-image-2.0-pro",
+        api_key="sk-test",
+        base_url=_IMAGE_BASE,
+        # A zero budget makes the deadline expire on the first check.
+        timeout=0,
+    )
+    token = model_config.set_request_tool_configs({})
+    try:
+        with pytest.raises(ModelError, match="task-mt-slow") as info:
+            asyncio.run(
+                model.generate(
+                    "translate",
+                    mode="translate",
+                    reference_image_urls=["https://cdn.test/poster.png"],
+                ),
+            )
+    finally:
+        model_config.reset_request_tool_configs(token)
+    assert "retrievable" in str(info.value)
+
+
+def _bind_project_scratch(tmp_path, monkeypatch, project_id: str) -> None:
+    """Create the minimum layout the Task-scoped scratch root requires."""
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    project_root = tmp_path / project_id
+    (project_root / "runtime").mkdir(parents=True, exist_ok=True)
+    (project_root / "project.json").write_text("{}", encoding="utf-8")
+
+
+def test_provider_task_ledger_records_accepted_tasks(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _bind_project_scratch(tmp_path, monkeypatch, "project-ledger")
+    with media_task_scope("task-ledger-1", project_id="project-ledger"):
+        note_provider_task(
+            provider_task_id="provider-task-1",
+            model="qwen-mt-image",
+            kind="image_translate",
+        )
+        ledger = task_work_root() / PROVIDER_TASK_LEDGER_NAME
+    assert ledger.is_file()
+    entries = read_provider_tasks("task-ledger-1", "project-ledger")
+    assert [entry["providerTaskId"] for entry in entries] == [
+        "provider-task-1",
+    ]
+    assert entries[0]["model"] == "qwen-mt-image"
+    assert entries[0]["kind"] == "image_translate"
+
+
+def test_provider_task_ledger_is_a_noop_without_a_task_scope() -> None:
+    # Ad-hoc scripts and unit tests must not fail on bookkeeping.
+    note_provider_task(
+        provider_task_id="provider-task-2",
+        model="wan2.2-s2v",
+        kind="s2v_generation",
+    )
+
+
+# ── s2v: detect binding and non-idempotent submit ────────────────────────────
+
+
+def test_detect_uploads_bound_to_the_detect_model(
+    s2v_env,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    portrait = tmp_path / "hero.png"
+    portrait.write_bytes(_png_bytes())
+    uploaded: dict = {}
+
+    async def fake_upload(path, *, api_key, model_name, media_type):
+        uploaded["model_name"] = model_name
+        return "oss://dashscope-instant/hero.png"
+
+    monkeypatch.setattr(
+        s2v_model,
+        "upload_local_file_to_dashscope_temp",
+        fake_upload,
+    )
+    with respx.mock:
+        route = respx.post(
+            f"{_S2V_BASE}/services/aigc/image2video/face-detect",
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"output": {"check_pass": True, "humanoid": True}},
+            ),
+        )
+        asyncio.run(s2v_model.detect_face(portrait.as_uri()))
+    # The uploaded URL is resolved by the detect model, so its policy must
+    # have been issued for that same model.
+    assert uploaded["model_name"] == "wan2.2-s2v-detect"
+    assert (
+        json.loads(route.calls.last.request.content)["model"]
+        == "wan2.2-s2v-detect"
+    )
+
+
+def test_submit_uploads_bound_to_the_generation_model(
+    s2v_env,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    portrait = tmp_path / "hero.png"
+    portrait.write_bytes(_png_bytes())
+    audio = tmp_path / "voice.wav"
+    audio.write_bytes(b"RIFF0000WAVE" + b"\x00" * 512)
+    models: list[str] = []
+
+    async def fake_upload(path, *, api_key, model_name, media_type):
+        models.append(model_name)
+        return f"oss://dashscope-instant/{path.name}"
+
+    monkeypatch.setattr(
+        s2v_model,
+        "upload_local_file_to_dashscope_temp",
+        fake_upload,
+    )
+    with respx.mock:
+        respx.post(
+            f"{_S2V_BASE}/services/aigc/image2video/video-synthesis/",
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"output": {"task_id": "task-s2v-bound"}},
+            ),
+        )
+        task_id = asyncio.run(
+            s2v_model.submit_s2v_task(portrait.as_uri(), audio.as_uri()),
+        )
+    assert task_id == "task-s2v-bound"
+    assert models == ["wan2.2-s2v", "wan2.2-s2v"]
+
+
+@respx.mock
+def test_billed_submit_is_not_retried_on_server_error(s2v_env) -> None:
+    """A 5xx may already have created (and billed) the task."""
+
+    route = respx.post(
+        f"{_S2V_BASE}/services/aigc/image2video/video-synthesis/",
+    ).mock(return_value=httpx.Response(503, json={"message": "unavailable"}))
+    with pytest.raises(ModelError, match="HTTP 503"):
+        asyncio.run(
+            s2v_model.submit_s2v_task(
+                "https://cdn.test/p.png",
+                "https://cdn.test/a.wav",
+            ),
+        )
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_billed_submit_still_retries_a_rate_limit(s2v_env, monkeypatch) -> None:
+    """429 is an outright rejection, so retrying cannot double-bill."""
+
+    monkeypatch.setattr(s2v_model, "_RETRY_BACKOFF_SECONDS", 0.0)
+    route = respx.post(
+        f"{_S2V_BASE}/services/aigc/image2video/video-synthesis/",
+    ).mock(
+        side_effect=[
+            httpx.Response(429, json={"message": "throttled"}),
+            httpx.Response(200, json={"output": {"task_id": "task-s2v-429"}}),
+        ],
+    )
+    task_id = asyncio.run(
+        s2v_model.submit_s2v_task(
+            "https://cdn.test/p.png",
+            "https://cdn.test/a.wav",
+        ),
+    )
+    assert task_id == "task-s2v-429"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_free_detect_still_retries_server_errors(s2v_env, monkeypatch) -> None:
+    monkeypatch.setattr(s2v_model, "_RETRY_BACKOFF_SECONDS", 0.0)
+    route = respx.post(
+        f"{_S2V_BASE}/services/aigc/image2video/face-detect",
+    ).mock(
+        side_effect=[
+            httpx.Response(503, json={"message": "unavailable"}),
+            httpx.Response(
+                200,
+                json={"output": {"check_pass": True, "humanoid": True}},
+            ),
+        ],
+    )
+    result = asyncio.run(s2v_model.detect_face("https://cdn.test/p.png"))
+    assert result.passed is True
+    assert route.call_count == 2
+
+
+# ── s2v detect model configuration ───────────────────────────────────────────
+
+
+def test_detect_model_accepts_both_field_spellings(monkeypatch) -> None:
+    """The persisted schema field and the plugin-host field both apply."""
+
+    monkeypatch.delenv("S2V_DETECT_MODEL_NAME", raising=False)
+    monkeypatch.delenv("CREATOR_DATA_ROOT", raising=False)
+    monkeypatch.delenv("CREATOR_MODEL_CONFIG_PATH", raising=False)
+    for field in ("detect_model", "detect_model_name"):
+        token = model_config.set_request_tool_configs(
+            {"creator_s2v_model": {field: "custom-detect"}},
+        )
+        try:
+            assert (
+                model_config.get_s2v_detect_model_name() == "custom-detect"
+            ), field
+        finally:
+            model_config.reset_request_tool_configs(token)
+
+
+def test_detect_model_reads_the_persisted_creator_section(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("S2V_DETECT_MODEL_NAME", raising=False)
+    config_path = tmp_path / "config" / "model_config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "s2v": {
+                    "enabled": True,
+                    "model_name": "wan2.2-s2v",
+                    "detect_model_name": "custom-detect",
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    model_config._clear_user_config_cache()
+    token = model_config.set_request_tool_configs({})
+    try:
+        assert model_config.get_s2v_detect_model_name() == "custom-detect"
+    finally:
+        model_config.reset_request_tool_configs(token)
+        model_config._clear_user_config_cache()
+
+
+# ── authorization identity ───────────────────────────────────────────────────
+
+
+def test_authorization_snapshots_the_effective_model(monkeypatch) -> None:
+    """Translate/video authorizations must name the submitted model."""
+
+    from services.file_agent_runtime.driver import _execution_provider_model
+    from services.specialist_tools import (
+        FileSpecialistToolRegistry,
+        SpecialistToolSpec,
+    )
+
+    del FileSpecialistToolRegistry  # imported only to assert module wiring
+
+    image_spec = SpecialistToolSpec(
+        name="image_generation",
+        description="d",
+        roles=frozenset(),
+        parameters={},
+        provider_kind="image",
+    )
+    video_spec = SpecialistToolSpec(
+        name="r2v_generation",
+        description="d",
+        roles=frozenset(),
+        parameters={},
+        provider_kind="video",
+    )
+    monkeypatch.setattr(
+        "services.file_agent_runtime.driver.get_video_backend",
+        lambda: "wan",
+    )
+    monkeypatch.setattr(
+        "services.file_agent_runtime.driver.get_video_model_name",
+        lambda: "happyhorse-1.1-r2v",
+    )
+    monkeypatch.setattr(
+        "services.file_agent_runtime.driver.get_image_model_name",
+        lambda: "qwen-image-2.0-pro",
+    )
+    monkeypatch.setattr(
+        "models.image.get_image_backend",
+        lambda: "DASHSCOPE",
+    )
+    monkeypatch.delenv("IMAGE_TRANSLATE_MODEL_NAME", raising=False)
+    token = model_config.set_request_tool_configs({})
+    try:
+        assert _execution_provider_model(image_spec, {}) == (
+            "dashscope",
+            "qwen-image-2.0-pro",
+        )
+        assert _execution_provider_model(
+            image_spec,
+            {"mode": "translate"},
+        ) == ("dashscope", "qwen-mt-image")
+        assert _execution_provider_model(video_spec, {}) == (
+            "wan",
+            "happyhorse-1.1-r2v",
+        )
+        assert _execution_provider_model(video_spec, {"mode": "t2v"}) == (
+            "wan",
+            "happyhorse-1.1-t2v",
+        )
+        assert _execution_provider_model(
+            video_spec,
+            {"mode": "video_edit"},
+        ) == ("wan", "happyhorse-1.1-video-edit")
+    finally:
+        model_config.reset_request_tool_configs(token)
+
+
+def test_video_edit_pricing_follows_the_input_video(monkeypatch) -> None:
+    """video_edit is billed by its input length, not by durationSeconds."""
+
+    from services.execution_pricing import estimate_execution_cost
+
+    long_input = estimate_execution_cost(
+        provider_kind="video",
+        provider="wan",
+        model="happyhorse-1.1-video-edit",
+        # 40s input truncated to the provider's 15s keep-window.
+        arguments={"mode": "video_edit", "durationSeconds": 15},
+    )
+    requested = estimate_execution_cost(
+        provider_kind="video",
+        provider="wan",
+        model="happyhorse-1.1-video-edit",
+        arguments={"mode": "video_edit", "durationSeconds": 5},
+    )
+    assert long_input is not None and requested is not None
+    assert long_input.estimated_cost > requested.estimated_cost
+
+
+# ── video_edit input duration ────────────────────────────────────────────────
+
+
+def test_video_edit_input_duration_is_validated() -> None:
+    from domain.errors import ValidationError
+    from services.media_files.r2v_execution import (
+        _assert_video_edit_input_duration,
+    )
+    from services.project_files.models import (
+        IndexedFile,
+        Project,
+        SourceAssetVersion,
+    )
+    from datetime import UTC, datetime
+
+    project = Project.new(project_id="p-dur", name="dur")
+
+    def register(version_id: str, duration: float | None) -> None:
+        created = datetime.now(UTC)
+        project.assets.files_by_id[f"file-{version_id}"] = IndexedFile(
+            file_id=f"file-{version_id}",
+            kind="source_original",
+            relative_uri=f"assets/sources/{version_id}.mp4",
+            sha256="0" * 64,
+            size_bytes=1024,
+            media_type="video/mp4",
+            created_at=created,
+        )
+        project.assets.source_versions_by_id[version_id] = SourceAssetVersion(
+            version_id=version_id,
+            logical_asset_id=f"asset-{version_id}",
+            name=version_id,
+            file_id=f"file-{version_id}",
+            checksum="0" * 64,
+            media_kind="video",
+            media_type="video/mp4",
+            duration_seconds=duration,
+            created_at=created,
+        )
+
+    register("v-ok", 10.0)
+    register("v-short", 1.5)
+    register("v-long", 75.0)
+    register("v-unknown", None)
+
+    _assert_video_edit_input_duration(project, "v-ok")
+    # An unknown duration cannot be judged locally; the provider still does.
+    _assert_video_edit_input_duration(project, "v-unknown")
+    with pytest.raises(ValidationError, match="3–60"):
+        _assert_video_edit_input_duration(project, "v-short")
+    with pytest.raises(ValidationError, match="3–60"):
+        _assert_video_edit_input_duration(project, "v-long")
+
+
+def test_video_submit_records_the_billed_task(monkeypatch, tmp_path) -> None:
+    """Every accepted video task lands in the durable ledger."""
+
+    _bind_project_scratch(tmp_path, monkeypatch, "project-video")
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1-r2v",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    monkeypatch.setattr(model_config, "get_video_api_key", lambda: "sk-test")
+    monkeypatch.setattr(
+        model_config,
+        "get_video_submit_url",
+        lambda: "https://bailian.example/api/v1/services/aigc/video-generation/video-synthesis",
+    )
+    monkeypatch.setattr(model_config, "get_video_submit_timeout", lambda: 5)
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"output": {"task_id": "task-video-ledger"}}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return _Response()
+
+    monkeypatch.setattr(video_model.httpx, "AsyncClient", lambda timeout: _Client())
+
+    with media_task_scope("task-video-1", project_id="project-video"):
+        task_id = asyncio.run(
+            video_model.submit_video_task(
+                "海浪拍打礁石",
+                mode="t2v",
+                duration=5,
+                resolution="720P",
+            ),
+        )
+    assert task_id == "task-video-ledger"
+    entries = read_provider_tasks("task-video-1", "project-video")
+    assert entries[0]["providerTaskId"] == "task-video-ledger"
+    # The ledger records the derived model that was actually submitted.
+    assert entries[0]["model"] == "happyhorse-1.1-t2v"
+    assert entries[0]["kind"] == "video_t2v"

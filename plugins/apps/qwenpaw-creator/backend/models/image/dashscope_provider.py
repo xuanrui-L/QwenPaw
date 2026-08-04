@@ -31,6 +31,7 @@ from models.media_transport import (
     upload_reference_bytes_to_dashscope_temp,
     validate_reference_image_bytes,
 )
+from models.provider_tasks import note_provider_task
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
 from models.image.base import (
@@ -62,6 +63,7 @@ DEFAULT_MODEL_NAME = "qwen-image-2.0-pro"
 _GENERATION_SUFFIX = "/services/aigc/multimodal-generation/generation"
 _TRANSLATE_SUBMIT_SUFFIX = "/services/aigc/image2image/image-synthesis"
 _TRANSLATE_POLL_INTERVAL_SECONDS = 3.0
+_TRANSLATE_RETRY_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 class DashScopeImageModel(BaseImageModel):
@@ -157,13 +159,23 @@ class DashScopeImageModel(BaseImageModel):
             return base[: -len(_GENERATION_SUFFIX)]
         return base
 
-    async def _public_reference_url(self, raw_url: str) -> str | None:
+    async def _public_reference_url(
+        self,
+        raw_url: str,
+        *,
+        model_name: str | None = None,
+    ) -> str | None:
         """Return a provider-resolvable URL for one reference image.
 
         Public HTTP(S) URLs pass through; local/generated media is uploaded
         to DashScope model-bound temporary storage (``oss://`` + resolve
         header). Corrupt local references return ``None`` so a stale project
         file cannot fail the whole request.
+
+        ``model_name`` must be the model that will *consume* the URL: a
+        temporary upload is bound to the model its policy was issued for
+        (see :mod:`models.media_transport`), so translate uploads bind to
+        ``qwen-mt-image`` rather than the generation model.
         """
 
         url = raw_url.strip()
@@ -180,7 +192,7 @@ class DashScopeImageModel(BaseImageModel):
             media_bytes,
             filename,
             api_key=self.api_key,
-            model_name=self.model_name,
+            model_name=model_name or self.model_name,
         )
 
     async def _request(
@@ -189,11 +201,13 @@ class DashScopeImageModel(BaseImageModel):
         prompt: str,
         aspect_ratio: str,
         clean_reference_urls: list[str],
+        mode: str = "generate",
     ) -> httpx.Response:
         body = await self._build_body(
             prompt,
             aspect_ratio,
             clean_reference_urls,
+            mode,
         )
         return await client.post(
             self.generation_url,
@@ -211,6 +225,7 @@ class DashScopeImageModel(BaseImageModel):
         prompt: str,
         aspect_ratio: str,
         clean_reference_urls: list[str],
+        mode: str = "generate",
     ) -> dict:
         # Official qwen-image content order: reference image blocks first, then
         # the single text instruction last (see qwen-image / qwen-image-edit
@@ -221,6 +236,14 @@ class DashScopeImageModel(BaseImageModel):
         for raw_url in dict.fromkeys(clean_reference_urls):
             public_url = await self._public_reference_url(raw_url)
             if public_url is None:
+                if mode == "edit":
+                    # An edit was authorized: silently dropping its input
+                    # would bill a text-to-image render of something else.
+                    raise ModelError(
+                        "Image edit reference cannot be read or is not a "
+                        f"decodable image: {raw_url[:120]}",
+                        model_name=self.model_name,
+                    )
                 # A stale or corrupt project reference must not fail the
                 # whole generation. Continue with the remaining references,
                 # or as text-to-image when none are usable.
@@ -291,10 +314,19 @@ class DashScopeImageModel(BaseImageModel):
         ``X-DashScope-Async: enable`` to ``image2image/image-synthesis``,
         then poll ``/tasks/{task_id}`` until SUCCEEDED and download
         ``output.image_url`` (24h TTL).
+
+        The task is billed on acceptance, so its id is reported to the
+        execution layer through :func:`note_provider_task` the moment it is
+        known (durable, survives this process) and transient poll failures
+        are retried instead of abandoning a paid task.
         """
 
         translate_model = model_config.get_image_translate_model_name()
-        public_url = await self._public_reference_url(image_url)
+        # The temporary upload must be bound to the model that resolves it.
+        public_url = await self._public_reference_url(
+            image_url,
+            model_name=translate_model,
+        )
         if public_url is None:
             raise ModelError(
                 f"Image translate input is not a readable image: {image_url[:120]}",
@@ -340,21 +372,62 @@ class DashScopeImageModel(BaseImageModel):
                     f"Image translate returned no task_id: {submitted}",
                     model_name=translate_model,
                 )
+            # Record the billed task before the first poll: an interruption
+            # after this point leaves a durable, retrievable reference
+            # instead of a silently lost paid result.
+            note_provider_task(
+                provider_task_id=task_id,
+                model=translate_model,
+                kind="image_translate",
+            )
             deadline = asyncio.get_running_loop().time() + max(
                 self.timeout,
                 30,
             )
+            poll_failures = 0
             while True:
-                poll = await client.get(
-                    f"{self.api_root}/tasks/{task_id}",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                )
-                if poll.status_code >= 400:
-                    raise ModelError(
-                        f"Image translate poll failed with status "
-                        f"{poll.status_code}: {format_http_error_detail(poll)[:400]}",
-                        model_name=translate_model,
+                transient = ""
+                try:
+                    poll = await client.get(
+                        f"{self.api_root}/tasks/{task_id}",
+                        headers={"Authorization": f"Bearer {self.api_key}"},
                     )
+                except httpx.TransportError as exc:
+                    transient = f"{type(exc).__name__}: {exc}"
+                else:
+                    if poll.status_code in _TRANSLATE_RETRY_STATUS:
+                        transient = (
+                            f"HTTP {poll.status_code} "
+                            f"{format_http_error_detail(poll)[:200]}"
+                        )
+                    elif poll.status_code >= 400:
+                        raise ModelError(
+                            f"Image translate poll failed with status "
+                            f"{poll.status_code} (task_id={task_id}): "
+                            f"{format_http_error_detail(poll)[:400]}",
+                            model_name=translate_model,
+                        )
+                if transient:
+                    # Polling is free and the task is already paid for, so a
+                    # rate limit or a 5xx must never end the wait.
+                    poll_failures += 1
+                    logger.warning(
+                        "Image translate poll failed (%d), retrying | "
+                        "task_id=%s: %s",
+                        poll_failures,
+                        task_id,
+                        transient,
+                    )
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise ModelError(
+                            f"Image translate polling kept failing until the "
+                            f"{self.timeout}s budget expired (task_id="
+                            f"{task_id}); the task is billed and its result "
+                            "stays retrievable for 24h",
+                            model_name=translate_model,
+                        )
+                    await asyncio.sleep(_TRANSLATE_POLL_INTERVAL_SECONDS)
+                    continue
                 payload = poll.json()
                 status_output = (
                     payload.get("output")
@@ -389,7 +462,8 @@ class DashScopeImageModel(BaseImageModel):
                 if asyncio.get_running_loop().time() >= deadline:
                     raise ModelError(
                         f"Image translate timed out after {self.timeout}s "
-                        f"(task_id={task_id})",
+                        f"(task_id={task_id}); the task is billed and its "
+                        "result stays retrievable for 24h",
                         model_name=translate_model,
                     )
                 await asyncio.sleep(_TRANSLATE_POLL_INTERVAL_SECONDS)

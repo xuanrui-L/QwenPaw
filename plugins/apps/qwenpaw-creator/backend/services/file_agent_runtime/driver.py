@@ -2951,7 +2951,14 @@ class FileCreatorAgentRuntime:
                 project_id,
                 authorization_id,
             )
-            active_provider, active_model = _execution_provider_model(spec)
+            active_provider, active_model = _execution_provider_model(
+                spec,
+                (
+                    arguments.get("arguments")
+                    if isinstance(arguments.get("arguments"), Mapping)
+                    else {}
+                ),
+            )
             if (
                 active_provider != authorization.requested_provider
                 or active_model != authorization.requested_model
@@ -3310,6 +3317,54 @@ class FileCreatorAgentRuntime:
         )
         return authorization
 
+    async def _billing_arguments(
+        self,
+        spec: SpecialistToolSpec,
+        *,
+        project_id: str,
+        tool_arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Tool arguments adjusted so the estimate matches what is billed.
+
+        ``video_edit`` ignores the tool's ``durationSeconds``: the provider
+        bills the input video's own length (truncated to its documented
+        keep-window), so the estimate reads that duration from the exact
+        version instead of the requested one.
+        """
+
+        arguments = dict(tool_arguments)
+        if spec.provider_kind != "video":
+            return arguments
+        if str(arguments.get("mode") or "").strip().casefold() != "video_edit":
+            return arguments
+        video_ref = str(arguments.get("videoRef") or "").strip()
+        if not video_ref:
+            return arguments
+        from models.video_capabilities import (
+            HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
+        )
+        from services.media_files.r2v_execution import (
+            media_version_duration_seconds,
+        )
+
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            duration = media_version_duration_seconds(
+                snapshot.project,
+                video_ref,
+            )
+        except Exception:  # noqa: BLE001 - estimation must never block
+            duration = None
+        if duration:
+            arguments["durationSeconds"] = min(
+                HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
+                max(1, round(duration)),
+            )
+        return arguments
+
     async def _await_execution_authorization(
         self,
         *,
@@ -3339,13 +3394,17 @@ class FileCreatorAgentRuntime:
             ).hex
         )
         target_ref = str(arguments.get("targetRef") or "project:unknown")
-        provider, model = _execution_provider_model(spec)
         tool_arguments = dict(arguments.get("arguments") or {})
+        provider, model = _execution_provider_model(spec, tool_arguments)
         estimate = estimate_execution_cost(
             provider_kind=spec.provider_kind,
             provider=provider,
             model=model,
-            arguments=tool_arguments,
+            arguments=await self._billing_arguments(
+                spec,
+                project_id=project_id,
+                tool_arguments=tool_arguments,
+            ),
         )
         record = ExecutionAuthorizationRecord(
             authorization_id=authorization_id,
@@ -4605,15 +4664,37 @@ def _specialist_tool_invocation_id(
     )
 
 
-def _execution_provider_model(spec: SpecialistToolSpec) -> tuple[str, str]:
-    """Snapshot model identity for an approval without loading a provider."""
+def _execution_provider_model(
+    spec: SpecialistToolSpec,
+    tool_arguments: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Snapshot the model an approval actually authorizes.
 
+    The identity must be the *effective* model, not just the configured
+    one: image translate runs on ``translate_model`` and the video modes run
+    on names derived from the configured base, so pricing and the
+    post-approval identity check would otherwise cover a different model
+    than the one submitted.
+    """
+
+    arguments = tool_arguments or {}
+    mode = str(arguments.get("mode") or "").strip().casefold()
     if spec.provider_kind == "image":
         from models.image import get_image_backend
 
+        if mode == "translate":
+            from models.config import get_image_translate_model_name
+
+            return "dashscope", get_image_translate_model_name()
         return get_image_backend().casefold(), get_image_model_name()
     if spec.provider_kind == "video":
-        return get_video_backend(), get_video_model_name()
+        from models.video_capabilities import derive_video_model_name
+
+        backend = get_video_backend()
+        model = get_video_model_name()
+        if mode and mode != "r2v" and backend != "seedance2":
+            model = derive_video_model_name(model, mode)
+        return backend, model
     if spec.provider_kind == "tts":
         from models.config import get_tts_model_name
 

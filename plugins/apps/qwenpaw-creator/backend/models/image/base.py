@@ -308,6 +308,7 @@ class BaseImageModel(ABC):
                             prompt,
                             aspect_ratio,
                             clean_reference_urls,
+                            active_mode,
                         )
                         if resp.status_code == 429:
                             wait = RETRY_BACKOFF_BASE * (attempt + 1)
@@ -388,8 +389,13 @@ class BaseImageModel(ABC):
         prompt: str,
         aspect_ratio: str,
         clean_reference_urls: list[str],
+        mode: str = "generate",
     ) -> httpx.Response:
-        """Build and send the provider-specific generation request."""
+        """Build and send the provider-specific generation request.
+
+        ``mode`` is the validated operation mode, so a provider can enforce
+        edit semantics instead of degrading into text-to-image.
+        """
 
     @abstractmethod
     async def _decode(self, data: dict | list) -> str:

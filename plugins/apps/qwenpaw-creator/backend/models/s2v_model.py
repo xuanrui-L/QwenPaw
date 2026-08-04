@@ -32,6 +32,7 @@ from PIL import Image
 
 from models import config as model_config
 from models.media_transport import upload_local_file_to_dashscope_temp
+from models.provider_tasks import note_provider_task
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
 from utils.paths import media_path_from_url
@@ -44,6 +45,9 @@ S2V_MIN_EDGE_PIXELS = 400
 S2V_MAX_EDGE_PIXELS = 7000
 
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+# A billed submission may have been accepted before an ambiguous server
+# error, so only an outright rejection (rate limit) may be retried.
+_SUBMIT_RETRY_STATUS = frozenset({429})
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = 2.0
 
@@ -99,16 +103,23 @@ def normalize_s2v_resolution(resolution: str) -> str:
     return value
 
 
-async def resolve_s2v_media_url(url: str, *, validate_portrait: bool) -> str:
+async def resolve_s2v_media_url(
+    url: str,
+    *,
+    validate_portrait: bool,
+    model_name: str,
+) -> str:
     """Return a provider-resolvable URL for one s2v input.
 
     Public HTTP(S)/OSS URLs pass through; ``file://`` and ``/generated/``
-    media is uploaded to DashScope model-bound temporary storage (48h TTL)
-    bound to the s2v model so detect and submit reuse the cached upload.
+    media is uploaded to DashScope model-bound temporary storage (48h TTL).
+    ``model_name`` must be the model that will *consume* the URL: a
+    temporary upload only resolves for the model its policy was issued for
+    (see :mod:`models.media_transport`), so the free detect call uploads
+    against the detect model and generation against ``wan2.2-s2v``.
     """
 
     value = url.strip()
-    model_name = model_config.get_s2v_model_name()
     if value.startswith(("http://", "https://", "oss://")):
         return value
     if value.startswith("/generated/"):
@@ -142,7 +153,16 @@ async def _post_json(
     *,
     payload: dict,
     extra_headers: dict | None = None,
+    retry_statuses: frozenset[int] = _RETRY_STATUS,
 ) -> dict:
+    """POST one S2V request, retrying only the given statuses.
+
+    ``retry_statuses`` is deliberately caller-supplied: a free, idempotent
+    detect may retry server errors, while a billed submission must not —
+    the provider can create (and bill) the task before answering 5xx, so a
+    retry would buy the same clip twice under one durable submit claim.
+    """
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {_require_key()}",
@@ -157,7 +177,7 @@ async def _post_json(
         for attempt in range(1, _RETRY_ATTEMPTS + 1):
             response = await client.post(url, headers=headers, json=payload)
             if (
-                response.status_code in _RETRY_STATUS
+                response.status_code in retry_statuses
                 and attempt < _RETRY_ATTEMPTS
             ):
                 wait = _RETRY_BACKOFF_SECONDS * attempt
@@ -183,14 +203,16 @@ async def _post_json(
 async def detect_face(image_url: str) -> FaceDetectResult:
     """Free synchronous portrait suitability check; always run first."""
 
+    detect_model = model_config.get_s2v_detect_model_name()
     resolved_url = await resolve_s2v_media_url(
         image_url,
         validate_portrait=True,
+        model_name=detect_model,
     )
     data = await _post_json(
         _endpoint("services/aigc/image2video/face-detect"),
         payload={
-            "model": model_config.get_s2v_detect_model_name(),
+            "model": detect_model,
             "input": {"image_url": resolved_url},
         },
     )
@@ -228,15 +250,17 @@ async def submit_s2v_task(
             model_name=model_config.get_s2v_model_name(),
         )
     normalized_resolution = normalize_s2v_resolution(resolution)
+    model_name = model_config.get_s2v_model_name()
     resolved_image = await resolve_s2v_media_url(
         image_url,
         validate_portrait=True,
+        model_name=model_name,
     )
     resolved_audio = await resolve_s2v_media_url(
         audio_url,
         validate_portrait=False,
+        model_name=model_name,
     )
-    model_name = model_config.get_s2v_model_name()
     data = await _post_json(
         _endpoint("services/aigc/image2video/video-synthesis/"),
         payload={
@@ -248,6 +272,8 @@ async def submit_s2v_task(
             "parameters": {"resolution": normalized_resolution},
         },
         extra_headers={"X-DashScope-Async": "enable"},
+        # Never retry an ambiguous 5xx: the clip may already be billed.
+        retry_statuses=_SUBMIT_RETRY_STATUS,
     )
     output = data.get("output") if isinstance(data.get("output"), dict) else {}
     task_id = str(output.get("task_id") or data.get("task_id") or "").strip()
@@ -256,6 +282,13 @@ async def submit_s2v_task(
             f"No task_id in S2V response: {data}",
             model_name=model_name,
         )
+    # The task is billed on acceptance; record it before returning so an
+    # interrupted poll leaves a retrievable reference.
+    note_provider_task(
+        provider_task_id=task_id,
+        model=model_name,
+        kind="s2v_generation",
+    )
     logger.info("S2V task submitted | task_id=%s", task_id)
     return task_id
 

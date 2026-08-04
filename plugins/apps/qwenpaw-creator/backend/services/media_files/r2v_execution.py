@@ -563,6 +563,54 @@ def _resolve_single_media_version(
     )
 
 
+def media_version_duration_seconds(
+    project: Project,
+    version_id: str,
+) -> float | None:
+    """Recorded duration of one exact source/artifact version, when known."""
+
+    version = project.assets.source_versions_by_id.get(
+        version_id,
+    ) or project.assets.artifact_versions_by_id.get(version_id)
+    return None if version is None else version.duration_seconds
+
+
+def _assert_video_edit_input_duration(
+    project: Project,
+    version_id: str,
+) -> None:
+    """Fail before a billed submission when the input length is unusable.
+
+    video_edit takes its duration from the input video (3-60s, with the
+    provider keeping only the first 15s), and the tool's durationSeconds is
+    not sent for this mode, so the input itself is the only thing to check.
+    """
+
+    duration = media_version_duration_seconds(project, version_id)
+    if duration is None:
+        # Older versions may carry no probe result; the provider still
+        # enforces its own contract in that case.
+        return
+    from models.video_capabilities import (
+        HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
+        HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS,
+        HAPPYHORSE_VIDEO_EDIT_MIN_INPUT_SECONDS,
+    )
+
+    if (
+        duration < HAPPYHORSE_VIDEO_EDIT_MIN_INPUT_SECONDS
+        or duration > HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS
+    ):
+        raise ValidationError(
+            f"video_edit 输入视频时长必须在 "
+            f"{HAPPYHORSE_VIDEO_EDIT_MIN_INPUT_SECONDS}–"
+            f"{HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS} 秒之间，"
+            f"当前 videoRef 为 {duration:.2f} 秒；超过 "
+            f"{HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS} 秒时上游只取前 "
+            f"{HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS} 秒",
+        )
+
+
 def _validated_request_mode(arguments: Mapping[str, Any]) -> str:
     """Normalize the requested mode against the runtime capability matrix."""
 
@@ -708,6 +756,7 @@ def _resolve_request(
             media_prefix="video/",
             label="videoRef",
         )
+        _assert_video_edit_input_duration(project, video_ref)
         version_ids = (video_ref,)
         checksums = [checksum]
         provenance = [ref]
@@ -4094,6 +4143,32 @@ class FileR2VExecutionService:
             await asyncio.gather(*workers, return_exceptions=True)
 
 
+def _accepted_provider_tasks_note(task_id: str, project_id: str) -> str:
+    """Name any billed provider task an interrupted Task already paid for.
+
+    Asynchronous provider submissions (e.g. qwen-mt-image translation) are
+    billed on acceptance and their result stays retrievable for 24h, so a
+    terminalized Task must say which ids to fetch instead of losing them.
+    """
+
+    from models.provider_tasks import read_provider_tasks
+
+    try:
+        entries = read_provider_tasks(task_id, project_id)
+    except Exception:  # noqa: BLE001 - bookkeeping must not break recovery
+        return ""
+    if not entries:
+        return ""
+    described = ", ".join(
+        f"{entry.get('model', '?')}:{entry.get('providerTaskId', '?')}"
+        for entry in entries
+    )
+    return (
+        "; already accepted (billed) provider tasks whose results stay "
+        f"retrievable for 24h: {described}"
+    )
+
+
 async def recover_interrupted_image_tasks(
     services: CreatorFileServices,
 ) -> int:
@@ -4145,6 +4220,7 @@ async def recover_interrupted_image_tasks(
                     message=(
                         "image provider call was interrupted; refusing automatic "
                         "non-idempotent resubmission"
+                        + _accepted_provider_tasks_note(task.task_id, project_id)
                     ),
                 )
             else:
@@ -4345,6 +4421,7 @@ __all__ = [
     "execute_file_r2v_command",
     "execute_file_s2v_command",
     "file_r2v_execution_service",
+    "media_version_duration_seconds",
     "preflight_s2v_face_detect",
     "recover_interrupted_image_tasks",
     "shutdown_file_media_execution_services",
