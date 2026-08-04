@@ -95,6 +95,7 @@ class DocumentTextCoverage(StrictModel):
     )
     extraction_fraction: float | None = Field(
         alias="extractionFraction",
+        strict=True,
         gt=0,
         le=1,
     )
@@ -106,9 +107,21 @@ class DocumentTextCoverage(StrictModel):
             raise ValueError(
                 "indexedChars cannot exceed extractedChars",
             )
-        if self.extraction_complete and self.extraction_fraction != 1.0:
+        if self.extraction_complete:
+            if self.extraction_fraction != 1.0:
+                raise ValueError(
+                    "complete extraction must declare "
+                    "extractionFraction=1.0",
+                )
+        elif (
+            self.extraction_fraction is not None
+            and self.extraction_fraction >= 1.0
+        ):
+            # An incomplete extraction claiming full coverage would let a
+            # truncated document persist ocr ratio=1.0.
             raise ValueError(
-                "complete extraction must declare extractionFraction=1.0",
+                "incomplete extraction requires extractionFraction to be "
+                "None or below 1.0",
             )
         return self
 

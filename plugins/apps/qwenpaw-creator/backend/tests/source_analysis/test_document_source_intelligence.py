@@ -875,6 +875,35 @@ def test_unknown_ratio_is_confined_to_document_ocr() -> None:
     )
 
 
+def test_text_coverage_model_is_strict_and_consistent() -> None:
+    # extractionFraction must be a real float (no string coercion) and an
+    # incomplete extraction must never claim full coverage.
+    from schemas.assets import DocumentTextCoverage
+
+    base = {
+        "indexedChars": 10,
+        "extractedChars": 10,
+        "extractionComplete": True,
+        "extractionFraction": 1.0,
+        "sha256": "a" * 64,
+    }
+    DocumentTextCoverage.model_validate(base)
+    with pytest.raises(ValueError):
+        DocumentTextCoverage.model_validate(
+            {**base, "extractionFraction": "1"},
+        )
+    with pytest.raises(ValueError):
+        DocumentTextCoverage.model_validate(
+            {**base, "extractionComplete": False},
+        )
+    DocumentTextCoverage.model_validate(
+        {**base, "extractionComplete": False, "extractionFraction": 0.5},
+    )
+    DocumentTextCoverage.model_validate(
+        {**base, "extractionComplete": False, "extractionFraction": None},
+    )
+
+
 def test_index_rejects_unknown_ratio_outside_document_ocr(tmp_path) -> None:
     # Index-level gate: tampering the canonical index.txt so a non-ocr
     # modality declares an unknown available ratio must fail to parse.
