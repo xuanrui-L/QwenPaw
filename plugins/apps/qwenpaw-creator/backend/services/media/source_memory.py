@@ -91,9 +91,18 @@ DETECT_FPS = 0.25
 FRAME_WORKERS = 10
 MIN_SCENE_SEC = 30.0
 MAX_SCENE_SEC = 300.0
-# P2 clip encoding for the VLM segment observation.
-CLIP_MAX_DIM = 720
-CLIP_CRF = 28
+# P2 clip encoding for the VLM segment observation. Non-DashScope
+# OpenAI-compatible gateways receive the clip as an inline base64 data
+# URL, so each macro clip must fit a conservative size budget; encoding
+# steps down this (max_dim, crf, fps) ladder until the segment fits.
+CLIP_ENCODE_LADDER = (
+    (720, 28, 8),
+    (512, 30, 8),
+    (384, 32, 6),
+    (320, 35, 4),
+    (256, 38, 3),
+)
+CLIP_SIZE_BUDGET_BYTES = 6 * 1024 * 1024
 SUBGRAPH_MAX_TOKENS = 16384
 AGGREGATION_MAX_TOKENS = 8192
 SUBGRAPH_RETRIES = 2
@@ -332,12 +341,15 @@ def _clip_segment_sync(
     out_path: Path,
     start_sec: float,
     end_sec: float,
+    max_dim: int,
+    crf: int,
+    fps: int,
 ) -> Path:
     """Encode one macro segment for VLM observation."""
     ffmpeg = _require_ffmpeg()
     duration = max(0.5, end_sec - start_sec)
     scale = (
-        f"scale='min({CLIP_MAX_DIM},iw)':'min({CLIP_MAX_DIM},ih)':"
+        f"scale='min({max_dim},iw)':'min({max_dim},ih)':"
         "force_original_aspect_ratio=decrease,"
         "pad=ceil(iw/2)*2:ceil(ih/2)*2"
     )
@@ -354,12 +366,14 @@ def _clip_segment_sync(
         str(local_path),
         "-vf",
         scale,
+        "-r",
+        str(fps),
         "-c:v",
         "libx264",
         "-preset",
         "ultrafast",
         "-crf",
-        str(CLIP_CRF),
+        str(crf),
         "-an",
         "-threads",
         "4",
@@ -379,6 +393,39 @@ def _clip_segment_sync(
             f"{proc.stderr.decode('utf-8', 'replace')[-300:]}",
         )
     return out_path
+
+
+def _clip_segment_within_budget_sync(
+    local_path: Path,
+    out_path: Path,
+    start_sec: float,
+    end_sec: float,
+) -> Path:
+    """Encode a segment, stepping down the ladder until it fits the
+    inline transport budget of OpenAI-compatible gateways."""
+    last_size = 0
+    for max_dim, crf, fps in CLIP_ENCODE_LADDER:
+        _clip_segment_sync(
+            local_path,
+            out_path,
+            start_sec,
+            end_sec,
+            max_dim,
+            crf,
+            fps,
+        )
+        last_size = out_path.stat().st_size
+        if last_size <= CLIP_SIZE_BUDGET_BYTES:
+            return out_path
+        logger.info(
+            "segment clip %s too large at %dpx (%d bytes), stepping down",
+            out_path.name,
+            max_dim,
+            last_size,
+        )
+    raise RuntimeError(
+        f"segment clip stays above transport budget: {last_size} bytes",
+    )
 
 
 def _segment_fps(duration_sec: float) -> float:
@@ -711,10 +758,10 @@ class SourceMemoryService:
             pass
 
     def _fail_sync(self, job: SourceMemoryBuildJob, error: Exception) -> None:
-        attempt_id = _stable_id("memattempt", job.project_id, job.index_id)
         try:
             task = self.executions.get_task(job.project_id, job.task_id)
             if task.status is TaskStatus.RUNNING:
+                attempt_id = self._attempt_id(job, task.last_attempt_seq)
                 self.executions.append_attempt(
                     job.project_id,
                     job.task_id,
@@ -742,10 +789,16 @@ class SourceMemoryService:
         except (ExecutionStateConflict, RecordNotFoundError):
             pass
 
+    @staticmethod
+    def _attempt_id(job: SourceMemoryBuildJob, attempt_seq: int) -> str:
+        """Attempt ids must be fresh per retry round; the open RUNNING
+        attempt keeps the id derived from the seq it was admitted at."""
+        base = _stable_id("memattempt", job.project_id, job.index_id)
+        return f"{base}-r{attempt_seq}"
+
     # -- build pipeline ------------------------------------------------------
 
     async def _execute(self, job: SourceMemoryBuildJob) -> None:
-        attempt_id = _stable_id("memattempt", job.project_id, job.index_id)
         task = await asyncio.to_thread(
             self.executions.get_task,
             job.project_id,
@@ -753,6 +806,7 @@ class SourceMemoryService:
         )
         if task.status is not TaskStatus.QUEUED:
             return
+        attempt_id = self._attempt_id(job, task.last_attempt_seq + 1)
         await asyncio.to_thread(
             self.executions.append_attempt,
             job.project_id,
@@ -792,18 +846,16 @@ class SourceMemoryService:
             len(macros),
         )
 
-        # ASR full-source transcription through the Creator ASR module.
-        asr_task: asyncio.Task[Any] | None = None
-        if model_config.get_asr_api_key():
-            asr_task = asyncio.create_task(
-                asr_model.transcribe(local_path.as_uri()),
-            )
-
-        # Phase 2 starts once ASR text is mergeable into segment context.
+        # ASR: reuse the transcript the published index already carries
+        # (single billing, consistent text); transcribe only when the
+        # index has no ASR modality at all.
         transcript: list[dict[str, float | str]] = []
-        if asr_task is not None:
+        index_transcript = await self._index_transcript(job)
+        if index_transcript:
+            transcript = index_transcript
+        elif model_config.get_asr_api_key():
             try:
-                result = await asr_task
+                result = await asr_model.transcribe(local_path.as_uri())
                 transcript = [
                     {
                         "start_sec": segment.start_ms / 1000.0,
@@ -849,6 +901,13 @@ class SourceMemoryService:
             extracted,
             len(macros),
         )
+        # Quality gate: a memory whose subgraphs all failed would only
+        # serve fallback aggregations; fail the build instead of
+        # persisting an unusable graph.
+        if macros and extracted == 0:
+            raise RuntimeError(
+                "subgraph extraction failed for every macro segment",
+            )
 
         # Phase 3: text-only aggregation via the configured VLM backend.
         async def call_llm(prompt: str) -> str:
@@ -908,6 +967,35 @@ class SourceMemoryService:
             len(nodes),
         )
 
+    async def _index_transcript(
+        self,
+        job: SourceMemoryBuildJob,
+    ) -> list[dict[str, float | str]]:
+        """Transcript records from the published index, in seconds."""
+        from services.source_analysis import source_analysis_service
+
+        try:
+            index = await asyncio.to_thread(
+                source_analysis_service(self.services).load,
+                job.project_id,
+                job.asset_id,
+                job.index_id,
+            )
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "source memory could not reload index transcript: %s",
+                error,
+            )
+            return []
+        return [
+            {
+                "start_sec": segment.start_ms / 1000.0,
+                "end_sec": segment.end_ms / 1000.0,
+                "text": segment.text,
+            }
+            for segment in index.transcript
+        ]
+
     async def _extract_subgraph(
         self,
         macro: MacroEvent,
@@ -920,7 +1008,7 @@ class SourceMemoryService:
             clip_path = work_root / f"{macro.macro_id}.mp4"
             try:
                 await asyncio.to_thread(
-                    _clip_segment_sync,
+                    _clip_segment_within_budget_sync,
                     local_path,
                     clip_path,
                     start,
@@ -1080,7 +1168,7 @@ class SourceMemoryService:
     # -- recovery ------------------------------------------------------------
 
     def recover_interrupted(self) -> None:
-        """Resume authorization waits; fail RUNNING builds cut by restart."""
+        """Re-queue interrupted builds; approved authorizations resume."""
         for project_id in self._list_project_ids():
             try:
                 tasks = self.executions.list_tasks(project_id)
@@ -1090,41 +1178,51 @@ class SourceMemoryService:
                 if task.kind is not TaskKind.SOURCE_MEMORY_BUILD:
                     continue
                 if task.status is TaskStatus.RUNNING:
-                    self._fail_running_recovery(task)
-                elif task.status is TaskStatus.QUEUED:
+                    task = self._requeue_interrupted(task)
+                if task.status is TaskStatus.QUEUED:
                     job = self._job_from_task(task)
                     if job is not None:
                         self._spawn(job)
 
     def _list_project_ids(self) -> list[str]:
-        projects_root = Path(self.services.root) / "projects"
-        if not projects_root.is_dir():
-            return []
-        return sorted(
-            child.name
-            for child in projects_root.iterdir()
-            if child.is_dir() and not child.is_symlink()
-        )
-
-    def _fail_running_recovery(self, task: TaskRecord) -> None:
         try:
+            return [
+                summary.project_id for summary in self.services.projects.list()
+            ]
+        except Exception:  # pylint: disable=broad-except
+            return []
+
+    def _requeue_interrupted(self, task: TaskRecord) -> TaskRecord:
+        """RUNNING after a restart: close the open attempt, then re-queue
+        (the FAILED→QUEUED transition is the sanctioned retry path and the
+        existing APPROVED authorization still covers the spend)."""
+        try:
+            attempts = self.executions.list_attempts(
+                task.project_id,
+                task.task_id,
+            )
+            if not attempts:
+                return task
+            open_attempt = attempts[-1]
             self.executions.append_attempt(
                 task.project_id,
                 task.task_id,
-                event_id=f"{task.task_id}-recovery-failed",
-                attempt_id=_stable_id(
-                    "memattempt",
-                    task.project_id,
-                    str(task.metadata.get("analysisVersionId") or ""),
-                ),
+                event_id=f"{open_attempt.attempt_id}-interrupted",
+                attempt_id=open_attempt.attempt_id,
                 status=TaskAttemptStatus.FAILED,
                 error={
                     "code": "MEMORY_BUILD_INTERRUPTED",
                     "message": "runtime restarted during the memory build",
                 },
             )
+            return self.executions.transition_task(
+                task.project_id,
+                task.task_id,
+                expected_status=TaskStatus.FAILED,
+                status=TaskStatus.QUEUED,
+            )
         except (ExecutionStateConflict, RecordNotFoundError):
-            pass
+            return task
 
     @staticmethod
     def _job_from_task(task: TaskRecord) -> SourceMemoryBuildJob | None:
