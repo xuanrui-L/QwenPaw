@@ -12,11 +12,18 @@ import {
   resolveElementVisualMeta,
 } from "@/selectors/timelineElementSelectors";
 import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
+import { formatSeconds } from "@/lib/timecode";
 
 interface ElementListProps {
   timeline: TimelineDocument;
   playheadTick: number;
   activeElementIds: string[];
+  /**
+   * True while an explicit selection (block/lane/junction click or range
+   * drag) pins the list; the header then describes a selection instead of
+   * pretending everything is active at the playhead.
+   */
+  selectionPinned: boolean;
   selectedElementId: string | null;
   tasks: TaskView[];
   onSelect: (elementId: string) => void;
@@ -70,13 +77,14 @@ function statusOf(
 }
 
 function sec(tick: number, ticksPerSecond: number): string {
-  return (tick / ticksPerSecond).toFixed(1).replace(/\.0$/, "");
+  return formatSeconds(tick, ticksPerSecond);
 }
 
 export default function ElementList({
   timeline,
   playheadTick,
   activeElementIds,
+  selectionPinned,
   selectedElementId,
   tasks,
   onSelect,
@@ -108,8 +116,11 @@ export default function ElementList({
       <header className="flex shrink-0 items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
         <div className="flex min-w-0 items-baseline gap-1.5">
           <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-            时间点:{sec(playheadTick, timeline.ticks_per_second)}s,{" "}
-            {activeElementIds.length}项内容
+            {selectionPinned
+              ? `已选择 ${activeElementIds.length} 项内容`
+              : `时间点:${sec(playheadTick, timeline.ticks_per_second)}s, ${
+                  activeElementIds.length
+                }项内容`}
           </h3>
           <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
             按开始时间排序
@@ -197,7 +208,7 @@ export default function ElementList({
                         {active && (
                           <span
                             className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-accent)]"
-                            title="当前时刻活跃"
+                            title={selectionPinned ? "已选择" : "当前时刻活跃"}
                           />
                         )}
                       </div>

@@ -6,6 +6,7 @@ import {
   newClientId,
   patchProject,
 } from "@/api/creator";
+import { useCreatorEditBufferStore } from "@/store/creatorEditBufferStore";
 import type {
   ProjectDocument,
   ProjectPatchResponse,
@@ -363,6 +364,14 @@ export const useProjectSnapshotStore = create<ProjectSnapshotState>(
           baseGeneration: state.generation,
           baseEtag: state.etag,
           operations,
+        });
+        // Every successful frontend patch is a manual user edit; buffer it so
+        // the next AgentDock message can carry the change history as context.
+        useCreatorEditBufferStore.getState().recordPatch({
+          projectId,
+          projectBefore: state.project,
+          operations: edits,
+          generation: response.generation,
         });
         set((current) => {
           if (current.projectId !== projectId) return {};

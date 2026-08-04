@@ -13,6 +13,8 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { getArtifactVersionMediaUrl, renderTimeline } from "@/api/creator";
 import {
+  elementsAtTick,
+  overlayContentKind,
   resolveTimelineRender,
   selectPrimaryTimeline,
   timelineEndTick,
@@ -87,7 +89,12 @@ export default function PlanPage() {
   const composeAttemptedGeneration = useRef<number | null>(null);
   const handledComposeTask = useRef<string | null>(null);
   const generation = useProjectSnapshotStore((state) => state.generation);
-  const [activeElementIds, setActiveElementIds] = useState<string[]>([]);
+  // Explicit selection (range drag, block/lane clicks) pins a list; when
+  // null, "content at the playhead" derives from timeline + playheadTick so
+  // keyboard seeks, playback and span edits can never show stale elements.
+  const [explicitActiveIds, setExplicitActiveIds] = useState<string[] | null>(
+    null,
+  );
   const durationTick = timelineEndTick(timeline);
   const displayDurationTick = timeline
     ? durationTick ||
@@ -96,6 +103,27 @@ export default function PlanPage() {
           timeline.ticks_per_second,
       )
     : 1;
+  const clampedPlayheadTick = Math.min(playheadTick, displayDurationTick);
+  // Any playhead motion (transport keys, scrub, playback, seeks) returns the
+  // panel to follow mode so it can never describe a stale selection.
+  const movePlayhead = useCallback((tick: number) => {
+    setPlayheadTick(tick);
+    setExplicitActiveIds(null);
+  }, []);
+  useEffect(() => {
+    // Never carry one project's selection into another.
+    setExplicitActiveIds(null);
+  }, [id]);
+  const activeElementIds = useMemo(
+    () =>
+      explicitActiveIds ??
+      (timeline
+        ? elementsAtTick(timeline, clampedPlayheadTick).map(
+            (element) => element.element_id,
+          )
+        : []),
+    [explicitActiveIds, timeline, clampedPlayheadTick],
+  );
   const reviewMode = query.get("review") === "1";
   const reviewField = query.get("field");
   const reviewPulse = query.get("reviewPulse");
@@ -140,6 +168,7 @@ export default function PlanPage() {
     )
       return;
     setPlayheadTick(selectedElement.span.start_tick);
+    setExplicitActiveIds(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedElement]);
 
@@ -176,6 +205,9 @@ export default function PlanPage() {
               ? currentTick
               : startTick;
           });
+          // Follow mode by default; a track block click re-pins its own
+          // explicit selection right after this handler in the same batch.
+          setExplicitActiveIds(null);
         }
         navigate(
           selectedElementId === elementId
@@ -199,7 +231,7 @@ export default function PlanPage() {
         (element.creation.type === "r2v" ||
           element.creation.type === "edit" ||
           (element.creation.type === "overlay" &&
-            ["motion", "media"].includes(element.creation.overlay_kind))),
+            overlayContentKind(element.creation) !== "copy")),
     );
     return {
       total: items.length,
@@ -491,7 +523,7 @@ export default function PlanPage() {
     if (!draft || !elementDraft.operations.length) return;
     if (
       draft.creation.type === "overlay" &&
-      ["pet_os", "interview_summary"].includes(draft.creation.overlay_kind) &&
+      overlayContentKind(draft.creation) === "copy" &&
       !draft.creation.text.trim()
     ) {
       message.error("文案类 Overlay 的文本不能为空");
@@ -573,6 +605,18 @@ export default function PlanPage() {
               重试合成
             </button>
           )}
+          <button
+            type="button"
+            title="点击合成成片"
+            disabled={isComposing}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)] transition hover:border-[var(--color-accent)] disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={() => void composeNow()}
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${isComposing ? "animate-spin" : ""}`}
+            />
+            {isComposing ? "合成中..." : "合成成片"}
+          </button>
           {/* Download-final-cut and export-project share one split entry. */}
           <Dropdown
             trigger={["click"]}
@@ -661,17 +705,16 @@ export default function PlanPage() {
         project={project}
         timeline={timeline}
         durationTick={displayDurationTick}
-        playheadTick={Math.min(playheadTick, displayDurationTick)}
+        playheadTick={clampedPlayheadTick}
         selectedElementId={selectedElementId}
-        activeElementIds={activeElementIds}
         previewOpen={previewOpen}
         tasks={tasks}
         onPreviewOpenChange={setPreviewOpen}
         onPlayheadChange={(tick) =>
-          setPlayheadTick(Math.max(0, Math.min(displayDurationTick, tick)))
+          movePlayhead(Math.max(0, Math.min(displayDurationTick, tick)))
         }
         onSelectElement={selectElement}
-        onActiveElementIdsChange={setActiveElementIds}
+        onActiveElementIdsChange={setExplicitActiveIds}
       />
 
       <main
@@ -685,6 +728,7 @@ export default function PlanPage() {
           timeline={timeline}
           playheadTick={playheadTick}
           activeElementIds={activeElementIds}
+          selectionPinned={explicitActiveIds !== null}
           selectedElementId={selectedElementId}
           tasks={tasks}
           onSelect={selectElement}

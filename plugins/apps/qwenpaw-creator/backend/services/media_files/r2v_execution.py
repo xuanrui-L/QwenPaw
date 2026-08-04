@@ -471,10 +471,7 @@ def _resolve_request(
             "R2V reference 只能来自 project.json 的 exact version 列表",
         )
     duration_seconds = _duration(
-        arguments.get(
-            "durationSeconds",
-            element.span.duration_tick / timeline.ticks_per_second,
-        ),
+        element.span.duration_tick / timeline.ticks_per_second,
     )
     ratio = str(
         arguments.get("ratio") or project.settings.aspect_ratio,
@@ -1008,6 +1005,30 @@ class FileR2VExecutionService:
                 self.start_task(project_id, recovered.task_id)
             return self._dispatch_result(recovered, stable, replayed=True)
 
+        # Two independent tool calls may legally submit the same command:
+        # an interrupted director gets re-delegated after the next review
+        # approval while its first submission is still generating. Their
+        # stable ids differ (derived from the tool-call id), so the replay
+        # checks above cannot see the first submission — attach to any
+        # live task carrying the same command hash instead of paying the
+        # provider for an identical video twice.
+        in_flight = await asyncio.to_thread(
+            self._find_in_flight_duplicate,
+            project_id,
+            command_hash,
+        )
+        if in_flight is not None:
+            logger.info(
+                "r2v dispatch attached to in-flight duplicate: "
+                "project=%s task=%s target=%s",
+                project_id,
+                in_flight.task_id,
+                _log_safe(target_ref),
+            )
+            if start and in_flight.status not in _TERMINAL_TASKS:
+                self.start_task(project_id, in_flight.task_id)
+            return self._dispatch_result(in_flight, stable, replayed=True)
+
         base = await asyncio.to_thread(self.services.projects.read, project_id)
         conflicts = [
             value
@@ -1217,6 +1238,28 @@ class FileR2VExecutionService:
             or run.metadata.get("commandRequestHash") != command_hash
         ):
             raise ConflictError("Idempotency-Key 已用于不同的 R2V Run")
+
+    def _find_in_flight_duplicate(
+        self,
+        project_id: str,
+        command_hash: str,
+    ) -> TaskRecord | None:
+        """Return a live R2V Task already generating this exact command.
+
+        The command hash covers command type, target and arguments but not
+        the caller's idempotency key, so it identifies "the same video"
+        across independent submissions.
+        """
+
+        for task in self.executions.list_tasks(project_id):
+            if (
+                task.kind is TaskKind.R2V_GENERATION
+                and task.status not in _TERMINAL_TASKS
+                and str(task.metadata.get("commandRequestHash") or "")
+                == command_hash
+            ):
+                return task
+        return None
 
     @staticmethod
     def _dispatch_result(

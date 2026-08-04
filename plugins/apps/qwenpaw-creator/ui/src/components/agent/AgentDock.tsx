@@ -32,6 +32,7 @@ import { useParams } from "@/routing/navigation";
 import logoGlyphOrange from "@/assets/design/logo-glyph-orange.png";
 import logoGlyphWhite from "@/assets/design/logo-mark-plain.png";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
+import { useCreatorEditBufferStore } from "@/store/creatorEditBufferStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import {
   useCreatorSessionStore,
@@ -862,6 +863,11 @@ function SubagentMessageBubble({
   );
 }
 
+function formatToolArgumentBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+}
+
 function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
   const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
@@ -880,13 +886,9 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
       : item.status;
   const active = resolvedStatus === "started";
   const { expanded, setExpanded } = useLiveDisclosure(active);
-  const rawArguments = Object.entries(item.argumentDeltas ?? {})
-    .sort(([left], [right]) => Number(left) - Number(right))
-    .map(([, value]) => value)
-    .join("");
   const renderedArguments = item.arguments
     ? JSON.stringify(item.arguments, null, 2)
-    : rawArguments;
+    : "";
   const hasArgs = Boolean(renderedArguments);
   const hasResult = item.result !== undefined && item.result !== null;
   const hasOutputEvents = item.outputEvents.length > 0;
@@ -925,6 +927,11 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
               ? "完成"
               : "失败"}
           </span>
+          {active && item.receivedBytes !== undefined && (
+            <span className="text-[9px] text-[var(--color-text-tertiary)]">
+              · 参数 {formatToolArgumentBytes(item.receivedBytes)}
+            </span>
+          )}
         </span>
         {hasDetails && allowExpand && (
           <button
@@ -1223,6 +1230,11 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           {estimatedDuration && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">
               {estimatedDuration}
+            </span>
+          )}
+          {active && data.receivedBytes !== undefined && (
+            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+              · 参数 {formatToolArgumentBytes(data.receivedBytes)}
             </span>
           )}
         </span>
@@ -1663,6 +1675,9 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
   );
   const interactionPanel = useCreatorInteractionStore((state) => state.panel);
   const extraRefs = useCreatorInteractionStore((state) => state.extraRefs);
+  const pendingEditCount = useCreatorEditBufferStore((state) =>
+    state.projectId === projectId ? state.entries.length : 0,
+  );
 
   const project = useProjectSnapshotStore((state) =>
     state.projectId === projectId ? state.project : null,
@@ -1728,11 +1743,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                   name: item.toolCall.name,
                   ...(item.toolCall.arguments
                     ? { arguments: item.toolCall.arguments }
-                    : {
-                        argumentsDelta: orderedDeltas(
-                          item.toolCall.argumentDeltas,
-                        ),
-                      }),
+                    : {}),
                 },
                 actionId: item.toolCall.id,
               }
@@ -2127,6 +2138,11 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
       ]),
     ];
     const submittedExtraRefs = extraRefs;
+    // Manual project.json edits accumulated since the previous message ride
+    // along as context so the agent can re-evaluate dependent plan pieces.
+    const userEdits = useCreatorEditBufferStore
+      .getState()
+      .consumeContext(projectId);
     try {
       const pending = sendMessage({
         message: text,
@@ -2147,6 +2163,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
             : undefined,
           selections: content.selections,
           extraRefs: allRefs,
+          userEdits: userEdits ?? undefined,
         },
       });
       inputRef.current?.clear();
@@ -2156,6 +2173,11 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
       setMentionQuery(null);
       useCreatorInteractionStore.getState().setExtraRefs([]);
       await pending;
+      if (userEdits) {
+        useCreatorEditBufferStore
+          .getState()
+          .markFlushed(projectId, userEdits.lastEntryAt);
+      }
     } catch (error) {
       if (!inputRef.current?.getContent().text.trim()) {
         inputRef.current?.setText(text);
@@ -2407,6 +2429,11 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                     )}
                   </div>
                 ))}
+                {session?.status === "ERROR" && session?.error?.message && (
+                  <div className="mx-3 my-2 rounded-md bg-[var(--color-danger-soft)] px-3 py-2 text-[11px] leading-[1.5] text-[var(--color-danger)]">
+                    {session.error.message}
+                  </div>
+                )}
               </div>
               {showJump && (
                 <button
@@ -2464,6 +2491,16 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                   </span>
                 )}
               </div>
+              {pendingEditCount > 0 && (
+                <div
+                  data-agent-edit-buffer
+                  title="你在编辑台手动应用的修改已生效；下次发送消息时会把这些变化同步给 Agent，便于它判断依赖是否需要调整"
+                  className="mb-2 flex items-center gap-1.5 rounded-md border border-dashed border-[var(--color-border)] bg-[var(--color-bg-secondary)]/60 px-2 py-1 text-[10px] text-[var(--color-text-secondary)]"
+                >
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--color-accent)]" />
+                  {pendingEditCount} 项手动修改将随下条消息同步给 Agent
+                </div>
+              )}
               {visibleChips.length > 0 && (
                 <div className="mb-2 flex flex-wrap items-center gap-1">
                   {visibleChips.map((chip) => {

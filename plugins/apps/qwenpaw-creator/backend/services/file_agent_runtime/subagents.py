@@ -41,7 +41,7 @@ _TARGET_GUIDANCE = {
     SpecialistRole.SOURCE_INTELLIGENCE: "asset:<logicalAssetId>",
     SpecialistRole.VISUAL_DEVELOPMENT: (
         "overall visuals: project:assets; or element:<id>, "
-        "asset:<id>, artifact:<id>"
+        "asset:<VisualEntity.entity_id>, artifact:<id>"
     ),
     SpecialistRole.R2V_GENERATION_DIRECTOR: "an existing r2v element:<id>",
     SpecialistRole.AI_EDITING_DIRECTOR: "an existing timeline:<id>",
@@ -125,6 +125,41 @@ class DelegateToAgentInput(BaseModel):
                     f"use {_TARGET_GUIDANCE[self.role]}",
                 )
 
+    def validate_project_targets(self, *, project: Project) -> None:
+        """Resolve role-sensitive refs against the current Project snapshot.
+
+        ``asset:`` names two different domains in the public tool surface:
+        Source Intelligence receives a source logical Asset, while Visual
+        Development receives a ``VisualEntity.entity_id``.  Syntax validation
+        alone cannot distinguish them, so a source Asset id could previously
+        start a Visual SpecialistRun and fail every image call.  Resolve the
+        ambiguous visual spelling before the run is created.
+        """
+
+        if self.role is not SpecialistRole.VISUAL_DEVELOPMENT:
+            return
+        entity_ids = project.visual.entities.items
+        for target_ref in self.target_refs:
+            kind, _, identifier = target_ref.partition(":")
+            if kind != "asset" or identifier in entity_ids:
+                continue
+            valid_targets = [
+                f"asset:{entity_id}"
+                for entity_id in project.visual.entities.order
+            ]
+            valid_hint = (
+                ", ".join(valid_targets[:8])
+                if valid_targets
+                else "no VisualEntity exists yet; create one with jq_project"
+            )
+            raise ValueError(
+                f"{self.role.value} targetRef {target_ref!r} does not resolve "
+                "to project.visual.entities.items; use "
+                "asset:<VisualEntity.entity_id>. Source logical Asset ids "
+                "belong in referenceVersionIds, not target_refs. Valid "
+                f"visual targets: {valid_hint}",
+            )
+
 
 def delegate_tool_manifest() -> dict[str, Any]:
     return {
@@ -134,7 +169,9 @@ def delegate_tool_manifest() -> dict[str, Any]:
             "description": (
                 "把一个边界明确的素材理解、视觉媒体、R2V 或 AI 剪辑任务委派给"
                 "对应 Creator Specialist。source_intelligence_agent 使用 asset:<id>；"
-                "visual_development_agent 的整体视觉使用 project:assets；"
+                "visual_development_agent 的整体视觉使用 project:assets，单个视觉实体"
+                "必须使用 asset:<VisualEntity.entity_id>；来源素材 logicalAssetId 只能"
+                "作为 referenceVersionIds，不能作为 Visual Specialist target_ref；"
                 "r2v_generation_director 使用 element:<id>，"
                 "ai_editing_director 使用 timeline:<id>。"
             ),

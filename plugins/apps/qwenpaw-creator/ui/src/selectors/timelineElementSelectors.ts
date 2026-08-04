@@ -2,10 +2,15 @@ import type {
   ArtifactSlotDocument,
   ArtifactVersionDocument,
   ElementCreationDocument,
+  OverlayCreationDocument,
   ProjectDocument,
   TimelineDocument,
   TimelineElementDocument,
 } from "@/contracts/creator";
+import {
+  splitTransitionsForDisplay,
+  type TransitionJunction,
+} from "@/lib/timelineEditing";
 
 export interface DisplayLane {
   id: string;
@@ -137,6 +142,21 @@ export const TRACK_TYPE_META: Record<
   audio: { label: "音频", color: "#12b76a", soft: "rgba(18,183,106,.12)" },
 };
 
+/**
+ * Semantic overlay category tolerant of schema v3, where overlay_kind was
+ * dropped: copy bubbles render deterministically, motion documents carry
+ * inline HTML, media overlays reference generated footage.
+ */
+export function overlayContentKind(
+  creation: OverlayCreationDocument,
+): "copy" | "motion" | "media" {
+  const kind = creation.overlay_kind as string | undefined;
+  if (kind === "pet_os" || kind === "interview_summary") return "copy";
+  if (kind === "motion") return "motion";
+  if (kind === "media") return "media";
+  return creation.motion?.html ? "motion" : "copy";
+}
+
 export function classifyElementTrack(
   element: TimelineElementDocument,
 ): TimelineTrackType | null {
@@ -150,20 +170,19 @@ export function classifyElementTrack(
       return "transition";
     case "audio":
       return "audio";
-    case "overlay":
-      if (
-        creation.overlay_kind === "pet_os" ||
-        creation.overlay_kind === "interview_summary"
-      ) {
+    case "overlay": {
+      const kind = creation.overlay_kind as string | undefined;
+      if (kind === "pet_os" || kind === "interview_summary") {
         return "subtitle";
       }
-      if (
-        creation.overlay_kind === "motion" ||
-        creation.overlay_kind === "media"
-      ) {
+      if (kind === "motion" || kind === "media") {
         return "motion";
       }
-      return null;
+      // Schema v3 dropped overlay_kind; infer the track from content so
+      // overlays never silently vanish from the board.
+      if (creation.motion?.html) return "motion";
+      return "subtitle";
+    }
     default:
       return null;
   }
@@ -226,6 +245,7 @@ export function resolveElementVisualMeta(element: TimelineElementDocument): {
 
 export function groupElementsByTracks(
   timeline: TimelineDocument | null | undefined,
+  bridgedPairs?: Set<string>,
 ): TimelineTrack[] {
   if (!timeline) return [];
   const grouped = new Map<TimelineTrackType, TimelineElementDocument[]>();
@@ -241,18 +261,31 @@ export function groupElementsByTracks(
     const meta = TRACK_TYPE_META[type];
     const laneMap: Array<{
       endTick: number;
+      lastElementId: string;
       elements: TimelineElementDocument[];
     }> = [];
     for (const element of elements) {
+      // Clips joined by a transition overlap on purpose; like the reference
+      // design they stay adjacent on one track row instead of being split
+      // into stacked lanes.
       const lane = laneMap.find(
-        (candidate) => candidate.endTick <= element.span.start_tick,
+        (candidate) =>
+          candidate.endTick <= element.span.start_tick ||
+          bridgedPairs?.has(
+            `${candidate.lastElementId}\u0000${element.element_id}`,
+          ),
       );
       const endTick = element.span.start_tick + element.span.duration_tick;
       if (lane) {
         lane.elements.push(element);
-        lane.endTick = endTick;
+        lane.endTick = Math.max(lane.endTick, endTick);
+        lane.lastElementId = element.element_id;
       } else {
-        laneMap.push({ endTick, elements: [element] });
+        laneMap.push({
+          endTick,
+          lastElementId: element.element_id,
+          elements: [element],
+        });
       }
     }
     return {
@@ -266,6 +299,44 @@ export function groupElementsByTracks(
       })),
     };
   });
+}
+
+export interface DisplayTrackGroups {
+  tracks: TimelineTrack[];
+  junctions: TransitionJunction[];
+}
+
+/**
+ * Track grouping for the editing surface: transitions whose from/to elements
+ * both exist are lifted out of the track rows and rendered as junction badges
+ * between the two clips; only orphan transitions keep an ordinary row. Clips
+ * bridged by a transition share one lane despite their overlap.
+ */
+export function groupDisplayTracks(
+  timeline: TimelineDocument | null | undefined,
+): DisplayTrackGroups {
+  if (!timeline) return { tracks: [], junctions: [] };
+  const { junctions } = splitTransitionsForDisplay(timeline);
+  if (!junctions.length)
+    return { tracks: groupElementsByTracks(timeline), junctions };
+  const junctionIds = new Set(
+    junctions.map((junction) => junction.transition.element_id),
+  );
+  const bridgedPairs = new Set(
+    junctions.map((junction) => `${junction.fromId}\u0000${junction.toId}`),
+  );
+  const filtered: TimelineDocument = {
+    ...timeline,
+    elements_by_id: Object.fromEntries(
+      Object.entries(timeline.elements_by_id).filter(
+        ([elementId]) => !junctionIds.has(elementId),
+      ),
+    ),
+  };
+  return {
+    tracks: groupElementsByTracks(filtered, bridgedPairs),
+    junctions,
+  };
 }
 
 export function selectedSlotVersion(

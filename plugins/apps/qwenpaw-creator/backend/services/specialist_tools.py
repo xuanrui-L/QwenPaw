@@ -112,8 +112,10 @@ class SpecialistToolSpec:
                 ):
                     target["pattern"] = _ASSET_TARGET_REF_PATTERN
                     target["description"] = (
-                        "必须使用本 Project 中已存在的 exact asset:<entityId>，"
-                        "不能直接使用 project:assets。"
+                        "必须使用本 Project 中已存在的 exact "
+                        "asset:<VisualEntity.entity_id>，不能直接使用 "
+                        "project:assets，也不能使用来源素材 logicalAssetId；"
+                        "来源素材版本只能放在 arguments.referenceVersionIds。"
                     )
                 else:
                     target["enum"] = list(targets)

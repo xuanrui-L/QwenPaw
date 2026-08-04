@@ -51,7 +51,12 @@ from services.media_files.overlay import (
     render_interview_summary_overlay,
     render_pet_os_overlay,
 )
-from services.media_files.motion_overlay import render_motion_overlay
+from services.media_files.motion_overlay import (
+    caption_layout_error,
+    probe_motion_document,
+    render_motion_overlay,
+)
+from services.media_files.motion_templates import render_caption_template
 from services.media_files.transitions import (
     SUPPORTED_XFADE_KINDS,
     TransitionClip,
@@ -310,41 +315,72 @@ class FfmpegLocalMediaRunner:
                     1 / 30,
                     end_seconds - start_seconds - tail_trim,
                 )
+
+                # Calculate freeze duration if target exceeds source
+                freeze_duration = 0.0
+                if (
+                    item.duration_seconds is not None
+                    and item.start_seconds is not None
+                    and item.end_seconds is not None
+                ):
+                    source_duration = item.duration_seconds
+                    target_duration = item.end_seconds - item.start_seconds
+                    if target_duration > source_duration:
+                        freeze_duration = target_duration - source_duration
+
                 segment = segment_dir / f"{index:06d}.mp4"
+                # apad references [0:a]; sources without an audio stream
+                # (common for generated R2V footage) must keep the optional
+                # 0:a? mapping or ffmpeg rejects the whole filtergraph.
+                freeze_audio = freeze_duration > 0 and self._probe_has_audio(
+                    item.path,
+                )
                 placement_filter = self._placement_filter(
                     item.location,
                     canvas_size=spec.canvas_size,
                     duration_seconds=segment_duration,
+                    freeze_duration=freeze_duration,
+                    freeze_audio=freeze_audio,
                 )
-                self._run(
+
+                # Build FFmpeg arguments
+                ffmpeg_args = [
+                    "-y",
+                    "-ss",
+                    f"{start_seconds:.6f}",
+                    "-t",
+                    f"{segment_duration:.6f}",
+                    "-i",
+                    os.fspath(item.path),
+                    "-filter_complex",
+                    placement_filter,
+                    "-map",
+                    "[outv]",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+
+                # Map audio if present
+                if freeze_audio:
+                    ffmpeg_args.extend(["-map", "[a]"])
+                else:
+                    ffmpeg_args.extend(["-map", "0:a?"])
+
+                ffmpeg_args.extend(
                     [
-                        "-y",
-                        "-ss",
-                        f"{start_seconds:.6f}",
-                        "-t",
-                        f"{segment_duration:.6f}",
-                        "-i",
-                        os.fspath(item.path),
-                        "-filter_complex",
-                        placement_filter,
-                        "-map",
-                        "[outv]",
-                        "-map",
-                        "0:a?",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-pix_fmt",
-                        "yuv420p",
                         "-c:a",
                         "aac",
                         "-movflags",
                         "+faststart",
                         os.fspath(segment),
                     ],
-                    cwd=spec.work_dir,
                 )
+
+                self._run(ffmpeg_args, cwd=spec.work_dir)
                 for warning in self._apply_overlay(item, segment):
                     overlay_warnings.append(
                         f"{item.source_ref or item.version_id}: {warning}",
@@ -633,6 +669,8 @@ class FfmpegLocalMediaRunner:
         *,
         canvas_size: tuple[int, int],
         duration_seconds: float,
+        freeze_duration: float = 0.0,
+        freeze_audio: bool = False,
     ) -> str:
         """Build one anchor-based placement graph shared with the UI preview."""
 
@@ -673,17 +711,38 @@ class FfmpegLocalMediaRunner:
         )
         overlay_x = round(location["x"] * canvas_width - rotated_width / 2)
         overlay_y = round(location["y"] * canvas_height - rotated_height / 2)
-        return (
+
+        # Build the video filter chain
+        video_filters = (
             f"[0:v]scale={box_width}:{box_height}:force_original_aspect_ratio=increase,"
             f"crop={box_width}:{box_height},setsar=1,format=rgba,"
             f"colorchannelmixer=aa={location['opacity']:.6f},"
             f"pad={padded_width}:{padded_height}:{pad_x}:{pad_y}:color=0x00000000,"
             f"rotate={location['rotation_degrees']:.6f}*PI/180:"
-            f"ow={rotated_width}:oh={rotated_height}:c=none[fg];"
+            f"ow={rotated_width}:oh={rotated_height}:c=none"
+        )
+
+        # Add tpad filter to freeze the last frame if needed
+        if freeze_duration > 0:
+            video_filters += (
+                f",tpad=stop_mode=clone:stop_duration={freeze_duration:.6f}"
+            )
+
+        video_filters += "[fg]"
+
+        # Build the filter chain
+        filter_chain = (
+            f"{video_filters};"
             f"color=c=black:s={canvas_width}x{canvas_height}:r=30:"
             f"d={duration_seconds:.6f}[bg];"
             f"[bg][fg]overlay={overlay_x}:{overlay_y}:shortest=1,format=yuv420p[outv]"
         )
+
+        # Only pad audio when freezing a source that actually has a stream.
+        if freeze_audio:
+            filter_chain += f";[0:a]apad=pad_dur={freeze_duration:.6f}[a]"
+
+        return filter_chain
 
     def _apply_overlay(
         self,
@@ -711,6 +770,8 @@ class FfmpegLocalMediaRunner:
             rendered = segment.with_name(f"{segment.stem}-overlay.mp4")
             styled_error: str | None = None
             motion = overlay.get("motion")
+            render_location = overlay.get("location")
+            using_safe_motion = False
             if (
                 isinstance(motion, Mapping)
                 and str(motion.get("html") or "").strip()
@@ -727,6 +788,67 @@ class FfmpegLocalMediaRunner:
                 isinstance(motion, Mapping)
                 and str(motion.get("html") or "").strip()
             ):
+                safety_error = caption_layout_error(
+                    render_location,
+                    str(overlay.get("text") or ""),
+                    video_size,
+                )
+                if safety_error is None:
+                    location = render_location
+                    width_ratio = (
+                        float(location.get("width", 1.0))
+                        if isinstance(location, Mapping)
+                        else 1.0
+                    )
+                    height_ratio = (
+                        float(location.get("height", 1.0))
+                        if isinstance(location, Mapping)
+                        else 1.0
+                    )
+                    probe = probe_motion_document(
+                        str(motion["html"]),
+                        box_width=max(160, round(video_size[0] * width_ratio)),
+                        box_height=max(
+                            90,
+                            round(video_size[1] * height_ratio),
+                        ),
+                        ffmpeg_path=self.executable,
+                    )
+                    if not probe.ok:
+                        safety_error = probe.error
+                    elif probe.edge_contact > 0.02:
+                        safety_error = "字幕卡内容触碰视口边缘，存在裁切风险"
+                    elif probe.text_occlusion > 0.10:
+                        safety_error = "字幕文字被卡片内的图标或装饰遮挡"
+                if safety_error is not None:
+                    render_location = {
+                        "x": 0.5,
+                        "y": 0.88,
+                        "width": 0.8,
+                        "height": 0.18,
+                        "anchor_x": 0.5,
+                        "anchor_y": 0.5,
+                        "opacity": 1.0,
+                    }
+                    motion = {
+                        "html": render_caption_template(
+                            str(overlay.get("text") or ""),
+                            emotion=str(overlay.get("vibe") or "chill"),
+                            box_width=0.8,
+                            box_height=0.18,
+                        ),
+                        "fps": 24,
+                        "loop": False,
+                    }
+                    using_safe_motion = True
+                    styled_error = (
+                        f"{overlay['kind']} 字幕动效未通过合成安全检查，"
+                        f"已用统一安全动效模板渲染: {safety_error}"
+                    )
+            if (
+                isinstance(motion, Mapping)
+                and str(motion.get("html") or "").strip()
+            ):
                 result = render_motion_overlay(
                     ffmpeg_path=self.executable,
                     input_path=segment,
@@ -737,7 +859,7 @@ class FfmpegLocalMediaRunner:
                     video_size=video_size,
                     appear_at=overlay["appear_at"],
                     duration=overlay["duration"],
-                    location=overlay.get("location"),
+                    location=render_location,
                     viewport_inset=0.05,
                 )
                 if result.success:
@@ -746,10 +868,53 @@ class FfmpegLocalMediaRunner:
                         warnings.append(styled_error)
                     continue
                 rendered.unlink(missing_ok=True)
-                styled_error = (
-                    f"{overlay['kind']} 生成样式渲染失败，已回退固定样式: "
-                    f"{result.error or '未知错误'}"
-                )
+                if not using_safe_motion:
+                    generated_error = result.error or "未知错误"
+                    render_location = {
+                        "x": 0.5,
+                        "y": 0.88,
+                        "width": 0.8,
+                        "height": 0.18,
+                        "anchor_x": 0.5,
+                        "anchor_y": 0.5,
+                        "opacity": 1.0,
+                    }
+                    safe_result = render_motion_overlay(
+                        ffmpeg_path=self.executable,
+                        input_path=segment,
+                        output_path=rendered,
+                        html=render_caption_template(
+                            str(overlay.get("text") or ""),
+                            emotion=str(overlay.get("vibe") or "chill"),
+                            box_width=0.8,
+                            box_height=0.18,
+                        ),
+                        fps=24,
+                        loop=False,
+                        video_size=video_size,
+                        appear_at=overlay["appear_at"],
+                        duration=overlay["duration"],
+                        location=render_location,
+                        viewport_inset=0.05,
+                    )
+                    if safe_result.success:
+                        os.replace(rendered, segment)
+                        warnings.append(
+                            f"{overlay['kind']} 生成样式渲染失败，"
+                            f"已用统一安全动效模板渲染: {generated_error}",
+                        )
+                        continue
+                    rendered.unlink(missing_ok=True)
+                    styled_error = (
+                        f"{overlay['kind']} 生成样式与安全动效模板均渲染失败，"
+                        "已回退固定样式: "
+                        f"{generated_error}; {safe_result.error or '未知错误'}"
+                    )
+                else:
+                    styled_error = (
+                        f"{overlay['kind']} 安全动效模板渲染失败，"
+                        f"已回退固定样式: {result.error or '未知错误'}"
+                    )
             if overlay["kind"] == "pet_os":
                 result = render_pet_os_overlay(
                     ffmpeg_path=self.executable,
@@ -760,7 +925,7 @@ class FfmpegLocalMediaRunner:
                     video_size=video_size,
                     appear_at=overlay["appear_at"],
                     duration=overlay["duration"],
-                    location=overlay.get("location"),
+                    location=render_location,
                 )
             else:
                 result = render_interview_summary_overlay(
@@ -1638,6 +1803,12 @@ def _timeline_execution(
             )
             end_seconds = (
                 render_source.source_out_tick / timeline.ticks_per_second
+            )
+        elif isinstance(element.creation, R2VCreation):
+            # For R2V elements, use the span duration to allow length adjustment
+            start_seconds = 0.0
+            end_seconds = (
+                element.span.duration_tick / timeline.ticks_per_second
             )
         inputs.append(
             _FrozenInput(
