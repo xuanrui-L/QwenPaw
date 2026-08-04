@@ -174,6 +174,52 @@ def test_indexed_text_bound_is_honest_about_truncation(tmp_path) -> None:
     assert all(
         "still enters the semantic index" not in note for note in result.notes
     )
+    # The indexing bound is separate from renderer-stage extraction.
+    assert result.extraction_complete is True
+    assert result.extraction_fraction == 1.0
+
+
+def test_csv_row_cap_reports_incomplete_extraction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # CR repro: a row-capped table must not pretend complete extraction.
+    # The true row total is unknowable under the capped read, so the
+    # fraction is honestly unknown.
+    monkeypatch.setattr(
+        "vendor.mm_plugins.renderers.data.FULL_TEXT_ROW_CAP",
+        50,
+    )
+    source = tmp_path / "big.csv"
+    rows = ["scene,cost"]
+    rows += [f"scene-{number},{number}" for number in range(1, 60)]
+    rows.append("final-unique-scene,9999")
+    source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    result = _read(source, tmp_path / "pages")
+
+    assert "final-unique-scene" not in result.indexed_text
+    assert result.extraction_complete is False
+    assert result.extraction_fraction is None
+    assert any("capped at 50 rows" in note for note in result.notes)
+
+
+def test_pdf_text_page_cap_reports_extraction_fraction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # With a known page total the extraction share is exact and feeds the
+    # conservative coverage merge.
+    monkeypatch.setattr(
+        "vendor.mm_plugins.renderers.pdf.DEFAULT_MAX_TEXT_PAGES",
+        2,
+    )
+    source = tmp_path / "script.pdf"
+    _make_pdf(source, pages=4)
+    result = _read(source, tmp_path / "pages")
+
+    assert result.extraction_complete is False
+    assert result.extraction_fraction == 0.5
+    assert any("capped at 2 of 4 pages" in note for note in result.notes)
 
 
 def test_csv_renders_table_image_and_markdown(tmp_path) -> None:

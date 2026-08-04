@@ -105,13 +105,18 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
                     },
                 )
         if total > max_text_pages:
+            # Structured extraction coverage so the caller can report an
+            # honest ratio instead of claiming completeness.
             blocks.append(
                 {
-                    "type": "full_text",
+                    "type": "extraction_note",
                     "text": (
-                        f"(text extraction capped at {max_text_pages} of "
-                        f"{total} pages)"
+                        f"text extraction capped at {max_text_pages} of "
+                        f"{total} pages"
                     ),
+                    "unit": "pages",
+                    "extracted": max_text_pages,
+                    "total": total,
                 },
             )
         return blocks

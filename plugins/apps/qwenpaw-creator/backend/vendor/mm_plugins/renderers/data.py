@@ -28,15 +28,34 @@ _PANDAS_HINT = (
 )
 
 
-def _full_text_block(df, title: str) -> dict[str, Any]:
-    """Complete rows of one sheet as a CSV-formatted full_text block."""
+def _full_text_block(df, title: str) -> list[dict[str, Any]]:
+    """Complete rows of one sheet as CSV-formatted full_text block(s).
+
+    When the row cap cuts extraction short, a structured extraction_note
+    follows so the caller reports honest coverage (the true total row
+    count is unknown without a full read).
+    """
     truncated = len(df) > FULL_TEXT_ROW_CAP
     if truncated:
         df = df.head(FULL_TEXT_ROW_CAP)
     text = df.fillna("").to_csv(index=False)
+    blocks: list[dict[str, Any]] = [
+        {"type": "full_text", "text": f"[{title}]\n{text}"},
+    ]
     if truncated:
-        text += f"\n... (full text capped at {FULL_TEXT_ROW_CAP} rows)"
-    return {"type": "full_text", "text": f"[{title}]\n{text}"}
+        blocks.append(
+            {
+                "type": "extraction_note",
+                "text": (
+                    f"{title}: text extraction capped at "
+                    f"{FULL_TEXT_ROW_CAP} rows (total unknown)"
+                ),
+                "unit": "rows",
+                "extracted": FULL_TEXT_ROW_CAP,
+                "total": None,
+            },
+        )
+    return blocks
 
 
 def render(path: str, **opts: Any) -> list[dict[str, Any]]:
@@ -67,7 +86,7 @@ def _render_csv(path: str, **opts: Any) -> list[dict[str, Any]]:
             max_rows=max_rows,
         ),
     )
-    blocks.append(_full_text_block(df_full, os.path.basename(path)))
+    blocks.extend(_full_text_block(df_full, os.path.basename(path)))
     return blocks
 
 
@@ -113,7 +132,7 @@ def _render_xlsx(path: str, **opts: Any) -> list[dict[str, Any]]:
             sheet_name=name,
             nrows=FULL_TEXT_ROW_CAP + 1,
         )
-        result.append(
+        result.extend(
             _full_text_block(
                 df_full,
                 f"{os.path.basename(path)} [Sheet {i + 1}: {name}]",

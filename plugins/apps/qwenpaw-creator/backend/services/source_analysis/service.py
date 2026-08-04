@@ -363,7 +363,7 @@ def resolve_document_page_ref(
 DOCUMENT_TEXT_CHUNK_CHARS = 2000
 
 
-def document_full_text_path(
+def document_indexed_text_path(
     project_root: Path,
     source_checksum: str,
     result_ref: str,
@@ -669,14 +669,14 @@ class SourceMediaAnalysisService:
         # Persist the bounded indexed text as a Runtime file: the excerpt
         # below is for model context only, while commit chunks this file
         # into the semantic index (coverage reflects any truncation).
-        full_text_path = document_full_text_path(
+        indexed_text_path = document_indexed_text_path(
             project_root,
             version.checksum,
             result_ref,
         )
-        full_text_path.parent.mkdir(parents=True, exist_ok=True)
+        indexed_text_path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(
-            full_text_path.write_text,
+            indexed_text_path.write_text,
             rendered.indexed_text,
             "utf-8",
         )
@@ -694,6 +694,11 @@ class SourceMediaAnalysisService:
             "textCoverage": {
                 "indexedChars": len(rendered.indexed_text),
                 "extractedChars": rendered.extracted_chars,
+                "extractionComplete": rendered.extraction_complete,
+                "extractionFraction": rendered.extraction_fraction,
+                "sha256": sha256(
+                    rendered.indexed_text.encode("utf-8"),
+                ).hexdigest(),
             },
             "notes": list(rendered.notes),
         }
@@ -924,7 +929,8 @@ class SourceMediaAnalysisService:
         document_page_refs: list[str] = []
         document_ratio: float | None = None
         document_run: SourceModelRunRef | None = None
-        document_full_text = ""
+        document_indexed_text = ""
+        document_text_available = False
         document_text_ratio: float | None = None
         document_ref = agent_payload.module_result_refs.document
         if is_document:
@@ -993,36 +999,77 @@ class SourceMediaAnalysisService:
                     f"恰好一条 [0,1000)；期望 {expected_intervals}，"
                     f"实际 {actual_intervals}",
                 )
-            # Prefer the persisted indexed text (the tool-result excerpt is
-            # bounded for model context); fall back for legacy results.
-            full_text_path = document_full_text_path(
+            # Text-extraction coverage is persisted honestly. New-format
+            # results must be backed by the intact Runtime text file; the
+            # excerpt fallback exists only for legacy results without
+            # textCoverage.
+            indexed_text_path = document_indexed_text_path(
                 self.services.projects.project_root(project_id),
                 version.checksum,
                 document_ref,
             )
-            if full_text_path.is_file():
-                document_full_text = await asyncio.to_thread(
-                    full_text_path.read_text,
-                    "utf-8",
-                )
-            else:
-                document_full_text = str(module.get("textExcerpt") or "")
-            # Text-extraction coverage is persisted honestly: indexing is
-            # bounded, so the ratio records how much extracted text made
-            # it into the index (legacy results imply full coverage).
             text_coverage = module.get("textCoverage")
             if isinstance(text_coverage, Mapping):
                 extracted_chars = int(
                     text_coverage.get("extractedChars") or 0,
                 )
                 indexed_chars = int(text_coverage.get("indexedChars") or 0)
-            else:
-                extracted_chars = indexed_chars = len(document_full_text)
-            if extracted_chars > 0:
-                document_text_ratio = min(
-                    1.0,
-                    indexed_chars / extracted_chars,
+                if not 0 <= indexed_chars <= extracted_chars:
+                    raise ValidationError(
+                        "read_document textCoverage 数值不合法",
+                    )
+                if not indexed_text_path.is_file():
+                    raise ValidationError(
+                        "文档索引文本的 Runtime 文件缺失，无法提交；请重新调用 "
+                        "read_document 后再提交",
+                    )
+                document_indexed_text = await asyncio.to_thread(
+                    indexed_text_path.read_text,
+                    "utf-8",
                 )
+                expected_sha = str(text_coverage.get("sha256") or "")
+                actual_sha = sha256(
+                    document_indexed_text.encode("utf-8"),
+                ).hexdigest()
+                if len(document_indexed_text) != indexed_chars or (
+                    expected_sha and actual_sha != expected_sha
+                ):
+                    raise ValidationError(
+                        "文档索引文本与 read_document 的 textCoverage 不一致"
+                        "（Runtime 文件被修改或截断）；请重新调用 "
+                        "read_document 后再提交",
+                    )
+                # Conservative merge of both truncation stages: character
+                # indexing bound x renderer extraction share. An unknowable
+                # extraction total yields an honest unknown ratio.
+                char_ratio = (
+                    min(1.0, indexed_chars / extracted_chars)
+                    if extracted_chars > 0
+                    else None
+                )
+                if text_coverage.get("extractionComplete", True):
+                    document_text_ratio = char_ratio
+                else:
+                    fraction = text_coverage.get("extractionFraction")
+                    document_text_ratio = (
+                        min(1.0, char_ratio * float(fraction))
+                        if char_ratio is not None
+                        and isinstance(fraction, (int, float))
+                        else None
+                    )
+            else:
+                if indexed_text_path.is_file():
+                    document_indexed_text = await asyncio.to_thread(
+                        indexed_text_path.read_text,
+                        "utf-8",
+                    )
+                else:
+                    document_indexed_text = str(
+                        module.get("textExcerpt") or "",
+                    )
+                if document_indexed_text:
+                    document_text_ratio = 1.0
+            document_text_available = bool(document_indexed_text)
             document_run = SourceModelRunRef(
                 id=f"docreader-{uuid5(NAMESPACE_URL, document_ref).hex}",
                 provider="document_reader",
@@ -1078,17 +1125,23 @@ class SourceMediaAnalysisService:
             "ocr": {
                 "mode": (
                     "available"
-                    if is_document and document_text_ratio is not None
+                    if is_document and document_text_available
                     else "unavailable"
                     if visual_available
                     else "not_applicable"
                 ),
                 "producer": (
                     "document_reader"
-                    if is_document and document_text_ratio is not None
+                    if is_document and document_text_available
                     else None
                 ),
-                "ratio": document_text_ratio if is_document else None,
+                # None with mode=available means the coverage share is
+                # honestly unknown (renderer cap with unknowable total).
+                "ratio": (
+                    document_text_ratio
+                    if is_document and document_text_available
+                    else None
+                ),
             },
             "audio": {
                 "mode": "unavailable" if asr_applicable else "not_applicable",
@@ -1167,7 +1220,7 @@ class SourceMediaAnalysisService:
                     "evidenceFrameRefs": [evidence_ref],
                 }
                 for number, chunk in enumerate(
-                    _document_text_chunks(document_full_text),
+                    _document_text_chunks(document_indexed_text),
                     1,
                 )
             )

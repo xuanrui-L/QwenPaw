@@ -62,6 +62,11 @@ class DocumentReadResult:
     # pre-cap size so callers can persist the coverage ratio.
     indexed_text: str
     extracted_chars: int
+    # Renderer-stage extraction coverage: complete means no page/row cap
+    # was hit; fraction is the known extracted share (None when the true
+    # total is unknowable, e.g. a row-capped CSV read).
+    extraction_complete: bool
+    extraction_fraction: float | None
     notes: tuple[str, ...]
 
 
@@ -152,6 +157,8 @@ def _read_document_sync(
     text_parts: list[str] = []
     full_text_parts: list[str] = []
     page_images: list[Path] = []
+    extraction_complete = True
+    extraction_fraction: float | None = 1.0
 
     max_pixels = budget_to_pixels(budget, IMAGE_BUDGET_TOKENS)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +190,26 @@ def _read_document_sync(
             text = str(block.get("text") or "").strip()
             if text:
                 full_text_parts.append(text)
+        elif block_type == "extraction_note":
+            extraction_complete = False
+            note = str(block.get("text") or "").strip()
+            if note:
+                notes.append(note)
+            total = block.get("total")
+            extracted = block.get("extracted")
+            if (
+                extraction_fraction is not None
+                and isinstance(total, int)
+                and isinstance(extracted, int)
+                and total > 0
+            ):
+                extraction_fraction = min(
+                    extraction_fraction,
+                    extracted / total,
+                )
+            else:
+                # The true total is unknown: the honest fraction is too.
+                extraction_fraction = None
 
     if not pages_rendered:
         pages_rendered = sorted(
@@ -226,6 +253,10 @@ def _read_document_sync(
         text_excerpt=text_excerpt,
         indexed_text=indexed_text,
         extracted_chars=extracted_chars,
+        extraction_complete=extraction_complete,
+        extraction_fraction=(
+            extraction_fraction if not extraction_complete else 1.0
+        ),
         notes=tuple(notes),
     )
 

@@ -38,9 +38,14 @@ class SourceCoverage(StrictModel):
     @model_validator(mode="after")
     def validate_availability(self) -> "SourceCoverage":
         if self.mode == "available":
-            if self.producer is None or self.ratio is None or self.ratio <= 0:
+            # ratio may be None for honestly-unknown coverage shares (e.g.
+            # a row-capped table read where the true total is unknowable).
+            if self.producer is None or (
+                self.ratio is not None and self.ratio <= 0
+            ):
                 raise ValueError(
-                    "available coverage requires producer and ratio in (0, 1]",
+                    "available coverage requires a producer and, when "
+                    "declared, a ratio in (0, 1]",
                 )
         elif self.producer is not None or self.ratio is not None:
             raise ValueError(

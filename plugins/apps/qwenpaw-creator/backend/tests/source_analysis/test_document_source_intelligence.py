@@ -26,6 +26,7 @@ from services.source_analysis import (
     SourceMediaAnalysisService,
 )
 from services.source_analysis.service import (
+    document_indexed_text_path,
     document_page_path,
     document_page_ref,
     resolve_document_page_ref,
@@ -685,6 +686,253 @@ def test_full_document_text_reaches_index_beyond_excerpt(tmp_path) -> None:
     assert ocr.mode == "available"
     assert ocr.producer == "document_reader"
     assert ocr.ratio == 1.0
+
+
+def _read_then_commit(
+    service: SourceMediaAnalysisService,
+    services: CreatorFileServices,
+    asset_id: str,
+    version_id: str,
+    *,
+    tag: str,
+    shots: list[dict],
+    between_read_and_commit=None,
+    strip_text_coverage: bool = False,
+):
+    """Shared read -> (mutate) -> commit flow for coverage-integrity tests."""
+    read_context = _running_context(
+        service,
+        services,
+        asset_id,
+        tool_call_id=f"{tag}-read",
+    )
+
+    async def scenario():
+        read_result = await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": f"asset-version:{version_id}"},
+            context=read_context,
+        )
+        stored = dict(read_result)
+        if strip_text_coverage:
+            stored.pop("textCoverage", None)
+        service.executions.append_specialist_message(
+            "project-1",
+            read_context.specialist_run_id,
+            message_id=f"tool-{tag}-result",
+            role="tool",
+            content_parts=[{"type": "text", "text": json.dumps(stored)}],
+            metadata={"tool": "read_document", "toolCallId": f"{tag}-read"},
+        )
+        if between_read_and_commit is not None:
+            between_read_and_commit(read_result)
+        commit_context = _running_context(
+            service,
+            services,
+            asset_id,
+            tool_call_id=f"{tag}-commit",
+        )
+        committed = await service.commit_agent_intelligence(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            command_id=f"{tag}-commit-1",
+            context=commit_context,
+            arguments={
+                "summary": f"{tag} 场景的文档理解。",
+                "shots": shots,
+                "entities": [],
+                "semanticEntries": [],
+                "moduleResultRefs": {"document": read_result["resultRef"]},
+            },
+        )
+        return read_result, committed
+
+    return asyncio.run(scenario())
+
+
+def test_document_commit_rejects_missing_or_tampered_indexed_text(
+    tmp_path,
+) -> None:
+    # CR P1: a new-format result must be backed by the intact Runtime
+    # indexed-text file; a silent excerpt fallback would publish coverage
+    # numbers that the semantic entries do not actually satisfy.
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="notes.txt",
+        content=("剧情推进。" * 6000).encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    project_root = services.projects.project_root("project-1")
+    snapshot = services.projects.read("project-1")
+    checksum = snapshot.project.assets.source_versions_by_id[
+        version_id
+    ].checksum
+
+    def delete_runtime_text(read_result):
+        document_indexed_text_path(
+            project_root,
+            checksum,
+            read_result["resultRef"],
+        ).unlink()
+
+    with pytest.raises(ValidationError) as missing:
+        _read_then_commit(
+            service,
+            services,
+            asset_id,
+            version_id,
+            tag="doc-missing-file",
+            shots=[_document_shot(1, "全文概括。")],
+            between_read_and_commit=delete_runtime_text,
+        )
+    assert "Runtime 文件缺失" in str(missing.value)
+
+    def tamper_runtime_text(read_result):
+        path = document_indexed_text_path(
+            project_root,
+            checksum,
+            read_result["resultRef"],
+        )
+        path.write_text("被替换的内容", encoding="utf-8")
+
+    with pytest.raises(ValidationError) as tampered:
+        _read_then_commit(
+            service,
+            services,
+            asset_id,
+            version_id,
+            tag="doc-tampered-file",
+            shots=[_document_shot(1, "全文概括。")],
+            between_read_and_commit=tamper_runtime_text,
+        )
+    assert "不一致" in str(tampered.value)
+
+
+def test_legacy_result_without_text_coverage_falls_back(tmp_path) -> None:
+    # Legacy tool results (no textCoverage) keep working: the excerpt
+    # fallback indexes what it has and reports full coverage.
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="notes.txt",
+        content="第一幕：猫信使出发。".encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    project_root = services.projects.project_root("project-1")
+    snapshot = services.projects.read("project-1")
+    checksum = snapshot.project.assets.source_versions_by_id[
+        version_id
+    ].checksum
+
+    def delete_runtime_text(read_result):
+        document_indexed_text_path(
+            project_root,
+            checksum,
+            read_result["resultRef"],
+        ).unlink()
+
+    _read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="doc-legacy",
+        shots=[_document_shot(1, "全文概括。")],
+        between_read_and_commit=delete_runtime_text,
+        strip_text_coverage=True,
+    )
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    assert index.coverage["ocr"].mode == "available"
+    assert index.coverage["ocr"].ratio == 1.0
+    assert any(
+        "猫信使出发" in item.text
+        for item in index.semantic_entries
+        if "document-text" in item.tags
+    )
+
+
+def test_truncated_indexing_persists_partial_ocr_ratio(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # Indexing truncation must surface as coverage.ocr.ratio < 1 and the
+    # cut tail must not appear in the semantic entries.
+    monkeypatch.setattr(
+        "services.document_reader.MAX_INDEXED_TEXT_CHARS",
+        5000,
+    )
+    marker = "末尾唯一标记：星光不灭。"
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="long.txt",
+        content=("剧情推进。" * 1600 + marker).encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="doc-truncated",
+        shots=[_document_shot(1, "全文概括。")],
+    )
+    coverage = read_result["textCoverage"]
+    assert coverage["indexedChars"] == 5000
+    assert coverage["extractedChars"] > 5000
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    ocr = index.coverage["ocr"]
+    assert ocr.mode == "available"
+    assert ocr.producer == "document_reader"
+    assert ocr.ratio == pytest.approx(
+        5000 / coverage["extractedChars"],
+    )
+    assert all(
+        marker not in item.text
+        for item in index.semantic_entries
+        if "document-text" in item.tags
+    )
+
+
+def test_unknown_extraction_total_yields_unknown_ratio(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # A row-capped table has an unknowable extraction total: coverage
+    # stays available but the ratio is honestly unknown (None).
+    monkeypatch.setattr(
+        "vendor.mm_plugins.renderers.data.FULL_TEXT_ROW_CAP",
+        50,
+    )
+    rows = ["scene,cost"]
+    rows += [f"scene-{number},{number}" for number in range(1, 62)]
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="big.csv",
+        content=("\n".join(rows) + "\n").encode("utf-8"),
+        media_type="text/csv",
+    )
+    service = SourceMediaAnalysisService(services)
+    read_result, committed = _read_then_commit(
+        service,
+        services,
+        asset_id,
+        version_id,
+        tag="doc-unknown-total",
+        shots=[_document_shot(1, "数据表概括。")],
+    )
+    assert read_result["textCoverage"]["extractionComplete"] is False
+    assert read_result["textCoverage"]["extractionFraction"] is None
+    assert committed["status"] == "SUCCEEDED"
+    index = service.load("project-1", asset_id)
+    ocr = index.coverage["ocr"]
+    assert ocr.mode == "available"
+    assert ocr.producer == "document_reader"
+    assert ocr.ratio is None
 
 
 def test_srt_text_only_commit_rejects_page_image_intervals(tmp_path) -> None:
