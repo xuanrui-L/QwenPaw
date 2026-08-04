@@ -37,6 +37,7 @@ from models.config import (
     get_execution_authorization_mode,
     get_mainline_max_model_turns,
     get_specialist_max_model_turns,
+    scale_mainline_max_model_turns,
     get_text_model_name,
     get_vlm_model_name,
     get_web_grounding_enabled,
@@ -1676,7 +1677,26 @@ class FileCreatorAgentRuntime:
         malformed_jq_attempts = 0
         malformed_jq_fingerprints: set[str] = set()
         deterministic_failure_counts: dict[str, int] = {}
-        for _turn_number in range(1, self.max_model_turns + 1):
+        # Element-heavy projects legitimately need more mainline turns
+        # (one element per jq_project call plus one delegation each), so
+        # the runaway cap scales with the current timeline size instead of
+        # failing healthy long runs.
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            element_count = sum(
+                len(timeline.elements_by_id)
+                for timeline in snapshot.project.timelines.items.values()
+            )
+        except Exception:
+            element_count = 0
+        turn_budget = scale_mainline_max_model_turns(
+            self.max_model_turns,
+            element_count,
+        )
+        for _turn_number in range(1, turn_budget + 1):
             self._assert_epoch(project_id, run_id, epoch)
             _compact_wire_project_snapshots(messages)
             assistant_message_id = f"message-{uuid4().hex}"
@@ -2025,7 +2045,7 @@ class FileCreatorAgentRuntime:
                         "another model turn",
                     )
         raise AgentModelError(
-            f"Creator Agent exceeded {self.max_model_turns} model turns",
+            f"Creator Agent exceeded {turn_budget} model turns",
         )
 
     async def _run_ground_prompt_context(

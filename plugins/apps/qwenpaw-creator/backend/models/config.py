@@ -339,6 +339,26 @@ def get_specialist_max_model_turns() -> int:
     )
 
 
+# One element consumes several mainline turns (create, delegate, resume),
+# so a fixed cap misfires on large projects: the scaled floor keeps the
+# runaway guard while letting long-but-healthy runs finish. Baseline covers
+# read/ground/strategy/entities; the per-element share covers structure
+# authoring plus delegation.
+TURN_SCALING_BASELINE = 8
+TURN_SCALING_PER_ELEMENT = 3
+
+
+def scale_mainline_max_model_turns(base: int, element_count: int) -> int:
+    """Raise the mainline budget for element-heavy projects, never lower it."""
+
+    if element_count <= 0:
+        return base
+    return max(
+        base,
+        TURN_SCALING_BASELINE + TURN_SCALING_PER_ELEMENT * element_count,
+    )
+
+
 def _map_tool_to_section(tool_name: str) -> str:
     return {
         CREATOR_TEXT_CONFIG_TOOL: "llm",
