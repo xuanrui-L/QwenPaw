@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -175,11 +176,15 @@ def test_load_skills_config_isolates_broken_documents(
     path.write_text("{not json", encoding="utf-8")
     config._clear_skills_config_cache()
     assert config.load_skills_config() == []
+    issues = config.load_skills_config_issues()
+    assert len(issues) == 1
+    assert "parse failed" in issues[0]["reason"]
     path.write_text(
         json.dumps(
             {
                 "skills": [
                     {"name": "no-path-entry"},
+                    {"name": "ok-entry", "path": str(tmp_path)},
                     {"name": "ok-entry", "path": str(tmp_path)},
                 ],
             },
@@ -188,6 +193,36 @@ def test_load_skills_config_isolates_broken_documents(
     )
     config._clear_skills_config_cache()
     assert [item.name for item in config.load_skills_config()] == ["ok-entry"]
+    issues = config.load_skills_config_issues()
+    assert [item["name"] for item in issues] == ["no-path-entry", "ok-entry"]
+    assert "schema validation failed" in issues[0]["reason"]
+    assert "duplicate skill name" in issues[1]["reason"]
+
+
+def test_invalid_config_entries_surface_as_unavailable_skills(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    data_root = _configure(tmp_path, monkeypatch, [])
+    (data_root / "config" / "skills_config.json").write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {"name": "malformed entry ~~ not valid"},
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    config._clear_skills_config_cache()
+    external_skills._clear_load_cache()
+    loaded = load_skills()
+    assert len(loaded) == 1
+    assert loaded[0].status == "unavailable"
+    assert "invalid configuration entry" in (loaded[0].reason or "")
+    # Invalid placeholders never inject context nor expose tools.
+    assert render_external_skills_context(loaded) == ""
+    assert external_skill_tool_manifests(loaded) == []
 
 
 def test_load_skills_config_missing_file_or_root(
@@ -295,6 +330,10 @@ def test_load_skills_marks_missing_requirements_unavailable(
     assert [item.status for item in loaded] == ["unavailable", "unavailable"]
     assert "surely-not-a-binary-xyz" in (loaded[0].reason or "")
     assert "DEMO_SKILL_MISSING_ENV" in (loaded[1].reason or "")
+    # Unmet requirements must tell the operator how to fix them because
+    # npx/uvx never install system binaries or env variables on their own.
+    assert "install it manually" in (loaded[0].reason or "")
+    assert "export it" in (loaded[1].reason or "")
 
 
 def test_load_skills_skips_disabled_entries(tmp_path, monkeypatch) -> None:
@@ -398,10 +437,17 @@ def test_tool_manifests_only_when_available(tmp_path, monkeypatch) -> None:
         "enum"
     ]
     assert enum == ["demo-skill"]
+    # The runtime injects the authoritative Project identity, so the
+    # model is never required to echo projectId back on skill tools.
+    for item in manifests:
+        assert "projectId" not in item["function"]["parameters"]["required"]
     assert external_skill_tool_manifests([]) == []
 
 
 # ── Sandbox execution ────────────────────────────────────────────────────────
+
+
+_PROJECT = "project-test-1"
 
 
 def _demo_config(tmp_path, monkeypatch, **entry_extra) -> Path:
@@ -428,6 +474,7 @@ def test_execute_skill_script_runs_in_sandbox_copy(
     skill_root = _demo_config(tmp_path, monkeypatch)
     result = asyncio.run(
         execute_skill_script(
+            project_id=_PROJECT,
             skill_name="demo-skill",
             script="scripts/echo.py",
             args=["a1"],
@@ -439,7 +486,67 @@ def test_execute_skill_script_runs_in_sandbox_copy(
     workdir = Path(result["workdir"])
     assert workdir != skill_root
     assert workdir.name == "demo-skill"
+    # The working copy is scoped per Project.
+    assert workdir.parent.name == _PROJECT
     assert (workdir / "SKILL.md").is_file()
+
+
+def test_sandbox_is_isolated_per_project(tmp_path, monkeypatch) -> None:
+    _demo_config(tmp_path, monkeypatch)
+
+    async def scenario():
+        first = await execute_skill_script(
+            project_id="project-a",
+            skill_name="demo-skill",
+            script="scripts/artifact.py",
+        )
+        second = await execute_skill_script(
+            project_id="project-b",
+            skill_name="demo-skill",
+            script="scripts/echo.py",
+        )
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert Path(first["workdir"]) != Path(second["workdir"])
+    # project-a produced an artifact; project-b's sandbox has none.
+    assert (Path(first["workdir"]) / "dist" / "output.mp4").is_file()
+    assert not (Path(second["workdir"]) / "dist").exists()
+    with pytest.raises(SkillExecutionError):
+        resolve_skill_artifact(
+            project_id="project-b",
+            skill_name="demo-skill",
+            path="dist/output.mp4",
+        )
+
+
+def test_sandbox_copy_carries_upstream_attribution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # Upstream layout: LICENSE/NOTICE live above the skill directory.
+    upstream = tmp_path / "upstream"
+    skill_root = _write_skill(upstream / "src" / "capabilities" / "demo")
+    (upstream / "LICENSE").write_text("Apache License 2.0", encoding="utf-8")
+    (upstream / "NOTICE").write_text("Qwen-MM-Plugins", encoding="utf-8")
+    _configure(
+        tmp_path,
+        monkeypatch,
+        [{"name": "demo-skill", "path": str(skill_root), "enabled": True}],
+    )
+    result = asyncio.run(
+        execute_skill_script(
+            project_id=_PROJECT,
+            skill_name="demo-skill",
+            script="scripts/echo.py",
+        ),
+    )
+    workdir = Path(result["workdir"])
+    assert (workdir / "UPSTREAM_LICENSE").read_text() == "Apache License 2.0"
+    assert (workdir / "UPSTREAM_NOTICE").read_text() == "Qwen-MM-Plugins"
+    provenance = (workdir / external_skills.PROVENANCE_FILENAME).read_text()
+    assert "Apache-2.0" in provenance
+    assert str(skill_root) in provenance
 
 
 def test_execute_skill_script_env_allowlist(tmp_path, monkeypatch) -> None:
@@ -448,6 +555,7 @@ def test_execute_skill_script_env_allowlist(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEMO_SKILL_PRIVATE", "must-not-leak")
     result = asyncio.run(
         execute_skill_script(
+            project_id=_PROJECT,
             skill_name="demo-skill",
             script="scripts/echo.py",
         ),
@@ -465,10 +573,19 @@ def test_execute_skill_script_rejects_path_escape(
         with pytest.raises(SkillExecutionError):
             asyncio.run(
                 execute_skill_script(
+                    project_id=_PROJECT,
                     skill_name="demo-skill",
                     script=candidate,
                 ),
             )
+    with pytest.raises(SkillExecutionError, match="invalid project id"):
+        asyncio.run(
+            execute_skill_script(
+                project_id="../escape",
+                skill_name="demo-skill",
+                script="scripts/echo.py",
+            ),
+        )
 
 
 def test_execute_skill_script_timeout_kills_process(
@@ -478,6 +595,7 @@ def test_execute_skill_script_timeout_kills_process(
     _demo_config(tmp_path, monkeypatch)
     result = asyncio.run(
         execute_skill_script(
+            project_id=_PROJECT,
             skill_name="demo-skill",
             script="scripts/sleepy.py",
             timeout_seconds=1,
@@ -488,10 +606,87 @@ def test_execute_skill_script_timeout_kills_process(
     assert "timed out" in result["error"]
 
 
+def test_execute_skill_script_cancellation_reaps_child(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A cancelled Agent run must not leave the skill process behind."""
+
+    skill_root = _demo_config(tmp_path, monkeypatch)
+    (skill_root / "scripts" / "pidfile.py").write_text(
+        "import os, pathlib, time\n"
+        "pathlib.Path('child.pid').write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    async def scenario() -> int:
+        task = asyncio.ensure_future(
+            execute_skill_script(
+                project_id=_PROJECT,
+                skill_name="demo-skill",
+                script="scripts/pidfile.py",
+            ),
+        )
+        pid_file = (
+            Path(os.environ["CREATOR_DATA_ROOT"])
+            / "skills-runtime"
+            / _PROJECT
+            / "demo-skill"
+            / "child.pid"
+        )
+        for _ in range(200):
+            if pid_file.is_file() and pid_file.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        child_pid = int(pid_file.read_text().strip())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return child_pid
+
+    child_pid = asyncio.run(scenario())
+    for _ in range(50):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail(f"skill child {child_pid} survived cancellation")
+
+
+def test_execute_skill_script_bounds_output_while_reading(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Multi-megabyte output is drained without being kept in memory."""
+
+    skill_root = _demo_config(tmp_path, monkeypatch)
+    (skill_root / "scripts" / "flood.py").write_text(
+        "import sys\n"
+        "chunk = 'y' * 65536\n"
+        "for _ in range(160):\n"  # ~10MB in total
+        "    sys.stdout.write(chunk)\n",
+        encoding="utf-8",
+    )
+    result = asyncio.run(
+        execute_skill_script(
+            project_id=_PROJECT,
+            skill_name="demo-skill",
+            script="scripts/flood.py",
+        ),
+    )
+    assert result["ok"] is True
+    assert result["stdoutTruncated"] is True
+    assert len(result["stdout"].encode("utf-8")) <= SKILL_STREAM_TRUNCATE_BYTES
+
+
 def test_execute_skill_script_truncates_output(tmp_path, monkeypatch) -> None:
     _demo_config(tmp_path, monkeypatch)
     result = asyncio.run(
         execute_skill_script(
+            project_id=_PROJECT,
             skill_name="demo-skill",
             script="scripts/noisy.py",
         ),
@@ -517,11 +712,19 @@ def test_execute_skill_script_refuses_unavailable_skill(
     )
     with pytest.raises(SkillExecutionError, match="unavailable"):
         asyncio.run(
-            execute_skill_script(skill_name="ghost", script="scripts/x.py"),
+            execute_skill_script(
+                project_id=_PROJECT,
+                skill_name="ghost",
+                script="scripts/x.py",
+            ),
         )
     with pytest.raises(SkillExecutionError, match="not configured"):
         asyncio.run(
-            execute_skill_script(skill_name="nope", script="scripts/x.py"),
+            execute_skill_script(
+                project_id=_PROJECT,
+                skill_name="nope",
+                script="scripts/x.py",
+            ),
         )
 
 
@@ -530,10 +733,15 @@ def test_skill_file_read_write_and_artifact_resolution(
     monkeypatch,
 ) -> None:
     _demo_config(tmp_path, monkeypatch)
-    read = read_skill_file(skill_name="demo-skill", path="SKILL.md")
+    read = read_skill_file(
+        project_id=_PROJECT,
+        skill_name="demo-skill",
+        path="SKILL.md",
+    )
     assert read["ok"] is True
     assert "Demo Skill" in read["content"]
     written = write_skill_file(
+        project_id=_PROJECT,
         skill_name="demo-skill",
         path="notes/PLAN.md",
         content="# plan",
@@ -541,21 +749,28 @@ def test_skill_file_read_write_and_artifact_resolution(
     assert written["ok"] is True
     with pytest.raises(SkillExecutionError):
         write_skill_file(
+            project_id=_PROJECT,
             skill_name="demo-skill",
             path="../escape.md",
             content="x",
         )
     result = asyncio.run(
         execute_skill_script(
+            project_id=_PROJECT,
             skill_name="demo-skill",
             script="scripts/artifact.py",
         ),
     )
     assert "dist/output.mp4" in result["changedFiles"]
     artifact = resolve_skill_artifact(
+        project_id=_PROJECT,
         skill_name="demo-skill",
         path="dist/output.mp4",
     )
     assert artifact.read_bytes() == b"fake-mp4-bytes"
     with pytest.raises(SkillExecutionError):
-        resolve_skill_artifact(skill_name="demo-skill", path="dist/nope.mp4")
+        resolve_skill_artifact(
+            project_id=_PROJECT,
+            skill_name="demo-skill",
+            path="dist/nope.mp4",
+        )

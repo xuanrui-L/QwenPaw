@@ -1595,19 +1595,29 @@ def _get_skills_config_path() -> Path:
     return Path("/__qwenpaw_creator_unconfigured__/skills_config.json")
 
 
-_SKILLS_CONFIG_CACHE: list | None = None
+_SKILLS_CONFIG_CACHE: tuple[list, list] | None = None
 _SKILLS_CONFIG_CACHE_PATH: Path | None = None
 _SKILLS_CONFIG_CACHE_FINGERPRINT: tuple[int, int, int] | None = None
 
 
-def load_skills_config() -> list:
-    """Return validated ``SkillEntry`` items from skills_config.json.
+def _issue_entry_name(raw: object, index: int) -> str:
+    if isinstance(raw, Mapping):
+        name = str(raw.get("name") or "").strip()
+        if name:
+            return name
+    return f"entry-{index}"
+
+
+def _load_skills_config_document() -> tuple[list, list]:
+    """Return ``(valid SkillEntry items, diagnostics)`` from disk/cache.
 
     Mirrors the ``_get_user_config`` fingerprint cache. The file holds no
     secrets (key-like values are referenced indirectly via env variable
     names), so nothing is decrypted. Any read/parse/validation failure is
-    isolated: broken documents yield an empty list and broken entries are
-    skipped, so session establishment is never affected.
+    isolated — never raised — but stays observable: broken documents and
+    rejected entries are reported as diagnostics
+    ``{"name", "path", "reason"}`` so callers can surface an unavailable
+    skill with a readable reason.
     """
 
     global _SKILLS_CONFIG_CACHE
@@ -1621,31 +1631,80 @@ def load_skills_config() -> list:
         and _SKILLS_CONFIG_CACHE_PATH == path
         and _SKILLS_CONFIG_CACHE_FINGERPRINT == fingerprint
     ):
-        return list(_SKILLS_CONFIG_CACHE)
+        entries, issues = _SKILLS_CONFIG_CACHE
+        return list(entries), list(issues)
     if fingerprint is None:
-        return []
+        return [], []
     entries: list[SkillEntry] = []
+    issues: list[dict] = []
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         raw_items = (
             document.get("skills") if isinstance(document, dict) else None
         )
+        if not isinstance(raw_items, list):
+            issues.append(
+                {
+                    "name": "skills-config",
+                    "path": str(path),
+                    "reason": 'document must be {"skills": [...]}',
+                },
+            )
+            raw_items = []
         seen_names: set[str] = set()
-        for raw in raw_items if isinstance(raw_items, list) else []:
+        for index, raw in enumerate(raw_items):
             try:
                 entry = SkillEntry.model_validate(raw)
-            except Exception:
+            except Exception as exc:
+                issues.append(
+                    {
+                        "name": _issue_entry_name(raw, index),
+                        "path": str(
+                            raw.get("path", "")
+                            if isinstance(raw, Mapping)
+                            else "",
+                        ),
+                        "reason": f"schema validation failed: {exc}"[:400],
+                    },
+                )
                 continue
             if entry.name in seen_names:
+                issues.append(
+                    {
+                        "name": entry.name,
+                        "path": entry.path,
+                        "reason": "duplicate skill name; first entry wins",
+                    },
+                )
                 continue
             seen_names.add(entry.name)
             entries.append(entry)
-    except Exception:
-        return []
-    _SKILLS_CONFIG_CACHE = entries
+    except Exception as exc:
+        return [], [
+            {
+                "name": "skills-config",
+                "path": str(path),
+                "reason": f"document parse failed: {exc}"[:400],
+            },
+        ]
+    _SKILLS_CONFIG_CACHE = (entries, issues)
     _SKILLS_CONFIG_CACHE_PATH = path
     _SKILLS_CONFIG_CACHE_FINGERPRINT = fingerprint
-    return list(entries)
+    return list(entries), list(issues)
+
+
+def load_skills_config() -> list:
+    """Return the validated ``SkillEntry`` items from skills_config.json."""
+
+    entries, _issues = _load_skills_config_document()
+    return entries
+
+
+def load_skills_config_issues() -> list:
+    """Return diagnostics for configuration entries that were rejected."""
+
+    _entries, issues = _load_skills_config_document()
+    return issues
 
 
 def _clear_skills_config_cache():

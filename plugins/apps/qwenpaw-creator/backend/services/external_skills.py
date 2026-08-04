@@ -11,8 +11,9 @@ establishment and the existing Creator pipeline are unaffected.
 
 Skills are exposed skill-style, not agent-style: a bounded context block is
 injected into the main Agent system prompt and scripts run through the
-``run_skill_script`` sandbox tool (workspace copy under
-``<CREATOR_DATA_ROOT>/skills-runtime/<name>/``). No subagent role is added.
+``run_skill_script`` sandbox tool (per-Project workspace copy under
+``<CREATOR_DATA_ROOT>/skills-runtime/<project_id>/<name>/``). No subagent
+role is added.
 """
 
 from __future__ import annotations
@@ -23,11 +24,13 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import time
 from typing import Any
+from uuid import uuid4
 
-from models.config import load_skills_config
+from models.config import load_skills_config, load_skills_config_issues
 from schemas.skills import SkillEntry, SkillRequirement, SkillRequirementKind
 from services.observability import trace_event
 from services.storage_root import require_creator_data_root
@@ -64,6 +67,9 @@ EXTERNAL_SKILL_TOOL_NAMES = frozenset(
 _SANDBOX_IGNORE_NAMES = {".git", "node_modules", "__pycache__"}
 _FRONT_MATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _NODE_VERSION = re.compile(r"v?(\d+)")
+_PROJECT_ID_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_STREAM_READ_CHUNK_BYTES = 64 * 1024
+PROVENANCE_FILENAME = "UPSTREAM_PROVENANCE.md"
 
 # Minimal base env for skill subprocesses; entry.env names are forwarded on
 # top as an explicit allowlist (controlled parameter passing to an external
@@ -123,20 +129,37 @@ def parse_skill_md(text: str) -> dict[str, Any]:
 
 
 def _probe_requirement(requirement: SkillRequirement) -> str | None:
-    """Return a readable failure reason, or None when satisfied."""
+    """Return a readable failure reason, or None when satisfied.
+
+    Failure reasons carry an install hint because npx/uvx only resolve
+    package dependencies inside scripts and never install system-level
+    binaries or runtimes on the user's behalf.
+    """
 
     if requirement.kind is SkillRequirementKind.BINARY:
         if shutil.which(requirement.value) is None:
-            return f"required binary not found on PATH: {requirement.value}"
+            return (
+                f"required binary not found on PATH: {requirement.value}; "
+                f"install it manually (e.g. via a system package manager) "
+                f"— npx/uvx will not install system binaries"
+            )
         return None
     if requirement.kind is SkillRequirementKind.ENV:
         if not os.environ.get(requirement.value, "").strip():
-            return f"required env variable is not set: {requirement.value}"
+            return (
+                f"required env variable is not set: {requirement.value}; "
+                f"export it in the Creator server environment before "
+                f"enabling this skill"
+            )
         return None
     if requirement.kind is SkillRequirementKind.NODE_MIN:
         node = shutil.which("node")
         if node is None:
-            return "required binary not found on PATH: node"
+            return (
+                "required binary not found on PATH: node; install "
+                f"Node.js >= {requirement.value} manually — npx/uvx will "
+                "not install the Node runtime itself"
+            )
         try:
             probe = subprocess.run(
                 [node, "--version"],
@@ -151,7 +174,11 @@ def _probe_requirement(requirement: SkillRequirement) -> str | None:
             return f"node --version probe failed: {type(exc).__name__}"
         minimum = int(str(requirement.value).lstrip("v").split(".", 1)[0])
         if major < minimum:
-            return f"node major version {major} is below required {minimum}"
+            return (
+                f"node major version {major} is below required {minimum}; "
+                f"upgrade Node.js manually — npx/uvx will not upgrade the "
+                f"Node runtime itself"
+            )
         return None
     return f"unknown requirement kind: {requirement.kind}"
 
@@ -192,17 +219,46 @@ def _load_one(entry: SkillEntry) -> LoadedSkill:
         return unavailable(f"skill load failed: {type(exc).__name__}: {exc}")
 
 
+def _issue_placeholder(issue: dict) -> LoadedSkill:
+    """Surface one rejected configuration entry as an unavailable skill."""
+
+    entry = SkillEntry.model_construct(
+        name=str(issue.get("name") or "invalid-entry"),
+        path=str(issue.get("path") or ""),
+        enabled=True,
+        description=None,
+        env=[],
+        requirements=[],
+    )
+    return LoadedSkill(
+        entry=entry,
+        status="unavailable",
+        reason=f"invalid configuration entry: {issue.get('reason')}",
+        skill_md="",
+        root=Path(str(issue.get("path") or "")),
+    )
+
+
 _LOAD_CACHE: tuple[float, tuple[str, ...], list[LoadedSkill]] | None = None
 _LOAD_CACHE_TTL_SECONDS = 30.0
 
 
 def load_skills() -> list[LoadedSkill]:
-    """Load every enabled configured skill; never raises."""
+    """Load every enabled configured skill; never raises.
+
+    Rejected configuration entries (schema failures, duplicate names, a
+    broken document) stay observable as ``unavailable`` placeholders with
+    a readable reason instead of being silently dropped.
+    """
 
     global _LOAD_CACHE
     try:
         entries = [item for item in load_skills_config() if item.enabled]
-        signature = tuple(entry.model_dump_json() for entry in entries)
+        issues = load_skills_config_issues()
+        signature = (
+            *(entry.model_dump_json() for entry in entries),
+            *(str(sorted(issue.items())) for issue in issues),
+        )
         now = time.monotonic()
         if (
             _LOAD_CACHE is not None
@@ -211,6 +267,7 @@ def load_skills() -> list[LoadedSkill]:
         ):
             return list(_LOAD_CACHE[2])
         loaded = [_load_one(entry) for entry in entries]
+        loaded.extend(_issue_placeholder(issue) for issue in issues)
         for skill in loaded:
             if not skill.available:
                 logger.warning(
@@ -331,19 +388,109 @@ def _require_available(name: str) -> LoadedSkill:
     return skill
 
 
-def skill_runtime_root(skill: LoadedSkill, *, create: bool = True) -> Path:
-    """Working copy under the Creator data root; seeded on first use."""
+def _require_project_id(project_id: str) -> str:
+    value = (project_id or "").strip()
+    if not value or not _PROJECT_ID_SAFE.fullmatch(value):
+        raise SkillExecutionError(f"invalid project id: {project_id!r}")
+    return value
+
+
+def _find_upstream_file(start: Path, prefixes: tuple[str, ...]) -> Path | None:
+    """Locate the nearest LICENSE/NOTICE walking up from the skill root."""
+
+    current = start
+    for _ in range(6):
+        try:
+            for child in sorted(current.iterdir()):
+                if child.is_file() and child.name.upper().startswith(prefixes):
+                    return child
+        except OSError:
+            return None
+        if current.parent == current:
+            return None
+        current = current.parent
+    return None
+
+
+def _write_provenance(skill: LoadedSkill, dest: Path) -> None:
+    """Attach upstream attribution to a materialized runtime copy.
+
+    The upstream skill is Apache-2.0 licensed and its LICENSE usually
+    lives above ``skill.root``; copying the skill into the user's data
+    directory therefore must carry the license text and a provenance
+    statement along (Apache-2.0 §4).
+    """
+
+    lines = [
+        "# Upstream provenance",
+        "",
+        f"- Skill name: {skill.entry.name}",
+        f"- Copied from: {skill.root}",
+        "- License: Apache-2.0 (see UPSTREAM_LICENSE in this directory)",
+        "- This directory is a runtime working copy created by QwenPaw",
+        "  Creator; files generated during skill execution are local",
+        "  artifacts, everything else originates from the source above.",
+        "",
+    ]
+    license_file = _find_upstream_file(skill.root, ("LICENSE",))
+    if license_file is not None:
+        shutil.copyfile(license_file, dest / "UPSTREAM_LICENSE")
+    else:
+        lines.append(
+            "- Upstream LICENSE file was not found next to or above the "
+            "skill root; refer to the source repository for the full text.",
+        )
+    notice_file = _find_upstream_file(skill.root, ("NOTICE",))
+    if notice_file is not None:
+        shutil.copyfile(notice_file, dest / "UPSTREAM_NOTICE")
+    (dest / PROVENANCE_FILENAME).write_text(
+        "\n".join(lines),
+        encoding="utf-8",
+    )
+
+
+def _seed_runtime_copy(skill: LoadedSkill, runtime_root: Path) -> None:
+    """Materialize the working copy atomically (concurrency-safe)."""
+
+    runtime_root.parent.mkdir(parents=True, exist_ok=True)
+    staging = runtime_root.parent / f".seed-{runtime_root.name}-{uuid4().hex}"
+    shutil.copytree(
+        skill.root,
+        staging,
+        symlinks=False,
+        ignore=shutil.ignore_patterns(*_SANDBOX_IGNORE_NAMES),
+    )
+    try:
+        _write_provenance(skill, staging)
+        os.rename(staging, runtime_root)
+    except OSError:
+        # A concurrent seeding won the rename; its copy is the authority.
+        shutil.rmtree(staging, ignore_errors=True)
+        if not runtime_root.is_dir():
+            raise
+
+
+def skill_runtime_root(
+    skill: LoadedSkill,
+    *,
+    project_id: str,
+    create: bool = True,
+) -> Path:
+    """Per-Project working copy under the Creator data root.
+
+    Scoping by ``project_id`` keeps concurrent Projects from sharing
+    fixed output paths (e.g. ``dist/output.mp4``) between the execution
+    and import tool turns.
+    """
 
     runtime_root = (
-        require_creator_data_root() / "skills-runtime" / skill.entry.name
+        require_creator_data_root()
+        / "skills-runtime"
+        / _require_project_id(project_id)
+        / skill.entry.name
     )
     if create and not runtime_root.exists():
-        shutil.copytree(
-            skill.root,
-            runtime_root,
-            symlinks=False,
-            ignore=shutil.ignore_patterns(*_SANDBOX_IGNORE_NAMES),
-        )
+        _seed_runtime_copy(skill, runtime_root)
     return runtime_root
 
 
@@ -402,10 +549,41 @@ def _script_command(script_path: Path, args: list[str]) -> list[str]:
     return [interpreter, str(script_path), *args]
 
 
-def _truncate_stream(data: bytes) -> tuple[str, bool]:
-    truncated = len(data) > SKILL_STREAM_TRUNCATE_BYTES
-    view = data[:SKILL_STREAM_TRUNCATE_BYTES]
-    return view.decode("utf-8", errors="replace"), truncated
+async def _drain_stream(
+    reader: asyncio.StreamReader | None,
+    limit: int,
+) -> tuple[bytes, int]:
+    """Drain a pipe keeping only a bounded prefix in memory.
+
+    The full stream is consumed so the child never blocks on a full
+    pipe, but everything beyond ``limit`` is discarded immediately: a
+    noisy skill cannot grow Creator memory past the cap.
+    """
+
+    kept = bytearray()
+    total = 0
+    if reader is None:
+        return b"", 0
+    while True:
+        chunk = await reader.read(_STREAM_READ_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if len(kept) < limit:
+            kept.extend(chunk[: limit - len(kept)])
+    return bytes(kept), total
+
+
+def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+    """Best-effort SIGKILL of the child's whole session."""
+
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _snapshot_files(root: Path) -> dict[str, tuple[int, int]]:
@@ -427,15 +605,20 @@ def _snapshot_files(root: Path) -> dict[str, tuple[int, int]]:
 
 async def execute_skill_script(
     *,
+    project_id: str,
     skill_name: str,
     script: str,
     args: list[str] | None = None,
     timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
-    """Run one skill script inside its sandbox working copy."""
+    """Run one skill script inside the Project's sandbox working copy."""
 
     skill = _require_available(skill_name)
-    runtime_root = await asyncio.to_thread(skill_runtime_root, skill)
+    runtime_root = await asyncio.to_thread(
+        skill_runtime_root,
+        skill,
+        project_id=project_id,
+    )
     script_path = _resolve_inside(runtime_root, script, label="script")
     if not script_path.is_file():
         raise SkillExecutionError(
@@ -461,24 +644,41 @@ async def execute_skill_script(
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
+    # Pipes are drained incrementally with a bounded kept prefix, so a
+    # noisy skill can neither block on a full pipe nor exhaust memory.
+    stdout_task = asyncio.ensure_future(
+        _drain_stream(process.stdout, SKILL_STREAM_TRUNCATE_BYTES),
+    )
+    stderr_task = asyncio.ensure_future(
+        _drain_stream(process.stderr, SKILL_STREAM_TRUNCATE_BYTES),
+    )
     timed_out = False
     try:
-        stdout_data, stderr_data = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout,
-        )
-    except (TimeoutError, asyncio.TimeoutError):
-        timed_out = True
         try:
-            import signal
-
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            process.kill()
-        stdout_data, stderr_data = await process.communicate()
+            await asyncio.wait_for(process.wait(), timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            timed_out = True
+            _kill_process_group(process)
+            await process.wait()
+        stdout_data, stdout_total = await stdout_task
+        stderr_data, stderr_total = await stderr_task
+    except BaseException:
+        # Cancellation (interrupted run, runtime shutdown) or any
+        # unexpected failure must reap the whole child session instead of
+        # leaving it running for up to the full timeout.
+        _kill_process_group(process)
+        stdout_task.cancel()
+        stderr_task.cancel()
+        try:
+            await asyncio.shield(
+                asyncio.wait_for(process.wait(), timeout=5),
+            )
+        except Exception:
+            pass
+        raise
     duration_ms = int((time.monotonic() - started) * 1000)
-    stdout_text, stdout_truncated = _truncate_stream(stdout_data or b"")
-    stderr_text, stderr_truncated = _truncate_stream(stderr_data or b"")
+    stdout_text = stdout_data.decode("utf-8", errors="replace")
+    stderr_text = stderr_data.decode("utf-8", errors="replace")
     after = await asyncio.to_thread(_snapshot_files, runtime_root)
     new_files = sorted(
         path for path, meta in after.items() if before.get(path) != meta
@@ -493,9 +693,9 @@ async def execute_skill_script(
         "timeoutSeconds": timeout,
         "durationMs": duration_ms,
         "stdout": stdout_text,
-        "stdoutTruncated": stdout_truncated,
+        "stdoutTruncated": stdout_total > SKILL_STREAM_TRUNCATE_BYTES,
         "stderr": stderr_text,
-        "stderrTruncated": stderr_truncated,
+        "stderrTruncated": stderr_total > SKILL_STREAM_TRUNCATE_BYTES,
         "workdir": str(runtime_root),
         "changedFiles": new_files[:SKILL_NEW_FILES_LIMIT],
         "changedFilesTruncated": len(new_files) > SKILL_NEW_FILES_LIMIT,
@@ -505,11 +705,20 @@ async def execute_skill_script(
     return result
 
 
-def read_skill_file(*, skill_name: str, path: str) -> dict[str, Any]:
+def read_skill_file(
+    *,
+    project_id: str,
+    skill_name: str,
+    path: str,
+) -> dict[str, Any]:
     """Read one UTF-8 text file from the sandbox (or pristine skill root)."""
 
     skill = _require_available(skill_name)
-    runtime_root = skill_runtime_root(skill, create=False)
+    runtime_root = skill_runtime_root(
+        skill,
+        project_id=project_id,
+        create=False,
+    )
     base = runtime_root if runtime_root.exists() else skill.root
     target = _resolve_inside(base, path, label="path")
     if not target.is_file():
@@ -529,6 +738,7 @@ def read_skill_file(*, skill_name: str, path: str) -> dict[str, Any]:
 
 def write_skill_file(
     *,
+    project_id: str,
     skill_name: str,
     path: str,
     content: str,
@@ -536,7 +746,7 @@ def write_skill_file(
     """Write one UTF-8 text file into the sandbox working copy."""
 
     skill = _require_available(skill_name)
-    runtime_root = skill_runtime_root(skill)
+    runtime_root = skill_runtime_root(skill, project_id=project_id)
     target = _resolve_inside(runtime_root, path, label="path")
     payload = content.encode("utf-8")
     if len(payload) > SKILL_FILE_WRITE_MAX_BYTES:
@@ -553,11 +763,20 @@ def write_skill_file(
     }
 
 
-def resolve_skill_artifact(*, skill_name: str, path: str) -> Path:
+def resolve_skill_artifact(
+    *,
+    project_id: str,
+    skill_name: str,
+    path: str,
+) -> Path:
     """Resolve one sandbox-relative artifact path for asset import."""
 
     skill = _require_available(skill_name)
-    runtime_root = skill_runtime_root(skill, create=False)
+    runtime_root = skill_runtime_root(
+        skill,
+        project_id=project_id,
+        create=False,
+    )
     if not runtime_root.exists():
         raise SkillExecutionError(
             f"skill sandbox has no working copy yet: {skill_name}",
@@ -577,13 +796,16 @@ def _flat_schema(
     properties: dict[str, Any],
     required: list[str],
 ) -> dict[str, Any]:
+    # projectId stays accepted for backwards compatibility but is neither
+    # required nor trusted: the runtime always injects the authoritative
+    # Project identity for skill tools.
     return {
         "type": "object",
         "properties": {
-            "projectId": {"type": "string", "minLength": 1},
+            "projectId": {"type": "string"},
             **properties,
         },
-        "required": ["projectId", *required],
+        "required": list(required),
         "additionalProperties": False,
     }
 
@@ -712,6 +934,7 @@ __all__ = [
     "EXTERNAL_SKILL_TOOL_NAMES",
     "IMPORT_SKILL_ARTIFACTS_TOOL_NAME",
     "LoadedSkill",
+    "PROVENANCE_FILENAME",
     "READ_SKILL_FILE_TOOL_NAME",
     "RUN_SKILL_SCRIPT_TOOL_NAME",
     "SKILL_CONTEXT_MAX_CHARS",

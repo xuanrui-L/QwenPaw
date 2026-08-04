@@ -104,6 +104,7 @@ from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
     ensure_media_call_budget,
 )
+from services.runtime_files.media_probe import MediaProbeError, probe_media
 from services.external_skills import (
     EXTERNAL_SKILL_MAX_MODEL_TURNS,
     EXTERNAL_SKILL_TOOL_NAMES,
@@ -2136,8 +2137,12 @@ class FileCreatorAgentRuntime:
                         # retain their existing recovery behavior.
                         malformed_jq_attempts = 0
                         malformed_jq_fingerprints.clear()
+                    # External skill tools take their Project identity from
+                    # the runtime, never from the model, so a stray projectId
+                    # echo from the model must not kill the whole run.
                     if (
                         call.name != DELEGATE_TOOL_NAME
+                        and call.name not in EXTERNAL_SKILL_TOOL_NAMES
                         and call.arguments.get("projectId") != project_id
                     ):
                         raise FileAgentRuntimeError(
@@ -2855,6 +2860,7 @@ class FileCreatorAgentRuntime:
         if name == READ_SKILL_FILE_TOOL_NAME:
             return await asyncio.to_thread(
                 read_external_skill_file,
+                project_id=project_id,
                 skill_name=skill_name,
                 path=str(arguments.get("path") or ""),
             )
@@ -2866,6 +2872,7 @@ class FileCreatorAgentRuntime:
                 )
             return await asyncio.to_thread(
                 write_external_skill_file,
+                project_id=project_id,
                 skill_name=skill_name,
                 path=str(arguments.get("path") or ""),
                 content=content,
@@ -2925,6 +2932,7 @@ class FileCreatorAgentRuntime:
             timeout_seconds=timeout_raw,
         )
         result = await execute_skill_script(
+            project_id=project_id,
             skill_name=skill_name,
             script=script,
             args=list(raw_args or []),
@@ -3075,6 +3083,34 @@ class FileCreatorAgentRuntime:
             )
         return authorization.authorization_id
 
+    @staticmethod
+    def _validate_skill_artifact_media(
+        local_path: Path,
+        media_kind: str,
+    ) -> str | None:
+        """Verify real decodable content before indexing; return a reason.
+
+        A broken skill must not pollute the Asset Index with arbitrary
+        bytes behind a media extension, so the artifact goes through the
+        existing inspection paths (ffprobe/ffmpeg for audio/video, the
+        reference-image validator for images).
+        """
+
+        try:
+            if media_kind == "image":
+                validate_reference_image_bytes(local_path.read_bytes())
+                return None
+            probe = probe_media(str(local_path))
+            if media_kind == "video" and not (probe.width and probe.height):
+                return "no decodable video stream"
+            if media_kind == "audio" and not probe.has_audio:
+                return "no decodable audio stream"
+            if not probe.duration_seconds:
+                return "media has no positive duration"
+            return None
+        except (ValueError, MediaProbeError) as exc:
+            return f"media validation failed: {exc}"
+
     def _import_skill_artifacts_sync(
         self,
         project_id: str,
@@ -3098,6 +3134,7 @@ class FileCreatorAgentRuntime:
             for raw_path in paths:
                 try:
                     local_path = resolve_skill_artifact(
+                        project_id=project_id,
                         skill_name=skill_name,
                         path=raw_path,
                     )
@@ -3122,6 +3159,13 @@ class FileCreatorAgentRuntime:
                         f"{raw_path}: unsupported media type "
                         f"{media_type or 'unknown'}",
                     )
+                    continue
+                validation_error = self._validate_skill_artifact_media(
+                    local_path,
+                    media_kind,
+                )
+                if validation_error is not None:
+                    issues.append(f"{raw_path}: {validation_error}")
                     continue
                 with local_path.open("rb") as stream:
                     staged = file_store.stage_stream(

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -97,10 +98,21 @@ def _write_demo_skill(root: Path) -> Path:
         "import sys\nprint('hello', *sys.argv[1:])\n",
         encoding="utf-8",
     )
+    # Renders a real (tiny) H.264 clip plus a junk file wearing a media
+    # extension, so import validation has one accept and one reject case.
     (scripts / "artifact.py").write_text(
         "from pathlib import Path\n"
+        "import subprocess\n"
         "Path('dist').mkdir(exist_ok=True)\n"
-        "Path('dist/output.mp4').write_bytes(b'fake-mp4-bytes')\n"
+        "subprocess.run(\n"
+        "    [\n"
+        "        'ffmpeg', '-y', '-v', 'error',\n"
+        "        '-f', 'lavfi', '-i', 'color=c=blue:s=64x64:d=0.4:r=10',\n"
+        "        '-pix_fmt', 'yuv420p', 'dist/output.mp4',\n"
+        "    ],\n"
+        "    check=True,\n"
+        ")\n"
+        "Path('dist/fake.mp4').write_bytes(b'fake-mp4-bytes')\n"
         "print('rendered')\n",
         encoding="utf-8",
     )
@@ -218,7 +230,10 @@ def test_run_skill_script_requires_authorization_then_executes(
                         call_id="skill-1",
                         name="run_skill_script",
                         arguments={
-                            "projectId": PROJECT_ID,
+                            # A wrong projectId echo must not kill the run:
+                            # skill tools take their Project identity from
+                            # the runtime, never from the model.
+                            "projectId": "project-someone-else",
                             "skill": "demo-skill",
                             "script": "scripts/echo.py",
                             "args": ["from-driver"],
@@ -375,9 +390,15 @@ def test_rejected_skill_authorization_blocks_execution(
     failed = next(item for item in payloads if item.get("ok") is False)
     assert "authorization rejected" in failed["error"]["message"]
     # The sandbox never ran: no working copy was seeded for the skill.
-    assert not (tmp_path / "skills-runtime" / "demo-skill").exists()
+    assert not (
+        tmp_path / "skills-runtime" / PROJECT_ID / "demo-skill"
+    ).exists()
 
 
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe are required to render and probe the artifact",
+)
 def test_import_skill_artifacts_registers_project_source(
     tmp_path,
     monkeypatch,
@@ -423,7 +444,11 @@ def test_import_skill_artifacts_registers_project_source(
                         arguments={
                             "projectId": PROJECT_ID,
                             "skill": "demo-skill",
-                            "paths": ["dist/output.mp4", "dist/missing.mp4"],
+                            "paths": [
+                                "dist/output.mp4",
+                                "dist/fake.mp4",
+                                "dist/missing.mp4",
+                            ],
                         },
                     ),
                 ),
@@ -439,6 +464,8 @@ def test_import_skill_artifacts_registers_project_source(
         )
         await driver.start()
         driver.notify(PROJECT_ID)
+        # The scripted turn renders a real ffmpeg clip; allow extra time
+        # on loaded machines.
         await _wait_for(
             lambda: (
                 services.sessions.get_project_session(
@@ -446,6 +473,7 @@ def test_import_skill_artifacts_registers_project_source(
                 ).last_consumed_message_seq
                 == 1
             ),
+            timeout=60.0,
         )
         await driver.wait_until_idle(PROJECT_ID)
         project = services.projects.read(PROJECT_ID)
@@ -467,6 +495,11 @@ def test_import_skill_artifacts_registers_project_source(
     assert import_payload["status"] == "success"
     assert import_payload["imported_count"] == 1
     assert any("missing.mp4" in issue for issue in import_payload["issues"])
+    # Arbitrary bytes behind a media extension are rejected, not indexed.
+    assert any(
+        "fake.mp4" in issue and "validation" in issue
+        for issue in import_payload["issues"]
+    )
     entry = import_payload["imported"][0]
     versions = project.project.assets.source_versions_by_id
     version = versions[entry["source_asset_version_id"]]
@@ -475,4 +508,13 @@ def test_import_skill_artifacts_registers_project_source(
     assert version.metadata["skill"] == "demo-skill"
     indexed = project.project.assets.files_by_id[entry["file_id"]]
     stored = project_root / indexed.relative_uri
-    assert stored.read_bytes() == b"fake-mp4-bytes"
+    # The stored file is the real rendered clip from the per-Project sandbox.
+    sandbox_artifact = (
+        tmp_path
+        / "skills-runtime"
+        / PROJECT_ID
+        / "demo-skill"
+        / "dist"
+        / "output.mp4"
+    )
+    assert stored.read_bytes() == sandbox_artifact.read_bytes()
