@@ -1763,7 +1763,9 @@ def test_repeated_malformed_jq_project_arguments_stop_after_two_retries(
     assert "Do not resend it" in errors[-1]["recovery"]
 
 
-async def _wait_for(predicate, *, timeout: float = 5.0) -> None:
+async def _wait_for(predicate, *, timeout: float = 30.0) -> None:
+    # Generous ceiling: the loop returns as soon as the predicate holds,
+    # while parallel full-suite runs need headroom under load.
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while not predicate():

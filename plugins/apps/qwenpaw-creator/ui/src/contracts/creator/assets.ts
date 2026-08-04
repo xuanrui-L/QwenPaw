@@ -1,5 +1,11 @@
 export type PostIngestAction = "NONE" | "ATTACH_SOURCE";
 
+/** Document facts produced by the backend document reader. */
+export interface DocumentMetadata {
+  format: string;
+  pageCount: number;
+}
+
 export interface AssetIngestAccepted {
   assetId: string;
   taskId: string;

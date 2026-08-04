@@ -22,7 +22,12 @@ class TextOrUrlAssetRequest(StrictModel):
 
 
 CoverageMode = Literal["available", "unavailable", "not_applicable"]
-CoverageProducer = Literal["model_native", "runtime_existing", "user_provided"]
+CoverageProducer = Literal[
+    "model_native",
+    "runtime_existing",
+    "user_provided",
+    "document_reader",
+]
 
 
 class SourceCoverage(StrictModel):
@@ -33,9 +38,19 @@ class SourceCoverage(StrictModel):
     @model_validator(mode="after")
     def validate_availability(self) -> "SourceCoverage":
         if self.mode == "available":
-            if self.producer is None or self.ratio is None or self.ratio <= 0:
+            if self.producer is None:
+                raise ValueError("available coverage requires a producer")
+            if self.ratio is None:
+                # Only the document reader may declare an honestly-unknown
+                # share (row-capped reads with unknowable totals); the
+                # index additionally confines this to document ocr.
+                if self.producer != "document_reader":
+                    raise ValueError(
+                        "available coverage requires a ratio in (0, 1]",
+                    )
+            elif self.ratio <= 0:
                 raise ValueError(
-                    "available coverage requires producer and ratio in (0, 1]",
+                    "available coverage requires a ratio in (0, 1]",
                 )
         elif self.producer is not None or self.ratio is not None:
             raise ValueError(
@@ -55,6 +70,60 @@ class SourceModelRunRef(StrictModel):
         if not value.strip():
             raise ValueError("model run fields cannot be empty")
         return value
+
+
+class DocumentMetadata(StrictModel):
+    """Document facts produced by the document reader (format + pages)."""
+
+    format: str = Field(min_length=1)
+    page_count: int = Field(alias="pageCount", strict=True, ge=1)
+
+
+class DocumentTextCoverage(StrictModel):
+    """Integrity + coverage facts for one read_document indexed text.
+
+    Every field is mandatory: a partially populated textCoverage must be
+    rejected instead of silently degrading the commit-time integrity
+    checks (fail-closed).
+    """
+
+    indexed_chars: int = Field(alias="indexedChars", strict=True, ge=0)
+    extracted_chars: int = Field(alias="extractedChars", strict=True, ge=0)
+    extraction_complete: bool = Field(
+        alias="extractionComplete",
+        strict=True,
+    )
+    extraction_fraction: float | None = Field(
+        alias="extractionFraction",
+        strict=True,
+        gt=0,
+        le=1,
+    )
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_consistency(self) -> "DocumentTextCoverage":
+        if self.indexed_chars > self.extracted_chars:
+            raise ValueError(
+                "indexedChars cannot exceed extractedChars",
+            )
+        if self.extraction_complete:
+            if self.extraction_fraction != 1.0:
+                raise ValueError(
+                    "complete extraction must declare "
+                    "extractionFraction=1.0",
+                )
+        elif (
+            self.extraction_fraction is not None
+            and self.extraction_fraction >= 1.0
+        ):
+            # An incomplete extraction claiming full coverage would let a
+            # truncated document persist ocr ratio=1.0.
+            raise ValueError(
+                "incomplete extraction requires extractionFraction to be "
+                "None or below 1.0",
+            )
+        return self
 
 
 class SourceMediaMetadata(StrictModel):
@@ -83,6 +152,15 @@ class SourceMediaMetadata(StrictModel):
         gt=0,
     )
     channels: int | None = Field(None, strict=True, gt=0)
+    document: DocumentMetadata | None = None
+
+    @model_validator(mode="after")
+    def validate_document_metadata(self) -> "SourceMediaMetadata":
+        if self.document is not None and self.media_kind != "document":
+            raise ValueError(
+                "document metadata is only valid for document media",
+            )
+        return self
 
 
 class SourceEvidenceRecord(StrictModel):
@@ -284,6 +362,7 @@ class SourceAgentModuleResultRefs(StrictModel):
     """Opaque Runtime-owned modality results selected by the outer VLM."""
 
     asr: str | None = None
+    document: str | None = None
 
 
 class SourceAgentIntelligenceInput(StrictModel):
@@ -326,6 +405,27 @@ class SourceIntelligenceIndex(StrictModel):
         if parsed.tzinfo is None:
             raise ValueError("createdAt must include a timezone")
         return value
+
+    @model_validator(mode="after")
+    def validate_unknown_coverage_scope(self) -> "SourceIntelligenceIndex":
+        # An honestly-unknown coverage share is confined to the document
+        # reader's text extraction; every other available coverage keeps
+        # the frozen ratio-in-(0,1] invariant.
+        for modality, coverage in self.coverage.items():
+            if (
+                coverage.mode == "available"
+                and coverage.ratio is None
+                and not (
+                    modality == "ocr"
+                    and coverage.producer == "document_reader"
+                    and self.media.media_kind == "document"
+                )
+            ):
+                raise ValueError(
+                    "an unknown coverage ratio is only allowed for "
+                    "document ocr coverage produced by document_reader",
+                )
+        return self
 
     @model_validator(mode="after")
     def validate_complete_index(self) -> "SourceIntelligenceIndex":
