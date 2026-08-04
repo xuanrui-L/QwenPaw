@@ -593,6 +593,10 @@ macro_id?: str, start_ms?/end_ms?: int, top_k?: int})`；search_* 现场调 embe
      `https://creator-store2.oss-cn-beijing.aliyuncs.com/upload_videos/%E3%80%90KPL%20Summer%202026%E3%80%91%E6%88%90%E9%83%BDAG%E8%B6%85%E7%8E%A9%E4%BC%9A%20vs%20%E9%87%8D%E5%BA%86%E7%8B%BC%E9%98%9F%20%EF%BD%9C%20Game%205%20%EF%BD%9C%20Stage%201%20-%20Jul%2003%20%EF%BD%9C%20%23honorofkings%20%23hokchannel.mp4`
 - 验收口径：UI 导入 → 构建完成 → 会话内「台词检索定位团战片段」（素材 2）与
   「语义检索定位场景转换」（素材 1），**读帧核对**定位时间窗与原片一致。
+  定位精度正式口径（定稿）：产品承诺 **macro 级时间窗**（帧差分切割的场景段，
+  典型 30–300s）命中与原片一致；micro-event 级子窗口来自 VLM 对片段内相对
+  时间的估计，为 best-effort（秒级–十秒级偏移），精确剪辑窗口必须经
+  `memory_guidance` 要求的回原片窄窗核验后使用，不作为检索命中的判定标准。
 
 **已定稿决策**：① 新建独立 `creator_embedding_model` 配置树；② 记忆 UI 仅展示
 「记忆已构建」徽标。
@@ -683,6 +687,33 @@ macro_id?: str, start_ms?/end_ms?: int, top_k?: int})`；search_* 现场调 embe
   ValidationError 配置错误，不再返回超出真实 transport 限制的地板值。
 - 新增单测 3 项（审校门控/审校回退/summary 幂等追加）+ 预算报错断言；
   Creator 后端 746/746。B6 重叠取证见上节修正后的记录。
+
+**CR 整改纪要（2026-08-04 第四轮，针对 A2/A7/B3/B4 遗留）**：
+- **A2 闭环**：`test_source_memory_real.py` 补 macro 数断言（5–50）与双 macro
+  中点帧导出（/tmp/wt6-manual-real-frames/）；增强后真实重跑
+  **1 passed / 12:40**（KPL 前 25 分钟，8 macros），macro_0004（456–663s）
+  中点 559s 帧为开局 01:47 河道遭遇战，窗口与原片一致。
+- **A7 真实替换闭环**：UI 上传变体素材 v2（checksum b7504595…→8b0dfd16…）
+  → 会话重指 ProjectSource → 重新理解发布新 index bcd6f8cd… →
+  memoryRef=None、无 source_memory 投影、UI 徽标仅留在旧 v1 卡（新卡无）、
+  正常阈值下无自动授权/任务；会话内 query_source_memory 原始返回：
+  `{"ok":true,"available":false,"reason":"该素材尚未构建长素材记忆；构建在
+  素材理解完成后自动排队，需要执行授权通过后才会生成。"}`——提示重建✓。
+- **B3 收敛**：专家不再给多套答案，基于 ASR 链给出唯一阵容（AG：关羽/
+  海月/杨戬/朵莉亚/一诺射手；狼队：司空震/后羿/元坦/张飞/第5人）；
+  人工读帧（380s BP 定妝栏、559s 对局头像栏）印证关羽（轩染）/海月（长生）/
+  朵莉亚（大帅）/杨戬（钟意）与司空震（信位）。剩余 2 个不确定项源于
+  既有能力边界：SI 专家无任意时间点抽帧工具（仅关键帧通路），已作为
+  平台限制记录（非 WT6 引入）。
+- **B4**：定位精度正式口径已写入验收标准（macro 级承诺，micro 级
+  best-effort 需回原片窄窗核验），见上方验收口径段。
+- **B6 取证位置澄清**：验收方第二轮引用的是首次（无重叠）运行；真重叠
+  证据在第三轮（本页上方）：构建 attempt 12:40:17Z→12:41:08Z 与猫项目
+  5 次 query_source_memory（12:40:36–12:41:08Z）重叠，持久化于
+  memtask-2abd…/attempts.jsonl 与服务日志。
+- 剩余开放项（平台级，非 WT6 范围）：专家工具参数 projectId 的 LLM 抄写
+  截断偶发（fail-close 拦截正确，需重委派）；建议后续改为运行时上下文
+  绑定；SI 专家缺任意时间点抽帧工具。
 
 ---
 

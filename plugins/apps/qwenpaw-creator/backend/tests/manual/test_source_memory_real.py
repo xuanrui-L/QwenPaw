@@ -138,6 +138,45 @@ def test_real_build_produces_queryable_memory(
     hits = toolkit.search_nodes("scene transition", top_k=5)
     assert hits, "hybrid retrieval must return candidates"
 
+    # The 25-minute trim should segment into a plausible macro count
+    # (MIN/MAX scene bounds are 30s/300s, so 5–50; broadcast material
+    # lands near 8).
+    macros = toolkit.memory.macro_events
+    assert 5 <= len(macros) <= 50, f"unexpected macro count {len(macros)}"
+
+    # Export mid-window frames for two macros so a human reviewer can
+    # check the located windows against the source (kept outside tmp
+    # cleanup on purpose).
+    export_dir = Path("/tmp/wt6-manual-real-frames")
+    export_dir.mkdir(exist_ok=True)
+    ffmpeg = source_memory._require_ffmpeg()
+    for macro in (macros[0], macros[len(macros) // 2]):
+        start, end = macro.time_range
+        midpoint = (float(start) + float(end)) / 2
+        frame = export_dir / f"{macro.macro_id}_{int(midpoint)}s.jpg"
+        subprocess.run(  # nosec B603
+            [
+                ffmpeg,
+                "-y",
+                "-v",
+                "error",
+                "-ss",
+                str(midpoint),
+                "-i",
+                str(trimmed_source),
+                "-frames:v",
+                "1",
+                str(frame),
+            ],
+            check=True,
+            timeout=300,
+        )
+        assert frame.is_file() and frame.stat().st_size > 0
+        print(
+            f"manual check frame: {frame} "
+            f"(macro {macro.macro_id} {start}-{end}s)",
+        )
+
 
 class _FakeServices:
     def __init__(self, root: Path) -> None:
