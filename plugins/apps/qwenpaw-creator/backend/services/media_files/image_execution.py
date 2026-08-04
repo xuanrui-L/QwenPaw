@@ -25,6 +25,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path, PurePosixPath
+import threading
 import re
 import socket
 import stat
@@ -114,6 +115,15 @@ _IMAGE_COMMANDS = frozenset(
     },
 )
 _IMAGE_MODES = ("generate", "edit", "translate")
+
+# Background supervision of accepted (billed) asynchronous provider tasks.
+# A finished result stays retrievable upstream for 24h, so the supervisor
+# keeps polling well past one pass instead of dropping a paid result.
+_RESUME_POLL_INTERVAL_SECONDS = 3.0
+_RESUME_POLL_BUDGET_SECONDS = 60.0
+_RESUME_RETRY_INTERVAL_SECONDS = 15.0
+_RESUME_HORIZON_SECONDS = 6 * 60 * 60.0
+_RESUME_MAX_CONSECUTIVE_FAILURES = 5
 _EDIT_MAX_REFERENCES = 3
 _MAX_IMAGE_BYTES = 64 * 1024 * 1024
 _SAFE_SUFFIX = re.compile(r"^\.[A-Za-z0-9]{1,10}$")
@@ -875,6 +885,10 @@ class FileImageExecutionService:
         *,
         provider: ImageProvider | None = None,
         max_output_bytes: int = _MAX_IMAGE_BYTES,
+        resume_poll_interval_seconds: float = _RESUME_POLL_INTERVAL_SECONDS,
+        resume_poll_budget_seconds: float = _RESUME_POLL_BUDGET_SECONDS,
+        resume_retry_interval_seconds: float = _RESUME_RETRY_INTERVAL_SECONDS,
+        resume_horizon_seconds: float = _RESUME_HORIZON_SECONDS,
     ) -> None:
         if max_output_bytes <= 0:
             raise ValueError("max_output_bytes must be positive")
@@ -882,6 +896,13 @@ class FileImageExecutionService:
         self.provider = provider or ExistingImageProvider()
         self.executions = ProjectExecutionStore(services.root)
         self.max_output_bytes = max_output_bytes
+        self.resume_poll_interval_seconds = resume_poll_interval_seconds
+        self.resume_poll_budget_seconds = resume_poll_budget_seconds
+        self.resume_retry_interval_seconds = resume_retry_interval_seconds
+        self.resume_horizon_seconds = resume_horizon_seconds
+        # Background pollers for accepted (billed) async provider tasks,
+        # keyed by Task id so one Task is never supervised twice.
+        self._resume_jobs: dict[str, asyncio.Task] = {}
 
     async def execute(
         self,
@@ -1098,13 +1119,20 @@ class FileImageExecutionService:
                 replayed=False,
             )
         except (ConflictError, ValidationError, StorageIntegrityError):
-            await self._fail_if_running(
-                project_id,
-                ids,
-                "IMAGE_GENERATION_FAILED",
-            )
+            if not await self._defer_to_resume_supervisor(project_id, ids):
+                await self._fail_if_running(
+                    project_id,
+                    ids,
+                    "IMAGE_GENERATION_FAILED",
+                )
             raise
         except Exception as exc:
+            if await self._defer_to_resume_supervisor(project_id, ids):
+                raise ConflictError(
+                    "图片 provider 任务已被受理（已计费）但本地等待未完成；"
+                    "后台轮询已接管，完成后会自动写回 Asset Index，"
+                    "请勿重复提交",
+                ) from exc
             await self._fail_if_running(
                 project_id,
                 ids,
@@ -1112,6 +1140,168 @@ class FileImageExecutionService:
                 message=str(exc),
             )
             raise
+
+    async def _defer_to_resume_supervisor(
+        self,
+        project_id: str,
+        ids: Mapping[str, str],
+    ) -> bool:
+        """Keep an accepted (billed) async provider task alive and supervised.
+
+        A local failure after the provider accepted the job — a polling
+        budget that expired, a dropped connection — must not terminalize the
+        Task: the paid result still exists upstream, so the Task stays
+        RUNNING and the background poller finishes it.
+        """
+
+        from models.provider_tasks import read_provider_tasks
+
+        try:
+            accepted = [
+                entry
+                for entry in read_provider_tasks(ids["task_id"], project_id)
+                if entry.get("providerTaskId")
+            ]
+        except Exception:  # noqa: BLE001 - bookkeeping must not mask errors
+            return False
+        if not accepted:
+            return False
+        try:
+            task = await asyncio.to_thread(
+                self.executions.get_task,
+                project_id,
+                ids["task_id"],
+            )
+        except RecordNotFoundError:
+            return False
+        if task.status is not TaskStatus.RUNNING or task.result is not None:
+            return False
+        logger.info(
+            "image provider task accepted but not awaited; handing it to the "
+            "background poller | task=%s provider_task=%s",
+            task.task_id,
+            accepted[-1].get("providerTaskId"),
+        )
+        self.schedule_resume(task)
+        return True
+
+    def schedule_resume(self, task: TaskRecord) -> None:
+        """Poll one accepted provider task in the background until terminal."""
+
+        existing = self._resume_jobs.get(task.task_id)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        job = loop.create_task(
+            self._resume_until_terminal(task),
+            name=f"image-translate-resume:{task.task_id}",
+        )
+        self._resume_jobs[task.task_id] = job
+        job.add_done_callback(
+            lambda _job, task_id=task.task_id: self._resume_jobs.pop(
+                task_id,
+                None,
+            ),
+        )
+
+    async def _resume_until_terminal(self, task: TaskRecord) -> None:
+        """Supervise one accepted provider task across transient failures.
+
+        The provider keeps a finished result for 24h, so polling continues
+        well past a single pass; only a definitive provider failure or an
+        exhausted horizon terminalizes the Task.
+        """
+
+        deadline = (
+            asyncio.get_running_loop().time() + self.resume_horizon_seconds
+        )
+        failures = 0
+        while True:
+            try:
+                outcome = await self.resume_provider_task(
+                    task,
+                    poll_interval_seconds=self.resume_poll_interval_seconds,
+                    poll_budget_seconds=self.resume_poll_budget_seconds,
+                )
+                failures = 0
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - retry transient errors
+                failures += 1
+                outcome = "error"
+                logger.warning(
+                    "image provider task resume attempt failed (%d) | "
+                    "task=%s: %s",
+                    failures,
+                    task.task_id,
+                    error,
+                )
+                if failures >= _RESUME_MAX_CONSECUTIVE_FAILURES:
+                    await self._fail_if_running(
+                        task.project_id,
+                        self._ids(
+                            task.project_id,
+                            str(task.idempotency_key or task.task_id),
+                        ),
+                        "IMAGE_RESUME_FAILED",
+                        message=(
+                            "could not finish the accepted image provider "
+                            f"task after {failures} attempts: {error}"
+                        ),
+                    )
+                    return
+            if outcome in {"published", "failed", "unsupported"}:
+                return
+            try:
+                latest = await asyncio.to_thread(
+                    self.executions.get_task,
+                    task.project_id,
+                    task.task_id,
+                )
+            except RecordNotFoundError:
+                return
+            if latest.status not in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+                # Cancelled or terminalized elsewhere; stop supervising.
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                await self._fail_if_running(
+                    task.project_id,
+                    self._ids(
+                        task.project_id,
+                        str(task.idempotency_key or task.task_id),
+                    ),
+                    "IMAGE_RESUME_TIMEOUT",
+                    message=(
+                        "the accepted image provider task did not finish "
+                        f"within {self.resume_horizon_seconds:.0f}s"
+                    ),
+                )
+                return
+            await asyncio.sleep(self.resume_retry_interval_seconds)
+
+    async def drain_resume_jobs(self) -> None:
+        """Await the background resume jobs (used by startup and tests)."""
+
+        while True:
+            jobs = [
+                job for job in self._resume_jobs.values() if not job.done()
+            ]
+            if not jobs:
+                return
+            await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def shutdown(self) -> None:
+        """Cancel background resume jobs; durable state stays resumable."""
+
+        jobs = list(self._resume_jobs.values())
+        self._resume_jobs.clear()
+        for job in jobs:
+            job.cancel()
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
 
     @staticmethod
     def _ids(project_id: str, key: str) -> dict[str, str]:
@@ -1972,6 +2162,47 @@ class FileImageExecutionService:
         )
 
 
+_image_registry_lock = threading.RLock()
+_image_registry: dict[Path, FileImageExecutionService] = {}
+
+
+def file_image_execution_service(
+    services: CreatorFileServices,
+    *,
+    provider: ImageProvider | None = None,
+) -> FileImageExecutionService:
+    """One image worker per data root, so its supervisor jobs are shared.
+
+    Background polling of accepted (billed) provider tasks lives on the
+    instance, so tool calls, HTTP routes and startup recovery must all reach
+    the same object; a caller passing its own provider (tests) gets an
+    unregistered instance instead.
+    """
+
+    if provider is not None:
+        return FileImageExecutionService(services, provider=provider)
+    root = services.root.resolve()
+    with _image_registry_lock:
+        worker = _image_registry.get(root)
+        if worker is None:
+            worker = FileImageExecutionService(services)
+            _image_registry[root] = worker
+        return worker
+
+
+async def shutdown_file_image_execution_services() -> None:
+    """Cancel supervisors; the durable ledger keeps tasks resumable."""
+
+    with _image_registry_lock:
+        workers = list(_image_registry.values())
+        _image_registry.clear()
+    if workers:
+        await asyncio.gather(
+            *(worker.shutdown() for worker in workers),
+            return_exceptions=True,
+        )
+
+
 async def execute_file_image_command(
     services: CreatorFileServices,
     *,
@@ -1985,7 +2216,7 @@ async def execute_file_image_command(
 ) -> FileImageExecutionResult:
     """Small route/tool entry point with an injectable provider for tests."""
 
-    worker = FileImageExecutionService(services, provider=provider)
+    worker = file_image_execution_service(services, provider=provider)
     return await worker.execute(
         project_id=project_id,
         command=command,
@@ -2002,4 +2233,6 @@ __all__ = [
     "FileImageExecutionService",
     "ImageProvider",
     "execute_file_image_command",
+    "file_image_execution_service",
+    "shutdown_file_image_execution_services",
 ]

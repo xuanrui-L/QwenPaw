@@ -890,3 +890,107 @@ def test_authorized_model_matches_the_submitted_model(monkeypatch) -> None:
             ),
         )
         assert authorized == captured["model"], (configured, mode)
+
+
+def test_probed_duration_reaches_the_billing_arguments(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Authorization prices the duration execution will really accept.
+
+    A video_edit input whose version carries no duration_seconds is probed
+    by the execution check; the approval card, scope and cost estimate must
+    read that same probed value instead of the requested durationSeconds.
+    """
+
+    from datetime import UTC, datetime
+
+    from services.media_files.r2v_execution import (
+        effective_video_duration_seconds,
+    )
+    from services.project_files.models import (
+        IndexedFile,
+        Project,
+        SourceAssetVersion,
+    )
+
+    project = Project.new(project_id="p-bill", name="bill")
+    created = datetime.now(UTC)
+    relative = "assets/sources/input.mp4"
+    project.assets.files_by_id["file-bill"] = IndexedFile(
+        file_id="file-bill",
+        kind="source_original",
+        relative_uri=relative,
+        sha256="0" * 64,
+        size_bytes=4096,
+        media_type="video/mp4",
+        created_at=created,
+    )
+    project.assets.source_versions_by_id["v-bill"] = SourceAssetVersion(
+        version_id="v-bill",
+        logical_asset_id="asset-bill",
+        name="input",
+        file_id="file-bill",
+        checksum="0" * 64,
+        media_kind="video",
+        media_type="video/mp4",
+        duration_seconds=None,
+        created_at=created,
+    )
+    media_path = tmp_path / relative
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"bill" * 64)
+
+    class _Probe:
+        duration_seconds = 12.0
+
+    monkeypatch.setattr(
+        "services.runtime_files.media_probe.probe_media",
+        lambda *args, **kwargs: _Probe(),
+    )
+    # The one shared resolver: recorded metadata is absent, so it probes.
+    assert (
+        effective_video_duration_seconds(project, tmp_path, "v-bill") == 12.0
+    )
+
+    class _Projects:
+        def read(self, project_id):
+            class _Snapshot:
+                pass
+
+            snapshot = _Snapshot()
+            snapshot.project = project
+            return snapshot
+
+        def project_root(self, project_id):
+            return tmp_path
+
+    class _Services:
+        projects = _Projects()
+
+    from services.file_agent_runtime.driver import FileCreatorAgentRuntime
+    from services.specialist_tools import SpecialistToolSpec
+
+    spec = SpecialistToolSpec(
+        name="r2v_generation",
+        description="d",
+        roles=frozenset(),
+        parameters={},
+        provider_kind="video",
+    )
+    driver = object.__new__(FileCreatorAgentRuntime)
+    driver.services = _Services()
+    billing = asyncio.run(
+        FileCreatorAgentRuntime._billing_arguments(
+            driver,
+            spec,
+            project_id="p-bill",
+            tool_arguments={
+                "mode": "video_edit",
+                "videoRef": "v-bill",
+                "durationSeconds": 5,
+            },
+        ),
+    )
+    # Priced on the probed input, not on the requested 5 seconds.
+    assert billing["durationSeconds"] == 12

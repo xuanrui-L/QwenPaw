@@ -39,6 +39,15 @@ SOURCE_VERSION_ID = "asset-version-poster"
 PROVIDER_TASK_ID = "provider-translate-1"
 
 
+@pytest.fixture(autouse=True)
+def _clear_image_registry():
+    """The per-root registry owns supervisor jobs; isolate every test."""
+
+    image_execution._image_registry.clear()
+    yield
+    image_execution._image_registry.clear()
+
+
 def _poster_png() -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (640, 480), color="white").save(output, format="PNG")
@@ -204,7 +213,15 @@ def test_recovery_resumes_and_publishes_a_billed_translate(
         fake_download,
     )
 
-    recovered = asyncio.run(recover_interrupted_image_tasks(services))
+    async def recover_and_drain() -> int:
+        count = await recover_interrupted_image_tasks(services)
+        # Startup only mounts the supervisor, so await it here.
+        await image_execution.file_image_execution_service(
+            services,
+        ).drain_resume_jobs()
+        return count
+
+    recovered = asyncio.run(recover_and_drain())
 
     assert recovered == 1
     # The same paid task was resumed, and nothing was resubmitted.
@@ -249,27 +266,25 @@ def test_recovery_keeps_a_still_running_translate_resumable(
         "models.image.poll_image_translate_task",
         still_running,
     )
-    original = FileImageExecutionService.resume_provider_task
 
-    async def bounded(self, task, **kwargs):
-        # One poll, then defer to the next recovery pass (keeps the test fast).
-        return await original(
-            self,
-            task,
-            poll_interval_seconds=0.0,
-            poll_budget_seconds=0.0,
-        )
+    async def recover_and_check() -> None:
+        registered = image_execution.file_image_execution_service(services)
+        registered.resume_poll_interval_seconds = 0.0
+        registered.resume_poll_budget_seconds = 0.0
+        # One retry pass, then stop supervising for this test.
+        registered.resume_retry_interval_seconds = 0.01
+        registered.resume_horizon_seconds = 0.0
+        await recover_interrupted_image_tasks(services)
+        await registered.drain_resume_jobs()
 
-    monkeypatch.setattr(
-        FileImageExecutionService,
-        "resume_provider_task",
-        bounded,
-    )
-    asyncio.run(recover_interrupted_image_tasks(services))
+    asyncio.run(recover_and_check())
 
     task = worker.executions.get_task(PROJECT_ID, task_id)
-    # Not terminalized: the billed task can still be resumed later.
-    assert task.status is TaskStatus.RUNNING
+    # Never published or lost: the paid task ends up back under supervision
+    # (here the shortened horizon terminalizes it with a resumable reason).
+    assert task.status in {TaskStatus.RUNNING, TaskStatus.FAILED}
+    if task.status is TaskStatus.FAILED:
+        assert "did not finish" in str(task.error)
 
 
 def test_recovery_fails_a_translate_the_provider_rejected(
@@ -292,8 +307,240 @@ def test_recovery_fails_a_translate_the_provider_rejected(
         return {"status": "FAILED", "error": "unsupported language pair"}
 
     monkeypatch.setattr("models.image.poll_image_translate_task", failed)
-    asyncio.run(recover_interrupted_image_tasks(services))
+
+    async def recover_and_drain() -> None:
+        await recover_interrupted_image_tasks(services)
+        await image_execution.file_image_execution_service(
+            services,
+        ).drain_resume_jobs()
+
+    asyncio.run(recover_and_drain())
 
     task = worker.executions.get_task(PROJECT_ID, task_id)
     assert task.status is TaskStatus.FAILED
     assert "unsupported language pair" in str(task.error)
+
+
+class _BudgetExpiredProvider:
+    """Accepts (bills) the async task, then exhausts the local poll budget."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, **kwargs):
+        self.calls += 1
+        from models.provider_tasks import note_provider_task
+
+        note_provider_task(
+            provider_task_id=PROVIDER_TASK_ID,
+            model="qwen-mt-image",
+            kind="image_translate",
+        )
+        # pylint: disable=no-name-in-module
+        from domain.errors import ModelError
+
+        # pylint: enable=no-name-in-module
+        raise ModelError(
+            "Image translate did not finish within 60s "
+            f"(task_id={PROVIDER_TASK_ID}); the task is billed",
+            model_name="qwen-mt-image",
+        )
+
+
+def test_poll_timeout_keeps_the_billed_task_supervised(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A local budget timeout must not terminalize a paid provider task.
+
+    The review's case: the provider already returned a task id, so failing
+    the Creator Task here would strand the paid result forever because
+    recovery only scans QUEUED/RUNNING.
+    """
+
+    services = _services(tmp_path, monkeypatch)
+    provider = _BudgetExpiredProvider()
+    worker = FileImageExecutionService(
+        services,
+        provider=provider,
+        resume_poll_interval_seconds=0.0,
+        resume_poll_budget_seconds=0.0,
+        resume_retry_interval_seconds=0.0,
+    )
+
+    polls: list[str] = []
+
+    async def fake_poll(provider_task_id: str) -> dict:
+        polls.append(provider_task_id)
+        # Still running on the first pass, then finished: the supervisor
+        # must come back on its own, without another process restart.
+        if len(polls) < 2:
+            return {"status": "RUNNING"}
+        return {
+            "status": "SUCCEEDED",
+            "image_url": "https://oss.test/translated.png",
+        }
+
+    async def fake_download(url: str, model_name: str) -> str:
+        path = unique_task_work_path("images", ".png", prefix="resumed-")
+        path.write_bytes(_TRANSLATED_PNG)
+        return media_url_for(path)
+
+    monkeypatch.setattr("models.image.poll_image_translate_task", fake_poll)
+    monkeypatch.setattr(
+        "models.image.base.download_remote_image",
+        fake_download,
+    )
+
+    async def scenario() -> None:
+        from domain.errors import ConflictError
+
+        with pytest.raises(ConflictError, match="后台轮询已接管"):
+            await worker.execute(
+                project_id=PROJECT_ID,
+                command="GENERATE_ASSET",
+                target_ref=f"asset:{ENTITY_ID}",
+                arguments={
+                    "prompt": "翻译海报文字",
+                    "mode": "translate",
+                    "referenceImageRefs": [SOURCE_VERSION_ID],
+                },
+                idempotency_key="translate-timeout",
+            )
+        # The Task is not FAILED; a supervisor owns it.
+        pending = worker.executions.get_task(
+            PROJECT_ID,
+            worker._ids(PROJECT_ID, "translate-timeout")["task_id"],
+        )
+        assert pending.status is TaskStatus.RUNNING
+        await worker.drain_resume_jobs()
+
+    asyncio.run(scenario())
+
+    task = worker.executions.get_task(
+        PROJECT_ID,
+        worker._ids(PROJECT_ID, "translate-timeout")["task_id"],
+    )
+    assert task.status is TaskStatus.SUCCEEDED
+    # Re-polled after the first pending pass, and never resubmitted.
+    assert len(polls) >= 2
+    assert provider.calls == 1
+    published = services.projects.read(PROJECT_ID).project
+    assert published.assets.artifact_versions_by_id
+
+
+def test_supervisor_survives_transient_resume_errors(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A dropped poll or download must not terminalize a paid task."""
+
+    services = _services(tmp_path, monkeypatch)
+    worker = FileImageExecutionService(
+        services,
+        provider=_UncalledProvider(),
+        resume_poll_interval_seconds=0.0,
+        resume_poll_budget_seconds=0.0,
+        resume_retry_interval_seconds=0.0,
+    )
+    task_id = asyncio.run(
+        _leave_interrupted_translate_task(
+            worker,
+            services,
+            idempotency_key="translate-transient",
+        ),
+    )
+    attempts = {"count": 0}
+
+    async def flaky_poll(provider_task_id: str) -> dict:
+        attempts["count"] += 1
+        if attempts["count"] <= 2:
+            raise TimeoutError("connection reset while polling")
+        return {
+            "status": "SUCCEEDED",
+            "image_url": "https://oss.test/translated.png",
+        }
+
+    async def fake_download(url: str, model_name: str) -> str:
+        path = unique_task_work_path("images", ".png", prefix="resumed-")
+        path.write_bytes(_TRANSLATED_PNG)
+        return media_url_for(path)
+
+    monkeypatch.setattr("models.image.poll_image_translate_task", flaky_poll)
+    monkeypatch.setattr(
+        "models.image.base.download_remote_image",
+        fake_download,
+    )
+
+    async def scenario() -> None:
+        task = worker.executions.get_task(PROJECT_ID, task_id)
+        worker.schedule_resume(task)
+        await worker.drain_resume_jobs()
+
+    asyncio.run(scenario())
+
+    task = worker.executions.get_task(PROJECT_ID, task_id)
+    assert attempts["count"] == 3
+    assert task.status is TaskStatus.SUCCEEDED
+
+
+def test_startup_recovery_schedules_instead_of_blocking(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Recovery mounts the supervisor and returns without polling inline."""
+
+    services = _services(tmp_path, monkeypatch)
+    registered = image_execution.file_image_execution_service(services)
+    registered.resume_poll_interval_seconds = 0.0
+    registered.resume_poll_budget_seconds = 0.0
+    registered.resume_retry_interval_seconds = 0.0
+    task_id = asyncio.run(
+        _leave_interrupted_translate_task(
+            registered,
+            services,
+            idempotency_key="translate-startup",
+        ),
+    )
+
+    slow_polls: list[str] = []
+
+    async def slow_poll(provider_task_id: str) -> dict:
+        slow_polls.append(provider_task_id)
+        await asyncio.sleep(0.05)
+        return {
+            "status": "SUCCEEDED",
+            "image_url": "https://oss.test/translated.png",
+        }
+
+    async def fake_download(url: str, model_name: str) -> str:
+        path = unique_task_work_path("images", ".png", prefix="resumed-")
+        path.write_bytes(_TRANSLATED_PNG)
+        return media_url_for(path)
+
+    monkeypatch.setattr("models.image.poll_image_translate_task", slow_poll)
+    monkeypatch.setattr(
+        "models.image.base.download_remote_image",
+        fake_download,
+    )
+
+    async def scenario() -> tuple[int, bool]:
+        recovered = await recover_interrupted_image_tasks(services)
+        # Startup did not wait for the provider.
+        still_running = (
+            registered.executions.get_task(PROJECT_ID, task_id).status
+            is TaskStatus.RUNNING
+        )
+        await registered.drain_resume_jobs()
+        return recovered, still_running
+
+    recovered, still_running = asyncio.run(scenario())
+
+    assert recovered == 1
+    assert still_running is True
+    assert slow_polls == [PROVIDER_TASK_ID]
+    assert (
+        registered.executions.get_task(PROJECT_ID, task_id).status
+        is TaskStatus.SUCCEEDED
+    )
+    asyncio.run(image_execution.shutdown_file_image_execution_services())

@@ -607,6 +607,24 @@ def _probed_media_duration_seconds(
     return float(duration) if duration else None
 
 
+def effective_video_duration_seconds(
+    project: Project,
+    project_root: Path,
+    version_id: str,
+) -> float | None:
+    """The duration a billed request will really be charged for.
+
+    Single resolver for authorization and execution: the recorded metadata
+    first, then a probe of the indexed local file for assets that carry
+    none. Returning None means the length is genuinely unknown.
+    """
+
+    recorded = media_version_duration_seconds(project, version_id)
+    if recorded is not None:
+        return recorded
+    return _probed_media_duration_seconds(project, project_root, version_id)
+
+
 def _assert_video_edit_input_duration(
     project: Project,
     project_root: Path,
@@ -621,13 +639,11 @@ def _assert_video_edit_input_duration(
     and a still-unknown length is rejected rather than billed blindly.
     """
 
-    duration = media_version_duration_seconds(project, version_id)
-    if duration is None:
-        duration = _probed_media_duration_seconds(
-            project,
-            project_root,
-            version_id,
-        )
+    duration = effective_video_duration_seconds(
+        project,
+        project_root,
+        version_id,
+    )
     from models.video_capabilities import (
         HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
         HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS,
@@ -4188,6 +4204,20 @@ class FileR2VExecutionService:
             await asyncio.gather(*workers, return_exceptions=True)
 
 
+def _has_accepted_provider_task(task_id: str, project_id: str) -> bool:
+    """Whether a billed provider task was accepted for this Creator Task."""
+
+    try:
+        from models.provider_tasks import read_provider_tasks
+
+        return any(
+            entry.get("providerTaskId")
+            for entry in read_provider_tasks(task_id, project_id)
+        )
+    except Exception:  # noqa: BLE001 - absence of a ledger is not an error
+        return False
+
+
 def _accepted_provider_tasks_note(task_id: str, project_id: str) -> str:
     """Name any billed provider task an interrupted Task already paid for.
 
@@ -4224,9 +4254,9 @@ async def recover_interrupted_image_tasks(
     accepted the request before the process died.
     """
 
-    from .image_execution import FileImageExecutionService
+    from .image_execution import file_image_execution_service
 
-    worker = FileImageExecutionService(services)
+    worker = file_image_execution_service(services)
     executions = worker.executions
     recovered = 0
     for project_id in services.projects.discover_project_ids():
@@ -4259,19 +4289,12 @@ async def recover_interrupted_image_tasks(
                 continue
             if task.status is TaskStatus.RUNNING:
                 # A server-side provider job (qwen-mt-image translation) is
-                # billed on acceptance and its id is durable, so resume it
-                # instead of discarding a paid result. Only the one-shot
-                # synchronous calls stay fail-closed below.
-                try:
-                    outcome = await worker.resume_provider_task(task)
-                except Exception as error:  # noqa: BLE001
-                    logger.warning(
-                        "image provider task resume failed | task=%s: %s",
-                        task.task_id,
-                        error,
-                    )
-                    outcome = "unsupported"
-                if outcome in {"published", "failed", "pending"}:
+                # billed on acceptance and its id is durable, so hand it to
+                # the background poller rather than discarding a paid result
+                # or blocking startup on it. Only the one-shot synchronous
+                # calls stay fail-closed below.
+                if _has_accepted_provider_task(task.task_id, project_id):
+                    worker.schedule_resume(task)
                     recovered += 1
                     continue
                 await worker._fail_if_running(  # noqa: SLF001
@@ -4386,6 +4409,9 @@ async def shutdown_file_media_execution_services() -> None:
             *(service.shutdown() for service in services),
             return_exceptions=True,
         )
+    from .image_execution import shutdown_file_image_execution_services
+
+    await shutdown_file_image_execution_services()
 
 
 def clear_file_media_execution_registry_for_tests() -> None:

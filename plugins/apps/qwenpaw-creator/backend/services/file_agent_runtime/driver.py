@@ -3344,7 +3344,7 @@ class FileCreatorAgentRuntime:
             HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
         )
         from services.media_files.r2v_execution import (
-            media_version_duration_seconds,
+            effective_video_duration_seconds,
         )
 
         try:
@@ -3352,8 +3352,12 @@ class FileCreatorAgentRuntime:
                 self.services.projects.read,
                 project_id,
             )
-            duration = media_version_duration_seconds(
+            # Same resolver execution uses, so a probed-only asset is priced
+            # and authorized on the duration it will actually be billed for.
+            duration = await asyncio.to_thread(
+                effective_video_duration_seconds,
                 snapshot.project,
+                self.services.projects.project_root(project_id),
                 video_ref,
             )
         except Exception:  # noqa: BLE001 - estimation must never block
