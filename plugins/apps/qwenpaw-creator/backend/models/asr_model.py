@@ -155,6 +155,7 @@ def _extract_audio_from_video(
         capture_output=True,
         text=True,
         timeout=600,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -535,6 +536,7 @@ def _silence_cut_points(
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -720,6 +722,7 @@ def _extract_chunk_window(
         capture_output=True,
         text=True,
         timeout=600,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -976,6 +979,7 @@ def _extract_audio_chunks(source: Path, directory: Path) -> list[Path]:
         capture_output=True,
         text=True,
         timeout=600,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RuntimeError(
