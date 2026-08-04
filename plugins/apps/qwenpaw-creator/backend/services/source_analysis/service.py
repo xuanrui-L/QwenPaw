@@ -858,7 +858,7 @@ class SourceMediaAnalysisService:
             source,
             version,
             indexed,
-            _local_path,
+            local_path,
             _source_url,
             media,
         ) = await asyncio.to_thread(
@@ -1296,14 +1296,60 @@ class SourceMediaAnalysisService:
             created_at,
             False,
         )
+        memory_build = await self._schedule_memory_build(
+            project_id=project_id,
+            index=index,
+            local_path=local_path,
+            context=context,
+            command_id=command_id,
+        )
         return {
             "ok": True,
             "status": "SUCCEEDED",
             "summary": index.summary,
             "shotCount": len(index.shots),
             "semanticEntryCount": len(index.semantic_entries),
+            **({"memoryBuild": memory_build} if memory_build else {}),
             **published,
         }
+
+    async def _schedule_memory_build(
+        self,
+        *,
+        project_id: str,
+        index: SourceIntelligenceIndex,
+        local_path: Path | None,
+        context: SourceAgentToolContext,
+        command_id: str,
+    ) -> dict[str, Any] | None:
+        """Queue the long-source memory build; never blocks the index."""
+
+        from services.media.source_memory import source_memory_service
+
+        try:
+            run = await asyncio.to_thread(
+                self.executions.get_run,
+                project_id,
+                context.specialist_run_id,
+            )
+            return await source_memory_service(
+                self.services,
+            ).maybe_schedule_build(
+                project_id=project_id,
+                index=index,
+                local_path=local_path,
+                run_id=run.run_id,
+                round_id=run.round_id,
+                caused_by_request_id=command_id,
+            )
+        except Exception as error:  # pylint: disable=broad-except
+            import logging
+
+            logging.getLogger("creator.source_memory").warning(
+                "memory build scheduling failed (non-fatal): %s",
+                error,
+            )
+            return None
 
     async def dispatch(
         self,
@@ -1553,6 +1599,24 @@ class SourceMediaAnalysisService:
             raise StorageIntegrityError(
                 "Source Intelligence 文件与 project.json 索引不一致",
             )
+        # Hydrate the read-only memory pointer AFTER the canonical byte
+        # check: memory artifacts live outside the immutable index file and
+        # invalidate themselves on sourceChecksum change.
+        from services.media.source_memory import (
+            load_memory_ref,
+            merge_projection_semantics,
+        )
+
+        project_root = self.services.projects.project_root(project_id)
+        index.memory_ref = load_memory_ref(
+            project_root,
+            index.id,
+            index.source_checksum,
+        )
+        # Fold the P3 Root/SuperEvent drafts into the semantic surface
+        # (producer=source_memory) so downstream consumers review them
+        # alongside the outer-VLM entries.
+        merge_projection_semantics(project_root, index)
         return index
 
     def query(

@@ -46,6 +46,7 @@ export interface TaskView {
     | "asset_ingest"
     | "asset_import"
     | "source_intelligence"
+    | "source_memory_build"
     | "image_generation"
     | "r2v_generation"
     | "ai_edit_plan"

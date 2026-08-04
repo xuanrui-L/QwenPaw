@@ -2416,6 +2416,8 @@ class FileCreatorAgentRuntime:
             project_id=project_id,
             project=snapshot.project,
             workspace_schema=tools.schema_prompt.text,
+            project_root=self.services.projects.project_root(project_id),
+            target_refs=delegated.target_refs,
         )
         record_metadata: dict[str, Any] = {"parentActionId": parent_action_id}
         if request.source == "review_rejection_feedback":

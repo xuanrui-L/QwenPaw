@@ -25,6 +25,7 @@ from domain.errors import ConflictError, StorageIntegrityError, ValidationError
 from models import config as model_config
 from schemas.models import (
     AsrConfig,
+    EmbeddingConfig,
     ExecutionAuthorizationConfig,
     GroundingConfig,
     LlmConfig,
@@ -90,7 +91,16 @@ router = APIRouter(
 )
 
 
-_SECTIONS = ("llm", "vlm", "grounding", "asr", "image", "video", "oss")
+_SECTIONS = (
+    "llm",
+    "vlm",
+    "grounding",
+    "asr",
+    "embedding",
+    "image",
+    "video",
+    "oss",
+)
 _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
     "llm": {
         "base_url": ("TEXT_BASE_URL",),
@@ -137,6 +147,11 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
         "base_url": ("ASR_BASE_URL",),
         "api_key": ("ASR_API_KEY",),
         "model_name": ("ASR_MODEL_NAME",),
+    },
+    "embedding": {
+        "base_url": ("EMBEDDING_BASE_URL",),
+        "api_key": ("EMBEDDING_API_KEY",),
+        "model_name": ("EMBEDDING_MODEL_NAME",),
     },
     "image": {
         "base_url": (
@@ -212,6 +227,13 @@ def _defaults() -> ModelConfigData:
             base_url="https://dashscope.aliyuncs.com/api/v1",
             protocol="DashScope Fun-ASR",
             reuse_llm_key=True,
+        ),
+        embedding=EmbeddingConfig(
+            enabled=False,
+            model_name="qwen3-vl-embedding",
+            base_url="https://dashscope.aliyuncs.com/api/v1",
+            protocol="DashScope（百炼）",
+            reuse_vlm_key=True,
         ),
         image=ModelConfigItem(
             enabled=False,
@@ -630,6 +652,7 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
         "llm": model_config.CREATOR_TEXT_CONFIG_TOOL,
         "vlm": model_config.CREATOR_VLM_CONFIG_TOOL,
         "asr": model_config.CREATOR_ASR_CONFIG_TOOL,
+        "embedding": model_config.CREATOR_EMBEDDING_CONFIG_TOOL,
         "image": model_config.CREATOR_IMAGE_CONFIG_TOOL,
         "video": model_config.CREATOR_VIDEO_CONFIG_TOOL,
     }
@@ -805,6 +828,11 @@ async def _validate_section_connectivity(
     api_key = item.get("api_key", "")
     if section == "asr" and item.get("reuse_llm_key") and not api_key:
         api_key = config.get("llm", {}).get("api_key", "")
+    if section == "embedding" and item.get("reuse_vlm_key") and not api_key:
+        api_key = config.get("vlm", {}).get("api_key", "") or config.get(
+            "llm",
+            {},
+        ).get("api_key", "")
     if not item.get("base_url") or not api_key:
         raise ValidationError(f"{section}: 缺少 Base URL 或 API Key，请检查配置")
 
@@ -999,6 +1027,7 @@ async def patch_model_config_section(
         "vlm",
         "grounding",
         "asr",
+        "embedding",
         "image",
         "video",
         "oss",
@@ -1115,6 +1144,22 @@ def _probe_payload(
         if provider == "whisper":
             return _openai_model_probe(body, headers)
         return _dashscope_policy_probe(body, headers)
+    if body.type == "embedding":
+        # Minimal real embedding request: the one-token spend is the only
+        # reliable probe on the native multimodal-embedding endpoint.
+        suffix = (
+            "/services/embeddings/multimodal-embedding/multimodal-embedding"
+        )
+        endpoint = base if base.endswith(suffix) else f"{base}{suffix}"
+        return (
+            endpoint,
+            headers,
+            {
+                "model": body.model_name,
+                "input": {"contents": [{"text": "ping"}]},
+                "parameters": {"dimension": 2560},
+            },
+        )
     if body.type in {"llm", "vlm"}:
         content: Any = "Reply with pong only."
         if body.type == "vlm":
@@ -1322,7 +1367,15 @@ async def get_real_api_key(section: str) -> dict[str, str]:
     API key to run connection tests, because it only stores the mask
     "__CREATOR_SECRET__".
     """
-    valid_sections = {"llm", "vlm", "asr", "image", "video", "grounding"}
+    valid_sections = {
+        "llm",
+        "vlm",
+        "asr",
+        "embedding",
+        "image",
+        "video",
+        "grounding",
+    }
     if section not in valid_sections:
         raise ValidationError(
             f"不支持的配置项: {section}，必须是 {', '.join(valid_sections)} 之一",
