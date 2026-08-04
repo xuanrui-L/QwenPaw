@@ -56,6 +56,7 @@ from services.project_files.agent_tools import (
     AgentProjectToolContext,
     AgentProjectTools,
     JQ_PROJECT_TOOL_NAME,
+    PATCH_PROJECT_TOOL_NAME,
     READ_PROJECT_TOOL_NAME,
     agent_project_tool_manifest,
 )
@@ -159,7 +160,7 @@ MAX_PERSISTED_RAW_TOOL_ARGUMENT_BYTES = 256 * 1024
 _PROJECT_SNAPSHOT_RESULT_KIND = "project_snapshot"
 _PROJECT_CHANGE_RECEIPT_RESULT_KIND = "project_change_receipt"
 _PROJECT_SNAPSHOT_TOOL_NAMES = frozenset(
-    {READ_PROJECT_TOOL_NAME, JQ_PROJECT_TOOL_NAME},
+    {READ_PROJECT_TOOL_NAME, JQ_PROJECT_TOOL_NAME, PATCH_PROJECT_TOOL_NAME},
 )
 
 
@@ -1964,7 +1965,7 @@ class FileCreatorAgentRuntime:
                         tool_name=call.name,
                         result=result,
                     )
-                    if call.name == "jq_project":
+                    if call.name in {"jq_project", "patch_project"}:
                         await self._workspace_changed(
                             project_id,
                             session_id,
@@ -2975,7 +2976,7 @@ class FileCreatorAgentRuntime:
                         and review_id not in review_ids
                     ):
                         review_ids.append(review_id)
-                    if call.name == "jq_project":
+                    if call.name in {"jq_project", "patch_project"}:
                         await self._workspace_changed(
                             project_id,
                             session_id,
