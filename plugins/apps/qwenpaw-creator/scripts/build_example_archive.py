@@ -91,6 +91,7 @@ _PRUNED_SUBTREES = (
     Path("observability/traces"),
     Path("runtime/transactions"),
     Path("runtime/change-rounds"),
+    Path("runtime/asset-cache"),
     Path("runtime/reviews"),
     Path("runtime/task-work"),
     Path("runtime/temp"),
@@ -99,6 +100,63 @@ _PRUNED_SUBTREES = (
 
 # Only plain-text runtime/document formats take part in the id rewrite.
 _TEXT_SUFFIXES = {".json", ".jsonl", ".txt", ".md"}
+
+
+def _prune_superseded_artifacts(staged: Path) -> int:
+    """Keep only each artifact slot's selected version and payload.
+
+    Example projects are read-only showcases. Historical render revisions make
+    video-edit projects hundreds of megabytes larger without changing what the
+    user sees when the example opens.
+    """
+
+    project_path = staged / "project.json"
+    document = json.loads(project_path.read_text(encoding="utf-8"))
+    assets = document.get("assets", {})
+    slots = assets.get("artifact_slots_by_id", {})
+    versions = assets.get("artifact_versions_by_id", {})
+    files = assets.get("files_by_id", {})
+    selected_ids = {
+        slot.get("selected_version_id")
+        for slot in slots.values()
+        if isinstance(slot, dict) and slot.get("selected_version_id")
+    }
+    if not selected_ids:
+        return 0
+
+    selected_files = {
+        version.get("file_id")
+        for version_id, version in versions.items()
+        if version_id in selected_ids and isinstance(version, dict)
+    }
+    removed_paths: list[Path] = []
+    for file_id, record in list(files.items()):
+        if not isinstance(record, dict) or record.get("kind") != "artifact_payload":
+            continue
+        if file_id in selected_files:
+            continue
+        relative_uri = record.get("relative_uri")
+        if isinstance(relative_uri, str):
+            removed_paths.append(staged / relative_uri)
+        del files[file_id]
+
+    assets["artifact_versions_by_id"] = {
+        version_id: version
+        for version_id, version in versions.items()
+        if version_id in selected_ids
+    }
+    for slot in slots.values():
+        if not isinstance(slot, dict):
+            continue
+        selected_id = slot.get("selected_version_id")
+        slot["version_ids"] = [selected_id] if selected_id else []
+    project_path.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    for path in removed_paths:
+        path.unlink(missing_ok=True)
+    return len(removed_paths)
 
 
 def example_project_id(example_id: str) -> str:
@@ -140,6 +198,32 @@ def _rewrite_text_files(staged: Path, old: str, new: str) -> int:
         path.write_text(text.replace(old, new), encoding="utf-8")
         rewritten += 1
     return rewritten
+
+
+def _convert_text_files_to_simplified(staged: Path) -> int:
+    """Convert user-visible text documents without touching binary media."""
+
+    try:
+        from opencc import OpenCC
+    except ImportError as exc:
+        raise SystemExit(
+            "--simplified requires opencc-python-reimplemented",
+        ) from exc
+    converter = OpenCC("t2s")
+    converted = 0
+    for path in sorted(staged.rglob("*")):
+        if not path.is_file() or path.suffix not in _TEXT_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        simplified = converter.convert(text)
+        if simplified == text:
+            continue
+        path.write_text(simplified, encoding="utf-8")
+        converted += 1
+    return converted
 
 
 def _repoint_state_etag(staged: Path, old_etag: str, new_etag: str) -> None:
@@ -223,6 +307,11 @@ def build(args: argparse.Namespace) -> Path:
         staged = Path(workdir) / new_id
         print(f"copying {source} -> {staged} (pruned)")
         _copy_pruned(source, staged)
+        removed = _prune_superseded_artifacts(staged)
+        print(f"removed {removed} superseded artifact payloads")
+        if args.simplified:
+            converted = _convert_text_files_to_simplified(staged)
+            print(f"converted {converted} text files to simplified Chinese")
         rewritten = _rewrite_text_files(staged, old_id, new_id)
         print(f"rewrote {old_id} -> {new_id} in {rewritten} text files")
 
@@ -273,6 +362,11 @@ def main() -> None:
         "--examples-dir",
         default=str(BACKEND_ROOT / "examples"),
         help="output directory (default: backend/examples)",
+    )
+    parser.add_argument(
+        "--simplified",
+        action="store_true",
+        help="convert text documents in the packaged example to Simplified Chinese",
     )
     build(parser.parse_args())
 

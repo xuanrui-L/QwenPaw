@@ -6,6 +6,13 @@
       "description": "做一个10秒左右的温馨短剧《雨天送伞》，从剧本、分镜到成片的完整示例。",
       "projectId": "project-af8e135859635dd9ad007dfd88434ba9",
       "archive": "rainy-day-umbrella.zip"
+    },
+    {
+      "id": "cat-perspective-0803",
+      "title": "小猫视角",
+      "description": "从小猫的第一视角剪辑日常探索高光，呈现它眼中的世界。",
+      "projectId": "project-10ee251e37e45f64aaf560b1f5b5b09f",
+      "archive": "cat-perspective-0803.zip"
     }
   ]
 }
