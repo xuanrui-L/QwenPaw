@@ -11,6 +11,7 @@ import pytest
 
 from domain.errors import ValidationError
 from services.document_reader import (
+    MAX_INDEXED_TEXT_CHARS,
     MAX_TEXT_EXCERPT_CHARS,
     is_supported_document,
     read_document,
@@ -121,8 +122,8 @@ def test_pdf_page_range_selection(tmp_path) -> None:
         "request more via the pages parameter" in n for n in result.notes
     )
     # Full text is decoupled from the rendered page subset: pages outside
-    # the range still contribute their text layer to full_text.
-    assert "Creator Doc Page 3: storyboard beats" in result.full_text
+    # the range still contribute their text layer to indexed_text.
+    assert "Creator Doc Page 3: storyboard beats" in result.indexed_text
     assert "Creator Doc Page 3: storyboard beats" not in result.text_excerpt
 
 
@@ -137,7 +138,8 @@ def test_pdf_full_text_covers_pages_beyond_render_cap(tmp_path) -> None:
     assert result.pages_rendered == tuple(range(1, 21))
     marker = "Creator Doc Page 21: storyboard beats"
     assert marker not in result.text_excerpt
-    assert marker in result.full_text
+    assert marker in result.indexed_text
+    assert result.extracted_chars == len(result.indexed_text)
 
 
 def test_csv_full_text_covers_rows_beyond_display_cap(tmp_path) -> None:
@@ -152,7 +154,26 @@ def test_csv_full_text_covers_rows_beyond_display_cap(tmp_path) -> None:
 
     assert result.format == "csv"
     assert "final-unique-scene" not in result.text_excerpt
-    assert "final-unique-scene" in result.full_text
+    assert "final-unique-scene" in result.indexed_text
+
+
+def test_indexed_text_bound_is_honest_about_truncation(tmp_path) -> None:
+    # Indexing is intentionally bounded (the semantic index is a
+    # line-oriented canonical file): oversized text is cut at the bound
+    # and the coverage numbers report it instead of claiming full text.
+    source = tmp_path / "huge.txt"
+    filler = ("剧情推进。" * 100 + "\n") * 4200
+    marker = "末尾唯一标记：星光不灭。"
+    source.write_text(filler + marker + "\n", encoding="utf-8")
+    result = _read(source, tmp_path / "pages")
+
+    assert result.extracted_chars > MAX_INDEXED_TEXT_CHARS
+    assert len(result.indexed_text) == MAX_INDEXED_TEXT_CHARS
+    assert marker not in result.indexed_text
+    assert any("indexing bound" in note for note in result.notes)
+    assert all(
+        "still enters the semantic index" not in note for note in result.notes
+    )
 
 
 def test_csv_renders_table_image_and_markdown(tmp_path) -> None:

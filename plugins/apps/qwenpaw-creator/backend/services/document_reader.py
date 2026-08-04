@@ -37,9 +37,11 @@ DocumentBudget = Literal["small", "normal", "large"]
 # Bounded text payload returned to the model alongside page images.
 MAX_TEXT_EXCERPT_CHARS = 20_000
 
-# Bound for the full extracted text kept for deterministic indexing; far
-# larger than the model excerpt but still finite for disk/index hygiene.
-MAX_FULL_TEXT_CHARS = 500_000
+# Character bound for the indexed extracted text. The semantic index is a
+# line-oriented canonical workspace file, so indexing is intentionally
+# bounded rather than unlimited; the ratio of indexed to extracted text is
+# reported as coverage instead of claiming completeness.
+MAX_INDEXED_TEXT_CHARS = 2_000_000
 
 # Web/HTML rendering needs Playwright; keep it off unless explicitly enabled.
 DOC_READER_WEB_ENABLED_ENV = "CREATOR_DOC_READER_WEB_ENABLED"
@@ -54,7 +56,12 @@ class DocumentReadResult:
     pages_rendered: tuple[int, ...]
     page_images: tuple[Path, ...]
     text_excerpt: str
-    full_text: str
+    # Bounded extracted text destined for the semantic index (NOT claimed
+    # to be complete): extraction is capped per renderer (pages/rows) and
+    # indexing at MAX_INDEXED_TEXT_CHARS. extracted_chars carries the
+    # pre-cap size so callers can persist the coverage ratio.
+    indexed_text: str
+    extracted_chars: int
     notes: tuple[str, ...]
 
 
@@ -193,19 +200,22 @@ def _read_document_sync(
     text_excerpt = "\n\n".join(text_parts)
     # Renderers emitting dedicated full_text blocks decouple indexing from
     # the rendered/display scope; others index exactly what was rendered.
-    full_text = (
+    indexed_text = (
         "\n\n".join(full_text_parts) if full_text_parts else text_excerpt
     )
-    if len(full_text) > MAX_FULL_TEXT_CHARS:
-        full_text = full_text[:MAX_FULL_TEXT_CHARS]
+    extracted_chars = len(indexed_text)
+    if extracted_chars > MAX_INDEXED_TEXT_CHARS:
+        indexed_text = indexed_text[:MAX_INDEXED_TEXT_CHARS]
         notes.append(
-            f"full text truncated to {MAX_FULL_TEXT_CHARS} characters",
+            "extracted text exceeds the indexing bound: indexed "
+            f"{MAX_INDEXED_TEXT_CHARS} of {extracted_chars} characters "
+            "(see text coverage)",
         )
     if len(text_excerpt) > MAX_TEXT_EXCERPT_CHARS:
         text_excerpt = text_excerpt[:MAX_TEXT_EXCERPT_CHARS]
         notes.append(
             f"text excerpt truncated to {MAX_TEXT_EXCERPT_CHARS} characters"
-            "; the full extracted text still enters the semantic index",
+            "; the extracted text is indexed separately (see text coverage)",
         )
 
     return DocumentReadResult(
@@ -214,7 +224,8 @@ def _read_document_sync(
         pages_rendered=tuple(pages_rendered),
         page_images=tuple(page_images),
         text_excerpt=text_excerpt,
-        full_text=full_text,
+        indexed_text=indexed_text,
+        extracted_chars=extracted_chars,
         notes=tuple(notes),
     )
 
@@ -242,7 +253,7 @@ __all__ = [
     "DOC_READER_WEB_ENABLED_ENV",
     "DocumentBudget",
     "DocumentReadResult",
-    "MAX_FULL_TEXT_CHARS",
+    "MAX_INDEXED_TEXT_CHARS",
     "MAX_TEXT_EXCERPT_CHARS",
     "SUPPORTED_DOCUMENT_EXTENSIONS",
     "is_supported_document",

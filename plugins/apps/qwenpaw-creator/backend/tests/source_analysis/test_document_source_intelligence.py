@@ -665,10 +665,14 @@ def test_full_document_text_reaches_index_beyond_excerpt(tmp_path) -> None:
 
     read_result, committed = asyncio.run(scenario())
 
-    # The tool result stays bounded for model context, while the full text
-    # is persisted separately and fully indexed.
+    # The tool result stays bounded for model context, while the indexed
+    # text is persisted separately with honest coverage numbers.
     assert len(read_result["textExcerpt"]) <= 20_000
-    assert read_result["fullTextChars"] > 25_000
+    assert read_result["textCoverage"]["extractedChars"] > 25_000
+    assert (
+        read_result["textCoverage"]["indexedChars"]
+        == read_result["textCoverage"]["extractedChars"]
+    )
     assert marker not in read_result["textExcerpt"]
     assert committed["status"] == "SUCCEEDED"
     index = service.load("project-1", asset_id)
@@ -676,6 +680,11 @@ def test_full_document_text_reaches_index_beyond_excerpt(tmp_path) -> None:
         item for item in index.semantic_entries if "document-text" in item.tags
     ]
     assert any(marker in item.text for item in doc_text)
+    # Text-extraction coverage is persisted on the ocr modality.
+    ocr = index.coverage["ocr"]
+    assert ocr.mode == "available"
+    assert ocr.producer == "document_reader"
+    assert ocr.ratio == 1.0
 
 
 def test_srt_text_only_commit_rejects_page_image_intervals(tmp_path) -> None:

@@ -666,9 +666,9 @@ class SourceMediaAnalysisService:
             document_page_ref(version.checksum, page)
             for page in rendered.pages_rendered
         ]
-        # Persist the full extracted text as a Runtime file: the bounded
-        # excerpt below is for model context only, while commit indexes
-        # the complete text deterministically.
+        # Persist the bounded indexed text as a Runtime file: the excerpt
+        # below is for model context only, while commit chunks this file
+        # into the semantic index (coverage reflects any truncation).
         full_text_path = document_full_text_path(
             project_root,
             version.checksum,
@@ -677,7 +677,7 @@ class SourceMediaAnalysisService:
         full_text_path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(
             full_text_path.write_text,
-            rendered.full_text,
+            rendered.indexed_text,
             "utf-8",
         )
         return {
@@ -691,7 +691,10 @@ class SourceMediaAnalysisService:
             "pagesRendered": list(rendered.pages_rendered),
             "pageImageRefs": page_refs,
             "textExcerpt": rendered.text_excerpt,
-            "fullTextChars": len(rendered.full_text),
+            "textCoverage": {
+                "indexedChars": len(rendered.indexed_text),
+                "extractedChars": rendered.extracted_chars,
+            },
             "notes": list(rendered.notes),
         }
 
@@ -922,6 +925,7 @@ class SourceMediaAnalysisService:
         document_ratio: float | None = None
         document_run: SourceModelRunRef | None = None
         document_full_text = ""
+        document_text_ratio: float | None = None
         document_ref = agent_payload.module_result_refs.document
         if is_document:
             if not document_ref:
@@ -989,7 +993,7 @@ class SourceMediaAnalysisService:
                     f"恰好一条 [0,1000)；期望 {expected_intervals}，"
                     f"实际 {actual_intervals}",
                 )
-            # Prefer the persisted full text (the tool-result excerpt is
+            # Prefer the persisted indexed text (the tool-result excerpt is
             # bounded for model context); fall back for legacy results.
             full_text_path = document_full_text_path(
                 self.services.projects.project_root(project_id),
@@ -1003,6 +1007,22 @@ class SourceMediaAnalysisService:
                 )
             else:
                 document_full_text = str(module.get("textExcerpt") or "")
+            # Text-extraction coverage is persisted honestly: indexing is
+            # bounded, so the ratio records how much extracted text made
+            # it into the index (legacy results imply full coverage).
+            text_coverage = module.get("textCoverage")
+            if isinstance(text_coverage, Mapping):
+                extracted_chars = int(
+                    text_coverage.get("extractedChars") or 0,
+                )
+                indexed_chars = int(text_coverage.get("indexedChars") or 0)
+            else:
+                extracted_chars = indexed_chars = len(document_full_text)
+            if extracted_chars > 0:
+                document_text_ratio = min(
+                    1.0,
+                    indexed_chars / extracted_chars,
+                )
             document_run = SourceModelRunRef(
                 id=f"docreader-{uuid5(NAMESPACE_URL, document_ref).hex}",
                 provider="document_reader",
@@ -1056,11 +1076,19 @@ class SourceMediaAnalysisService:
                 "ratio": 1.0 if asr_available else None,
             },
             "ocr": {
-                "mode": "unavailable"
-                if visual_available
-                else "not_applicable",
-                "producer": None,
-                "ratio": None,
+                "mode": (
+                    "available"
+                    if is_document and document_text_ratio is not None
+                    else "unavailable"
+                    if visual_available
+                    else "not_applicable"
+                ),
+                "producer": (
+                    "document_reader"
+                    if is_document and document_text_ratio is not None
+                    else None
+                ),
+                "ratio": document_text_ratio if is_document else None,
             },
             "audio": {
                 "mode": "unavailable" if asr_applicable else "not_applicable",
