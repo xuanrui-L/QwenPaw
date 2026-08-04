@@ -533,11 +533,15 @@ def _memory_ref() -> SourceMemoryRef:
     )
 
 
-def _write_fixture_projection(directory: Path) -> None:
-    projection = SourceMemoryProjection(
-        indexId="intel-1",
-        summary="memory digest of the whole video",
-        semanticEntries=[
+def _write_fixture_projection(
+    directory: Path,
+    *,
+    reviewed: bool = True,
+) -> None:
+    payload = {
+        "indexId": "intel-1",
+        "summary": "memory digest of the whole video",
+        "semanticEntries": [
             {
                 "text": "Super event one: rooftop exploration",
                 "tags": ["memory"],
@@ -546,7 +550,14 @@ def _write_fixture_projection(directory: Path) -> None:
                 "confidence": 0.6,
             },
         ],
-    )
+    }
+    if reviewed:
+        payload["review"] = {
+            "status": "approved",
+            "model": "qwen3.7-plus",
+            "reviewedAt": "2026-08-01T01:30:00Z",
+        }
+    projection = SourceMemoryProjection.model_validate(payload)
     (directory / "projection.json").write_text(
         json.dumps(
             projection.model_dump(mode="json", by_alias=True),
@@ -574,13 +585,15 @@ def test_clip_budget_derives_from_transport_limit(monkeypatch) -> None:
         source_memory._clip_size_budget_bytes()
         == source_memory.CLIP_SIZE_BUDGET_CAP_BYTES - 64 * 1024
     )
-    # Tiny limits floor at a workable minimum.
+    # Limits too small for any workable clip are a configuration error
+    # instead of a budget that transport would later refuse.
     monkeypatch.setattr(
         source_memory.model_config,
         "get_vlm_max_inline_bytes",
         lambda: 100 * 1024,
     )
-    assert source_memory._clip_size_budget_bytes() == 256 * 1024
+    with pytest.raises(ValidationError):
+        source_memory._clip_size_budget_bytes()
 
 
 def test_index_transcript_reuses_available_empty_asr(
@@ -814,3 +827,92 @@ def test_merge_projection_semantics_noop_without_memory_ref(
         entry.model_run_id != source_memory.SOURCE_MEMORY_RUN_ID
         for entry in index.semantic_entries
     )
+
+
+def test_merge_projection_requires_approved_review(tmp_path) -> None:
+    # Fail-close: unreviewed drafts never reach the index surfaces.
+    project_root = tmp_path / "projects" / "project-1"
+    directory = _write_fixture_memory(project_root, "intel-1")
+    _write_fixture_projection(directory, reviewed=False)
+    index = _index(memory_ref=_memory_ref())
+    before = len(index.semantic_entries)
+    summary_before = index.summary
+    source_memory.merge_projection_semantics(project_root, index)
+    assert len(index.semantic_entries) == before
+    assert index.summary == summary_before
+
+
+def test_merge_projection_appends_reviewed_summary(tmp_path) -> None:
+    project_root = tmp_path / "projects" / "project-1"
+    directory = _write_fixture_memory(project_root, "intel-1")
+    _write_fixture_projection(directory)
+    index = _index(memory_ref=_memory_ref())
+    source_memory.merge_projection_semantics(project_root, index)
+    assert "[长素材记忆摘要 · 已审校]" in index.summary
+    assert "memory digest of the whole video" in index.summary
+    # Idempotent: the marker is appended once even across repeat loads.
+    source_memory.merge_projection_semantics(project_root, index)
+    assert index.summary.count("[长素材记忆摘要 · 已审校]") == 1
+
+
+def test_review_projection_approves_or_fails_closed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service = _service(tmp_path)
+    draft = SourceMemoryProjection(
+        indexId="intel-1",
+        summary="draft digest",
+        semanticEntries=[
+            {
+                "text": "Super event one",
+                "tags": ["memory"],
+                "startMs": 0,
+                "endMs": 60000,
+                "confidence": 0.6,
+            },
+        ],
+    )
+
+    async def good_chat(_content, **_kwargs):
+        return json.dumps(
+            {
+                "summary": "reviewed digest",
+                "semanticEntries": [
+                    {
+                        "text": "Super event one (reviewed)",
+                        "tags": ["memory"],
+                        "startMs": 0,
+                        "endMs": 60000,
+                        "confidence": 0.7,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "chat_completion",
+        good_chat,
+    )
+    monkeypatch.setattr(
+        source_memory.model_config,
+        "get_vlm_model_name",
+        lambda: "qwen3.7-plus",
+    )
+    reviewed = asyncio.run(service._review_projection(draft))
+    assert reviewed.review is not None
+    assert reviewed.review.status == "approved"
+    assert reviewed.summary == "reviewed digest"
+
+    async def bad_chat(_content, **_kwargs):
+        raise RuntimeError("vlm unavailable")
+
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "chat_completion",
+        bad_chat,
+    )
+    fallback = asyncio.run(service._review_projection(draft))
+    assert fallback.review is None
+    assert fallback.summary == "draft digest"

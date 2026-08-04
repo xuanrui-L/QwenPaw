@@ -111,6 +111,7 @@ CLIP_ENCODE_LADDER = (
 CLIP_SIZE_BUDGET_CAP_BYTES = 6 * 1024 * 1024
 _BASE64_EXPANSION = 4.0 / 3.0
 _CLIP_BUDGET_HEADROOM_BYTES = 64 * 1024
+_CLIP_MIN_WORKABLE_BUDGET_BYTES = 256 * 1024
 
 
 def _clip_size_budget_bytes() -> int:
@@ -119,7 +120,9 @@ def _clip_size_budget_bytes() -> int:
     The inline pre-flight check in the VLM backend enforces
     ``get_vlm_max_inline_bytes`` on the raw file, while the gateway sees
     the Base64-expanded request body; budget against both, capped at a
-    conservative default.
+    conservative default. Configurations too small for any workable
+    segment clip are rejected up front instead of producing a budget
+    that transport would later refuse.
     """
     inline_limit = model_config.get_vlm_max_inline_bytes()
     base64_safe = int(inline_limit / _BASE64_EXPANSION)
@@ -131,12 +134,36 @@ def _clip_size_budget_bytes() -> int:
         )
         - _CLIP_BUDGET_HEADROOM_BYTES
     )
-    return max(budget, 256 * 1024)
+    if budget < _CLIP_MIN_WORKABLE_BUDGET_BYTES:
+        raise ValidationError(
+            "VLM max_inline_bytes is too small for source-memory clips: "
+            f"derived budget {budget} bytes is below the workable minimum "
+            f"{_CLIP_MIN_WORKABLE_BUDGET_BYTES} bytes",
+        )
+    return budget
 
 
 SUBGRAPH_MAX_TOKENS = 16384
 AGGREGATION_MAX_TOKENS = 8192
 SUBGRAPH_RETRIES = 2
+PROJECTION_REVIEW_MAX_TOKENS = 4096
+
+# Outer-VLM review of the P3 projection drafts. Not an agent prompt
+# (no placeholder whitelist involvement) — a Creator-side constant like
+# the vendored pipeline prompts.
+PROJECTION_REVIEW_PROMPT = """You are the Source Intelligence reviewer.
+Below are draft catalog entries projected from a hierarchical memory of
+a long video: one overall summary plus per-super-event semantic entries
+with millisecond time windows.
+
+Review the drafts: fix wording, drop entries that are vague, redundant
+or internally inconsistent, and keep time windows unchanged. Do not
+invent new facts. Return ONLY a JSON object:
+{"summary": str, "semanticEntries": [{"text": str, "tags": [str],
+"startMs": int, "endMs": int, "confidence": float}]}
+
+Drafts:
+"""
 
 MEMORY_DIR_NAME = "memory"
 GRAPH_FILENAME = "graph_memory.json"
@@ -179,11 +206,20 @@ class SourceMemorySemanticDraft(StrictModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
-class SourceMemoryProjection(StrictModel):
-    """Draft summary/semantics projected from the P3 hierarchy.
+class ProjectionReview(StrictModel):
+    """Outer-VLM review verdict attached to a projection."""
 
-    The outer Source Intelligence VLM reviews these drafts; they never
-    overwrite the published immutable index directly.
+    status: Literal["approved"] = "approved"
+    model: str = Field(min_length=1)
+    reviewed_at: str = Field(alias="reviewedAt", min_length=1)
+
+
+class SourceMemoryProjection(StrictModel):
+    """Summary/semantics projected from the P3 hierarchy.
+
+    Drafts are reviewed by the outer Source Intelligence VLM during the
+    build; only reviewed projections are folded into the standard index
+    surfaces. The immutable index file is never rewritten.
     """
 
     producer: Literal["source_memory"] = "source_memory"
@@ -192,6 +228,7 @@ class SourceMemoryProjection(StrictModel):
     semantic_entries: list[SourceMemorySemanticDraft] = Field(
         alias="semanticEntries",
     )
+    review: ProjectionReview | None = None
 
 
 # ── Artifact locations & hydration ──────────────────────────────────────────
@@ -245,12 +282,13 @@ SOURCE_MEMORY_RUN_ID = "source_memory"
 
 
 def merge_projection_semantics(project_root: Path, index: Any) -> None:
-    """Fold the P3 projection drafts into a loaded index, in memory.
+    """Fold the reviewed P3 projection into a loaded index, in memory.
 
-    Root/SuperEvent digests enter the standard ``semanticEntries``
-    surface with ``modelRunId`` carrying the ``source_memory`` producer
-    marker; the immutable index file on disk stays untouched (same
-    hydrated-only contract as ``memoryRef``).
+    Only projections carrying an approved outer-VLM review are merged
+    (fail-close for unreviewed drafts). The Root digest is appended to
+    ``index.summary`` and the SuperEvent entries join ``semanticEntries``
+    with ``modelRunId=source_memory``; the immutable index file on disk
+    stays untouched (same hydrated-only contract as ``memoryRef``).
     """
     if index.memory_ref is None:
         return
@@ -264,6 +302,8 @@ def merge_projection_semantics(project_root: Path, index: Any) -> None:
         )
         projection = SourceMemoryProjection.model_validate(raw)
     except (OSError, json.JSONDecodeError, ValueError):
+        return
+    if projection.review is None or projection.review.status != "approved":
         return
     if not isinstance(meta, Mapping):
         return
@@ -281,6 +321,11 @@ def merge_projection_semantics(project_root: Path, index: Any) -> None:
         "createdAt": built_at,
     }
     duration_ms = index.media.duration_ms
+    # Reviewed Root digest enters the standard summary surface with a
+    # clear origin marker (and also as an anchor semantic entry).
+    marker = "[长素材记忆摘要 · 已审校]"
+    if marker not in index.summary:
+        index.summary = f"{index.summary}\n\n{marker} {projection.summary}"
     drafts: list[SemanticIndexEntry] = [
         SemanticIndexEntry(
             id="sem-mem-summary",
@@ -912,7 +957,10 @@ class SourceMemoryService:
 
     # -- build pipeline ------------------------------------------------------
 
-    async def _execute(self, job: SourceMemoryBuildJob) -> None:
+    async def _execute(  # pylint: disable=too-many-statements
+        self,
+        job: SourceMemoryBuildJob,
+    ) -> None:
         task = await asyncio.to_thread(
             self.executions.get_task,
             job.project_id,
@@ -1095,12 +1143,22 @@ class SourceMemoryService:
         index_obj = EmbeddingIndex()
         index_obj.build(nodes, vectors)
 
+        # Outer-VLM review of the projection drafts (the WT6 contract:
+        # drafts enter the index surfaces only after review).
+        draft_projection = SourceMemoryProjection(
+            indexId=job.index_id,
+            summary=self._projection_summary(memory),
+            semanticEntries=self._projection_entries(memory),
+        )
+        projection = await self._review_projection(draft_projection)
+
         output = await asyncio.to_thread(
             self._persist_artifacts_sync,
             job,
             memory,
             index_obj,
             len(nodes),
+            projection,
         )
         await asyncio.to_thread(
             self.executions.append_attempt,
@@ -1237,12 +1295,63 @@ class SourceMemoryService:
                 return
             apply_subgraph_payload(macro, payload)
 
+    async def _review_projection(
+        self,
+        draft: SourceMemoryProjection,
+    ) -> SourceMemoryProjection:
+        """Outer-VLM review of the projection drafts.
+
+        Returns the reviewed projection (``review`` set). On any failure
+        the drafts are kept without a review verdict and are therefore
+        never merged into the index surfaces (fail-close).
+        """
+        payload = {
+            "summary": draft.summary,
+            "semanticEntries": [
+                entry.model_dump(mode="json", by_alias=True)
+                for entry in draft.semantic_entries
+            ],
+        }
+        prompt = PROJECTION_REVIEW_PROMPT + json.dumps(
+            payload,
+            ensure_ascii=False,
+        )
+        try:
+            response = await vlm_model.chat_completion(
+                [{"type": "text", "text": prompt}],
+                temperature=0.2,
+                max_tokens=PROJECTION_REVIEW_MAX_TOKENS,
+            )
+            candidate = extract_json(response)
+            reviewed = SourceMemoryProjection.model_validate(
+                {
+                    "indexId": draft.index_id,
+                    "summary": candidate["summary"],
+                    "semanticEntries": candidate["semanticEntries"],
+                    "review": {
+                        "status": "approved",
+                        "model": model_config.get_vlm_model_name(),
+                        "reviewedAt": datetime.now(UTC)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    },
+                },
+            )
+            return reviewed
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "projection review failed (drafts stay unreviewed): %s",
+                error,
+            )
+            return draft
+
     def _persist_artifacts_sync(
         self,
         job: SourceMemoryBuildJob,
         memory: HierarchicalGraphMemory,
         index_obj: EmbeddingIndex,
         node_count: int,
+        projection: SourceMemoryProjection,
     ) -> dict[str, Any]:
         project_root = self.services.projects.project_root(job.project_id)
         directory = memory_dir(project_root, job.index_id)
@@ -1256,11 +1365,6 @@ class SourceMemoryService:
         if appended.exists():
             os.replace(appended, embeddings_path)
         built_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-        projection = SourceMemoryProjection(
-            indexId=job.index_id,
-            summary=self._projection_summary(memory),
-            semanticEntries=self._projection_entries(memory),
-        )
         projection_path = directory / PROJECTION_FILENAME
         tmp = projection_path.with_suffix(".tmp")
         tmp.write_text(

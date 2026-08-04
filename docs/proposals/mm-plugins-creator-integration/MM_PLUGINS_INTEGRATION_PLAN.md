@@ -655,14 +655,34 @@ macro_id?: str, start_ms?/end_ms?: int, top_k?: int})`；search_* 现场调 embe
     1275s（VICTORY 结算）与 OCR 命中一致。
   - B5：会话驱动剪 15 秒团战高光（源区间 915–930s）入时间轴
     `edit:teamfight-highlight-001`，预览播放器可播（render_source 直引）。
-  - B6：合成素材构建 RUNNING 期间猫项目并行完成语义检索（发现蝶/鸟巢/
-    母鸟雏鸟三窗口，6900s 读帧核对吻合）。
+  - B6：首轮记录有误（检索实际发生在构建完成后 ≈96s，无重叠），已于
+    第三轮重做并取证：合成素材第五版构建 attempt 窗口
+    12:40:17Z→12:41:08Z（RUNNING→SUCCEEDED），期间猫项目专家于
+    12:40:36Z/12:40:55Z/12:41:00Z/12:41:04Z/12:41:08Z 连续调用
+    `query_source_memory`（河床/水边检索，命中 macro_0022/0010 带节点依据），
+    构建 RUNNING 与跨项目检索真实重叠。
   - A7/A8：新 index 版本不误挂旧记忆（memoryRef=None、无 source_memory
     entries）；正常 20min 阈值下 130s 素材提交新版本不产生授权/任务。
 - B4 已知限制：micro-event 级时间窗来自 VLM 对片段内相对时间的估计，存在
   秒级–十秒级偏移（森林→公路 me_001 报 4192–4197s，实际路面在 ≈ 4200–4230s
     才入画）；macro 级窗口可靠，`memory_guidance` 已要求对精确剪辑窗口回原片
   窄窗核验后再使用。
+
+**CR 整改纪要（2026-08-04 第三轮）**：
+- **[P1] projection 审校链落地**：构建期新增外层 VLM 审校步骤
+  （`_review_projection`，文本调用，可改写/剔除草稿条目），审校通过后
+  `projection.json` 携带 `review{status:approved, model, reviewedAt}`；
+  `merge_projection_semantics` 仅合并已审校投影（未审校 fail-close 不进
+  表面），且审校后的 Root 摘要以「[长素材记忆摘要 · 已审校]」标记追加进
+  `index.summary`（内存层，不动 canonical 字节），满足「草稿进
+  summary/semantic_entries、外层 VLM 只审校」的定稿口径。审校失败保留未审
+  草稿不影响构建成功。存量 3 份产物已经真实外层 VLM 审校回填
+  （全部 APPROVED，KPL 表面验证 summary 含审校标记 + 6 条 source_memory
+  entries）。
+- **[P2] 预算下限**：推导预算低于可工作下限（256KiB）时直接报
+  ValidationError 配置错误，不再返回超出真实 transport 限制的地板值。
+- 新增单测 3 项（审校门控/审校回退/summary 幂等追加）+ 预算报错断言；
+  Creator 后端 746/746。B6 重叠取证见上节修正后的记录。
 
 ---
 
