@@ -994,3 +994,188 @@ def test_probed_duration_reaches_the_billing_arguments(
     )
     # Priced on the probed input, not on the requested 5 seconds.
     assert billing["durationSeconds"] == 12
+
+
+def _billing_driver(project, project_root, *, fail: bool = False):
+    """Minimal runtime shell exposing only what _billing_arguments touches."""
+
+    from services.file_agent_runtime.driver import FileCreatorAgentRuntime
+
+    class _Projects:
+        def read(self, project_id):
+            if fail:
+                raise RuntimeError("project temporarily unreadable")
+
+            class _Snapshot:
+                pass
+
+            snapshot = _Snapshot()
+            snapshot.project = project
+            return snapshot
+
+        def project_root(self, project_id):
+            return project_root
+
+    class _Services:
+        projects = _Projects()
+
+    driver = object.__new__(FileCreatorAgentRuntime)
+    driver.services = _Services()
+    return driver
+
+
+def test_unknown_duration_blocks_a_payable_authorization(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """No approvable price may be produced for unverifiable billing terms.
+
+    Otherwise the scope records the requested 5s while execution later
+    probes 12s and bills that instead (the review's TOCTOU path).
+    """
+
+    from datetime import UTC, datetime
+
+    from domain.errors import ValidationError
+    from services.project_files.models import (
+        IndexedFile,
+        Project,
+        SourceAssetVersion,
+    )
+
+    project = Project.new(project_id="p-unknown", name="unknown")
+    created = datetime.now(UTC)
+    # Indexed, but the file is not on disk: exactly the "temporarily
+    # unavailable input" the review described.
+    project.assets.files_by_id["file-unknown"] = IndexedFile(
+        file_id="file-unknown",
+        kind="source_original",
+        relative_uri="assets/sources/missing.mp4",
+        sha256="0" * 64,
+        size_bytes=1024,
+        media_type="video/mp4",
+        created_at=created,
+    )
+    project.assets.source_versions_by_id["v-unknown"] = SourceAssetVersion(
+        version_id="v-unknown",
+        logical_asset_id="asset-unknown",
+        name="input",
+        file_id="file-unknown",
+        checksum="0" * 64,
+        media_kind="video",
+        media_type="video/mp4",
+        duration_seconds=None,
+        created_at=created,
+    )
+    from services.specialist_tools import SpecialistToolSpec
+
+    spec = SpecialistToolSpec(
+        name="r2v_generation",
+        description="d",
+        roles=frozenset(),
+        parameters={},
+        provider_kind="video",
+    )
+    arguments = {
+        "mode": "video_edit",
+        "videoRef": "v-unknown",
+        "durationSeconds": 5,
+    }
+    from services.file_agent_runtime.driver import FileCreatorAgentRuntime
+
+    # Unknown duration (no indexed file to probe).
+    with pytest.raises(ValidationError, match="无法确定"):
+        asyncio.run(
+            FileCreatorAgentRuntime._billing_arguments(
+                _billing_driver(project, tmp_path),
+                spec,
+                project_id="p-unknown",
+                tool_arguments=arguments,
+            ),
+        )
+    # A probe that raises is equally unverifiable, never a silent fallback.
+    with pytest.raises(ValidationError, match="无法确定"):
+        asyncio.run(
+            FileCreatorAgentRuntime._billing_arguments(
+                _billing_driver(project, tmp_path, fail=True),
+                spec,
+                project_id="p-unknown",
+                tool_arguments=arguments,
+            ),
+        )
+
+
+def test_billing_terms_are_revalidated_after_approval() -> None:
+    """Approved scope parameters must still match at invocation time."""
+
+    from services.file_agent_runtime.driver import (
+        _BILLING_SENSITIVE_ARGUMENTS,
+    )
+
+    approved = {
+        "mode": "video_edit",
+        "durationSeconds": 5,
+        "resolution": "720P",
+    }
+    active = {
+        "mode": "video_edit",
+        "durationSeconds": 12,
+        "resolution": "720P",
+    }
+    drifted = [
+        key
+        for key in _BILLING_SENSITIVE_ARGUMENTS
+        if key in active and approved.get(key) != active[key]
+    ]
+    # The duration drift the review described is detected before invocation.
+    assert drifted == ["durationSeconds"]
+    same = [
+        key
+        for key in _BILLING_SENSITIVE_ARGUMENTS
+        if key in approved and approved.get(key) != approved[key]
+    ]
+    assert same == []
+
+
+def test_s2v_section_round_trips_through_save_and_load(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The digital-human section must persist every field it renders.
+
+    Acceptance hit "S2V settings cannot be saved"; the cause was the
+    un-fillable frozen Base URL in the modal, not the storage layer, so this
+    pins the storage contract (including the optional detect model).
+    """
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv(
+        "CREATOR_MODEL_CONFIG_PATH",
+        str(tmp_path / "model_config.json"),
+    )
+    from api.model_routes import load_model_config, save_model_config
+
+    loaded = load_model_config()
+    save_model_config(
+        loaded.model_copy(
+            update={
+                "s2v": loaded.s2v.model_copy(
+                    update={
+                        "enabled": True,
+                        "model_name": "wan2.2-s2v",
+                        "base_url": "https://dashscope.aliyuncs.com/api/v1",
+                        "detect_model_name": "wan2.2-s2v-detect",
+                        "reuse_llm_key": True,
+                    },
+                ),
+            },
+        ),
+    )
+    reloaded = load_model_config()
+    assert reloaded.s2v.enabled is True
+    assert reloaded.s2v.model_name == "wan2.2-s2v"
+    assert reloaded.s2v.base_url == "https://dashscope.aliyuncs.com/api/v1"
+    assert reloaded.s2v.detect_model_name == "wan2.2-s2v-detect"
+    # The getters the provider actually calls must see the same values.
+    assert model_config.get_s2v_model_name() == "wan2.2-s2v"
+    assert model_config.get_s2v_detect_model_name() == "wan2.2-s2v-detect"

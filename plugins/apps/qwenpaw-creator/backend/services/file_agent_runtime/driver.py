@@ -29,7 +29,7 @@ from domain.enums import (
     SpecialistRunStatus,
     TaskStatus,
 )
-from domain.errors import ConflictError, ReviewPendingError
+from domain.errors import ConflictError, ReviewPendingError, ValidationError
 from models.config import (
     CREATION_CHECKPOINT_REQUIRED,
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
@@ -134,6 +134,10 @@ from .subagents import (
 )
 
 logger = setup_logger("creator.agent_runtime")
+
+# Arguments the provider prices on: they must still match the approved scope
+# at invocation time, or the user would pay for terms they never saw.
+_BILLING_SENSITIVE_ARGUMENTS = ("durationSeconds", "resolution", "mode")
 
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
@@ -2967,6 +2971,41 @@ class FileCreatorAgentRuntime:
                     "execution model configuration changed after authorization; "
                     "request a new authorization",
                 )
+            # The billing terms must still be the approved ones: a video_edit
+            # input whose duration only became probeable while the user was
+            # deciding would otherwise be billed on a length nobody approved.
+            approved_parameters = (
+                authorization.scope.get("parameters")
+                if isinstance(authorization.scope, Mapping)
+                else None
+            )
+            if isinstance(approved_parameters, Mapping):
+                active_billing = await self._billing_arguments(
+                    spec,
+                    project_id=project_id,
+                    tool_arguments=(
+                        dict(arguments.get("arguments"))
+                        if isinstance(arguments.get("arguments"), Mapping)
+                        else {}
+                    ),
+                )
+                drifted = [
+                    key
+                    for key in _BILLING_SENSITIVE_ARGUMENTS
+                    if key in active_billing
+                    and approved_parameters.get(key) != active_billing[key]
+                ]
+                if drifted:
+                    raise FileAgentRuntimeError(
+                        "billing terms changed after authorization "
+                        f"({', '.join(drifted)}): "
+                        + ", ".join(
+                            f"{key} {approved_parameters.get(key)!r} -> "
+                            f"{active_billing[key]!r}"
+                            for key in drifted
+                        )
+                        + "; request a new authorization",
+                    )
 
         waiting_runtime = bool(spec and spec.long_running)
         if waiting_runtime:
@@ -3360,13 +3399,27 @@ class FileCreatorAgentRuntime:
                 self.services.projects.project_root(project_id),
                 video_ref,
             )
-        except Exception:  # noqa: BLE001 - estimation must never block
-            duration = None
-        if duration:
-            arguments["durationSeconds"] = min(
-                HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
-                max(1, round(duration)),
+        except Exception as error:  # noqa: BLE001 - reported as unknown below
+            logger.warning(
+                "could not resolve the video_edit input duration | "
+                "project=%s ref=%s: %s",
+                project_id,
+                video_ref,
+                error,
             )
+            duration = None
+        if not duration:
+            # Never offer an approvable price for terms we cannot verify:
+            # execution rejects an unknown video_edit length anyway, so fail
+            # here instead of authorizing the unverified requested duration.
+            raise ValidationError(
+                "无法确定 videoRef 的时长，video_edit 按输入视频计费，"
+                "因此无法给出可批准的费用；请重新引入该视频以补齐元数据后重试",
+            )
+        arguments["durationSeconds"] = min(
+            HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS,
+            max(1, round(duration)),
+        )
         return arguments
 
     async def _await_execution_authorization(

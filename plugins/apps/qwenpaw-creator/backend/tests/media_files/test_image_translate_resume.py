@@ -544,3 +544,195 @@ def test_startup_recovery_schedules_instead_of_blocking(
         is TaskStatus.SUCCEEDED
     )
     asyncio.run(image_execution.shutdown_file_image_execution_services())
+
+
+def test_transient_failures_never_terminalize_before_the_horizon(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The review's reproduction: 5 failures then success must still publish.
+
+    A run of retryable errors may only drive backoff; terminal failure is
+    reserved for an explicit provider verdict or the supervision horizon.
+    """
+
+    services = _services(tmp_path, monkeypatch)
+    worker = FileImageExecutionService(
+        services,
+        provider=_UncalledProvider(),
+        resume_poll_interval_seconds=0.0,
+        resume_poll_budget_seconds=0.0,
+        resume_retry_interval_seconds=0.0,
+        resume_horizon_seconds=3600.0,
+    )
+    task_id = asyncio.run(
+        _leave_interrupted_translate_task(
+            worker,
+            services,
+            idempotency_key="translate-many-failures",
+        ),
+    )
+    attempts = {"count": 0}
+
+    async def flaky_poll(provider_task_id: str) -> dict:
+        attempts["count"] += 1
+        if attempts["count"] <= 5:
+            raise TimeoutError("transient network failure")
+        return {
+            "status": "SUCCEEDED",
+            "image_url": "https://oss.test/translated.png",
+        }
+
+    async def fake_download(url: str, model_name: str) -> str:
+        path = unique_task_work_path("images", ".png", prefix="resumed-")
+        path.write_bytes(_TRANSLATED_PNG)
+        return media_url_for(path)
+
+    monkeypatch.setattr("models.image.poll_image_translate_task", flaky_poll)
+    monkeypatch.setattr(
+        "models.image.base.download_remote_image",
+        fake_download,
+    )
+
+    async def scenario() -> None:
+        worker.schedule_resume(
+            worker.executions.get_task(PROJECT_ID, task_id),
+        )
+        await worker.drain_resume_jobs()
+
+    asyncio.run(scenario())
+
+    assert attempts["count"] == 6
+    task = worker.executions.get_task(PROJECT_ID, task_id)
+    assert task.status is TaskStatus.SUCCEEDED
+    assert services.projects.read(
+        PROJECT_ID,
+    ).project.assets.artifact_versions_by_id
+
+
+def test_backoff_grows_and_is_capped() -> None:
+    """Failures escalate the wait instead of terminalizing the task."""
+
+    worker = object.__new__(FileImageExecutionService)
+    worker.resume_retry_interval_seconds = 15.0
+    assert worker._resume_backoff_seconds(0) == 15.0
+    assert worker._resume_backoff_seconds(1) == 15.0
+    assert worker._resume_backoff_seconds(2) == 30.0
+    assert worker._resume_backoff_seconds(3) == 60.0
+    assert worker._resume_backoff_seconds(50) == 300.0
+
+
+def test_cancelled_task_is_never_published_by_a_resume(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The review's reproduction: cancel before the job runs, expect no file.
+
+    A cancelled Task must not gain an artifact, and no orphan file may be
+    left behind in the asset store.
+    """
+
+    services = _services(tmp_path, monkeypatch)
+    worker = FileImageExecutionService(
+        services,
+        provider=_UncalledProvider(),
+        resume_poll_interval_seconds=0.0,
+        resume_poll_budget_seconds=0.0,
+        resume_retry_interval_seconds=0.0,
+    )
+    task_id = asyncio.run(
+        _leave_interrupted_translate_task(
+            worker,
+            services,
+            idempotency_key="translate-cancelled",
+        ),
+    )
+    downloads: list[str] = []
+
+    async def succeeded(provider_task_id: str) -> dict:
+        return {
+            "status": "SUCCEEDED",
+            "image_url": "https://oss.test/translated.png",
+        }
+
+    async def fake_download(url: str, model_name: str) -> str:
+        downloads.append(url)
+        path = unique_task_work_path("images", ".png", prefix="resumed-")
+        path.write_bytes(_TRANSLATED_PNG)
+        return media_url_for(path)
+
+    monkeypatch.setattr("models.image.poll_image_translate_task", succeeded)
+    monkeypatch.setattr(
+        "models.image.base.download_remote_image",
+        fake_download,
+    )
+
+    async def scenario() -> str:
+        # The user cancels while the resume job is still queued.
+        worker.executions.transition_task(
+            PROJECT_ID,
+            task_id,
+            expected_status=TaskStatus.RUNNING,
+            status=TaskStatus.CANCELLED,
+        )
+        return await worker.resume_provider_task(
+            worker.executions.get_task(PROJECT_ID, task_id),
+            poll_interval_seconds=0.0,
+            poll_budget_seconds=0.0,
+        )
+
+    outcome = asyncio.run(scenario())
+
+    assert outcome == "cancelled"
+    # Nothing was downloaded or published for a cancelled Task.
+    assert not downloads
+    task = worker.executions.get_task(PROJECT_ID, task_id)
+    assert task.status is TaskStatus.CANCELLED
+    published = services.projects.read(PROJECT_ID).project
+    assert not published.assets.artifact_versions_by_id
+    artifacts = services.projects.project_root(PROJECT_ID) / "assets/artifacts"
+    assert not list(artifacts.glob("*.png"))
+
+
+def test_cancel_stops_the_image_supervisor(tmp_path, monkeypatch) -> None:
+    """Cancelling a Task must stop its background poller."""
+
+    services = _services(tmp_path, monkeypatch)
+    worker = FileImageExecutionService(
+        services,
+        provider=_UncalledProvider(),
+        resume_poll_interval_seconds=0.0,
+        resume_poll_budget_seconds=0.0,
+        resume_retry_interval_seconds=0.05,
+    )
+    task_id = asyncio.run(
+        _leave_interrupted_translate_task(
+            worker,
+            services,
+            idempotency_key="translate-cancel-stop",
+        ),
+    )
+
+    async def forever_running(provider_task_id: str) -> dict:
+        return {"status": "RUNNING"}
+
+    monkeypatch.setattr(
+        "models.image.poll_image_translate_task",
+        forever_running,
+    )
+
+    async def scenario() -> bool:
+        task = worker.executions.get_task(PROJECT_ID, task_id)
+        worker.schedule_resume(task)
+        await asyncio.sleep(0)
+        cancelled = worker.executions.transition_task(
+            PROJECT_ID,
+            task_id,
+            expected_status=TaskStatus.RUNNING,
+            status=TaskStatus.CANCELLED,
+        )
+        worker.notify_terminal_task(cancelled)
+        await asyncio.sleep(0.05)
+        return not worker._resume_jobs
+
+    assert asyncio.run(scenario()) is True

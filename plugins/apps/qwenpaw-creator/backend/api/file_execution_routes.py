@@ -368,6 +368,14 @@ async def cancel_task(
         )
 
         file_r2v_execution_service(services).notify_terminal_task(task)
+    elif task.kind is TaskKind.IMAGE_GENERATION:
+        # An accepted (billed) image provider task may be under background
+        # supervision; cancelling must stop it before it publishes.
+        from services.media_files.image_execution import (
+            file_image_execution_service,
+        )
+
+        file_image_execution_service(services).notify_terminal_task(task)
     return _task_view(task)
 
 

@@ -123,7 +123,10 @@ _RESUME_POLL_INTERVAL_SECONDS = 3.0
 _RESUME_POLL_BUDGET_SECONDS = 60.0
 _RESUME_RETRY_INTERVAL_SECONDS = 15.0
 _RESUME_HORIZON_SECONDS = 6 * 60 * 60.0
-_RESUME_MAX_CONSECUTIVE_FAILURES = 5
+# Retries only back off; a terminal verdict comes from the provider or from
+# the horizon above, never from a run of transient failures.
+_RESUME_BACKOFF_MAX_SHIFT = 5
+_RESUME_BACKOFF_CAP_SECONDS = 300.0
 _EDIT_MAX_REFERENCES = 3
 _MAX_IMAGE_BYTES = 64 * 1024 * 1024
 _SAFE_SUFFIX = re.compile(r"^\.[A-Za-z0-9]{1,10}$")
@@ -826,6 +829,24 @@ def _image_suffix(media_type: str) -> str:
     return guessed if _SAFE_SUFFIX.fullmatch(guessed) else ".png"
 
 
+def _accepted_provider_task_hint(task_id: str, project_id: str) -> str:
+    """Name the billed provider task ids so a result stays retrievable."""
+
+    try:
+        from models.provider_tasks import read_provider_tasks
+
+        ids = [
+            str(entry.get("providerTaskId"))
+            for entry in read_provider_tasks(task_id, project_id)
+            if entry.get("providerTaskId")
+        ]
+    except Exception:  # noqa: BLE001 - hint only
+        return ""
+    if not ids:
+        return ""
+    return f" (billed provider task(s): {', '.join(ids)})"
+
+
 def _publish_snapshot(resolved: _ResolvedRequest) -> dict[str, Any]:
     """The subset of a resolved request needed to publish its output."""
 
@@ -1239,21 +1260,10 @@ class FileImageExecutionService:
                     task.task_id,
                     error,
                 )
-                if failures >= _RESUME_MAX_CONSECUTIVE_FAILURES:
-                    await self._fail_if_running(
-                        task.project_id,
-                        self._ids(
-                            task.project_id,
-                            str(task.idempotency_key or task.task_id),
-                        ),
-                        "IMAGE_RESUME_FAILED",
-                        message=(
-                            "could not finish the accepted image provider "
-                            f"task after {failures} attempts: {error}"
-                        ),
-                    )
-                    return
-            if outcome in {"published", "failed", "unsupported"}:
+                # A retryable failure never terminalizes a paid task: the
+                # count only drives backoff, so a network or parsing outage
+                # cannot strand a result that is still retrievable upstream.
+            if outcome in {"published", "failed", "unsupported", "cancelled"}:
                 return
             try:
                 latest = await asyncio.to_thread(
@@ -1277,10 +1287,42 @@ class FileImageExecutionService:
                     message=(
                         "the accepted image provider task did not finish "
                         f"within {self.resume_horizon_seconds:.0f}s"
+                        + _accepted_provider_task_hint(
+                            task.task_id,
+                            task.project_id,
+                        )
                     ),
                 )
                 return
-            await asyncio.sleep(self.resume_retry_interval_seconds)
+            await asyncio.sleep(self._resume_backoff_seconds(failures))
+
+    def _resume_backoff_seconds(self, failures: int) -> float:
+        """Exponential backoff for retries, capped; 0 keeps tests fast."""
+
+        interval = self.resume_retry_interval_seconds
+        if failures <= 0 or interval <= 0:
+            return interval
+        return min(
+            interval * (2 ** min(failures - 1, _RESUME_BACKOFF_MAX_SHIFT)),
+            _RESUME_BACKOFF_CAP_SECONDS,
+        )
+
+    def notify_terminal_task(self, task: TaskRecord) -> None:
+        """Stop supervising a Task that a user cancelled or terminalized.
+
+        The provider task may already be paid for, but a cancelled Task must
+        not gain a late artifact; the durable ledger still names the billed
+        id for manual retrieval.
+        """
+
+        job = self._resume_jobs.pop(task.task_id, None)
+        if job is not None and not job.done():
+            logger.info(
+                "cancelling image resume supervision | task=%s status=%s",
+                task.task_id,
+                task.status.value,
+            )
+            job.cancel()
 
     async def drain_resume_jobs(self) -> None:
         """Await the background resume jobs (used by startup and tests)."""
@@ -1714,6 +1756,51 @@ class FileImageExecutionService:
                 ),
             )
             return "failed"
+        return await self._publish_resumed_output(
+            task=task,
+            ids=ids,
+            snapshot=snapshot,
+            translated_url=translated_url,
+            model_name=str(entries[-1].get("model") or "qwen-mt-image"),
+            provider_task_id=provider_task_id,
+        )
+
+    async def _publish_resumed_output(
+        self,
+        *,
+        task: TaskRecord,
+        ids: Mapping[str, str],
+        snapshot: Mapping[str, Any],
+        translated_url: str,
+        model_name: str,
+        provider_task_id: str,
+    ) -> str:
+        """Download and publish a resumed result under the same boundary.
+
+        Mirrors the in-process commit path: a Task cancelled before or during
+        publication never gains an artifact, and a late result is
+        quarantined instead of left unreferenced.
+        """
+
+        # Re-read the Task first: it may have been cancelled while this job
+        # was queued, and a cancelled Task must not gain a published file.
+        try:
+            current = await asyncio.to_thread(
+                self.executions.get_task,
+                task.project_id,
+                task.task_id,
+            )
+        except RecordNotFoundError:
+            return "cancelled"
+        if current.status is not TaskStatus.RUNNING:
+            logger.info(
+                "resumed image task is no longer running (%s); skipping "
+                "publication | task=%s provider_task=%s",
+                current.status.value,
+                task.task_id,
+                provider_task_id,
+            )
+            return "cancelled"
         base = await asyncio.to_thread(
             self.services.projects.read,
             task.project_id,
@@ -1724,7 +1811,7 @@ class FileImageExecutionService:
 
             generated_url = await download_remote_image(
                 translated_url,
-                str(entries[-1].get("model") or "qwen-mt-image"),
+                model_name,
             )
             published_result = await self._materialize_and_publish(
                 base=base,
@@ -1736,20 +1823,37 @@ class FileImageExecutionService:
         # Record the immutable result on the Task, then converge it exactly
         # like the in-process path does, so the Task reaches SUCCEEDED and
         # the Project commit becomes visible.
-        task = await asyncio.to_thread(
-            self.executions.transition_task,
-            task.project_id,
-            task.task_id,
-            expected_status=TaskStatus.RUNNING,
-            status=TaskStatus.RUNNING,
-            updates={
-                "progress": 0.9,
-                "result": published_result,
-                "output_refs": [
-                    f"artifact-version:{ids['artifact_version_id']}",
-                ],
-            },
-        )
+        try:
+            task = await asyncio.to_thread(
+                self.executions.transition_task,
+                task.project_id,
+                task.task_id,
+                expected_status=TaskStatus.RUNNING,
+                status=TaskStatus.RUNNING,
+                updates={
+                    "progress": 0.9,
+                    "result": published_result,
+                    "output_refs": [
+                        f"artifact-version:{ids['artifact_version_id']}",
+                    ],
+                },
+            )
+        except ExecutionStateConflict:
+            latest = await asyncio.to_thread(
+                self.executions.get_task,
+                task.project_id,
+                task.task_id,
+            )
+            if latest.status is not TaskStatus.CANCELLED:
+                raise
+            await self._quarantine(
+                task=latest,
+                ids=ids,
+                reason="TASK_CANCELLED_BEFORE_IMPORT",
+                result=published_result,
+                run_status=SpecialistRunStatus.CANCELLED,
+            )
+            return "cancelled"
         await self._converge(task=task, ids=ids, replayed=True)
         logger.info(
             "resumed image translate task published | task=%s provider_task=%s",
