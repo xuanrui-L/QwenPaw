@@ -104,6 +104,57 @@ SEEK = '''
 }
 '''
 
+TEXT_OCCLUSION = '''
+() => {
+  const walker = document.createTreeWalker(
+    document.body,
+    NodeFilter.SHOW_TEXT,
+  );
+  let covered = 0;
+  let sampled = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!node.textContent || !node.textContent.trim()) continue;
+    const parent = node.parentElement;
+    if (!parent) continue;
+    const style = getComputedStyle(parent);
+    if (
+      style.display === 'none' || style.visibility === 'hidden' ||
+      Number(style.opacity || 1) < 0.05
+    ) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    for (const rect of range.getClientRects()) {
+      if (rect.width < 1 || rect.height < 1) continue;
+      const points = [];
+      for (const xFraction of [0.2, 0.5, 0.8]) {
+        for (const yFraction of [0.2, 0.5, 0.8]) {
+          points.push([
+            rect.left + rect.width * xFraction,
+            rect.top + rect.height * yFraction,
+          ]);
+        }
+      }
+      for (const [x, y] of points) {
+        if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) {
+          covered += 1;
+          sampled += 1;
+          continue;
+        }
+        const top = document.elementFromPoint(x, y);
+        // elementFromPoint returns the text node's parent when the glyph is
+        // actually painted.  Returning an ancestor means this sample was
+        // clipped by an overflow container or covered by another layer.
+        const textIsTopmost = top === parent;
+        if (!textIsTopmost) covered += 1;
+        sampled += 1;
+      }
+    }
+  }
+  return sampled > 0 ? covered / sampled : 0;
+}
+'''
+
 
 def main():
     job = json.loads(sys.stdin.read())
@@ -150,6 +201,7 @@ def main():
                 info = page.evaluate(COLLECT)
                 count = int(info.get("count") or 0)
                 total_ms = float(info.get("totalMs") or 0.0)
+                text_occlusion = 0.0
                 if job["mode"] == "probe" and count > 0 and job.get("frames_dir"):
                     # Sample the whole animation envelope. Two midpoints miss
                     # entrance overshoot, late rotation and end-frame clipping.
@@ -166,6 +218,10 @@ def main():
                                 ),
                                 "outputMs": total_ms,
                             },
+                        )
+                        text_occlusion = max(
+                            text_occlusion,
+                            float(page.evaluate(TEXT_OCCLUSION) or 0.0),
                         )
                         page.screenshot(
                             path="%s/%05d.png" % (job["frames_dir"], index),
@@ -198,7 +254,11 @@ def main():
                         )
             finally:
                 browser.close()
-    print(json.dumps({"count": count, "totalMs": total_ms}))
+    print(json.dumps({
+        "count": count,
+        "totalMs": total_ms,
+        "textOcclusion": text_occlusion,
+    }))
 
 
 try:
@@ -216,6 +276,7 @@ class MotionDocumentProbe:
     animation_total_ms: float = 0.0
     visible_coverage: float = -1.0
     edge_contact: float = -1.0
+    text_occlusion: float = -1.0
 
 
 def _normalized_box(
@@ -261,6 +322,57 @@ def _normalized_box(
     top = round(values["y"] * video_height - anchor_y * box_height)
     opacity = min(1.0, max(0.0, values["opacity"]))
     return box_width, box_height, left, top, opacity
+
+
+def caption_layout_error(
+    location: Mapping[str, Any] | None,
+    text: str,
+    video_size: tuple[int, int],
+) -> str | None:
+    """Return a deterministic reason when a caption viewport is unreadable."""
+
+    canvas_width, canvas_height = video_size
+    if canvas_width <= 0 or canvas_height <= 0:
+        return "字幕卡画布尺寸必须为正数"
+    box_width, box_height, _left, _top, _opacity = _normalized_box(
+        location,
+        video_size,
+    )
+    compact_text = re.sub(r"\s+", "", text)
+    character_count = max(1, len(compact_text))
+    scale = min(canvas_width / 1280.0, canvas_height / 720.0)
+    nominal_font = max(18.0, 30.0 * scale)
+    minimum_width = max(
+        canvas_width * 0.24,
+        min(
+            canvas_width * 0.68,
+            min(character_count, 14) * nominal_font * 0.72
+            + nominal_font * 2.0,
+        ),
+    )
+    if box_width < minimum_width:
+        return (
+            "字幕卡 location.width 太窄，文字会逐字竖排或被装饰遮挡；"
+            f"当前约 {box_width:.0f}px，至少需要 {minimum_width:.0f}px"
+        )
+    if character_count >= 4 and box_width / max(1.0, box_height) < 1.25:
+        return (
+            "字幕卡必须保持横向布局，location 宽高比至少为 1.25，"
+            "避免文字竖排并与图标重叠"
+        )
+    usable_width = max(1.0, box_width - nominal_font * 2.0)
+    characters_per_line = max(1, int(usable_width / (nominal_font * 0.9)))
+    estimated_lines = math.ceil(character_count / characters_per_line)
+    minimum_height = max(
+        canvas_height * 0.12,
+        estimated_lines * nominal_font * 1.25 + nominal_font * 1.5,
+    )
+    if box_height < minimum_height:
+        return (
+            "字幕卡 location.height 不足以完整容纳换行文字和装饰；"
+            f"当前约 {box_height:.0f}px，至少需要 {minimum_height:.0f}px"
+        )
+    return None
 
 
 def _kill_worker_session(process: subprocess.Popen) -> None:
@@ -472,6 +584,7 @@ def probe_motion_document(
             )
         count = int(result.get("count") or 0)
         total_ms = float(result.get("totalMs") or 0.0)
+        text_occlusion = float(result.get("textOcclusion", -1.0))
         if count <= 0:
             return MotionDocumentProbe(
                 False,
@@ -503,6 +616,7 @@ def probe_motion_document(
             animation_total_ms=total_ms,
             visible_coverage=coverage,
             edge_contact=edge_contact,
+            text_occlusion=text_occlusion,
         )
         with _probe_cache_lock:
             _probe_cache[cache_key] = probe
@@ -745,6 +859,7 @@ def render_motion_overlay(
 
 
 __all__ = [
+    "caption_layout_error",
     "MotionDocumentProbe",
     "probe_motion_document",
     "render_motion_overlay",

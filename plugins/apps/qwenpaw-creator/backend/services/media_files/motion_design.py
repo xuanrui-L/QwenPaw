@@ -35,7 +35,10 @@ from services.media_files.keyframe_cache import (
     materialize_keyframe,
     verified_indexed_path,
 )
-from services.media_files.motion_overlay import probe_motion_document
+from services.media_files.motion_overlay import (
+    caption_layout_error,
+    probe_motion_document,
+)
 from services.media_files.motion_templates import (
     MOTION_TEMPLATE_VERSION,
     SUPPORTED_EMOTIONS,
@@ -301,11 +304,34 @@ def _locations_overlap(
     )
 
 
+def _validate_caption_location(
+    location: ElementLocation,
+    text: str,
+    canvas_size: tuple[int, int],
+) -> None:
+    """Reject caption boxes that cannot produce a readable horizontal card.
+
+    The generated HTML probe catches clipping at the viewport boundary, but a
+    very narrow, tall viewport can still force CJK copy into a vertical stack
+    and let decorative children cover it.  Keep the outer geometry suitable
+    for subtitles before spending a browser render attempt.
+    """
+
+    error = caption_layout_error(
+        location.model_dump(mode="json"),
+        text,
+        canvas_size,
+    )
+    if error is not None:
+        raise ValidationError(error)
+
+
 def _validated_design(
     raw: Mapping[str, Any],
     *,
     required_text: str | None = None,
     default_loop: bool = True,
+    canvas_size: tuple[int, int] | None = None,
 ) -> tuple[MotionGraphic, ElementLocation, str] | str:
     """Return ``(motion, location, concept)`` or a skip reason string.
 
@@ -448,6 +474,8 @@ def _validated_design(
         intensity=intensity,
     )
     location = _validated_location(raw.get("location"))
+    if required_text is not None and canvas_size is not None:
+        _validate_caption_location(location, required_text, canvas_size)
     return motion, location, concept
 
 
@@ -587,6 +615,7 @@ async def _design_document(
                 parsed,
                 required_text=required_text,
                 default_loop=default_loop,
+                canvas_size=canvas_size,
             )
         except ValidationError as exc:
             last_error = str(exc)
@@ -641,6 +670,17 @@ async def _design_document(
                 "整句台词和卡片装饰必须完整落在视口内、四周留出边距："
                 "一行放不下就换行并适当调小字号，绝不要让内容贴到或超出视口边缘。"
                 "请修正后重新只输出一个 JSON 对象。"
+            )
+            continue
+        if required_text is not None and probe.text_occlusion > 0.10:
+            last_error = (
+                "字幕文字被卡片内的图标或装饰遮挡"
+                f"（遮挡采样率 {probe.text_occlusion:.0%}）"
+            )
+            feedback = (
+                f"\n上一次输出被拒绝，原因：{last_error}。"
+                "请把文字放在独立且位于最上层的区域，并为图标保留单独空间；"
+                "任何装饰都不得覆盖文字。请修正后重新只输出一个 JSON 对象。"
             )
             continue
         return motion, location, concept
@@ -971,6 +1011,21 @@ async def design_motion_overlays(
         )
         if overlay.location:
             location = overlay.location
+        try:
+            _validate_caption_location(
+                location,
+                creation.text,
+                canvas_size,
+            )
+        except ValidationError:
+            location = ElementLocation(
+                x=0.50,
+                y=0.88,
+                width=0.80,
+                height=0.18,
+                anchor_x=0.5,
+                anchor_y=0.5,
+            )
         motion = MotionGraphic(
             html=render_caption_template(
                 creation.text,
