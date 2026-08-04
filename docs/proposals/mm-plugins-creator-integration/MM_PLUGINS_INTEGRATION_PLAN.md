@@ -632,6 +632,38 @@ macro_id?: str, start_ms?/end_ms?: int, top_k?: int})`；search_* 现场调 embe
   projectId，被运行时 fail-close 正确拦截，重委派即可恢复；后续可评估将
   projectId 从专家工具参数移除、改由运行时上下文绑定。
 
+**CR 整改纪要（2026-08-04 第二轮，提交 `5b229066`）**：
+- 两个 P1 + 三个 P2 全部修复并补回归测试（10 个新用例）：
+  ① vendored 分词器对 CJK 连续串改出字符 bigram，短台词获得 BM25 精确命中；
+  BM25 零分候选不再获得稀疏 RRF 排名（真实产物验证：「一换三」Top1 命中
+  `asr_macro_0006_000`）；② 恢复不再重放计费调用——RUNNING 中断仅在完整产物
+  已落盘时重排队收敛（_execute 开头产物收敛，零新增调用），否则 fail-close
+  保持 FAILED 需新 commit/授权；③ P3 projection 经 `load()` 并回 SI 表面：
+  Root/SuperEvent 草稿以 `modelRunId=source_memory` 进入 `semanticEntries`
+  （内存合并，canonical 字节不变；真实 KPL 产物 29 条含 6 条 source_memory）；
+  ④ ASR 复用改用 `coverage.asr.mode` 判定，静音素材不重复计费；⑤ 编码预算由
+  `get_vlm_max_inline_bytes` 派生（含 Base64 膨胀与 headroom）。
+- 遗留验收项补执行完成：
+  - A2：`tests/manual/test_source_memory_real.py`（marker `manual_real`，默认排除）
+    用 KPL 原片前 25 分钟真实跑通全管线（1 passed / 20:23）。
+  - A3：抽 3 段（macro_0000/0005/0008）原片音频重新 fun-asr 转写，与图谱
+    asr_text 逐句吻合。
+  - B1：合成 2 分钟素材（临时 60s 阈值）先拒绝→授权 DECLINED、任务
+    CANCELLED（零调用）；新 index 重新触发后批准→SUCCEEDED（2 macros/7 节点）。
+  - B3：KPL 会话追问高地团战双方英雄，专家用 subgraph+search_ocr 给出实体/
+    OCR 节点依据并主动交叉印证 BP 矛盾；读帧核对 925s（对局团战）与
+    1275s（VICTORY 结算）与 OCR 命中一致。
+  - B5：会话驱动剪 15 秒团战高光（源区间 915–930s）入时间轴
+    `edit:teamfight-highlight-001`，预览播放器可播（render_source 直引）。
+  - B6：合成素材构建 RUNNING 期间猫项目并行完成语义检索（发现蝶/鸟巢/
+    母鸟雏鸟三窗口，6900s 读帧核对吻合）。
+  - A7/A8：新 index 版本不误挂旧记忆（memoryRef=None、无 source_memory
+    entries）；正常 20min 阈值下 130s 素材提交新版本不产生授权/任务。
+- B4 已知限制：micro-event 级时间窗来自 VLM 对片段内相对时间的估计，存在
+  秒级–十秒级偏移（森林→公路 me_001 报 4192–4197s，实际路面在 ≈ 4200–4230s
+    才入画）；macro 级窗口可靠，`memory_guidance` 已要求对精确剪辑窗口回原片
+  窄窗核验后再使用。
+
 ---
 
 ### WT7 · 外置 Skill 接入机制 + edu-agent（`feat/creator-external-skills`）🔵
