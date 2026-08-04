@@ -149,6 +149,31 @@ def derive_video_model_name(model_name: str, mode: str) -> str:
     return f"{base}-{suffix}"
 
 
+def configured_mode_segment(model_name: str) -> str | None:
+    """The mode encoded in a configured model name, or ``None`` for bases.
+
+    ``wan2.7-i2v`` encodes ``i2v``; ``happyhorse-1.1`` and other bare family
+    names encode nothing. Follows the same full-segment matching rule as
+    ``derive_video_model_name`` so dated variants and hyphen-token overlaps
+    resolve identically.
+    """
+
+    suffix_to_mode = {
+        f"-{value}": key for key, value in _MODE_SUFFIXES.items()
+    }
+    base = model_name.strip()
+    lowered = base.casefold()
+    for segment in _KNOWN_SUFFIX_SEGMENTS:
+        index = lowered.find(segment)
+        if index == -1:
+            continue
+        end = index + len(segment)
+        if end < len(base) and base[end] != "-":
+            continue
+        return suffix_to_mode[segment]
+    return None
+
+
 def effective_video_model_name(
     model_name: str,
     mode: str,
@@ -158,8 +183,12 @@ def effective_video_model_name(
 
     Single source of truth for both the submit path and the execution
     authorization snapshot: HappyHorse names every mode (so even the default
-    r2v derives ``-r2v``), other Bailian families only need derivation for
-    the non-default modes, and seedance2 uses the configured name as-is.
+    r2v derives ``-r2v``), other Bailian families derive for the non-default
+    modes and whenever the configured name encodes a *different* mode (a
+    configured ``wan2.7-i2v`` cannot serve an r2v request as-is, so it
+    resolves to ``wan2.7-r2v``). A mode-less configured name keeps the
+    historical byte-identical r2v behaviour, and seedance2 always uses the
+    configured name as-is.
     """
 
     configured = model_name.strip()
@@ -167,6 +196,9 @@ def effective_video_model_name(
         return configured
     normalized_mode = (mode or "r2v").strip().casefold() or "r2v"
     if backend_key == "happyhorse" or normalized_mode != "r2v":
+        return derive_video_model_name(configured, normalized_mode)
+    encoded = configured_mode_segment(configured)
+    if encoded is not None and encoded != normalized_mode:
         return derive_video_model_name(configured, normalized_mode)
     return configured
 
@@ -245,6 +277,7 @@ __all__ = [
     "HAPPYHORSE_VIDEO_EDIT_MIN_INPUT_SECONDS",
     "VIDEO_MODES",
     "VIDEO_MODE_MATRIX",
+    "configured_mode_segment",
     "derive_video_model_name",
     "effective_video_model_name",
     "is_happyhorse_model",

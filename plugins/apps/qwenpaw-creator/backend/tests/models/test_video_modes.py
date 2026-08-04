@@ -17,7 +17,9 @@ from models import config as model_config
 from models import video_model
 from models.video_capabilities import (
     VIDEO_MODE_MATRIX,
+    configured_mode_segment,
     derive_video_model_name,
+    effective_video_model_name,
     validate_video_mode,
     video_backend_key,
     video_model_prompt_guidance,
@@ -141,6 +143,68 @@ def test_derive_model_name_replaces_existing_mode_segment() -> None:
     )
     assert derive_video_model_name("happyhorse-1.1-r2v", "r2v") == (
         "happyhorse-1.1-r2v"
+    )
+
+
+def test_configured_mode_segment_detection() -> None:
+    assert configured_mode_segment("wan2.7-i2v") == "i2v"
+    assert configured_mode_segment("wan2.7-t2v-2026-04-25") == "t2v"
+    assert configured_mode_segment("happyhorse-1.0-video-edit") == (
+        "video_edit"
+    )
+    assert configured_mode_segment("happyhorse-1.1") is None
+    # A longer hyphen token must not match a shorter mode segment.
+    assert configured_mode_segment("wan2.7-r2v2") is None
+
+
+def test_effective_name_derives_wan_cross_mode_names() -> None:
+    """A wan name encoding another mode cannot serve an r2v request as-is."""
+
+    # Review M2: configured wan2.7-i2v + default r2v used to submit the
+    # i2v model; it must resolve to the r2v family instead.
+    assert effective_video_model_name("wan2.7-i2v", "r2v", "wan") == (
+        "wan2.7-r2v"
+    )
+    assert effective_video_model_name("wan2.7-t2v", "", "wan") == (
+        "wan2.7-r2v"
+    )
+    # Dated variants keep their tail.
+    assert (
+        effective_video_model_name(
+            "wan2.7-i2v-2026-04-25",
+            "r2v",
+            "wan",
+        )
+        == "wan2.7-r2v-2026-04-25"
+    )
+
+
+def test_effective_name_keeps_legacy_wan_r2v_behaviour() -> None:
+    # The historical byte-identical contract: an r2v or mode-less configured
+    # name is submitted untouched for the default mode.
+    assert effective_video_model_name("wan2.7-r2v", "r2v", "wan") == (
+        "wan2.7-r2v"
+    )
+    assert effective_video_model_name("wanx-video", "r2v", "wan") == (
+        "wanx-video"
+    )
+    # seedance2 always submits the configured name as-is.
+    assert (
+        effective_video_model_name(
+            "doubao-seedance-2.0-pro",
+            "r2v",
+            "seedance2",
+        )
+        == "doubao-seedance-2.0-pro"
+    )
+    # HappyHorse still derives for every mode, including the default.
+    assert (
+        effective_video_model_name(
+            "happyhorse-1.1",
+            "r2v",
+            "happyhorse",
+        )
+        == "happyhorse-1.1-r2v"
     )
 
 
