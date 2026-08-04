@@ -3137,6 +3137,133 @@ def test_costly_specialist_tool_waits_for_file_authorization(
     assert "execution.authorization_decided" in event_types
 
 
+def test_approved_billing_arguments_do_not_trip_the_drift_guard(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """An unchanged authorized r2v call must run (review M1 regression).
+
+    The drift guard compares billing-sensitive arguments (durationSeconds /
+    resolution / mode) against ``authorization.scope["parameters"]``; the
+    scope stores the full billing arguments, so a request whose terms did
+    not change between approval and invocation must never be rejected.
+    """
+
+    import services.file_agent_runtime.driver as driver_module
+
+    monkeypatch.setattr(
+        driver_module,
+        "get_execution_authorization_mode",
+        lambda: "required",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_creation_checkpoint_mode",
+        lambda: "skip",
+    )
+    parent_turn = 0
+    specialist_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn, specialist_turn
+        names = {item["function"]["name"] for item in tools}
+        if "r2v_generation" in names:
+            specialist_turn += 1
+            if specialist_turn == 1:
+                return AgentModelTurn(
+                    tool_calls=(
+                        AgentToolCall(
+                            call_id="generate-ep1-video",
+                            name="r2v_generation",
+                            arguments={
+                                "projectId": PROJECT_ID,
+                                "targetRef": "element:ep1",
+                                "arguments": {
+                                    "prompt": "ep1 video",
+                                    "durationSeconds": 5,
+                                    "resolution": "720P",
+                                    "mode": "r2v",
+                                },
+                            },
+                        ),
+                    ),
+                )
+            return AgentModelTurn(content="[SUCCESS]\n视频已生成。")
+        parent_turn += 1
+        if parent_turn == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="delegate-ep1-video",
+                        name="delegate_to_agent",
+                        arguments={
+                            "role": "r2v_generation_director",
+                            "target_refs": ["element:ep1"],
+                            "task": "生成 ep1 视频",
+                        },
+                    ),
+                ),
+            )
+        return AgentModelTurn(content="R2V Specialist 已完成。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="生成视频")
+        driver = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(callback),
+            poll_interval_seconds=0.01,
+        )
+
+        async def fake_invoke(**_kwargs):
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": "SUCCEEDED",
+                    "artifactVersionId": "artifact-version-1",
+                },
+            )
+
+        driver.specialist_tools.invoke = fake_invoke  # type: ignore[method-assign]
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: bool(
+                driver.executions.list_execution_authorizations(PROJECT_ID),
+            ),
+        )
+        authorization = driver.executions.list_execution_authorizations(
+            PROJECT_ID,
+        )[0]
+        driver.executions.decide_execution_authorization(
+            PROJECT_ID,
+            authorization.authorization_id,
+            authorization_token=authorization.authorization_token,
+            status=ExecutionAuthorizationStatus.APPROVED,
+            decision={
+                "provider": authorization.requested_provider,
+                "model": authorization.requested_model,
+                "maxCost": 0,
+                "maxCandidates": 1,
+            },
+        )
+        await driver.wait_until_idle(PROJECT_ID)
+        completed_run = driver.executions.get_specialist_run(
+            PROJECT_ID,
+            authorization.run_id,
+        )
+        await driver.stop()
+        return authorization, completed_run
+
+    authorization, completed_run = asyncio.run(scenario())
+    # The billed terms were recorded in full on the approval scope…
+    approved = authorization.scope["parameters"]
+    assert approved["durationSeconds"] == 5
+    assert approved["resolution"] == "720P"
+    assert approved["mode"] == "r2v"
+    # …so the unchanged invocation passes the drift guard and completes.
+    assert completed_run.status.value == "SUCCEEDED"
+
+
 def test_review_pending_is_a_neutral_specialist_pause(
     tmp_path,
     monkeypatch,
