@@ -527,7 +527,8 @@ def test_sandbox_copy_carries_upstream_attribution(
     # Upstream layout: LICENSE/NOTICE live above the skill directory.
     upstream = tmp_path / "upstream"
     skill_root = _write_skill(upstream / "src" / "capabilities" / "demo")
-    (upstream / "LICENSE").write_text("Apache License 2.0", encoding="utf-8")
+    apache_text = "Apache License\nVersion 2.0, January 2004\n"
+    (upstream / "LICENSE").write_text(apache_text, encoding="utf-8")
     (upstream / "NOTICE").write_text("Qwen-MM-Plugins", encoding="utf-8")
     _configure(
         tmp_path,
@@ -542,11 +543,73 @@ def test_sandbox_copy_carries_upstream_attribution(
         ),
     )
     workdir = Path(result["workdir"])
-    assert (workdir / "UPSTREAM_LICENSE").read_text() == "Apache License 2.0"
+    assert (workdir / "UPSTREAM_LICENSE").read_text() == apache_text
     assert (workdir / "UPSTREAM_NOTICE").read_text() == "Qwen-MM-Plugins"
     provenance = (workdir / external_skills.PROVENANCE_FILENAME).read_text()
     assert "Apache-2.0" in provenance
     assert str(skill_root) in provenance
+
+
+def test_provenance_never_mislabels_or_crosses_repo_boundary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The generic skill path must produce honest license statements."""
+
+    # An MIT-licensed skill must be labeled MIT, never Apache.
+    mit_repo = tmp_path / "mit-repo"
+    mit_root = _write_skill(mit_repo / "skill")
+    (mit_repo / "LICENSE").write_text(
+        "MIT License\n\nPermission is hereby granted, free of charge...",
+        encoding="utf-8",
+    )
+    # A skill inside its own repository (marked by .git) must not pick
+    # up an ancestor LICENSE from an unrelated outer project, and with
+    # no license found the provenance must not claim any license.
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    (outer / "LICENSE").write_text(
+        "Apache License\nVersion 2.0, January 2004\n",
+        encoding="utf-8",
+    )
+    inner_repo = outer / "inner-repo"
+    bare_root = _write_skill(inner_repo / "skill")
+    (inner_repo / ".git").mkdir()
+    _configure(
+        tmp_path,
+        monkeypatch,
+        [
+            {"name": "mit-skill", "path": str(mit_root), "enabled": True},
+            {"name": "bare-skill", "path": str(bare_root), "enabled": True},
+        ],
+    )
+    mit_result = asyncio.run(
+        execute_skill_script(
+            project_id=_PROJECT,
+            skill_name="mit-skill",
+            script="scripts/echo.py",
+        ),
+    )
+    mit_dir = Path(mit_result["workdir"])
+    mit_provenance = (
+        mit_dir / external_skills.PROVENANCE_FILENAME
+    ).read_text()
+    assert "- License: MIT" in mit_provenance
+    assert "Apache" not in mit_provenance
+    bare_result = asyncio.run(
+        execute_skill_script(
+            project_id=_PROJECT,
+            skill_name="bare-skill",
+            script="scripts/echo.py",
+        ),
+    )
+    bare_dir = Path(bare_result["workdir"])
+    assert not (bare_dir / "UPSTREAM_LICENSE").exists()
+    bare_provenance = (
+        bare_dir / external_skills.PROVENANCE_FILENAME
+    ).read_text()
+    assert "no LICENSE file was found" in bare_provenance
+    assert "Apache" not in bare_provenance
 
 
 def test_execute_skill_script_env_allowlist(tmp_path, monkeypatch) -> None:

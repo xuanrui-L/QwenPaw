@@ -396,7 +396,12 @@ def _require_project_id(project_id: str) -> str:
 
 
 def _find_upstream_file(start: Path, prefixes: tuple[str, ...]) -> Path | None:
-    """Locate the nearest LICENSE/NOTICE walking up from the skill root."""
+    """Locate the nearest LICENSE/NOTICE walking up from the skill root.
+
+    The walk never crosses a repository boundary: a directory containing
+    ``.git`` is searched itself but its ancestors are not, so a license
+    belonging to an unrelated outer project is never picked up.
+    """
 
     current = start
     for _ in range(6):
@@ -404,42 +409,90 @@ def _find_upstream_file(start: Path, prefixes: tuple[str, ...]) -> Path | None:
             for child in sorted(current.iterdir()):
                 if child.is_file() and child.name.upper().startswith(prefixes):
                     return child
+            at_repo_boundary = (current / ".git").exists()
         except OSError:
             return None
-        if current.parent == current:
+        if at_repo_boundary or current.parent == current:
             return None
         current = current.parent
+    return None
+
+
+def _identify_license(license_file: Path | None) -> str | None:
+    """Best-effort SPDX-style identification of the upstream license.
+
+    Returns None when the text cannot be identified; the provenance note
+    then points at UPSTREAM_LICENSE instead of claiming a license.
+    """
+
+    if license_file is None:
+        return None
+    try:
+        text = license_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    head = " ".join(text[:4000].split()).casefold()
+    if "apache license" in head and "version 2.0" in head:
+        return "Apache-2.0"
+    if (
+        "mit license" in head
+        or "permission is hereby granted, free of charge" in head
+    ):
+        return "MIT"
+    if "gnu general public license" in head:
+        if "version 3" in head:
+            return "GPL-3.0"
+        if "version 2" in head:
+            return "GPL-2.0"
+        return None
+    if "bsd" in head and "redistribution and use" in head:
+        return "BSD"
+    if "mozilla public license" in head and "2.0" in head:
+        return "MPL-2.0"
     return None
 
 
 def _write_provenance(skill: LoadedSkill, dest: Path) -> None:
     """Attach upstream attribution to a materialized runtime copy.
 
-    The upstream skill is Apache-2.0 licensed and its LICENSE usually
-    lives above ``skill.root``; copying the skill into the user's data
-    directory therefore must carry the license text and a provenance
-    statement along (Apache-2.0 §4).
+    Copying a skill into the user's data directory materializes
+    third-party content, so the runtime copy must carry the upstream
+    license text (when present) and an honest provenance statement.
+    The license is identified from the actual LICENSE text; unknown
+    licenses are never mislabeled.
     """
 
+    license_file = _find_upstream_file(skill.root, ("LICENSE",))
+    identified = _identify_license(license_file)
+    if license_file is not None and identified is not None:
+        license_line = (
+            f"- License: {identified} "
+            "(see UPSTREAM_LICENSE in this directory)"
+        )
+    elif license_file is not None:
+        license_line = (
+            "- License: unidentified; see UPSTREAM_LICENSE in this "
+            "directory for the authoritative text"
+        )
+    else:
+        license_line = (
+            "- License: no LICENSE file was found next to or above the "
+            "skill root (within the same repository); refer to the "
+            "upstream source for licensing terms"
+        )
     lines = [
         "# Upstream provenance",
         "",
         f"- Skill name: {skill.entry.name}",
         f"- Copied from: {skill.root}",
-        "- License: Apache-2.0 (see UPSTREAM_LICENSE in this directory)",
+        license_line,
         "- This directory is a runtime working copy created by QwenPaw",
         "  Creator; files generated during skill execution are local",
         "  artifacts, everything else originates from the source above.",
         "",
     ]
-    license_file = _find_upstream_file(skill.root, ("LICENSE",))
     if license_file is not None:
         shutil.copyfile(license_file, dest / "UPSTREAM_LICENSE")
-    else:
-        lines.append(
-            "- Upstream LICENSE file was not found next to or above the "
-            "skill root; refer to the source repository for the full text.",
-        )
     notice_file = _find_upstream_file(skill.root, ("NOTICE",))
     if notice_file is not None:
         shutil.copyfile(notice_file, dest / "UPSTREAM_NOTICE")
