@@ -1417,7 +1417,15 @@ async def get_real_api_key(section: str) -> dict[str, str]:
     API key to run connection tests, because it only stores the mask
     "__CREATOR_SECRET__".
     """
-    valid_sections = {"llm", "vlm", "asr", "image", "video", "grounding"}
+    valid_sections = {
+        "llm",
+        "vlm",
+        "asr",
+        "tts",
+        "image",
+        "video",
+        "grounding",
+    }
     if section not in valid_sections:
         raise ValidationError(
             f"不支持的配置项: {section}，必须是 {', '.join(valid_sections)} 之一",

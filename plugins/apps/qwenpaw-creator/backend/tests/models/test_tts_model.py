@@ -87,6 +87,21 @@ def test_synthesize_without_key_raises(monkeypatch) -> None:
         asyncio.run(tts_model.synthesize("你好"))
 
 
+def test_synthesize_rejects_unknown_system_voice(monkeypatch) -> None:
+    """A made-up voice must fail before reaching the provider."""
+
+    async def fail_post_json(url, *, api_key, payload, timeout_seconds):
+        raise AssertionError("provider must not be called")
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setattr(tts_model, "_post_json", fail_post_json)
+
+    with pytest.raises(ValueError, match="available system voices"):
+        asyncio.run(
+            tts_model.synthesize("你好", voice="zh-CN-YunxiNeural"),
+        )
+
+
 def test_enroll_voice_builds_enrollment_payload(monkeypatch) -> None:
     captured: dict = {}
 

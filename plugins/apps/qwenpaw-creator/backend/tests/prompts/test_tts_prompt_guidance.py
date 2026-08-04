@@ -56,7 +56,11 @@ def test_unconfigured_tts_leaves_no_trace(monkeypatch) -> None:
         project_id="project-voice-guidance-check",
         workspace_schema="SCHEMA",
     )
-    assert "旁白" not in delegator
+    # The base delegator prompt legitimately says "旁白" when planning
+    # dialogue, so only TTS-specific markers prove the section leaked.
+    assert "旁白与配音能力" not in delegator
+    assert "音色" not in delegator
+    assert "tts" not in delegator.lower()
     assert "{{tts_guidance}}" not in delegator
 
 
@@ -75,6 +79,10 @@ def test_model_with_system_voices_presents_design_as_optional(
     assert "tts_generation" in editing
     assert "默认音色" in editing
     assert "没有系统音色" not in editing
+    # The guidance must enumerate the real voice names so the agent cannot
+    # invent one from another provider's namespace.
+    assert "Cherry" in editing
+    assert "Serena" in editing
 
     delegator = render_creator_system_prompt(
         project_id="project-voice-guidance-check",

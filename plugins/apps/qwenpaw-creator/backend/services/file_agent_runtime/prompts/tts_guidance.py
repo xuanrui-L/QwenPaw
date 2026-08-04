@@ -121,6 +121,10 @@ def _editing_guidance(capability, scenario: str) -> str:
             "使用配置的默认音色，传已绑定音色的 characterRef 时自动改用该角色"
             "的专属音色。",
         )
+        lines.append(
+            "- voice 参数只接受以下系统音色（其它名字会直接报错）："
+            f"{'、'.join(capability.system_voices)}；省略时用默认音色。",
+        )
     else:
         lines.append(
             f"- 当前语音模型 {capability.model} 没有系统音色：`tts_generation` "
