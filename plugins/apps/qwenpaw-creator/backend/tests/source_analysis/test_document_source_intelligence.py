@@ -861,6 +861,51 @@ def test_document_commit_rejects_partial_text_coverage(tmp_path) -> None:
     assert "textCoverage 不合法" in str(excinfo.value)
 
 
+def test_document_commit_rejects_null_text_coverage(tmp_path) -> None:
+    # CR P1: an explicit "textCoverage": null must not be treated as a legacy
+    # result. Branching on key presence sends it to the strict model, so a
+    # same-length content swap of the Runtime file can no longer be committed
+    # with ratio=1.0.
+    body = "剧情推进。" * 2000
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="notes.txt",
+        content=body.encode("utf-8"),
+        media_type="text/plain",
+    )
+    service = SourceMediaAnalysisService(services)
+    project_root = services.projects.project_root("project-1")
+    snapshot = services.projects.read("project-1")
+    checksum = snapshot.project.assets.source_versions_by_id[
+        version_id
+    ].checksum
+
+    def null_coverage(stored):
+        stored["textCoverage"] = None
+
+    def swap_same_length_content(read_result):
+        path = document_indexed_text_path(
+            project_root,
+            checksum,
+            read_result["resultRef"],
+        )
+        original = path.read_text(encoding="utf-8")
+        path.write_text("Z" * len(original), encoding="utf-8")
+
+    with pytest.raises(ValidationError) as excinfo:
+        _read_then_commit(
+            service,
+            services,
+            asset_id,
+            version_id,
+            tag="doc-null-coverage",
+            shots=[_document_shot(1, "全文概括。")],
+            between_read_and_commit=swap_same_length_content,
+            mutate_stored=null_coverage,
+        )
+    assert "textCoverage 不合法" in str(excinfo.value)
+
+
 def test_unknown_ratio_is_confined_to_document_ocr() -> None:
     # CR P2: the honest-unknown ratio must not weaken every modality's
     # frozen invariant.

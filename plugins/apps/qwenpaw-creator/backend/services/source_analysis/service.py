@@ -1009,8 +1009,11 @@ class SourceMediaAnalysisService:
                 version.checksum,
                 document_ref,
             )
-            raw_text_coverage = module.get("textCoverage")
-            if raw_text_coverage is not None:
+            if "textCoverage" in module:
+                # Key present (any value, including null) marks a new-format
+                # result, so a null can never be mistaken for a legacy result
+                # and skip the integrity check.
+                raw_text_coverage = module["textCoverage"]
                 # New-format results carry a strict integrity contract: any
                 # missing or malformed field rejects the commit instead of
                 # silently degrading the checks (fail-closed).
