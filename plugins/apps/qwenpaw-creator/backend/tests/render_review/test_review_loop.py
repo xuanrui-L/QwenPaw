@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -534,6 +535,74 @@ def test_selection_switch_between_check_and_admit_aborts_feedback(
     assert outcome == "stale"
     assert feedback_sent is False
     assert _feedback_messages(services) == []
+
+
+def test_cancel_during_admission_releases_persisted_claim(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+) -> None:
+    """A cancel landing while the admission thread runs must not strand it.
+
+    The worker persists the claim, then the awaiting task is cancelled
+    before the result reaches the coroutine; the settle path must release
+    the claim from the worker's outcome so a same-process replay is not
+    blocked until the TTL.
+    """
+    _stub_vlm(monkeypatch, [_vlm_response(verdict_major_failure=False)])
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    chain_path = review_module._chain_path(reports_root, TARGET_REF)
+    claim_written = threading.Event()
+    release_gate = threading.Event()
+    real_admit = review_module._admit_round
+
+    def slow_admit(*args, **kwargs):
+        result = real_admit(*args, **kwargs)
+        claim_written.set()
+        # Hold the worker past the cancellation point.
+        release_gate.wait(5)
+        return result
+
+    monkeypatch.setattr(review_module, "_admit_round", slow_admit)
+
+    async def scenario() -> None:
+        video_path = (
+            services.projects.project_root(PROJECT_ID)
+            / "assets"
+            / "artifacts"
+            / "video-cancel-1.mp4"
+        )
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_path.write_bytes(b"stub")
+        task = asyncio.create_task(
+            review_module.run_review_loop(
+                services,
+                project_id=PROJECT_ID,
+                video_path=video_path,
+                video_id="video-cancel-1",
+                target_ref=TARGET_REF,
+                slot_id=SLOT_ID,
+            ),
+        )
+        await asyncio.to_thread(claim_written.wait, 5)
+        task.cancel()
+        release_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Let the settle done-callback run on the loop.
+        for _ in range(20):
+            await asyncio.sleep(0.05)
+            state = json.loads(chain_path.read_text(encoding="utf-8"))
+            if not state.get("claim"):
+                break
+
+    asyncio.run(scenario())
+    state = json.loads(chain_path.read_text(encoding="utf-8"))
+    assert not state.get("claim")
+    monkeypatch.setattr(review_module, "_admit_round", real_admit)
+    # Same-process replay reviews the video immediately (no TTL wait).
+    report = _run_round(services, "video-cancel-1")
+    assert report is not None and report.verdict == "pass"
 
 
 def test_claim_from_dead_process_is_reclaimed(services) -> None:

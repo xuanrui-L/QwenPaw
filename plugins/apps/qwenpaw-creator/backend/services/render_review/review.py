@@ -598,6 +598,53 @@ def _admit_feedback(
     return True
 
 
+def _settle_cancelled_admission(
+    admission: "asyncio.Task[tuple[int, str] | None] | None",
+    admitted: tuple[int, str] | None,
+    reports_root: Path,
+    *,
+    target_ref: str,
+    video_id: str,
+) -> None:
+    """Release whatever claim a cancelled loop may have persisted.
+
+    ``asyncio.to_thread`` keeps running after the awaiting task is
+    cancelled, so the admission worker can write a claim while ``admitted``
+    is still ``None`` in the coroutine. The release must therefore follow
+    the worker's real outcome: it runs immediately when the result is
+    already known and as a done-callback otherwise, so a same-process
+    replay is never blocked until the claim TTL expires. Process death is
+    covered separately by the claim lease.
+    """
+    if admitted is not None:
+        _release_claim(reports_root, target_ref=target_ref, video_id=video_id)
+        return
+    if admission is None:
+        return
+
+    def _cleanup(done: "asyncio.Future[tuple[int, str] | None]") -> None:
+        try:
+            if (
+                not done.cancelled()
+                and done.exception() is None
+                and done.result() is not None
+            ):
+                _release_claim(
+                    reports_root,
+                    target_ref=target_ref,
+                    video_id=video_id,
+                )
+        except Exception:
+            logger.exception(
+                "failed to settle cancelled render review claim",
+            )
+
+    if admission.done():
+        _cleanup(admission)
+    else:
+        admission.add_done_callback(_cleanup)
+
+
 async def run_review_loop(
     services: "CreatorFileServices",
     *,
@@ -610,13 +657,20 @@ async def run_review_loop(
     """Run one advisory review round for a freshly published final render."""
     reports_root = _reports_root(services, project_id)
     admitted: tuple[int, str] | None = None
+    admission: "asyncio.Task[tuple[int, str] | None] | None" = None
     try:
-        admitted = await asyncio.to_thread(
-            _admit_round,
-            reports_root,
-            target_ref=target_ref,
-            video_id=video_id,
+        # Shielded so a cancellation delivered mid-admission cannot orphan
+        # a claim the worker thread already persisted; the cancel handler
+        # settles the claim from the worker's real outcome.
+        admission = asyncio.ensure_future(
+            asyncio.to_thread(
+                _admit_round,
+                reports_root,
+                target_ref=target_ref,
+                video_id=video_id,
+            ),
         )
+        admitted = await asyncio.shield(admission)
         if admitted is None:
             trace_event(
                 "render_review.skipped",
@@ -679,12 +733,13 @@ async def run_review_loop(
     except asyncio.CancelledError:
         # Shutdown/cancellation must not leave a live-looking claim behind;
         # the crash-lease covers process death, this covers task cancel.
-        if admitted is not None:
-            _release_claim(
-                reports_root,
-                target_ref=target_ref,
-                video_id=video_id,
-            )
+        _settle_cancelled_admission(
+            admission,
+            admitted,
+            reports_root,
+            target_ref=target_ref,
+            video_id=video_id,
+        )
         raise
     except Exception as exc:
         # Advisory only: a review failure must never disturb delivery.
