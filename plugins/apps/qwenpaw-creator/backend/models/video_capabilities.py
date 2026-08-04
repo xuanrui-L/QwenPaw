@@ -119,6 +119,15 @@ def derive_video_model_name(model_name: str, mode: str) -> str:
     ``wan2.7-i2v-2026-04-25``): an existing mode segment is replaced in
     place so dated variants keep their tail, otherwise the suffix is
     appended.
+
+    A derived name is only as available as its model family: measured on a
+    Bailian workspace endpoint, ``happyhorse-1.1`` serves t2v/i2v/r2v but
+    has **no** ``-video-edit`` model, while ``happyhorse-1.0-video-edit``
+    exists. Verify a name at zero cost by POSTing the video-synthesis
+    endpoint **without** the ``X-DashScope-Async`` header: an existing
+    model answers HTTP 403 ``AccessDenied`` ("does not support synchronous
+    calls") and creates no task, a missing one answers HTTP 404
+    ``InvalidParameter: Model not exist.``
     """
 
     normalized_mode = (mode or "r2v").strip().casefold() or "r2v"

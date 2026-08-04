@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from models import config as model_config
@@ -34,9 +35,30 @@ class _FakeResponse:
         return {"output": {"task_id": "task-mode-1"}}
 
 
+class _ModelNotExistResponse:
+    """Provider answer when a derived model name has no such model."""
+
+    status_code = 404
+    text = (
+        '{"code":"InvalidParameter","message":"Model not exist.",'
+        '"request_id":"req-1"}'
+    )
+
+    def raise_for_status(self) -> None:
+        raise httpx.HTTPStatusError(
+            "404",
+            request=httpx.Request("POST", "https://bailian.example"),
+            response=httpx.Response(404, text=self.text),
+        )
+
+    def json(self) -> dict:
+        return {"code": "InvalidParameter", "message": "Model not exist."}
+
+
 class _FakeAsyncClient:
-    def __init__(self, captured: dict):
+    def __init__(self, captured: dict, response=None):
         self._captured = captured
+        self._response = response or _FakeResponse()
 
     async def __aenter__(self) -> "_FakeAsyncClient":
         return self
@@ -44,14 +66,19 @@ class _FakeAsyncClient:
     async def __aexit__(self, *exc) -> bool:
         return False
 
-    async def post(self, url, headers=None, json=None) -> _FakeResponse:
+    async def post(self, url, headers=None, json=None):
         self._captured["url"] = url
         self._captured["headers"] = headers
         self._captured["body"] = json
-        return _FakeResponse()
+        return self._response
 
 
-def _bind(monkeypatch, model: str, captured: dict | None = None) -> None:
+def _bind(
+    monkeypatch,
+    model: str,
+    captured: dict | None = None,
+    response=None,
+) -> None:
     monkeypatch.setattr(
         model_config,
         "get_video_model_name",
@@ -81,7 +108,7 @@ def _bind(monkeypatch, model: str, captured: dict | None = None) -> None:
         monkeypatch.setattr(
             video_model.httpx,
             "AsyncClient",
-            lambda timeout: _FakeAsyncClient(captured),
+            lambda timeout: _FakeAsyncClient(captured, response),
         )
 
 
@@ -415,6 +442,33 @@ def test_happyhorse_t2v_validates_duration(monkeypatch) -> None:
                 resolution="720P",
             ),
         )
+
+
+def test_derived_model_not_existing_explains_the_family_mismatch(
+    monkeypatch,
+) -> None:
+    """Measured case: happyhorse-1.1 has no -video-edit model upstream."""
+
+    captured: dict = {}
+    _bind(
+        monkeypatch,
+        "happyhorse-1.1-r2v",
+        captured,
+        response=_ModelNotExistResponse(),
+    )
+
+    with pytest.raises(ModelError, match="happyhorse-1.1-video-edit") as info:
+        asyncio.run(
+            video_model.submit_video_task(
+                "把场景改成黄昏",
+                mode="video_edit",
+                video_url="/generated/source.mp4",
+                resolution="720P",
+            ),
+        )
+    message = str(info.value)
+    assert "happyhorse-1.1-r2v" in message
+    assert "creator_video_model.model" in message
 
 
 # ── prompt guidance ──────────────────────────────────────────────────────────

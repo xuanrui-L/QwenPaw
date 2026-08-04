@@ -646,6 +646,20 @@ async def submit_video_task(
         logger.error(
             f"Video task submission HTTP error: {e.response.status_code} - {e.response.text[:500]}",
         )
+        if (
+            "model not exist" in e.response.text.casefold()
+            and effective_model != model_name
+        ):
+            # The mode-derived name was rejected: the configured family has no
+            # model for this mode (e.g. happyhorse-1.1 has no -video-edit).
+            # Say so instead of leaking the bare provider message.
+            raise ModelError(
+                f"视频模型 `{effective_model}` 不存在：mode={normalized_mode} 的模型名"
+                f"由已配置模型 `{model_name}` 派生而来，但该模型族在当前 endpoint "
+                "上没有这个模式。请把 creator_video_model.model 换成支持该模式的"
+                "模型族（可先用零成本健康检查确认模型名可用），或改用其他 mode",
+                model_name=effective_model,
+            )
         # Keep a long enough response body: error codes such as content
         # moderation appear after ~200 characters, and truncating too short
         # prevents callers from recognising the error type (end-to-end Run
