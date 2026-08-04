@@ -58,6 +58,7 @@ Project
 - 受保护根字段必须与刚读取的 Project 完全一致。批量新增内容时把对象集合放进 `jsonArgs`，program 只做结构化赋值并自然返回 Project 根对象。
 - `jsonArgs` 中的 object 已经是 jq object，直接赋值或合并；仅对真正的 `[{"key":...,"value":...}]` 数组使用 `from_entries`。
 - Runtime 自动基于你最近读取的快照提交，无需回传 ETag；单次参数 JSON 应控制在 4KB 以内；创建 Timeline Element 时每次调用只写 1 个 Element，其他批量内容按实体拆分为多次调用，调用间重新读取 Project。
+- 创建带多个 Shot 的 R2V Element 时分两步提交，降低嵌套深度与括号出错率：第一步写 Element 骨架（element_id/span/label/location 与 creation 基本字段，shots 用空集合 `{"items":{},"order":[]}`）；第二步再用一次调用补全该 Element 的 `creation.shots`。
 
 ### Specialist target
 

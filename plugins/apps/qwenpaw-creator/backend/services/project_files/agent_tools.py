@@ -445,6 +445,44 @@ _PROJECT_SCHEMA_MESSAGE_HINTS: tuple[tuple[str, str], ...] = (
 )
 _MAX_SCHEMA_ERROR_LINES = 8
 
+# Fields that live on TimelineElement itself. A bracket slip in a large
+# nested payload routinely drops them inside ``creation`` instead, which
+# surfaces as several "Field required" errors that never name the real
+# mistake.
+_ELEMENT_LEVEL_FIELDS = frozenset(
+    {
+        "element_id",
+        "span",
+        "label",
+        "location",
+        "outputs",
+        "render_source",
+        "z_index",
+        "enabled",
+    },
+)
+
+
+def _misnested_element_field_hint(item: Mapping[str, Any]) -> str:
+    """Name the bracket-misplacement when element fields sit in creation."""
+
+    if item.get("type") != "missing":
+        return ""
+    loc = item.get("loc") or ()
+    if not loc or str(loc[-1]) not in _ELEMENT_LEVEL_FIELDS:
+        return ""
+    parent = item.get("input")
+    if not isinstance(parent, Mapping):
+        return ""
+    creation = parent.get("creation")
+    if isinstance(creation, Mapping) and str(loc[-1]) in creation:
+        return (
+            "花括号层级错位：该 element 级字段被误嵌进了 creation 内部。"
+            "请把 element_id/span/label 等字段提到与 creation 同级，"
+            "creation 内只保留 type 及创作字段"
+        )
+    return ""
+
 
 def _translate_project_schema_error(error: ValidationError) -> str:
     """Render post-jq Project validation errors as located, fixable items."""
@@ -469,7 +507,10 @@ def _translate_project_schema_error(error: ValidationError) -> str:
                     hint = f"（{text}）"
                     break
             else:
-                if item.get("type") == "extra_forbidden":
+                misnested = _misnested_element_field_hint(item)
+                if misnested:
+                    hint = f"（{misnested}）"
+                elif item.get("type") == "extra_forbidden":
                     hint = (
                         "（该字段不在 Project Schema 中，"
                         "请对照 system prompt 里的 PROJECT_JSON_SCHEMA）"
