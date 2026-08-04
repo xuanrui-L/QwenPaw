@@ -141,7 +141,7 @@ def _publish_selected(
     assets["artifact_versions_by_id"][video_id] = {
         "version_id": video_id,
         "slot_id": SLOT_ID,
-        "kind": "timeline_render",
+        "kind": "final_video",
         "owner_ref": TARGET_REF,
         "name": "final",
         "file_id": file_id,
@@ -151,7 +151,7 @@ def _publish_selected(
     }
     slot = assets["artifact_slots_by_id"].get(SLOT_ID) or {
         "slot_id": SLOT_ID,
-        "kind": "timeline_render",
+        "kind": "final_video",
         "owner_ref": TARGET_REF,
         "version_ids": [],
         "selected_version_id": None,
@@ -425,7 +425,7 @@ def test_unselected_artifact_never_receives_feedback(
         project.assets.artifact_versions_by_id[version_id] = ArtifactVersion(
             version_id=version_id,
             slot_id="slot:render",
-            kind="timeline_render",
+            kind="final_video",
             owner_ref=TARGET_REF,
             name="final",
             file_id=file_id,
@@ -435,7 +435,7 @@ def test_unselected_artifact_never_receives_feedback(
         )
     project.assets.artifact_slots_by_id["slot:render"] = ArtifactSlot(
         slot_id="slot:render",
-        kind="timeline_render",
+        kind="final_video",
         owner_ref=TARGET_REF,
         version_ids=["video-a", "video-b"],
         selected_version_id="video-b",
@@ -870,7 +870,7 @@ def test_result_from_task_routes_every_success_through_review(
             "artifactVersion": {
                 "version_id": "artifact-version-replay",
                 "slot_id": "slot:render",
-                "kind": "timeline_render",
+                "kind": "final_video",
                 "owner_ref": TARGET_REF,
                 "name": "final",
                 "file_id": "file-1",
