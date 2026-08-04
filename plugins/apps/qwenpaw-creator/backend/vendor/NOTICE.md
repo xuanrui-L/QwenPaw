@@ -25,7 +25,7 @@ Ported from `src/capabilities/video-memory/` into
 | `segmentation.py` | `skill/script/build_memory/build_graph.py` (Phase 1) | frame extraction/IO moved to the Creator service; OpenCV HLS conversion re-implemented with Pillow + NumPy; pure planning functions kept |
 | `subgraph.py` | `skill/script/build_memory/build_graph.py` (Phase 2 parsing) | media clipping/upload and VLM transport removed (Creator `creator_vlm_model` backend is used instead); response parsing and relative→absolute time shifting kept |
 | `aggregation.py` | `skill/script/build_memory/build_graph.py` (Phase 3) + `pipeline_worker.py` orchestration ideas | orchestration rewritten as `async` around an injected LLM callable; window/parse/fallback logic kept |
-| `embeddings.py` | `skill/script/build_memory/embeddings.py` | DashScope HTTP client removed (rewritten as `backend/models/embedding_model.py`); BM25 index, hybrid RRF search and `.npz` persistence kept; search accepts a precomputed query embedding |
+| `embeddings.py` | `skill/script/build_memory/embeddings.py` | DashScope HTTP client removed (rewritten as `backend/models/embedding_model.py`); BM25 index, hybrid RRF search and `.npz` persistence kept; search accepts a precomputed query embedding; tokenizer splits CJK runs into character bigrams for exact short-phrase BM25 matches; zero-score BM25 candidates no longer earn a sparse RRF rank |
 | `toolkit.py` | `qwen_mm_plugins_video_memory/toolkit.py` + query logic of `loader.py` | EgoLife time system and cutoff support removed; methods return Python objects instead of JSON strings; embedding lookups take a precomputed query vector |
 
 Not vendored: `llm_client.py`, `env_config.py` (env-driven configuration is

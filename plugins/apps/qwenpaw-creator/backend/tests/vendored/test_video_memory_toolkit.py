@@ -295,3 +295,42 @@ def test_asr_nodes_are_chunked_for_embedding() -> None:
     asr_nodes = [n for n in nodes if n["node_type"] == "asr_text"]
     assert len(asr_nodes) >= 3
     assert all(len(n["text"]) <= 520 for n in asr_nodes)
+
+
+def test_cjk_tokenizer_emits_character_bigrams() -> None:
+    from vendor.mm_plugins.video_memory.embeddings import _tokenize
+
+    tokens = _tokenize("张飞也没一波一换三 asphalt road")
+    assert "一换" in tokens
+    assert "换三" in tokens
+    assert "asphalt" in tokens
+    # Mixed digit/CJK runs keep matchable bigrams too.
+    assert "0换" in _tokenize("打出了一波0换3")
+
+
+def test_short_chinese_phrase_gets_exact_bm25_hit() -> None:
+    # Regression: a whole commentary sentence used to collapse into one
+    # opaque token, so exact short phrases missed BM25 entirely and RRF
+    # surfaced arbitrary zero-score candidates.
+    index = EmbeddingIndex()
+    nodes = [
+        {
+            "node_id": f"asr_{i}",
+            "node_type": "asr_text",
+            "macro_id": f"macro_{i:04d}",
+            "text": text,
+        }
+        for i, text in enumerate(
+            [
+                "张飞也没一波一换三，AG要尝试打终结的。",
+                "现在整体的野射对位上面双方都有领先。",
+                "这场比赛打得非常精彩，值得回看。",
+                "赛后采访回顾第一局的关键团战细节。",
+            ],
+        )
+    ]
+    index.build(nodes, None)
+    hits = index.search("一换三", top_k=4)
+    assert hits[0]["node_id"] == "asr_0"
+    # Zero-score BM25 candidates gain no sparse rank credit.
+    assert hits[0]["score"] > hits[1]["score"]

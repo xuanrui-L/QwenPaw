@@ -114,15 +114,24 @@ _STOPWORDS = frozenset(
 )
 
 _TOKEN_RE = re.compile(r"[\w一-鿿]+", re.UNICODE)
+_CJK_CHAR_RE = re.compile(r"[一-鿿]")
 
 
 def _tokenize(text: str) -> list[str]:
-    """Tokenize text into lowercase tokens, filtering stopwords."""
-    return [
-        t
-        for t in _TOKEN_RE.findall(text.lower())
-        if t not in _STOPWORDS and len(t) > 1
-    ]
+    """Tokenize text into lowercase tokens, filtering stopwords.
+
+    Runs containing CJK characters are split into character bigrams so
+    short Chinese phrases (e.g. commentary catchphrases) get exact BM25
+    matches instead of one opaque sentence-long token; pure Latin/digit
+    runs are kept as whole words.
+    """
+    tokens: list[str] = []
+    for run in _TOKEN_RE.findall(text.lower()):
+        if _CJK_CHAR_RE.search(run):
+            tokens.extend(run[i : i + 2] for i in range(max(len(run) - 1, 1)))
+        else:
+            tokens.append(run)
+    return [t for t in tokens if t not in _STOPWORDS and len(t) > 1]
 
 
 class EmbeddingIndex:
@@ -267,8 +276,12 @@ class EmbeddingIndex:
             dense_rank = {}
 
         sparse_scores = self._sparse_search(query)
+        # Only nodes with a positive BM25 score earn a sparse rank;
+        # zero-score nodes must not gain RRF credit from arbitrary
+        # ordering among ties.
+        candidate_set = set(indices)
         sparse_ranked = sorted(
-            [(i, sparse_scores.get(i, 0.0)) for i in indices],
+            [(i, s) for i, s in sparse_scores.items() if i in candidate_set],
             key=lambda x: x[1],
             reverse=True,
         )

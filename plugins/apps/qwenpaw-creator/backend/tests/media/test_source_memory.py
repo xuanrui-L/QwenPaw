@@ -517,3 +517,300 @@ def test_build_datetime_marker_is_timezone_aware() -> None:
         macroCount=1,
     )
     assert ref.macro_count == 1
+
+
+# ── CR remediation regressions ──────────────────────────────────────────────
+
+
+def _memory_ref() -> SourceMemoryRef:
+    return SourceMemoryRef(
+        graphPath="runtime/source-intelligence/intel-1/memory/"
+        "graph_memory.json",
+        embeddingsPath="runtime/source-intelligence/intel-1/memory/"
+        "embeddings.npz",
+        builtAt="2026-08-01T01:00:00Z",
+        macroCount=2,
+    )
+
+
+def _write_fixture_projection(directory: Path) -> None:
+    projection = SourceMemoryProjection(
+        indexId="intel-1",
+        summary="memory digest of the whole video",
+        semanticEntries=[
+            {
+                "text": "Super event one: rooftop exploration",
+                "tags": ["memory"],
+                "startMs": 0,
+                "endMs": 60000,
+                "confidence": 0.6,
+            },
+        ],
+    )
+    (directory / "projection.json").write_text(
+        json.dumps(
+            projection.model_dump(mode="json", by_alias=True),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_clip_budget_derives_from_transport_limit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        source_memory.model_config,
+        "get_vlm_max_inline_bytes",
+        lambda: 4 * 1024 * 1024,
+    )
+    budget = source_memory._clip_size_budget_bytes()
+    assert budget == int(4 * 1024 * 1024 * 3 / 4) - 64 * 1024
+    # A generous transport limit is capped at the conservative default.
+    monkeypatch.setattr(
+        source_memory.model_config,
+        "get_vlm_max_inline_bytes",
+        lambda: 64 * 1024 * 1024,
+    )
+    assert (
+        source_memory._clip_size_budget_bytes()
+        == source_memory.CLIP_SIZE_BUDGET_CAP_BYTES - 64 * 1024
+    )
+    # Tiny limits floor at a workable minimum.
+    monkeypatch.setattr(
+        source_memory.model_config,
+        "get_vlm_max_inline_bytes",
+        lambda: 100 * 1024,
+    )
+    assert source_memory._clip_size_budget_bytes() == 256 * 1024
+
+
+def test_index_transcript_reuses_available_empty_asr(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # Available-but-empty ASR coverage (silent source) must be reused,
+    # not re-billed; missing coverage must allow transcription.
+    service = _service(tmp_path)
+    job = source_memory.SourceMemoryBuildJob(
+        project_id="project-1",
+        task_id="task-1",
+        authorization_id=None,
+        index_id="intel-1",
+        asset_id="asset-1",
+        asset_version_id="version-1",
+        source_checksum="checksum-1",
+        duration_ms=25 * 60 * 1000,
+        local_path=str(tmp_path / "video.mp4"),
+    )
+
+    def fake_service(coverage_mode: str):
+        index = SimpleNamespace(
+            coverage={"asr": SimpleNamespace(mode=coverage_mode)},
+            transcript=[],
+        )
+        return SimpleNamespace(load=lambda *args: index)
+
+    import services.source_analysis as source_analysis_module
+
+    monkeypatch.setattr(
+        source_analysis_module,
+        "source_analysis_service",
+        lambda _services: fake_service("available"),
+    )
+    available, transcript = asyncio.run(service._index_transcript(job))
+    assert available is True
+    assert transcript == []
+
+    monkeypatch.setattr(
+        source_analysis_module,
+        "source_analysis_service",
+        lambda _services: fake_service("unavailable"),
+    )
+    available, transcript = asyncio.run(service._index_transcript(job))
+    assert available is False
+
+
+class _RecordingExecutions:
+    def __init__(self, task) -> None:
+        self.task = task
+        self.attempts: list[dict] = []
+        self.transitions: list[dict] = []
+
+    def get_task(self, _project_id, _task_id):
+        return self.task
+
+    def list_tasks(self, _project_id):
+        return [self.task]
+
+    def list_attempts(self, _project_id, _task_id):
+        return [SimpleNamespace(attempt_id="attempt-1")]
+
+    def append_attempt(self, _project_id, _task_id, **kwargs):
+        self.attempts.append(kwargs)
+        if kwargs["status"].name == "FAILED":
+            self.task = SimpleNamespace(
+                **{**self.task.__dict__, "status": _task_status("FAILED")},
+            )
+
+    def transition_task(self, _project_id, _task_id, **kwargs):
+        self.transitions.append(kwargs)
+        self.task = SimpleNamespace(
+            **{**self.task.__dict__, "status": kwargs["status"]},
+        )
+        return self.task
+
+
+def _task_status(name: str):
+    from domain.enums import TaskStatus
+
+    return TaskStatus[name]
+
+
+def _running_task(tmp_path: Path) -> SimpleNamespace:
+    from domain.enums import TaskKind
+
+    return SimpleNamespace(
+        project_id="project-1",
+        task_id="task-1",
+        kind=TaskKind.SOURCE_MEMORY_BUILD,
+        status=_task_status("RUNNING"),
+        last_attempt_seq=1,
+        metadata={
+            "analysisVersionId": "intel-1",
+            "localPath": str(tmp_path / "video.mp4"),
+            "sourceChecksum": "checksum-1",
+            "assetVersionId": "version-1",
+            "targetRef": "asset:asset-1",
+            "durationMs": 25 * 60 * 1000,
+            "authorizationId": "auth-1",
+        },
+    )
+
+
+def test_recover_fail_closes_without_durable_artifacts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service = _service(tmp_path)
+    task = _running_task(tmp_path)
+    executions = _RecordingExecutions(task)
+    service.executions = executions
+    monkeypatch.setattr(
+        service.services.projects,
+        "list",
+        lambda: [SimpleNamespace(project_id="project-1")],
+        raising=False,
+    )
+    spawned: list = []
+    monkeypatch.setattr(service, "_spawn", spawned.append)
+
+    service.recover_interrupted()
+
+    # Attempt closed as FAILED, but no automatic re-queue/spawn: a
+    # rebuild without artifacts requires a fresh authorization.
+    assert executions.attempts[-1]["status"].name == "FAILED"
+    assert not executions.transitions
+    assert not spawned
+
+
+def test_recover_requeues_when_artifacts_are_durable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service = _service(tmp_path)
+    project_root = tmp_path / "projects" / "project-1"
+    _write_fixture_memory(project_root, "intel-1")
+    task = _running_task(tmp_path)
+    executions = _RecordingExecutions(task)
+    service.executions = executions
+    monkeypatch.setattr(
+        service.services.projects,
+        "list",
+        lambda: [SimpleNamespace(project_id="project-1")],
+        raising=False,
+    )
+    spawned: list = []
+    monkeypatch.setattr(service, "_spawn", spawned.append)
+
+    service.recover_interrupted()
+
+    assert executions.transitions[-1]["status"].name == "QUEUED"
+    assert len(spawned) == 1
+
+
+def test_execute_converges_on_existing_artifacts(tmp_path) -> None:
+    # A QUEUED task whose artifacts are already durable must succeed
+    # without touching the media pipeline (no replayed billed calls).
+    service = _service(tmp_path)
+    project_root = tmp_path / "projects" / "project-1"
+    _write_fixture_memory(project_root, "intel-1")
+    task = SimpleNamespace(
+        project_id="project-1",
+        task_id="task-1",
+        status=_task_status("QUEUED"),
+        last_attempt_seq=2,
+    )
+    executions = _RecordingExecutions(task)
+    service.executions = executions
+    job = source_memory.SourceMemoryBuildJob(
+        project_id="project-1",
+        task_id="task-1",
+        authorization_id="auth-1",
+        index_id="intel-1",
+        asset_id="asset-1",
+        asset_version_id="version-1",
+        source_checksum="checksum-1",
+        duration_ms=25 * 60 * 1000,
+        local_path=str(tmp_path / "missing.mp4"),
+    )
+    asyncio.run(service._execute(job))
+    statuses = [item["status"].name for item in executions.attempts]
+    assert statuses == ["RUNNING", "SUCCEEDED"]
+    assert executions.attempts[-1]["output"]["converged"] is True
+
+
+def test_merge_projection_semantics_folds_drafts(tmp_path) -> None:
+    project_root = tmp_path / "projects" / "project-1"
+    directory = _write_fixture_memory(project_root, "intel-1")
+    _write_fixture_projection(directory)
+    index = _index(memory_ref=_memory_ref())
+    before = len(index.semantic_entries)
+
+    source_memory.merge_projection_semantics(project_root, index)
+
+    added = index.semantic_entries[before:]
+    assert [entry.id for entry in added] == ["sem-mem-summary", "sem-mem-000"]
+    assert all(
+        entry.model_run_id == source_memory.SOURCE_MEMORY_RUN_ID
+        for entry in added
+    )
+    assert any(
+        run.id == source_memory.SOURCE_MEMORY_RUN_ID
+        for run in index.model_runs
+    )
+    # Idempotent on repeated loads.
+    source_memory.merge_projection_semantics(project_root, index)
+    assert len(index.semantic_entries) == before + 2
+
+
+def test_merge_projection_semantics_requires_matching_checksum(
+    tmp_path,
+) -> None:
+    project_root = tmp_path / "projects" / "project-1"
+    directory = _write_fixture_memory(project_root, "intel-1")
+    _write_fixture_projection(directory)
+    index = _index(checksum="checksum-other", memory_ref=_memory_ref())
+    before = len(index.semantic_entries)
+    source_memory.merge_projection_semantics(project_root, index)
+    assert len(index.semantic_entries) == before
+
+
+def test_merge_projection_semantics_noop_without_memory_ref(
+    tmp_path,
+) -> None:
+    project_root = tmp_path / "projects" / "project-1"
+    index = _index()
+    source_memory.merge_projection_semantics(project_root, index)
+    assert all(
+        entry.model_run_id != source_memory.SOURCE_MEMORY_RUN_ID
+        for entry in index.semantic_entries
+    )

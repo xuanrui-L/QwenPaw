@@ -1160,13 +1160,21 @@ class SourceMediaAnalysisService:
         # Hydrate the read-only memory pointer AFTER the canonical byte
         # check: memory artifacts live outside the immutable index file and
         # invalidate themselves on sourceChecksum change.
-        from services.media.source_memory import load_memory_ref
+        from services.media.source_memory import (
+            load_memory_ref,
+            merge_projection_semantics,
+        )
 
+        project_root = self.services.projects.project_root(project_id)
         index.memory_ref = load_memory_ref(
-            self.services.projects.project_root(project_id),
+            project_root,
             index.id,
             index.source_checksum,
         )
+        # Fold the P3 Root/SuperEvent drafts into the semantic surface
+        # (producer=source_memory) so downstream consumers review them
+        # alongside the outer-VLM entries.
+        merge_projection_semantics(project_root, index)
         return index
 
     def query(

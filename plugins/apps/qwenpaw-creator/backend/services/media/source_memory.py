@@ -40,7 +40,12 @@ from domain.enums import TaskKind, TaskStatus
 from domain.errors import ValidationError
 from models import asr_model, embedding_model, vlm_model
 from models import config as model_config
-from schemas.assets import SourceIntelligenceIndex, SourceMemoryRef
+from schemas.assets import (
+    SemanticIndexEntry,
+    SourceIntelligenceIndex,
+    SourceMemoryRef,
+    SourceModelRunRef,
+)
 from schemas.common import StrictModel
 from services.execution_pricing import (
     CostEstimate,
@@ -93,8 +98,9 @@ MIN_SCENE_SEC = 30.0
 MAX_SCENE_SEC = 300.0
 # P2 clip encoding for the VLM segment observation. Non-DashScope
 # OpenAI-compatible gateways receive the clip as an inline base64 data
-# URL, so each macro clip must fit a conservative size budget; encoding
-# steps down this (max_dim, crf, fps) ladder until the segment fits.
+# URL, so each macro clip must fit the configured inline transport
+# limit after Base64 expansion (~4/3); encoding steps down this
+# (max_dim, crf, fps) ladder until the segment fits.
 CLIP_ENCODE_LADDER = (
     (720, 28, 8),
     (512, 30, 8),
@@ -102,7 +108,32 @@ CLIP_ENCODE_LADDER = (
     (320, 35, 4),
     (256, 38, 3),
 )
-CLIP_SIZE_BUDGET_BYTES = 6 * 1024 * 1024
+CLIP_SIZE_BUDGET_CAP_BYTES = 6 * 1024 * 1024
+_BASE64_EXPANSION = 4.0 / 3.0
+_CLIP_BUDGET_HEADROOM_BYTES = 64 * 1024
+
+
+def _clip_size_budget_bytes() -> int:
+    """Raw clip budget derived from the active transport limit.
+
+    The inline pre-flight check in the VLM backend enforces
+    ``get_vlm_max_inline_bytes`` on the raw file, while the gateway sees
+    the Base64-expanded request body; budget against both, capped at a
+    conservative default.
+    """
+    inline_limit = model_config.get_vlm_max_inline_bytes()
+    base64_safe = int(inline_limit / _BASE64_EXPANSION)
+    budget = (
+        min(
+            CLIP_SIZE_BUDGET_CAP_BYTES,
+            inline_limit,
+            base64_safe,
+        )
+        - _CLIP_BUDGET_HEADROOM_BYTES
+    )
+    return max(budget, 256 * 1024)
+
+
 SUBGRAPH_MAX_TOKENS = 16384
 AGGREGATION_MAX_TOKENS = 8192
 SUBGRAPH_RETRIES = 2
@@ -208,6 +239,86 @@ def load_memory_ref(
         builtAt=built_at,
         macroCount=macro_count,
     )
+
+
+SOURCE_MEMORY_RUN_ID = "source_memory"
+
+
+def merge_projection_semantics(project_root: Path, index: Any) -> None:
+    """Fold the P3 projection drafts into a loaded index, in memory.
+
+    Root/SuperEvent digests enter the standard ``semanticEntries``
+    surface with ``modelRunId`` carrying the ``source_memory`` producer
+    marker; the immutable index file on disk stays untouched (same
+    hydrated-only contract as ``memoryRef``).
+    """
+    if index.memory_ref is None:
+        return
+    directory = memory_dir(project_root, index.id)
+    try:
+        meta = json.loads(
+            (directory / META_FILENAME).read_text(encoding="utf-8"),
+        )
+        raw = json.loads(
+            (directory / PROJECTION_FILENAME).read_text(encoding="utf-8"),
+        )
+        projection = SourceMemoryProjection.model_validate(raw)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(meta, Mapping):
+        return
+    if meta.get("sourceChecksum") != index.source_checksum:
+        return
+    built_at = str(meta.get("builtAt") or "")
+    if not built_at:
+        return
+    evidence = [f"memory://{index.id}/{GRAPH_FILENAME}"]
+    common: dict[str, Any] = {
+        "assetVersionId": index.asset_version_id,
+        "sourceChecksum": index.source_checksum,
+        "modelRunId": SOURCE_MEMORY_RUN_ID,
+        "evidenceFrameRefs": evidence,
+        "createdAt": built_at,
+    }
+    duration_ms = index.media.duration_ms
+    drafts: list[SemanticIndexEntry] = [
+        SemanticIndexEntry(
+            id="sem-mem-summary",
+            text=projection.summary,
+            tags=["memory", "summary"],
+            confidence=0.6,
+            **common,
+        ),
+    ]
+    for n, draft in enumerate(projection.semantic_entries):
+        end_ms = draft.end_ms
+        if duration_ms is not None:
+            end_ms = min(end_ms, duration_ms)
+        if end_ms <= draft.start_ms:
+            continue
+        drafts.append(
+            SemanticIndexEntry(
+                id=f"sem-mem-{n:03d}",
+                text=draft.text,
+                tags=draft.tags,
+                startMs=draft.start_ms,
+                endMs=end_ms,
+                confidence=draft.confidence,
+                **common,
+            ),
+        )
+    existing_ids = {entry.id for entry in index.semantic_entries}
+    index.semantic_entries.extend(
+        entry for entry in drafts if entry.id not in existing_ids
+    )
+    if SOURCE_MEMORY_RUN_ID not in {run.id for run in index.model_runs}:
+        index.model_runs.append(
+            SourceModelRunRef(
+                id=SOURCE_MEMORY_RUN_ID,
+                provider="creator",
+                model="source-memory-p3",
+            ),
+        )
 
 
 def has_built_memory(
@@ -403,6 +514,7 @@ def _clip_segment_within_budget_sync(
 ) -> Path:
     """Encode a segment, stepping down the ladder until it fits the
     inline transport budget of OpenAI-compatible gateways."""
+    budget = _clip_size_budget_bytes()
     last_size = 0
     for max_dim, crf, fps in CLIP_ENCODE_LADDER:
         _clip_segment_sync(
@@ -415,13 +527,15 @@ def _clip_segment_within_budget_sync(
             fps,
         )
         last_size = out_path.stat().st_size
-        if last_size <= CLIP_SIZE_BUDGET_BYTES:
+        if last_size <= budget:
             return out_path
         logger.info(
-            "segment clip %s too large at %dpx (%d bytes), stepping down",
+            "segment clip %s too large at %dpx (%d bytes > %d), "
+            "stepping down",
             out_path.name,
             max_dim,
             last_size,
+            budget,
         )
     raise RuntimeError(
         f"segment clip stays above transport budget: {last_size} bytes",
@@ -807,6 +921,44 @@ class SourceMemoryService:
         if task.status is not TaskStatus.QUEUED:
             return
         attempt_id = self._attempt_id(job, task.last_attempt_seq + 1)
+        # Converge on durable artifacts before spending anything: a
+        # restart between persistence and the SUCCEEDED event must not
+        # replay billed model calls under the same authorization.
+        existing = await asyncio.to_thread(self._existing_ref, job)
+        if existing is not None:
+            await asyncio.to_thread(
+                self.executions.append_attempt,
+                job.project_id,
+                job.task_id,
+                event_id=f"{attempt_id}-running",
+                attempt_id=attempt_id,
+                status=TaskAttemptStatus.RUNNING,
+                input={
+                    "analysisVersionId": job.index_id,
+                    "converged": True,
+                },
+            )
+            await asyncio.to_thread(
+                self.executions.append_attempt,
+                job.project_id,
+                job.task_id,
+                event_id=f"{attempt_id}-succeeded",
+                attempt_id=attempt_id,
+                status=TaskAttemptStatus.SUCCEEDED,
+                output={
+                    "converged": True,
+                    "graphPath": existing.graph_path,
+                    "embeddingsPath": existing.embeddings_path,
+                    "macroCount": existing.macro_count,
+                },
+                output_refs=[existing.graph_path],
+            )
+            logger.info(
+                "source memory build converged on existing artifacts: "
+                "task=%s",
+                job.task_id,
+            )
+            return
         await asyncio.to_thread(
             self.executions.append_attempt,
             job.project_id,
@@ -848,10 +1000,12 @@ class SourceMemoryService:
 
         # ASR: reuse the transcript the published index already carries
         # (single billing, consistent text); transcribe only when the
-        # index has no ASR modality at all.
+        # index never produced the ASR modality. Available-but-empty
+        # coverage (a silent source) is a legitimate final state and
+        # must not be billed again.
         transcript: list[dict[str, float | str]] = []
-        index_transcript = await self._index_transcript(job)
-        if index_transcript:
+        asr_available, index_transcript = await self._index_transcript(job)
+        if asr_available:
             transcript = index_transcript
         elif model_config.get_asr_api_key():
             try:
@@ -967,11 +1121,29 @@ class SourceMemoryService:
             len(nodes),
         )
 
+    def _existing_ref(
+        self,
+        job: SourceMemoryBuildJob,
+    ) -> SourceMemoryRef | None:
+        """Valid persisted artifacts for this build job, if any."""
+        try:
+            project_root = self.services.projects.project_root(
+                job.project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return None
+        return load_memory_ref(
+            project_root,
+            job.index_id,
+            job.source_checksum,
+        )
+
     async def _index_transcript(
         self,
         job: SourceMemoryBuildJob,
-    ) -> list[dict[str, float | str]]:
-        """Transcript records from the published index, in seconds."""
+    ) -> tuple[bool, list[dict[str, float | str]]]:
+        """ASR availability and transcript records (seconds) from the
+        published index."""
         from services.source_analysis import source_analysis_service
 
         try:
@@ -986,8 +1158,12 @@ class SourceMemoryService:
                 "source memory could not reload index transcript: %s",
                 error,
             )
-            return []
-        return [
+            return False, []
+        asr_coverage = index.coverage.get("asr")
+        available = (
+            asr_coverage is not None and asr_coverage.mode == "available"
+        )
+        return available, [
             {
                 "start_sec": segment.start_ms / 1000.0,
                 "end_sec": segment.end_ms / 1000.0,
@@ -1168,7 +1344,14 @@ class SourceMemoryService:
     # -- recovery ------------------------------------------------------------
 
     def recover_interrupted(self) -> None:
-        """Re-queue interrupted builds; approved authorizations resume."""
+        """Converge or fail interrupted builds; never replay billed work.
+
+        A build cut while RUNNING is closed as FAILED. It is re-queued
+        only when complete artifacts are already durable (the follow-up
+        attempt converges without new model calls); otherwise it stays
+        FAILED and a rebuild requires a fresh commit/authorization.
+        QUEUED tasks resume their authorization wait as before.
+        """
         for project_id in self._list_project_ids():
             try:
                 tasks = self.executions.list_tasks(project_id)
@@ -1178,7 +1361,26 @@ class SourceMemoryService:
                 if task.kind is not TaskKind.SOURCE_MEMORY_BUILD:
                     continue
                 if task.status is TaskStatus.RUNNING:
-                    task = self._requeue_interrupted(task)
+                    task = self._close_interrupted(task)
+                    if task.status is not TaskStatus.FAILED:
+                        continue
+                    job = self._job_from_task(task)
+                    if job is None or self._existing_ref(job) is None:
+                        logger.warning(
+                            "source memory build %s interrupted without "
+                            "durable artifacts; not retried automatically",
+                            task.task_id,
+                        )
+                        continue
+                    try:
+                        task = self.executions.transition_task(
+                            task.project_id,
+                            task.task_id,
+                            expected_status=TaskStatus.FAILED,
+                            status=TaskStatus.QUEUED,
+                        )
+                    except (ExecutionStateConflict, RecordNotFoundError):
+                        continue
                 if task.status is TaskStatus.QUEUED:
                     job = self._job_from_task(task)
                     if job is not None:
@@ -1192,10 +1394,8 @@ class SourceMemoryService:
         except Exception:  # pylint: disable=broad-except
             return []
 
-    def _requeue_interrupted(self, task: TaskRecord) -> TaskRecord:
-        """RUNNING after a restart: close the open attempt, then re-queue
-        (the FAILED→QUEUED transition is the sanctioned retry path and the
-        existing APPROVED authorization still covers the spend)."""
+    def _close_interrupted(self, task: TaskRecord) -> TaskRecord:
+        """Close the attempt left RUNNING by a restart as FAILED."""
         try:
             attempts = self.executions.list_attempts(
                 task.project_id,
@@ -1215,11 +1415,9 @@ class SourceMemoryService:
                     "message": "runtime restarted during the memory build",
                 },
             )
-            return self.executions.transition_task(
+            return self.executions.get_task(
                 task.project_id,
                 task.task_id,
-                expected_status=TaskStatus.FAILED,
-                status=TaskStatus.QUEUED,
             )
         except (ExecutionStateConflict, RecordNotFoundError):
             return task
