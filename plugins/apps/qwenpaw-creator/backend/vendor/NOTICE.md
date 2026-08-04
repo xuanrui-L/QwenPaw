@@ -1,19 +1,32 @@
-# Third-Party Notices — `backend/vendor/`
+# Third-Party Vendored Code Notice
 
-This directory contains code vendored from third-party repositories under
-Apache-2.0-compliant terms (Apache License 2.0, Section 4). Each vendored
-file keeps the upstream attribution in its header together with a summary of
-local modifications.
+This directory contains source code vendored (algorithm ported) from
+third-party projects under their respective licenses. Vendoring follows the
+project-wide rule set in
+`docs/proposals/mm-plugins-creator-integration/MM_PLUGINS_INTEGRATION_PLAN.md`
+(§2.2, technique B): no runtime dependency on the upstream package, no
+environment-variable injection, no in-process invocation of upstream code.
 
 ## Qwen-MM-Plugins
 
-- Source repository: https://github.com/QwenLM/Qwen-MM-Plugins
-- Vendored at commit: `077aea63d9e7ad50d91bab6c8dff12183a24d48b`
-- License: Apache License, Version 2.0
-  (https://www.apache.org/licenses/LICENSE-2.0)
+- Upstream repository: Qwen-MM-Plugins
+  (local mirror: `/Users/linxuanrui/Documents/projects/Project-Creator/Qwen-MM-Plugins`)
+- Upstream baseline: `release` branch, commit `077aea6`
+- License: Apache License 2.0 (see upstream `LICENSE`)
+- Vendored location: `backend/vendor/mm_plugins/`
 
-Vendored modules:
+Per Apache-2.0 §4(b), every vendored file keeps an attribution header naming
+the upstream path and commit, and states that the file carries modifications
+for QwenPaw Creator. The canonical header template is:
 
-| Local module | Upstream source | Notes |
-|---|---|---|
-| `vendor/mm_plugins/image_budget.py` | `src/shared/image.py` (`budget_to_pixels`, `smart_resize`) + budget constants from `src/shared/env.py` | Function bodies verbatim; constants inlined to drop the upstream package dependency. |
+```python
+# Vendored from Qwen-MM-Plugins (Apache-2.0), release commit 077aea6.
+# Upstream path: <path inside upstream repository>
+# Modified for QwenPaw Creator. See backend/vendor/NOTICE.md.
+```
+
+### Module inventory
+
+| Vendored module | Upstream source | Modifications |
+| --- | --- | --- |
+| `mm_plugins/image_budget.py` | `src/shared/image.py` (`budget_to_pixels`, `smart_resize`) + constants from `src/shared/env.py` | Constants inlined (no env lookups); `smart_resize` floors the over-budget branch (matching canonical `qwen_vl_utils`) and shrinks the long side after short-side clamping so results never exceed the pixel budget, even at extreme aspect ratios. Shared with the doc-reader worktree; keep content byte-identical across branches. Render-review (WT4) adds the `VIDEO_BUDGET_TOKENS`/`VIDEO_MIN_PIXELS` constants as a pure additive block on top of the canonical copy. |

@@ -46,7 +46,6 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
-from models.config import is_self_review_enabled
 from services.media_files.overlay import (
     PET_OS_VIBES,
     render_interview_summary_overlay,
@@ -2038,26 +2037,7 @@ class FileLocalMediaExecutionService:
                     run_status=SpecialistRunStatus.CANCELLED,
                 )
                 raise ConflictError("本地媒体 Task 已取消，迟到结果已隔离")
-            converged = await self._converge(
-                task=task,
-                ids=ids,
-                replayed=False,
-            )
-            # Self-review hook (single point): advisory only, detached, never
-            # blocks the compose result path. Runs only after the final
-            # composition converged into the Project (a stale/quarantined
-            # result must not be reviewed). Disabled unless the code-level
-            # CREATOR_SELF_REVIEW_ENABLED switch is on.
-            if (
-                resolved.command is CreatorCommandType.COMPOSE_FINAL_VIDEO
-                and is_self_review_enabled()
-            ):
-                schedule_render_review(
-                    self.services,
-                    project_id=project_id,
-                    published_result=published_result,
-                )
-            return converged
+            return await self._converge(task=task, ids=ids, replayed=False)
         except (ConflictError, ValidationError, StorageIntegrityError) as exc:
             await self._fail_if_running(
                 project_id,
@@ -3026,8 +3006,8 @@ class FileLocalMediaExecutionService:
 
         self._closed = True
 
-    @staticmethod
     def _result_from_task(
+        self,
         task: TaskRecord,
         *,
         replayed: bool,
@@ -3044,6 +3024,16 @@ class FileLocalMediaExecutionService:
             raise StorageIntegrityError(
                 "SUCCEEDED 本地媒体 Task 缺少可重放结果",
             ) from exc
+        # Self-review hook: every successful convergence (fresh render,
+        # idempotent replay, fingerprint reuse and crash recovery) flows
+        # through this single point. Scheduling is advisory and idempotent:
+        # the switch, the command filter and already-reviewed dedup all live
+        # on the review side.
+        schedule_render_review(
+            self.services,
+            project_id=task.project_id,
+            published_result=result,
+        )
         return FileLocalMediaExecutionResult(
             task_id=task.task_id,
             run_id=str(task.run_id or ""),

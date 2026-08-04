@@ -7,6 +7,11 @@ Runs the *real* VLM against the curated fixture cases under
 human-annotated ``expected.json``. Prompt iteration bar: zero missed defects
 across the set and at most one false alarm per case.
 
+Each case's ``plan_context`` labels are materialized as a real Project
+timeline (audio elements / subtitle overlays / settings) and the review
+context is derived through the production ``derive_plan_context`` builder,
+so the eval exercises exactly the live compose-path context.
+
 Manual invocation (never runs in CI):
 
     RENDER_REVIEW_EVAL=1 CREATOR_DATA_ROOT=... QWENPAW_KEYRING_ACCOUNT=... \
@@ -23,8 +28,17 @@ from pathlib import Path
 import pytest
 
 from services.project_files.facade import CreatorFileServices
-from services.project_files.models import Project
-from services.render_review.review import review_render
+from services.project_files.models import (
+    AudioCreation,
+    ElementLocation,
+    OverlayCreation,
+    Project,
+    ProjectSettings,
+    Timeline,
+    TimelineElement,
+    TimelineSpan,
+)
+from services.render_review.review import derive_plan_context, review_render
 
 pytestmark = [
     pytest.mark.manual,
@@ -45,6 +59,7 @@ CASES_DIR = (
     / "cases"
 )
 PROJECT_ID = "project-render-review-eval"
+TARGET_REF = "timeline:timeline:main"
 MAX_FALSE_ALARMS_PER_CASE = 1
 
 
@@ -58,6 +73,48 @@ def _load_cases() -> list[tuple[str, Path, dict]]:
         expected = json.loads(expected_path.read_text(encoding="utf-8"))
         cases.append((case_dir.name, video_path, expected))
     return cases
+
+
+def _project_for_case(expected: dict) -> Project:
+    """Materialize the annotated plan as a real Project timeline.
+
+    The labels only shape the *plan* (settings + timeline elements); the
+    review context itself is derived from that plan through the same
+    ``derive_plan_context`` builder used on the live compose path.
+    """
+    labels = expected.get("plan_context") or {}
+    project = Project.new(
+        project_id=PROJECT_ID,
+        name="Render Review Eval",
+        settings=ProjectSettings(
+            content_type=labels.get("content_type"),
+            target_duration_seconds=labels.get("target_duration_seconds"),
+        ),
+    )
+    elements: dict[str, TimelineElement] = {}
+    if labels.get("expects_voiceover"):
+        elements["audio:vo1"] = TimelineElement(
+            element_id="audio:vo1",
+            span=TimelineSpan(start_tick=0, duration_tick=1000),
+            creation=AudioCreation(
+                source_asset_version_id="artifact-version-eval-vo",
+            ),
+        )
+    if labels.get("expects_subtitles"):
+        elements["overlay:sub1"] = TimelineElement(
+            element_id="overlay:sub1",
+            span=TimelineSpan(start_tick=0, duration_tick=1000),
+            location=ElementLocation(),
+            creation=OverlayCreation(
+                overlay_kind="pet_os",
+                text="评测字幕",
+                prompt="评测字幕",
+            ),
+        )
+    timeline = Timeline(timeline_id="timeline:main", elements_by_id=elements)
+    project.timelines.items["timeline:main"] = timeline
+    project.timelines.order.append("timeline:main")
+    return project
 
 
 def _grade(report, expected: dict) -> dict:
@@ -98,6 +155,10 @@ def test_eval_set_zero_miss_low_false_alarm(tmp_path: Path) -> None:
 
     results = []
     for case_name, video_path, expected in cases:
+        plan_context = derive_plan_context(
+            _project_for_case(expected),
+            TARGET_REF,
+        )
         report = asyncio.run(
             review_render(
                 services,
@@ -105,10 +166,11 @@ def test_eval_set_zero_miss_low_false_alarm(tmp_path: Path) -> None:
                 video_path=video_path,
                 video_id=case_name,
                 round_number=1,
-                plan_context=expected.get("plan_context") or {},
+                plan_context=plan_context,
             ),
         )
         graded = _grade(report, expected)
+        graded["derived_context"] = plan_context
         results.append(graded)
         print(json.dumps(graded, ensure_ascii=False))
 

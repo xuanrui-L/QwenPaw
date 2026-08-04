@@ -42,6 +42,7 @@ from services.runtime_files import (
     MessageClassification,
     RuntimeSessionNotFound,
 )
+from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.media_probe import probe_media
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
@@ -54,6 +55,11 @@ logger = setup_logger("creator.render_review")
 _TRACE_COMPONENT = "render_review"
 _VLM_ATTEMPTS = 2
 _UNSAFE_REF_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+# An in-flight claim older than this is treated as abandoned (crashed loop)
+# and may be reclaimed by a later scheduling attempt for the same video.
+_CLAIM_TTL_SECONDS = 30 * 60
+# Bounded dedup history of already-reviewed artifact versions per chain file.
+_REVIEWED_HISTORY_LIMIT = 50
 
 
 def _reports_root(services: "CreatorFileServices", project_id: str) -> Path:
@@ -87,60 +93,221 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _chain_lock(reports_root: Path, target_ref: str) -> CrossProcessFileLock:
+    chain_path = _chain_path(reports_root, target_ref)
+    chain_path.parent.mkdir(parents=True, exist_ok=True)
+    return CrossProcessFileLock(
+        chain_path.with_name(f"{chain_path.name}.lock"),
+    )
+
+
+def _claim_is_live(claim: Mapping[str, Any]) -> bool:
+    raw = str(claim.get("claimed_at") or "")
+    try:
+        claimed_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    age = (datetime.now(UTC) - claimed_at).total_seconds()
+    return 0 <= age < _CLAIM_TTL_SECONDS
+
+
 def _admit_round(
     reports_root: Path,
     *,
     target_ref: str,
     video_id: str,
 ) -> tuple[int, str] | None:
-    """Return ``(round_number, chain_id)`` or ``None`` when the chain is spent."""
-    state = _read_json(_chain_path(reports_root, target_ref))
-    if state is not None and state.get("status") == "open":
-        rounds_completed = int(state.get("rounds_completed") or 0)
-        if str(state.get("last_video_id") or "") == video_id:
+    """Atomically claim the next round, or return ``None`` when not due.
+
+    The claim is persisted before any review work starts so concurrent
+    schedules cannot double-book a round; a claim for an older video is
+    superseded by the newer composition, and the superseded loop drops its
+    findings at finalization.
+    """
+    chain_path = _chain_path(reports_root, target_ref)
+    with _chain_lock(reports_root, target_ref):
+        state = _read_json(chain_path) or {}
+        reviewed = [
+            str(item) for item in state.get("reviewed_video_ids") or []
+        ]
+        if video_id in reviewed or video_id == str(
+            state.get("last_video_id") or "",
+        ):
             return None
-        if rounds_completed >= MAX_REVIEW_ROUNDS:
-            # Defensive: an open chain never exceeds the cap in practice.
+        claim = state.get("claim") or {}
+        if claim.get("video_id") == video_id and _claim_is_live(claim):
+            # The same video is already being reviewed (replayed schedule).
             return None
-        return rounds_completed + 1, str(state.get("chain_id") or "")
-    return 1, f"chain-{uuid4().hex[:12]}"
+        if state.get("status") == "open":
+            rounds_completed = int(state.get("rounds_completed") or 0)
+            if rounds_completed >= MAX_REVIEW_ROUNDS:
+                return None
+            chain_id = (
+                str(state.get("chain_id") or "") or f"chain-{uuid4().hex[:12]}"
+            )
+            round_number = rounds_completed + 1
+        else:
+            # Absent or closed chain: a fresh composition starts a new chain
+            # while the reviewed-history dedup carries over.
+            state = {}
+            chain_id = f"chain-{uuid4().hex[:12]}"
+            round_number = 1
+        now = datetime.now(UTC).isoformat()
+        state.update(
+            {
+                "chain_id": chain_id,
+                "target_ref": target_ref,
+                "rounds_completed": int(state.get("rounds_completed") or 0),
+                "status": "open",
+                "reviewed_video_ids": reviewed,
+                "claim": {
+                    "video_id": video_id,
+                    "round": round_number,
+                    "claimed_at": now,
+                },
+                "updated_at": now,
+            },
+        )
+        _write_json(chain_path, state)
+    return round_number, chain_id
 
 
-def _complete_round(
+def _release_claim(
     reports_root: Path,
     *,
+    target_ref: str,
+    video_id: str,
+) -> None:
+    """Best-effort claim release after a failed review round."""
+    chain_path = _chain_path(reports_root, target_ref)
+    try:
+        with _chain_lock(reports_root, target_ref):
+            state = _read_json(chain_path) or {}
+            claim = state.get("claim") or {}
+            if claim.get("video_id") != video_id:
+                return
+            state["claim"] = None
+            state["updated_at"] = datetime.now(UTC).isoformat()
+            _write_json(chain_path, state)
+    except Exception:
+        logger.exception("failed to release render review claim")
+
+
+def _selected_slot_version(
+    services: "CreatorFileServices",
+    project_id: str,
+    *,
+    video_id: str,
+    slot_id: str | None,
+) -> str | None:
+    """Return the currently selected ArtifactVersion of the render slot."""
+    snapshot = services.projects.read(project_id)
+    slots = snapshot.project.assets.artifact_slots_by_id
+    slot = None
+    if slot_id:
+        slot = slots.get(slot_id)
+    if slot is None:
+        slot = next(
+            (item for item in slots.values() if video_id in item.version_ids),
+            None,
+        )
+    return slot.selected_version_id if slot is not None else None
+
+
+def _finalize_round(
+    services: "CreatorFileServices",
+    reports_root: Path,
+    *,
+    project_id: str,
     target_ref: str,
     chain_id: str,
     round_number: int,
     video_id: str,
-    verdict: str,
-) -> None:
-    keep_open = verdict == "revise" and round_number < MAX_REVIEW_ROUNDS
-    _write_json(
-        _chain_path(reports_root, target_ref),
-        {
-            "chain_id": chain_id,
-            "target_ref": target_ref,
-            "rounds_completed": round_number,
-            "status": "open" if keep_open else "closed",
-            "last_video_id": video_id,
-            "last_verdict": verdict,
-            "updated_at": datetime.now(UTC).isoformat(),
-        },
-    )
+    slot_id: str | None,
+    report: RenderReviewReport,
+) -> tuple[str, bool]:
+    """Re-validate freshness and, still under the chain lock, admit feedback.
+
+    Returns ``(outcome, feedback_sent)`` where outcome is ``completed``,
+    ``superseded`` (a newer composition claimed the chain while the VLM ran)
+    or ``stale`` (the reviewed video is no longer the selected artifact).
+    Superseded/stale findings never mutate the current timeline and never
+    consume a chain round.
+    """
+    chain_path = _chain_path(reports_root, target_ref)
+    with _chain_lock(reports_root, target_ref):
+        state = _read_json(chain_path) or {}
+        claim = state.get("claim") or {}
+        now = datetime.now(UTC).isoformat()
+        reviewed = [
+            str(item) for item in state.get("reviewed_video_ids") or []
+        ]
+        if video_id not in reviewed:
+            reviewed.append(video_id)
+        reviewed = reviewed[-_REVIEWED_HISTORY_LIMIT:]
+        if claim.get("video_id") != video_id:
+            state["reviewed_video_ids"] = reviewed
+            state["updated_at"] = now
+            _write_json(chain_path, state)
+            return "superseded", False
+        selected: str | None = None
+        try:
+            selected = _selected_slot_version(
+                services,
+                project_id,
+                video_id=video_id,
+                slot_id=slot_id,
+            )
+        except Exception:
+            logger.exception("failed to resolve selected artifact version")
+        if selected is not None and selected != video_id:
+            state.update(
+                {
+                    "claim": None,
+                    "reviewed_video_ids": reviewed,
+                    "updated_at": now,
+                },
+            )
+            _write_json(chain_path, state)
+            return "stale", False
+        feedback_sent = False
+        if report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS:
+            feedback_sent = _admit_feedback(
+                services,
+                project_id=project_id,
+                report=report,
+                target_ref=target_ref,
+                chain_id=chain_id,
+            )
+        keep_open = (
+            report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS
+        )
+        state.update(
+            {
+                "chain_id": chain_id,
+                "target_ref": target_ref,
+                "rounds_completed": round_number,
+                "status": "open" if keep_open else "closed",
+                "last_video_id": video_id,
+                "last_verdict": report.verdict,
+                "reviewed_video_ids": reviewed,
+                "claim": None,
+                "updated_at": now,
+            },
+        )
+        _write_json(chain_path, state)
+        return "completed", feedback_sent
 
 
-def _plan_context(
-    services: "CreatorFileServices",
-    project_id: str,
-    target_ref: str,
-) -> dict[str, Any]:
+def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
+    """Derive the review plan context from authoritative Project data.
+
+    ``expects_voiceover`` and ``expects_subtitles`` come from the actual
+    timeline plan (audio elements / text overlays), never from annotations,
+    so the live compose path and the eval harness share one context source.
+    """
     context: dict[str, Any] = {"timeline_ref": target_ref}
-    try:
-        snapshot = services.projects.read(project_id)
-    except Exception:
-        return context
-    settings = getattr(snapshot.project, "settings", None)
+    settings = getattr(project, "settings", None)
     if settings is not None:
         context["content_type"] = getattr(settings, "content_type", None)
         context["target_duration_seconds"] = getattr(
@@ -148,7 +315,39 @@ def _plan_context(
             "target_duration_seconds",
             None,
         )
+    timeline_id = target_ref.partition(":")[2] or target_ref
+    timelines = getattr(getattr(project, "timelines", None), "items", None)
+    timeline = (timelines or {}).get(timeline_id)
+    expects_voiceover = False
+    expects_subtitles = False
+    if timeline is not None:
+        for element in timeline.elements_by_id.values():
+            if not getattr(element, "enabled", True):
+                continue
+            creation = getattr(element, "creation", None)
+            kind = getattr(creation, "type", None)
+            if kind == "audio":
+                expects_voiceover = True
+            elif kind == "overlay":
+                overlay_kind = getattr(creation, "overlay_kind", "")
+                text = str(getattr(creation, "text", "") or "").strip()
+                if overlay_kind in ("pet_os", "interview_summary") and text:
+                    expects_subtitles = True
+    context["expects_voiceover"] = expects_voiceover
+    context["expects_subtitles"] = expects_subtitles
     return context
+
+
+def _plan_context(
+    services: "CreatorFileServices",
+    project_id: str,
+    target_ref: str,
+) -> dict[str, Any]:
+    try:
+        snapshot = services.projects.read(project_id)
+    except Exception:
+        return {"timeline_ref": target_ref}
+    return derive_plan_context(snapshot.project, target_ref)
 
 
 async def review_render(
@@ -315,10 +514,12 @@ async def run_review_loop(
     video_path: Path,
     video_id: str,
     target_ref: str,
+    slot_id: str | None = None,
 ) -> RenderReviewReport | None:
     """Run one advisory review round for a freshly published final render."""
+    reports_root = _reports_root(services, project_id)
+    admitted: tuple[int, str] | None = None
     try:
-        reports_root = _reports_root(services, project_id)
         admitted = await asyncio.to_thread(
             _admit_round,
             reports_root,
@@ -331,7 +532,7 @@ async def run_review_loop(
                 component=_TRACE_COMPONENT,
                 attributes={
                     "videoRef": f"artifact-version:{video_id}",
-                    "reason": "chain_spent_or_duplicate",
+                    "reason": "already_reviewed_or_chain_spent",
                 },
                 projectId=project_id,
             )
@@ -351,33 +552,26 @@ async def run_review_loop(
             round_number=round_number,
             plan_context=plan_context,
         )
-        feedback_sent = False
-        if report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS:
-            feedback_sent = await asyncio.to_thread(
-                _admit_feedback,
-                services,
-                project_id=project_id,
-                report=report,
-                target_ref=target_ref,
-                chain_id=chain_id,
-            )
-            if feedback_sent:
-                # Lazy import: the runtime registry pulls in the driver and
-                # would create an import cycle at module load time.
-                from services.file_agent_runtime.registry import (
-                    notify_creator_agent_runtime,
-                )
-
-                notify_creator_agent_runtime(project_id)
-        await asyncio.to_thread(
-            _complete_round,
+        outcome, feedback_sent = await asyncio.to_thread(
+            _finalize_round,
+            services,
             reports_root,
+            project_id=project_id,
             target_ref=target_ref,
             chain_id=chain_id,
             round_number=round_number,
             video_id=video_id,
-            verdict=report.verdict,
+            slot_id=slot_id,
+            report=report,
         )
+        if feedback_sent:
+            # Lazy import: the runtime registry pulls in the driver and
+            # would create an import cycle at module load time.
+            from services.file_agent_runtime.registry import (
+                notify_creator_agent_runtime,
+            )
+
+            notify_creator_agent_runtime(project_id)
         trace_event(
             "render_review.round_completed",
             component=_TRACE_COMPONENT,
@@ -385,6 +579,7 @@ async def run_review_loop(
                 "videoRef": report.video_ref,
                 "round": round_number,
                 "verdict": report.verdict,
+                "outcome": outcome,
                 "feedbackSent": feedback_sent,
             },
             projectId=project_id,
@@ -393,6 +588,13 @@ async def run_review_loop(
     except Exception as exc:
         # Advisory only: a review failure must never disturb delivery.
         logger.exception("render review loop failed for %s", video_id)
+        if admitted is not None:
+            await asyncio.to_thread(
+                _release_claim,
+                reports_root,
+                target_ref=target_ref,
+                video_id=video_id,
+            )
         trace_event(
             "render_review.failed",
             component=_TRACE_COMPONENT,
@@ -413,8 +615,22 @@ def schedule_render_review(
     project_id: str,
     published_result: Mapping[str, Any],
 ) -> None:
-    """Detach a review round for a published COMPOSE_FINAL_VIDEO result."""
+    """Detach a review round for a successful COMPOSE_FINAL_VIDEO result.
+
+    This is the single idempotent scheduling point: every successful
+    convergence path (fresh render, idempotent replay, fingerprint reuse and
+    crash recovery) may call it; the review-side round admission dedups
+    already-reviewed and in-flight artifact versions.
+    """
     try:
+        from models.config import is_self_review_enabled
+
+        if not is_self_review_enabled():
+            return
+        if str(published_result.get("commandType") or "") != (
+            "COMPOSE_FINAL_VIDEO"
+        ):
+            return
         indexed = published_result.get("indexedFile")
         artifact = published_result.get("artifactVersion")
         if not isinstance(indexed, Mapping) or not isinstance(
@@ -424,8 +640,16 @@ def schedule_render_review(
             return
         relative_uri = str(indexed.get("relative_uri") or "")
         video_id = str(artifact.get("version_id") or "")
+        slot_id = str(artifact.get("slot_id") or "") or None
         target_ref = str(published_result.get("targetRef") or "")
         if not relative_uri or not video_id or not target_ref:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "render review scheduling skipped: no running event loop",
+            )
             return
         video_path = services.projects.project_root(project_id) / relative_uri
         task = asyncio.create_task(
@@ -435,6 +659,7 @@ def schedule_render_review(
                 video_path=video_path,
                 video_id=video_id,
                 target_ref=target_ref,
+                slot_id=slot_id,
             ),
         )
 
@@ -455,6 +680,7 @@ def schedule_render_review(
 
 
 __all__ = [
+    "derive_plan_context",
     "review_render",
     "run_review_loop",
     "schedule_render_review",

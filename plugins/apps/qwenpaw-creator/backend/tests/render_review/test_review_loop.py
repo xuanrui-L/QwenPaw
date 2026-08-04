@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
-# pylint: disable=redefined-outer-name,unused-argument
+# pylint: disable=redefined-outer-name,unused-argument,protected-access
 """Review loop tests: stubbed VLM pass/revise states, round cap, switch off."""
 
 from __future__ import annotations
@@ -8,17 +8,26 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from models.config import is_self_review_enabled
 from schemas.render_review import (
     AudioProfile,
+    RenderReviewReport,
     ReviewDimension,
+    ReviewFinding,
     ReviewFrame,
 )
+from services.media_files import local_execution
 from services.project_files.facade import CreatorFileServices
-from services.project_files.models import Project
+from services.project_files.models import (
+    ArtifactSlot,
+    ArtifactVersion,
+    IndexedFile,
+    Project,
+)
 from services.render_review import review as review_module
 from services.render_review.protocol import MAX_REVIEW_ROUNDS
 from services.runtime_files.media_probe import MediaProbe
@@ -242,3 +251,258 @@ def test_self_review_switch_defaults_off(monkeypatch) -> None:
     assert is_self_review_enabled() is True
     monkeypatch.setenv("CREATOR_SELF_REVIEW_ENABLED", "off")
     assert is_self_review_enabled() is False
+
+
+def _revise_report(video_id: str, round_number: int) -> RenderReviewReport:
+    findings = [
+        ReviewFinding(
+            dimension=dimension,
+            passed=dimension is not ReviewDimension.ENGINEERING,
+            severity=(
+                "major"
+                if dimension is ReviewDimension.ENGINEERING
+                else "minor"
+            ),
+            evidence_timestamp_ms=(
+                1000 if dimension is ReviewDimension.ENGINEERING else None
+            ),
+            suggestion=(
+                "移除黑帧" if dimension is ReviewDimension.ENGINEERING else ""
+            ),
+        )
+        for dimension in ReviewDimension
+    ]
+    return RenderReviewReport(
+        video_ref=f"artifact-version:{video_id}",
+        round=round_number,
+        findings=findings,
+        verdict="revise",
+    )
+
+
+def test_superseding_claim_drops_stale_feedback(services) -> None:
+    """An in-flight round for an older video must not mutate the timeline."""
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    admitted_a = review_module._admit_round(
+        reports_root,
+        target_ref=TARGET_REF,
+        video_id="video-old",
+    )
+    assert admitted_a == (1, admitted_a[1])
+    # A newer composition supersedes the in-flight claim atomically.
+    admitted_b = review_module._admit_round(
+        reports_root,
+        target_ref=TARGET_REF,
+        video_id="video-new",
+    )
+    assert admitted_b is not None
+    outcome_a, feedback_a = review_module._finalize_round(
+        services,
+        reports_root,
+        project_id=PROJECT_ID,
+        target_ref=TARGET_REF,
+        chain_id=admitted_a[1],
+        round_number=admitted_a[0],
+        video_id="video-old",
+        slot_id=None,
+        report=_revise_report("video-old", admitted_a[0]),
+    )
+    assert outcome_a == "superseded"
+    assert feedback_a is False
+    assert _feedback_messages(services) == []
+    outcome_b, feedback_b = review_module._finalize_round(
+        services,
+        reports_root,
+        project_id=PROJECT_ID,
+        target_ref=TARGET_REF,
+        chain_id=admitted_b[1],
+        round_number=admitted_b[0],
+        video_id="video-new",
+        slot_id=None,
+        report=_revise_report("video-new", admitted_b[0]),
+    )
+    assert outcome_b == "completed"
+    assert feedback_b is True
+    chain = json.loads(
+        (review_module._chain_path(reports_root, TARGET_REF)).read_text(
+            encoding="utf-8",
+        ),
+    )
+    # The superseded round consumed no chain budget.
+    assert chain["rounds_completed"] == 1
+    assert chain["last_video_id"] == "video-new"
+    assert "video-old" in chain["reviewed_video_ids"]
+
+
+def test_unselected_artifact_never_receives_feedback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Feedback is dropped when the video is no longer the selected render."""
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    services = CreatorFileServices.create(tmp_path.resolve())
+    project = Project.new(project_id=PROJECT_ID, name="Render Review")
+    created_at = project.created_at
+    for version_id in ("video-a", "video-b"):
+        file_id = f"file-{version_id}"
+        project.assets.files_by_id[file_id] = IndexedFile(
+            file_id=file_id,
+            kind="artifact_payload",
+            relative_uri=f"assets/artifacts/{file_id}.mp4",
+            sha256="0" * 64,
+            size_bytes=4,
+            media_type="video/mp4",
+            created_at=created_at,
+        )
+        project.assets.artifact_versions_by_id[version_id] = ArtifactVersion(
+            version_id=version_id,
+            slot_id="slot:render",
+            kind="timeline_render",
+            owner_ref=TARGET_REF,
+            name="final",
+            file_id=file_id,
+            checksum="0" * 64,
+            based_on_generation=0,
+            created_at=created_at,
+        )
+    project.assets.artifact_slots_by_id["slot:render"] = ArtifactSlot(
+        slot_id="slot:render",
+        kind="timeline_render",
+        owner_ref=TARGET_REF,
+        version_ids=["video-a", "video-b"],
+        selected_version_id="video-b",
+    )
+    services.projects.create(project)
+    services.sessions.create_project_runtime(PROJECT_ID)
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    admitted = review_module._admit_round(
+        reports_root,
+        target_ref=TARGET_REF,
+        video_id="video-a",
+    )
+    assert admitted is not None
+    outcome, feedback_sent = review_module._finalize_round(
+        services,
+        reports_root,
+        project_id=PROJECT_ID,
+        target_ref=TARGET_REF,
+        chain_id=admitted[1],
+        round_number=admitted[0],
+        video_id="video-a",
+        slot_id="slot:render",
+        report=_revise_report("video-a", admitted[0]),
+    )
+    assert outcome == "stale"
+    assert feedback_sent is False
+    assert _feedback_messages(services) == []
+
+
+def test_failed_round_releases_claim_for_retry(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+) -> None:
+    _stub_vlm(monkeypatch, ["不是 JSON", "还不是 JSON"])
+    assert _run_round(services, "video-retry-1") is None
+    reports_root = review_module._reports_root(services, PROJECT_ID)
+    chain = json.loads(
+        review_module._chain_path(reports_root, TARGET_REF).read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert not chain.get("claim")
+    # The same video can be rescheduled after the failure.
+    _stub_vlm(monkeypatch, [_vlm_response(verdict_major_failure=False)])
+    report = _run_round(services, "video-retry-1")
+    assert report is not None and report.verdict == "pass"
+
+
+def test_schedule_gate_and_dedup(services, monkeypatch) -> None:
+    """The single scheduling point filters switch, command and shape."""
+    calls: list[str] = []
+
+    async def fake_loop(*args, **kwargs):
+        calls.append(kwargs["video_id"])
+        return None
+
+    monkeypatch.setattr(review_module, "run_review_loop", fake_loop)
+    result = {
+        "commandType": "COMPOSE_FINAL_VIDEO",
+        "targetRef": TARGET_REF,
+        "indexedFile": {"relative_uri": "assets/artifacts/f.mp4"},
+        "artifactVersion": {
+            "version_id": "video-gate-1",
+            "slot_id": "slot:render",
+        },
+    }
+
+    async def drive() -> None:
+        monkeypatch.delenv("CREATOR_SELF_REVIEW_ENABLED", raising=False)
+        review_module.schedule_render_review(
+            services,
+            project_id=PROJECT_ID,
+            published_result=result,
+        )
+        monkeypatch.setenv("CREATOR_SELF_REVIEW_ENABLED", "1")
+        review_module.schedule_render_review(
+            services,
+            project_id=PROJECT_ID,
+            published_result={**result, "commandType": "EXECUTE_EDIT"},
+        )
+        review_module.schedule_render_review(
+            services,
+            project_id=PROJECT_ID,
+            published_result=result,
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(drive())
+    assert calls == ["video-gate-1"]
+
+
+def test_result_from_task_routes_every_success_through_review(
+    services,
+    monkeypatch,
+) -> None:
+    """Replay/recovery convergences share the same scheduling point."""
+    scheduled: list[str] = []
+
+    def fake_schedule(_services, *, project_id, published_result):
+        del project_id
+        scheduled.append(published_result["artifactVersion"]["version_id"])
+
+    monkeypatch.setattr(
+        local_execution,
+        "schedule_render_review",
+        fake_schedule,
+    )
+    service = object.__new__(local_execution.FileLocalMediaExecutionService)
+    service.services = services
+    task = SimpleNamespace(
+        task_id="task-1",
+        run_id="run-1",
+        project_id=PROJECT_ID,
+        result={
+            "commandType": "COMPOSE_FINAL_VIDEO",
+            "targetRef": TARGET_REF,
+            "transactionId": "txn-1",
+            "projectEtag": "etag-1",
+            "projectGeneration": 3,
+            "indexedFile": {"relative_uri": "assets/artifacts/f.mp4"},
+            "artifactVersion": {
+                "version_id": "artifact-version-replay",
+                "slot_id": "slot:render",
+                "kind": "timeline_render",
+                "owner_ref": TARGET_REF,
+                "name": "final",
+                "file_id": "file-1",
+                "checksum": "0" * 64,
+                "based_on_generation": 1,
+                "created_at": "2026-08-03T00:00:00Z",
+            },
+        },
+    )
+    outcome = service._result_from_task(task, replayed=True)
+    assert outcome.artifact_version_id == "artifact-version-replay"
+    assert outcome.replayed is True
+    assert scheduled == ["artifact-version-replay"]

@@ -19,9 +19,13 @@ from services.render_review.frames import (
 from services.runtime_files.media_probe import probe_media
 from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 from vendor.mm_plugins.image_budget import (
+    IMAGE_BUDGET_TOKENS,
+    IMAGE_MIN_PIXELS,
     TOKEN_SIZE,
     VIDEO_BUDGET_TOKENS,
+    VIDEO_MIN_PIXELS,
     budget_to_pixels,
+    smart_resize,
 )
 
 pytestmark = pytest.mark.unit
@@ -158,3 +162,23 @@ def test_segment_loudness_merges_runs() -> None:
     assert segments[1].silent is True
     assert segments[0].end_ms == segments[1].start_ms
     assert segments[-1].end_ms == 2000
+
+
+def test_smart_resize_never_exceeds_budget() -> None:
+    """Patch-grid rounding must not overshoot the pixel budget."""
+    video_budget = budget_to_pixels("normal", VIDEO_BUDGET_TOKENS)
+    cases = [
+        (274, 913, VIDEO_MIN_PIXELS, video_budget),
+        (720, 1280, VIDEO_MIN_PIXELS, video_budget),
+        (1, 10_000, VIDEO_MIN_PIXELS, video_budget),
+        (
+            2160,
+            3840,
+            IMAGE_MIN_PIXELS,
+            budget_to_pixels("normal", IMAGE_BUDGET_TOKENS),
+        ),
+    ]
+    for height, width, min_pixels, max_pixels in cases:
+        out_h, out_w = smart_resize(height, width, min_pixels, max_pixels)
+        assert out_h % TOKEN_SIZE == 0 and out_w % TOKEN_SIZE == 0
+        assert out_h * out_w <= max_pixels, (height, width, out_h, out_w)

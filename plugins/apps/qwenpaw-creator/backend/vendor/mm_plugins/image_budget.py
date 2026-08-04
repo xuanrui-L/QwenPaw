@@ -1,22 +1,14 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
 # pylint: disable=line-too-long
-# Vendored from Qwen-MM-Plugins (https://github.com/QwenLM/Qwen-MM-Plugins),
-# commit 077aea63d9e7ad50d91bab6c8dff12183a24d48b, licensed under the
-# Apache License, Version 2.0. See backend/vendor/NOTICE.md.
-#
-# Modifications for QwenPaw Creator:
-# - Extracted only the resolution-budget math (`budget_to_pixels`,
-#   `smart_resize`) from ``src/shared/image.py``; the two function bodies are
-#   kept verbatim.
-# - Inlined the budget constants (``TOKEN_SIZE``, ``DEFAULT_BUDGET``,
-#   ``IMAGE_BUDGET_TOKENS``, ``VIDEO_BUDGET_TOKENS`` and the derived
-#   ``*_MIN_PIXELS``) verbatim from ``src/shared/env.py`` so the module has no
-#   runtime dependency on the upstream package.
-"""Resolution-budget math shared with the upstream VLM tooling.
+# Vendored from Qwen-MM-Plugins (Apache-2.0), release commit 077aea6.
+# Upstream path: src/shared/image.py (budget_to_pixels, smart_resize)
+#   with resolution constants inlined from src/shared/env.py.
+# Modified for QwenPaw Creator. See backend/vendor/NOTICE.md.
+"""Resolution-budget math shared by document reading and render review.
 
-Maps a resolution preset to a pixel budget and resizes dimensions into that
-budget, snapped to the visual-token patch grid expected by Qwen VLMs.
+This module is the canonical vendored copy shared across Creator worktrees;
+keep its content byte-identical when re-vendoring on another branch.
 """
 
 from __future__ import annotations
@@ -24,15 +16,15 @@ from __future__ import annotations
 import logging
 import math
 
-# Spatial patch size for one image token, just used to compute budgets.
+# Patch-grid unit of Qwen-VL style models (pixels per token side).
 TOKEN_SIZE = 32
-# Default budget for image/video processing.
 DEFAULT_BUDGET = "normal"
-
-# Per-preset resolution budgets (visual-token counts) → pixels via budget_to_pixels(budget, MAP).
 IMAGE_BUDGET_TOKENS = {"small": 256, "normal": 1024, "large": 2048}
 IMAGE_MIN_PIXELS = min(IMAGE_BUDGET_TOKENS.values()) * TOKEN_SIZE * TOKEN_SIZE
 
+# Render-review (WT4) addition: per-frame video budgets inlined verbatim from
+# upstream src/shared/env.py. A pure additive block on top of the canonical
+# copy so cross-worktree re-vendoring stays a mechanical union.
 VIDEO_BUDGET_TOKENS = {"small": 80, "normal": 256, "large": 1024}
 VIDEO_MIN_PIXELS = min(VIDEO_BUDGET_TOKENS.values()) * TOKEN_SIZE * TOKEN_SIZE
 
@@ -50,7 +42,14 @@ def smart_resize(
     max_pixels: int,
     factor: int = TOKEN_SIZE,
 ) -> tuple[int, int]:
-    """Resize (h, w) into [min_pixels, max_pixels], snapped to a multiple of `factor` (the patch grid)."""
+    """Resize (h, w) into [min_pixels, max_pixels], snapped to a multiple of `factor` (the patch grid).
+
+    Creator modification: the upstream copy rounded to the patch grid after
+    scaling, which can overshoot max_pixels by up to one row/column of
+    patches. This version floors the over-budget branch (matching the
+    canonical qwen_vl_utils smart_resize) so the result never exceeds the
+    budget.
+    """
     if min_pixels > max_pixels:
         logging.warning(
             "min_pixels (%d) > max_pixels (%d), clamping max_pixels to min_pixels",
@@ -59,28 +58,30 @@ def smart_resize(
         )
         max_pixels = min_pixels
 
-    if height * width < min_pixels:
-        scale = math.sqrt(min_pixels / (height * width))
-        height = int(height * scale)
-        width = int(width * scale)
-
-    if height * width > max_pixels:
-        scale = math.sqrt(max_pixels / (height * width))
-        height = int(height * scale)
-        width = int(width * scale)
-
     height = max(factor, round(height / factor) * factor)
     width = max(factor, round(width / factor) * factor)
+
+    def _floor_into_budget(h: int, w: int) -> tuple[int, int]:
+        beta = math.sqrt((h * w) / max_pixels)
+        h = max(factor, math.floor(h / beta / factor) * factor)
+        w = max(factor, math.floor(w / beta / factor) * factor)
+        # Clamping an extreme-aspect short side back up to one patch can
+        # re-exceed the budget; shrink the long side to compensate.
+        if h * w > max_pixels:
+            if h >= w:
+                h = max(factor, max_pixels // w // factor * factor)
+            else:
+                w = max(factor, max_pixels // h // factor * factor)
+        return h, w
+
+    if height * width > max_pixels:
+        height, width = _floor_into_budget(height, width)
+    elif height * width < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        height = math.ceil(height * beta / factor) * factor
+        width = math.ceil(width * beta / factor) * factor
+        if height * width > max_pixels:
+            # min and max budgets can coincide (the small preset); the hard
+            # max budget wins over the soft minimum.
+            height, width = _floor_into_budget(height, width)
     return height, width
-
-
-__all__ = [
-    "TOKEN_SIZE",
-    "DEFAULT_BUDGET",
-    "IMAGE_BUDGET_TOKENS",
-    "IMAGE_MIN_PIXELS",
-    "VIDEO_BUDGET_TOKENS",
-    "VIDEO_MIN_PIXELS",
-    "budget_to_pixels",
-    "smart_resize",
-]
