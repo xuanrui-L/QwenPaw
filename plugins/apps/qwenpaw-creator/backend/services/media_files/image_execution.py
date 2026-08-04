@@ -201,6 +201,60 @@ def _fingerprint(value: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(canonical_json_bytes(value)).hexdigest()}"
 
 
+# Transient provider failures may be retried on a derived durable slot;
+# deterministic rejections (safety refusals, validation errors) never are.
+# Markers are matched case-insensitively against the persisted task error.
+_TRANSIENT_ERROR_MARKERS = (
+    "connection",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "too many requests",
+    "status 429",
+    "status 502",
+    "status 503",
+    "status 504",
+)
+_MAX_TRANSIENT_RETRY_SLOTS = 3
+
+
+def _is_transient_task_error(error: Mapping[str, Any] | None) -> bool:
+    if not isinstance(error, Mapping):
+        return False
+    message = str(error.get("message") or "").casefold()
+    return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def _terminated_task_conflict(
+    task: Any,
+    *,
+    exhausted_retries: bool = False,
+) -> ConflictError:
+    """Name the original failure and the exact way out of the replay wall.
+
+    Identical arguments always map to the same durable slot, so a bare
+    "task terminated" message traps the model in a resend loop: it cannot
+    know that only changed arguments (or a fixed cause) produce a new task.
+    """
+
+    status = task.status.value if task is not None else "FAILED"
+    reason = ""
+    error = getattr(task, "error", None)
+    if isinstance(error, Mapping) and error.get("message"):
+        reason = f"；原失败原因：{str(error['message'])[:200]}"
+    if exhausted_retries:
+        advice = "瞬态重试槽位已用尽，说明故障持续存在。请停止重发相同请求，向用户报告故障或稍后再试。"
+    else:
+        advice = (
+            "相同 arguments 的重发将始终返回此错误；若需重试，请先修正失败原因"
+            "并调整 arguments（如更换参考图或修改 prompt 措辞）以生成新任务。"
+        )
+    return ConflictError(f"图片 Task 已终止: {status}{reason}。{advice}")
+
+
 def _plain_sha256(value: str) -> str:
     normalized = value.strip().lower().removeprefix("sha256:")
     if not re.fullmatch(r"[a-f0-9]{64}", normalized):
@@ -780,15 +834,28 @@ class FileImageExecutionService:
                 "arguments": dict(arguments),
             },
         )
-        try:
-            existing_task = await asyncio.to_thread(
-                self.executions.get_task,
-                project_id,
-                ids["task_id"],
+        # Identical retries reuse the same durable slot, so a transient
+        # provider failure (network, timeout, 5xx) would otherwise become a
+        # permanent ConflictError wall for this run. Probe a bounded number
+        # of derived retry slots for transient failures only; deterministic
+        # rejections (safety refusals, validation) keep the terminal wall.
+        existing_task = None
+        for attempt in range(_MAX_TRANSIENT_RETRY_SLOTS + 1):
+            slot_key = (
+                idempotency_key
+                if attempt == 0
+                else f"{idempotency_key}#transient-retry-{attempt}"
             )
-        except RecordNotFoundError:
-            existing_task = None
-        if existing_task is not None:
+            ids = self._ids(project_id, slot_key)
+            try:
+                existing_task = await asyncio.to_thread(
+                    self.executions.get_task,
+                    project_id,
+                    ids["task_id"],
+                )
+            except RecordNotFoundError:
+                existing_task = None
+                break
             self._assert_command_replay(
                 existing_task,
                 command=command_value,
@@ -797,14 +864,6 @@ class FileImageExecutionService:
             )
             if existing_task.status is TaskStatus.SUCCEEDED:
                 return self._result_from_task(existing_task, replayed=True)
-            if existing_task.status in {
-                TaskStatus.FAILED,
-                TaskStatus.CANCELLED,
-                TaskStatus.QUARANTINED,
-            }:
-                raise ConflictError(
-                    f"图片 Task 已终止: {existing_task.status.value}",
-                )
             if existing_task.status is TaskStatus.RUNNING:
                 if existing_task.result is None:
                     raise ConflictError("图片 Task 已由另一个执行者领取")
@@ -813,6 +872,16 @@ class FileImageExecutionService:
                     ids=ids,
                     replayed=True,
                 )
+            if existing_task.status is TaskStatus.FAILED and (
+                _is_transient_task_error(existing_task.error)
+            ):
+                continue
+            raise _terminated_task_conflict(existing_task)
+        else:
+            raise _terminated_task_conflict(
+                existing_task,
+                exhausted_retries=True,
+            )
 
         base = await asyncio.to_thread(self.services.projects.read, project_id)
         conflicts = [
@@ -870,7 +939,7 @@ class FileImageExecutionService:
             TaskStatus.CANCELLED,
             TaskStatus.QUARANTINED,
         }:
-            raise ConflictError(f"图片 Task 已终止: {task.status.value}")
+            raise _terminated_task_conflict(task)
 
         if task.status is TaskStatus.RUNNING and task.result is not None:
             return await self._converge(

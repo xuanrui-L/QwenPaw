@@ -5104,6 +5104,30 @@ def _specialist_tool_recovery(
             "artifact-version references such as the character design and "
             "storyboard images, then call r2v_generation again."
         )
+    if name == "image_generation" and any(
+        marker in error.casefold()
+        for marker in (
+            "rejected by the safety system",
+            "content policy",
+            "content_policy_violation",
+        )
+    ):
+        # The image provider's safety system deterministically rejects the
+        # request; identical resubmission can never succeed. The dominant
+        # cause in practice is real-person photos travelling as reference
+        # images — including into scene/prop generations that do not need
+        # any face at all.
+        return (
+            "The image provider's safety system rejected this request — a "
+            "deterministic content policy, not a transient failure; do not "
+            "resubmit the same arguments. For scene or prop targets, remove "
+            "every reference image that contains a person before retrying. "
+            "For character targets, drop real-photo references "
+            "(asset-version IDs of downloaded or uploaded images) and use "
+            "already generated stylized artifact-version references — or a "
+            "text-only prompt — instead, then call image_generation again "
+            "with the adjusted references or a rephrased prompt."
+        )
     if name == "jq_project":
         return _jq_project_recovery(code)
     if name == "ai_edit":

@@ -1348,6 +1348,34 @@ def test_r2v_real_face_rejection_gets_targeted_recovery() -> None:
     assert "video_reference_version_ids" not in generic
 
 
+def test_image_safety_rejection_gets_targeted_recovery() -> None:
+    """A provider safety refusal names the reference-image fix.
+
+    Deterministic safety rejections (for example real-person photos used
+    as references) can never succeed with identical arguments; the
+    recovery must say to drop person-bearing references instead of the
+    generic retry text.
+    """
+
+    targeted = _specialist_tool_recovery(
+        "image_generation",
+        "Task task-1 ended as FAILED: {'code': 'IMAGE_GENERATION_FAILED', "
+        "'message': 'Image generation failed with status 400: Your request "
+        "was rejected by the safety system.'}",
+    )
+    assert "safety system" in targeted
+    assert "do not resubmit the same arguments" in targeted.casefold()
+    assert "remove" in targeted.casefold()
+    assert "scene or prop" in targeted
+
+    # Other image failures keep the generic guidance.
+    generic = _specialist_tool_recovery(
+        "image_generation",
+        "Task task-2 ended as FAILED: provider timeout",
+    )
+    assert "safety system" not in generic
+
+
 def test_extra_data_recovery_names_the_premature_close() -> None:
     """An "Extra data" strict error gets the premature-close hint.
 
