@@ -117,8 +117,7 @@ export function PetOsBubble({
       textH = lines.length * lineHeightOf(fontSize) - 2;
       bubbleW = Math.min(textW + padding * 2 + border * 2, maxBubbleW);
       bubbleBodyH = textH + padding * 2 + border * 2;
-      bubbleH =
-        bubbleBodyH + Math.max(tailHeight, emojiSize + emojiGap);
+      bubbleH = bubbleBodyH + Math.max(tailHeight, emojiSize + emojiGap);
       if (
         textW + padding * 2 + border * 2 <= maxBubbleW &&
         bubbleH <= containerH
@@ -160,10 +159,7 @@ export function PetOsBubble({
         tailTip[0] - Math.floor(emojiSize / 2),
       ),
     );
-    const emojiY = Math.min(
-      containerH - emojiSize,
-      bubbleBottom + emojiGap,
-    );
+    const emojiY = Math.min(containerH - emojiSize, bubbleBottom + emojiGap);
 
     content = (
       <svg

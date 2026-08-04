@@ -647,7 +647,9 @@ class FfmpegLocalMediaRunner:
                     probe = probe_motion_document(
                         str(motion["html"]),
                         box_width=max(160, round(video_size[0] * width_ratio)),
-                        box_height=max(90, round(video_size[1] * height_ratio)),
+                        box_height=max(
+                            90, round(video_size[1] * height_ratio)
+                        ),
                         ffmpeg_path=self.executable,
                     )
                     if not probe.ok:

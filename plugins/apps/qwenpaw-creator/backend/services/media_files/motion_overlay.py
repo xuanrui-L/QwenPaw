@@ -356,10 +356,7 @@ def caption_layout_error(
             f"当前约 {box_width:.0f}px，至少需要 {minimum_width:.0f}px"
         )
     if character_count >= 4 and box_width / max(1.0, box_height) < 1.25:
-        return (
-            "字幕卡必须保持横向布局，location 宽高比至少为 1.25，"
-            "避免文字竖排并与图标重叠"
-        )
+        return "字幕卡必须保持横向布局，location 宽高比至少为 1.25，" "避免文字竖排并与图标重叠"
     usable_width = max(1.0, box_width - nominal_font * 2.0)
     characters_per_line = max(1, int(usable_width / (nominal_font * 0.9)))
     estimated_lines = math.ceil(character_count / characters_per_line)

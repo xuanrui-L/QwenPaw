@@ -674,8 +674,7 @@ async def _design_document(
             continue
         if required_text is not None and probe.text_occlusion > 0.10:
             last_error = (
-                "字幕文字被卡片内的图标或装饰遮挡"
-                f"（遮挡采样率 {probe.text_occlusion:.0%}）"
+                "字幕文字被卡片内的图标或装饰遮挡" f"（遮挡采样率 {probe.text_occlusion:.0%}）"
             )
             feedback = (
                 f"\n上一次输出被拒绝，原因：{last_error}。"
