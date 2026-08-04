@@ -1299,6 +1299,21 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                   streamingAssistantMessages = remaining;
                 }
               }
+              if (event.type === "agent.run.failed" && session) {
+                const errorPayload = event.data.error as
+                  | { code?: string; message?: string; retryable?: boolean }
+                  | undefined;
+                if (errorPayload?.message) {
+                  session = {
+                    ...session,
+                    error: errorPayload as {
+                      code: string;
+                      message: string;
+                      retryable: boolean;
+                    },
+                  };
+                }
+              }
             }
             if (event.type === "agent.message_delta") {
               const messageId =

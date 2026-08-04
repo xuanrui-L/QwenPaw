@@ -2407,6 +2407,11 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                     )}
                   </div>
                 ))}
+                {session?.status === "ERROR" && session?.error?.message && (
+                  <div className="mx-3 my-2 rounded-md bg-[var(--color-danger-soft)] px-3 py-2 text-[11px] leading-[1.5] text-[var(--color-danger)]">
+                    {session.error.message}
+                  </div>
+                )}
               </div>
               {showJump && (
                 <button
