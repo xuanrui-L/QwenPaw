@@ -1,4 +1,4 @@
-/** Inspiration example cards backed by plugin-bundled built-in Projects. */
+/** Inspiration example cards backed by OSS-hosted built-in Projects. */
 
 import { useEffect, useState } from "react";
 import { message } from "antd";
@@ -19,7 +19,7 @@ export default function InspirationExamples() {
         if (!cancelled) setExamples(data.items ?? []);
       })
       .catch(() => {
-        // No bundled examples (or an older backend): keep the section hidden.
+        // No hosted examples (or an older backend): keep the section hidden.
       });
     return () => {
       cancelled = true;

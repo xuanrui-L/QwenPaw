@@ -62,8 +62,6 @@ __pycache__/
 *.rdb
 *.egg-info/
 *.zip
-# Plugin-bundled inspiration example archives must ship with the repo.
-!plugins/apps/*/backend/examples/*.zip
 config.json
 
 # IDEs and editors

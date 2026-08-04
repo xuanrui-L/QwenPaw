@@ -65,7 +65,7 @@ export interface ProjectListResponse {
   offset: number;
 }
 
-/** One plugin-bundled inspiration example backed by a built-in Project. */
+/** One OSS-hosted inspiration example backed by a built-in Project. */
 export interface InspirationExampleSummary {
   id: string;
   title: string;

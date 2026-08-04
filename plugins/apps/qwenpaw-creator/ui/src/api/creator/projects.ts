@@ -176,19 +176,21 @@ export function deleteProject(projectId: string): Promise<void> {
   });
 }
 
-/** Plugin-bundled inspiration examples shown under the home composer. */
+/** OSS-hosted inspiration examples shown under the home composer. */
 export function listInspirationExamples(): Promise<InspirationExampleListResponse> {
   return creatorRequest("/examples");
 }
 
-/** Materialize (if needed) a bundled example and return its project id. */
+/** Download (if needed) a hosted example and return its project id. */
 export function openInspirationExample(
   exampleId: string,
 ): Promise<InspirationExampleOpenResponse> {
   return creatorRequest(
     `/examples/${encodeURIComponent(exampleId)}/open`,
     { method: "POST" },
-    { timeoutMs: 120_000 },
+    // First open downloads the archive from OSS (tens of MB), so this call
+    // gets a much longer budget than regular API requests.
+    { timeoutMs: 300_000 },
   );
 }
 

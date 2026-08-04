@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
-"""Build a plugin-bundled inspiration example archive from a real Project.
+"""Build an OSS-hosted inspiration example archive from a real Project.
 
-The archive ships inside the plugin at ``backend/examples/`` and is
-materialized on demand by ``POST /examples/{id}/open``.  The source Project is
-re-identified under a deterministic example project id so it can never collide
-with the Project it was built from, and runtime layers that store checksums
-over historical ``project.json`` bytes (transactions, change rounds, reviews)
-are pruned because they cannot survive re-identification.  ``state.json`` is
-re-pointed at the recomputed ETag of the rewritten ``project.json`` so future
-commits still see a consistent baseline.
+Only ``backend/examples/manifest.json`` ships inside the plugin; the archive
+itself is uploaded to OSS and downloaded on demand by
+``POST /examples/{id}/open``.  The source Project is re-identified under a
+deterministic example project id so it can never collide with the Project it
+was built from, and runtime layers that store checksums over historical
+``project.json`` bytes (transactions, change rounds, reviews) are pruned
+because they cannot survive re-identification.  ``state.json`` is re-pointed
+at the recomputed ETag of the rewritten ``project.json`` so future commits
+still see a consistent baseline.
 
 Tutorial
 ========
@@ -34,11 +35,14 @@ build works in five steps:
 3. **Repoint the ETag** - ``runtime/state.json`` is updated to the recomputed
    ETag of the rewritten ``project.json`` so later commits stay consistent.
 4. **Zip** - the staged directory is archived as
-   ``backend/examples/<example-id>.zip`` with the project id as the single
-   top-level folder (the same shape the import endpoint expects).
+   ``dist/examples/<example-id>.zip`` with the project id as the single
+   top-level folder (the same shape the import endpoint expects).  This
+   output directory is gitignored: the zip is an upload artifact, not a
+   repository file.
 5. **Manifest** - ``backend/examples/manifest.json`` gains (or updates) the
-   card entry: id, title, description, projectId and archive name.  The home
-   page reads this catalogue through ``GET /examples``.
+   card entry: id, title, description, projectId, archiveUrl and the sha256
+   of the built zip.  The home page reads this catalogue through
+   ``GET /examples``.
 
 How to use it
 -------------
@@ -52,15 +56,19 @@ an unzipped project export) and pick a stable ``--example-id``:
         --description "做一个乌鸦喝水的卡通短视频…"
 
 Re-running with the same ``--example-id`` rebuilds the zip and replaces the
-manifest entry in place.  Ship the plugin as usual afterwards - the archive
-rides along in ``backend/examples/`` and users never import anything by hand:
-clicking the inspiration card installs it (marked ``.builtin-example`` so it
-stays out of "my projects") and opens the project page.
+manifest entry in place.  Afterwards upload ``dist/examples/<example-id>.zip``
+to OSS and record its public URL in the manifest, either by re-running with
+``--archive-url https://…`` or by editing ``archiveUrl`` by hand (the sha256
+stays valid as long as the uploaded bytes are the built zip).  Users never
+import anything by hand: clicking the inspiration card downloads and installs
+it (marked ``.builtin-example`` so it stays out of "my projects") and opens
+the project page.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -131,7 +139,10 @@ def _prune_superseded_artifacts(staged: Path) -> int:
     }
     removed_paths: list[Path] = []
     for file_id, record in list(files.items()):
-        if not isinstance(record, dict) or record.get("kind") != "artifact_payload":
+        if (
+            not isinstance(record, dict)
+            or record.get("kind") != "artifact_payload"
+        ):
             continue
         if file_id in selected_files:
             continue
@@ -255,7 +266,8 @@ def _update_manifest(
     title: str,
     description: str,
     project_id: str,
-    archive_name: str,
+    archive_url: str,
+    sha256: str,
 ) -> None:
     manifest_path = examples_dir / "manifest.json"
     manifest: dict = {"examples": []}
@@ -271,7 +283,8 @@ def _update_manifest(
         "title": title,
         "description": description,
         "projectId": project_id,
-        "archive": archive_name,
+        "archiveUrl": archive_url,
+        "sha256": sha256,
     }
     entries = [
         item
@@ -284,6 +297,14 @@ def _update_manifest(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build(args: argparse.Namespace) -> Path:
@@ -302,6 +323,8 @@ def build(args: argparse.Namespace) -> Path:
 
     examples_dir = Path(args.examples_dir).expanduser().resolve()
     examples_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as workdir:
         staged = Path(workdir) / new_id
@@ -323,20 +346,31 @@ def build(args: argparse.Namespace) -> Path:
         _repoint_state_etag(staged, old_etag, project_etag(new_project))
 
         archive_name = f"{args.example_id}.zip"
-        archive_path = examples_dir / archive_name
+        archive_path = output_dir / archive_name
         print(f"zipping -> {archive_path}")
         _zip_directory(staged, archive_path)
 
+    sha256 = _file_sha256(archive_path)
+    archive_url = args.archive_url or (
+        f"https://REPLACE_WITH_OSS_URL/{archive_name}"
+    )
     _update_manifest(
         examples_dir,
         example_id=args.example_id,
         title=args.title,
         description=args.description,
         project_id=new_id,
-        archive_name=archive_name,
+        archive_url=archive_url,
+        sha256=sha256,
     )
     size_mb = archive_path.stat().st_size / (1024 * 1024)
     print(f"done: {archive_path} ({size_mb:.1f} MB), projectId={new_id}")
+    print(f"sha256={sha256}")
+    if not args.archive_url:
+        print(
+            "upload the zip to OSS, then set archiveUrl in "
+            f"{examples_dir / 'manifest.json'}",
+        )
     return archive_path
 
 
@@ -361,7 +395,17 @@ def main() -> None:
     parser.add_argument(
         "--examples-dir",
         default=str(BACKEND_ROOT / "examples"),
-        help="output directory (default: backend/examples)",
+        help="manifest directory (default: backend/examples)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(BACKEND_ROOT.parent / "dist" / "examples"),
+        help="zip output directory (default: dist/examples, gitignored)",
+    )
+    parser.add_argument(
+        "--archive-url",
+        default="",
+        help="public OSS URL of the uploaded zip (placeholder when omitted)",
     )
     parser.add_argument(
         "--simplified",
