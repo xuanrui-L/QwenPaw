@@ -317,6 +317,53 @@ describe("TimelineLivePreview", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("previews html_js timelines as backend poster frames, never script iframes", () => {
+    const project = cloneProject();
+    const overlay =
+      project.timelines.items["timeline:main"].elements_by_id["overlay-title"];
+    if (overlay.creation.type !== "overlay" || !overlay.creation.motion) {
+      throw new Error("expected generated motion overlay");
+    }
+    // js timelines never execute in the preview sandbox; the layer must
+    // show the deterministic backend poster instead of a dead iframe.
+    overlay.creation.motion.format = "html_js";
+    overlay.creation.motion.html = null;
+    overlay.creation.motion.html_file_id = "file-motion-poster-test";
+
+    const { container } = renderPreview(project, 2000);
+    const poster = container.querySelector(
+      '[data-live-motion-overlay="overlay-title"]',
+    ) as HTMLImageElement;
+    expect(poster).toBeInTheDocument();
+    expect(poster.tagName).toBe("IMG");
+    expect(poster).toHaveAttribute("data-live-motion-poster", "true");
+    expect(poster.getAttribute("src")).toContain(
+      "/media/motion-documents/file-motion-poster-test/poster",
+    );
+    expect(poster.getAttribute("src")).toContain("format=html_js");
+    expect(
+      container.querySelector("iframe[data-live-motion-overlay]"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("fails closed for html_js without a poster", () => {
+    const project = cloneProject();
+    const overlay =
+      project.timelines.items["timeline:main"].elements_by_id["overlay-title"];
+    if (overlay.creation.type !== "overlay" || !overlay.creation.motion) {
+      throw new Error("expected generated motion overlay");
+    }
+    // Inline html_js cannot exist in committed Projects (schema rejects
+    // it); if such a shape ever reaches the UI it must render nothing
+    // instead of a dead script document.
+    overlay.creation.motion.format = "html_js";
+
+    const { container } = renderPreview(project, 2000);
+    expect(
+      container.querySelector('[data-live-motion-overlay="overlay-title"]'),
+    ).not.toBeInTheDocument();
+  });
+
   it("reduces older agent paw trails to the trusted three-paw sequence", () => {
     const project = cloneProject();
     const overlay =
@@ -324,6 +371,9 @@ describe("TimelineLivePreview", () => {
     if (overlay.creation.type !== "overlay" || !overlay.creation.motion) {
       throw new Error("expected generated motion overlay");
     }
+    // Paw trails are text-free decorations; the caption viewport-safety
+    // wrapper only applies to overlays with copy.
+    overlay.creation.text = "";
     overlay.creation.motion.html =
       '<html><head></head><body><div data-motion-motif="paw_trail"><i class="p5"></i></div></body></html>';
 

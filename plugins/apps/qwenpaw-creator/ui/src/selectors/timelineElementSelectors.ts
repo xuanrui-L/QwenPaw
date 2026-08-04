@@ -150,11 +150,13 @@ export const TRACK_TYPE_META: Record<
 export function overlayContentKind(
   creation: OverlayCreationDocument,
 ): "copy" | "motion" | "media" {
+  // Committed snapshots derive overlay roles from data; the legacy
+  // overlay_kind tag is only honored for pre-migration payloads.
   const kind = creation.overlay_kind as string | undefined;
   if (kind === "pet_os" || kind === "interview_summary") return "copy";
   if (kind === "motion") return "motion";
   if (kind === "media") return "media";
-  return creation.motion?.html ? "motion" : "copy";
+  return creation.text?.trim() ? "copy" : "motion";
 }
 
 export function classifyElementTrack(
@@ -170,19 +172,11 @@ export function classifyElementTrack(
       return "transition";
     case "audio":
       return "audio";
-    case "overlay": {
-      const kind = creation.overlay_kind as string | undefined;
-      if (kind === "pet_os" || kind === "interview_summary") {
-        return "subtitle";
-      }
-      if (kind === "motion" || kind === "media") {
-        return "motion";
-      }
-      // Schema v3 dropped overlay_kind; infer the track from content so
-      // overlays never silently vanish from the board.
-      if (creation.motion?.html) return "motion";
-      return "subtitle";
-    }
+    case "overlay":
+      // Overlay roles derive from data (legacy tags stay recognized in
+      // overlayContentKind): copy rides the subtitle track, decorations
+      // and media stickers ride the motion track.
+      return overlayContentKind(creation) === "copy" ? "subtitle" : "motion";
     default:
       return null;
   }
@@ -230,13 +224,9 @@ export function resolveElementVisualMeta(element: TimelineElementDocument): {
   const trackType = classifyElementTrack(element);
   if (trackType) return TRACK_TYPE_META[trackType];
   if (element.creation.type === "overlay") {
-    const kind = element.creation.overlay_kind;
-    if (kind === "pet_os" || kind === "interview_summary") {
-      return TRACK_TYPE_META.subtitle;
-    }
-    if (kind === "motion" || kind === "media") {
-      return TRACK_TYPE_META.motion;
-    }
+    return element.creation.text.trim()
+      ? TRACK_TYPE_META.subtitle
+      : TRACK_TYPE_META.motion;
   }
   return ELEMENT_TYPE_META[
     element.creation.type as Exclude<ElementCreationDocument["type"], "overlay">
@@ -410,7 +400,7 @@ export function elementCreationSummary(
     case "edit":
       return creation.intent || creation.reason;
     case "overlay":
-      return creation.text || creation.prompt || creation.overlay_kind;
+      return creation.text || creation.prompt || "动效";
     case "transition":
       return `${
         TRANSITION_KIND_LABEL[creation.transition_kind] ??

@@ -20,6 +20,7 @@ from pathlib import PurePosixPath
 import re
 from typing import Annotated, Any, Generic, Literal, TypeVar
 from urllib.parse import urlsplit
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import (
     AfterValidator,
@@ -31,7 +32,7 @@ from pydantic import (
 )
 
 
-CURRENT_PROJECT_SCHEMA_VERSION = 4
+CURRENT_PROJECT_SCHEMA_VERSION = 5
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
@@ -114,6 +115,21 @@ class CreativeStrategy(StrictModel):
     creative_direction: str = ""
     constraints: str = ""
     success_criteria: str = ""
+
+
+def motion_document_file_id(checksum: str) -> str:
+    """Content-addressed file id of one externalized motion document.
+
+    Single source of truth shared by the design pipeline (which publishes
+    documents under this id) and Project graph validation (which rejects
+    references whose id does not derive from the indexed checksum).
+    """
+
+    digest = uuid5(
+        NAMESPACE_URL,
+        f"qwenpaw-creator:motion-document:{checksum}",
+    ).hex
+    return f"file-motion-{digest}"
 
 
 class IndexedFile(StrictModel):
@@ -673,16 +689,24 @@ class EditCreation(StrictModel):
 
 
 class MotionGraphic(StrictModel):
-    """One self-contained deterministic HTML/CSS animation document.
+    """One self-contained deterministic HTML animation document.
 
-    ``html`` is a complete standalone document that draws on a transparent
-    background and animates exclusively through CSS animations, so any
-    conforming renderer can seek it frame by frame.  External network
-    resources are never loaded during rendering.
+    The document payload lives in exactly one place: inline in ``html``
+    (legacy projects) or externalized as an indexed Project file referenced
+    by ``html_file_id`` (new writes).  ``format`` selects the animation
+    contract: ``html_css`` documents animate exclusively through CSS
+    animations; ``html_js`` documents drive a whitelisted vendored runtime
+    from an inline script and expose the ``window.__hf`` seek protocol.
+    External network resources are never loaded during rendering.
     """
 
-    format: Literal["html_css"] = "html_css"
-    html: str = Field(min_length=32, max_length=200_000)
+    format: Literal["html_css", "html_js"] = "html_css"
+    html: str | None = Field(
+        default=None,
+        min_length=32,
+        max_length=200_000,
+    )
+    html_file_id: EntityId | None = None
     fps: int = Field(default=24, ge=8, le=60)
     loop: bool = True
     design_notes: str = ""
@@ -694,6 +718,15 @@ class MotionGraphic(StrictModel):
     entrance: str = "pop"
     exit: str = "soft_fade"
     intensity: float = Field(default=0.6, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_document_payload(self) -> MotionGraphic:
+        if (self.html is None) == (self.html_file_id is None):
+            raise ValueError(
+                "motion document requires exactly one of html or"
+                " html_file_id",
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -745,14 +778,15 @@ class MotionGraphic(StrictModel):
 class OverlayCreation(StrictModel):
     """Procedural or generated overlay creative facts.
 
-    ``motion`` carries one generated presentation document.  It is the whole
-    payload of an ``overlay_kind="motion"`` decoration, and the optional
-    generated styling of a text overlay (``pet_os`` / ``interview_summary``),
-    whose ``text`` stays the authoritative content either way.
+    The overlay's role is derived from its data instead of a kind tag:
+    non-empty ``text`` makes it a caption card (``text`` stays the
+    authoritative copy; ``motion`` is optional generated styling with a
+    deterministic bubble fallback); empty ``text`` with a ``motion``
+    document (or a ``prompt`` awaiting design) is a text-free decoration;
+    a media sticker carries its payload on the Element's render_source.
     """
 
     type: Literal["overlay"] = "overlay"
-    overlay_kind: Literal["pet_os", "interview_summary", "motion", "media"]
     text: str = ""
     vibe: str = "chill"
     prompt: str = ""
@@ -761,22 +795,23 @@ class OverlayCreation(StrictModel):
 
     @model_validator(mode="after")
     def _validate_payload(self) -> OverlayCreation:
-        if (
-            self.overlay_kind in {"pet_os", "interview_summary"}
-            and not self.text.strip()
-        ):
-            raise ValueError("text overlay requires non-empty text")
-        if self.overlay_kind in {"motion", "media"} and not (
+        if not self.text.strip() and not (
             self.prompt.strip() or self.reference_version_ids
         ):
             raise ValueError(
-                "generated overlay requires prompt or reference versions",
-            )
-        if self.motion is not None and self.overlay_kind == "media":
-            raise ValueError(
-                "motion payload is not valid for overlay_kind=media",
+                "text-free overlay requires prompt or reference versions",
             )
         return self
+
+
+def overlay_role(creation: OverlayCreation) -> str:
+    """Derived overlay role: ``caption`` or ``decoration``.
+
+    Media stickers are recognised at the Element level through their
+    render_source; at the creation level they look like decorations.
+    """
+
+    return "caption" if creation.text.strip() else "decoration"
 
 
 class TransitionCreation(StrictModel):
@@ -935,7 +970,7 @@ class Timeline(StrictModel):
 
 
 class Project(StrictModel):
-    schema_version: Literal[4] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[5] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime
@@ -1246,6 +1281,57 @@ class Project(StrictModel):
                     creation.reference_version_ids,
                     "overlay reference",
                 )
+                if (
+                    creation.motion is not None
+                    and creation.motion.format == "html_js"
+                    and creation.motion.html is not None
+                ):
+                    # html_js documents may only enter a committed Project
+                    # through the motion design pipeline, which probes the
+                    # __hf contract and externalizes the body to a
+                    # content-addressed file. Accepting inline script
+                    # documents here would bypass every render truth gate
+                    # until composition time.
+                    raise ValueError(
+                        f"element {element_id!r} carries an inline html_js "
+                        "motion document; html_js motions must be created "
+                        "through the motion design pipeline "
+                        "(design_motion_overlays), which validates the "
+                        "window.__hf contract and externalizes the document "
+                        "before commit",
+                    )
+                if (
+                    creation.motion is not None
+                    and creation.motion.html_file_id is not None
+                ):
+                    # An externalized reference is only trusted when it
+                    # provably identifies a content-addressed motion
+                    # document published by the design pipeline: the file
+                    # id must derive from the indexed checksum, so a
+                    # dangling id or a repointed IndexedFile cannot smuggle
+                    # an unprobed document past the design gates.
+                    reference = creation.motion.html_file_id
+                    indexed = self.assets.files_by_id.get(reference)
+                    if indexed is None:
+                        raise ValueError(
+                            f"element {element_id!r} references motion "
+                            f"document {reference!r} that does not exist in "
+                            "assets.files_by_id",
+                        )
+                    if (
+                        indexed.kind != "large_text"
+                        or indexed.schema_name != "motion_document"
+                        or indexed.file_id
+                        != motion_document_file_id(indexed.sha256)
+                        or indexed.relative_uri
+                        != f"assets/motion/{indexed.sha256}.html"
+                    ):
+                        raise ValueError(
+                            f"element {element_id!r} references "
+                            f"{reference!r} which is not a content-addressed "
+                            "motion document published by the motion design "
+                            "pipeline",
+                        )
             elif isinstance(creation, AudioCreation):
                 _require_key(
                     source_versions,

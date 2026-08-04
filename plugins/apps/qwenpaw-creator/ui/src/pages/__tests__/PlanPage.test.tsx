@@ -96,8 +96,11 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getAllByText("20s").length).toBeGreaterThan(0);
     expect(screen.getByText("16:9")).toBeInTheDocument();
     expect(screen.getByText("6 项内容")).toBeInTheDocument();
-    // The transition now renders as a junction badge, so only 5 track rows remain.
-    expect(screen.getByText(/5 轨/)).toHaveTextContent("可上下滚动");
+    // The transition renders as a junction badge, and both fixture
+    // overlays carry copy (styled captions stay captions), so the rows
+    // are ai/clip/subtitle/audio = 4 tracks and no vertical scrolling is
+    // needed.
+    expect(screen.getByText(/4 轨/)).not.toHaveTextContent("可上下滚动");
     expect(
       container.querySelector('[class~="max-h-[320px]"]'),
     ).toBeInTheDocument();

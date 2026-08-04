@@ -169,7 +169,7 @@ def test_ai_edit_rules_are_dynamic_specialist_prompt_not_runtime_state() -> (
 
     assert "当前内容类型是 `interview`" in prompt
     assert "60 至 120 秒" in prompt
-    assert "interview_summary" in prompt
+    assert "采访要点台词卡" in prompt
     assert "不超过 30 个汉字" in prompt
     # Pure orchestration role: the prompt must not mention removed
     # composition tools.

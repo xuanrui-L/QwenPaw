@@ -106,7 +106,7 @@ def test_creator_owns_timeline_element_planning() -> None:
     assert "jsonArgs" in prompt
     assert "`updated_at` 由 Runtime 自动维护" in prompt
     assert "content_type=pet_video" in prompt
-    assert "overlay_kind=pet_os" in prompt
+    assert "台词卡 Overlay Element" in prompt
     assert "x=0.5, y=0.5" in prompt
 
 
@@ -196,7 +196,7 @@ def test_ai_editing_director_requires_pet_inner_monologue_not_action_labels() ->
     None
 ):
     prompt = load_file_agent_prompt("ai_editing_director.system")
-    for field in ("overlay_kind=pet_os", "文案", "`vibe`", "绝对 span"):
+    for field in ("宠物 OS 台词卡", "文案", "`vibe`", "绝对 span"):
         assert field in prompt
     assert "不是镜头标题、动作标签或客观摘要" in prompt
     assert "不再使用相对某个内部对象" in prompt

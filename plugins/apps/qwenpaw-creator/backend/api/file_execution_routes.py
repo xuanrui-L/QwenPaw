@@ -395,7 +395,7 @@ def _timeline_has_text_overlays_without_motion(
     return any(
         element.enabled
         and isinstance(element.creation, OverlayCreation)
-        and element.creation.overlay_kind in {"pet_os", "interview_summary"}
+        and element.creation.text.strip()
         and element.creation.motion is None
         for element in timeline.elements_by_id.values()
     )

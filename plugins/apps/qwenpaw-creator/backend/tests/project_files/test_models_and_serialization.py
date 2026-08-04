@@ -123,7 +123,7 @@ def test_project_new_has_complete_valid_defaults_and_utc_time():
         now=datetime(2026, 7, 15, 16, 0, tzinfo=timezone.utc),
     )
 
-    assert project.schema_version == 4
+    assert project.schema_version == 5
     assert project.generation == 0
     assert project.created_at.tzinfo == timezone.utc
     assert project.timelines.order == ["timeline:main"]

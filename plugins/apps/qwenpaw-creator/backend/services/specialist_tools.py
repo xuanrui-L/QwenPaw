@@ -394,10 +394,10 @@ _SPECS = (
         name="design_motion_overlays",
         description=(
             "让视觉设计模型观察目标 Timeline 的真实画面帧做两件事："
-            "为每个文字 Overlay（pet_os/interview_summary）生成贴合画面的精美"
+            "为每个台词卡 Overlay（text 非空）生成贴合画面的精美"
             "动态字幕卡样式，写入该 Element 的 creation.motion（渲染失败自动回退"
             "固定气泡模板）；再从全片挑选少数最值得装饰的片段（默认最多 3 个），"
-            "生成 overlay_kind=motion 的装饰 Overlay Element。全部结果直接写入 "
+            "生成无文字的装饰 Overlay Element（text 为空）。全部结果直接写入 "
             "project.json 并返回逐项摘要；写入后可用 read_project 查看，"
             "之后由确定性后端渲染接口把样式与动效合成进成片。"
         ),

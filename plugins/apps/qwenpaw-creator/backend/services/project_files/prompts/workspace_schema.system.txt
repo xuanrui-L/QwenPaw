@@ -40,9 +40,9 @@ Project
 - Edit 的 `span.duration_tick` 必须等于 `round((source_out_tick-source_in_tick)/playback_rate)`。
 - Project 不持久化额外的内容分组、轨道、独立 Content、ProductionFlow 或顺序 Composition。
 - `creation.type` 表达 r2v/edit/overlay/transition/audio 的创作语义；执行器与任务状态不属于该结构。
-- Overlay `creation` 结构（`type="overlay"`）：字段只有 `overlay_kind`、`text`、`vibe`、`prompt`、`reference_version_ids`、`motion`。`emotion`、`entrance`、`exit`、`intensity`、`theme`、`variant`、`motif`、`html`、`fps`、`loop`、`design_notes` 等动效字段属于 `MotionGraphic`，必须放在 `creation.motion` 子对象内，不得直接写在 `creation` 上。`overlay_kind=motion` 或 `media` 的 Overlay 必须携带非空 `prompt`。正确示例：
+- Overlay `creation` 结构（`type="overlay"`）：字段只有 `text`、`vibe`、`prompt`、`reference_version_ids`、`motion`，没有 kind 字段——角色由数据决定。常用形式：台词卡（宠物 OS 内心独白、采访要点摘要等）把权威文案写入 `text`；无文字装饰动效把 `text` 留空、创意写入 `prompt`、动效文档在 `creation.motion`；媒体贴片把 `text` 留空并用 Element 的 `render_source` 引用媒体版本。`text` 为空的 Overlay 必须携带非空 `prompt` 或引用版本。`emotion`、`entrance`、`exit`、`intensity`、`theme`、`variant`、`motif`、`html`、`fps`、`loop`、`design_notes` 等动效字段属于 `MotionGraphic`，必须放在 `creation.motion` 子对象内，不得直接写在 `creation` 上。正确示例：
   ```json
-  {"type":"overlay","overlay_kind":"motion","prompt":"聚焦标记动效","motion":{"html":"<html>…</html>","emotion":"curious","entrance":"pop","exit":"soft_fade","intensity":0.6}}
+  {"type":"overlay","prompt":"聚焦标记动效","motion":{"html":"<html>…</html>","emotion":"curious","entrance":"pop","exit":"soft_fade","intensity":0.6}}
   ```
 - Transition 元素的 `span` 必须完全包含在其两个端点元素 span 的交集中，即 `max(from.start, to.start) <= transition.start` 且 `transition.end <= min(from.end, to.end)`。创建 transition 前必须确保 `from_element_id` 和 `to_element_id` 对应的两个元素存在时间重叠，并将 transition 的 span 设在该重叠区间内。
 - outputs 通过 ArtifactSlot 表达具名产物，render_source 表达当前实际渲染来源。

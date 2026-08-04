@@ -393,7 +393,8 @@ _PROJECT_SCHEMA_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
         "intensity、theme、variant、motif、html、fps、loop、"
         "design_notes）必须放在 creation.motion 子对象内，"
         "不得直接写在 creation 上；"
-        "overlay_kind=motion 或 media 的 Overlay 必须携带非空 prompt",
+        "Overlay 没有 overlay_kind 字段：台词卡把文案写入 text，"
+        "text 为空的装饰/媒体 Overlay 必须携带非空 prompt 或引用版本",
     ),
 )
 _MAX_SCHEMA_ERROR_LINES = 8

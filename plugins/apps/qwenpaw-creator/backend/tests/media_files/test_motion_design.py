@@ -48,29 +48,23 @@ def _motion() -> MotionGraphic:
 
 
 class TestOverlayCreationMotionValidator:
-    def test_pet_os_accepts_motion_styling(self) -> None:
+    def test_caption_accepts_motion_styling(self) -> None:
         creation = OverlayCreation(
-            overlay_kind="pet_os",
             text="本喵要发光",
             motion=_motion(),
         )
         assert creation.motion is not None
 
-    def test_interview_summary_accepts_motion_styling(self) -> None:
+    def test_decoration_accepts_motion_with_prompt(self) -> None:
         creation = OverlayCreation(
-            overlay_kind="interview_summary",
-            text="核心观点",
+            prompt="呼应跳跃的弹性线条",
             motion=_motion(),
         )
         assert creation.motion is not None
 
-    def test_media_rejects_motion(self) -> None:
-        with pytest.raises(ValueError, match="overlay_kind=media"):
-            OverlayCreation(
-                overlay_kind="media",
-                prompt="一张贴纸",
-                motion=_motion(),
-            )
+    def test_text_free_overlay_requires_prompt_or_refs(self) -> None:
+        with pytest.raises(ValueError, match="prompt or reference"):
+            OverlayCreation(motion=_motion())
 
 
 class TestValidatedDesignTextMode:

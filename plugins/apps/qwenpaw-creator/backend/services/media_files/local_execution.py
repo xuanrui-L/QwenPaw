@@ -51,6 +51,7 @@ from services.media_files.overlay import (
     render_interview_summary_overlay,
     render_pet_os_overlay,
 )
+from services.media_files.motion_engine import full_engine_digest
 from services.media_files.motion_overlay import render_motion_overlay
 from services.media_files.transitions import (
     SUPPORTED_XFADE_KINDS,
@@ -686,6 +687,7 @@ class FfmpegLocalMediaRunner:
                     duration=overlay["duration"],
                     location=overlay.get("location"),
                     viewport_inset=0.05,
+                    doc_format=str(motion.get("format") or "html_css"),
                 )
                 if result.success:
                     os.replace(rendered, segment)
@@ -710,6 +712,9 @@ class FfmpegLocalMediaRunner:
                     location=overlay.get("location"),
                 )
             else:
+                # Interview-summary card styling: reached by legacy inputs
+                # frozen before overlay kinds were removed and by overlays
+                # whose migrated presentation is vibe="summary".
                 result = render_interview_summary_overlay(
                     ffmpeg_path=self.executable,
                     input_path=segment,
@@ -722,10 +727,14 @@ class FfmpegLocalMediaRunner:
                 )
             if not result.success:
                 rendered.unlink(missing_ok=True)
-                warnings.append(
-                    result.error or f"{overlay['kind']} overlay 渲染失败",
+                # The fixed template is the last carrier of the caption
+                # copy: when it fails too, the final cut would silently
+                # lose mandatory content, so the execution aborts and the
+                # task fails into the rejection feedback loop.
+                raise ValidationError(
+                    f"{overlay['kind']} 字幕渲染失败，已中止合成（台词内容不得从成片中"
+                    f"丢失）: {result.error or '未知错误'}",
                 )
-                continue
             os.replace(rendered, segment)
             if styled_error is not None:
                 warnings.append(styled_error)
@@ -738,8 +747,11 @@ class FfmpegLocalMediaRunner:
     ) -> list[str]:
         """Burn every generated motion overlay into one prepared segment.
 
-        Motion overlays are additive polish: a failed document only records a
-        warning so the edit itself still completes.
+        A failed decoration has no fallback rendering: shipping the
+        segment anyway would silently publish a final cut that lacks a
+        committed overlay. The render error aborts the whole execution so
+        the task fails and the rejection feedback loop can regenerate or
+        drop the design instead.
         """
 
         warnings: list[str] = []
@@ -765,14 +777,15 @@ class FfmpegLocalMediaRunner:
                 duration=normalized["duration"],
                 location=normalized.get("location"),
                 viewport_inset=0.05,
+                doc_format=normalized["format"],
             )
             if not result.success:
                 rendered.unlink(missing_ok=True)
-                warnings.append(
-                    f"motion overlay {normalized['element_id']} 渲染失败: "
-                    f"{result.error or '未知错误'}",
+                raise ValidationError(
+                    f"motion overlay {normalized['element_id']} 渲染失败，"
+                    "已中止合成（不发布缺少既定动效的成片）；请修复或移除该动效 "
+                    f"Element 后重新合成: {result.error or '未知错误'}",
                 )
-                continue
             os.replace(rendered, segment)
         return warnings
 
@@ -822,6 +835,7 @@ class FfmpegLocalMediaRunner:
         return {
             "element_id": str(raw.get("element_id") or ""),
             "html": html,
+            "format": str(raw.get("format") or "html_css"),
             "fps": min(60, max(8, fps)),
             "loop": bool(raw.get("loop", True)),
             "appear_at": appear_at,
@@ -1271,7 +1285,40 @@ def _motion_document_matches_text(html: str, text: str) -> bool:
     return needle in re.sub(r"\s+", "", plain)
 
 
+def _motion_document_payload(
+    project: Project,
+    motion: Any,
+) -> dict[str, Any]:
+    """Render-facing facts of one MotionGraphic without loading files.
+
+    ``checksum`` always identifies the document content (inline hash or
+    the IndexedFile digest), so fingerprints never embed the raw html.
+    ``html_js`` entries additionally carry the engine salt: any vendored
+    runtime or prelude upgrade invalidates the render fingerprint.
+    """
+
+    if motion.html is not None:
+        checksum = hashlib.sha256(motion.html.encode("utf-8")).hexdigest()
+    else:
+        indexed = project.assets.files_by_id.get(motion.html_file_id or "")
+        if indexed is None:
+            raise StorageIntegrityError(
+                f"motion 文档引用的 IndexedFile 不存在: {motion.html_file_id}",
+            )
+        checksum = indexed.sha256
+    payload: dict[str, Any] = {
+        "format": motion.format,
+        "html": motion.html,
+        "html_file_id": motion.html_file_id,
+        "checksum": checksum,
+    }
+    if motion.format == "html_js":
+        payload["engine"] = full_engine_digest()
+    return payload
+
+
 def _edit_overlays(
+    project: Project,
     timeline: Timeline,
     element: TimelineElement,
 ) -> tuple[Mapping[str, Any], ...]:
@@ -1298,8 +1345,7 @@ def _edit_overlays(
             for candidate in timeline.elements_by_id.values()
             if candidate.enabled
             and isinstance(candidate.creation, OverlayCreation)
-            and candidate.creation.overlay_kind
-            in {"pet_os", "interview_summary"}
+            and candidate.creation.text.strip()
             and candidate.span.overlaps(element.span)
             and _owned(candidate)
         ),
@@ -1315,7 +1361,15 @@ def _edit_overlays(
         motion = overlay.creation.motion
         result.append(
             {
-                "kind": overlay.creation.overlay_kind,
+                # Fixed fallback styling tag: overlay roles derive from
+                # data (non-empty text = caption).  vibe="summary" is the
+                # migrated interview_summary presentation and keeps the
+                # interview card fallback instead of the pet-OS bubble.
+                "kind": (
+                    "interview_summary"
+                    if overlay.creation.vibe == "summary"
+                    else "pet_os"
+                ),
                 "text": overlay.creation.text,
                 "vibe": overlay.creation.vibe,
                 "location": (
@@ -1325,7 +1379,7 @@ def _edit_overlays(
                 ),
                 "motion": (
                     {
-                        "html": motion.html,
+                        **_motion_document_payload(project, motion),
                         "fps": motion.fps,
                         "loop": motion.loop,
                     }
@@ -1468,6 +1522,7 @@ def _validate_contiguous_edit_elements(
 
 
 def _edit_motion_overlays(
+    project: Project,
     timeline: Timeline,
     element: TimelineElement,
 ) -> tuple[Mapping[str, Any], ...]:
@@ -1483,7 +1538,7 @@ def _edit_motion_overlays(
             for candidate in timeline.elements_by_id.values()
             if candidate.enabled
             and isinstance(candidate.creation, OverlayCreation)
-            and candidate.creation.overlay_kind == "motion"
+            and not candidate.creation.text.strip()
             and candidate.creation.motion is not None
             and candidate.span.overlaps(element.span)
         ),
@@ -1500,7 +1555,7 @@ def _edit_motion_overlays(
         motions.append(
             {
                 "element_id": overlay.element_id,
-                "html": motion.html,
+                **_motion_document_payload(project, motion),
                 "fps": motion.fps,
                 "loop": motion.loop,
                 "location": (
@@ -1604,8 +1659,8 @@ def _timeline_execution(
                     if element.location is not None
                     else None
                 ),
-                overlays=_edit_overlays(timeline, element),
-                motions=_edit_motion_overlays(timeline, element),
+                overlays=_edit_overlays(project, timeline, element),
+                motions=_edit_motion_overlays(project, timeline, element),
             ),
         )
         read_set.append(
@@ -1710,6 +1765,29 @@ def _resolve_execution(
     raise ValidationError(f"不支持的本地媒体命令: {command.value}")
 
 
+def _fingerprint_motion(motion: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one motion mapping for fingerprinting.
+
+    The raw html body never enters the fingerprint; ``checksum`` (plus the
+    engine salt for html_js) fully identifies the rendered output, and it
+    is available without loading externalized documents from disk.
+    """
+
+    return {key: value for key, value in motion.items() if key != "html"}
+
+
+def _fingerprint_overlay(
+    overlay: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if overlay is None:
+        return None
+    data = dict(overlay)
+    motion = data.get("motion")
+    if isinstance(motion, Mapping):
+        data["motion"] = _fingerprint_motion(motion)
+    return data
+
+
 def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
     """Fingerprint of render content: covers only inputs that affect output.
 
@@ -1742,8 +1820,12 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
                     "end": item.end_seconds,
                     "originalSound": item.original_sound,
                     "location": item.location,
-                    "overlays": [dict(o) for o in item.overlays],
-                    "motions": [dict(motion) for motion in item.motions],
+                    "overlays": [
+                        _fingerprint_overlay(o) for o in item.overlays
+                    ],
+                    "motions": [
+                        _fingerprint_motion(motion) for motion in item.motions
+                    ],
                 }
                 for item in resolved.inputs
             ],
@@ -1822,6 +1904,47 @@ def _terminal_task_message(task: TaskRecord) -> str:
         if detail and detail != message:
             message = f"{message}: {detail}"
     return message
+
+
+def _materialized_motion(
+    project: Project,
+    file_store: AssetFileStore,
+    motion: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Load one externalized motion document body for rendering.
+
+    Content is verified against the IndexedFile digest on open, so a
+    corrupted or swapped file fails the task instead of rendering silently
+    wrong frames.
+    """
+
+    if motion.get("html"):
+        return motion
+    file_id = str(motion.get("html_file_id") or "")
+    indexed = project.assets.files_by_id.get(file_id)
+    if indexed is None:
+        raise StorageIntegrityError(
+            f"motion 文档引用的 IndexedFile 不存在: {file_id}",
+        )
+    with file_store.open_verified(indexed) as stream:
+        html = stream.read().decode("utf-8")
+    return {**motion, "html": html}
+
+
+def _materialized_overlay(
+    project: Project,
+    file_store: AssetFileStore,
+    overlay: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if overlay is None:
+        return None
+    motion = overlay.get("motion")
+    if not isinstance(motion, Mapping) or motion.get("html"):
+        return overlay
+    return {
+        **overlay,
+        "motion": _materialized_motion(project, file_store, motion),
+    }
 
 
 class FileLocalMediaExecutionService:
@@ -2403,8 +2526,22 @@ class FileLocalMediaExecutionService:
                     duration_seconds=frozen.duration_seconds,
                     original_sound=frozen.original_sound,
                     location=frozen.location,
-                    overlays=frozen.overlays,
-                    motions=frozen.motions,
+                    overlays=tuple(
+                        _materialized_overlay(
+                            base.project,
+                            file_store,
+                            overlay,
+                        )
+                        for overlay in frozen.overlays
+                    ),
+                    motions=tuple(
+                        _materialized_motion(
+                            base.project,
+                            file_store,
+                            motion,
+                        )
+                        for motion in frozen.motions
+                    ),
                 ),
             )
         output_path = work_dir / "output.mp4"
