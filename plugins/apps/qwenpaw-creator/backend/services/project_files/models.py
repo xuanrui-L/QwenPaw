@@ -442,6 +442,12 @@ class VisualVariant(StrictModel):
         default_factory=list,
     )
     selected_artifact_version_id: EntityId | None = None
+    # Intra-character consistency: which variant this one was derived
+    # from, and what it is allowed to change (costume_change, age_stage,
+    # alternate_style ...). Core identity traits stay locked to the
+    # entity's continuity.
+    derived_from_variant_id: EntityId | None = None
+    consistency_tags: list[str] = Field(default_factory=list)
 
 
 class VisualEntity(StrictModel):
@@ -455,6 +461,10 @@ class VisualEntity(StrictModel):
         default_factory=EntityCollection,
     )
     selected_artifact_version_id: EntityId | None = None
+    # The identity master: new variants reference this variant's selected
+    # artifact first so the character does not drift across costumes and
+    # stages.
+    canonical_variant_id: EntityId | None = None
 
     @model_validator(mode="after")
     def _validate_required_variants(self) -> VisualEntity:
@@ -470,6 +480,64 @@ class VisualEntity(StrictModel):
                 "visual variants must be declared in required_variant_ids: "
                 + ", ".join(sorted(undeclared)),
             )
+        if (
+            self.canonical_variant_id is not None
+            and self.canonical_variant_id not in self.variants.items
+        ):
+            raise ValueError(
+                f"canonical_variant_id {self.canonical_variant_id} is not "
+                "one of this entity's variants",
+            )
+        for variant in self.variants.items.values():
+            if (
+                variant.derived_from_variant_id is not None
+                and variant.derived_from_variant_id not in self.variants.items
+            ):
+                raise ValueError(
+                    f"variant {variant.variant_id} derives from missing "
+                    f"variant {variant.derived_from_variant_id}",
+                )
+        return self
+
+
+class VisualCastLineup(StrictModel):
+    """One canonical multi-character reference image (cast lineup).
+
+    Locks relative consistency — scale ratios, shared style baseline,
+    palette, era and default spatial order — that per-entity continuity
+    cannot express. Individual anchors stay authoritative for identity;
+    the lineup is the group anchor referenced by storyboards and videos.
+    """
+
+    lineup_id: EntityId
+    name: str = Field(min_length=1)
+    description: str = ""
+    # Order equals the default left-to-right placement in the image.
+    character_refs: list[EntityId] = Field(default_factory=list)
+    scene_ref: EntityId | None = None
+    prop_refs: list[EntityId] = Field(default_factory=list)
+    reference_asset_version_ids: list[EntityId] = Field(default_factory=list)
+    reference_artifact_version_ids: list[EntityId] = Field(
+        default_factory=list,
+    )
+    generated_artifact_version_ids: list[EntityId] = Field(
+        default_factory=list,
+    )
+    selected_artifact_version_id: EntityId | None = None
+    # Human/agent-authored relative notes, e.g. "A:B:C ≈ 175:165:150cm".
+    relative_notes: str = ""
+
+    @model_validator(mode="after")
+    def _validate_lineup(self) -> VisualCastLineup:
+        if len(self.character_refs) != len(set(self.character_refs)):
+            raise ValueError(
+                "cast lineup character_refs cannot contain duplicates",
+            )
+        if len(self.character_refs) < 2:
+            raise ValueError(
+                "a cast lineup needs at least two characters; single "
+                "characters are covered by their own variants",
+            )
         return self
 
 
@@ -477,6 +545,9 @@ class VisualDevelopment(StrictModel):
     visual_bible: str = ""
     style: str = ""
     entities: EntityCollection[VisualEntity] = Field(
+        default_factory=EntityCollection,
+    )
+    cast_lineups: EntityCollection[VisualCastLineup] = Field(
         default_factory=EntityCollection,
     )
 
@@ -661,6 +732,10 @@ class R2VCreation(StrictModel):
     visual_variant_refs: dict[EntityId, EntityId] = Field(
         default_factory=dict,
     )
+    # Group anchors: cast lineups whose selected artifact should lead the
+    # storyboard/video reference chain when several characters share the
+    # frame.
+    cast_lineup_refs: list[EntityId] = Field(default_factory=list)
     shots: EntityCollection[Shot] = Field(default_factory=EntityCollection)
     recipe: GenerationRecipe | None = None
     storyboard_prompt: str = ""
@@ -1185,6 +1260,56 @@ class Project(StrictModel):
                 )
 
         _require_collection_identity(
+            self.visual.cast_lineups,
+            "lineup_id",
+            "visual cast lineups",
+        )
+        for lineup in self.visual.cast_lineups.items.values():
+            for ref in lineup.character_refs:
+                if ref not in visual_ids["character"]:
+                    raise ValueError(
+                        f"cast lineup {lineup.lineup_id} references "
+                        f"missing character {ref}",
+                    )
+            if (
+                lineup.scene_ref is not None
+                and lineup.scene_ref not in visual_ids["scene"]
+            ):
+                raise ValueError(
+                    f"cast lineup {lineup.lineup_id} references missing "
+                    f"scene {lineup.scene_ref}",
+                )
+            for ref in lineup.prop_refs:
+                if ref not in visual_ids["prop"]:
+                    raise ValueError(
+                        f"cast lineup {lineup.lineup_id} references "
+                        f"missing prop {ref}",
+                    )
+            _require_all(
+                source_versions,
+                lineup.reference_asset_version_ids,
+                "cast lineup source",
+            )
+            _require_all(
+                artifact_versions,
+                lineup.reference_artifact_version_ids,
+                "cast lineup artifact reference",
+            )
+            _require_all(
+                artifact_versions,
+                lineup.generated_artifact_version_ids,
+                "cast lineup artifact",
+            )
+            if lineup.selected_artifact_version_id is not None and (
+                lineup.selected_artifact_version_id
+                not in lineup.generated_artifact_version_ids
+            ):
+                raise ValueError(
+                    f"cast lineup {lineup.lineup_id} selected artifact "
+                    "must be one of its generated versions",
+                )
+
+        _require_collection_identity(
             self.timelines,
             "timeline_id",
             "timelines",
@@ -1216,6 +1341,12 @@ class Project(StrictModel):
                     "video reference",
                 )
                 _validate_visual_refs(creation, visual_ids)
+                for lineup_ref in creation.cast_lineup_refs:
+                    if lineup_ref not in self.visual.cast_lineups.items:
+                        raise ValueError(
+                            f"element {element_id}: cast_lineup_refs "
+                            f"references missing lineup {lineup_ref}",
+                        )
                 _validate_visual_variant_refs(
                     creation,
                     self.visual.entities.items,
@@ -1562,6 +1693,7 @@ __all__ = [
     "TimelineElement",
     "TimelineSpan",
     "TransitionCreation",
+    "VisualCastLineup",
     "VisualDevelopment",
     "VisualEntity",
     "VisualVariant",
