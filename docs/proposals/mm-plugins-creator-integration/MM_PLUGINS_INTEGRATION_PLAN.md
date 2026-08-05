@@ -204,6 +204,50 @@ worktree 与特性分支。
 占位符校验机制天然防冲突漏改）；`local_execution.py` 与
 `ai_editing_director.system.txt`（WT8 分支与 WT4 交叠，集成时 motion 先合）。
 
+**F4 素材理解功能线先行集成回填（2026-08-05，dispatch/F4）**：
+- 集成分支 `integration/mm-plugins` 自 `origin/dev/creator`（`0c2f1b76`，含 #64–#73）
+  拉出；三分支按 WT1→WT3→WT6 合入并推 origin：
+  - `integ/wt1-merged` = `ba12c8a5`（零冲突；ac073503 的 plugin.json 描述改动随分支带入）；
+  - `integ/wt3-merged` = `4fc1d276`（冲突仅 `backend/pytest.ini` marker 描述，取并集）；
+  - `integ/wt6-merged` = `0dc084b6`（9 处冲突全部按预案解决：pytest.ini 取并集；
+    `plugin.json` deps 取并集（+numpy）；vendor `__init__` 取 WT3 attribution 版；
+    NOTICE.md 取并集（renderers 清单 + video-memory 清单）；`specialist_tools.py`
+    双侧追加块并集；SI prompt 工具行并集；`AssetsPage.tsx` 保 #72 分组结构 +
+    WT6 memoryBuilt 徽标移回卡片内层；测试文件并集）。
+- 快门禁/全量门禁：asr 域 33、doc 域 42、memory 域 50 全绿；合并后 backend 全量
+  879→修复后 880 全绿；UI 331 全绿；pre-commit 全绿；根仓 pytest 6715 通过、9 个
+  失败与基线快照完全一致（chrome nm_host×6/service_worker/coding_project/tauri，
+  均在 Creator 域外，非本线引入）。
+- **集成缺陷 1 例（已修复）**：`4f130d89` — read_document 用 `write_text` 落盘、
+  commit 用 `read_text` 读回，universal-newline 把 pdfium 文本层的 `\r\n` 折叠成
+  `\n`，textCoverage 长度/sha256 永不匹配 → commit 全拒 → SI agent 16 轮耗尽死循
+  环。改为两侧字节级读写（fail-closed 语义不变），新增含 `\r\n` 多行 PDF 的回归
+  测试（无修复必现失败）；已 cherry-pick 回 `feat/creator-doc-reader`（`70c40132`）。
+- F4 真实验收（集成栈 `~/.qwenpaw-integ`:8100，8099 被占改用 8100）：
+  - WT1：A1–A3 真实转写通过（KPL 素材，转写与原声/读帧一致；A4–A6 respx 覆盖）；
+    B1 配置持久化、B2/B3 全片 8 块转写、B5 填错模型名 UI 呈现可读 404 错误。
+  - WT3：A1–A9 全过（libreoffice 版式还原良好，XLSX CJK 表格完整；A7 VLM 读页
+    回答与 PDF 逐字一致）；B1–B6 全过（.glb 可读拒绝、PPTX 第 3 页问答与原稿一致）。
+  - WT6：KPL（32:37）授权卡 ¥1.47（7 段×0.15+210 节点×0.002）、11 macros 全覆盖
+    构建成功；猫 POV（116:48）授权卡 ¥4.83（23 段×0.15+690 节点×0.002）构建成功；
+    B1 先拒绝路径验证（QUEUED→CANCELLED 零扣费；CANCELLED 不自动重试，需新
+    index 重启，属设计行为）；9 类 query_type 结构全部合法，search_asr/
+    search_ocr（「二连击破」00:30:37）/search_nodes（river/riverbank）命中窗口
+    回原片读帧核对属实；A7 checksum 失效返回 None、A8 阈值 20min 生效；
+    构建期与文档理解/上传并行不阻塞（B6）。
+  - 串联验收：同项目导入 KPL 长视频 +《巅峰五排》剧本 PDF → 剧本三幕/角色总结
+    与原文一致 → Agent 按三幕结构定位三段团战（读帧核对与描述一致）→ 30s 成片
+    合成（V1 三段 + FX 动效轨 + 转场），三幕帧读帧核对通过。
+- 实际消耗记录：ASR 转写 ≈ 13.5 分钟额度（A 组）+ 32.6 分钟×3（KPL 全片，含
+  网关瞬断重试一轮）+ 116.8 分钟（猫全片）；VLM 约 40 次（构建 P2 34 段 + 文档/
+  审阅若干）；两次 memory 构建授权 ¥1.47 + ¥4.83；缩样校准构建（25min）13:37 完成
+  8 macros。
+- 已知观察项（非本线回归）：主 Agent 工具集无 `query_source_memory`（该工具
+  roles 仅 SOURCE_INTELLIGENCE，主线需经委派使用，建议后续线评估是否放开）；
+  SI 索引层 shot 粒度（13 shots/117min）时间窗较粗，精确定位应走 graph memory；
+  远程 URL 大文件在缓存完成前委派理解会 BLOCKED，需重试（时序问题）。
+- 分支与 worktree 按约未清理；未合回 dev/creator。
+
 ### 2.4 隔离开发栈约定
 
 每个 worktree 运行独立栈：根目录 `dev-isolated.sh`（记入 `.git/info/exclude`），独立
