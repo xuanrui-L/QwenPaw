@@ -35,6 +35,7 @@ const configuredModelConfig: ModelConfigData = {
     reuse_llm: true,
     validation_source: "llm",
     tavily_api_key: "",
+    serper_api_key: "",
     native_search_enabled: true,
     search_provider: "dashscope_qwen",
     search_reuse_llm: true,
@@ -102,6 +103,8 @@ const configuredModelConfig: ModelConfigData = {
     policy_api_key: "",
   },
   executionAuthorization: { mode: "allow_all" },
+  creationCheckpoints: { mode: "skip" },
+  mediaReview: { mode: "required" },
 };
 
 function installComposerMockFetch(
@@ -179,7 +182,7 @@ describe("ProjectComposer ingest boundary", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: { value: "制作一支短片" },
     });
 
@@ -220,7 +223,7 @@ describe("ProjectComposer ingest boundary", () => {
         <ProjectComposer open onClose={vi.fn()} />
       </MemoryRouter>,
     );
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: {
         value: "  制作一个   关于雪夜城市与归途的电影感短片，画面温暖克制  ",
       },
@@ -290,7 +293,7 @@ describe("ProjectComposer ingest boundary", () => {
         <ProjectComposer open onClose={onClose} />
       </MemoryRouter>,
     );
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: { value: "用素材制作短片" },
     });
     const fileInput = [
@@ -388,7 +391,7 @@ describe("ProjectComposer ingest boundary", () => {
     fireEvent.change(screen.getByPlaceholderText(/^项目名称（选填/), {
       target: { value: "新项目" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: { value: "做一个雪夜 SUV 短片" },
     });
     const fileInput = [
@@ -482,7 +485,7 @@ describe("ProjectComposer ingest boundary", () => {
     fireEvent.change(screen.getByPlaceholderText(/^项目名称（选填/), {
       target: { value: "文件夹项目" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: { value: "使用文件夹素材创作" },
     });
     const file = new File(["video"], "shot.mp4", { type: "video/mp4" });
@@ -557,7 +560,7 @@ describe("ProjectComposer ingest boundary", () => {
     fireEvent.change(screen.getByPlaceholderText(/^项目名称（选填/), {
       target: { value: "远程视频快速启动项目" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: { value: "立即使用远程视频创作" },
     });
     fireEvent.change(screen.getByPlaceholderText("粘贴 URL 后回车"), {
@@ -663,7 +666,7 @@ describe("ProjectComposer ingest boundary", () => {
     fireEvent.change(screen.getByPlaceholderText(/^项目名称（选填/), {
       target: { value: "远程视频项目" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: { value: "使用远程视频创作" },
     });
     fireEvent.change(screen.getByPlaceholderText("粘贴 URL 后回车"), {
@@ -770,7 +773,7 @@ describe("ProjectComposer ingest boundary", () => {
     fireEvent.change(screen.getByPlaceholderText(/^项目名称（选填/), {
       target: { value: "失败远程视频项目" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/^目标描述：/), {
+    fireEvent.change(screen.getByPlaceholderText(/^例：霸道总裁短剧/), {
       target: { value: "使用远程视频创作" },
     });
     fireEvent.change(screen.getByPlaceholderText("粘贴 URL 后回车"), {

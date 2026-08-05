@@ -12,6 +12,7 @@ import type {
   ProjectPatchResponse,
   ProjectServerSyncStatus,
 } from "@/contracts/creator";
+import i18n from "@/i18n";
 
 export type ProjectSnapshotSyncStatus =
   | "idle"
@@ -339,10 +340,10 @@ export const useProjectSnapshotStore = create<ProjectSnapshotState>(
       ensureProject(projectId);
       const state = get();
       if (!state.project || state.generation === null || !state.etag) {
-        throw new Error("Project 快照尚未加载");
+        throw new Error(i18n.t("store.snapshotNotLoad"));
       }
       if (!edits.length) {
-        throw new Error("没有需要应用的 Project 修改");
+        throw new Error(i18n.t("store.noOpsToApply"));
       }
       set({ patching: true, patchError: null });
       try {

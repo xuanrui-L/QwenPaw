@@ -119,6 +119,10 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
             "TAVILY_API_KEY",
             "WEB_GROUNDING_TAVILY_API_KEY",
         ),
+        "serper_api_key": (
+            "SERPER_API_KEY",
+            "WEB_GROUNDING_SERPER_API_KEY",
+        ),
         "reuse_llm": (
             "WEB_GROUNDING_REUSE_LLM",
             "WEB_GROUNDING_REUSE_VLM",
@@ -384,6 +388,9 @@ def _assemble_model_config(
     checkpoints = configs.get("creation_checkpoints")
     if isinstance(checkpoints, dict):
         base["creation_checkpoints"].update(checkpoints)
+    media_review = configs.get("media_review")
+    if isinstance(media_review, dict):
+        base["media_review"].update(media_review)
     if base["vlm"].get("use_llm"):
         for field in ("base_url", "api_key", "model_name"):
             if not base["vlm"].get(field):
@@ -475,7 +482,13 @@ def get_host_provider_api_key(provider_id: str) -> str | None:
 # Placeholder returned instead of persisted secrets; a submitted placeholder
 # means "keep the stored value".
 SECRET_MASK = "__CREATOR_SECRET__"
-_SECRET_FIELDS = ("api_key", "access_key_secret", "policy_api_key")
+_SECRET_FIELDS = (
+    "api_key",
+    "access_key_secret",
+    "policy_api_key",
+    "tavily_api_key",
+    "serper_api_key",
+)
 
 
 def _decrypt_secret_fields(data: dict) -> dict:
@@ -631,20 +644,20 @@ def _ensure_grounding_model_configured(data: ModelConfigData) -> None:
         raise ValidationError(
             f"Grounding 默认启用；请完整配置 {source} 的 Base URL、API Key 和模型名称，或关闭 Grounding",
         )
-    if grounding.tavily_api_key:
+    if grounding.tavily_api_key or grounding.serper_api_key:
         return
     search_model = _grounding_search_model(data)
     if not grounding.native_search_enabled:
         raise ValidationError(
-            "Grounding 搜索未配置；请配置 Tavily，或启用 Qwen/DashScope 原生搜索",
+            "Grounding 搜索未配置；请配置 Tavily/Serper，或启用 Qwen/DashScope 原生搜索",
         )
     if not _model_config_complete(search_model):
         raise ValidationError(
-            "Grounding 搜索未配置；请配置 Tavily，或完整配置 Qwen/DashScope 搜索模型",
+            "Grounding 搜索未配置；请配置 Tavily/Serper，或完整配置 Qwen/DashScope 搜索模型",
         )
     if not _supports_dashscope_native_search(search_model):
         raise ValidationError(
-            "当前搜索模型不支持 Qwen/DashScope 原生 web_search；请配置 Tavily，或选择 DashScope（百炼）搜索模型",
+            "当前搜索模型不支持 Qwen/DashScope 原生 web_search；请配置 Tavily/Serper，或选择 DashScope（百炼）搜索模型",
         )
 
 
@@ -700,6 +713,7 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
     configs[model_config.CREATOR_GROUNDING_CONFIG_TOOL] = {
         "enabled": grounding.enabled,
         "tavily_api_key": grounding.tavily_api_key,
+        "serper_api_key": grounding.serper_api_key,
         "reuse_llm": grounding.reuse_llm,
         "validation_source": grounding.validation_source,
         "api_key": grounding.api_key,
@@ -825,11 +839,15 @@ async def _validate_section_connectivity(
         except Exception as exc:
             exc_str = str(exc)
             if "InvalidAccessKeyId" in exc_str or "AccessDenied" in exc_str:
-                raise ValidationError("OSS: Access Key 无效或权限不足，请检查配置")
+                raise ValidationError(
+                    "OSS: Access Key 无效或权限不足，请检查配置",
+                )
             if "NoSuchBucket" in exc_str:
                 raise ValidationError("OSS: Bucket 不存在，请检查 Bucket 名称")
             if "connect" in exc_str.lower() or "timeout" in exc_str.lower():
-                raise ValidationError("OSS: 无法连接到 OSS 服务，请检查 Endpoint 和网络")
+                raise ValidationError(
+                    "OSS: 无法连接到 OSS 服务，请检查 Endpoint 和网络",
+                )
             raise ValidationError(f"OSS: {exc_str}")
         return
 
@@ -841,7 +859,9 @@ async def _validate_section_connectivity(
     if section in ("asr", "tts") and item.get("reuse_llm_key") and not api_key:
         api_key = config.get("llm", {}).get("api_key", "")
     if not item.get("base_url") or not api_key:
-        raise ValidationError(f"{section}: 缺少 Base URL 或 API Key，请检查配置")
+        raise ValidationError(
+            f"{section}: 缺少 Base URL 或 API Key，请检查配置",
+        )
 
     probe = ModelConnectionTestRequest(
         type=section,
@@ -880,9 +900,13 @@ async def _validate_section_connectivity(
                     f"{section}: HTTP {resp.status_code}: {msg or '请求失败'}",
                 )
         except httpx.ConnectError:
-            raise ValidationError(f"{section}: 无法连接到服务，请检查 Base URL 是否正确")
+            raise ValidationError(
+                f"{section}: 无法连接到服务，请检查 Base URL 是否正确",
+            )
         except httpx.TimeoutException:
-            raise ValidationError(f"{section}: 连接超时，请检查网络或 Base URL")
+            raise ValidationError(
+                f"{section}: 连接超时，请检查网络或 Base URL",
+            )
         except httpx.HTTPError as exc:
             raise ValidationError(f"{section}: {exc}")
 
@@ -1007,6 +1031,82 @@ async def patch_creation_checkpoints(
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
         merged["creation_checkpoints"] = {"mode": mode}
+        try:
+            return ModelConfigData.model_validate(merged)
+        except PydanticValidationError as exc:
+            first_error = exc.errors()[0] if exc.errors() else {}
+            field = ".".join(str(loc) for loc in first_error.get("loc", []))
+            message = first_error.get("msg", str(exc))
+            raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
+
+    def transaction() -> None:
+        mutate_model_config(mutate)
+        _notify_agent_model_config_changed()
+
+    await asyncio.to_thread(transaction)
+    return {"ok": True}
+
+
+@router.patch("/config/permission-mode")
+async def patch_permission_mode(
+    data: dict[str, Any] = Body(...),
+) -> dict[str, bool]:
+    """Atomically persist one stop of the permission ladder.
+
+    The slider writes three coupled fields; saving them through separate
+    PATCH calls can strand the server in a mixed state when one call
+    fails (worst case: a stale media_review=auto_approve hiding behind a
+    conservative-looking UI). One mutate transaction removes the class.
+    """
+
+    execution = data.get("execution_authorization")
+    checkpoints = data.get("creation_checkpoints")
+    media_review = data.get("media_review")
+    if execution not in ("required", "allow_all"):
+        raise ValidationError(
+            "execution_authorization 必须是 'required' 或 'allow_all'",
+        )
+    if checkpoints not in ("required", "skip"):
+        raise ValidationError(
+            "creation_checkpoints 必须是 'required' 或 'skip'",
+        )
+    if media_review not in ("required", "auto_approve"):
+        raise ValidationError(
+            "media_review 必须是 'required' 或 'auto_approve'",
+        )
+
+    def mutate(current: ModelConfigData) -> ModelConfigData:
+        merged = current.model_dump()
+        merged["execution_authorization"] = {"mode": execution}
+        merged["creation_checkpoints"] = {"mode": checkpoints}
+        merged["media_review"] = {"mode": media_review}
+        try:
+            return ModelConfigData.model_validate(merged)
+        except PydanticValidationError as exc:
+            first_error = exc.errors()[0] if exc.errors() else {}
+            field = ".".join(str(loc) for loc in first_error.get("loc", []))
+            message = first_error.get("msg", str(exc))
+            raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
+
+    def transaction() -> None:
+        mutate_model_config(mutate)
+        _notify_agent_model_config_changed()
+
+    await asyncio.to_thread(transaction)
+    return {"ok": True}
+
+
+@router.patch("/config/media-review")
+async def patch_media_review(
+    data: dict[str, Any] = Body(...),
+) -> dict[str, bool]:
+    mode = data.get("mode")
+    if mode not in ("required", "auto_approve"):
+        raise ValidationError("mode 必须是 'required' 或 'auto_approve'")
+
+    def mutate(current: ModelConfigData) -> ModelConfigData:
+        merged = current.model_dump()
+        merged["media_review"] = {"mode": mode}
         try:
             return ModelConfigData.model_validate(merged)
         except PydanticValidationError as exc:

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 export type AssetPreviewState =
   | "planned"
@@ -10,12 +11,13 @@ export type AssetPreviewState =
 function placeholderLabel(
   state: AssetPreviewState,
   loadFailed: boolean,
+  t: (key: string) => string,
 ): string {
-  if (loadFailed) return "预览不可用";
-  if (state === "planned") return "待生成";
-  if (state === "processing") return "入库中";
-  if (state === "failed") return "入库失败";
-  return "暂无预览";
+  if (loadFailed) return t("assetPreview.previewUnavailable");
+  if (state === "planned") return t("assetPreview.pendingGeneration");
+  if (state === "processing") return t("assetPreview.ingesting");
+  if (state === "failed") return t("assetPreview.ingestFailed");
+  return t("assetPreview.noPreview");
 }
 
 // Audio has no visual frame to show, so a ready track renders as a
@@ -80,6 +82,7 @@ export default function AssetMediaPreview({
   placeholderClassName: string;
 }) {
   const [loadFailed, setLoadFailed] = useState(false);
+  const { t } = useTranslation();
 
   useEffect(() => setLoadFailed(false), [previewUrl]);
 
@@ -88,7 +91,7 @@ export default function AssetMediaPreview({
     return (
       <video
         src={previewUrl}
-        aria-label={`${name} 视频`}
+        aria-label={`${name} ${t("assetPreview.video")}`}
         controls={controls}
         muted={!controls}
         playsInline
@@ -116,7 +119,7 @@ export default function AssetMediaPreview({
       data-asset-preview-state={loadFailed ? "unavailable" : state}
       className={placeholderClassName}
     >
-      {placeholderLabel(state, loadFailed)}
+      {placeholderLabel(state, loadFailed, t)}
     </span>
   );
 }

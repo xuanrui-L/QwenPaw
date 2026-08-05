@@ -997,10 +997,10 @@ class ProjectExecutionStore:
                 project_id,
                 authorization_id,
             )
-            # An approval-resume replays the same tool call: the candidate
-            # carries a fresh random token and no decision yet, so compare
-            # the request signature (not the full record) and hand back the
-            # already-decided authorization instead of failing the replay.
+            # authorization_id is derived deterministically from the
+            # request, so identical retries replay the durable record:
+            # compare the request signature, which ignores the per-call
+            # random token and the decision lifecycle fields.
             if self._authorization_request_signature(
                 existing,
             ) == self._authorization_request_signature(candidate):

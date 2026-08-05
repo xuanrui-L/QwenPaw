@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { message } from "antd";
 import { Coins, Eye, PlayCircle } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import type {
   ExecutionAuthorizationApproval,
   ExecutionAuthorizationView,
@@ -11,6 +12,7 @@ import { creatorTargetLabel, taskKindLabel } from "@/lib/creatorPresentation";
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
 import { navigateToLocator } from "@/routing/locators";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
+import i18n from "@/i18n";
 
 const BUTTON_BASE =
   "rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:opacity-50";
@@ -54,7 +56,7 @@ function authorizationOperation(
 ): string {
   return typeof authorization.scope.operation === "string"
     ? taskKindLabel(authorization.scope.operation)
-    : "高成本媒体执行";
+    : i18n.t("executionAuth.title");
 }
 
 function authorizationParameterSummary(
@@ -65,19 +67,33 @@ function authorizationParameterSummary(
   const parameters = raw as Record<string, unknown>;
   const parts: string[] = [];
   if (parameters.durationSeconds) {
-    parts.push(`时长 ${parameters.durationSeconds}秒`);
+    parts.push(
+      i18n.t("executionAuth.duration", {
+        duration: parameters.durationSeconds,
+      }),
+    );
   }
   if (typeof parameters.resolution === "string") {
-    parts.push(`分辨率 ${parameters.resolution.toUpperCase()}`);
+    parts.push(
+      i18n.t("executionAuth.resolutionLabel", {
+        resolution: parameters.resolution.toUpperCase(),
+      }),
+    );
   }
   if (typeof parameters.ratio === "string") {
-    parts.push(`比例 ${parameters.ratio}`);
+    parts.push(i18n.t("executionAuth.ratio", { ratio: parameters.ratio }));
   }
   if (typeof parameters.aspectRatio === "string") {
-    parts.push(`画幅 ${parameters.aspectRatio}`);
+    parts.push(
+      i18n.t("executionAuth.frameSize", { size: parameters.aspectRatio }),
+    );
   }
   if (typeof parameters.generateAudio === "boolean") {
-    parts.push(parameters.generateAudio ? "有声" : "无声");
+    parts.push(
+      parameters.generateAudio
+        ? i18n.t("executionAuth.withAudio")
+        : i18n.t("executionAuth.withoutAudio"),
+    );
   }
   return parts.join(" · ");
 }
@@ -91,7 +107,9 @@ function humanizeRefTokens(
     /(?:visual-entity|artifact-version|asset-version|element|asset|source):[\w.-]+(?::[\w.-]+)*/g,
     (token) => {
       const label = creatorTargetLabel(token, project);
-      return label && label !== "当前项目" ? `「${label}」` : token;
+      return label && label !== i18n.t("executionAuth.currentProject")
+        ? `「${label}」`
+        : token;
     },
   );
 }
@@ -110,7 +128,9 @@ export function authorizationDetail(
   }/${authorization.model}`;
   const billing = authorizationBilling(authorization);
   return billing?.displayText
-    ? `${detail} · 预计费用 ${billing.displayText}`
+    ? `${detail} · ${i18n.t("executionAuth.estimatedCost")} ${
+        billing.displayText
+      }`
     : detail;
 }
 
@@ -172,6 +192,7 @@ export default function ExecutionAuthorizationCard({
   authorization: ExecutionAuthorizationView;
   project?: ProjectDocument | null;
 }) {
+  const { t } = useTranslation();
   const approve = useExecutionAuthorizationStore((state) => state.approve);
   const decline = useExecutionAuthorizationStore((state) => state.decline);
   const projectId = useExecutionAuthorizationStore((state) => state.projectId);
@@ -187,7 +208,7 @@ export default function ExecutionAuthorizationCard({
     navigateToLocator(projectId, jumpTarget.locator, {
       review: true,
       field: jumpTarget.field,
-      description: "生产确认 / 查看生成输入",
+      description: t("executionAuth.productionConfirm"),
     });
   };
 
@@ -198,7 +219,7 @@ export default function ExecutionAuthorizationCard({
         authorization.id,
         authorizationApprovalPayload(authorization),
       );
-      message.success("已确认，专业制作将继续");
+      message.success(t("executionAuth.confirmed"));
     } catch (error) {
       message.error((error as Error).message);
     } finally {
@@ -209,7 +230,7 @@ export default function ExecutionAuthorizationCard({
     setBusy(true);
     try {
       await decline(authorization.id, authorization.authorizationToken);
-      message.success("已取消，当前制作已终止");
+      message.success(t("executionAuth.cancelled"));
     } catch (error) {
       message.error((error as Error).message);
     } finally {
@@ -223,36 +244,36 @@ export default function ExecutionAuthorizationCard({
       className="rounded-xl border border-[var(--color-warning)]/50 bg-[var(--color-warning-soft)]/40 p-2.5"
     >
       <OnboardingHint hintKey="executionAuthorization" className="mb-2">
-        首次说明：Agent
-        即将调用付费生成模型，下方已给出预估费用。点击「继续」才会真正执行，「取消」则终止本次制作；可在模型配置中关闭此确认。
+        {t("executionAuth.firstTimeDesc")}
       </OnboardingHint>
       <div className="flex items-start gap-2.5">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="inline-flex items-center gap-1 rounded bg-[var(--color-warning-soft)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-warning)]">
               <PlayCircle className="h-3 w-3" />
-              生产确认
+              {t("executionAuth.productionConfirm")}
             </span>
             <span className="min-w-0 flex-1 truncate text-xs font-semibold text-[var(--color-text-primary)]">
-              {authorizationOperation(authorization)}等待确认
+              {authorizationOperation(authorization)}
+              {t("executionAuth.waitingConfirm")}
             </span>
             {jumpTarget && projectId && (
               <button
                 type="button"
                 onClick={openTarget}
-                aria-label="查看生成输入"
-                title="跳转到将要生成的 Prompt / 编辑位置，确认前先检查输入"
+                aria-label={t("executionAuth.view")}
+                title={t("executionAuth.jumpToPrompt")}
                 className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
               >
                 <Eye className="h-3 w-3" />
-                查看
+                {t("executionAuth.view")}
               </button>
             )}
           </div>
           <dl className="mt-1.5 space-y-0.5 text-[11px] leading-4">
             <div className="flex gap-1">
               <dt className="shrink-0 text-[var(--color-text-tertiary)]">
-                对象
+                {t("executionAuth.object")}
               </dt>
               <dd className="min-w-0 truncate text-[var(--color-text-secondary)]">
                 {creatorTargetLabel(authorization.targetRef, project)}
@@ -260,7 +281,7 @@ export default function ExecutionAuthorizationCard({
             </div>
             <div className="flex gap-1">
               <dt className="shrink-0 text-[var(--color-text-tertiary)]">
-                模型
+                {t("executionAuth.model")}
               </dt>
               <dd className="min-w-0 truncate text-[var(--color-text-secondary)]">
                 {authorization.provider} / {authorization.model}
@@ -269,7 +290,7 @@ export default function ExecutionAuthorizationCard({
             {parameterSummary && (
               <div className="flex gap-1">
                 <dt className="shrink-0 text-[var(--color-text-tertiary)]">
-                  参数
+                  {t("executionAuth.parameter")}
                 </dt>
                 <dd className="min-w-0 text-[var(--color-text-secondary)]">
                   {parameterSummary}
@@ -281,13 +302,17 @@ export default function ExecutionAuthorizationCard({
             <div className="mt-1.5 rounded-md border border-[var(--color-warning)]/30 bg-[var(--color-bg-primary)]/60 px-2 py-1.5">
               <p className="flex items-center gap-1 text-[11px] font-semibold leading-4 text-[var(--color-warning)]">
                 <Coins className="h-3 w-3" />
-                预计费用 {billing.displayText ?? "费用未知"}
+                {t("executionAuth.estimatedCostLabel")}{" "}
+                {billing.displayText ?? t("executionAuth.costUnknown")}
               </p>
               {billing.formula && (
                 <p className="mt-0.5 text-[10px] leading-4 text-[var(--color-text-secondary)]">
-                  计算：{billing.formula}
+                  {t("executionAuth.calculation")}
+                  {billing.formula}
                   {billing.pricingModel
-                    ? `（按 ${billing.pricingModel} 计价）`
+                    ? t("executionAuth.pricingModel", {
+                        model: billing.pricingModel,
+                      })
                     : ""}
                 </p>
               )}
@@ -314,7 +339,7 @@ export default function ExecutionAuthorizationCard({
           onClick={() => void continueRun()}
           className={`flex-1 ${BUTTON_PRIMARY}`}
         >
-          继续
+          {t("executionAuth.continue")}
         </button>
         <button
           type="button"
@@ -322,7 +347,7 @@ export default function ExecutionAuthorizationCard({
           onClick={() => void cancelRun()}
           className={`flex-1 ${BUTTON_GHOST}`}
         >
-          取消
+          {t("executionAuth.cancel")}
         </button>
       </div>
     </article>

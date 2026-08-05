@@ -9,6 +9,7 @@ from models.config import (
     DEFAULT_SPECIALIST_MAX_MODEL_TURNS,
     get_mainline_max_model_turns,
     get_specialist_max_model_turns,
+    scale_mainline_max_model_turns,
 )
 
 
@@ -55,3 +56,15 @@ def test_turn_limits_reject_invalid_values(monkeypatch) -> None:
     assert (
         get_specialist_max_model_turns() == DEFAULT_SPECIALIST_MAX_MODEL_TURNS
     )
+
+
+def test_turn_budget_scales_with_element_count() -> None:
+    # Small projects keep the configured floor.
+    assert scale_mainline_max_model_turns(24, 0) == 24
+    assert scale_mainline_max_model_turns(24, 5) == 24  # 8 + 15 = 23 < 24
+    # Element-heavy projects raise the cap: 8 + 3 * 12 = 44.
+    assert scale_mainline_max_model_turns(24, 12) == 44
+    # A higher configured value is never lowered.
+    assert scale_mainline_max_model_turns(64, 12) == 64
+    # Negative counts (defensive) fall back to the base.
+    assert scale_mainline_max_model_turns(24, -3) == 24

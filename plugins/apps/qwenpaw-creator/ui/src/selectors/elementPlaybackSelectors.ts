@@ -14,6 +14,7 @@ import {
   elementsAtTick,
   overlayContentKind,
 } from "@/selectors/timelineElementSelectors";
+import i18n from "@/i18n";
 
 export type ElementPlaybackStatus =
   | "ready"
@@ -48,12 +49,12 @@ export const ELEMENT_PLAYBACK_STATUS_LABEL: Record<
   ElementPlaybackStatus,
   string
 > = {
-  ready: "已就绪",
-  generating: "生成中",
-  queued: "排队中",
-  failed: "生成失败",
-  stale: "需重新生成",
-  pending: "待生成",
+  ready: "playback.ready",
+  generating: "playback.generating",
+  queued: "playback.queued",
+  failed: "playback.failed",
+  stale: "playback.needRegen",
+  pending: "playback.pending",
 };
 
 function mediaKindOfType(mediaType: string): ElementPlaybackMediaKind {
