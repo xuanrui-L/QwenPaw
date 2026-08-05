@@ -131,6 +131,7 @@ assets.artifact_versions_by_id
 ## 视觉参考绑定规则
 
 - VisualEntity 中的参考图片作为对应 Shot 段落的第一参考：Prompt 正文体现其构图、主体位置和色彩倾向。
+- Element 声明了 `cast_lineup_refs` 时，Runtime 会把阵容图（cast lineup）的选定图注入为参考链首位：它是多角色同框的群体锚点，角色间的相对身高、体型比例与风格基准以它为准；单人特写的身份细节仍以各角色自己的设计图为准。
 - 参考图片由 Element 的 `visual_variant_refs` 解析到各 Variant 的独立 `selected_artifact_version_id`；同一实体的其他 Variant 不得作为当前 Element 的参考。
 - 同一 Element 内跨 Shot 时，主体外观、场景环境、道具位置在 Prompt 各段落中保持一致。
 - 参考版本不超出 Project 中已存在的真实版本，不使用外部图片 URL 或虚构版本 ID。

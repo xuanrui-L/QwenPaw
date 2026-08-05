@@ -107,6 +107,7 @@ _IMAGE_COMMANDS = frozenset(
     {
         CreatorCommandType.GENERATE_ASSET,
         CreatorCommandType.GENERATE_STORYBOARD_IMAGE,
+        CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE,
     },
 )
 _MAX_IMAGE_BYTES = 64 * 1024 * 1024
@@ -395,6 +396,50 @@ def _resolve_version_references(
     return urls, checksums, read_set
 
 
+def _lineup_character_reference_ids(
+    project: Any,
+    lineup: Any,
+) -> tuple[list[str], list[str]]:
+    """Identity anchors for every lineup character, placement order kept.
+
+    Each character contributes its canonical variant's selected artifact
+    (the identity master), falling back to any variant with a selected
+    artifact, then to the entity-level selection. Characters without any
+    generated artifact are reported so the caller can fail actionably —
+    a lineup drawn from text alone cannot lock relative consistency.
+    """
+
+    version_ids: list[str] = []
+    missing: list[str] = []
+    for ref in lineup.character_refs:
+        entity = project.visual.entities.items.get(ref)
+        if entity is None:
+            missing.append(ref)
+            continue
+        variant = None
+        if entity.canonical_variant_id:
+            variant = entity.variants.items.get(entity.canonical_variant_id)
+        if variant is None or not variant.selected_artifact_version_id:
+            variant = next(
+                (
+                    item
+                    for item in entity.variants.items.values()
+                    if item.selected_artifact_version_id
+                ),
+                variant,
+            )
+        selected = (
+            variant.selected_artifact_version_id
+            if variant is not None and variant.selected_artifact_version_id
+            else entity.selected_artifact_version_id
+        )
+        if selected:
+            version_ids.append(selected)
+        else:
+            missing.append(ref)
+    return version_ids, missing
+
+
 def _resolve_request(
     *,
     snapshot: ProjectSnapshot,
@@ -520,6 +565,62 @@ def _resolve_request(
             role=SpecialistRole.VISUAL_DEVELOPMENT,
             target_id=entity_id,
             variant_id=variant.variant_id if variant else None,
+        )
+    elif command is CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE:
+        lineup_id = _target_id(target_ref, "lineup")
+        lineup = project.visual.cast_lineups.items.get(lineup_id)
+        if lineup is None:
+            raise NotFoundError("阵容图（cast lineup）不存在")
+        anchor_ids, missing = _lineup_character_reference_ids(project, lineup)
+        if missing:
+            raise ValidationError(
+                "生成阵容图前，以下角色必须先有已选定的视觉图（canonical "
+                "variant 的 selected artifact）：" + "、".join(missing),
+            )
+        prompt = explicit_prompt or lineup.description.strip()
+        character_names = [
+            (project.visual.entities.items[ref].name.strip() or ref)
+            for ref in lineup.character_refs
+        ]
+        prompt_parts = [
+            "一张多角色阵容对比图（cast lineup）：所有角色全身站立并排，"
+            "同一地平线，从左到右依次为：" + "、".join(character_names) + "。",
+            "严格保持各角色之间真实的身高与体型比例，风格、光照、色彩基准完全统一。",
+        ]
+        if prompt:
+            prompt_parts.append(prompt)
+        if lineup.relative_notes.strip():
+            prompt_parts.append(
+                f"相对关系要求：{lineup.relative_notes.strip()}",
+            )
+        if project.visual.style.strip():
+            prompt_parts.append(project.visual.style.strip())
+        prompt_parts.append(
+            "No panel numbers, no captions, no labels, no subtitles, "
+            "no watermarks, no annotation text in the image.",
+        )
+        prompt = "\n".join(prompt_parts)
+        version_ids = [
+            *anchor_ids,
+            *lineup.reference_asset_version_ids,
+            *lineup.reference_artifact_version_ids,
+            *explicit_version_ids,
+        ]
+        resolved = _ResolvedRequest(
+            command=command,
+            target_ref=f"lineup:{lineup_id}",
+            prompt=prompt,
+            aspect_ratio=project.settings.aspect_ratio,
+            reference_image_urls=(),
+            reference_version_ids=tuple(dict.fromkeys(version_ids)),
+            reference_checksums=(),
+            read_set=(),
+            slot_id=f"lineup:{lineup_id}:image",
+            slot_kind="cast_lineup_image",
+            owner_ref=f"lineup:{lineup_id}",
+            artifact_name=f"{lineup.name or lineup_id} 阵容图",
+            role=SpecialistRole.VISUAL_DEVELOPMENT,
+            target_id=lineup_id,
         )
     else:  # pragma: no cover - public entry validates this first
         raise ValidationError(f"不支持的图片命令: {command.value}")
@@ -1534,6 +1635,21 @@ class FileImageExecutionService:
                 slot_id=artifact.slot_id,
                 select_for_render=False,
             )
+        elif command is CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE:
+            lineup_id = _target_id(target_ref, "lineup")
+            lineup = candidate["visual"]["cast_lineups"]["items"].get(
+                lineup_id,
+            )
+            if lineup is None:
+                raise ConflictError("阵容图（cast lineup）已不存在")
+            if (
+                artifact.version_id
+                not in lineup["generated_artifact_version_ids"]
+            ):
+                lineup["generated_artifact_version_ids"].append(
+                    artifact.version_id,
+                )
+            lineup["selected_artifact_version_id"] = artifact.version_id
         else:
             entity_id = _target_id(target_ref, "asset")
             entity = candidate["visual"]["entities"]["items"].get(entity_id)

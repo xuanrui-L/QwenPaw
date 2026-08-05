@@ -240,6 +240,7 @@ class ArtifactSlot(StrictModel):
 # result, which later collides with the real pipeline write-back.
 ARTIFACT_SLOT_KINDS = frozenset(
     {
+        "cast_lineup_image",
         "element_video",
         "final_video",
         "r2v_storyboard_image",

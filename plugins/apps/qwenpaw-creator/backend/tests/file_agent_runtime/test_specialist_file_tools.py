@@ -114,7 +114,8 @@ def test_project_assets_scope_admits_image_asset_children(tmp_path) -> None:
 
     assert spec is not None
     assert "enum" not in target
-    assert target["pattern"] == r"^asset:.+$"
+    # Cast lineups joined the Project-assets scope alongside entities.
+    assert target["pattern"] == r"^(asset|lineup):.+$"
     assert "不能直接使用 project:assets" in target["description"]
     assert image_arguments["properties"]["variantId"]["minLength"] == 1
     assert "多个" in image_arguments["properties"]["variantId"]["description"]
