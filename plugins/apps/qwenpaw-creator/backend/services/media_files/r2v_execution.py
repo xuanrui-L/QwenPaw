@@ -71,6 +71,7 @@ from services.project_files.models import (
 from services.media_files.element_adapter import (
     bind_candidate_output,
     find_timeline_element,
+    reconcile_candidate_span,
     selected_element_output,
     target_element_id,
 )
@@ -4117,6 +4118,14 @@ class FileR2VExecutionService:
             output_name="main",
             slot_id=artifact.slot_id,
             select_for_render=True,
+        )
+        # The provider decides the real footage length (s2v follows its
+        # driving audio); align the timeline with what was actually billed
+        # and delivered instead of freezing the last frame to pad the plan.
+        reconcile_candidate_span(
+            candidate,
+            element_id=element_id,
+            actual_duration_seconds=artifact.duration_seconds,
         )
 
     async def _quarantine(

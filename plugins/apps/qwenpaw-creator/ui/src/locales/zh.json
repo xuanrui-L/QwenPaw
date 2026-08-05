@@ -474,7 +474,8 @@
     "i2vFirstFramePlaceholder": "选择首帧图片 version",
     "videoPromptLabel": "Prompt 文本",
     "videoPromptPlaceholder": "描述要生成的视频：主体、动作、场景、镜头与画质",
-    "noVideoResult": "尚无生成结果。"
+    "noVideoResult": "尚无生成结果。",
+    "notSelected": "尚未选择"
   },
   "elementDetail": {
     "selectElement": "选择一项时间线内容",
@@ -540,7 +541,11 @@
       "easeOut": "渐出（ease-out）",
       "easeInOut": "缓入缓出（ease-in-out）"
     },
-    "enterWorkbench": "进入制作工作台（{{mode}}）"
+    "enterWorkbench": "进入制作工作台（{{mode}}）",
+    "ttsRegenerateHint": "修改文本后确认，将由创作助手重新合成这段语音",
+    "ttsRegenerateConfirm": "确认修改并重新合成",
+    "ttsRegenerateQueued": "已提交创作助手：合成完成并通过审阅后将自动替换这段语音",
+    "ttsRegenerateMessage": "请把时间线元素 {{element}}（{{label}}）的旁白文本改为：\n「{{text}}」\n然后用 TTS 重新合成这段旁白，注册新的音频 version 并把该元素的 source_asset_version_id 换成新版本；如时长变化请同步调整该元素的时长。"
   },
   "agent": {
     "assistant": "创作助手",

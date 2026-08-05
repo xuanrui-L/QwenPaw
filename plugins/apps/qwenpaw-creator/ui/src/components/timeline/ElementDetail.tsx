@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { Alert, Button, Input, InputNumber, Select } from "antd";
+import { useMemo, useState } from "react";
+import { Alert, Button, Input, InputNumber, Select, message } from "antd";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import {
@@ -29,6 +29,7 @@ import {
 import { outputLabel } from "@/lib/creatorPresentation";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
+import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 
 interface ElementDetailProps {
   project: ProjectDocument;
@@ -51,6 +52,70 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
     <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
       {children}
     </span>
+  );
+}
+
+/** Editable narration script for TTS-produced audio elements. Confirming a
+ * change hands the rewrite to the Creative Assistant, which re-synthesizes
+ * the audio through the normal authorization/review pipeline and swaps the
+ * element onto the new version — the UI never bills a model directly. */
+function TtsScriptEditor({
+  elementId,
+  elementLabel,
+  initialText,
+}: {
+  elementId: string;
+  elementLabel: string;
+  initialText: string;
+}) {
+  const { t } = useTranslation();
+  const [text, setText] = useState(initialText);
+  const [submitting, setSubmitting] = useState(false);
+  const dirty = text.trim() !== initialText.trim();
+  const submit = async () => {
+    setSubmitting(true);
+    try {
+      await useCreatorSessionStore.getState().sendMessage({
+        message: t("elementDetail.ttsRegenerateMessage", {
+          element: `element:${elementId}`,
+          label: elementLabel,
+          text: text.trim(),
+        }),
+      });
+      message.success(t("elementDetail.ttsRegenerateQueued"));
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  return (
+    <div className="mt-1.5 space-y-1.5">
+      <Input.TextArea
+        value={text}
+        autoSize={{ minRows: 2, maxRows: 6 }}
+        disabled={submitting}
+        onChange={(event) => setText(event.target.value)}
+        className="!text-xs"
+      />
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[10px] text-[var(--color-text-tertiary)]">
+          {t("elementDetail.ttsRegenerateHint")}
+        </span>
+        <Button
+          size="small"
+          type="primary"
+          loading={submitting}
+          disabled={!dirty || !text.trim()}
+          onClick={() => void submit()}
+          className="!text-[11px]"
+        >
+          {t("elementDetail.ttsRegenerateConfirm")}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -771,9 +836,12 @@ export default function ElementDetail({
                       </span>
                     </div>
                     {textPreview && (
-                      <p className="mt-1.5 whitespace-pre-wrap leading-5">
-                        “{textPreview}”
-                      </p>
+                      <TtsScriptEditor
+                        key={`${element.element_id}:${creation.source_asset_version_id}`}
+                        elementId={element.element_id}
+                        elementLabel={element.label || element.element_id}
+                        initialText={textPreview}
+                      />
                     )}
                     {(voiceName || ttsModel) && (
                       <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">

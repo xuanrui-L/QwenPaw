@@ -18,6 +18,7 @@ import {
   getAssetVersionMediaUrl,
   getResolvedModels,
 } from "@/api/creator";
+import type { ResolvedModels } from "@/api/creator/models";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { useProjectDraft } from "@/lib/useProjectDraft";
 import { visualVariantLabel } from "@/lib/visualVariants";
@@ -236,7 +237,7 @@ export default function R2VWorkbenchPage() {
   const generationMode: VideoGenerationMode = creation?.type ?? "r2v";
   const [viewedSbId, setViewedSbId] = useState<string | null>(null);
   const [viewedVideoId, setViewedVideoId] = useState<string | null>(null);
-  const [resolvedVideoModel, setResolvedVideoModel] = useState<string | null>(
+  const [resolvedModels, setResolvedModels] = useState<ResolvedModels | null>(
     null,
   );
 
@@ -258,7 +259,7 @@ export default function R2VWorkbenchPage() {
     let cancelled = false;
     getResolvedModels()
       .then((resolved) => {
-        if (!cancelled) setResolvedVideoModel(resolved.video.model || null);
+        if (!cancelled) setResolvedModels(resolved);
       })
       .catch(() => {
         /* best-effort: fall back to recipe.model below */
@@ -528,6 +529,43 @@ export default function R2VWorkbenchPage() {
       updateElement((draft) => {
         (draft.creation as unknown as Record<string, unknown>)[field] = value;
       });
+    const modeModel =
+      (modeCreation.type === "s2v"
+        ? resolvedModels?.s2v?.model
+        : resolvedModels?.video?.byMode?.[modeCreation.type] ??
+          resolvedModels?.video?.model) ??
+      modeCreation.recipe?.model ??
+      "—";
+    const imagePicker = (
+      value: string | null,
+      field: string,
+      placeholder: string,
+      alt: string,
+    ) => (
+      <div className="space-y-2">
+        <Select
+          size="small"
+          className="!w-full"
+          placeholder={placeholder}
+          value={value}
+          disabled={patching}
+          options={imageOptions}
+          onChange={(next) => updateModeField(field, next ?? null)}
+          allowClear
+        />
+        {imageUrlOf(value) ? (
+          <img
+            src={imageUrlOf(value)!}
+            alt={alt}
+            className="max-h-64 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] object-contain"
+          />
+        ) : (
+          <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+            {t("r2v.notSelected")}
+          </div>
+        )}
+      </div>
+    );
 
     return (
       <div
@@ -585,32 +623,17 @@ export default function R2VWorkbenchPage() {
           </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_340px]">
           <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
             {modeCreation.type === "s2v" ? (
               <>
                 <Panel title={t("r2v.s2vPortrait")}>
-                  <div className="space-y-2">
-                    <Select
-                      size="small"
-                      className="!w-full"
-                      placeholder={t("r2v.s2vPortraitPlaceholder")}
-                      value={modeCreation.portrait_version_id}
-                      disabled={patching}
-                      options={imageOptions}
-                      onChange={(value) =>
-                        updateModeField("portrait_version_id", value ?? null)
-                      }
-                      allowClear
-                    />
-                    {imageUrlOf(modeCreation.portrait_version_id) && (
-                      <img
-                        src={imageUrlOf(modeCreation.portrait_version_id)!}
-                        alt={t("r2v.s2vPortrait")}
-                        className="max-h-56 rounded-lg border border-[var(--color-border)]"
-                      />
-                    )}
-                  </div>
+                  {imagePicker(
+                    modeCreation.portrait_version_id,
+                    "portrait_version_id",
+                    t("r2v.s2vPortraitPlaceholder"),
+                    t("r2v.s2vPortrait"),
+                  )}
                 </Panel>
                 <Panel title={t("r2v.s2vScript")}>
                   <PromptTextArea
@@ -637,12 +660,17 @@ export default function R2VWorkbenchPage() {
                       }
                       allowClear
                     />
-                    {audioUrlOf(modeCreation.audio_version_id) && (
+                    {audioUrlOf(modeCreation.audio_version_id) ? (
                       <audio
                         controls
+                        preload="metadata"
                         src={audioUrlOf(modeCreation.audio_version_id)!}
-                        className="w-full"
+                        className="h-10 w-full"
                       />
+                    ) : (
+                      <div className="flex h-10 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
+                        {t("r2v.notSelected")}
+                      </div>
                     )}
                   </div>
                 </Panel>
@@ -651,32 +679,12 @@ export default function R2VWorkbenchPage() {
               <>
                 {modeCreation.type === "i2v" && (
                   <Panel title={t("r2v.i2vFirstFrame")}>
-                    <div className="space-y-2">
-                      <Select
-                        size="small"
-                        className="!w-full"
-                        placeholder={t("r2v.i2vFirstFramePlaceholder")}
-                        value={modeCreation.first_frame_version_id}
-                        disabled={patching}
-                        options={imageOptions}
-                        onChange={(value) =>
-                          updateModeField(
-                            "first_frame_version_id",
-                            value ?? null,
-                          )
-                        }
-                        allowClear
-                      />
-                      {imageUrlOf(modeCreation.first_frame_version_id) && (
-                        <img
-                          src={
-                            imageUrlOf(modeCreation.first_frame_version_id)!
-                          }
-                          alt={t("r2v.i2vFirstFrame")}
-                          className="max-h-56 rounded-lg border border-[var(--color-border)]"
-                        />
-                      )}
-                    </div>
+                    {imagePicker(
+                      modeCreation.first_frame_version_id,
+                      "first_frame_version_id",
+                      t("r2v.i2vFirstFramePlaceholder"),
+                      t("r2v.i2vFirstFrame"),
+                    )}
                   </Panel>
                 )}
                 <Panel title={t("r2v.videoPrompt")}>
@@ -694,7 +702,9 @@ export default function R2VWorkbenchPage() {
                 </Panel>
               </>
             )}
+          </div>
 
+          <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
             <Panel
               title={t("r2v.videoResult")}
               badge={
@@ -714,8 +724,19 @@ export default function R2VWorkbenchPage() {
                     className="max-h-72 w-full rounded-lg border border-[var(--color-border)] bg-black"
                   />
                 ) : (
-                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                  <div className="flex h-32 items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)]">
                     {t("r2v.noVideoResult")}
+                  </div>
+                )}
+                {videoTask && (videoGenerating || videoFailed) && (
+                  <p
+                    className={`text-[11px] ${
+                      videoFailed
+                        ? "text-[var(--color-error)]"
+                        : "text-[var(--color-text-tertiary)]"
+                    }`}
+                  >
+                    {videoTaskMessage}
                   </p>
                 )}
                 {viewedVideo &&
@@ -735,9 +756,7 @@ export default function R2VWorkbenchPage() {
                   )}
               </div>
             </Panel>
-          </div>
 
-          <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
             <div className="grid grid-cols-3 gap-2">
               {[
                 { label: t("r2v.duration"), value: `${spanSeconds}s` },
@@ -747,8 +766,7 @@ export default function R2VWorkbenchPage() {
                 },
                 {
                   label: t("r2v.modelLabel"),
-                  value:
-                    resolvedVideoModel ?? modeCreation.recipe?.model ?? "—",
+                  value: modeModel,
                 },
               ].map((cell) => (
                 <div
@@ -758,7 +776,10 @@ export default function R2VWorkbenchPage() {
                   <p className="text-[10px] text-[var(--color-text-tertiary)]">
                     {cell.label}
                   </p>
-                  <p className="mt-0.5 truncate text-xs font-semibold text-[var(--color-text-primary)]">
+                  <p
+                    title={cell.value}
+                    className="mt-1 truncate text-xs font-semibold text-[var(--color-text-primary)]"
+                  >
                     {cell.value}
                   </p>
                 </div>
@@ -1369,7 +1390,11 @@ export default function R2VWorkbenchPage() {
               },
               {
                 label: t("r2v.modelLabel"),
-                value: resolvedVideoModel ?? creation.recipe?.model ?? "R2V",
+                value:
+                  resolvedModels?.video?.byMode?.r2v ??
+                  resolvedModels?.video?.model ??
+                  creation.recipe?.model ??
+                  "R2V",
               },
             ].map((cell) => (
               <div

@@ -47,7 +47,13 @@ export function getModelConfig(): Promise<ModelConfigData> {
 }
 
 export interface ResolvedModels {
-  video: { provider: string; model: string };
+  video: {
+    provider: string;
+    model: string;
+    /** Per-mode derived names — what a t2v/i2v element actually bills. */
+    byMode?: Record<string, string>;
+  };
+  s2v?: { model: string };
 }
 
 /**

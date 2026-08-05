@@ -474,7 +474,8 @@
     "i2vFirstFramePlaceholder": "Pick the first-frame image version",
     "videoPromptLabel": "Prompt text",
     "videoPromptPlaceholder": "Describe the video: subject, motion, scene, camera and quality",
-    "noVideoResult": "No generated result yet."
+    "noVideoResult": "No generated result yet.",
+    "notSelected": "Not selected yet"
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",
@@ -540,7 +541,11 @@
       "easeOut": "Ease Out",
       "easeInOut": "Ease In-Out"
     },
-    "enterWorkbench": "Open Production Workbench ({{mode}})"
+    "enterWorkbench": "Open Production Workbench ({{mode}})",
+    "ttsRegenerateHint": "Confirm the edited script and the assistant re-synthesizes this narration",
+    "ttsRegenerateConfirm": "Confirm & Re-synthesize",
+    "ttsRegenerateQueued": "Handed to the assistant: the narration is replaced once synthesis passes review",
+    "ttsRegenerateMessage": "Please change the narration script of timeline element {{element}} ({{label}}) to:\n\"{{text}}\"\nThen re-synthesize it with TTS, register the new audio version and point the element's source_asset_version_id at it; adjust the element duration if it changes."
   },
   "agent": {
     "assistant": "Creative Assistant",

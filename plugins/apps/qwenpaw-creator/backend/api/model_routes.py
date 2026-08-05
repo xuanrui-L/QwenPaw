@@ -928,12 +928,34 @@ async def get_resolved_models() -> dict[str, Any]:
 
     Unlike ``/models/config`` (persisted-only), this reflects request-scoped
     host tool config, environment overrides and defaults — i.e. the value
-    ``get_video_model_name()`` returns at submission time.  Read-only.
+    ``get_video_model_name()`` returns at submission time.  ``byMode``
+    carries the per-mode derived names (a configured ``wan2.7-r2v`` submits
+    as ``wan2.7-t2v`` for a t2v element), and ``s2v`` names the digital-human
+    model, so mode workbenches can show the model their element will bill
+    against.  Read-only.
     """
+    from models.video_capabilities import (
+        effective_video_model_name,
+        video_backend_key,
+    )
+
+    video_model = model_config.get_video_model_name()
+    backend_key = video_backend_key(video_model)
     return {
         "video": {
             "provider": model_config.get_video_backend(),
-            "model": model_config.get_video_model_name(),
+            "model": video_model,
+            "byMode": {
+                mode: effective_video_model_name(
+                    video_model,
+                    mode,
+                    backend_key,
+                )
+                for mode in ("r2v", "t2v", "i2v", "video_edit")
+            },
+        },
+        "s2v": {
+            "model": model_config.get_s2v_model_name(),
         },
     }
 
