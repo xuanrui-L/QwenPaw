@@ -111,3 +111,14 @@ export function getHostProviderApiKey(
 ): Promise<{ api_key: string | null }> {
   return creatorRequest(`/models/host-provider/${providerId}/api-key`);
 }
+
+export interface DogfoodingStatus {
+  enabled: boolean;
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+}
+
+export function getDogfoodingStatus(): Promise<DogfoodingStatus> {
+  return creatorRequest("/models/dogfooding-status");
+}

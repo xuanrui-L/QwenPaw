@@ -653,12 +653,14 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
         if section == "image" and "dashscope" in item.protocol.casefold():
             tool_config["_image_backend"] = "DASHSCOPE"
         if section == "video":
-            tool_config["_video_backend"] = (
-                "seedance2"
-                if "volcano" in item.protocol.casefold()
-                or "火山" in item.protocol
-                else "wan"
-            )
+            protocol_lower = item.protocol.casefold()
+            if "dogfooding" in protocol_lower:
+                # DogFooding 协议：走 token-portal，使用 wan 后端逻辑
+                tool_config["_video_backend"] = "wan"
+            elif "volcano" in protocol_lower or "火山" in protocol_lower:
+                tool_config["_video_backend"] = "seedance2"
+            else:
+                tool_config["_video_backend"] = "wan"
         configs[tool_name] = tool_config
     grounding = data.grounding
     configs[model_config.CREATOR_GROUNDING_CONFIG_TOOL] = {
@@ -1327,3 +1329,33 @@ async def get_host_provider_key(provider_id: str) -> dict[str, str | None]:
     """
     api_key = get_host_provider_api_key(provider_id)
     return {"api_key": api_key}
+
+
+# ---------------------------------------------------------------------------
+# DogFooding Status Check
+# ---------------------------------------------------------------------------
+
+
+@router.get("/dogfooding-status")
+async def get_dogfooding_status() -> dict[str, Any]:
+    """Check if DogFooding is configured via the dogfooding-bundle plugin.
+
+    Returns whether the agentscope-dogfooding provider is registered and has
+    an API key configured.
+    """
+    try:
+        from qwenpaw.providers.provider_manager import ProviderManager
+
+        manager = ProviderManager.get_instance()
+        provider = manager.get_provider("agentscope-dogfooding")
+        if not provider:
+            return {"enabled": False}
+        api_key = str(getattr(provider, "api_key", "") or "").strip()
+        return {
+            "enabled": True,
+            "api_key": api_key,
+            "base_url": str(getattr(provider, "base_url", "") or ""),
+            "model": "Peach-07-17-DogFooding",
+        }
+    except Exception:
+        return {"enabled": False}

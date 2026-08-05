@@ -30,7 +30,9 @@ import {
   getHostProviders,
   getHostProviderApiKey,
   getRealApiKey,
+  getDogfoodingStatus,
 } from "@/api/creator";
+import type { DogfoodingStatus } from "@/api/creator";
 import type { HostProviderInfo } from "@/api/creator";
 import type {
   GroundingConfig,
@@ -56,6 +58,7 @@ const LLM_PROTOCOLS = [
   "百度千帆",
   "Volcano Engine（火山引擎）",
   "小米 MiMo",
+  "AgentScope Dogfooding",
   "自定义",
 ];
 const VLM_PROTOCOLS = [
@@ -75,11 +78,16 @@ const VLM_PROTOCOLS = [
   "百度千帆",
   "Volcano Engine（火山引擎）",
   "小米 MiMo",
+  "AgentScope Dogfooding",
   "自定义",
 ];
 const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
-const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
+const VIDEO_PROTOCOLS = [
+  "DashScope（百炼）",
+  "Volcano Engine（火山引擎）",
+  "AgentScope Dogfooding",
+];
 
 interface ProtocolPreset {
   base_url: string;
@@ -384,10 +392,22 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const [saving, setSaving] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [hostProviders, setHostProviders] = useState<HostProviderInfo[]>([]);
+  const [dogfoodingStatus, setDogfoodingStatus] =
+    useState<DogfoodingStatus | null>(null);
 
   useEffect(() => {
     getHostProviders().then(setHostProviders);
+    getDogfoodingStatus()
+      .then(setDogfoodingStatus)
+      .catch(() => {});
   }, []);
+
+  const DOGFOODING_PROTOCOL = "AgentScope Dogfooding";
+  const DOGFOODING_PRESET: ProtocolPreset = {
+    base_url: dogfoodingStatus?.base_url ?? "http://proxy.agentscope.design/v1",
+    freeze_url: true,
+    models: [dogfoodingStatus?.model ?? "Peach-07-17-DogFooding"],
+  };
 
   // Resolve the real API key (for connection tests).
   const resolveRealApiKey = async (
@@ -435,14 +455,63 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           ...data.executionAuthorization,
         },
       };
-      if (!VLM_PROTOCOLS.includes(merged.vlm.protocol))
-        merged.vlm.protocol = VLM_PROTOCOLS[0];
+      const allLlmProtocols = protocolsFor("llm");
+      if (!allLlmProtocols.includes(merged.llm.protocol)) {
+        if (
+          merged.llm.protocol === DOGFOODING_PROTOCOL &&
+          dogfoodingStatus?.enabled
+        ) {
+          // Keep DogFooding protocol
+        } else {
+          merged.llm.protocol = allLlmProtocols[0];
+        }
+      }
+      const allVlmProtocols = protocolsFor("vlm");
+      if (!allVlmProtocols.includes(merged.vlm.protocol)) {
+        if (
+          merged.vlm.protocol === DOGFOODING_PROTOCOL &&
+          dogfoodingStatus?.enabled
+        ) {
+          // Keep DogFooding protocol
+        } else {
+          merged.vlm.protocol = allVlmProtocols[0];
+        }
+      }
       if (!ASR_PROTOCOLS.includes(merged.asr.protocol))
         merged.asr.protocol = ASR_PROTOCOLS[0];
       if (!IMAGE_PROTOCOLS.includes(merged.image.protocol))
         merged.image.protocol = IMAGE_PROTOCOLS[0];
-      if (!VIDEO_PROTOCOLS.includes(merged.video.protocol))
-        merged.video.protocol = VIDEO_PROTOCOLS[0];
+      const allVideoProtocols = protocolsFor("video");
+      if (!allVideoProtocols.includes(merged.video.protocol)) {
+        if (
+          merged.video.protocol === DOGFOODING_PROTOCOL &&
+          dogfoodingStatus?.enabled
+        ) {
+          // Keep DogFooding protocol
+        } else {
+          merged.video.protocol = allVideoProtocols[0];
+        }
+      }
+
+      // Auto-fill DogFooding API key if protocol is DogFooding
+      if (
+        merged.llm.protocol === DOGFOODING_PROTOCOL &&
+        dogfoodingStatus?.api_key
+      ) {
+        merged.llm.api_key = dogfoodingStatus.api_key;
+      }
+      if (
+        merged.vlm.protocol === DOGFOODING_PROTOCOL &&
+        dogfoodingStatus?.api_key
+      ) {
+        merged.vlm.api_key = dogfoodingStatus.api_key;
+      }
+      if (
+        merged.video.protocol === DOGFOODING_PROTOCOL &&
+        dogfoodingStatus?.api_key
+      ) {
+        merged.video.api_key = dogfoodingStatus.api_key;
+      }
       const initialTested: Record<string, boolean> = {};
       CARD_META.forEach((meta) => {
         if (meta.type === "grounding") return;
@@ -465,6 +534,26 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       setExpanded({ llm: true });
     }
   }, [open, loadConfig]);
+
+  // Update config when DogFooding status becomes available
+  useEffect(() => {
+    if (!dogfoodingStatus?.enabled || !dogfoodingStatus.api_key) return;
+    setConfig((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const t of ["llm", "vlm", "video"] as ModelType[]) {
+        const item = next[t] as ModelConfigItem;
+        if (item.protocol === DOGFOODING_PROTOCOL && !item.api_key) {
+          (next as Record<string, unknown>)[t] = {
+            ...item,
+            api_key: dogfoodingStatus.api_key!,
+          };
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [dogfoodingStatus]);
 
   const handleReload = useCallback(async () => {
     if (reloading) return;
@@ -828,6 +917,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
       for (const section of dirtySections) {
         if (section !== "grounding" && !tested[section]) {
+          const item = config[section] as ModelConfigItem;
+          if (item.protocol === DOGFOODING_PROTOCOL) {
+            continue;
+          }
           const ok = await handleTest(section);
           if (!ok) return;
         }
@@ -859,21 +952,37 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     onClose();
   }, [onClose]);
 
-  const protocolsFor = (type: ModelType) =>
-    type === "llm"
-      ? LLM_PROTOCOLS
-      : type === "vlm"
-      ? VLM_PROTOCOLS
-      : type === "asr"
-      ? ASR_PROTOCOLS
-      : type === "image"
-      ? IMAGE_PROTOCOLS
-      : VIDEO_PROTOCOLS;
+  const protocolsFor = (type: ModelType) => {
+    const base =
+      type === "llm"
+        ? LLM_PROTOCOLS
+        : type === "vlm"
+        ? VLM_PROTOCOLS
+        : type === "asr"
+        ? ASR_PROTOCOLS
+        : type === "image"
+        ? IMAGE_PROTOCOLS
+        : VIDEO_PROTOCOLS;
+    if (
+      dogfoodingStatus?.enabled &&
+      (type === "llm" || type === "vlm" || type === "video") &&
+      !base.includes(DOGFOODING_PROTOCOL)
+    ) {
+      return [DOGFOODING_PROTOCOL, ...base];
+    }
+    return base;
+  };
 
   const getPresetForType = (
     type: ModelType,
     protocol: string,
   ): ProtocolPreset | null => {
+    if (protocol === DOGFOODING_PROTOCOL) {
+      if (type === "llm" || type === "vlm" || type === "video") {
+        return DOGFOODING_PRESET;
+      }
+      return null;
+    }
     if (type === "llm" || type === "vlm") {
       const providerId = PROTOCOL_TO_PROVIDER_ID[protocol];
       if (!providerId) return null;
@@ -899,6 +1008,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     type: ModelType,
     protocol: string,
   ): { value: string; label: string }[] => {
+    if (protocol === DOGFOODING_PROTOCOL) {
+      const preset = DOGFOODING_PRESET;
+      return preset.models.map((m) => ({ value: m, label: m }));
+    }
     if (type === "llm" || type === "vlm") {
       const providerId = PROTOCOL_TO_PROVIDER_ID[protocol];
       if (!providerId) return [];
@@ -929,6 +1042,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           updateItem(type, "model_name", preset.models[0]);
         }
       }
+    }
+
+    // Auto-fill API key for DogFooding protocol
+    if (protocol === DOGFOODING_PROTOCOL && dogfoodingStatus?.api_key) {
+      updateItem(type, "api_key", dogfoodingStatus.api_key);
     }
 
     // For LLM/VLM on their first configuration (empty api_key), try to

@@ -349,7 +349,7 @@ export default function HomePage() {
             </div>
           </div>
         </main>
-      ) : (
+      ) : view === "projects" ? (
         <main className="min-h-[calc(100vh-72px)] bg-[linear-gradient(180deg,#FFFFFF_31%,#FAFAFA_43%)]">
           <div className="mx-auto w-full max-w-[1360px] px-5">
             {!llmReady && (
@@ -463,7 +463,7 @@ export default function HomePage() {
             开始创作
           </button>
         </main>
-      )}
+      ) : null}
 
       <Modal
         open={previewProject !== null}
