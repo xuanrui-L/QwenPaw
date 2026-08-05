@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# pylint: disable=redefined-outer-name,unused-argument
+# pylint: disable=redefined-outer-name,unused-argument,protected-access
 """Async media review: admission, parsing, scheduling and the image loop."""
 
 from __future__ import annotations
@@ -287,7 +287,12 @@ def test_schedule_filters_unreviewed_commands(monkeypatch) -> None:
             project_id=PROJECT_ID,
             published_result=_published("assets/artifacts/a.png"),
         )
+        # The in-flight task must be strongly referenced until it settles;
+        # the done callback then drops it again.
+        assert len(media_module._ACTIVE_REVIEW_TASKS) == 1
         await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not media_module._ACTIVE_REVIEW_TASKS
 
     asyncio.run(_run())
     assert started == ["image"]

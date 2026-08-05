@@ -159,7 +159,9 @@ def parse_sync_advisory(
                 name=row.name,
                 score=score,
                 ok=ok,
-                finding=finding if not ok else finding,
+                # Advisory hygiene: passing rows carry no finding/suggestion,
+                # so the agent only ever sees actionable weak-row evidence.
+                finding=finding if not ok else "",
                 suggestion=str(item.get("suggestion") or "") if not ok else "",
             ),
         )

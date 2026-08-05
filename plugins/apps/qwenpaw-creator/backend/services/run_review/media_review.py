@@ -45,6 +45,11 @@ _VIDEO_REVIEW_FRAMES = 8
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 _IMAGE_CHECK_KEYS = ("devices", "type_fonts", "composition_safety", "craft")
+
+# Strong references to in-flight review tasks: the event loop only keeps
+# weak references, so an unreferenced task could be garbage-collected in
+# the middle of a multi-second gates/VLM round.
+_ACTIVE_REVIEW_TASKS: set["asyncio.Task[Any]"] = set()
 _VIDEO_CHECK_KEYS = (
     "devices",
     "type_fonts",
@@ -534,8 +539,10 @@ def schedule_media_review(
                 kind=kind,
             ),
         )
+        _ACTIVE_REVIEW_TASKS.add(task)
 
         def _log_outcome(done: asyncio.Task[Any]) -> None:
+            _ACTIVE_REVIEW_TASKS.discard(done)
             if not done.cancelled() and done.exception() is not None:
                 logger.error(
                     "media review task crashed: %s",

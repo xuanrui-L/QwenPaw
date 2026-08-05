@@ -112,6 +112,11 @@ def test_parse_sync_advisory_derives_ok_deterministically() -> None:
     weak = advisory.weak_scores()
     assert [item.row_key for item in weak] == ["concept"]
     assert weak[0].suggestion
+    # Advisory hygiene: passing rows never carry finding/suggestion text.
+    passing = [item for item in advisory.scores if item.ok]
+    assert passing and all(
+        not item.finding and not item.suggestion for item in passing
+    )
     # A weak score without a cited finding cannot stand.
     payload = json.loads(_advisory_payload(weak_concept=True))
     payload["scores"][0]["finding"] = ""
