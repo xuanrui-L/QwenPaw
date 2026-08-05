@@ -17,7 +17,6 @@ from api import model_routes
 from domain.errors import CreatorError, ValidationError
 from schemas.models import ModelConfigData
 
-
 router = model_routes.router
 
 
@@ -51,6 +50,7 @@ def _config(model_name: str = "qwen-plus") -> dict:
             "custom_protocol": "",
             "reuse_llm": True,
             "tavily_api_key": "tvly-test",
+            "serper_api_key": "serper-secret",
         },
         "asr": {
             "enabled": False,
@@ -150,6 +150,7 @@ def test_grounding_accepts_generic_vlm_validation_with_tavily_search() -> None:
 def test_grounding_rejects_non_search_llm_when_tavily_is_absent() -> None:
     payload = _config()
     payload["grounding"]["tavily_api_key"] = ""
+    payload["grounding"]["serper_api_key"] = ""
     payload["llm"].update(
         {
             "model_name": "generic-text-model",
@@ -162,6 +163,17 @@ def test_grounding_rejects_non_search_llm_when_tavily_is_absent() -> None:
         model_routes._ensure_grounding_model_configured(
             ModelConfigData.model_validate(payload),
         )
+
+
+def test_grounding_accepts_serper_only_search() -> None:
+    payload = _config()
+    payload["grounding"]["tavily_api_key"] = ""
+    payload["grounding"]["serper_api_key"] = "serper-secret"
+    payload["grounding"]["native_search_enabled"] = False
+
+    model_routes._ensure_grounding_model_configured(
+        ModelConfigData.model_validate(payload),
+    )
 
 
 def test_creation_checkpoints_mode_round_trips_through_assembly(
@@ -369,7 +381,10 @@ def test_model_config_is_single_file_native_and_idempotent(
         "custom_protocol": "",
         "reuse_llm": True,
         "validation_source": "llm",
-        "tavily_api_key": "tvly-test",
+        # Search-provider keys are secret fields: GET returns the
+        # keep-placeholder instead of the persisted credentials.
+        "tavily_api_key": model_routes.SECRET_MASK,
+        "serper_api_key": model_routes.SECRET_MASK,
         "native_search_enabled": True,
         "search_provider": "dashscope_qwen",
         "search_reuse_llm": True,

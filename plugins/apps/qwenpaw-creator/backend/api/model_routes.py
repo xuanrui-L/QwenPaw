@@ -108,6 +108,10 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
             "TAVILY_API_KEY",
             "WEB_GROUNDING_TAVILY_API_KEY",
         ),
+        "serper_api_key": (
+            "SERPER_API_KEY",
+            "WEB_GROUNDING_SERPER_API_KEY",
+        ),
         "reuse_llm": (
             "WEB_GROUNDING_REUSE_LLM",
             "WEB_GROUNDING_REUSE_VLM",
@@ -450,7 +454,13 @@ def get_host_provider_api_key(provider_id: str) -> str | None:
 # Placeholder returned instead of persisted secrets; a submitted placeholder
 # means "keep the stored value".
 SECRET_MASK = "__CREATOR_SECRET__"
-_SECRET_FIELDS = ("api_key", "access_key_secret", "policy_api_key")
+_SECRET_FIELDS = (
+    "api_key",
+    "access_key_secret",
+    "policy_api_key",
+    "tavily_api_key",
+    "serper_api_key",
+)
 
 
 def _decrypt_secret_fields(data: dict) -> dict:
@@ -606,20 +616,20 @@ def _ensure_grounding_model_configured(data: ModelConfigData) -> None:
         raise ValidationError(
             f"Grounding 默认启用；请完整配置 {source} 的 Base URL、API Key 和模型名称，或关闭 Grounding",
         )
-    if grounding.tavily_api_key:
+    if grounding.tavily_api_key or grounding.serper_api_key:
         return
     search_model = _grounding_search_model(data)
     if not grounding.native_search_enabled:
         raise ValidationError(
-            "Grounding 搜索未配置；请配置 Tavily，或启用 Qwen/DashScope 原生搜索",
+            "Grounding 搜索未配置；请配置 Tavily/Serper，或启用 Qwen/DashScope 原生搜索",
         )
     if not _model_config_complete(search_model):
         raise ValidationError(
-            "Grounding 搜索未配置；请配置 Tavily，或完整配置 Qwen/DashScope 搜索模型",
+            "Grounding 搜索未配置；请配置 Tavily/Serper，或完整配置 Qwen/DashScope 搜索模型",
         )
     if not _supports_dashscope_native_search(search_model):
         raise ValidationError(
-            "当前搜索模型不支持 Qwen/DashScope 原生 web_search；请配置 Tavily，或选择 DashScope（百炼）搜索模型",
+            "当前搜索模型不支持 Qwen/DashScope 原生 web_search；请配置 Tavily/Serper，或选择 DashScope（百炼）搜索模型",
         )
 
 
@@ -665,6 +675,7 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
     configs[model_config.CREATOR_GROUNDING_CONFIG_TOOL] = {
         "enabled": grounding.enabled,
         "tavily_api_key": grounding.tavily_api_key,
+        "serper_api_key": grounding.serper_api_key,
         "reuse_llm": grounding.reuse_llm,
         "validation_source": grounding.validation_source,
         "api_key": grounding.api_key,
@@ -790,11 +801,15 @@ async def _validate_section_connectivity(
         except Exception as exc:
             exc_str = str(exc)
             if "InvalidAccessKeyId" in exc_str or "AccessDenied" in exc_str:
-                raise ValidationError("OSS: Access Key 无效或权限不足，请检查配置")
+                raise ValidationError(
+                    "OSS: Access Key 无效或权限不足，请检查配置",
+                )
             if "NoSuchBucket" in exc_str:
                 raise ValidationError("OSS: Bucket 不存在，请检查 Bucket 名称")
             if "connect" in exc_str.lower() or "timeout" in exc_str.lower():
-                raise ValidationError("OSS: 无法连接到 OSS 服务，请检查 Endpoint 和网络")
+                raise ValidationError(
+                    "OSS: 无法连接到 OSS 服务，请检查 Endpoint 和网络",
+                )
             raise ValidationError(f"OSS: {exc_str}")
         return
 
@@ -806,7 +821,9 @@ async def _validate_section_connectivity(
     if section == "asr" and item.get("reuse_llm_key") and not api_key:
         api_key = config.get("llm", {}).get("api_key", "")
     if not item.get("base_url") or not api_key:
-        raise ValidationError(f"{section}: 缺少 Base URL 或 API Key，请检查配置")
+        raise ValidationError(
+            f"{section}: 缺少 Base URL 或 API Key，请检查配置",
+        )
 
     probe = ModelConnectionTestRequest(
         type=section,
@@ -845,9 +862,13 @@ async def _validate_section_connectivity(
                     f"{section}: HTTP {resp.status_code}: {msg or '请求失败'}",
                 )
         except httpx.ConnectError:
-            raise ValidationError(f"{section}: 无法连接到服务，请检查 Base URL 是否正确")
+            raise ValidationError(
+                f"{section}: 无法连接到服务，请检查 Base URL 是否正确",
+            )
         except httpx.TimeoutException:
-            raise ValidationError(f"{section}: 连接超时，请检查网络或 Base URL")
+            raise ValidationError(
+                f"{section}: 连接超时，请检查网络或 Base URL",
+            )
         except httpx.HTTPError as exc:
             raise ValidationError(f"{section}: {exc}")
 

@@ -200,6 +200,7 @@ const DEFAULT_CONFIG: ModelConfigData = {
     reuse_llm: true,
     validation_source: "llm",
     tavily_api_key: "",
+    serper_api_key: "",
     native_search_enabled: true,
     search_provider: "dashscope_qwen",
     search_reuse_llm: true,
@@ -291,6 +292,7 @@ export function supportsQwenNativeSearch(item: ModelConfigItem): boolean {
 function groundingSearchLabel(config: ModelConfigData): string {
   const providers: string[] = [];
   if (config.grounding.tavily_api_key) providers.push("tavily");
+  if (config.grounding.serper_api_key) providers.push("serper");
   const searchModel = groundingSearchModel(config);
   if (
     config.grounding.native_search_enabled &&
@@ -533,6 +535,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       }
       if (
         field === "tavily_api_key" ||
+        field === "serper_api_key" ||
         field === "native_search_enabled" ||
         field === "search_reuse_llm" ||
         field === "search_api_key" ||
@@ -795,7 +798,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           !!searchModel.model_name &&
           hasUsableApiKey(searchModel) &&
           supportsQwenNativeSearch(searchModel);
-        if (!config.grounding.tavily_api_key && !nativeSearchReady) {
+        if (
+          !config.grounding.tavily_api_key &&
+          !config.grounding.serper_api_key &&
+          !nativeSearchReady
+        ) {
           message.warning(t("modelConfig.groundingSearchNotConfigured"));
           return;
         }
@@ -1126,7 +1133,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       !!searchModel.base_url &&
       hasUsableApiKey(searchModel) &&
       supportsQwenNativeSearch(searchModel);
-    const searchReady = !!config.grounding.tavily_api_key || nativeSearchReady;
+    const searchReady =
+      !!config.grounding.tavily_api_key ||
+      !!config.grounding.serper_api_key ||
+      nativeSearchReady;
     const searchLabel = groundingSearchLabel(config);
 
     return (
@@ -1278,6 +1288,76 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   value={config.grounding.tavily_api_key}
                   onChange={(event) =>
                     updateGrounding("tavily_api_key", event.target.value)
+                  }
+                />
+              </div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                margin: "-8px 0 -8px 16px",
+                fontSize: 13,
+                lineHeight: 1,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              ↓
+            </div>
+            {/* Second choice: Serper (Google search), tried after Tavily. */}
+            <div
+              style={{
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                padding: "12px 14px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "1px 6px",
+                    borderRadius: 4,
+                    background: "var(--color-bg-secondary)",
+                    color: "var(--color-text-secondary)",
+                    flexShrink: 0,
+                  }}
+                >
+                  次选
+                </span>
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  Serper（Google）搜索
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: config.grounding.serper_api_key
+                      ? "var(--color-success)"
+                      : "var(--color-text-tertiary)",
+                  }}
+                >
+                  {config.grounding.serper_api_key
+                    ? "已配置"
+                    : "未配置，将跳过该渠道"}
+                </span>
+              </div>
+              <div>
+                <label className="field-label">Serper API Key（可选）</label>
+                <Input.Password
+                  placeholder="serper key"
+                  value={config.grounding.serper_api_key}
+                  onChange={(event) =>
+                    updateGrounding("serper_api_key", event.target.value)
                   }
                 />
               </div>

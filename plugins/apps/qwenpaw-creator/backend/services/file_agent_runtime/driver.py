@@ -49,7 +49,13 @@ from models.config import (
     get_video_backend,
     get_video_model_name,
 )
-from models.media_transport import validate_reference_image_bytes
+from models.media_transport import (
+    read_reference_media,
+    validate_reference_image_bytes,
+)
+from services.object_grounding import ground_image_objects
+from services.object_grounding import object_grounding_image_suffix
+from services.object_grounding import render_object_grounding_annotation
 from services.project_files.agent_tools import (
     AgentProjectToolError,
     AgentProjectToolContext,
@@ -67,6 +73,7 @@ from services.project_files.models import (
     Project,
     SourceAssetVersion,
 )
+from services.project_files.remote_cache import public_source_url
 from services.runtime_files.models import (
     ChangeOrigin,
     CreatorMessageRecord,
@@ -83,6 +90,7 @@ from services.runtime_files.execution_store import (
     ProjectExecutionStore,
 )
 from services.runtime_files.errors import RecordNotFoundError
+from services.runtime_files.atomic_store import atomic_replace_bytes
 from services.execution_pricing import (
     CostEstimate,
     estimate_execution_cost,
@@ -101,6 +109,10 @@ from services.runtime_files.session_store import (
 )
 from services.web_grounding import ground_prompt_context
 from utils.logger import setup_logger
+from utils.paths import media_path_from_url
+from utils.paths import media_task_scope
+from utils.paths import media_url_for
+from utils.paths import unique_task_work_path
 
 from .checkpoints import (
     CHECKPOINT_PROVIDER,
@@ -141,6 +153,7 @@ from .subagents import (
 logger = setup_logger("creator.agent_runtime")
 
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
+OBJECT_GROUNDING_TOOL_NAME = "ground_image_objects"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
@@ -391,6 +404,25 @@ def _grounding_visual_is_usable(source: Mapping[str, Any]) -> bool:
     )
 
 
+def _object_grounding_version_ref(value: str) -> tuple[str, str] | None:
+    ref = str(value or "").strip()
+    for prefix, kind in (
+        ("asset-version:", "asset"),
+        ("artifact-version:", "artifact"),
+    ):
+        if ref.startswith(prefix):
+            version_id = ref.removeprefix(prefix).strip()
+            return (kind, version_id) if version_id else None
+    parsed = urlparse(ref)
+    if parsed.scheme not in {"asset", "artifact"} or not parsed.netloc:
+        return None
+    identity = unquote(parsed.netloc)
+    if "@" not in identity:
+        return None
+    version_id = identity.rsplit("@", 1)[-1].strip()
+    return (parsed.scheme, version_id) if version_id else None
+
+
 def _ground_prompt_context_tool_manifest() -> dict[str, Any]:
     return {
         "type": "function",
@@ -438,10 +470,55 @@ def _ground_prompt_context_tool_manifest() -> dict[str, Any]:
     }
 
 
+def _object_grounding_tool_manifest() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": OBJECT_GROUNDING_TOOL_NAME,
+            "description": (
+                "使用 Creator VLM 检测并定位一张图片中的指定对象。返回每个对象的 "
+                "0-1000 归一化 bbox 和原图像素 bbox；需要可视化时可生成带框标注图。"
+                "imageRef 接受本轮附件中的 asset-version/artifact-version ref、"
+                "asset:// 或 artifact:// workspace ref、安全公网图片 URL，或当前 "
+                "Project 的 /generated URL。不要传本机文件路径。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "projectId": {"type": "string", "minLength": 1},
+                    "imageRef": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "要检测的 exact AssetVersion/ArtifactVersion workspace "
+                            "ref、安全公网图片 URL，或当前 Project 的 /generated URL。"
+                        ),
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000,
+                        "description": (
+                            "要检测的对象，例如 all cats、the red car、画面中的所有人。"
+                        ),
+                    },
+                    "returnImage": {
+                        "type": "boolean",
+                        "description": "是否生成带检测框的临时标注图。",
+                    },
+                },
+                "required": ["projectId", "imageRef", "prompt"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _creator_agent_tool_manifest() -> list[dict[str, Any]]:
     manifest = [*agent_project_tool_manifest()]
     if get_web_grounding_enabled():
         manifest.append(_ground_prompt_context_tool_manifest())
+    manifest.append(_object_grounding_tool_manifest())
     manifest.append(delegate_tool_manifest())
     return manifest
 
@@ -1914,6 +1991,11 @@ class FileCreatorAgentRuntime:
                             request=request,
                             arguments=call.arguments,
                         )
+                    elif call.name == OBJECT_GROUNDING_TOOL_NAME:
+                        result = await self._run_object_grounding(
+                            request=request,
+                            arguments=call.arguments,
+                        )
                     else:
                         result = await asyncio.to_thread(
                             tools.invoke,
@@ -2111,6 +2193,197 @@ class FileCreatorAgentRuntime:
             request_id=request.message_id,
             result=result,
         )
+
+    def _read_object_grounding_project_image(
+        self,
+        project_id: str,
+        image_ref: str,
+    ) -> tuple[bytes | None, str | None]:
+        parsed_ref = _object_grounding_version_ref(image_ref)
+        if parsed_ref is None:
+            raise FileAgentRuntimeError(
+                "ground_image_objects imageRef is not a supported Project ref",
+            )
+        kind, version_id = parsed_ref
+        snapshot = self.services.projects.read(project_id)
+        if kind == "asset":
+            version = snapshot.project.assets.source_versions_by_id.get(
+                version_id,
+            )
+        else:
+            version = snapshot.project.assets.artifact_versions_by_id.get(
+                version_id,
+            )
+        if version is None:
+            raise FileAgentRuntimeError(
+                f"ground_image_objects image version does not exist: {version_id}",
+            )
+        if not str(version.media_type or "").casefold().startswith("image/"):
+            raise FileAgentRuntimeError(
+                f"ground_image_objects imageRef is not an image: {version_id}",
+            )
+        if version.file_id:
+            indexed = snapshot.project.assets.files_by_id.get(version.file_id)
+            if indexed is None:
+                raise FileAgentRuntimeError(
+                    f"ground_image_objects image file is missing from the index: {version_id}",
+                )
+            if indexed.sha256 != version.checksum:
+                raise FileAgentRuntimeError(
+                    f"ground_image_objects image checksum does not match the index: {version_id}",
+                )
+            content = AssetFileStore(
+                self.services.projects.project_root(project_id),
+            ).read_verified(indexed)
+            return content, None
+        if kind == "asset" and isinstance(version, SourceAssetVersion):
+            remote_url = public_source_url(version)
+            if remote_url:
+                return None, remote_url
+        raise FileAgentRuntimeError(
+            f"ground_image_objects image bytes are unavailable: {version_id}",
+        )
+
+    async def _resolve_object_grounding_image(
+        self,
+        project_id: str,
+        image_ref: str,
+    ) -> bytes:
+        ref = str(image_ref or "").strip()
+        if ref.startswith(("http://", "https://")):
+            content, _filename = await read_reference_media(
+                ref,
+                max_bytes=GROUNDING_VISUAL_MAX_BYTES,
+            )
+        elif ref.startswith("/generated/"):
+            path = media_path_from_url(ref)
+            project_root = self.services.projects.project_root(
+                project_id,
+            ).resolve()
+            try:
+                path.resolve().relative_to(project_root)
+            except ValueError as exc:
+                raise FileAgentRuntimeError(
+                    "ground_image_objects cannot read generated media outside the current Project",
+                ) from exc
+            content, _filename = await read_reference_media(
+                ref,
+                max_bytes=GROUNDING_VISUAL_MAX_BYTES,
+            )
+        else:
+            content, remote_url = await asyncio.to_thread(
+                self._read_object_grounding_project_image,
+                project_id,
+                ref,
+            )
+            if content is None:
+                if not remote_url:
+                    raise FileAgentRuntimeError(
+                        "ground_image_objects image bytes are unavailable",
+                    )
+                content, _filename = await read_reference_media(
+                    remote_url,
+                    max_bytes=GROUNDING_VISUAL_MAX_BYTES,
+                )
+        if len(content) > GROUNDING_VISUAL_MAX_BYTES:
+            raise FileAgentRuntimeError(
+                f"ground_image_objects image exceeds {GROUNDING_VISUAL_MAX_BYTES} bytes",
+            )
+        try:
+            validate_reference_image_bytes(content)
+        except ValueError as exc:
+            raise FileAgentRuntimeError(
+                "ground_image_objects image cannot be decoded",
+            ) from exc
+        return content
+
+    @staticmethod
+    def _write_object_grounding_runtime_image(
+        *,
+        project_id: str,
+        request_id: str,
+        content: bytes,
+        subdir: str,
+        prefix: str,
+        suffix: str,
+    ) -> str:
+        with media_task_scope(request_id, project_id=project_id):
+            path = unique_task_work_path(
+                subdir,
+                suffix,
+                prefix=prefix,
+                task_id=request_id,
+            )
+            atomic_replace_bytes(path, content)
+            return media_url_for(path)
+
+    async def _run_object_grounding(
+        self,
+        *,
+        request: CreatorMessageRecord,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        image_ref = str(arguments.get("imageRef") or "").strip()
+        prompt = str(arguments.get("prompt") or "").strip()
+        return_image = arguments.get("returnImage", False)
+        if not image_ref:
+            raise FileAgentRuntimeError(
+                "ground_image_objects requires imageRef",
+            )
+        if not prompt:
+            raise FileAgentRuntimeError(
+                "ground_image_objects requires prompt",
+            )
+        if len(prompt) > 1000:
+            raise FileAgentRuntimeError(
+                "ground_image_objects prompt exceeds 1000 characters",
+            )
+        if not isinstance(return_image, bool):
+            raise FileAgentRuntimeError(
+                "ground_image_objects returnImage must be boolean",
+            )
+        content = await self._resolve_object_grounding_image(
+            request.project_id,
+            image_ref,
+        )
+        suffix = object_grounding_image_suffix(content)
+        input_url = await asyncio.to_thread(
+            self._write_object_grounding_runtime_image,
+            project_id=request.project_id,
+            request_id=request.message_id,
+            content=content,
+            subdir="object-grounding",
+            prefix="input-",
+            suffix=suffix,
+        )
+        result = await ground_image_objects(
+            content,
+            input_url,
+            prompt,
+        )
+        response: dict[str, Any] = {
+            "ok": True,
+            "status": "success",
+            "imageRef": image_ref,
+            "inputImageUrl": input_url,
+            **result,
+        }
+        if return_image:
+            annotated = await asyncio.to_thread(
+                render_object_grounding_annotation,
+                content,
+                list(result.get("detections") or []),
+            )
+            response["annotatedImageUrl"] = await asyncio.to_thread(
+                self._write_object_grounding_runtime_image,
+                project_id=request.project_id,
+                request_id=request.message_id,
+                content=annotated,
+                subdir="object-grounding",
+                prefix="annotated-",
+                suffix=".png",
+            )
+        return response
 
     async def _promote_grounding_visuals(
         self,
@@ -4668,6 +4941,8 @@ def _runtime_action_result_kind(
         return _PROJECT_SNAPSHOT_RESULT_KIND
     if not failed and tool_name == GROUND_PROMPT_CONTEXT_TOOL_NAME:
         return "web_grounding"
+    if not failed and tool_name == OBJECT_GROUNDING_TOOL_NAME:
+        return "object_grounding"
     return None
 
 

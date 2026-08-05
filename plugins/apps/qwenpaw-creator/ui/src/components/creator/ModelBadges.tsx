@@ -90,7 +90,9 @@ export default function ModelBadges() {
         !!searchModel.base_url &&
         supportsQwenNativeSearch(searchModel);
       const searchReady =
-        !!config.grounding.tavily_api_key || nativeSearchReady;
+        !!config.grounding.tavily_api_key ||
+        !!config.grounding.serper_api_key ||
+        nativeSearchReady;
       const verifierReady =
         !!verifier.model_name && !!verifier.api_key && !!verifier.base_url;
       if (!searchReady && !verifierReady) return "none";

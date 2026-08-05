@@ -59,6 +59,7 @@ class GroundingConfig(ModelConfigItem):
     reuse_llm: bool = True
     validation_source: Literal["llm", "vlm", "custom"] = "llm"
     tavily_api_key: str = ""
+    serper_api_key: str = ""
     native_search_enabled: bool = True
     search_provider: Literal["dashscope_qwen"] = "dashscope_qwen"
     search_reuse_llm: bool = True

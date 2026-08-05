@@ -63,6 +63,12 @@ CONVERSATION_ID = "conversation-1"
 GOAL_ID = "goal-1"
 
 
+def _png_bytes_for_grounding() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (16, 12), color="white").save(output, format="PNG")
+    return output.getvalue()
+
+
 def test_tool_argument_fragments_are_aggregated_and_persisted_once() -> None:
     emitted: list[tuple[str, int, int, bool]] = []
     fragment = "abcdefghijkl"
@@ -883,6 +889,7 @@ def _edit_client(*, description: str):
             "read_project_file",
             "jq_project",
             "ground_prompt_context",
+            "ground_image_objects",
             "elements_at",
             "delegate_to_agent",
         }
@@ -892,6 +899,7 @@ def _edit_client(*, description: str):
         )
         assert "# Workspace 基础 Schema" in messages[0]["content"]
         assert "PROJECT_JSON_SCHEMA=" in messages[0]["content"]
+        assert "ground_image_objects" in messages[0]["content"]
         turn += 1
         if turn == 1:
             return AgentModelTurn(
@@ -2004,6 +2012,240 @@ def test_creator_agent_can_call_ground_prompt_context_tool(
     )
 
 
+def test_creator_agent_can_call_object_grounding_tool(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from services.file_agent_runtime import driver as driver_module
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (100, 50), color="white").save(
+        image_buffer,
+        format="PNG",
+    )
+    image_bytes = image_buffer.getvalue()
+
+    async def fake_resolve(self, project_id, image_ref):
+        assert project_id == PROJECT_ID
+        assert image_ref == "https://images.example.test/frame.png"
+        return image_bytes
+
+    async def fake_ground(content, image_url, prompt):
+        assert content == image_bytes
+        assert image_url.startswith(
+            f"/generated/projects/{PROJECT_ID}/task-work/",
+        )
+        assert prompt == "the red car"
+        return {
+            "imageSize": {"width": 100, "height": 50},
+            "detections": [
+                {
+                    "label": "red car",
+                    "bbox_normalized": [100, 200, 900, 800],
+                    "bbox_pixel": [10, 10, 90, 40],
+                },
+            ],
+            "rawResponse": (
+                '[{"label":"red car","bbox_2d":[100,200,900,800]}]'
+            ),
+            "model": "qwen-test-vl",
+        }
+
+    monkeypatch.setattr(
+        driver_module.FileCreatorAgentRuntime,
+        "_resolve_object_grounding_image",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "ground_image_objects",
+        fake_ground,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "render_object_grounding_annotation",
+        lambda content, detections: image_bytes,
+    )
+
+    turn = 0
+
+    async def callback(messages, tools):
+        nonlocal turn
+        manifests = {
+            item["function"]["name"]: item["function"] for item in tools
+        }
+        assert "ground_image_objects" in manifests
+        schema = manifests["ground_image_objects"]["parameters"]
+        assert schema["required"] == ["projectId", "imageRef", "prompt"]
+        turn += 1
+        if turn == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="object-ground-1",
+                        name="ground_image_objects",
+                        arguments={
+                            "projectId": PROJECT_ID,
+                            "imageRef": (
+                                "https://images.example.test/frame.png"
+                            ),
+                            "prompt": "the red car",
+                            "returnImage": True,
+                        },
+                    ),
+                ),
+            )
+        result = json.loads(messages[-1]["content"])
+        assert result.get("detections", [])[0]["bbox_normalized"] == [
+            100,
+            200,
+            900,
+            800,
+        ]
+        assert result["annotatedImageUrl"].startswith(
+            f"/generated/projects/{PROJECT_ID}/task-work/",
+        )
+        return AgentModelTurn(content="对象定位已完成")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="定位图片中的红色汽车",
+        )
+        runtime = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(callback),
+            poll_interval_seconds=0.01,
+        )
+        await runtime.start()
+        runtime.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: (
+                services.sessions.get_project_session(
+                    PROJECT_ID,
+                ).last_consumed_message_seq
+                == 1
+            ),
+        )
+        await runtime.wait_until_idle(PROJECT_ID)
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+        await runtime.stop()
+        return messages, events
+
+    messages, events = asyncio.run(scenario())
+    tool_results = [
+        item
+        for item in messages
+        if item.source == "runtime_action_result"
+        and item.metadata.get("tool") == "ground_image_objects"
+    ]
+    assert len(tool_results) == 1
+    assert tool_results[0].metadata["resultKind"] == "object_grounding"
+    payload = json.loads(tool_results[0].content_parts[0].text or "")
+    assert payload["status"] == "success"
+    assert payload["inputImageUrl"].startswith("/generated/projects/")
+    assert any(
+        event.event_type == "agent.tool_completed"
+        and event.payload.get("tool") == "ground_image_objects"
+        for event in events
+    )
+
+
+def test_object_grounding_generated_url_is_scoped_to_current_project(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from services.file_agent_runtime import driver as driver_module
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+    services, _snapshot = _create_project(tmp_path, initial_goal=None)
+    runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
+    image_bytes = _png_bytes_for_grounding()
+    ingested, _ = _ingest_many_sync(
+        services,
+        project_id=PROJECT_ID,
+        key="object-grounding-image",
+        inputs=[
+            _AssetInput(
+                name="input.png",
+                content=image_bytes,
+                media_type="image/png",
+            ),
+        ],
+        attach_source=False,
+        scope="object-grounding-ref-test",
+    )
+    asset_id = ingested["items"][0]["assetId"]
+    version_id = ingested["items"][0]["assetVersionId"]
+    current_image = (
+        services.projects.project_root(PROJECT_ID)
+        / "runtime"
+        / "task-work"
+        / "request-1"
+        / "input.png"
+    )
+    current_image.parent.mkdir(parents=True)
+    current_image.write_bytes(image_bytes)
+    current_url = (
+        f"/generated/projects/{PROJECT_ID}/task-work/request-1/input.png"
+    )
+
+    assert (
+        asyncio.run(
+            runtime._resolve_object_grounding_image(PROJECT_ID, current_url),
+        )
+        == current_image.read_bytes()
+    )
+    assert (
+        asyncio.run(
+            runtime._resolve_object_grounding_image(
+                PROJECT_ID,
+                f"asset-version:{version_id}",
+            ),
+        )
+        == image_bytes
+    )
+    assert (
+        asyncio.run(
+            runtime._resolve_object_grounding_image(
+                PROJECT_ID,
+                f"asset://{asset_id}@{version_id}",
+            ),
+        )
+        == image_bytes
+    )
+    with pytest.raises(
+        driver_module.FileAgentRuntimeError,
+        match="outside the current Project",
+    ):
+        asyncio.run(
+            runtime._resolve_object_grounding_image(
+                PROJECT_ID,
+                "/generated/projects/other-project/task-work/request-1/input.png",
+            ),
+        )
+
+
+def test_object_grounding_version_ref_requires_exact_version() -> None:
+    from services.file_agent_runtime import driver as driver_module
+
+    assert driver_module._object_grounding_version_ref(
+        "asset-version:source-version-1",
+    ) == ("asset", "source-version-1")
+    assert driver_module._object_grounding_version_ref(
+        "artifact://artifact-1@artifact-version-1",
+    ) == ("artifact", "artifact-version-1")
+    assert (
+        driver_module._object_grounding_version_ref("asset://asset-1") is None
+    )
+    assert (
+        driver_module._object_grounding_version_ref("/tmp/local.png") is None
+    )
+
+
 def test_grounding_visual_promotion_requires_explicit_acceptance() -> None:
     from services.file_agent_runtime import driver as driver_module
 
@@ -2132,6 +2374,7 @@ def test_parent_authors_timeline_elements_without_planning_specialists(
             "read_project_file",
             "jq_project",
             "ground_prompt_context",
+            "ground_image_objects",
             "elements_at",
             "delegate_to_agent",
         }
