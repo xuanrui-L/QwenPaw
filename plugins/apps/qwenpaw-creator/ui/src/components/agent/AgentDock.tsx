@@ -473,10 +473,7 @@ function actionReason(envelope: CreatorActionEnvelope): string {
 
 function waitingActionTitle(reason: string): string {
   const subject = reason || i18n.t("agent.processing");
-  if (/^(?:正在)?等待/.test(subject)) {
-    return subject.endsWith("中") ? subject : `${subject}中`;
-  }
-  return i18n.t("agent.waitingForOutput", { subject });
+  return i18n.t("agent.waitingInProgress", { subject });
 }
 
 function actionTitle(envelope: CreatorActionEnvelope, active: boolean): string {

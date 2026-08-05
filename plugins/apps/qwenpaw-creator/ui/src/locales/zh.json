@@ -185,6 +185,10 @@
     "saveFailedServer": "保存失败：服务端未确认写入",
     "snapshotLost": "快照丢失，请重新打开配置",
     "close": "关闭",
+    "disabledLabel": "（已停用）",
+    "notTestedLabel": "（未测试）",
+    "modelDisabled": "{{model}}（已停用）",
+    "modelNotTested": "{{model}}（未测试）",
     "setupGuideHint": "不知道该配什么？查看各场景的模型要求与支持的提供商",
     "executionAuth": "高花费模型执行授权",
     "executionAuthDesc": "开启后，高花费模型的执行需要确认。",
@@ -242,7 +246,8 @@
     "configured": "已配置",
     "configuredNotEnabled": "已配置但未启用",
     "notConfigured": "未配置",
-    "modelConfig": "模型配置"
+    "modelConfig": "模型配置",
+    "badgeTitle": "{{name}}：{{status}}"
   },
   "assets": {
     "title": "素材与产物",
@@ -388,6 +393,8 @@
     "noVideoYet": "尚未生成视频",
     "taskSubmitted": "任务已提交，等待最新状态",
     "videoGenFailed": "视频生成失败",
+    "defaultCamera": "⊙ 静止",
+    "defaultFraming": "中景",
     "duration": "时长",
     "frameSize": "画幅",
     "modelLabel": "模型",
@@ -555,6 +562,7 @@
     "waitingReview": "等待审阅",
     "waitingOutput": "等待输出中",
     "waitingForOutput": "等待{{subject}}中",
+    "waitingInProgress": "{{subject}}中",
     "toolCallActive": "{{tool}}处理中",
     "toolCallDone": "{{tool}}完成",
     "done": "已完成",

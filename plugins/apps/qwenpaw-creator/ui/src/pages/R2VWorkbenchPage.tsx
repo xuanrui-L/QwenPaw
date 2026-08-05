@@ -730,8 +730,8 @@ export default function R2VWorkbenchPage() {
       draft.creation.shots.items[shotId] = {
         shot_id: shotId,
         description: "",
-        camera: "⊙ 静止",
-        framing: "中景",
+        camera: t("r2v.defaultCamera"),
+        framing: t("r2v.defaultFraming"),
         duration_seconds: 3,
       };
       draft.creation.shots.order.push(shotId);

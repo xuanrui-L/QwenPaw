@@ -1804,11 +1804,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 }}
               >
                 {!item.enabled
-                  ? `（${t("common.disabled")}）`
+                  ? t("modelConfig.disabledLabel")
                   : usingLlm
                   ? config.llm.model_name
                   : item.model_name}
-                {!isTested && item.enabled && `（${t("common.notTested")}）`}
+                {!isTested && item.enabled && t("modelConfig.notTestedLabel")}
               </span>
             )}
           </div>
@@ -2053,18 +2053,24 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             ) {
               subText = tested.vlm
                 ? config.llm.model_name
-                : `${config.llm.model_name}（${t("common.notTested")}）`;
+                : t("modelConfig.modelNotTested", {
+                    model: config.llm.model_name,
+                  });
               subColor = tested.vlm
                 ? "var(--color-success)"
                 : "var(--color-text-tertiary)";
             } else if (!item.enabled && hasModel) {
-              subText = `${item.model_name}（${t("common.disabled")}）`;
+              subText = t("modelConfig.modelDisabled", {
+                model: item.model_name,
+              });
               subColor = "var(--color-text-tertiary)";
             } else if (!hasModel) {
               subText = t("common.notConfigured");
               subColor = "var(--color-text-tertiary)";
             } else if (tested[meta.type] !== true) {
-              subText = `${item.model_name}（${t("common.notTested")}）`;
+              subText = t("modelConfig.modelNotTested", {
+                model: item.model_name,
+              });
               subColor = "var(--color-danger)";
             } else {
               subText = item.model_name;

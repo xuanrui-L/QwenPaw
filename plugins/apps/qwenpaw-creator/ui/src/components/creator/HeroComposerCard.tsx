@@ -292,7 +292,7 @@ export default function HeroComposerCard() {
           <div className="flex items-center gap-1 rounded-full bg-[rgba(43,27,0,0.04)] py-1 pl-4 pr-2">
             <span className="text-sm font-medium leading-6 text-[#656563]">
               {t("home.contentType")}
-              <sup className="text-[var(--color-accent)]">*</sup>：
+              <sup className="text-[var(--color-accent)]">*</sup>:
             </span>
             <Select
               aria-label={t("home.contentType")}

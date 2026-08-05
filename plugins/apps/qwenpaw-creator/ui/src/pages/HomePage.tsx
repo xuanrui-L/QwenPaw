@@ -31,6 +31,7 @@ import { useOnboardingStore } from "@/store/onboardingStore";
 import { ProjectImporter } from "@/components/creator/ProjectImportExport";
 import LanguageToggle from "@/components/common/LanguageToggle";
 import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 
 interface ProjectCardProps {
   project: ProjectSummary;
@@ -247,7 +248,8 @@ export default function HomePage() {
 
   const formatDate = useCallback((dateStr: string) => {
     const date = new Date(dateStr);
-    return date.toLocaleDateString("zh-CN", {
+    const locale = i18n.language === "zh" ? "zh-CN" : "en-US";
+    return date.toLocaleDateString(locale, {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",

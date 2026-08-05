@@ -126,8 +126,14 @@ export default function ModelBadges() {
             <span
               key={meta.type}
               className="flex h-5 items-center gap-2"
-              title={`${t(meta.labelKey)}：${t(STATUS_TEXT_KEYS[state])}`}
-              aria-label={`${t(meta.labelKey)}：${t(STATUS_TEXT_KEYS[state])}`}
+              title={t("modelBadges.badgeTitle", {
+                name: t(meta.labelKey),
+                status: t(STATUS_TEXT_KEYS[state]),
+              })}
+              aria-label={t("modelBadges.badgeTitle", {
+                name: t(meta.labelKey),
+                status: t(STATUS_TEXT_KEYS[state]),
+              })}
               data-model-badge={meta.type}
               data-status={state}
             >
