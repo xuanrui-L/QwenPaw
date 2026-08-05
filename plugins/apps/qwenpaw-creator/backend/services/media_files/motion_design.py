@@ -865,7 +865,16 @@ async def _design_document(
                 f"\n上一次输出的 HTML 加载校验失败，原因：{last_error}。" "请修正后重新只输出一个 JSON 对象。"
             )
             continue
-        if 0.0 <= probe.visible_coverage < min_coverage:
+        # Blueprint cards wrap their content instead of flooding the
+        # viewport (hyperframes-style), so their honest pixel coverage is
+        # naturally lower; readability is already guarded by the edge and
+        # occlusion gates plus the blueprint's own two-axis font clamp.
+        effective_min_coverage = (
+            min(min_coverage, 0.10)
+            if str(parsed.get("blueprint") or "").strip()
+            else min_coverage
+        )
+        if 0.0 <= probe.visible_coverage < effective_min_coverage:
             last_error = f"卡片内容只覆盖盒子面积的 {probe.visible_coverage:.0%}，太小了"
             feedback = (
                 f"\n上一次输出被拒绝，原因：{last_error}。"

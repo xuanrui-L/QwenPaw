@@ -87,20 +87,27 @@ def _chars(text: str) -> str:
     return "".join(pieces)
 
 
-def _caption_font_vh(text: str) -> float:
-    """Font size (vh of the caption viewport) that keeps the copy filling
-    the card: short lines go big, long lines wrap smaller."""
+def _caption_font_css(text: str) -> str:
+    """Two-axis font clamp for one caption viewport.
+
+    The document only knows its own viewport, so the size is expressed
+    as ``min(vh, vw)``: the vh term keeps line stacks inside flat boxes,
+    the vw term keeps the longest line inside narrow boxes. Every
+    decorative measure in the blueprints is em-based so the whole card
+    scales with this value no matter how extreme the box ratio is.
+    """
 
     length = max(1, len(re.sub(r"\s+", "", text)))
-    if length <= 4:
-        return 30.0
-    if length <= 8:
-        return 24.0
-    if length <= 12:
-        return 19.0
-    if length <= 18:
-        return 15.0
-    return 12.0
+    per_line = length if length <= 12 else math.ceil(length / 2)
+    lines = 1 if length <= 12 else 2
+    # CJK glyphs are roughly square. Width budget: glyph run plus the
+    # widest card chrome (≈1.9em of padding/side accents) inside 80% of
+    # the viewport. Height budget: the tallest card stack (line-height
+    # plus vertical padding, gap and rule ≈2.4em per line) inside 76%,
+    # leaving the root 8% inset and entrance travel untouched.
+    vw = 80.0 / (per_line * 1.08 + 1.9)
+    vh = 76.0 / (lines * 2.4)
+    return f"min({vh:.1f}vh,{vw:.1f}vw)"
 
 
 def _document(css: str, body: str, script: str, duration: float) -> str:
@@ -123,22 +130,23 @@ def _caption_stagger_pop(
     palette: BlueprintPalette,
     intensity: float,
 ) -> tuple[str, float]:
-    """综艺花字：贴纸底板 + 逐字弹入 + 强调下划线，末态稳定微浮。"""
+    """综艺花字：内容包裹式贴纸胶囊 + 逐字弹入 + 强调下划线。"""
 
     overshoot = 1.3 + intensity * 0.6
-    font = _caption_font_vh(text)
+    font = _caption_font_css(text)
     css = f"""
-.card{{position:absolute;inset:2%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4%;background:{palette.paper}f0;border:1vh solid {palette.ink};border-radius:6vh;box-shadow:1.2vh 1.6vh 0 {palette.secondary}59}}
-.line{{display:flex;flex-wrap:wrap;justify-content:center;max-width:94%;font-family:"PingFang SC","Arial Black",sans-serif;font-weight:900;font-size:{font:.1f}vh;line-height:1.15;color:{palette.ink}}}
+.wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
+.card{{display:flex;flex-direction:column;align-items:center;gap:.18em;max-width:96%;padding:.34em .85em .3em;font-size:{font};background:{palette.paper}f2;border:.07em solid {palette.ink};border-radius:.55em;box-shadow:.14em .18em 0 {palette.secondary}59}}
+.line{{display:flex;flex-wrap:wrap;justify-content:center;font-family:"PingFang SC","Arial Black",sans-serif;font-weight:900;font-size:1em;line-height:1.18;color:{palette.ink}}}
 .ch,.sp{{display:inline-block;font-style:normal}}
-.rule{{width:38%;height:2.4vh;border-radius:99px;background:linear-gradient(90deg,{palette.primary},{palette.secondary});transform-origin:center}}
+.rule{{width:52%;height:.11em;border-radius:99px;background:linear-gradient(90deg,{palette.primary},{palette.secondary});transform-origin:center}}
 """
-    body = f"<div class='card'><div class='line'>{_chars(text)}</div><div class='rule'></div></div>"
+    body = f"<div class='wrap'><div class='card'><div class='line'>{_chars(text)}</div><div class='rule'></div></div></div>"
     script = f"""
 tl.fromTo('.card',{{autoAlpha:.45,scale:.96}},{{autoAlpha:1,scale:1,duration:.4,ease:'power2.out'}},0);
 tl.fromTo('.ch',{{autoAlpha:.4,y:'16%',scale:.9,rotate:-3}},{{autoAlpha:1,y:'0%',scale:1,rotate:0,duration:.5,stagger:.04,ease:'back.out({overshoot:.2f})'}},.05);
 tl.fromTo('.rule',{{scaleX:.3,autoAlpha:.4}},{{scaleX:1,autoAlpha:1,duration:.55,ease:'power3.out'}},.2);
-tl.to('.card',{{y:'-1.2%',duration:1.0,ease:'sine.inOut'}},.9);
+tl.to('.card',{{y:'-3%',duration:1.0,ease:'sine.inOut'}},.9);
 tl.to('.card',{{y:'0%',duration:1.0,ease:'sine.inOut'}},1.9);
 """
     return _document(css, body, script, 2.9), 2.9
@@ -149,20 +157,22 @@ def _caption_ink_reveal(
     palette: BlueprintPalette,
     intensity: float,
 ) -> tuple[str, float]:
-    """电影字幕：深色色带底板 + 字距收拢淡入 + 侧色条 draw-on。"""
+    """电影字幕：大字直压画面 + 细描边投影保可读 + 侧色条 draw-on，
+    无满框底板，仅文字底部一条包裹式半透明 scrim 融入画面。"""
 
     reveal = 0.55 + intensity * 0.25
-    font = _caption_font_vh(text)
+    font = _caption_font_css(text)
     css = f"""
-.card{{position:absolute;inset:2%;display:flex;align-items:center;justify-content:center;gap:3%;background:linear-gradient(105deg,{palette.ink}f2,{palette.secondary}e6);border-radius:3vh;padding:0 4%}}
-.bar{{width:1.8vh;height:62%;border-radius:99px;background:{palette.primary};transform-origin:top;flex:none}}
-.text{{max-width:88%;font-family:"PingFang SC","Songti SC",serif;font-weight:700;font-size:{font:.1f}vh;line-height:1.3;letter-spacing:.35vh;color:{palette.paper};text-shadow:0 0 1.8vh {palette.primary}80}}
+.wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
+.card{{display:flex;align-items:center;gap:.42em;max-width:96%;font-size:{font};padding:.22em .6em;border-radius:.3em;background:color-mix(in srgb,{palette.ink} 42%,transparent)}}
+.bar{{width:.14em;height:1.15em;border-radius:99px;background:{palette.primary};transform-origin:top;flex:none}}
+.text{{font-family:"PingFang SC","Songti SC",serif;font-weight:700;font-size:1em;line-height:1.32;letter-spacing:.06em;color:{palette.paper};text-shadow:0 .04em .12em {palette.ink},0 0 .5em {palette.ink}b3}}
 """
-    body = f"<div class='card'><div class='bar'></div><div class='text'>{escape(text.strip())}</div></div>"
+    body = f"<div class='wrap'><div class='card'><div class='bar'></div><div class='text'>{escape(text.strip())}</div></div></div>"
     script = f"""
 tl.fromTo('.card',{{autoAlpha:.5}},{{autoAlpha:1,duration:.45,ease:'power1.out'}},0);
 tl.fromTo('.bar',{{scaleY:.35,autoAlpha:.5}},{{scaleY:1,autoAlpha:1,duration:{reveal:.2f},ease:'power2.out'}},0);
-tl.fromTo('.text',{{autoAlpha:.45,letterSpacing:'1.4vh',x:'2%'}},{{autoAlpha:1,letterSpacing:'.35vh',x:'0%',duration:{reveal + 0.2:.2f},ease:'power3.out'}},.05);
+tl.fromTo('.text',{{autoAlpha:.45,letterSpacing:'.28em',x:'2%'}},{{autoAlpha:1,letterSpacing:'.06em',x:'0%',duration:{reveal + 0.2:.2f},ease:'power3.out'}},.05);
 tl.to('.bar',{{scaleY:.86,duration:1.1,ease:'sine.inOut'}},1.0);
 tl.to('.bar',{{scaleY:1,duration:1.1,ease:'sine.inOut'}},2.1);
 """
@@ -174,17 +184,19 @@ def _caption_glow_breath(
     palette: BlueprintPalette,
     intensity: float,
 ) -> tuple[str, float]:
-    """情绪光晕：柔色圓角底板 + 文字发光呼吸 + 星芒点缀。"""
+    """情绪光晕：无底板，文字发光呼吸直压画面，背后一团包裹式柔光晕，
+    两侧星芒点缀随字号缩放。"""
 
-    glow = 1.4 + intensity * 1.6
-    font = _caption_font_vh(text)
+    glow = 0.12 + intensity * 0.14
+    font = _caption_font_css(text)
     css = f"""
-.card{{position:absolute;inset:2%;display:flex;align-items:center;justify-content:center;background:radial-gradient(120% 160% at 50% 120%,{palette.secondary}e6,{palette.ink}f0);border-radius:8vh}}
-.text{{max-width:90%;text-align:center;font-family:"PingFang SC",sans-serif;font-weight:800;font-size:{font:.1f}vh;line-height:1.25;color:{palette.paper};text-shadow:0 0 {glow:.1f}vh {palette.primary},0 0 {glow * 2.4:.1f}vh {palette.primary}99}}
-.spark{{position:absolute;width:5%;aspect-ratio:1;background:{palette.primary};clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%)}}
-.s1{{left:6%;top:16%}}.s2{{right:7%;bottom:14%}}
+.wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
+.card{{position:relative;display:flex;align-items:center;gap:.34em;max-width:96%;font-size:{font};padding:.3em .55em}}
+.halo{{position:absolute;inset:-8% -4%;border-radius:50%;background:radial-gradient(closest-side,{palette.ink}80,transparent 78%)}}
+.text{{position:relative;text-align:center;font-family:"PingFang SC",sans-serif;font-weight:800;font-size:1em;line-height:1.3;color:{palette.paper};text-shadow:0 0 {glow:.2f}em {palette.primary},0 0 {glow * 2.4:.2f}em {palette.primary}99,0 .05em .14em {palette.ink}}}
+.spark{{position:relative;width:.34em;height:.34em;flex:none;background:{palette.primary};clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%)}}
 """
-    body = f"<div class='card'><i class='spark s1'></i><i class='spark s2'></i><div class='text'>{escape(text.strip())}</div></div>"
+    body = f"<div class='wrap'><div class='card'><i class='halo'></i><i class='spark'></i><div class='text'>{escape(text.strip())}</div><i class='spark'></i></div></div>"
     script = """
 tl.fromTo('.card',{autoAlpha:.42,scale:.965},{autoAlpha:1,scale:1,duration:.7,ease:'power2.out'},0);
 tl.fromTo('.spark',{autoAlpha:.35,scale:.5,rotate:-40},{autoAlpha:1,scale:1,rotate:0,duration:.6,stagger:.18,ease:'back.out(1.6)'},.1);
