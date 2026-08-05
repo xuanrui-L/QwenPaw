@@ -55,3 +55,16 @@ def test_dispatch_rejects_unknown_and_gated_nodes(app, api_runtime_root):
             assert missing.status_code == 404
 
     asyncio.run(scenario())
+
+
+def test_work_graph_missing_project_is_404_json(app, api_runtime_root):
+    async def scenario():
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/projects/project-none/work-graph")
+            assert response.status_code == 404
+            assert "message" in response.json().get("error", response.json())
+
+    asyncio.run(scenario())

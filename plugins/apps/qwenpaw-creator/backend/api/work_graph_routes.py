@@ -18,6 +18,7 @@ from domain.errors import NotFoundError, ValidationError
 from services.file_agent_runtime.work_graph import derive_work_graph
 from services.file_agent_runtime.work_scheduler import WorkGraphScheduler
 from services.project_files.facade import CreatorFileServices
+from services.project_files.store import ProjectNotFound
 from services.runtime_files.execution_store import ProjectExecutionStore
 
 from .dependencies import CreatorErrorRoute, project_file_services
@@ -31,7 +32,10 @@ router = APIRouter(
 
 
 def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
-    snapshot = services.projects.read(project_id)
+    try:
+        snapshot = services.projects.read(project_id)
+    except ProjectNotFound as exc:
+        raise NotFoundError(str(exc)) from exc
     tasks = ProjectExecutionStore(services.root).list_tasks(project_id)
     graph = derive_work_graph(snapshot.project, tasks=tasks)
     return {
@@ -58,6 +62,13 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
     }
 
 
+def _read_project(project_id: str, services: CreatorFileServices):
+    try:
+        return services.projects.read(project_id)
+    except ProjectNotFound as exc:
+        raise NotFoundError(str(exc)) from exc
+
+
 @router.get("/work-graph")
 async def get_work_graph(
     project_id: str,
@@ -75,7 +86,7 @@ async def dispatch_work_graph_node(
     node_id: str,
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
-    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    snapshot = await asyncio.to_thread(_read_project, project_id, services)
     tasks = await asyncio.to_thread(
         ProjectExecutionStore(services.root).list_tasks,
         project_id,
