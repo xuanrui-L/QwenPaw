@@ -311,11 +311,20 @@ class FfmpegLocalMediaRunner:
                         freeze_duration = target_duration - source_duration
 
                 segment = segment_dir / f"{index:06d}.mp4"
+                # A still image can carry a segment (pure motion-graphics
+                # cuts render generated backdrops with overlays on top).
+                # ffmpeg needs -loop 1 to keep emitting frames and -t to
+                # bound the loop; seeking into a still is meaningless.
+                is_still_image = item.duration_seconds is None and str(
+                    item.media_type or "",
+                ).startswith("image/")
                 # apad references [0:a]; sources without an audio stream
                 # (common for generated R2V footage) must keep the optional
                 # 0:a? mapping or ffmpeg rejects the whole filtergraph.
-                freeze_audio = freeze_duration > 0 and self._probe_has_audio(
-                    item.path,
+                freeze_audio = (
+                    freeze_duration > 0
+                    and not is_still_image
+                    and self._probe_has_audio(item.path)
                 )
                 placement_filter = self._placement_filter(
                     item.location,
@@ -326,25 +335,42 @@ class FfmpegLocalMediaRunner:
                 )
 
                 # Build FFmpeg arguments
-                ffmpeg_args = [
-                    "-y",
-                    "-ss",
-                    f"{start_seconds:.6f}",
-                    "-t",
-                    f"{segment_duration:.6f}",
-                    "-i",
-                    os.fspath(item.path),
-                    "-filter_complex",
-                    placement_filter,
-                    "-map",
-                    "[outv]",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-pix_fmt",
-                    "yuv420p",
-                ]
+                if is_still_image:
+                    ffmpeg_args = [
+                        "-y",
+                        "-loop",
+                        "1",
+                        "-framerate",
+                        "30",
+                        "-t",
+                        f"{segment_duration:.6f}",
+                        "-i",
+                        os.fspath(item.path),
+                    ]
+                else:
+                    ffmpeg_args = [
+                        "-y",
+                        "-ss",
+                        f"{start_seconds:.6f}",
+                        "-t",
+                        f"{segment_duration:.6f}",
+                        "-i",
+                        os.fspath(item.path),
+                    ]
+                ffmpeg_args.extend(
+                    [
+                        "-filter_complex",
+                        placement_filter,
+                        "-map",
+                        "[outv]",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "veryfast",
+                        "-pix_fmt",
+                        "yuv420p",
+                    ],
+                )
 
                 # Map audio if present
                 if freeze_audio:
@@ -1392,7 +1418,18 @@ def _indexed_version(
     media_type = (
         indexed.media_type if indexed is not None else version.media_type
     )
-    if not media_type.casefold().startswith("video/"):
+    normalized_media_type = media_type.casefold()
+    if not normalized_media_type.startswith(
+        ("video/", "image/"),
+    ):
+        raise ValidationError(f"媒体输入不是视频或图片: {version_id}")
+    if (
+        normalized_media_type.startswith("image/")
+        and require_artifact is False
+    ):
+        # Source images stay outside the composition main track; only
+        # generated artifact stills may back a segment (pure
+        # motion-graphics cuts render generated backdrops).
         raise ValidationError(f"媒体输入不是视频: {version_id}")
     return indexed, version
 
