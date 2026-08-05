@@ -25,6 +25,7 @@ import type {
   ProjectDocument,
   SourceAssetVersionDocument,
   VisualEntityDocument,
+  VisualCastLineupDocument,
   VisualVariantDocument,
 } from "@/contracts/creator";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
@@ -74,7 +75,8 @@ type AssetItem = {
   raw:
     | SourceAssetVersionDocument
     | ArtifactVersionDocument
-    | VisualEntityDocument;
+    | VisualEntityDocument
+    | VisualCastLineupDocument;
 };
 
 type AssetItemGroup = {
@@ -373,14 +375,68 @@ function assetItems(project: ProjectDocument): AssetItem[] {
       });
     },
   );
-  return dedupeByChecksum([...visuals, ...sources, ...artifacts]).sort(
-    (left, right) => {
-      return (
-        (right.createdAt || "").localeCompare(left.createdAt || "") ||
-        left.name.localeCompare(right.name)
+  // Cast lineups are visual assets too: the group anchor that locks
+  // relative scale and style across characters surfaces alongside the
+  // per-entity cards so its generation state is never invisible.
+  const lineups = (project.visual.cast_lineups?.order ?? []).flatMap(
+    (lineupId): AssetItem[] => {
+      const lineup = project.visual.cast_lineups?.items[lineupId];
+      if (!lineup) return [];
+      const selectedVersionId = lineup.selected_artifact_version_id;
+      const artifact = selectedVersionId
+        ? project.assets.artifact_versions_by_id[selectedVersionId]
+        : undefined;
+      const media = artifact
+        ? artifactMedia(project, artifact)
+        : { kind: "image", type: "" };
+      const characterNames = lineup.character_refs.map(
+        (ref) => project.visual.entities.items[ref]?.name || ref,
       );
+      return [
+        {
+          id: lineupId,
+          ref: `lineup:${lineupId}`,
+          kind: "visual",
+          name: lineup.name,
+          cardName: `${lineup.name}（阵容图）`,
+          description:
+            lineup.relative_notes ||
+            lineup.description ||
+            `阵容图：${characterNames.join("、")}`,
+          mediaKind: media.kind,
+          mediaType: media.type,
+          previewUrl: artifact
+            ? getArtifactVersionMediaUrl(artifact.version_id)
+            : undefined,
+          stale: artifact?.stale,
+          checksum: artifact?.checksum,
+          ownerRef: artifact?.owner_ref,
+          variantState: artifact ? "active" : "unselected",
+          provenanceRefs: artifact?.provenance_refs ?? [],
+          metadata: {
+            kind: "cast_lineup",
+            character_refs: lineup.character_refs,
+            relative_notes: lineup.relative_notes,
+            generated_artifact_version_ids:
+              lineup.generated_artifact_version_ids,
+            selected_artifact_version_id: selectedVersionId,
+          },
+          raw: lineup,
+        },
+      ];
     },
   );
+  return dedupeByChecksum([
+    ...lineups,
+    ...visuals,
+    ...sources,
+    ...artifacts,
+  ]).sort((left, right) => {
+    return (
+      (right.createdAt || "").localeCompare(left.createdAt || "") ||
+      left.name.localeCompare(right.name)
+    );
+  });
 }
 
 function visualItemGroups(

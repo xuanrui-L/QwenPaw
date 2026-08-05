@@ -42,7 +42,7 @@ class SpecialistToolWait(StrEnum):
 
 
 _PROJECT_ASSETS_TARGET_REF = "project:assets"
-_ASSET_TARGET_REF_PATTERN = r"^asset:.+$"
+_ASSET_TARGET_REF_PATTERN = r"^(asset|lineup):.+$"
 _SOURCE_PROJECT_TOOL_NAMES = frozenset({"read_project", "read_project_file"})
 
 
@@ -82,7 +82,11 @@ class SpecialistToolSpec:
             role=role,
             admitted_target_refs=admitted_target_refs,
         ):
-            return target_ref.startswith("asset:") and bool(target_ref[6:])
+            # Cast lineups are visual assets too: a Project-assets run may
+            # generate the group anchor alongside individual entity images.
+            return (
+                target_ref.startswith("asset:") and bool(target_ref[6:])
+            ) or (target_ref.startswith("lineup:") and bool(target_ref[7:]))
         return target_ref in admitted_target_refs
 
     def manifest(
@@ -108,7 +112,8 @@ class SpecialistToolSpec:
                     target["pattern"] = _ASSET_TARGET_REF_PATTERN
                     target["description"] = (
                         "必须使用本 Project 中已存在的 exact "
-                        "asset:<VisualEntity.entity_id>，不能直接使用 "
+                        "asset:<VisualEntity.entity_id>（或阵容图 "
+                        "lineup:<VisualCastLineup.lineup_id>），不能直接使用 "
                         "project:assets，也不能使用来源素材 logicalAssetId；"
                         "来源素材版本只能放在 arguments.referenceVersionIds。"
                     )
@@ -533,11 +538,19 @@ class FileSpecialistToolRegistry:
             return SpecialistToolResult(payload=dict(result))
 
         if name == "image_generation":
-            command = (
-                CreatorCommandType.GENERATE_ASSET
-                if role is SpecialistRole.VISUAL_DEVELOPMENT
-                else CreatorCommandType.GENERATE_STORYBOARD_IMAGE
-            )
+            if target_ref.startswith("lineup:"):
+                # The cast lineup is the group anchor; only the visual
+                # development role may draw it, storyboard directors
+                # consume it through the reference chain instead.
+                if role is not SpecialistRole.VISUAL_DEVELOPMENT:
+                    raise PermissionDeniedError(
+                        "只有视觉开发 Specialist 可以生成阵容图",
+                    )
+                command = CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE
+            elif role is SpecialistRole.VISUAL_DEVELOPMENT:
+                command = CreatorCommandType.GENERATE_ASSET
+            else:
+                command = CreatorCommandType.GENERATE_STORYBOARD_IMAGE
             execution = await execute_file_image_command(
                 self.services,
                 project_id=project_id,

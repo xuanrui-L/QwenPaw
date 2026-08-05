@@ -120,6 +120,8 @@ export interface VisualVariantDocument extends ProjectJsonRecord {
   reference_artifact_version_ids: string[];
   generated_artifact_version_ids: string[];
   selected_artifact_version_id: string | null;
+  derived_from_variant_id?: string | null;
+  consistency_tags?: string[];
 }
 
 export interface VisualEntityDocument extends ProjectJsonRecord {
@@ -131,12 +133,28 @@ export interface VisualEntityDocument extends ProjectJsonRecord {
   required_variant_ids: string[];
   variants: ProjectEntityCollection<VisualVariantDocument>;
   selected_artifact_version_id: string | null;
+  canonical_variant_id?: string | null;
+}
+
+export interface VisualCastLineupDocument extends ProjectJsonRecord {
+  lineup_id: string;
+  name: string;
+  description: string;
+  character_refs: string[];
+  scene_ref: string | null;
+  prop_refs: string[];
+  reference_asset_version_ids: string[];
+  reference_artifact_version_ids: string[];
+  generated_artifact_version_ids: string[];
+  selected_artifact_version_id: string | null;
+  relative_notes: string;
 }
 
 export interface VisualDevelopmentDocument extends ProjectJsonRecord {
   visual_bible: string;
   style: string;
   entities: ProjectEntityCollection<VisualEntityDocument>;
+  cast_lineups?: ProjectEntityCollection<VisualCastLineupDocument>;
 }
 
 export interface TimelineSpanDocument extends ProjectJsonRecord {
@@ -181,6 +199,7 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   scene_ref: string | null;
   prop_refs: string[];
   visual_variant_refs: Record<string, string>;
+  cast_lineup_refs?: string[];
   shots: ProjectEntityCollection<ShotDocument>;
   recipe: GenerationRecipeDocument | null;
   storyboard_prompt: string;
