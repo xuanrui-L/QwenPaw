@@ -770,7 +770,6 @@
     "seconds": "秒",
     "overview": "概览",
     "compactOverview": "紧凑时间轴概览；点击任意时刻查看同时出现的内容",
-    "timelineEmpty": "时间轴中还没有内容",
     "selectRow": "选取整行",
     "timelineContent": "时间线内容",
     "addToConversation": "添加到对话",

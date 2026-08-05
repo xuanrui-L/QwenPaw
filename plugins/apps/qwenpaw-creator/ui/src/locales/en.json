@@ -770,7 +770,6 @@
     "seconds": "seconds",
     "overview": "Overview",
     "compactOverview": "Compact timeline overview; click any moment to see concurrent content",
-    "timelineEmpty": "Timeline is empty",
     "selectRow": "Select entire row",
     "timelineContent": "Timeline content",
     "addToConversation": "Add to conversation",
