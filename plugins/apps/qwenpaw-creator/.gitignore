@@ -9,3 +9,5 @@ data/
 generated/
 backend/data/
 backend/generated/
+# local-only eval media for the manual render-review eval (never commit)
+backend/tests/fixtures/render_review/
