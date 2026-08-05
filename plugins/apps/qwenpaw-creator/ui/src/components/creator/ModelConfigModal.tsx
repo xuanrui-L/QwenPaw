@@ -281,7 +281,7 @@ const PERMISSION_MODES: {
   {
     label: "YOLO",
     description:
-      "完全无人值守：审阅也自动通过，产物直接入库——质量不设防，注意成本。",
+      "完全无人值守：审阅自动通过，持续执行直至成片——质量不设防，注意成本。",
     checkpoints: "skip",
     execution: "allow_all",
     mediaReview: "auto_approve",
