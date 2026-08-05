@@ -1,6 +1,7 @@
 /** Inspiration example cards backed by OSS-hosted built-in Projects. */
 
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { message } from "antd";
 import { Loader2 } from "lucide-react";
 import type { InspirationExampleSummary } from "@/contracts/creator";
@@ -10,6 +11,7 @@ import cardArt from "@/assets/design/inspiration-card-art.png";
 
 export default function InspirationExamples() {
   const router = useRouter();
+  const { t } = useTranslation();
   const [examples, setExamples] = useState<InspirationExampleSummary[]>([]);
   const [openingId, setOpeningId] = useState<string | null>(null);
 
@@ -36,7 +38,7 @@ export default function InspirationExamples() {
       // sticky disabled state stops double-fires until that happens.
       router.push(`/project/${opened.projectId}/plan`);
     } catch {
-      message.error("打开灵感示例失败，请稍后重试");
+      message.error(t("inspiration.openFailed"));
       setOpeningId(null);
     }
   };
@@ -45,7 +47,7 @@ export default function InspirationExamples() {
   return (
     <div className="w-full">
       <p className="mb-2 text-sm leading-6 tracking-[0.4px] text-[#808080]">
-        灵感示例
+        {t("inspiration.title")}
       </p>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {examples.map((example) => (
