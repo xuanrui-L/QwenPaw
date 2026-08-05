@@ -147,6 +147,8 @@ from .models import (
 from .native_media import source_intelligence_content_parts
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
+from .work_graph import WorkNodeStatus, derive_work_graph
+from .work_scheduler import WorkGraphScheduler
 from .subagents import (
     DELEGATE_TOOL_NAME,
     DelegateToAgentInput,
@@ -983,6 +985,9 @@ class FileCreatorAgentRuntime:
         self._blocked_heads: dict[str, int] = {}
         self._epochs: dict[str, int] = {}
         self._publication_lock = threading.RLock()
+        # Event-driven media fan-out: the model plans, the Runtime executes
+        # READY work-graph nodes in parallel (unattended ladder only).
+        self.work_scheduler = WorkGraphScheduler(services)
 
     async def _complete_model_turn(
         self,

@@ -329,6 +329,25 @@ def get_media_review_mode() -> str:
 
 DEFAULT_MAINLINE_MAX_MODEL_TURNS = 24
 DEFAULT_SPECIALIST_MAX_MODEL_TURNS = 16
+DEFAULT_MEDIA_PARALLELISM = 3
+
+
+def get_media_parallelism() -> int:
+    """Per-project cap on concurrently dispatched media tasks.
+
+    The work-graph scheduler fans out READY media nodes up to this many
+    at once; the global model_slot semaphores still bound each provider
+    kind underneath, so this is the coarse project-level knob.
+    """
+
+    section = _get_user_config().get("agent_runtime")
+    value = section.get("media_parallelism") if isinstance(
+        section,
+        dict,
+    ) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_MEDIA_PARALLELISM
 
 
 def _turn_limit(section: dict | None, key: str, default: int) -> int:
