@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """A flaky download must not terminalize an already-generated video."""
+# pylint: disable=protected-access
 from __future__ import annotations
 
 import asyncio
