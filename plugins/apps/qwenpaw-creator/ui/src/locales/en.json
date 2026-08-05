@@ -882,7 +882,8 @@
     "rulerScrub": "Click or drag to position playhead",
     "compactOverviewAriaLabel": "Compact timeline overview; click any moment to see concurrent content",
     "editBufferTooltip": "Your manual edits from the workbench have been applied; these changes will be synced to the Agent with your next message so it can assess dependency adjustments",
-    "pendingEditCount": "{{count}} manual edits will sync with Agent on next message"
+    "pendingEditCount": "{{count}} manual edits will sync with Agent on next message",
+    "itemsAtMomentBadge": "{{count}} items at this moment"
   },
   "elementList": {
     "disabled": "Disabled",

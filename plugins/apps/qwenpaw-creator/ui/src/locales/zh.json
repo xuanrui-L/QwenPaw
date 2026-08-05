@@ -882,7 +882,8 @@
     "rulerScrub": "点击或拖动定位播放头",
     "compactOverviewAriaLabel": "紧凑时间轴概览；点击任意时刻查看同时出现的内容",
     "editBufferTooltip": "你在编辑台手动应用的修改已生效；下次发送消息时会把这些变化同步给 Agent，便于它判断依赖是否需要调整",
-    "pendingEditCount": "{{count}} 项手动修改将随下条消息同步给 Agent"
+    "pendingEditCount": "{{count}} 项手动修改将随下条消息同步给 Agent",
+    "itemsAtMomentBadge": "该时刻有 {{count}} 项内容"
   },
   "elementList": {
     "disabled": "已停用",
