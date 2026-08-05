@@ -274,7 +274,7 @@ describe("origin/main visible shell fidelity", () => {
     expect(
       screen.getByRole("button", { name: /保存配置/ }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /取\s*消/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /关闭/ })).toBeInTheDocument();
     // allow_all + skip + auto_approve maps to the top (YOLO) stop.
     const permissionSlider = screen.getByRole("slider", {
       name: "执行确认模式：",
