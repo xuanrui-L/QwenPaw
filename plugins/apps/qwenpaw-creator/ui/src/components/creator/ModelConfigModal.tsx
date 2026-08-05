@@ -78,7 +78,11 @@ const VLM_PROTOCOLS = [
   "小米 MiMo",
   "自定义",
 ];
-const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
+const ASR_PROTOCOLS = [
+  "DashScope Fun-ASR",
+  "DashScope Qwen3-ASR",
+  "OpenAI Whisper",
+];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
 
@@ -113,6 +117,11 @@ const ASR_PRESETS: Record<string, ProtocolPreset> = {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
     freeze_url: true,
     models: ["fun-asr"],
+  },
+  "DashScope Qwen3-ASR": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    freeze_url: true,
+    models: ["qwen3-asr-flash"],
   },
   "OpenAI Whisper": {
     base_url: "https://api.openai.com/v1",
