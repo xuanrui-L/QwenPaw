@@ -27,6 +27,7 @@ from services.project_files.models import (
     TimelineElement,
     TimelineSpan,
 )
+from utils.exceptions import ModelError
 
 
 pytestmark = pytest.mark.unit
@@ -120,7 +121,9 @@ def test_deterministic_rejection_keeps_the_terminal_wall(
         "rejected by the safety system"
     )
 
-    with pytest.raises(RuntimeError):
+    # Safety refusals surface as non-retryable ModelError (and carry the
+    # reference-vs-prompt guidance tested in test_image_safety_rejection).
+    with pytest.raises(ModelError):
         _execute(services, _FailingProvider(safety_message))
 
     with pytest.raises(ConflictError) as caught:

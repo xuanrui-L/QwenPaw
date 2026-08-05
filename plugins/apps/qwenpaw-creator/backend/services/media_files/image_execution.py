@@ -95,6 +95,7 @@ from services.runtime_files.safe_remote_download import (
 )
 
 # pylint: disable=no-name-in-module
+from utils.exceptions import ModelError
 from utils.paths import media_path_from_url, media_task_scope
 
 # pylint: enable=no-name-in-module
@@ -219,6 +220,45 @@ _TRANSIENT_ERROR_MARKERS = (
     "status 504",
 )
 _MAX_TRANSIENT_RETRY_SLOTS = 3
+
+# Deterministic provider-side content refusals. Field data (2026-08-05,
+# 22 consecutive 400s): the model *narrates* removing the person-photo
+# references while resending the identical ref list every call, so the
+# refusal must name the refs it saw and repeat-offender calls are blocked
+# locally instead of burning provider quota.
+_SAFETY_REJECTION_MARKERS = (
+    "rejected by the safety system",
+    "content policy",
+    "content_policy",
+)
+
+
+def _is_safety_rejection_message(message: str) -> bool:
+    folded = message.casefold()
+    return any(marker in folded for marker in _SAFETY_REJECTION_MARKERS)
+
+
+def _resolved_reference_ids(resolved: _ResolvedRequest) -> tuple[str, ...]:
+    return tuple(resolved.reference_version_ids) + tuple(
+        resolved.reference_image_urls,
+    )
+
+
+def _safety_rejection_note(resolved: _ResolvedRequest) -> str:
+    refs = _resolved_reference_ids(resolved)
+    if refs:
+        listed = ", ".join(refs[:6])
+        return (
+            f"本次调用携带了图片参考 [{listed}]。safety 拒绝通常由含真人照片的"
+            "参考图触发：在移除这些参考（置空 referenceVersionIds 改用纯文本，"
+            "或改用已生成的风格化 artifact-version id）之前，仅修改 prompt 的"
+            "重试不会成功。"
+        )
+    return (
+        "本次调用未携带参考图，拒绝来自 prompt 文本本身：请移除对真实人物的"
+        "可识别描述（姓名、球队/机构名、可定位的真实事件），改用虚构化的"
+        "外貌与气质描述。"
+    )
 
 
 def _is_transient_task_error(error: Mapping[str, Any] | None) -> bool:
@@ -812,6 +852,10 @@ class FileImageExecutionService:
         self.provider = provider or ExistingImageProvider()
         self.executions = ProjectExecutionStore(services.root)
         self.max_output_bytes = max_output_bytes
+        # (project_id, target_ref) -> reference ids of the last safety-
+        # rejected call. Process-local: worth losing on restart, priceless
+        # for cutting off same-refs resend loops within a session.
+        self._safety_rejected_refs: dict[tuple[str, str], frozenset[str]] = {}
 
     async def execute(
         self,
@@ -960,6 +1004,7 @@ class FileImageExecutionService:
         try:
             # No Project/Runtime lock spans this await.  The ContextVar only
             # scopes compatibility scratch emitted by the existing provider.
+            self._block_known_safety_refs(project_id, resolved)
             with media_task_scope(task.task_id, project_id=project_id):
                 provider_output = await self.provider.generate(
                     prompt=resolved.prompt,
@@ -1031,13 +1076,57 @@ class FileImageExecutionService:
             )
             raise
         except Exception as exc:
+            message = str(exc)
+            if _is_safety_rejection_message(message):
+                self._note_safety_rejection(project_id, resolved)
+                message = f"{message} {_safety_rejection_note(resolved)}"
+                exc = ModelError(
+                    message,
+                    model_name=getattr(exc, "model_name", ""),
+                    retryable=False,
+                )
             await self._fail_if_running(
                 project_id,
                 ids,
                 "IMAGE_GENERATION_FAILED",
-                message=str(exc),
+                message=message,
             )
-            raise
+            raise exc
+
+    def _block_known_safety_refs(
+        self,
+        project_id: str,
+        resolved: _ResolvedRequest,
+    ) -> None:
+        """Refuse locally when a safety-rejected ref set is resent verbatim.
+
+        The provider's answer is deterministic for the same references, so
+        replaying them with a reworded prompt only burns quota and turns.
+        """
+
+        refs = frozenset(_resolved_reference_ids(resolved))
+        if not refs:
+            return
+        rejected = self._safety_rejected_refs.get(
+            (project_id, resolved.target_ref),
+        )
+        if rejected is not None and refs == rejected:
+            raise ConflictError(
+                "已本地拦截：上一次 safety 拒绝时携带的是完全相同的图片参考 "
+                f"[{', '.join(sorted(refs)[:6])}]。"
+                + _safety_rejection_note(resolved),
+            )
+
+    def _note_safety_rejection(
+        self,
+        project_id: str,
+        resolved: _ResolvedRequest,
+    ) -> None:
+        refs = frozenset(_resolved_reference_ids(resolved))
+        if refs:
+            self._safety_rejected_refs[
+                (project_id, resolved.target_ref)
+            ] = refs
 
     @staticmethod
     def _ids(project_id: str, key: str) -> dict[str, str]:
