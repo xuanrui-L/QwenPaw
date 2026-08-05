@@ -502,3 +502,186 @@ def test_vlm_failure_releases_claim_for_retry(
     )
     assert retry is not None
     assert retry.round == 1
+
+
+def test_default_switch_values(monkeypatch) -> None:
+    from models.config import is_media_review_enabled, is_sync_review_enabled
+
+    monkeypatch.delenv("CREATOR_SYNC_REVIEW_ENABLED", raising=False)
+    monkeypatch.delenv("CREATOR_MEDIA_REVIEW_ENABLED", raising=False)
+    assert is_sync_review_enabled() is False
+    assert is_media_review_enabled() is False
+    monkeypatch.setenv("CREATOR_SYNC_REVIEW_ENABLED", "1")
+    monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "on")
+    assert is_sync_review_enabled() is True
+    assert is_media_review_enabled() is True
+    monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "off")
+    assert is_media_review_enabled() is False
+
+
+@requires_ffmpeg
+def test_stale_selection_never_receives_feedback(
+    media_services,
+    monkeypatch,
+) -> None:
+    """Feedback is dropped when the artifact is no longer selected."""
+    services = media_services
+    monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "1")
+    relative_uri = _publish_image_project(services)
+    services.sessions.create_project_runtime(PROJECT_ID)
+    _stub_vlm(monkeypatch, [_image_findings(craft_fail=True)])
+    # The selection moves on while the VLM round is in flight.
+    monkeypatch.setattr(
+        media_module.feedback,
+        "selected_slot_version",
+        lambda *args, **kwargs: "artifact-version-newer",
+    )
+    report = asyncio.run(
+        media_module.run_media_review_loop(
+            services,
+            project_id=PROJECT_ID,
+            published=_published(relative_uri),
+            kind="image",
+        ),
+    )
+    assert report is not None
+    assert report.verdict == "revise"
+    session = services.sessions.get_project_session_snapshot(PROJECT_ID)
+    messages = services.sessions.list_messages(
+        PROJECT_ID,
+        session.session_id,
+        after_seq=0,
+        limit=None,
+    )
+    assert [
+        item for item in messages if item.source == "run_review_feedback"
+    ] == []
+
+
+def _make_black_gap_clip(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            _FFMPEG,
+            "-y",
+            "-hide_banner",
+            "-nostats",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=192x108:d=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:d=3",
+            "-shortest",
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            "drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:"
+            "enable='between(t,1,2)'",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+
+
+def _publish_video_project(services: CreatorFileServices) -> str:
+    import hashlib
+
+    project = Project.new(project_id=PROJECT_ID, name="Media Review")
+    created_at = project.created_at
+    relative_uri = "assets/artifacts/file-vid-1.mp4"
+    root = services.projects.project_root(PROJECT_ID)
+    staging = Path(str(root) + "-staging.mp4")
+    _make_black_gap_clip(staging)
+    payload = staging.read_bytes()
+    sha = hashlib.sha256(payload).hexdigest()
+    project.assets.files_by_id["file-vid-1"] = IndexedFile(
+        file_id="file-vid-1",
+        kind="artifact_payload",
+        relative_uri=relative_uri,
+        sha256=sha,
+        size_bytes=len(payload),
+        media_type="video/mp4",
+        created_at=created_at,
+    )
+    project.assets.artifact_versions_by_id[VERSION_ID] = ArtifactVersion(
+        version_id=VERSION_ID,
+        slot_id=SLOT_ID,
+        kind="element_video",
+        owner_ref="element:e1",
+        name="分镜视频 1",
+        file_id="file-vid-1",
+        checksum=sha,
+        based_on_generation=0,
+        created_at=created_at,
+    )
+    project.assets.artifact_slots_by_id[SLOT_ID] = ArtifactSlot(
+        slot_id=SLOT_ID,
+        kind="element_video",
+        owner_ref="element:e1",
+        version_ids=[VERSION_ID],
+        selected_version_id=VERSION_ID,
+    )
+    services.projects.create(project)
+    destination = root / relative_uri
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging.replace(destination)
+    return relative_uri
+
+
+@requires_ffmpeg
+def test_element_video_loop_embeds_gate_block(
+    media_services,
+    monkeypatch,
+) -> None:
+    """The video loop runs gates + frames + stats and delivers feedback."""
+    services = media_services
+    monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "1")
+    relative_uri = _publish_video_project(services)
+    services.sessions.create_project_runtime(PROJECT_ID)
+    calls = _stub_vlm(monkeypatch, [_video_findings(black_fail=True)])
+    published = _published(relative_uri)
+    published["commandType"] = "GENERATE_R2V_VIDEO"
+    report = asyncio.run(
+        media_module.run_media_review_loop(
+            services,
+            project_id=PROJECT_ID,
+            published=published,
+            kind="element_video",
+        ),
+    )
+    assert report is not None
+    assert report.kind == "element_video"
+    assert report.verdict == "revise"
+    # The vendored gate block is embedded and the interior black was caught
+    # objectively before the VLM even ran.
+    assert report.gate_block is not None
+    assert report.gate_block["passed"] is False
+    black = next(
+        gate for gate in report.gate_block["gates"] if gate["name"] == "black"
+    )
+    assert black["metrics"]["interior_gaps"]
+    assert report.stats and "judgment" in report.stats
+    # Evidence frames and the gate block both reached the VLM turn.
+    user_text = calls[0]["content"][0]["text"]
+    assert "门禁证据块" in user_text
+    image_parts = [
+        part for part in calls[0]["content"] if part.get("type") != "text"
+    ]
+    assert len(image_parts) >= 2
+    session = services.sessions.get_project_session_snapshot(PROJECT_ID)
+    messages = services.sessions.list_messages(
+        PROJECT_ID,
+        session.session_id,
+        after_seq=0,
+        limit=None,
+    )
+    feedback_messages = [
+        item for item in messages if item.source == "run_review_feedback"
+    ]
+    assert len(feedback_messages) == 1
+    assert "分镜视频" in feedback_messages[0].content_parts[0].text

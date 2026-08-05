@@ -25,17 +25,12 @@ from models.vlm_model import chat_completion, multimodal_media_part
 from schemas.run_review import MediaReviewFinding, MediaReviewReport
 from services.observability.tracing import trace_event
 from services.render_review.frames import extract_review_frames
-from services.run_review import admission
+from services.run_review import admission, feedback
 from services.run_review.rubric_prompts import (
     build_image_check_system_prompt,
     build_scene_check_system_prompt,
 )
-from services.runtime_files import (
-    MessageChannel,
-    MessageClassification,
-    RequestAdmissionConflict,
-    RuntimeSessionNotFound,
-)
+from services.runtime_files import RequestAdmissionConflict
 from utils.logger import setup_logger
 from vendor.mm_plugins import frame_stats, review_gates
 
@@ -72,29 +67,6 @@ def _reports_root(services: "CreatorFileServices", project_id: str) -> Path:
     return (
         services.projects.project_root(project_id) / "runtime" / "run-review"
     )
-
-
-def _selected_slot_version(
-    services: "CreatorFileServices",
-    project_id: str,
-    *,
-    version_id: str,
-    slot_id: str | None,
-) -> str | None:
-    """Return the currently selected ArtifactVersion of the owning slot."""
-    snapshot = services.projects.read(project_id)
-    slots = snapshot.project.assets.artifact_slots_by_id
-    slot = slots.get(slot_id) if slot_id else None
-    if slot is None:
-        slot = next(
-            (
-                item
-                for item in slots.values()
-                if version_id in item.version_ids
-            ),
-            None,
-        )
-    return slot.selected_version_id if slot is not None else None
 
 
 def _derive_plan_context(
@@ -316,89 +288,6 @@ async def review_media_artifact(
     return report
 
 
-def _feedback_text(
-    report: MediaReviewReport,
-    *,
-    target_ref: str,
-    command: str,
-) -> str:
-    payload = {
-        "type": "run_review_feedback",
-        "artifact_ref": report.artifact_ref,
-        "kind": report.kind,
-        "round": report.round,
-        "max_rounds": admission.MAX_MEDIA_REVIEW_ROUNDS,
-        "verdict": report.verdict,
-        "findings": [
-            item.model_dump(mode="json") for item in report.failed_findings()
-        ],
-    }
-    label = "生成图像" if report.kind == "image" else "分镜视频"
-    return (
-        f"【运行审阅反馈 · {label} · 第 {report.round}/"
-        f"{admission.MAX_MEDIA_REVIEW_ROUNDS} 轮】\n"
-        f"产物 {report.artifact_ref}（{command}）未通过旁路审阅。请针对 "
-        f"{target_ref} 仅修复下列结构化审阅发现中列出的问题（重新生成或调整"
-        "提示词），不要扩大改动范围。\n\n"
-        + json.dumps(payload, ensure_ascii=False, indent=2)
-    )
-
-
-def _admit_feedback(
-    services: "CreatorFileServices",
-    *,
-    project_id: str,
-    report: MediaReviewReport,
-    target_ref: str,
-    command: str,
-    version_id: str,
-    freshness_guard: Any = None,
-) -> bool:
-    """Admit the findings as a durable turn message. Mirrors render_review."""
-    try:
-        session = services.sessions.get_project_session_snapshot(project_id)
-    except RuntimeSessionNotFound:
-        logger.info(
-            "run review feedback skipped: project %s has no runtime session",
-            project_id,
-        )
-        return False
-    conversations = services.sessions.list_conversations(
-        project_id,
-        session.session_id,
-    )
-    default = next(
-        (item for item in conversations if item.is_default),
-        conversations[0] if conversations else None,
-    )
-    if default is None:
-        return False
-    request_id = f"run-review-{version_id}-round-{report.round}"
-    services.sessions.admit_user_request(
-        project_id,
-        session.session_id,
-        default.conversation_id,
-        request_id=request_id,
-        client_message_id=request_id,
-        content_parts=[
-            {
-                "type": "text",
-                "text": _feedback_text(
-                    report,
-                    target_ref=target_ref,
-                    command=command,
-                ),
-            },
-        ],
-        source="run_review_feedback",
-        channel=MessageChannel.RUNTIME,
-        classification=MessageClassification.MUTATION_INSTRUCTION,
-        metadata={"runReview": report.model_dump(mode="json")},
-        admission_guard=freshness_guard,
-    )
-    return True
-
-
 def _finalize_round(
     services: "CreatorFileServices",
     reports_root: Path,
@@ -421,7 +310,7 @@ def _finalize_round(
 
         def _resolve_selected() -> str | None:
             try:
-                return _selected_slot_version(
+                return feedback.selected_slot_version(
                     services,
                     project_id,
                     version_id=version_id,
@@ -435,7 +324,7 @@ def _finalize_round(
             outcome = "stale"
         else:
             try:
-                feedback_sent = _admit_feedback(
+                feedback_sent = feedback.admit_feedback(
                     services,
                     project_id=project_id,
                     report=report,
