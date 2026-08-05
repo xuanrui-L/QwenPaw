@@ -55,8 +55,8 @@ function importProject(
       }
       reject(new Error(msg));
     };
-      xhr.onerror = () => reject(new Error(i18n.t("lib.importFailedNetwork")));
-      xhr.onabort = () => reject(new Error(i18n.t("lib.importFailedCancelled")));
+    xhr.onerror = () => reject(new Error(i18n.t("lib.importFailedNetwork")));
+    xhr.onabort = () => reject(new Error(i18n.t("lib.importFailedCancelled")));
 
     xhr.send(form);
   });
@@ -230,10 +230,12 @@ export async function saveExportFile(
     },
   );
   if (!response.ok) {
-      throw new Error(i18n.t("lib.exportFailedHttp", { status: response.status }));
+    throw new Error(
+      i18n.t("lib.exportFailedHttp", { status: response.status }),
+    );
   }
   if (!response.body) {
-      throw new Error(i18n.t("lib.exportFailedNoData"));
+    throw new Error(i18n.t("lib.exportFailedNoData"));
   }
 
   let filename = `${projectId}.zip`;

@@ -97,7 +97,7 @@ export default function DiffView({
   if (lines.length === 0) {
     return (
       <p className="rounded-md bg-[var(--color-bg-secondary)] p-2 text-[10px] text-[var(--color-text-tertiary)]">
-            {t("lib.noContentChanges")}
+        {t("lib.noContentChanges")}
       </p>
     );
   }

@@ -3,6 +3,7 @@ import type { ComponentType, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { message } from "antd";
 import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 import {
   AudioWaveform,
   Blend,
@@ -408,8 +409,12 @@ export default function TimelineTracks({
     const attachment = {
       kind: isPoint ? ("timeline_point" as const) : ("timeline_range" as const),
       text: isPoint
-        ? `${startText}s · ${selectedElements.length} ${t("timeline.itemsAtSameTime")}`
-        : `${startText}s – ${endText}s · ${selectedElements.length} ${t("timeline.timelineItems")}`,
+        ? `${startText}s · ${selectedElements.length} ${t(
+            "timeline.itemsAtSameTime",
+          )}`
+        : `${startText}s – ${endText}s · ${selectedElements.length} ${t(
+            "timeline.timelineItems",
+          )}`,
       ref: timelineRef(timeline),
       field: isPoint
         ? `${timelineRef(timeline)}@${selection.startTick}`
@@ -549,7 +554,9 @@ export default function TimelineTracks({
         authorityTimeline,
         drag.lastChanges.slice(0, 1),
       );
-      message.warning(follow.ok === false ? follow.reason : t("timeline.adjustmentFailed"));
+      message.warning(
+        follow.ok === false ? follow.reason : t("timeline.adjustmentFailed"),
+      );
       onDragOverridesChange(null);
       return;
     }
@@ -758,7 +765,7 @@ export default function TimelineTracks({
         type="button"
         data-element-block={element.element_id}
         data-element-block-state={playbackState}
-            title={`${element.label || t("timeline.timelineContent")} · ${seconds(
+        title={`${element.label || t("timeline.timelineContent")} · ${seconds(
           element.span.start_tick,
           timeline.ticks_per_second,
         )}s – ${seconds(
@@ -767,12 +774,8 @@ export default function TimelineTracks({
         )}s${
           playbackState === "ready"
             ? ""
-            : ` · ${ELEMENT_PLAYBACK_STATUS_LABEL[playbackState]}`
-        }${
-          editable
-            ? t("timeline.draggableHint")
-            : ""
-        }`}
+            : ` · ${i18n.t(ELEMENT_PLAYBACK_STATUS_LABEL[playbackState])}`
+        }${editable ? t("timeline.draggableHint") : ""}`}
         onPointerDown={(event) => {
           const trim = (event.target as HTMLElement)
             .closest("[data-element-trim]")
@@ -1061,7 +1064,9 @@ export default function TimelineTracks({
                               className="relative flex h-11 border-b border-[var(--color-border)]/65 last:border-b-0"
                             >
                               <div
-                                title={`${track.label}${t("timeline.clickSelectRow")}`}
+                                title={`${track.label}${t(
+                                  "timeline.clickSelectRow",
+                                )}`}
                                 onPointerDown={(event) =>
                                   event.stopPropagation()
                                 }
@@ -1117,7 +1122,8 @@ export default function TimelineTracks({
                             transition.creation.type === "transition"
                               ? transition.creation.transition_kind
                               : "";
-                          const kindLabel = TRANSITION_KIND_LABEL[kind] ?? kind;
+                          const kindKey = TRANSITION_KIND_LABEL[kind];
+                          const kindLabel = kindKey ? i18n.t(kindKey) : kind;
                           const junctionSelected =
                             selectedElementId === transition.element_id;
                           const leftStyle = `${percent(
@@ -1152,9 +1158,7 @@ export default function TimelineTracks({
                                   transition.span.duration_tick,
                                   timeline.ticks_per_second,
                                 )}s${
-                                  editable
-                                    ? t("timeline.clickEditHint")
-                                    : ""
+                                  editable ? t("timeline.clickEditHint") : ""
                                 }`}
                                 onPointerDown={(event) =>
                                   beginBlockDrag(event, transition, "move")

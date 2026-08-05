@@ -6,54 +6,50 @@ import type {
 } from "@/contracts/creator";
 import i18n from "@/i18n";
 
-const TASK_KIND_LABELS: Record<TaskView["kind"], string> = {
-  asset_ingest: i18n.t("presentation.taskKinds.asset_ingest"),
-  asset_import: i18n.t("presentation.taskKinds.asset_import"),
-  source_intelligence: i18n.t("presentation.taskKinds.source_intelligence"),
-  image_generation: i18n.t("presentation.taskKinds.image_generation"),
-  r2v_generation: i18n.t("presentation.taskKinds.r2v_generation"),
-  ai_edit_plan: i18n.t("presentation.taskKinds.ai_edit_plan"),
-  ai_edit_execute: i18n.t("presentation.taskKinds.ai_edit_execute"),
-  compose: i18n.t("presentation.taskKinds.compose"),
+const TASK_KIND_LABEL_KEYS: Record<TaskView["kind"], string> = {
+  asset_ingest: "presentation.taskKinds.asset_ingest",
+  asset_import: "presentation.taskKinds.asset_import",
+  source_intelligence: "presentation.taskKinds.source_intelligence",
+  image_generation: "presentation.taskKinds.image_generation",
+  r2v_generation: "presentation.taskKinds.r2v_generation",
+  ai_edit_plan: "presentation.taskKinds.ai_edit_plan",
+  ai_edit_execute: "presentation.taskKinds.ai_edit_execute",
+  compose: "presentation.taskKinds.compose",
 };
 
 export function taskKindLabel(kind: string): string {
-  return (
-    TASK_KIND_LABELS[kind as TaskView["kind"]] ??
-    i18n.t("presentation.taskExecution")
-  );
+  const key = TASK_KIND_LABEL_KEYS[kind as TaskView["kind"]];
+  return key ? i18n.t(key) : i18n.t("presentation.taskExecution");
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  IDLE: i18n.t("presentation.statuses.IDLE"),
-  QUEUED: i18n.t("presentation.statuses.QUEUED"),
-  QUEUED_CAPACITY: i18n.t("presentation.statuses.QUEUED_CAPACITY"),
-  RUNNING: i18n.t("presentation.statuses.RUNNING"),
-  RUNNING_MODEL: i18n.t("presentation.statuses.RUNNING_MODEL"),
-  WAITING_RUNTIME: i18n.t("presentation.statuses.WAITING_RUNTIME"),
-  WAITING_AUTHORIZATION: i18n.t("presentation.statuses.WAITING_AUTHORIZATION"),
-  WAITING_USER_INPUT: i18n.t("presentation.statuses.WAITING_USER_INPUT"),
-  WAITING_EXECUTION_AUTH: i18n.t(
-    "presentation.statuses.WAITING_EXECUTION_AUTH",
-  ),
-  PENDING_REVIEW: i18n.t("presentation.statuses.PENDING_REVIEW"),
-  RESUMING: i18n.t("presentation.statuses.RESUMING"),
-  INTERRUPT_REQUESTED: i18n.t("presentation.statuses.INTERRUPT_REQUESTED"),
-  SUCCEEDED: i18n.t("presentation.statuses.SUCCEEDED"),
-  BLOCKED: i18n.t("presentation.statuses.BLOCKED"),
-  FAILED: i18n.t("presentation.statuses.FAILED"),
-  STALE: i18n.t("presentation.statuses.STALE"),
-  CANCELLED: i18n.t("presentation.statuses.CANCELLED"),
-  QUARANTINED: i18n.t("presentation.statuses.QUARANTINED"),
-  ERROR: i18n.t("presentation.statuses.ERROR"),
+const STATUS_LABEL_KEYS: Record<string, string> = {
+  IDLE: "presentation.statuses.IDLE",
+  QUEUED: "presentation.statuses.QUEUED",
+  QUEUED_CAPACITY: "presentation.statuses.QUEUED_CAPACITY",
+  RUNNING: "presentation.statuses.RUNNING",
+  RUNNING_MODEL: "presentation.statuses.RUNNING_MODEL",
+  WAITING_RUNTIME: "presentation.statuses.WAITING_RUNTIME",
+  WAITING_AUTHORIZATION: "presentation.statuses.WAITING_AUTHORIZATION",
+  WAITING_USER_INPUT: "presentation.statuses.WAITING_USER_INPUT",
+  WAITING_EXECUTION_AUTH: "presentation.statuses.WAITING_EXECUTION_AUTH",
+  PENDING_REVIEW: "presentation.statuses.PENDING_REVIEW",
+  RESUMING: "presentation.statuses.RESUMING",
+  INTERRUPTED: "presentation.statuses.INTERRUPTED",
+  SUCCEEDED: "presentation.statuses.SUCCEEDED",
+  BLOCKED: "presentation.statuses.BLOCKED",
+  FAILED: "presentation.statuses.FAILED",
+  STALE: "presentation.statuses.STALE",
+  CANCELLED: "presentation.statuses.CANCELLED",
+  QUARANTINED: "presentation.statuses.QUARANTINED",
+  ERROR: "presentation.statuses.ERROR",
 };
 
 export function creatorStatusLabel(
   status: SpecialistRunStatus | TaskStatus | string | null | undefined,
 ): string {
-  return status
-    ? STATUS_LABELS[status] ?? i18n.t("presentation.processing")
-    : i18n.t("presentation.dash");
+  if (!status) return i18n.t("presentation.dash");
+  const key = STATUS_LABEL_KEYS[status];
+  return key ? i18n.t(key) : i18n.t("presentation.processing");
 }
 
 function elementName(
@@ -191,43 +187,36 @@ export function creatorRoleLabel(name: string): string {
   return labels[name] ?? i18n.t("presentation.specialistProduction");
 }
 
-const TOOL_RUNNING_LABELS: Record<string, string> = {
-  read_project: i18n.t("presentation.toolRunning.read_project"),
-  read_project_file: i18n.t("presentation.toolRunning.read_project_file"),
-  jq_project: i18n.t("presentation.toolRunning.jq_project"),
-  elements_at: i18n.t("presentation.toolRunning.elements_at"),
-  ground_prompt_context: i18n.t(
-    "presentation.toolRunning.ground_prompt_context",
-  ),
-  analyze_source_media: i18n.t("presentation.toolRunning.analyze_source_media"),
-  source_intelligence: i18n.t("presentation.toolRunning.source_intelligence"),
-  transcribe_source_audio: i18n.t(
-    "presentation.toolRunning.transcribe_source_audio",
-  ),
-  commit_source_intelligence: i18n.t(
+const TOOL_RUNNING_LABEL_KEYS: Record<string, string> = {
+  read_project: "presentation.toolRunning.read_project",
+  read_project_file: "presentation.toolRunning.read_project_file",
+  jq_project: "presentation.toolRunning.jq_project",
+  elements_at: "presentation.toolRunning.elements_at",
+  ground_prompt_context: "presentation.toolRunning.ground_prompt_context",
+  analyze_source_media: "presentation.toolRunning.analyze_source_media",
+  source_intelligence: "presentation.toolRunning.source_intelligence",
+  transcribe_source_audio: "presentation.toolRunning.transcribe_source_audio",
+  commit_source_intelligence:
     "presentation.toolRunning.commit_source_intelligence",
-  ),
-  ai_edit: i18n.t("presentation.toolRunning.ai_edit"),
-  read_file: i18n.t("presentation.toolRunning.read_file"),
-  write_file: i18n.t("presentation.toolRunning.write_file"),
-  edit_file: i18n.t("presentation.toolRunning.edit_file"),
-  append_file: i18n.t("presentation.toolRunning.append_file"),
-  grep_search: i18n.t("presentation.toolRunning.grep_search"),
-  glob_search: i18n.t("presentation.toolRunning.glob_search"),
-  ast_search: i18n.t("presentation.toolRunning.ast_search"),
-  plan: i18n.t("presentation.toolRunning.plan"),
-  final: i18n.t("presentation.toolRunning.final"),
-  finalize_video: i18n.t("presentation.toolRunning.finalize_video"),
-  yield_until_runtime_event: i18n.t(
+  ai_edit: "presentation.toolRunning.ai_edit",
+  read_file: "presentation.toolRunning.read_file",
+  write_file: "presentation.toolRunning.write_file",
+  edit_file: "presentation.toolRunning.edit_file",
+  append_file: "presentation.toolRunning.append_file",
+  grep_search: "presentation.toolRunning.grep_search",
+  glob_search: "presentation.toolRunning.glob_search",
+  ast_search: "presentation.toolRunning.ast_search",
+  plan: "presentation.toolRunning.plan",
+  final: "presentation.toolRunning.final",
+  finalize_video: "presentation.toolRunning.finalize_video",
+  yield_until_runtime_event:
     "presentation.toolRunning.yield_until_runtime_event",
-  ),
-  complete_current_change: i18n.t(
-    "presentation.toolRunning.complete_current_change",
-  ),
+  complete_current_change: "presentation.toolRunning.complete_current_change",
 };
 
 export function getToolRunningLabel(name: string): string | null {
-  return TOOL_RUNNING_LABELS[name] ?? null;
+  const key = TOOL_RUNNING_LABEL_KEYS[name];
+  return key ? i18n.t(key) : null;
 }
 
 export function getRoleRunningLabel(name: string): string | null {

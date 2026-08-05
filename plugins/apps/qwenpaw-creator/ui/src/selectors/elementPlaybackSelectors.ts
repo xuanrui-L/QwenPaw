@@ -49,12 +49,12 @@ export const ELEMENT_PLAYBACK_STATUS_LABEL: Record<
   ElementPlaybackStatus,
   string
 > = {
-  ready: i18n.t("playback.ready"),
-  generating: i18n.t("playback.generating"),
-  queued: i18n.t("playback.queued"),
-  failed: i18n.t("playback.failed"),
-  stale: i18n.t("playback.needRegen"),
-  pending: i18n.t("playback.pending"),
+  ready: "playback.ready",
+  generating: "playback.generating",
+  queued: "playback.queued",
+  failed: "playback.failed",
+  stale: "playback.needRegen",
+  pending: "playback.pending",
 };
 
 function mediaKindOfType(mediaType: string): ElementPlaybackMediaKind {

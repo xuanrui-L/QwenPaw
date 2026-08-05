@@ -290,7 +290,9 @@ export function transitionFollowChanges(
     if (!window) {
       return {
         ok: false,
-        reason: i18n.t("lib.transitionOverlapError", { name: element.label || element.element_id }),
+        reason: i18n.t("lib.transitionOverlapError", {
+          name: element.label || element.element_id,
+        }),
       };
     }
     const minTick = minDurationTick(timeline.ticks_per_second);

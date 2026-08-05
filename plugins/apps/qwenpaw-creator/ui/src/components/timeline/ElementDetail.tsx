@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Alert, Button, Input, InputNumber, Select } from "antd";
 import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 import {
   ArrowUpRight,
   Box,
@@ -94,17 +95,19 @@ function TextField({
   );
 }
 
-const TRANSITION_KIND_OPTIONS = [
-  "crossfade",
-  "fadeblack",
-  "fadewhite",
-  "dissolve",
-  "wipeleft",
-  "cut",
-].map((kind) => ({
-  value: kind,
-  label: `${TRANSITION_KIND_LABEL[kind]}（${kind}）`,
-}));
+function getTransitionKindOptions() {
+  return [
+    "crossfade",
+    "fadeblack",
+    "fadewhite",
+    "dissolve",
+    "wipeleft",
+    "cut",
+  ].map((kind) => ({
+    value: kind,
+    label: `${i18n.t(TRANSITION_KIND_LABEL[kind] ?? "")}（${kind}）`,
+  }));
+}
 
 function getTransitionEasingOptions(t: (key: string) => string) {
   return [
@@ -674,19 +677,20 @@ export default function ElementDetail({
                     className="w-full"
                     disabled={applying}
                     value={creation.transition_kind}
-                    options={
-                      TRANSITION_KIND_OPTIONS.some(
+                    options={(() => {
+                      const opts = getTransitionKindOptions();
+                      return opts.some(
                         (option) => option.value === creation.transition_kind,
                       )
-                        ? TRANSITION_KIND_OPTIONS
+                        ? opts
                         : [
                             {
                               value: creation.transition_kind,
                               label: creation.transition_kind,
                             },
-                            ...TRANSITION_KIND_OPTIONS,
-                          ]
-                    }
+                            ...opts,
+                          ];
+                    })()}
                     onChange={(value) =>
                       onChange((draft) => {
                         if (draft.creation.type === "transition")

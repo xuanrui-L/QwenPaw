@@ -136,32 +136,32 @@ export const TRACK_TYPE_META: Record<
   { label: string; color: string; soft: string }
 > = {
   ai: {
-    label: i18n.t("timeline.trackTypes.ai"),
+    label: "timeline.trackTypes.ai",
     color: "#ff7f16",
     soft: "rgba(255,127,22,.12)",
   },
   clip: {
-    label: i18n.t("timeline.trackTypes.clip"),
+    label: "timeline.trackTypes.clip",
     color: "#3b82f6",
     soft: "rgba(59,130,246,.12)",
   },
   subtitle: {
-    label: i18n.t("timeline.trackTypes.subtitle"),
+    label: "timeline.trackTypes.subtitle",
     color: "#8b5cf6",
     soft: "rgba(139,92,246,.12)",
   },
   motion: {
-    label: i18n.t("timeline.trackTypes.motion"),
+    label: "timeline.trackTypes.motion",
     color: "#f59e0b",
     soft: "rgba(245,158,11,.12)",
   },
   transition: {
-    label: i18n.t("timeline.trackTypes.transition"),
+    label: "timeline.trackTypes.transition",
     color: "#0d9488",
     soft: "rgba(13,148,136,.12)",
   },
   audio: {
-    label: i18n.t("timeline.trackTypes.audio"),
+    label: "timeline.trackTypes.audio",
     color: "#12b76a",
     soft: "rgba(18,183,106,.12)",
   },
@@ -253,19 +253,29 @@ export function resolveElementVisualMeta(element: TimelineElementDocument): {
   soft: string;
 } {
   const trackType = classifyElementTrack(element);
-  if (trackType) return TRACK_TYPE_META[trackType];
+  if (trackType) {
+    const meta = TRACK_TYPE_META[trackType];
+    return { ...meta, label: i18n.t(meta.label) };
+  }
   if (element.creation.type === "overlay") {
     const kind = element.creation.overlay_kind;
     if (kind === "pet_os" || kind === "interview_summary") {
-      return TRACK_TYPE_META.subtitle;
+      const meta = TRACK_TYPE_META.subtitle;
+      return { ...meta, label: i18n.t(meta.label) };
     }
     if (kind === "motion" || kind === "media") {
-      return TRACK_TYPE_META.motion;
+      const meta = TRACK_TYPE_META.motion;
+      return { ...meta, label: i18n.t(meta.label) };
     }
   }
-  return ELEMENT_TYPE_META[
-    element.creation.type as Exclude<ElementCreationDocument["type"], "overlay">
-  ];
+  const meta =
+    ELEMENT_TYPE_META[
+      element.creation.type as Exclude<
+        ElementCreationDocument["type"],
+        "overlay"
+      >
+    ];
+  return { ...meta, label: i18n.t(meta.label) };
 }
 
 export function groupElementsByTracks(
@@ -315,7 +325,7 @@ export function groupElementsByTracks(
     }
     return {
       type,
-      label: meta.label,
+      label: i18n.t(meta.label),
       color: meta.color,
       soft: meta.soft,
       lanes: laneMap.map((lane, index) => ({
@@ -417,13 +427,13 @@ export function resolveTimelineRender(
  * "fade" is a synonym of crossfade.
  */
 export const TRANSITION_KIND_LABEL: Record<string, string> = {
-  crossfade: i18n.t("timeline.transitionKinds.crossfade"),
-  fade: i18n.t("timeline.transitionKinds.fade"),
-  fadeblack: i18n.t("timeline.transitionKinds.fadeblack"),
-  fadewhite: i18n.t("timeline.transitionKinds.fadewhite"),
-  dissolve: i18n.t("timeline.transitionKinds.dissolve"),
-  wipeleft: i18n.t("timeline.transitionKinds.wipeleft"),
-  cut: i18n.t("timeline.transitionKinds.cut"),
+  crossfade: "timeline.transitionKinds.crossfade",
+  fade: "timeline.transitionKinds.fade",
+  fadeblack: "timeline.transitionKinds.fadeblack",
+  fadewhite: "timeline.transitionKinds.fadewhite",
+  dissolve: "timeline.transitionKinds.dissolve",
+  wipeleft: "timeline.transitionKinds.wipeleft",
+  cut: "timeline.transitionKinds.cut",
 };
 
 export function elementCreationSummary(
@@ -436,11 +446,11 @@ export function elementCreationSummary(
       return creation.intent || creation.reason;
     case "overlay":
       return creation.text || creation.prompt || creation.overlay_kind;
-    case "transition":
-      return `${
-        TRANSITION_KIND_LABEL[creation.transition_kind] ??
-        creation.transition_kind
-      } ${i18n.t("timeline.elementSummary.transition")}`;
+    case "transition": {
+      const key = TRANSITION_KIND_LABEL[creation.transition_kind];
+      const label = key ? i18n.t(key) : creation.transition_kind ?? "";
+      return `${label} ${i18n.t("timeline.elementSummary.transition")}`;
+    }
     case "audio":
       return i18n.t("timeline.elementSummary.audio");
   }
@@ -455,22 +465,22 @@ export const ELEMENT_TYPE_META: Record<
   }
 > = {
   r2v: {
-    label: i18n.t("timeline.elementTypes.r2v"),
+    label: "timeline.elementTypes.r2v",
     color: "#ff7f16",
     soft: "rgba(255,127,22,.12)",
   },
   edit: {
-    label: i18n.t("timeline.elementTypes.edit"),
+    label: "timeline.elementTypes.edit",
     color: "#3b82f6",
     soft: "rgba(59,130,246,.12)",
   },
   transition: {
-    label: i18n.t("timeline.elementTypes.transition"),
+    label: "timeline.elementTypes.transition",
     color: "#0d9488",
     soft: "rgba(13,148,136,.12)",
   },
   audio: {
-    label: i18n.t("timeline.elementTypes.audio"),
+    label: "timeline.elementTypes.audio",
     color: "#12b76a",
     soft: "rgba(18,183,106,.12)",
   },

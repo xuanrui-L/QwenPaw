@@ -56,11 +56,14 @@ function locateField(element: Element | null): {
   const region = element?.closest?.(
     "[data-creator-field]",
   ) as HTMLElement | null;
-    if (!region) return { field: null, path: null, label: i18n.t("lib.pageSelectedText") };
+  if (!region)
+    return { field: null, path: null, label: i18n.t("lib.pageSelectedText") };
   return {
     field: region.getAttribute("data-creator-field"),
     path: region.getAttribute("data-creator-path"),
-      label: region.getAttribute("data-creator-field-label") || i18n.t("lib.selectedText"),
+    label:
+      region.getAttribute("data-creator-field-label") ||
+      i18n.t("lib.selectedText"),
   };
 }
 
@@ -127,7 +130,8 @@ export default function SelectionToolbar() {
           const field = region?.getAttribute("data-creator-field") ?? null;
           const path = region?.getAttribute("data-creator-path") ?? null;
           const label =
-            region?.getAttribute("data-creator-field-label") || t("lib.selectedText");
+            region?.getAttribute("data-creator-field-label") ||
+            t("lib.selectedText");
           if (!region || !field) return null;
           if (
             !region.contains(range.startContainer) ||
@@ -270,7 +274,7 @@ export default function SelectionToolbar() {
         className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
       >
         <MessageSquarePlus className="h-3.5 w-3.5" />
-            {t("lib.addToConversation")}
+        {t("lib.addToConversation")}
       </button>
     </div>
   );

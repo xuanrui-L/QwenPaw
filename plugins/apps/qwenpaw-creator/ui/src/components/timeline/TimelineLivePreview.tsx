@@ -28,6 +28,7 @@ import {
   PetOsBubble,
 } from "@/components/timeline/OverlayCopyLayer";
 import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 
 interface TimelineLivePreviewProps {
   project: ProjectDocument;
@@ -115,7 +116,7 @@ function PlaceholderLayer({ layer }: { layer: ElementPlayback }) {
   const { t } = useTranslation();
   const { element, status } = layer;
   const meta = resolveElementVisualMeta(element);
-  const label = ELEMENT_PLAYBACK_STATUS_LABEL[status];
+  const label = i18n.t(ELEMENT_PLAYBACK_STATUS_LABEL[status]);
   const fullFrame = isFullFrame(element.location);
   const StatusIcon =
     status === "generating" ? Loader2 : status === "queued" ? Clock3 : ImageOff;

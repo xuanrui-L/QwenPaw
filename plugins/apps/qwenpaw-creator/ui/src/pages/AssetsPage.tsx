@@ -213,7 +213,8 @@ function visualVariantCardName(variant: VisualVariantDocument): string {
     .at(-1)
     ?.trim();
   if (!variantName) return visualVariantLabel(variant, 36);
-  if (variantName.toLocaleLowerCase() === "default") return i18n.t("assets.defaultLook");
+  if (variantName.toLocaleLowerCase() === "default")
+    return i18n.t("assets.defaultLook");
   return variantName
     .split(/[-_]+/)
     .filter(Boolean)
@@ -426,7 +427,10 @@ function visualItemGroups(
           requiredCount > 0
             ? definedCount === requiredCount
               ? i18n.t("assets.charactersCount", { count: definedCount })
-              : i18n.t("assets.charactersOfCount", { defined: definedCount, required: requiredCount })
+              : i18n.t("assets.charactersOfCount", {
+                  defined: definedCount,
+                  required: requiredCount,
+                })
             : i18n.t("assets.oneSetting"),
         items: entityItems,
       });
@@ -444,7 +448,9 @@ function visualItemGroups(
           {
             key: "visual-scenes",
             label: i18n.t("assets.scene"),
-            countLabel: i18n.t("assets.sceneSettings", { count: sceneItems.length }),
+            countLabel: i18n.t("assets.sceneSettings", {
+              count: sceneItems.length,
+            }),
             items: sceneItems,
           },
         ]
@@ -454,7 +460,9 @@ function visualItemGroups(
           {
             key: "visual-props",
             label: i18n.t("assets.prop"),
-            countLabel: i18n.t("assets.propSettings", { count: propItems.length }),
+            countLabel: i18n.t("assets.propSettings", {
+              count: propItems.length,
+            }),
             items: propItems,
           },
         ]
@@ -464,7 +472,9 @@ function visualItemGroups(
           {
             key: "visual-other",
             label: i18n.t("assets.otherSettings"),
-            countLabel: i18n.t("assets.otherSettingsCount", { count: unassigned.length }),
+            countLabel: i18n.t("assets.otherSettingsCount", {
+              count: unassigned.length,
+            }),
             items: unassigned,
           },
         ]

@@ -260,9 +260,15 @@ describe("PlanPage Timeline/Element frontend", () => {
     fireEvent.pointerDown(chart, { pointerId: 1, clientX: x });
     fireEvent.pointerUp(chart, { pointerId: 1, clientX: x });
 
-    expect(container.querySelector("[data-timeline-point-candidates]")).toBeInTheDocument();
-    expect(container.querySelector("[data-timeline-point-candidates]")?.textContent).toContain("该时刻有");
-    expect(container.querySelector("[data-timeline-point-candidates]")?.textContent).toContain("5");
+    expect(
+      container.querySelector("[data-timeline-point-candidates]"),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector("[data-timeline-point-candidates]")?.textContent,
+    ).toContain("该时刻有");
+    expect(
+      container.querySelector("[data-timeline-point-candidates]")?.textContent,
+    ).toContain("5");
     expect(chart.nextElementSibling).toBe(
       container.querySelector("[data-timeline-point-candidates]"),
     );

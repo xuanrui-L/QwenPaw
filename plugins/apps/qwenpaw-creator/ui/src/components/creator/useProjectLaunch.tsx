@@ -89,7 +89,9 @@ async function waitForTask(
         throw new Error(
           taskErrorMessage(
             task.error,
-            i18n.t("lib.sourceProcessingFailed", { status: creatorStatusLabel(task.status) }),
+            i18n.t("lib.sourceProcessingFailed", {
+              status: creatorStatusLabel(task.status),
+            }),
           ),
         );
       }
@@ -119,7 +121,7 @@ function remoteUrlContentPart(url: string): CreatorContentPart {
   try {
     pathname = new URL(url).pathname.toLowerCase();
   } catch {
-      return { type: "text", text: i18n.t("lib.remoteSourceUrl", { url }) };
+    return { type: "text", text: i18n.t("lib.remoteSourceUrl", { url }) };
   }
   if (/\.(png|jpe?g|webp|gif|bmp|avif)$/.test(pathname)) {
     return { type: "image_url", image_url: { url } };
@@ -380,7 +382,9 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
             if (terminal.has(view.status)) {
               if (view.status !== "SUCCEEDED")
                 throw new Error(
-                  i18n.t("lib.folderImportFailed", { status: creatorStatusLabel(view.status) }),
+                  i18n.t("lib.folderImportFailed", {
+                    status: creatorStatusLabel(view.status),
+                  }),
                 );
               refs.push(
                 ...view.items.map(
@@ -389,7 +393,9 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
               );
               if (view.failures.length > 0) {
                 message.warning(
-                  i18n.t("lib.folderImportSkipped", { count: view.failures.length }),
+                  i18n.t("lib.folderImportSkipped", {
+                    count: view.failures.length,
+                  }),
                 );
               }
               break;
@@ -397,7 +403,11 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
             await wait(800);
           }
         } catch (error) {
-          message.warning(i18n.t("lib.folderImportError", { detail: (error as Error).message }));
+          message.warning(
+            i18n.t("lib.folderImportError", {
+              detail: (error as Error).message,
+            }),
+          );
         }
       }
 
@@ -417,7 +427,10 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
           refs.push(...taskRefs);
         } catch (error) {
           message.warning(
-            i18n.t("lib.attachmentIngestFailed", { name: att.file.name, detail: (error as Error).message }),
+            i18n.t("lib.attachmentIngestFailed", {
+              name: att.file.name,
+              detail: (error as Error).message,
+            }),
           );
         }
       }
@@ -442,7 +455,12 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
             : [];
           refs.push(...taskRefs);
         } catch (error) {
-          message.warning(i18n.t("lib.attachmentIngestFailed", { name: att.url, detail: (error as Error).message }));
+          message.warning(
+            i18n.t("lib.attachmentIngestFailed", {
+              name: att.url,
+              detail: (error as Error).message,
+            }),
+          );
         }
       }
 

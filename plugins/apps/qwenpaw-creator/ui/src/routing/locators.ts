@@ -52,7 +52,7 @@ export function navigateToLocator(
   const current = currentHashPath();
   useNavigationStore.getState().pushLocation({
     path: current,
-      description: options.description || i18n.t("lib.reviewDecision"),
+    description: options.description || i18n.t("lib.reviewDecision"),
   });
   useNavigationStore.getState().setExpectedPath(base.split("?")[0]);
   useNavigationStore.getState().setReviewFocus({
@@ -93,7 +93,7 @@ export function navigateToRefItem(
   item: RefSearchItem,
 ): void {
   navigateToLocator(projectId, item.uiLocator, {
-      description: i18n.t("lib.reference", { name: item.name }),
+    description: i18n.t("lib.reference", { name: item.name }),
   });
 }
 

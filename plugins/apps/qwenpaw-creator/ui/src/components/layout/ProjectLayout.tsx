@@ -336,7 +336,7 @@ export default function ProjectLayout() {
     navigateToLocator(id, locator, {
       review: true,
       field: locator.field ?? undefined,
-        description: t("lib.reviewOrViewChanges"),
+      description: t("lib.reviewOrViewChanges"),
     });
   }, [activeFileReview, fileReviewSyncStatus, id, pendingReviewNavigation]);
 

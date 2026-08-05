@@ -473,18 +473,18 @@ function actionReason(envelope: CreatorActionEnvelope): string {
 
 function waitingActionTitle(reason: string): string {
   const subject = reason || i18n.t("agent.processing");
-  const prefixed = /^(?:正在)?等待/.test(subject)
-    ? subject
-    : `${i18n.t("agent.waitingOutput").replace(/中$/, "")}${subject}`;
-  return prefixed.endsWith("中") ? prefixed : `${prefixed}中`;
+  if (/^(?:正在)?等待/.test(subject)) {
+    return subject.endsWith("中") ? subject : `${subject}中`;
+  }
+  return i18n.t("agent.waitingForOutput", { subject });
 }
 
 function actionTitle(envelope: CreatorActionEnvelope, active: boolean): string {
   if (envelope.action === "tool_call") {
     const label = creatorToolLabel(envelope.tool || "");
     return active
-      ? `${label}${i18n.t("agent.processing")}`
-      : `${label}${i18n.t("agent.completed")}`;
+      ? i18n.t("agent.toolCallActive", { tool: label })
+      : i18n.t("agent.toolCallDone", { tool: label });
   }
   if (envelope.action === "yield_until_runtime_event") {
     return waitingActionTitle(actionReason(envelope));
@@ -955,7 +955,8 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
           </span>
           {active && item.receivedBytes !== undefined && (
             <span className="text-[9px] text-[var(--color-text-tertiary)]">
-              {i18n.t("lib.arguments")}{formatToolArgumentBytes(item.receivedBytes)}
+              {i18n.t("lib.arguments")}
+              {formatToolArgumentBytes(item.receivedBytes)}
             </span>
           )}
         </span>
@@ -1262,7 +1263,8 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           )}
           {active && data.receivedBytes !== undefined && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">
-              {i18n.t("lib.arguments")}{formatToolArgumentBytes(data.receivedBytes)}
+              {i18n.t("lib.arguments")}
+              {formatToolArgumentBytes(data.receivedBytes)}
             </span>
           )}
         </span>
