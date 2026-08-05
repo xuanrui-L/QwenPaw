@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from domain.errors import ValidationError
+from services.media_files import motion_engine
 from services.media_files.motion_blueprints import (
     CAPTION_BLUEPRINT_ORDER,
     DECORATION_BLUEPRINTS,
@@ -15,6 +18,41 @@ from services.media_files.motion_blueprints import (
     validated_palette,
 )
 from services.media_files.motion_design import _validated_design
+from services.media_files.motion_engine import VendorLib
+
+_FAKE_GSAP = b"window.gsap={timeline:function(){return{}}};"
+
+
+@pytest.fixture()
+def stub_gsap_vendor(monkeypatch, tmp_path):
+    """Install a verified stand-in for the pinned GSAP runtime.
+
+    CI never runs the vendor fetch CLI, so blueprint documents (which
+    reference vendor/gsap.min.js) must resolve against a stub file.
+    """
+
+    stub = VendorLib(
+        name="gsap",
+        filename="gsap.min.js",
+        sha256=hashlib.sha256(_FAKE_GSAP).hexdigest(),
+        size_bytes=len(_FAKE_GSAP),
+        source_url="https://example.invalid/gsap.min.js",
+        license_note="test stub",
+    )
+    vendor_dir = tmp_path / "vendor"
+    vendor_dir.mkdir()
+    (vendor_dir / stub.filename).write_bytes(_FAKE_GSAP)
+    monkeypatch.setattr(motion_engine, "VENDOR_LIBS", {"gsap": stub})
+    monkeypatch.setattr(
+        motion_engine,
+        "_LIBS_BY_FILENAME",
+        {stub.filename: stub},
+    )
+    monkeypatch.setenv(
+        "QWENPAW_CREATOR_MOTION_VENDOR_DIR",
+        str(vendor_dir),
+    )
+    return stub
 
 
 class TestBlueprintRendering:
@@ -79,7 +117,7 @@ class TestBlueprintDesignValidation:
         "anchor_y": 0.5,
     }
 
-    def test_caption_blueprint_route_validates(self) -> None:
+    def test_caption_blueprint_route_validates(self, stub_gsap_vendor) -> None:
         design = _validated_design(
             {
                 "concept": "画面取色的逐字弹入卡",
@@ -98,7 +136,10 @@ class TestBlueprintDesignValidation:
         assert motion.html is not None and "window.__hf" in motion.html
         assert motion.loop is False
 
-    def test_decoration_blueprint_route_validates(self) -> None:
+    def test_decoration_blueprint_route_validates(
+        self,
+        stub_gsap_vendor,
+    ) -> None:
         design = _validated_design(
             {
                 "needed": True,
@@ -134,7 +175,10 @@ class TestBlueprintDesignValidation:
                 canvas_size=(1280, 720),
             )
 
-    def test_blueprint_satisfies_verbatim_text_gate(self) -> None:
+    def test_blueprint_satisfies_verbatim_text_gate(
+        self,
+        stub_gsap_vendor,
+    ) -> None:
         # stagger_pop wraps every character in its own tag; the verbatim
         # gate strips markup so the copy must still read through.
         design = _validated_design(
