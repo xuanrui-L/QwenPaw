@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import { message } from "antd";
+import { useTranslation } from "react-i18next";
 import {
   AudioWaveform,
   Blend,
@@ -157,6 +158,7 @@ export default function TimelineTracks({
   onCommitSpans,
   onZoomChange,
 }: TimelineTracksProps) {
+  const { t } = useTranslation();
   const [selection, setSelection] = useState<TimelineSelection | null>(null);
   const [toolbarPos, setToolbarPos] = useState<{
     left: number;
@@ -925,11 +927,11 @@ export default function TimelineTracks({
           >
             <div className="relative flex h-7 border-b border-[var(--color-border)]">
               <div className="sticky left-0 z-30 flex w-[68px] shrink-0 items-center border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] pl-2.5 text-[10px] text-[var(--color-text-tertiary)]">
-                轨道
+                {t("timeline.trackLabel")}
               </div>
               <div
                 data-timeline-scale
-                title="点击或拖动定位播放头"
+                title={t("timeline.rulerScrub")}
                 onPointerDown={beginRulerScrub}
                 onPointerMove={moveRulerScrub}
                 onPointerUp={endRulerScrub}
@@ -987,11 +989,11 @@ export default function TimelineTracks({
             {collapsed ? (
               <div className="relative flex h-8 border-b border-[var(--color-border)]/65">
                 <div className="sticky left-0 z-30 flex w-[68px] shrink-0 items-center border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] pl-2.5 text-[10px] font-semibold text-[var(--color-text-tertiary)]">
-                  概览
+                  {t("timeline.overview")}
                 </div>
                 <div
                   className="relative min-w-0 flex-1"
-                  aria-label="紧凑时间轴概览；点击任意时刻查看同时出现的内容"
+                  aria-label={t("timeline.compactOverviewAriaLabel")}
                 >
                   {Object.values(timeline.elements_by_id).map((element) => {
                     const meta = resolveElementVisualMeta(element);

@@ -40,6 +40,7 @@ import PageLoadError from "@/components/PageLoadError";
 import PageSkeleton from "@/components/PageSkeleton";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import { visualVariantLabel } from "@/lib/visualVariants";
+import { useTranslation } from "react-i18next";
 
 type FilterKey =
   | "all"
@@ -85,14 +86,14 @@ type AssetItemGroup = {
   items: AssetItem[];
 };
 
-const FILTERS: Array<{ key: FilterKey; label: string }> = [
-  { key: "all", label: "全部" },
-  { key: "source", label: "来源素材" },
-  { key: "artifact", label: "生成产物" },
-  { key: "visual", label: "视觉设定" },
-  { key: "image", label: "图片" },
-  { key: "video", label: "视频" },
-  { key: "audio", label: "音频" },
+const FILTERS: Array<{ key: FilterKey; labelKey: string }> = [
+  { key: "all", labelKey: "assets.all" },
+  { key: "source", labelKey: "assets.source" },
+  { key: "artifact", labelKey: "assets.artifact" },
+  { key: "visual", labelKey: "assets.visual" },
+  { key: "image", labelKey: "assets.image" },
+  { key: "video", labelKey: "assets.video" },
+  { key: "audio", labelKey: "assets.audio" },
 ];
 
 function fileMedia(
@@ -470,15 +471,15 @@ function visualItemGroups(
   ];
 }
 
-function kindLabel(item: AssetItem): string {
-  if (item.kind === "source") return "来源";
-  if (item.kind === "artifact") return "产物";
+function kindLabel(item: AssetItem, t: (key: string) => string): string {
+  if (item.kind === "source") return t("assets.sourceLabel");
+  if (item.kind === "artifact") return t("assets.artifactLabel");
   const entity = item.raw as VisualEntityDocument;
   return entity.kind === "character"
-    ? "角色"
+    ? t("assets.character")
     : entity.kind === "scene"
-    ? "场景"
-    : "道具";
+    ? t("assets.scene")
+    : t("assets.prop");
 }
 
 function mediaIcon(kind: string) {
@@ -679,6 +680,7 @@ function GenerationPromptEditor({
   onSave: (target: PromptTarget, next: string) => Promise<void>;
   saving: boolean;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState(target.value);
   const dirty = draft !== target.value;
   return (
@@ -695,7 +697,7 @@ function GenerationPromptEditor({
         <div className="flex gap-1.5">
           {dirty && (
             <Button size="small" onClick={() => setDraft(target.value)}>
-              还原
+              {t("common.reset")}
             </Button>
           )}
           <Button
@@ -705,7 +707,7 @@ function GenerationPromptEditor({
             loading={saving}
             onClick={() => void onSave(target, draft)}
           >
-            保存
+            {t("common.save")}
           </Button>
         </div>
       </div>
@@ -713,17 +715,18 @@ function GenerationPromptEditor({
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         autoSize={{ minRows: 3, maxRows: 10 }}
-        placeholder="该产物的生成 Prompt"
+        placeholder={t("assets.promptPlaceholder")}
         className="!text-xs"
       />
       <p className="mt-1.5 text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-        修改后保存即写入项目；下次生成将使用新 Prompt。
+        {t("assets.promptSaveHint")}
       </p>
     </div>
   );
 }
 
 export default function AssetsPage() {
+  const { t } = useTranslation();
   const { id = "" } = useParams();
   const query = useSearchParams();
   const project = useProjectSnapshotStore((state) =>
@@ -821,10 +824,10 @@ export default function AssetsPage() {
     setUploading(true);
     try {
       await ingestAssetFile(id, file, "ATTACH_SOURCE");
-      message.success("素材已提交，入库完成后会自动出现在这里");
+      message.success(t("assets.uploadSuccess"));
       await refreshAfterIngest();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "上传失败");
+      message.error(error instanceof Error ? error.message : t("assets.uploadFailed"));
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -832,7 +835,7 @@ export default function AssetsPage() {
   };
   const addValue = async () => {
     if (!inputName.trim() || !inputValue.trim()) {
-      message.warning("请填写名称和内容");
+      message.warning(t("assets.fillNameAndContent"));
       return;
     }
     setUploading(true);
@@ -844,14 +847,14 @@ export default function AssetsPage() {
         postIngestAction: "ATTACH_SOURCE",
       });
       message.success(
-        inputKind === "url" ? "链接已提交入库" : "文本素材已提交入库",
+        inputKind === "url" ? t("assets.linkSubmitted") : t("assets.textSubmitted"),
       );
       setAddOpen(false);
       setInputName("");
       setInputValue("");
       await refreshAfterIngest();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "添加失败");
+      message.error(error instanceof Error ? error.message : t("assets.addFailed"));
     } finally {
       setUploading(false);
     }
@@ -861,7 +864,7 @@ export default function AssetsPage() {
     if (syncStatus === "invalid" || syncStatus === "not_found") {
       return (
         <PageLoadError
-          message={syncError || "Project 无法读取"}
+          message={syncError || t("assets.projectReadError")}
           retry={() => void pollOnce(id)}
         />
       );
@@ -874,10 +877,10 @@ export default function AssetsPage() {
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)]/70 px-5 py-3 backdrop-blur">
         <div>
           <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-            素材与产物
+            {t("assets.title")}
           </h2>
           <p className="mt-0.5 text-xs text-[var(--color-text-secondary)]">
-            当前项目中的来源素材、生成结果与视觉设定；时间线内容会引用这里的具体版本。
+            {t("assets.description")}
           </p>
         </div>
         <div
@@ -898,7 +901,7 @@ export default function AssetsPage() {
             icon={<Link2 className="h-3.5 w-3.5" />}
             onClick={() => setAddOpen(true)}
           >
-            添加链接或文本
+            {t("assets.addLinkOrText")}
           </Button>
           <Button
             size="small"
@@ -906,7 +909,7 @@ export default function AssetsPage() {
             icon={<Upload className="h-3.5 w-3.5" />}
             onClick={() => fileInputRef.current?.click()}
           >
-            上传素材
+            {t("assets.uploadAsset")}
           </Button>
         </div>
       </header>
@@ -927,7 +930,7 @@ export default function AssetsPage() {
                   : "border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/50"
               }`}
             >
-              {candidate.label}
+              {t(candidate.labelKey)}
             </button>
           ))}
         </div>
@@ -936,12 +939,12 @@ export default function AssetsPage() {
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="搜索名称或 ID"
+            placeholder={t("assets.searchNameOrId")}
             className="min-w-0 flex-1 border-0 bg-transparent px-2 py-1.5 text-xs outline-none"
           />
         </div>
         <span className="text-[11px] text-[var(--color-text-tertiary)]">
-          {items.length} 项
+          {t("assets.items", { count: items.length })}
         </span>
       </div>
 
@@ -1006,7 +1009,7 @@ export default function AssetsPage() {
                             <Icon className="pointer-events-none absolute h-6 w-6 -translate-y-3 text-[var(--color-text-tertiary)]" />
                           )}
                           <span className="absolute left-2 top-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                            {kindLabel(item)}
+                            {kindLabel(item, t)}
                           </span>
                           <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
                             {item.variantState && (
@@ -1020,15 +1023,15 @@ export default function AssetsPage() {
                                 }`}
                               >
                                 {item.variantState === "active"
-                                  ? "使用中"
+                                  ? t("assets.active")
                                   : item.variantState === "history"
-                                  ? "历史"
-                                  : "未选择"}
+                                  ? t("assets.history")
+                                  : t("assets.unselected")}
                               </span>
                             )}
                             {item.stale && (
                               <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                                过期
+                                {t("assets.stale")}
                               </span>
                             )}
                           </div>
@@ -1061,10 +1064,10 @@ export default function AssetsPage() {
             <div className="flex h-full min-h-64 flex-col items-center justify-center text-center text-[var(--color-text-tertiary)]">
               <Paperclip className="mb-3 h-8 w-8 opacity-50" />
               <p className="text-sm font-medium text-[var(--color-text-secondary)]">
-                当前筛选下没有素材
+                {t("assets.noAssets")}
               </p>
               <p className="mt-1 text-xs">
-                上传来源素材，或让 Agent 根据时间轴生成画面与成片。
+                {t("assets.noAssetsDesc")}
               </p>
             </div>
           )}
@@ -1108,11 +1111,11 @@ export default function AssetsPage() {
                 <div>
                   <div className="flex items-center gap-2">
                     <span className="rounded bg-[var(--color-accent-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent)]">
-                      {kindLabel(selected)}
+                      {kindLabel(selected, t)}
                     </span>
                     {selected.stale && (
                       <span className="text-[10px] font-semibold text-amber-600">
-                        已过期
+                        {t("assets.expired")}
                       </span>
                     )}
                   </div>
@@ -1125,17 +1128,17 @@ export default function AssetsPage() {
                 </div>
                 <dl className="space-y-2 text-xs">
                   {[
-                    ["引用", selected.ref],
-                    ["媒体", selected.mediaType || selected.mediaKind],
+                    [t("assets.ref"), selected.ref],
+                    [t("assets.media"), selected.mediaType || selected.mediaKind],
                     [
-                      "时长",
+                      t("common.duration"),
                       selected.durationSeconds == null
                         ? "—"
                         : `${selected.durationSeconds.toFixed(2)}s`,
                     ],
                     ["Owner", selected.ownerRef || "—"],
                     [
-                      "创建时间",
+                      t("assets.createdTime"),
                       selected.createdAt
                         ? new Date(selected.createdAt).toLocaleString("zh-CN")
                         : "—",
@@ -1166,7 +1169,7 @@ export default function AssetsPage() {
                   return (
                     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3">
                       <div className="mb-2 text-[11px] font-semibold text-[var(--color-text-secondary)]">
-                        引用参考图
+                        {t("assets.provenanceRef")}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {resolved.map((entry) => {
@@ -1210,7 +1213,7 @@ export default function AssetsPage() {
                 {Object.keys(selected.metadata).length > 0 && (
                   <details className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3 text-xs">
                     <summary className="cursor-pointer font-semibold text-[var(--color-text-secondary)]">
-                      元数据
+                      {t("assets.metadata")}
                     </summary>
                     <dl className="mt-2 space-y-1.5">
                       {Object.entries(selected.metadata).map(([key, value]) => (
@@ -1251,10 +1254,10 @@ export default function AssetsPage() {
                               value: next,
                             },
                           ]);
-                          message.success("生成 Prompt 已保存");
+                          message.success(t("assets.promptSaved"));
                         } catch (error) {
                           message.error(
-                            `保存失败：${(error as Error).message}`,
+                            t("assets.saveFailed", { detail: (error as Error).message }),
                           );
                         }
                       }}
@@ -1274,7 +1277,7 @@ export default function AssetsPage() {
                         )
                       }
                     >
-                      进入该视频的 R2V 工作台
+                      {t("assets.enterR2VWorkbench")}
                     </Button>
                   )}
                 <div className="flex gap-2">
@@ -1289,7 +1292,7 @@ export default function AssetsPage() {
                         fetch(selected.previewUrl!)
                           .then((res) => {
                             if (!res.ok)
-                              throw new Error(`下载失败（${res.status}）`);
+                              throw new Error(t("assets.downloadFailed", { status: res.status }));
                             return res.blob();
                           })
                           .then((blob) => {
@@ -1304,16 +1307,16 @@ export default function AssetsPage() {
                             message.error(
                               error instanceof Error
                                 ? error.message
-                                : "下载失败",
+                                : t("assets.downloadFailedGeneric"),
                             );
                           });
                       }}
                     >
-                      下载
+                      {t("common.download")}
                     </Button>
                   )}
                   <Button className="flex-1" onClick={() => selectItem(null)}>
-                    关闭
+                    {t("common.close")}
                   </Button>
                 </div>
               </div>
@@ -1322,10 +1325,10 @@ export default function AssetsPage() {
             <div className="flex h-full min-h-64 flex-col items-center justify-center px-8 text-center">
               <Box className="mb-3 h-8 w-8 text-[var(--color-text-tertiary)] opacity-50" />
               <p className="text-sm font-medium text-[var(--color-text-secondary)]">
-                选择一项查看详情
+                {t("assets.selectDetail")}
               </p>
               <p className="mt-1 text-xs leading-5 text-[var(--color-text-tertiary)]">
-                这里显示 Project 内实际保存的版本、引用与产物状态。
+                {t("assets.selectDetailDesc")}
               </p>
             </div>
           )}
@@ -1333,11 +1336,11 @@ export default function AssetsPage() {
       </main>
 
       <Modal
-        title="添加来源素材"
+        title={t("assets.addSourceAsset")}
         open={addOpen}
         confirmLoading={uploading}
-        okText="提交入库"
-        cancelText="取消"
+        okText={t("assets.submitToAssets")}
+        cancelText={t("common.cancel")}
         onOk={() => void addValue()}
         onCancel={() => setAddOpen(false)}
       >
@@ -1345,22 +1348,22 @@ export default function AssetsPage() {
           activeKey={inputKind}
           onChange={(key) => setInputKind(key as "url" | "text")}
           items={[
-            { key: "url", label: "链接" },
-            { key: "text", label: "文本" },
+            { key: "url", label: t("assets.link") },
+            { key: "text", label: t("assets.text") },
           ]}
         />
         <div className="space-y-3">
           <Input
             value={inputName}
             onChange={(event) => setInputName(event.target.value)}
-            placeholder="素材名称"
+            placeholder={t("assets.assetName")}
           />
           <Input.TextArea
             value={inputValue}
             onChange={(event) => setInputValue(event.target.value)}
             autoSize={{ minRows: inputKind === "url" ? 2 : 6, maxRows: 10 }}
             placeholder={
-              inputKind === "url" ? "https://…" : "粘贴脚本、要求或其他文本素材"
+              inputKind === "url" ? t("assets.linkPlaceholder") : t("assets.textPlaceholder")
             }
           />
         </div>

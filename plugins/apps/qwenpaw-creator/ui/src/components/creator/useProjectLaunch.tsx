@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Modal, message } from "antd";
 import type {
   CreatorContentPart,
@@ -37,35 +38,32 @@ export const MODES = [
 
 export const AUTO_PROJECT_NAME_LENGTH = 20;
 
-export const SCENARIO_OPTIONS: { key: CreatorScenario; label: string }[] = [
-  { key: "short_drama", label: "短剧" },
-  { key: "video_edit", label: "剪辑" },
-  { key: "general", label: "通用" },
+export const SCENARIO_OPTIONS: { key: CreatorScenario; labelKey: string }[] = [
+  { key: "short_drama", labelKey: "scenario.shortDrama" },
+  { key: "video_edit", labelKey: "scenario.editing" },
+  { key: "general", labelKey: "scenario.general" },
 ];
 
-export const SCENARIO_TERMS: Record<CreatorScenario, { description: string }> =
+export const SCENARIO_TERMS: Record<CreatorScenario, { descriptionKey: string }> =
   {
     general: {
-      description:
-        '例：以"我在马路边，捡到一分钱"的儿歌歌词为故事内容，做一个1分钟视频。',
+      descriptionKey: "scenario.exampleGeneral",
     },
     short_drama: {
-      description:
-        "例：霸道总裁短剧。要突出快节奏，强化戏剧冲突，故事要有高频反转，最后要有个美好结局。",
+      descriptionKey: "scenario.exampleShortDrama",
     },
     video_edit: {
-      description:
-        "例：把我上传的这段黑白默片老电影，剪辑成一段新视频。新视频长度为30秒。新视频要用彩色图像替换到原有的黑白图像。新视频要给人物加上合适的中文配音。",
+      descriptionKey: "scenario.exampleEditing",
     },
   };
 
-export const CONTENT_TYPE_OPTIONS: { key: string; label: string }[] = [
-  { key: "pet_video", label: "宠物" },
-  { key: "gaming", label: "游戏" },
-  { key: "sports", label: "体育" },
-  { key: "travel_vlog", label: "旅行" },
-  { key: "interview", label: "采访" },
-  { key: "general", label: "通用" },
+export const CONTENT_TYPE_OPTIONS: { key: string; labelKey: string }[] = [
+  { key: "pet_video", labelKey: "scenario.pet" },
+  { key: "gaming", labelKey: "scenario.game" },
+  { key: "sports", labelKey: "scenario.sports" },
+  { key: "travel_vlog", labelKey: "scenario.travel" },
+  { key: "interview", labelKey: "scenario.interview" },
+  { key: "general", labelKey: "scenario.generalType" },
 ];
 
 const terminal = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "QUARANTINED"]);
@@ -135,6 +133,7 @@ function remoteUrlContentPart(url: string): CreatorContentPart {
  * folder / URL), required-model validation and the idempotent launch flow.
  */
 export function useProjectLaunch(options?: { onLaunched?: () => void }) {
+  const { t } = useTranslation();
   const onLaunched = options?.onLaunched;
   const router = useRouter();
   const [projectName, setProjectName] = useState("");
@@ -207,7 +206,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
     if (oversized.length > 0) {
       const errorMessage = `${oversized.map((f) => f.name).join("\n")}`;
       Modal.error({
-        title: "文件尺寸超过 100MB 限制",
+        title: t("home.fileSizeLimit"),
         content: <div style={{ whiteSpace: "pre-wrap" }}>{errorMessage}</div>,
       });
       return true;
@@ -240,7 +239,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
     const url = urlDraft.trim();
     if (!url) return;
     if (!/^https?:\/\//i.test(url)) {
-      message.warning("请输入以 http(s):// 开头的链接");
+      message.warning(t("home.urlFormatError"));
       return;
     }
     setAttachments((prev) => [
@@ -269,28 +268,28 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
   };
 
   const launchHint = () => {
-    if (!projectDescription.trim()) return "请用文字描述你的目标";
-    if (isVideoEdit && contentType === null) return "请选择视频剪辑的内容类型";
-    if (hasMissingModels) return "请先配置当前场景必选的模型";
+    if (!projectDescription.trim()) return t("home.inputPlaceholder");
+    if (isVideoEdit && contentType === null) return t("home.selectContentType");
+    if (hasMissingModels) return t("home.configureRequiredModel");
     return undefined;
   };
 
   const handleLaunch = async () => {
     if (!projectDescription.trim()) {
-      message.warning("请先用文字描述你的目标，附件会作为项目资产入库");
+      message.warning(t("home.describeTargetFirst"));
       return;
     }
     if (isVideoEdit && contentType === null) {
-      message.warning("请选择视频剪辑的内容类型");
+      message.warning(t("home.selectContentType"));
       return;
     }
     if (hasMissingModels) {
-      message.warning("请先配置当前场景必选的模型");
+      message.warning(t("home.configureRequiredModel"));
       return;
     }
     const pendingUrl = urlDraft.trim();
     if (pendingUrl && !/^https?:\/\//i.test(pendingUrl)) {
-      message.warning("URL 格式不正确，请以 http:// 或 https:// 开头");
+      message.warning(t("home.urlFormatError"));
       return;
     }
     setLaunching(true);
@@ -482,7 +481,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
       initialMessageRequests.current.clear();
       sourceRequestIds.current.clear();
     } catch (error) {
-      message.error((error as Error).message || "启动失败");
+      message.error((error as Error).message || t("home.launchFailed"));
     } finally {
       setLaunching(false);
     }

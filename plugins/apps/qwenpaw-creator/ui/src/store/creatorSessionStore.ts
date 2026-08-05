@@ -22,6 +22,7 @@ import {
   isTechnicalControlText,
   isUserAuthorityMessage,
 } from "@/lib/creatorMessagePresentation";
+import i18n from "@/i18n";
 
 const conversationRetryIds = new Map<string, string>();
 
@@ -764,7 +765,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
 
       newConversation: async () => {
         const { projectId, activeConversationId } = get();
-        if (!projectId) throw new Error("Creator Session 尚未初始化");
+        if (!projectId) throw new Error(i18n.t("store.sessionNotInit"));
         const created = await createStableConversation(projectId);
         if (
           get().projectId !== projectId ||
@@ -852,7 +853,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       sendMessage: async (input) => {
         const { projectId, session, activeConversationId } = get();
         if (!projectId || !session || !activeConversationId)
-          throw new Error("Creator Session 尚未初始化");
+          throw new Error(i18n.t("store.sessionNotInit"));
         const text =
           input.message ??
           input.content?.find((part) => part.type === "text")?.text ??
@@ -1501,7 +1502,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                           ...activity,
                           completed: true,
                           terminalKind: "CANCELLED" as const,
-                          summaryText: activity.summaryText ?? "用户中止",
+                          summaryText: activity.summaryText ?? i18n.t("store.userAbort"),
                           terminalEventSeq: event.seq,
                         },
                       };

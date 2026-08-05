@@ -27,6 +27,7 @@ import {
   InterviewSummaryBox,
   PetOsBubble,
 } from "@/components/timeline/OverlayCopyLayer";
+import { useTranslation } from "react-i18next";
 
 interface TimelineLivePreviewProps {
   project: ProjectDocument;
@@ -111,6 +112,7 @@ function mediaTargetSeconds(
 }
 
 function PlaceholderLayer({ layer }: { layer: ElementPlayback }) {
+  const { t } = useTranslation();
   const { element, status } = layer;
   const meta = resolveElementVisualMeta(element);
   const label = ELEMENT_PLAYBACK_STATUS_LABEL[status];
@@ -139,7 +141,7 @@ function PlaceholderLayer({ layer }: { layer: ElementPlayback }) {
           className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
           style={{ color: meta.color, background: `${meta.color}26` }}
         >
-          {meta.label} · {status === "generating" ? "画面生成中…" : label}
+          {meta.label} · {status === "generating" ? t("livePreview.generating") : label}
         </span>
         {status === "generating" && (
           <div className="agent-working-shimmer mt-1 h-1 w-32 rounded-full bg-white/15" />
@@ -271,6 +273,7 @@ function MotionOverlayLayer({
   onVisualReadyChange: (visualKey: string, ready: boolean) => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const { t } = useTranslation();
   const { element } = layer;
   const motion =
     element.creation.type === "overlay" ? element.creation.motion : null;
@@ -314,7 +317,7 @@ function MotionOverlayLayer({
       ref={iframeRef}
       data-live-motion-overlay={element.element_id}
       srcDoc={motionPreviewDocument(motion.html, isTextOverlay)}
-      title={element.label || "动态动效"}
+      title={element.label || t("livePreview.motionEffect")}
       // No scripts allowed; allow-same-origin exists only so the parent page
       // can sync the CSS animation timeline.
       sandbox="allow-same-origin"
@@ -351,6 +354,7 @@ export default function TimelineLivePreview({
   onPlayheadChange,
   onPlayingChange,
 }: TimelineLivePreviewProps) {
+  const { t } = useTranslation();
   const ticksPerSecond = timeline.ticks_per_second || 1;
   const mediaRefs = useRef(new Map<string, HTMLVideoElement>());
   const imageRefs = useRef(new Map<string, HTMLImageElement>());
@@ -636,7 +640,7 @@ export default function TimelineLivePreview({
       >
         {!anyVisible && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-white/55">
-            该时刻还没有画面内容
+            {t("livePreview.noContentYet")}
           </div>
         )}
         {layers.map((layer) => {
@@ -747,13 +751,13 @@ export default function TimelineLivePreview({
             <Loader2 className="h-7 w-7 animate-spin text-white/75" />
             <span className="text-sm font-semibold text-white/90">
               {semanticIncompleteLayers.length > 0
-                ? "该时间点尚未渲染完成"
-                : "正在定位画面"}
+                ? t("livePreview.notRenderedYet")
+                : t("livePreview.locating")}
             </span>
             <span className="max-w-md text-xs leading-5 text-white/60">
               {semanticIncompleteLayers.length > 0
-                ? `${incompleteLayerCount} 个图层仍在生成、排队或等待重新渲染，完整画面就绪后才能预览。`
-                : "已渲染内容加载寻帧中，画面就绪后立即显示，无需重新渲染。"}
+                ? `${incompleteLayerCount} ${t("livePreview.layersGenerating")}`
+                : t("livePreview.loadingFrame")}
             </span>
           </div>
         )}

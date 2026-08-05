@@ -234,7 +234,7 @@ describe("origin/main visible shell fidelity", () => {
       "!border-x-0",
       "!bg-transparent",
     );
-    expect(screen.getByPlaceholderText(/^目标描述：/)).toHaveClass(
+    expect(screen.getByPlaceholderText(/^例：霸道总裁短剧/)).toHaveClass(
       "!border-none",
       "!p-4",
     );

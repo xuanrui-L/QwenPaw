@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Alert, Button, Input, InputNumber, Select } from "antd";
+import { useTranslation } from "react-i18next";
 import {
   ArrowUpRight,
   Box,
@@ -105,34 +106,36 @@ const TRANSITION_KIND_OPTIONS = [
   label: `${TRANSITION_KIND_LABEL[kind]}（${kind}）`,
 }));
 
-const TRANSITION_EASING_OPTIONS = [
-  { value: "linear", label: "匀速（linear）" },
-  { value: "ease-in", label: "渐入（ease-in）" },
-  { value: "ease-out", label: "渐出（ease-out）" },
-  { value: "ease-in-out", label: "缓入缓出（ease-in-out）" },
-];
+function getTransitionEasingOptions(t: (key: string) => string) {
+  return [
+    { value: "linear", label: t("elementDetail.easingOptions.linear") },
+    { value: "ease-in", label: t("elementDetail.easingOptions.easeIn") },
+    { value: "ease-out", label: t("elementDetail.easingOptions.easeOut") },
+    { value: "ease-in-out", label: t("elementDetail.easingOptions.easeInOut") },
+  ];
+}
 
-function taskStatus(element: TimelineElementDocument, tasks: TaskView[]) {
+function taskStatus(element: TimelineElementDocument, tasks: TaskView[], t: (key: string) => string) {
   const task = tasks.find(
     (item) => item.targetRef === `element:${element.element_id}`,
   );
   if (task?.status === "RUNNING" || task?.status === "QUEUED")
     return {
-      label: task.status === "RUNNING" ? "生成中" : "等待中",
+      label: task.status === "RUNNING" ? t("elementDetail.generating") : t("elementDetail.waiting"),
       tone: "text-[var(--color-warning)] bg-[var(--color-warning-soft)]",
     };
   if (task?.status === "FAILED" || task?.status === "QUARANTINED")
     return {
-      label: "生成失败",
+      label: t("elementDetail.genFailed"),
       tone: "text-[var(--color-danger)] bg-[var(--color-danger-soft)]",
     };
   if (Object.keys(element.outputs).length)
     return {
-      label: "已有产物",
+      label: t("elementDetail.hasProduct"),
       tone: "text-[var(--color-success)] bg-[var(--color-success-soft)]",
     };
   return {
-    label: "可编辑",
+    label: t("elementDetail.editable"),
     tone: "text-[var(--color-text-secondary)] bg-[var(--color-bg-secondary)]",
   };
 }
@@ -141,14 +144,16 @@ function sec(tick: number, ticksPerSecond: number): number {
   return Number((tick / ticksPerSecond).toFixed(3));
 }
 
-const LOCATION_FIELDS = {
-  x: "水平位置（%）",
-  y: "垂直位置（%）",
-  width: "画面宽度（%）",
-  height: "画面高度（%）",
-  rotation_degrees: "旋转角度（°）",
-  opacity: "不透明度（%）",
-} as const;
+function getLocationFields(t: (key: string) => string) {
+  return {
+    x: t("elementDetail.xPosition"),
+    y: t("elementDetail.yPosition"),
+    width: t("elementDetail.width"),
+    height: t("elementDetail.height"),
+    rotation_degrees: t("elementDetail.rotation"),
+    opacity: t("elementDetail.opacity"),
+  } as const;
+}
 
 export default function ElementDetail({
   project,
@@ -165,6 +170,7 @@ export default function ElementDetail({
   onAcceptConflicts,
   onOpenWorkbench,
 }: ElementDetailProps) {
+  const { t } = useTranslation();
   const outputs = useMemo(
     () => (element ? resolveElementOutputs(project, element) : []),
     [element, project],
@@ -179,10 +185,10 @@ export default function ElementDetail({
         <div className="max-w-sm px-8 text-center">
           <Layers3 className="mx-auto mb-3 h-8 w-8 text-[var(--color-text-tertiary)]" />
           <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
-            选择一项时间线内容
+            {t("elementDetail.selectElement")}
           </h3>
           <p className="mt-2 text-xs leading-5 text-[var(--color-text-secondary)]">
-            可从左侧列表或上方时间轴选择，查看其简介、创作方式、位置和产物。
+            {t("elementDetail.selectElementDesc")}
           </p>
         </div>
       </section>
@@ -190,7 +196,7 @@ export default function ElementDetail({
   }
 
   const meta = resolveElementVisualMeta(element);
-  const status = taskStatus(element, tasks);
+  const status = taskStatus(element, tasks, t);
   const baseSegments = [
     "timelines",
     "items",
@@ -232,7 +238,7 @@ export default function ElementDetail({
             onClick={onDiscard}
             className="!h-[22px] !px-2 !font-[inherit] !text-[11px] !font-semibold !leading-[20px]"
           >
-            放弃修改
+            {t("elementDetail.discardChanges")}
           </Button>
           <Button
             size="small"
@@ -242,11 +248,11 @@ export default function ElementDetail({
             onClick={onApply}
             className="!h-[22px] !px-2 !font-[inherit] !text-[11px] !font-semibold !leading-[20px]"
           >
-            {dirtyCount > 0 ? `应用修改（${dirtyCount}）` : "应用修改"}
+            {dirtyCount > 0 ? t("elementDetail.applyChangesCount", { count: dirtyCount }) : t("elementDetail.applyChanges")}
           </Button>
           {!element.enabled && (
             <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">
-              已停用
+              {t("elementDetail.disabled")}
             </span>
           )}
           <span
@@ -259,7 +265,7 @@ export default function ElementDetail({
             type="button"
             onClick={onClose}
             className="icon-button"
-            aria-label="关闭内容详情"
+            aria-label={t("elementDetail.closeDetail")}
           >
             <X className="h-4 w-4" />
           </button>
@@ -271,14 +277,14 @@ export default function ElementDetail({
           <Alert
             type="warning"
             showIcon
-            message="这些字段在编辑期间被其他操作更新"
+            message={t("elementDetail.conflictTitle")}
             description={
               <div className="space-y-2">
                 <p>
-                  本地草稿仍然保留。确认使用本地修改覆盖最新值后，才能应用。
+                  {t("elementDetail.conflictDesc")}
                 </p>
                 <Button size="small" onClick={onAcceptConflicts}>
-                  使用我的修改
+                  {t("elementDetail.useMyChanges")}
                 </Button>
               </div>
             }
@@ -288,12 +294,12 @@ export default function ElementDetail({
           <div className="mb-3">
             <h4 className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
               <Clock3 className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-              时间与层级
+              {t("elementDetail.timeAndLayer")}
             </h4>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
             <label>
-              <FieldLabel>开始时间（秒）</FieldLabel>
+              <FieldLabel>{t("elementDetail.startTime")}</FieldLabel>
               <InputNumber
                 className="w-full"
                 min={0}
@@ -311,7 +317,7 @@ export default function ElementDetail({
               />
             </label>
             <label>
-              <FieldLabel>持续时间（秒）</FieldLabel>
+              <FieldLabel>{t("elementDetail.durationLabel")}</FieldLabel>
               <InputNumber
                 className="w-full"
                 min={1 / timeline.ticks_per_second}
@@ -333,7 +339,7 @@ export default function ElementDetail({
               />
             </label>
             <label>
-              <FieldLabel>叠放顺序</FieldLabel>
+              <FieldLabel>{t("elementDetail.zIndex")}</FieldLabel>
               <InputNumber
                 className="w-full"
                 disabled={applying}
@@ -349,7 +355,7 @@ export default function ElementDetail({
           </div>
           <div className="mt-3">
             <TextField
-              label="名称"
+              label={t("elementDetail.nameLabel")}
               value={element.label}
               path={pointer("label")}
               field={`element:${element.element_id}/label`}
@@ -367,7 +373,7 @@ export default function ElementDetail({
           <section className="rounded-xl border border-[var(--color-border)] p-3">
             <h4 className="mb-3 flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
               <Box className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-              成片画面位置
+              {t("elementDetail.positionInFrame")}
             </h4>
             <div className="grid gap-4 lg:grid-cols-[180px_minmax(0,1fr)]">
               <div className="flex min-h-40 items-center justify-center rounded-lg bg-[#191613] p-3">
@@ -419,7 +425,7 @@ export default function ElementDetail({
                   ] as const
                 ).map((key) => (
                   <label key={key}>
-                    <FieldLabel>{LOCATION_FIELDS[key]}</FieldLabel>
+                    <FieldLabel>{getLocationFields(t)[key]}</FieldLabel>
                     <InputNumber
                       className="w-full"
                       step={1}
@@ -458,12 +464,12 @@ export default function ElementDetail({
         <section className="rounded-xl border border-[var(--color-border)] p-3">
           <h4 className="mb-3 flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
             <Sparkles className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-            创作内容
+            {t("elementDetail.creationContent")}
           </h4>
           {creation.type === "r2v" && (
             <div className="space-y-3">
               <TextField
-                label="创作意图"
+                label={t("elementDetail.intent")}
                 value={creation.intent}
                 multiline
                 path={pointer("creation", "intent")}
@@ -477,7 +483,7 @@ export default function ElementDetail({
                 }
               />
               <TextField
-                label="叙事"
+                label={t("elementDetail.narrative")}
                 value={creation.narrative}
                 multiline
                 path={pointer("creation", "narrative")}
@@ -491,7 +497,7 @@ export default function ElementDetail({
                 }
               />
               <TextField
-                label="分镜描述"
+                label={t("elementDetail.storyboardDesc")}
                 value={creation.storyboard_prompt}
                 multiline
                 path={pointer("creation", "storyboard_prompt")}
@@ -505,7 +511,7 @@ export default function ElementDetail({
                 }
               />
               <TextField
-                label="画面生成描述"
+                label={t("elementDetail.videoDesc")}
                 value={creation.video_prompt}
                 multiline
                 path={pointer("creation", "video_prompt")}
@@ -520,7 +526,7 @@ export default function ElementDetail({
               />
               {creation.shots.order.length > 0 && (
                 <div>
-                  <FieldLabel>分镜</FieldLabel>
+                  <FieldLabel>{t("elementDetail.storyboards")}</FieldLabel>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {creation.shots.order.map((shotId, index) => {
                       const shot = creation.shots.items[shotId];
@@ -546,7 +552,7 @@ export default function ElementDetail({
           {creation.type === "edit" && (
             <div className="space-y-3">
               <TextField
-                label="剪辑意图"
+                label={t("elementDetail.editIntent")}
                 value={creation.intent}
                 multiline
                 path={pointer("creation", "intent")}
@@ -560,7 +566,7 @@ export default function ElementDetail({
                 }
               />
               <TextField
-                label="选择理由"
+                label={t("elementDetail.reason")}
                 value={creation.reason}
                 multiline
                 path={pointer("creation", "reason")}
@@ -580,30 +586,30 @@ export default function ElementDetail({
                     title={decodeURIComponent(
                       project.assets.source_versions_by_id[
                         element.render_source.version_id
-                      ]?.name || "当前素材",
+                       ]?.name || t("elementDetail.currentSource"),
                     )}
                   >
                     {decodeURIComponent(
                       project.assets.source_versions_by_id[
                         element.render_source.version_id
-                      ]?.name || "当前素材",
+                      ]?.name || t("elementDetail.currentSource"),
                     )}
                   </b>
                   <br />
-                  选用{" "}
+                  {t("elementDetail.using")}{" "}
                   {sec(
                     element.render_source.source_in_tick,
                     timeline.ticks_per_second,
                   )}
                   s –{" "}
                   {element.render_source.source_out_tick == null
-                    ? "结尾"
+                    ? t("elementDetail.end")
                     : `${sec(
                         element.render_source.source_out_tick,
                         timeline.ticks_per_second,
                       )}s`}
                   {" · "}
-                  {element.render_source.playback_rate} 倍速
+                  {element.render_source.playback_rate} {t("elementDetail.speed")}
                 </div>
               )}
             </div>
@@ -611,7 +617,7 @@ export default function ElementDetail({
           {creation.type === "overlay" && (
             <div className="space-y-3">
               <TextField
-                label="文本"
+                label={t("elementDetail.textLabel")}
                 value={creation.text}
                 multiline
                 path={pointer("creation", "text")}
@@ -625,7 +631,7 @@ export default function ElementDetail({
                 }
               />
               <TextField
-                label="动效描述"
+                label={t("elementDetail.effectDesc")}
                 value={creation.prompt}
                 multiline
                 path={pointer("creation", "prompt")}
@@ -644,10 +650,10 @@ export default function ElementDetail({
             <div className="space-y-3">
               <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
                 {timeline.elements_by_id[creation.from_element_id]?.label ||
-                  "前一画面"}{" "}
+                  t("elementDetail.previousFrame")}{" "}
                 →{" "}
                 {timeline.elements_by_id[creation.to_element_id]?.label ||
-                  "后一画面"}
+                  t("elementDetail.nextFrame")}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <label
@@ -655,7 +661,7 @@ export default function ElementDetail({
                   data-creator-path={pointer("creation", "transition_kind")}
                   className="block"
                 >
-                  <FieldLabel>转场类型</FieldLabel>
+                  <FieldLabel>{t("elementDetail.transitionType")}</FieldLabel>
                   <Select
                     className="w-full"
                     disabled={applying}
@@ -686,19 +692,19 @@ export default function ElementDetail({
                   data-creator-path={pointer("creation", "easing")}
                   className="block"
                 >
-                  <FieldLabel>缓动</FieldLabel>
+                  <FieldLabel>{t("elementDetail.easing")}</FieldLabel>
                   <Select
                     className="w-full"
                     disabled={applying}
                     value={creation.easing}
                     options={
-                      TRANSITION_EASING_OPTIONS.some(
+                      getTransitionEasingOptions(t).some(
                         (option) => option.value === creation.easing,
                       )
-                        ? TRANSITION_EASING_OPTIONS
+                        ? getTransitionEasingOptions(t)
                         : [
                             { value: creation.easing, label: creation.easing },
-                            ...TRANSITION_EASING_OPTIONS,
+                            ...getTransitionEasingOptions(t),
                           ]
                     }
                     onChange={(value) =>
@@ -711,19 +717,18 @@ export default function ElementDetail({
                 </label>
               </div>
               <p className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-                转场时长即上方“持续时间”，须落在两端画面的重叠区间内；
-                预览统一以交叉溶解近似展示，成片按所选类型合成。
+                {t("elementDetail.transitionNote")}
               </p>
             </div>
           )}
           {creation.type === "audio" && (
             <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
-              音频素材：
+              {t("elementDetail.audioSource")}
               {project.assets.source_versions_by_id[
                 creation.source_asset_version_id
-              ]?.name || "当前音频"}
+              ]?.name || t("elementDetail.currentAudio")}
               <br />
-              音量 {creation.gain_db} dB · 声像 {creation.pan}
+              {t("elementDetail.volume")} {creation.gain_db} dB · {t("elementDetail.pan")} {creation.pan}
             </div>
           )}
         </section>
@@ -732,11 +737,11 @@ export default function ElementDetail({
           <section className="rounded-xl border border-[var(--color-border)] p-3">
             <h4 className="mb-3 flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
               <Film className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-              生成结果
+              {t("elementDetail.generationResult")}
             </h4>
             {outputs.length === 0 ? (
               <p className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-tertiary)]">
-                当前还没有生成结果。
+                {t("elementDetail.noResult")}
               </p>
             ) : (
               <div className="space-y-3">
@@ -756,7 +761,7 @@ export default function ElementDetail({
                       <div className="flex items-center justify-between gap-2 bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px]">
                         <b>{outputLabel(output.name)}</b>
                         <span className="text-[var(--color-text-tertiary)]">
-                          {output.selected ? "已生成" : "未生成"}
+                          {output.selected ? t("elementDetail.generated") : t("elementDetail.notGenerated")}
                         </span>
                       </div>
                       {url && mediaType.startsWith("image/") && (
@@ -779,7 +784,7 @@ export default function ElementDetail({
                       )}
                       {output.selected?.stale && (
                         <p className="px-3 py-2 text-[10px] text-[var(--color-warning)]">
-                          该结果基于旧版方案，需要重新生成。
+                          {t("elementDetail.resultStale")}
                         </p>
                       )}
                     </div>
@@ -799,7 +804,7 @@ export default function ElementDetail({
             disabled={dirtyCount > 0 || applying}
             onClick={() => onOpenWorkbench(element)}
           >
-            进入 R2V 工作台
+            {t("elementDetail.enterR2VWorkbench")}
           </Button>
         </footer>
       )}

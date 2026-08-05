@@ -17,6 +17,7 @@ import {
   jsonBody,
   newClientId,
 } from "./client";
+import i18n from "@/i18n";
 
 function syncStatus(
   value: unknown,
@@ -92,7 +93,7 @@ export async function getProjectSnapshot(
         message:
           typeof body.message === "string"
             ? body.message
-            : "project.json 未通过校验",
+            : i18n.t("api.projectValidationFailed"),
       };
     }
     throw new CreatorHttpError(response.status, {

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { CircleAlert, CircleCheck } from "lucide-react";
 import type {
   VisualCoverageReport,
@@ -5,24 +6,25 @@ import type {
 } from "@/selectors/visualVariantCoverage";
 import { visualVariantLabel } from "@/lib/visualVariants";
 
-const STATUS_LABEL: Record<VisualCoverageStatus, string> = {
-  covered: "覆盖完成",
-  missing_required_variant: "必需 Variant 尚未定义",
-  unassigned_variant: "Element 未绑定 Variant",
-  missing_artifact: "视觉设定尚无使用中产物",
+const STATUS_LABEL_KEYS: Record<VisualCoverageStatus, string> = {
+  covered: "visualCoverage.covered",
+  missing_required_variant: "visualCoverage.variantUndefined",
+  unassigned_variant: "visualCoverage.elementUnbound",
+  missing_artifact: "visualCoverage.noActiveProduct",
 };
 
-function kindLabel(kind: "character" | "scene" | "prop"): string {
-  if (kind === "character") return "角色";
-  if (kind === "scene") return "场景";
-  return "道具";
-}
+const KIND_LABEL_KEYS: Record<string, string> = {
+  character: "visualCoverage.character",
+  scene: "visualCoverage.scene",
+  prop: "visualCoverage.prop",
+};
 
 export default function VisualCoverageCheckpoint({
   report,
 }: {
   report: VisualCoverageReport;
 }) {
+  const { t } = useTranslation();
   if (!report.total) return null;
   return (
     <details
@@ -39,11 +41,11 @@ export default function VisualCoverageCheckpoint({
         ) : (
           <CircleCheck className="h-4 w-4 text-emerald-600" />
         )}
-        视觉覆盖 {report.covered}/{report.total}
+        {t("visualCoverage.title", { covered: report.covered, total: report.total })}
         <span className="font-normal text-[var(--color-text-secondary)]">
           {report.issueCount
-            ? `· ${report.issueCount} 项需要核对`
-            : "· 所有被引用实体均已绑定产物"}
+            ? t("visualCoverage.issuesToCheck", { count: report.issueCount })
+            : t("visualCoverage.allBound")}
         </span>
       </summary>
       <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -58,12 +60,12 @@ export default function VisualCoverageCheckpoint({
                   {item.entity.name}
                 </div>
                 <div className="text-[var(--color-text-tertiary)]">
-                  {kindLabel(item.entity.kind)} ·{" "}
-                  {item.referencedElementIds.length} 个 Element 引用
+                  {t(KIND_LABEL_KEYS[item.entity.kind])} ·{" "}
+                  {item.referencedElementIds.length} {t("visualCoverage.elementRefs")}
                 </div>
                 {item.entity.required_variant_ids.length > 0 && (
                   <div className="text-[var(--color-text-tertiary)]">
-                    必需 Variant {item.definedRequiredCount}/
+                    {t("visualCoverage.requiredVariants")} {item.definedRequiredCount}/
                     {item.entity.required_variant_ids.length}
                   </div>
                 )}
@@ -75,17 +77,17 @@ export default function VisualCoverageCheckpoint({
                     : "bg-amber-100 text-amber-700"
                 }`}
               >
-                {STATUS_LABEL[item.status]}
+                {t(STATUS_LABEL_KEYS[item.status])}
               </span>
             </div>
             {item.unassignedElementIds.length > 0 && (
               <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-700">
-                {item.unassignedElementIds.length} 个 Element 未指定 Variant
+                {item.unassignedElementIds.length} {t("visualCoverage.elementsUnspecified")}
               </div>
             )}
             {item.missingVariantIds.length > 0 && (
               <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-700">
-                缺少：{item.missingVariantIds.join("、")}
+                {t("visualCoverage.missing")}{item.missingVariantIds.join("、")}
               </div>
             )}
             {item.variants.length > 0 && (
@@ -97,7 +99,7 @@ export default function VisualCoverageCheckpoint({
                   >
                     <span className="min-w-0 truncate">
                       {visualVariantLabel(variant.variant)} ·{" "}
-                      {variant.referencedElementIds.length} 个 Element
+                      {variant.referencedElementIds.length} {t("visualCoverage.elements")}
                     </span>
                     <span
                       className={
@@ -107,8 +109,8 @@ export default function VisualCoverageCheckpoint({
                       }
                     >
                       {variant.selectedAvailable
-                        ? `使用中 · ${variant.generatedCount} 个产物`
-                        : `${variant.generatedCount} 个产物 · 未选择`}
+                        ? `${t("visualCoverage.activeProducts")}${variant.generatedCount} ${t("visualCoverage.products")}`
+                        : `${variant.generatedCount} ${t("visualCoverage.productsUnselected")}`}
                     </span>
                   </div>
                 ))}

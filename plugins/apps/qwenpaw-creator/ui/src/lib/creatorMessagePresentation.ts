@@ -3,6 +3,7 @@ import type {
   CreatorEvent,
   CreatorMessage,
 } from "@/contracts/creator";
+import i18n from "@/i18n";
 
 const USER_AUTHORITY_SOURCES = new Set([
   "user",
@@ -141,7 +142,7 @@ function withoutLegacyFileRuntimePlaceholder(
   if (toolCalls.length === 0) return message.content;
   const names = toolCalls.map(toolCallName);
   if (names.some((name) => !name)) return message.content;
-  const placeholder = `准备调用工具：${names.join("、")}`;
+  const placeholder = i18n.t("lib.prepareCallTool", { names: names.join("、") });
   return message.content.filter(
     (part) => part.type !== "text" || part.text !== placeholder,
   );
