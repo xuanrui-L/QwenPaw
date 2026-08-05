@@ -927,14 +927,9 @@ export default function ElementDetail({
             disabled={dirtyCount > 0 || applying}
             onClick={() => onOpenWorkbench(element)}
           >
-            {`进入制作工作台（${
-              {
-                r2v: "参考生视频",
-                t2v: "文本生视频",
-                i2v: "首帧生视频",
-                s2v: "数字人口播",
-              }[creation.type]
-            }）`}
+            {t("elementDetail.enterWorkbench", {
+              mode: t(`r2v.modeLabel.${creation.type}`),
+            })}
           </Button>
         </footer>
       )}

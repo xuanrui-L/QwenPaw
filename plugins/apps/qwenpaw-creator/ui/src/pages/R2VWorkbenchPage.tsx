@@ -53,23 +53,23 @@ const FIELD_LABEL_KEYS: Record<ReferenceField, string> = {
 // reference-to-video when the element declares something else.
 export const GENERATION_MODE_META: Record<
   VideoGenerationMode,
-  { label: string; subtitle: string }
+  { labelKey: string; subtitleKey: string }
 > = {
   r2v: {
-    label: "参考生视频",
-    subtitle: "AI 生成画面子界面，继承分镜、引用资产和产物版本。",
+    labelKey: "r2v.modeLabel.r2v",
+    subtitleKey: "r2v.modeSubtitle.r2v",
   },
   t2v: {
-    label: "文本生视频",
-    subtitle: "纯文本生成：视频由 video prompt 驱动，不携带任何参考素材。",
+    labelKey: "r2v.modeLabel.t2v",
+    subtitleKey: "r2v.modeSubtitle.t2v",
   },
   i2v: {
-    label: "首帧生视频",
-    subtitle: "首帧生成：以选定的首帧图为起点生成运动，画幅跟随首帧。",
+    labelKey: "r2v.modeLabel.i2v",
+    subtitleKey: "r2v.modeSubtitle.i2v",
   },
   s2v: {
-    label: "数字人口播",
-    subtitle: "数字人生成：人像画面 + 驱动音频合成对口型视频，提交前先跑免费人像检测。",
+    labelKey: "r2v.modeLabel.s2v",
+    subtitleKey: "r2v.modeSubtitle.s2v",
   },
 };
 
@@ -101,6 +101,7 @@ function PromptTextArea({
   field,
   path,
   disabled = false,
+  placeholder,
   onChange,
 }: {
   label: string;
@@ -108,6 +109,7 @@ function PromptTextArea({
   field: string;
   path: string;
   disabled?: boolean;
+  placeholder?: string;
   onChange: (value: string) => void;
 }) {
   const { t } = useTranslation();
@@ -125,7 +127,7 @@ function PromptTextArea({
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         autoSize={{ minRows: 2, maxRows: 10 }}
-        placeholder={t("r2v.generateAndEdit", { label })}
+        placeholder={placeholder ?? t("r2v.generateAndEdit", { label })}
         className="!rounded-lg !border-[var(--color-border)] !bg-[var(--color-bg-secondary)] !text-xs"
       />
       <InlineReviewDiff pointer={path} />
@@ -544,16 +546,16 @@ export default function R2VWorkbenchPage() {
             </button>
             <div className="min-w-0">
               <h2 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                {`视频方案 / ${elementLabel} / 制作工作台`}
+                {t("r2v.title", { element: elementLabel })}
                 <span
                   data-generation-mode={modeCreation.type}
                   className="ml-2 inline-block rounded-full border border-[var(--color-border-secondary)] px-2 py-[1px] align-middle text-[10px] font-medium text-[var(--color-text-secondary)]"
                 >
-                  {GENERATION_MODE_META[modeCreation.type].label}
+                  {t(GENERATION_MODE_META[modeCreation.type].labelKey)}
                 </span>
               </h2>
               <p className="mt-0.5 truncate text-xs text-[var(--color-text-secondary)]">
-                {GENERATION_MODE_META[modeCreation.type].subtitle}
+                {t(GENERATION_MODE_META[modeCreation.type].subtitleKey)}
               </p>
             </div>
           </div>
@@ -587,12 +589,12 @@ export default function R2VWorkbenchPage() {
           <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
             {modeCreation.type === "s2v" ? (
               <>
-                <Panel title="人物图（s2v 参考）">
+                <Panel title={t("r2v.s2vPortrait")}>
                   <div className="space-y-2">
                     <Select
                       size="small"
                       className="!w-full"
-                      placeholder="选择单人正脸人物图 version"
+                      placeholder={t("r2v.s2vPortraitPlaceholder")}
                       value={modeCreation.portrait_version_id}
                       disabled={patching}
                       options={imageOptions}
@@ -604,15 +606,16 @@ export default function R2VWorkbenchPage() {
                     {imageUrlOf(modeCreation.portrait_version_id) && (
                       <img
                         src={imageUrlOf(modeCreation.portrait_version_id)!}
-                        alt="人物图"
+                        alt={t("r2v.s2vPortrait")}
                         className="max-h-56 rounded-lg border border-[var(--color-border)]"
                       />
                     )}
                   </div>
                 </Panel>
-                <Panel title="台词">
+                <Panel title={t("r2v.s2vScript")}>
                   <PromptTextArea
-                    label="台词（经 TTS 合成为驱动音频）"
+                    label={t("r2v.s2vScriptLabel")}
+                    placeholder={t("r2v.s2vScriptPlaceholder")}
                     value={modeCreation.script}
                     field="script"
                     path={elementPointer("creation", "script")}
@@ -620,12 +623,12 @@ export default function R2VWorkbenchPage() {
                     onChange={(value) => updateModeField("script", value)}
                   />
                 </Panel>
-                <Panel title="驱动音频">
+                <Panel title={t("r2v.s2vAudio")}>
                   <div className="space-y-2">
                     <Select
                       size="small"
                       className="!w-full"
-                      placeholder="选择驱动音频 version（可由台词 TTS 产出）"
+                      placeholder={t("r2v.s2vAudioPlaceholder")}
                       value={modeCreation.audio_version_id}
                       disabled={patching}
                       options={audioOptions}
@@ -647,12 +650,12 @@ export default function R2VWorkbenchPage() {
             ) : (
               <>
                 {modeCreation.type === "i2v" && (
-                  <Panel title="首帧图（i2v 参考）">
+                  <Panel title={t("r2v.i2vFirstFrame")}>
                     <div className="space-y-2">
                       <Select
                         size="small"
                         className="!w-full"
-                        placeholder="选择首帧图片 version"
+                        placeholder={t("r2v.i2vFirstFramePlaceholder")}
                         value={modeCreation.first_frame_version_id}
                         disabled={patching}
                         options={imageOptions}
@@ -669,16 +672,17 @@ export default function R2VWorkbenchPage() {
                           src={
                             imageUrlOf(modeCreation.first_frame_version_id)!
                           }
-                          alt="首帧图"
+                          alt={t("r2v.i2vFirstFrame")}
                           className="max-h-56 rounded-lg border border-[var(--color-border)]"
                         />
                       )}
                     </div>
                   </Panel>
                 )}
-                <Panel title="Video Prompt">
+                <Panel title={t("r2v.videoPrompt")}>
                   <PromptTextArea
-                    label="视频 Prompt"
+                    label={t("r2v.videoPromptLabel")}
+                    placeholder={t("r2v.videoPromptPlaceholder")}
                     value={modeCreation.video_prompt}
                     field="video_prompt"
                     path={elementPointer("creation", "video_prompt")}
@@ -692,7 +696,7 @@ export default function R2VWorkbenchPage() {
             )}
 
             <Panel
-              title="视频结果"
+              title={t("r2v.videoResult")}
               badge={
                 <ArtifactVersionChips
                   versions={videoVersions}
@@ -711,7 +715,7 @@ export default function R2VWorkbenchPage() {
                   />
                 ) : (
                   <p className="text-xs text-[var(--color-text-tertiary)]">
-                    尚无生成结果。
+                    {t("r2v.noVideoResult")}
                   </p>
                 )}
                 {viewedVideo &&
@@ -726,7 +730,7 @@ export default function R2VWorkbenchPage() {
                       }
                       className="!text-[11px]"
                     >
-                      设为当前
+                      {t("r2v.setAsCurrent")}
                     </Button>
                   )}
               </div>
@@ -736,10 +740,13 @@ export default function R2VWorkbenchPage() {
           <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
             <div className="grid grid-cols-3 gap-2">
               {[
-                { label: "时长", value: `${spanSeconds}s` },
-                { label: "画幅", value: project.settings.aspect_ratio },
+                { label: t("r2v.duration"), value: `${spanSeconds}s` },
                 {
-                  label: "模型",
+                  label: t("r2v.frameSize"),
+                  value: project.settings.aspect_ratio,
+                },
+                {
+                  label: t("r2v.modelLabel"),
                   value:
                     resolvedVideoModel ?? modeCreation.recipe?.model ?? "—",
                 },
@@ -1094,16 +1101,16 @@ export default function R2VWorkbenchPage() {
           </button>
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-              {`视频方案 / ${elementLabel} / 制作工作台`}
+              {t("r2v.title", { element: elementLabel })}
               <span
                 data-generation-mode={generationMode}
                 className="ml-2 inline-block rounded-full border border-[var(--color-border-secondary)] px-2 py-[1px] align-middle text-[10px] font-medium text-[var(--color-text-secondary)]"
               >
-                {modeMeta.label}
+                {t(modeMeta.labelKey)}
               </span>
             </h2>
             <p className="mt-0.5 truncate text-xs text-[var(--color-text-secondary)]">
-              {modeMeta.subtitle}
+              {t(modeMeta.subtitleKey)}
             </p>
           </div>
         </div>

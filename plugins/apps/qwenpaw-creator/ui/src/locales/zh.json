@@ -450,7 +450,31 @@
       "characters": "角色",
       "props": "道具",
       "sources": "素材"
-    }
+    },
+    "modeLabel": {
+      "r2v": "参考生视频",
+      "t2v": "文本生视频",
+      "i2v": "首帧生视频",
+      "s2v": "数字人口播"
+    },
+    "modeSubtitle": {
+      "r2v": "AI 生成画面子界面，继承分镜、引用资产和产物版本。",
+      "t2v": "纯文本生成：视频由 video prompt 驱动，不携带任何参考素材。",
+      "i2v": "首帧生成：以选定的首帧图为起点生成运动，画幅跟随首帧。",
+      "s2v": "数字人生成：人像画面 + 驱动音频合成对口型视频，提交前先跑免费人像检测。"
+    },
+    "s2vPortrait": "人物图（s2v 参考）",
+    "s2vPortraitPlaceholder": "选择单人正脸人物图 version",
+    "s2vScript": "台词",
+    "s2vScriptLabel": "台词文本",
+    "s2vScriptPlaceholder": "输入台词；Agent 会用 TTS 把它合成为驱动音频",
+    "s2vAudio": "驱动音频",
+    "s2vAudioPlaceholder": "选择驱动音频 version（可由台词 TTS 产出）",
+    "i2vFirstFrame": "首帧图（i2v 参考）",
+    "i2vFirstFramePlaceholder": "选择首帧图片 version",
+    "videoPromptLabel": "Prompt 文本",
+    "videoPromptPlaceholder": "描述要生成的视频：主体、动作、场景、镜头与画质",
+    "noVideoResult": "尚无生成结果。"
   },
   "elementDetail": {
     "selectElement": "选择一项时间线内容",
@@ -515,7 +539,8 @@
       "easeIn": "渐入（ease-in）",
       "easeOut": "渐出（ease-out）",
       "easeInOut": "缓入缓出（ease-in-out）"
-    }
+    },
+    "enterWorkbench": "进入制作工作台（{{mode}}）"
   },
   "agent": {
     "assistant": "创作助手",

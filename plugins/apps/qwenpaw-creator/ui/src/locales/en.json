@@ -450,7 +450,31 @@
       "characters": "Characters",
       "props": "Props",
       "sources": "Sources"
-    }
+    },
+    "modeLabel": {
+      "r2v": "Reference to Video",
+      "t2v": "Text to Video",
+      "i2v": "Image to Video",
+      "s2v": "Digital Human"
+    },
+    "modeSubtitle": {
+      "r2v": "AI-generated frame sub-interface, inheriting storyboards, reference assets and artifact versions.",
+      "t2v": "Pure text generation: the video is driven by the prompt alone, no reference material is submitted.",
+      "i2v": "First-frame generation: motion starts from the chosen frame; the aspect follows it.",
+      "s2v": "Digital human: a portrait plus driving audio produce a lip-synced clip; a free face check runs before submission."
+    },
+    "s2vPortrait": "Portrait (s2v reference)",
+    "s2vPortraitPlaceholder": "Pick a single front-facing portrait version",
+    "s2vScript": "Script",
+    "s2vScriptLabel": "Script text",
+    "s2vScriptPlaceholder": "Write the lines; the agent turns them into the driving audio via TTS",
+    "s2vAudio": "Driving audio",
+    "s2vAudioPlaceholder": "Pick the driving audio version (TTS output of the script)",
+    "i2vFirstFrame": "First frame (i2v reference)",
+    "i2vFirstFramePlaceholder": "Pick the first-frame image version",
+    "videoPromptLabel": "Prompt text",
+    "videoPromptPlaceholder": "Describe the video: subject, motion, scene, camera and quality",
+    "noVideoResult": "No generated result yet."
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",
@@ -515,7 +539,8 @@
       "easeIn": "Ease In",
       "easeOut": "Ease Out",
       "easeInOut": "Ease In-Out"
-    }
+    },
+    "enterWorkbench": "Open Production Workbench ({{mode}})"
   },
   "agent": {
     "assistant": "Creative Assistant",
