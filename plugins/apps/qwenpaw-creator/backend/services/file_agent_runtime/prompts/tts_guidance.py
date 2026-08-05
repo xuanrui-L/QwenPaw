@@ -47,7 +47,8 @@ def delegator_guidance() -> str:
         "- ai_editing_director 具备旁白生成能力：可把旁白文本合成为音频资产、"
         "创建 creation.type=audio 的 Element 并重新合成成片。旁白/配音需求直接"
         "委派它到 timeline:<timelineId>，在任务中写明旁白文案要求，并要求按"
-        "镜头/语义分段生成、每段 span 对齐对应画面；不需要用户提供音频文件。",
+        "镜头/语义分段生成、每段 span 对齐对应画面；自带人声的区间（如"
+        " generation_mode=s2v 的数字人口播）不安排旁白；不需要用户提供音频文件。",
     ]
     if capability.has_system_voices:
         lines.append(
@@ -136,6 +137,11 @@ def _editing_guidance(capability, scenario: str) -> str:
         "一个独立的 audio Element，span 只覆盖它解说的画面区间；禁止用一条"
         "音频贯穿整条 Timeline。每段文本长度要与画面时长匹配（中文语速约每秒"
         " 4–5 字），生成后用返回的 durationSeconds 校准 span。",
+    )
+    lines.append(
+        "- 自带人声的区间不安排旁白：数字人口播（generation_mode=s2v）的"
+        " span 内视频自身就是人声，台词/现场声为内容重点的片段同理；"
+        "旁白 Element 的 span 不得与这些区间重叠。",
     )
     lines.append(
         "- 音频上片：用 jq_project 在目标 Timeline 创建 creation.type=audio 的"

@@ -172,6 +172,18 @@ def _variant_project() -> Project:
     return Project.model_validate(project.model_dump(mode="json"))
 
 
+def test_r2v_generation_mode_defaults_to_r2v_and_rejects_unknown_modes():
+    """generation_mode is the declared video mode: legacy documents without
+    the field keep behaving as r2v, every published mode round-trips, and a
+    made-up mode is storage corruption rather than a silent fallback."""
+
+    assert R2VCreation().generation_mode == "r2v"
+    for mode in ("r2v", "t2v", "i2v", "s2v"):
+        assert R2VCreation(generation_mode=mode).generation_mode == mode
+    with pytest.raises(ValidationError):
+        R2VCreation(generation_mode="video_edit")
+
+
 def test_r2v_variant_binding_must_target_a_referenced_entity_and_variant():
     project = _variant_project()
     raw = project.model_dump(mode="json")

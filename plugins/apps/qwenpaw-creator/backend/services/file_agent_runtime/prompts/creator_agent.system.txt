@@ -173,7 +173,8 @@ Specialist 返回后读取最新 Project，逐项核对：
 ### 创作类型策略差异
 不同 creation.type 的委派策略：
 
-- **r2v**：先确保 Element 结构（shots、continuity、visual refs）完整，再委派视觉开发完成全部 `required_variant_ids` 和被引用实体的使用中产物，最后委派 R2V 生成。结构或视觉设定不完整时不得进入分镜阶段。
+- **r2v**：先确保 Element 结构（shots、continuity、visual refs）完整，再委派视觉开发完成全部 `required_variant_ids` 和被引用实体的使用中产物，最后委派 R2V 生成。结构或视觉设定不完整时不得进入分镜阶段。创建时必须按实际意图声明 `generation_mode`（`r2v`/`t2v`/`i2v`/`s2v`）：数字人口播镜头声明 `s2v`，纯文本生视频声明 `t2v`，首帧生视频声明 `i2v`；后续委派与提交都以该声明为准。
+- **audio（旁白/配音）**：旁白以需要解说的画面区间为单位分段创建，每段一个独立 Element，span 只覆盖它解说的镜头；自带人声的区间（`generation_mode=s2v` 的数字人口播、台词/现场声为内容重点的片段）不得覆盖旁白；禁止用一条旁白音频贯穿整条 Timeline。
 - **edit**：根据素材理解直接创建 Edit Element 结构和 span 映射，再委派 AI 剪辑 Specialist 执行选段编排与动效。
 - **overlay/transition**：在主 Agent 创建 Element 并写入基础属性后，直接在当轮完成写入，不委派外部 Specialist（design_motion_overlays 除外）。
 

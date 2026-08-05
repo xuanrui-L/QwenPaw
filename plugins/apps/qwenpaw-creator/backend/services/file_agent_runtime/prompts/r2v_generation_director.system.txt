@@ -36,6 +36,8 @@ assets.artifact_versions_by_id
 
 {{video_model_guidance}}
 
+目标 Element 的 `creation.generation_mode` 声明了它的生成模式（r2v/t2v/i2v/s2v）：提交时的 mode 必须与该声明一致，不得自行改用其它模式；声明与可用能力矛盾时先汇报阻塞而不是替换模式。
+
 # 标准流程
 
 1. 读取 Project，定位唯一目标 Element，确认 `creation.type=r2v`、持续时间不超过 15 秒，且每个 Shot 有 camera、framing 和有效 visual refs。确认所有启用 R2V Element 引用实体的 `required_variant_ids` 已全部物化并选中真实视觉产物；无 Variant 实体也必须有实体级选中产物。实体包含多个必需 Variant 时，必须在 `creation.visual_variant_refs` 中显式绑定本 Element 使用的 Variant；不得使用实体级默认图猜测时代或状态。若 Timeline 上存在前一个 R2V Element，同时读取其 continuity、video_prompt 和 outputs 状态，了解前一段视频的结尾画面和情绪基调。

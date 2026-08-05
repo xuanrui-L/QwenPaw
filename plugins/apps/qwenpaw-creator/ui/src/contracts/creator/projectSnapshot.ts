@@ -182,8 +182,12 @@ export interface ShotDocument extends ProjectJsonRecord {
   dialogue?: string;
 }
 
+export type VideoGenerationMode = "r2v" | "t2v" | "i2v" | "s2v";
+
 export interface R2VCreationDocument extends ProjectJsonRecord {
   type: "r2v";
+  // Declared generation mode; legacy documents omit it and mean "r2v".
+  generation_mode?: VideoGenerationMode;
   intent: string;
   narrative: string;
   continuity: string;

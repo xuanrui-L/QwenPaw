@@ -50,6 +50,7 @@ Project
 - `assets` 中的文件和版本记录来自素材入库、素材理解或媒体生成结果；未产出的结果保持 `null` 或空集合。
 - 禁止使用 `pending-render`、`todo`、`placeholder` 等虚构 ID。
 - R2V Creation 的 `storyboard_reference_version_ids` 和 `video_reference_version_ids` 属于 `creation.r2v` 层级（与 `storyboard_prompt`、`video_prompt` 同级），不属于 `shots` 层级。`shots` 只包含 Shot 对象（shot_id、description、camera、framing、camera_description、dialogue、duration_seconds、character_refs、scene_ref、prop_refs），不包含 reference_version_ids 字段。
+- R2V Creation 的 `generation_mode` 声明该镜头的生成模式（`r2v` 默认/参考生视频、`t2v` 纯文本生视频、`i2v` 首帧生视频、`s2v` 数字人口播）。规划时必须按实际意图设置：后续提交的 mode 与工作台展示都以它为准。
 - Shot 的 `framing` 字段只能使用以下 4 个枚举值之一：`全景`、`中景`、`近景`、`特写`。不得使用其他景别描述（如"中近景"、"大特写"、"远景"等）。
 
 ### jq_project 输出约束

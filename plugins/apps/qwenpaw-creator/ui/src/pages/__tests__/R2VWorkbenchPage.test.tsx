@@ -91,8 +91,13 @@ describe("R2V Workbench page", () => {
     const { container } = renderWorkbench();
 
     expect(
-      screen.getByText("视频方案 / 午饭名场面 / 制作工作台"),
+      screen.getByText(/视频方案 \/ 午饭名场面 \/ 制作工作台/),
     ).toBeInTheDocument();
+    // The legacy fixture has no generation_mode, so the badge reads as the
+    // historical r2v default.
+    expect(
+      container.querySelector('[data-generation-mode="r2v"]'),
+    ).toHaveTextContent("参考生视频");
     expect(screen.getByText("Shot 列表（1）")).toBeInTheDocument();
     expect(screen.getByDisplayValue("橘猫隔窗看向午饭")).toBeInTheDocument();
     expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();
@@ -120,6 +125,27 @@ describe("R2V Workbench page", () => {
     expect(useCreatorInteractionStore.getState().selectedRef).toBe(
       "element:r2v-window",
     );
+  });
+
+  it("presents an s2v element as the digital-human workbench, not r2v", () => {
+    const project = cloneProject();
+    const creation =
+      project.timelines.items["timeline:main"].elements_by_id["r2v-window"]
+        .creation;
+    if (creation.type !== "r2v") throw new Error("fixture R2V Element missing");
+    creation.generation_mode = "s2v";
+    seedProject(project);
+
+    const { container } = renderWorkbench();
+
+    expect(
+      container.querySelector('[data-generation-mode="s2v"]'),
+    ).toHaveTextContent("数字人口播");
+    expect(
+      screen.getByText(/数字人生成：人像画面 \+ 驱动音频/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("人像画面（口播首帧）")).toBeInTheDocument();
+    expect(screen.getByText(/s2v 模式以人像图/)).toBeInTheDocument();
   });
 
   it("shows the runtime-resolved video model instead of creation.recipe.model", async () => {
@@ -238,10 +264,12 @@ describe("R2V Workbench page", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "进入 R2V 工作台" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /进入制作工作台（参考生视频）/ }),
+    );
     await waitFor(() =>
       expect(
-        screen.getByText("视频方案 / 午饭名场面 / 制作工作台"),
+        screen.getByText(/视频方案 \/ 午饭名场面 \/ 制作工作台/),
       ).toBeInTheDocument(),
     );
   });

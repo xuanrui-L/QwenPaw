@@ -675,6 +675,11 @@ class R2VCreation(StrictModel):
     """Declarative R2V creative facts, independent of the executing Agent."""
 
     type: Literal["r2v"] = "r2v"
+    # Which generation mode this element is planned for. The workbench and
+    # the submit tool both read it, so a t2v/i2v/s2v element never presents
+    # (or executes) as a reference-to-video one. "r2v" keeps the historical
+    # default for existing projects.
+    generation_mode: Literal["r2v", "t2v", "i2v", "s2v"] = "r2v"
     intent: str = ""
     narrative: str = ""
     continuity: str = ""

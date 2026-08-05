@@ -32,6 +32,7 @@ import type {
   ProjectDocument,
   TaskView,
   TimelineElementDocument,
+  VideoGenerationMode,
 } from "@/contracts/creator";
 
 const { TextArea } = Input;
@@ -43,6 +44,35 @@ const FIELD_LABEL: Record<ReferenceField, string> = {
   characters: "角色",
   props: "道具",
   sources: "素材",
+};
+
+// Mode-specific workbench copy: the page serves every video generation
+// mode, so its title, hints and reference surfaces must not read as
+// reference-to-video when the element declares something else.
+export const GENERATION_MODE_META: Record<
+  VideoGenerationMode,
+  { label: string; subtitle: string; referenceHint: string | null }
+> = {
+  r2v: {
+    label: "参考生视频",
+    subtitle: "AI 生成画面子界面，继承分镜、引用资产和产物版本。",
+    referenceHint: null,
+  },
+  t2v: {
+    label: "文本生视频",
+    subtitle: "纯文本生成：视频由 video prompt 驱动，不携带任何参考素材。",
+    referenceHint: "t2v 模式不使用参考素材；以下绑定仅供分镜与一致性参考，不会随视频提交。",
+  },
+  i2v: {
+    label: "首帧生视频",
+    subtitle: "首帧生成：以选定的首帧图为起点生成运动，画幅跟随首帧。",
+    referenceHint: "i2v 模式只提交首帧图（默认取已选分镜图版本），其它引用不随视频提交。",
+  },
+  s2v: {
+    label: "数字人口播",
+    subtitle: "数字人生成：人像画面 + 驱动音频合成对口型视频，提交前先跑免费人像检测。",
+    referenceHint: "s2v 模式以人像图（取已选分镜图版本）与音频驱动，不提交其它参考素材。",
+  },
 };
 
 function Panel({
@@ -192,6 +222,9 @@ export default function R2VWorkbenchPage() {
   );
   const element = elementDraft.value;
   const creation = element?.creation.type === "r2v" ? element.creation : null;
+  // Declared generation mode drives every mode-specific surface below;
+  // legacy documents without the field behave as r2v.
+  const generationMode = creation?.generation_mode ?? "r2v";
   const [viewedSbId, setViewedSbId] = useState<string | null>(null);
   const [viewedVideoId, setViewedVideoId] = useState<string | null>(null);
   const [resolvedVideoModel, setResolvedVideoModel] = useState<string | null>(
@@ -303,6 +336,7 @@ export default function R2VWorkbenchPage() {
   }
 
   const elementLabel = element.label || element.element_id;
+  const modeMeta = GENERATION_MODE_META[generationMode];
   const elementPointer = (...segments: Array<string | number>) =>
     projectJsonPointer(
       "timelines",
@@ -761,9 +795,15 @@ export default function R2VWorkbenchPage() {
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
               {`视频方案 / ${elementLabel} / 制作工作台`}
+              <span
+                data-generation-mode={generationMode}
+                className="ml-2 inline-block rounded-full border border-[var(--color-border-secondary)] px-2 py-[1px] align-middle text-[10px] font-medium text-[var(--color-text-secondary)]"
+              >
+                {modeMeta.label}
+              </span>
             </h2>
             <p className="mt-0.5 truncate text-xs text-[var(--color-text-secondary)]">
-              AI 生成画面子界面，继承分镜、引用资产和产物版本。
+              {modeMeta.subtitle}
             </p>
           </div>
         </div>
@@ -845,7 +885,13 @@ export default function R2VWorkbenchPage() {
           </Panel>
 
           <Panel
-            title="分镜Prompt与分镜图"
+            title={
+              generationMode === "s2v"
+                ? "人像画面（口播首帧）"
+                : generationMode === "i2v"
+                ? "首帧图与分镜Prompt"
+                : "分镜Prompt与分镜图"
+            }
             badge={
               <ArtifactVersionChips
                 versions={storyboardVersions}
@@ -1037,6 +1083,14 @@ export default function R2VWorkbenchPage() {
           </div>
 
           <Panel title={`输入引用（${inputRefs.length}）`}>
+            {modeMeta.referenceHint && (
+              <p
+                data-generation-mode-hint
+                className="mb-2 rounded-md bg-[var(--color-bg-tertiary)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]"
+              >
+                {modeMeta.referenceHint}
+              </p>
+            )}
             {inputRefs.length === 0 ? (
               <p className="text-xs text-[var(--color-text-tertiary)]">
                 暂无引用资产。
