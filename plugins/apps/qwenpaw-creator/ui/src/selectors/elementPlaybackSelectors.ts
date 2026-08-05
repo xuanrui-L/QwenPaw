@@ -17,7 +17,12 @@ import {
 import i18n from "@/i18n";
 
 export type ElementPlaybackStatus =
-  "ready" | "generating" | "queued" | "failed" | "stale" | "pending";
+  | "ready"
+  | "generating"
+  | "queued"
+  | "failed"
+  | "stale"
+  | "pending";
 
 export type ElementPlaybackMediaKind = "video" | "image" | "audio" | "other";
 
@@ -196,8 +201,8 @@ export function resolveElementPlayback(
       taskStatus === "generating" || taskStatus === "queued"
         ? taskStatus
         : artifactStatus === "ready"
-          ? "ready"
-          : (taskStatus ?? artifactStatus);
+        ? "ready"
+        : taskStatus ?? artifactStatus;
     return {
       element,
       status,

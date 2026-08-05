@@ -52,7 +52,7 @@ export function creatorStatusLabel(
   status: SpecialistRunStatus | TaskStatus | string | null | undefined,
 ): string {
   return status
-    ? (STATUS_LABELS[status] ?? i18n.t("presentation.processing"))
+    ? STATUS_LABELS[status] ?? i18n.t("presentation.processing")
     : i18n.t("presentation.dash");
 }
 

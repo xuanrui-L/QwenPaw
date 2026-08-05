@@ -19,7 +19,8 @@ export interface SpanDragResult {
 }
 
 export type TransitionFollowResult =
-  { ok: true; changes: SpanChange[] } | { ok: false; reason: string };
+  | { ok: true; changes: SpanChange[] }
+  | { ok: false; reason: string };
 
 /** Spans shorter than 0.1s are almost always accidental trims. */
 export function minDurationTick(ticksPerSecond: number): number {

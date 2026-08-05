@@ -256,8 +256,8 @@ export function useProjectDraft<T>(
         ...(change.op === "remove"
           ? { before: change.before }
           : change.op === "add"
-            ? { value: change.value, missingBefore: true }
-            : { before: change.before, value: change.value }),
+          ? { value: change.value, missingBefore: true }
+          : { before: change.before, value: change.value }),
       })),
     [changes, rootKey],
   );

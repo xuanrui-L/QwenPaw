@@ -117,8 +117,12 @@ export default function VisualCoverageCheckpoint({
                       }
                     >
                       {variant.selectedAvailable
-                        ? `${t("visualCoverage.activeProducts")}${variant.generatedCount} ${t("visualCoverage.products")}`
-                        : `${variant.generatedCount} ${t("visualCoverage.productsUnselected")}`}
+                        ? `${t("visualCoverage.activeProducts")}${
+                            variant.generatedCount
+                          } ${t("visualCoverage.products")}`
+                        : `${variant.generatedCount} ${t(
+                            "visualCoverage.productsUnselected",
+                          )}`}
                     </span>
                   </div>
                 ))}

@@ -128,7 +128,9 @@ export function authorizationDetail(
   }/${authorization.model}`;
   const billing = authorizationBilling(authorization);
   return billing?.displayText
-    ? `${detail} · ${i18n.t("executionAuth.estimatedCost")} ${billing.displayText}`
+    ? `${detail} · ${i18n.t("executionAuth.estimatedCost")} ${
+        billing.displayText
+      }`
     : detail;
 }
 

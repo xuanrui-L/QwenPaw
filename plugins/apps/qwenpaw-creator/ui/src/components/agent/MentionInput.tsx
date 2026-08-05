@@ -87,7 +87,9 @@ function createSelectionPill(selection: SelectionAttachment): HTMLSpanElement {
   // Preserve the special structure used by the cutover tests and clipboard round-trip.
   pill.dataset.selectionRef = encodedSelection(selection);
   pill.textContent = `“${clip(selection.text)}”`;
-  pill.title = `${i18n.t("agent.refText")}${selection.label}\n${selection.text}`;
+  pill.title = `${i18n.t("agent.refText")}${selection.label}\n${
+    selection.text
+  }`;
   return pill;
 }
 
@@ -182,7 +184,7 @@ const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
       ) as HTMLElement | null;
       const thumb =
         pill && editorRef.current?.contains(pill)
-          ? (pill.dataset.thumb ?? null)
+          ? pill.dataset.thumb ?? null
           : null;
       setHoverThumb(thumb);
     };

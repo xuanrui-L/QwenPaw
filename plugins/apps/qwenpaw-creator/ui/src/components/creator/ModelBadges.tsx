@@ -70,10 +70,10 @@ export default function ModelBadges() {
         config.grounding.validation_source === "llm"
           ? config.llm
           : config.grounding.validation_source === "vlm"
-            ? config.vlm.use_llm
-              ? config.llm
-              : config.vlm
-            : config.grounding;
+          ? config.vlm.use_llm
+            ? config.llm
+            : config.vlm
+          : config.grounding;
       const searchModel = config.grounding.search_reuse_llm
         ? config.llm
         : {

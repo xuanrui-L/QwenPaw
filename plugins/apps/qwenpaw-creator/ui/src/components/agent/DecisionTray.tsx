@@ -254,7 +254,9 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
           }`}
         >
           {urgent
-            ? `${t("decisionTray.productionConfirmBlock")} ${pendingAuths.length} ${t("decisionTray.itemsBlocking")}${
+            ? `${t("decisionTray.productionConfirmBlock")} ${
+                pendingAuths.length
+              } ${t("decisionTray.itemsBlocking")}${
                 reviewUnitCount > 0
                   ? ` · ${t("decisionTray.review")} ${reviewUnitCount}`
                   : ""
@@ -286,7 +288,9 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
                   ["all", `${t("decisionTray.all")} ${items.length}`],
                   [
                     "auth",
-                    `${t("decisionTray.productionConfirmTab")} ${pendingAuths.length}`,
+                    `${t("decisionTray.productionConfirmTab")} ${
+                      pendingAuths.length
+                    }`,
                   ],
                   [
                     "review",

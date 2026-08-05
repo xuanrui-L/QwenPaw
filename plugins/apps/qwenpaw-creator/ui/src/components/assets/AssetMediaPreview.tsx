@@ -2,7 +2,11 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 export type AssetPreviewState =
-  "planned" | "processing" | "ready" | "failed" | "unavailable";
+  | "planned"
+  | "processing"
+  | "ready"
+  | "failed"
+  | "unavailable";
 
 function placeholderLabel(
   state: AssetPreviewState,

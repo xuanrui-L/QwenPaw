@@ -4,7 +4,12 @@ export interface AssetIngestAccepted {
   assetId: string;
   taskId: string;
   status:
-    "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "QUARANTINED";
+    | "QUEUED"
+    | "RUNNING"
+    | "SUCCEEDED"
+    | "FAILED"
+    | "CANCELLED"
+    | "QUARANTINED";
   progress?: number | null;
   assetVersionId?: string | null;
   result?: Record<string, unknown> | null;

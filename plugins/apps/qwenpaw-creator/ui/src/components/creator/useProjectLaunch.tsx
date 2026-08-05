@@ -165,8 +165,8 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
       scenario === "short_drama"
         ? ["vlm", "image", "video"]
         : scenario === "video_edit" || hasAttachments
-          ? ["vlm"]
-          : [];
+        ? ["vlm"]
+        : [];
     const missing: string[] = [];
     for (const type of required) {
       const item = config[type];

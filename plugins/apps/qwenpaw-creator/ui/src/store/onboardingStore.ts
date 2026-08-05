@@ -9,7 +9,10 @@ import { create } from "zustand";
 export const ONBOARDING_STORAGE_KEY = "qwenpaw-creator:onboarding:v2";
 
 export type OnboardingHintKey =
-  "executionAuthorization" | "review" | "mention" | "addToConversation";
+  | "executionAuthorization"
+  | "review"
+  | "mention"
+  | "addToConversation";
 
 interface PersistedOnboarding {
   homeTourDone: boolean;

@@ -441,8 +441,8 @@ export default function ElementDetail({
                         key === "width" || key === "height"
                           ? 0.1
                           : key === "opacity"
-                            ? 0
-                            : undefined
+                          ? 0
+                          : undefined
                       }
                       max={key === "opacity" ? 100 : undefined}
                       value={

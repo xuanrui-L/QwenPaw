@@ -126,7 +126,10 @@ export default function ElementList({
               ? t("elementList.selectedItems", {
                   count: activeElementIds.length,
                 })
-              : `${t("elementList.timePoint")}${sec(playheadTick, timeline.ticks_per_second)}s, ${activeElementIds.length}${t("elementList.items")}`}
+              : `${t("elementList.timePoint")}${sec(
+                  playheadTick,
+                  timeline.ticks_per_second,
+                )}s, ${activeElementIds.length}${t("elementList.items")}`}
           </h3>
           <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
             {t("elementList.sortByStart")}

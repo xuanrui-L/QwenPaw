@@ -108,8 +108,7 @@ function operationSummary(
 
 function previewText(value: unknown, limit = 26): string {
   if (value === null || value === undefined) return "—";
-  const text =
-    typeof value === "string" ? value : (JSON.stringify(value) ?? "—");
+  const text = typeof value === "string" ? value : JSON.stringify(value) ?? "—";
   const normalized = text.replace(/\s+/g, " ").trim();
   return normalized.length > limit
     ? `${normalized.slice(0, limit)}…`
@@ -122,7 +121,9 @@ function operationPreview(operation: FileProjectReviewOperation): string {
   if (operation.kind === "create")
     return `${i18n.t("fileReview.addedLabel")}${previewText(operation.after)}`;
   if (operation.kind === "delete")
-    return `${i18n.t("fileReview.deletedLabel")}${previewText(operation.before)}`;
+    return `${i18n.t("fileReview.deletedLabel")}${previewText(
+      operation.before,
+    )}`;
   return `${previewText(operation.before)} → ${previewText(operation.after)}`;
 }
 
@@ -171,7 +172,9 @@ export function reviewTrayLabel(review: FileProjectReviewRecord): string {
   const pending = review.operations.filter(
     (operation) => operation.decision === "PENDING",
   ).length;
-  return `${i18n.t("fileReview.textReview")}${pending} ${i18n.t("fileReview.places")}`;
+  return `${i18n.t("fileReview.textReview")}${pending} ${i18n.t(
+    "fileReview.places",
+  )}`;
 }
 
 export default function FileProjectReviewPanel({
@@ -253,8 +256,8 @@ export default function FileProjectReviewPanel({
         decision === "ACCEPT"
           ? t("fileReview.keptCount", { count: affectedUnits })
           : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
-            ? t("fileReview.undoneCount", { count: affectedUnits })
-            : t("fileReview.undoneCountSimple", { count: affectedUnits }),
+          ? t("fileReview.undoneCount", { count: affectedUnits })
+          : t("fileReview.undoneCountSimple", { count: affectedUnits }),
       );
       return true;
     } catch (error) {

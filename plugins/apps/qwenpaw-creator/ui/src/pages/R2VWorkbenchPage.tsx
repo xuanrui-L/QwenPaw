@@ -355,7 +355,7 @@ export default function R2VWorkbenchPage() {
   const slotOf = (name: string): ArtifactSlotDocument | null => {
     const output = element.outputs[name];
     return output
-      ? (project.assets.artifact_slots_by_id[output.slot_id] ?? null)
+      ? project.assets.artifact_slots_by_id[output.slot_id] ?? null
       : null;
   };
   const storyboardSlot = slotOf("storyboard");
@@ -672,8 +672,8 @@ export default function R2VWorkbenchPage() {
             ? [normalizeVisualEntityId(draft.creation.scene_ref)]
             : []
           : field === "characters"
-            ? draft.creation.character_refs.map(normalizeVisualEntityId)
-            : draft.creation.prop_refs.map(normalizeVisualEntityId);
+          ? draft.creation.character_refs.map(normalizeVisualEntityId)
+          : draft.creation.prop_refs.map(normalizeVisualEntityId);
       for (const entityId of previousEntityIds) {
         if (nextEntityIds.includes(entityId)) continue;
         // Schema v3 persists bare entity IDs. Also clean prefixed keys from

@@ -253,8 +253,8 @@ function EventCard({
             failed
               ? "text-[var(--color-danger)]"
               : completed
-                ? "text-[var(--color-success)]"
-                : "text-[var(--color-accent)]"
+              ? "text-[var(--color-success)]"
+              : "text-[var(--color-accent)]"
           }
         >
           {completed ? "✓ " : failed ? "× " : "→ "}
@@ -279,8 +279,8 @@ function EventCard({
         error
           ? "text-[var(--color-danger)]"
           : success
-            ? "text-[var(--color-success)]"
-            : "text-[var(--color-text-secondary)]"
+          ? "text-[var(--color-success)]"
+          : "text-[var(--color-text-secondary)]"
       }`}
     >
       {summary}

@@ -137,10 +137,10 @@ export function selectVisualVariantCoverage(
           selectedVersionId,
           selectedAvailable: Boolean(
             selectedVersionId &&
-            variant.generated_artifact_version_ids.includes(
-              selectedVersionId,
-            ) &&
-            project.assets.artifact_versions_by_id[selectedVersionId],
+              variant.generated_artifact_version_ids.includes(
+                selectedVersionId,
+              ) &&
+              project.assets.artifact_versions_by_id[selectedVersionId],
           ),
         } satisfies VisualVariantCoverage,
       ];
@@ -154,20 +154,20 @@ export function selectVisualVariantCoverage(
     const entitySelectedVersionId = entry.entity.selected_artifact_version_id;
     const entitySelectedAvailable = Boolean(
       entitySelectedVersionId &&
-      project.assets.artifact_versions_by_id[entitySelectedVersionId],
+        project.assets.artifact_versions_by_id[entitySelectedVersionId],
     );
     const status: VisualCoverageStatus =
       missingVariantIds.length > 0
         ? "missing_required_variant"
         : entry.unassignedElementIds.size > 0
-          ? "unassigned_variant"
-          : entry.entity.required_variant_ids.length > 0
-            ? requiredVariants.some((variant) => !variant.selectedAvailable)
-              ? "missing_artifact"
-              : "covered"
-            : entitySelectedAvailable
-              ? "covered"
-              : "missing_artifact";
+        ? "unassigned_variant"
+        : entry.entity.required_variant_ids.length > 0
+        ? requiredVariants.some((variant) => !variant.selectedAvailable)
+          ? "missing_artifact"
+          : "covered"
+        : entitySelectedAvailable
+        ? "covered"
+        : "missing_artifact";
     return [
       {
         entity: entry.entity,

@@ -248,13 +248,13 @@ export default function TimelineCanvas({
     finalFrameReady &&
     Boolean(
       finalVideo &&
-      !finalVideo.error &&
-      finalVideo.readyState >= 2 &&
-      !finalVideo.seeking &&
-      (playing ||
-        Math.abs(
-          finalVideo.currentTime - playheadTick / timeline.ticks_per_second,
-        ) <= 0.35),
+        !finalVideo.error &&
+        finalVideo.readyState >= 2 &&
+        !finalVideo.seeking &&
+        (playing ||
+          Math.abs(
+            finalVideo.currentTime - playheadTick / timeline.ticks_per_second,
+          ) <= 0.35),
     );
 
   // ------------------------------------------------------------------
@@ -410,13 +410,13 @@ export default function TimelineCanvas({
       const video = videoRef.current;
       const ready = Boolean(
         video &&
-        !video.error &&
-        video.readyState >= 2 &&
-        !video.seeking &&
-        (playing ||
-          Math.abs(
-            video.currentTime - playheadTick / timeline.ticks_per_second,
-          ) <= 0.35),
+          !video.error &&
+          video.readyState >= 2 &&
+          !video.seeking &&
+          (playing ||
+            Math.abs(
+              video.currentTime - playheadTick / timeline.ticks_per_second,
+            ) <= 0.35),
       );
       setFinalFrameReady((current) => (current === ready ? current : ready));
     };
@@ -789,8 +789,8 @@ export default function TimelineCanvas({
                 ? t("timeline.notAffectedLabel")
                 : t("timeline.finalCut")
               : renderedVersion?.stale
-                ? t("timeline.contentUpdated")
-                : t("timeline.livePreview")}
+              ? t("timeline.contentUpdated")
+              : t("timeline.livePreview")}
           </div>
         </div>
       )}

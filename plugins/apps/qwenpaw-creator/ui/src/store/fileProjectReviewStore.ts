@@ -13,7 +13,11 @@ import type {
 import i18n from "@/i18n";
 
 export type FileProjectReviewSyncStatus =
-  "idle" | "syncing" | "healthy" | "degraded" | "not_found";
+  | "idle"
+  | "syncing"
+  | "healthy"
+  | "degraded"
+  | "not_found";
 
 export interface FileProjectReviewPollOptions {
   activeIntervalMs: number;

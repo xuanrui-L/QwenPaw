@@ -43,7 +43,13 @@ import { visualVariantLabel } from "@/lib/visualVariants";
 import { useTranslation } from "react-i18next";
 
 type FilterKey =
-  "all" | "source" | "artifact" | "visual" | "image" | "video" | "audio";
+  | "all"
+  | "source"
+  | "artifact"
+  | "visual"
+  | "image"
+  | "video"
+  | "audio";
 type AssetItem = {
   id: string;
   ref: string;
@@ -67,7 +73,9 @@ type AssetItem = {
   provenanceRefs: string[];
   metadata: Record<string, unknown>;
   raw:
-    SourceAssetVersionDocument | ArtifactVersionDocument | VisualEntityDocument;
+    | SourceAssetVersionDocument
+    | ArtifactVersionDocument
+    | VisualEntityDocument;
 };
 
 type AssetItemGroup = {
@@ -98,12 +106,12 @@ function fileMedia(
   const kind = type.startsWith("image/")
     ? "image"
     : type.startsWith("video/")
-      ? "video"
-      : type.startsWith("audio/")
-        ? "audio"
-        : type.startsWith("text/")
-          ? "text"
-          : "other";
+    ? "video"
+    : type.startsWith("audio/")
+    ? "audio"
+    : type.startsWith("text/")
+    ? "text"
+    : "other";
   return { kind, type };
 }
 
@@ -470,8 +478,8 @@ function kindLabel(item: AssetItem, t: (key: string) => string): string {
   return entity.kind === "character"
     ? t("assets.character")
     : entity.kind === "scene"
-      ? t("assets.scene")
-      : t("assets.prop");
+    ? t("assets.scene")
+    : t("assets.prop");
 }
 
 function mediaIcon(kind: string) {
@@ -526,11 +534,11 @@ function resolveProvenanceRef(
     // provenance therefore stays unresolved until it names visual-variant:.
     const versionId = entity
       ? entity.variants.order.length === 1
-        ? (entity.variants.items[entity.variants.order[0]]
-            ?.selected_artifact_version_id ?? null)
+        ? entity.variants.items[entity.variants.order[0]]
+            ?.selected_artifact_version_id ?? null
         : entity.variants.order.length === 0
-          ? entity.selected_artifact_version_id
-          : null
+        ? entity.selected_artifact_version_id
+        : null
       : null;
     const version = versionId
       ? project.assets.artifact_versions_by_id[versionId]
@@ -581,10 +589,11 @@ function visualEntityPromptTarget(
       entity.variants.items[requestedVariantId] &&
       requestedVariantId) ||
     (versionId &&
-      entity.variants.order.find((candidate) =>
-        entity.variants.items[
-          candidate
-        ]?.generated_artifact_version_ids.includes(versionId),
+      entity.variants.order.find(
+        (candidate) =>
+          entity.variants.items[
+            candidate
+          ]?.generated_artifact_version_ids.includes(versionId),
       )) ||
     entity.variants.order[0];
   const variant = variantId ? entity.variants.items[variantId] : null;
@@ -605,8 +614,8 @@ function generationPromptTarget(
     return visualEntityPromptTarget(
       entity,
       selected.variantId
-        ? (entity.variants.items[selected.variantId]
-            ?.selected_artifact_version_id ?? null)
+        ? entity.variants.items[selected.variantId]
+            ?.selected_artifact_version_id ?? null
         : entity.selected_artifact_version_id,
       selected.variantId,
     );
@@ -996,8 +1005,8 @@ export default function AssetsPage() {
                               item.previewUrl
                                 ? "ready"
                                 : item.kind === "visual"
-                                  ? "planned"
-                                  : "unavailable"
+                                ? "planned"
+                                : "unavailable"
                             }
                             mediaClassName="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
                             placeholderClassName="flex flex-col items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]"
@@ -1015,15 +1024,15 @@ export default function AssetsPage() {
                                   item.variantState === "active"
                                     ? "bg-emerald-500 text-white"
                                     : item.variantState === "history"
-                                      ? "bg-black/60 text-white"
-                                      : "bg-amber-500 text-white"
+                                    ? "bg-black/60 text-white"
+                                    : "bg-amber-500 text-white"
                                 }`}
                               >
                                 {item.variantState === "active"
                                   ? t("assets.active")
                                   : item.variantState === "history"
-                                    ? t("assets.history")
-                                    : t("assets.unselected")}
+                                  ? t("assets.history")
+                                  : t("assets.unselected")}
                               </span>
                             )}
                             {item.stale && (
@@ -1093,8 +1102,8 @@ export default function AssetsPage() {
                       selected.previewUrl
                         ? "ready"
                         : selected.kind === "visual"
-                          ? "planned"
-                          : "unavailable"
+                        ? "planned"
+                        : "unavailable"
                     }
                     controls
                     mediaClassName="h-full w-full object-contain"

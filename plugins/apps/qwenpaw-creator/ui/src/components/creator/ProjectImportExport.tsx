@@ -314,11 +314,11 @@ export function ExportProgressCard({
   const percent = done
     ? 100
     : progress.totalBytes
-      ? Math.min(
-          99,
-          Math.floor((progress.receivedBytes / progress.totalBytes) * 100),
-        )
-      : null;
+    ? Math.min(
+        99,
+        Math.floor((progress.receivedBytes / progress.totalBytes) * 100),
+      )
+    : null;
   const sizeText = progress.totalBytes
     ? `${formatBytes(progress.receivedBytes)} / ${formatBytes(
         progress.totalBytes,

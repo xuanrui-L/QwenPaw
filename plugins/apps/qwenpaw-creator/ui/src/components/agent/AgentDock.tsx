@@ -337,8 +337,8 @@ function MessageParts({
             {part.type === "audio"
               ? t("agent.audioAttachment")
               : part.type === "document"
-                ? t("agent.documentAttachment")
-                : part.type}{" "}
+              ? t("agent.documentAttachment")
+              : part.type}{" "}
             ·{" "}
             {String(
               part.attachment.name ||
@@ -401,8 +401,8 @@ function ThinkingDisclosure({
           {isReplaying
             ? t("agent.thinkingDone")
             : active
-              ? t("agent.thinking")
-              : t("agent.thinkingDone")}
+            ? t("agent.thinking")
+            : t("agent.thinkingDone")}
         </span>
         {allowExpand && (
           <button
@@ -923,8 +923,8 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
     resolvedStatus === "succeeded"
       ? "text-[var(--color-success)]"
       : resolvedStatus === "failed"
-        ? "text-[var(--color-danger)]"
-        : "text-[var(--color-text-tertiary)]";
+      ? "text-[var(--color-danger)]"
+      : "text-[var(--color-text-tertiary)]";
   const displayLabel = creatorToolLabel(item.tool);
   return (
     <div
@@ -948,10 +948,10 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
             {isReplaying
               ? ""
               : active
-                ? t("agent.processing")
-                : resolvedStatus === "succeeded"
-                  ? t("agent.completed")
-                  : t("agent.failed")}
+              ? t("agent.processing")
+              : resolvedStatus === "succeeded"
+              ? t("agent.completed")
+              : t("agent.failed")}
           </span>
           {active && item.receivedBytes !== undefined && (
             <span className="text-[9px] text-[var(--color-text-tertiary)]">
@@ -1030,7 +1030,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
         label: t("agent.waitingReview"),
         tone: "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
       }
-    : (terminal ?? SUBAGENT_RUNNING_META);
+    : terminal ?? SUBAGENT_RUNNING_META;
   return (
     <div
       data-subagent-activity={activity.parentActionId}
@@ -1069,14 +1069,14 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
                 materializedTool={Boolean(
                   actionEnvelopeFromStreamText(subagentMessageText(entry.item))
                     ?.tool &&
-                  tools.some(
-                    (tool) =>
-                      tool.tool ===
-                        actionEnvelopeFromStreamText(
-                          subagentMessageText(entry.item),
-                        )?.tool &&
-                      tool.firstEventSeq >= entry.item.firstEventSeq,
-                  ),
+                    tools.some(
+                      (tool) =>
+                        tool.tool ===
+                          actionEnvelopeFromStreamText(
+                            subagentMessageText(entry.item),
+                          )?.tool &&
+                        tool.firstEventSeq >= entry.item.firstEventSeq,
+                    ),
                 )}
               />
             ) : (
@@ -1164,12 +1164,12 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
         ? activity.waitingReview
           ? "waiting_review"
           : activity.terminalKind === "FAILED" ||
-              activity.terminalKind === "BLOCKED"
-            ? "failed"
-            : activity.terminalKind === "CANCELLED" ||
-                activity.terminalKind === "STALE"
-              ? "cancelled"
-              : "succeeded"
+            activity.terminalKind === "BLOCKED"
+          ? "failed"
+          : activity.terminalKind === "CANCELLED" ||
+            activity.terminalKind === "STALE"
+          ? "cancelled"
+          : "succeeded"
         : "started"
       : status;
   // When the project reached a terminal state, force "started" tools terminal too.
@@ -1185,12 +1185,12 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
     resolvedStatus === "succeeded"
       ? "text-[var(--color-success)]"
       : resolvedStatus === "failed"
-        ? "text-[var(--color-danger)]"
-        : resolvedStatus === "cancelled"
-          ? "text-[var(--color-text-tertiary)]"
-          : resolvedStatus === "waiting_review"
-            ? "text-[var(--color-accent)]"
-            : "text-[var(--color-text-secondary)]";
+      ? "text-[var(--color-danger)]"
+      : resolvedStatus === "cancelled"
+      ? "text-[var(--color-text-tertiary)]"
+      : resolvedStatus === "waiting_review"
+      ? "text-[var(--color-accent)]"
+      : "text-[var(--color-text-secondary)]";
 
   let displayLabel: string;
   let subLabel: string | null = null;
@@ -1241,14 +1241,14 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
             {isReplaying
               ? ""
               : active
-                ? t("agent.processing")
-                : resolvedStatus === "succeeded"
-                  ? t("agent.completed")
-                  : resolvedStatus === "cancelled"
-                    ? t("agent.cancelled")
-                    : resolvedStatus === "waiting_review"
-                      ? ` · ${t("agent.waitingReview")}`
-                      : t("agent.failed")}
+              ? t("agent.processing")
+              : resolvedStatus === "succeeded"
+              ? t("agent.completed")
+              : resolvedStatus === "cancelled"
+              ? t("agent.cancelled")
+              : resolvedStatus === "waiting_review"
+              ? ` · ${t("agent.waitingReview")}`
+              : t("agent.failed")}
           </span>
           {subLabel && active && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">
@@ -1452,9 +1452,9 @@ function projectRefItems(
                 : undefined;
             })()
           : entity.variants.order.length === 0 &&
-              entity.selected_artifact_version_id
-            ? getArtifactVersionMediaUrl(entity.selected_artifact_version_id)
-            : undefined,
+            entity.selected_artifact_version_id
+          ? getArtifactVersionMediaUrl(entity.selected_artifact_version_id)
+          : undefined,
       uiLocator: { page: "assets", assetId: entity.entity_id },
     }),
   );
@@ -1719,7 +1719,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
 
   const streaming = Boolean(
     session &&
-    ["RUNNING", "RESUMING", "INTERRUPT_REQUESTED"].includes(session.status),
+      ["RUNNING", "RESUMING", "INTERRUPT_REQUESTED"].includes(session.status),
   );
   const stoppable =
     Object.values(subagentActivities).some((activity) => !activity.completed) ||
@@ -1911,8 +1911,8 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
           type: selectedRef.startsWith("element:")
             ? "element"
             : selectedRef.startsWith("timeline:")
-              ? "timeline"
-              : "asset",
+            ? "timeline"
+            : "asset",
           uiLocator: {},
         },
       );
@@ -2503,8 +2503,8 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                     liveStatus.state === "working"
                       ? "agent-live-shimmer font-medium"
                       : liveStatus.state === "stopping"
-                        ? "font-medium text-[var(--color-danger)]"
-                        : "text-[var(--color-text-tertiary)]"
+                      ? "font-medium text-[var(--color-danger)]"
+                      : "text-[var(--color-text-tertiary)]"
                   }`}
                 >
                   {liveStatus.label}
@@ -2554,8 +2554,8 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                           chip.thumbnailUrl
                             ? undefined
                             : manual
-                              ? t("agent.manualRef")
-                              : t("agent.autoContext")
+                            ? t("agent.manualRef")
+                            : t("agent.autoContext")
                         }
                       >
                         @{chip.name}

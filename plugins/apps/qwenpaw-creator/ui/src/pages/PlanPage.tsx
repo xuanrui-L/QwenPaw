@@ -64,7 +64,7 @@ export default function PlanPage() {
   const selectedElementId = query.get("element");
   const selectedElement =
     selectedElementId && timeline
-      ? (timeline.elements_by_id[selectedElementId] ?? null)
+      ? timeline.elements_by_id[selectedElementId] ?? null
       : null;
   const elementDraft = useProjectDraft(
     selectedElement,
@@ -263,19 +263,19 @@ export default function PlanPage() {
   const activeComposeTask = useMemo(
     () =>
       timelineTargetRef
-        ? (tasks.find(
+        ? tasks.find(
             (task) =>
               task.kind === "compose" &&
               task.targetRef === timelineTargetRef &&
               (task.status === "QUEUED" || task.status === "RUNNING"),
-          ) ?? null)
+          ) ?? null
         : null,
     [tasks, timelineTargetRef],
   );
   const requestedComposeTask = useMemo(
     () =>
       requestedComposeTaskId
-        ? (tasks.find((task) => task.id === requestedComposeTaskId) ?? null)
+        ? tasks.find((task) => task.id === requestedComposeTaskId) ?? null
         : null,
     [requestedComposeTaskId, tasks],
   );
@@ -308,8 +308,8 @@ export default function PlanPage() {
         total: composeElementProgress.total,
       })
     : activeComposeTask
-      ? t("plan.composingShort")
-      : t("plan.preparingComposeShort");
+    ? t("plan.composingShort")
+    : t("plan.preparingComposeShort");
 
   const composeNow = useCallback(async () => {
     if (!timeline || isComposing) return;
@@ -428,8 +428,8 @@ export default function PlanPage() {
       typeof requestedComposeTask.error?.message === "string"
         ? requestedComposeTask.error.message
         : requestedComposeTask.status === "QUARANTINED"
-          ? t("plan.composeContentChanged")
-          : t("plan.composeNotCompleted");
+        ? t("plan.composeContentChanged")
+        : t("plan.composeNotCompleted");
     message.error(t("plan.composeFailed", { detail }));
   }, [id, pollOnce, requestedComposeTask]);
 
@@ -454,7 +454,9 @@ export default function PlanPage() {
   const downloadRender = useCallback(async () => {
     if (!freshRender) return;
     const url = getArtifactVersionMediaUrl(freshRender.version_id);
-    const filename = `${freshRender.name || project?.name || t("plan.finalCut")}.mp4`;
+    const filename = `${
+      freshRender.name || project?.name || t("plan.finalCut")
+    }.mp4`;
     try {
       const response = await fetch(url);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -586,7 +588,9 @@ export default function PlanPage() {
               >
                 {project.strategy.creative_brief}
                 {project.strategy.creative_direction &&
-                  `\n\n${t("plan.creativeDirectionLabel", { direction: project.strategy.creative_direction })}`}
+                  `\n\n${t("plan.creativeDirectionLabel", {
+                    direction: project.strategy.creative_direction,
+                  })}`}
               </div>
             </details>
           ) : (
@@ -661,19 +665,19 @@ export default function PlanPage() {
                 freshRender
                   ? t("plan.downloadFinalTitle")
                   : isComposing
-                    ? composeElementProgress
-                      ? t("plan.composing", {
-                          completed: composeElementProgress.completed,
-                          total: composeElementProgress.total,
-                        })
-                      : t("plan.preparingCompose")
-                    : readiness.total === 0
-                      ? t("plan.noComposableContent")
-                      : readiness.notReady > 0
-                        ? t("plan.waitingForContent", {
-                            count: readiness.notReady,
-                          })
-                        : t("plan.waitingForCompose")
+                  ? composeElementProgress
+                    ? t("plan.composing", {
+                        completed: composeElementProgress.completed,
+                        total: composeElementProgress.total,
+                      })
+                    : t("plan.preparingCompose")
+                  : readiness.total === 0
+                  ? t("plan.noComposableContent")
+                  : readiness.notReady > 0
+                  ? t("plan.waitingForContent", {
+                      count: readiness.notReady,
+                    })
+                  : t("plan.waitingForCompose")
               }
               className="relative inline-flex cursor-pointer items-center gap-1.5 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
             >
