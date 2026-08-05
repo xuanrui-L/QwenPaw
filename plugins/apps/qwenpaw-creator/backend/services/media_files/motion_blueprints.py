@@ -110,11 +110,23 @@ def _caption_font_css(text: str) -> str:
     return f"min({vh:.1f}vh,{vw:.1f}vw)"
 
 
-def _document(css: str, body: str, script: str, duration: float) -> str:
+def _document(
+    css: str,
+    body: str,
+    script: str,
+    duration: float,
+    *,
+    exit_style: str = "soft_fade",
+) -> str:
     register = _HF_REGISTER.replace("%DUR%", f"{duration:.3f}")
+    # data-motion-exit hands the ending to the renderer-managed exit (an
+    # alpha fade over the last 15% of the output window): cards and
+    # decorations leave gracefully instead of hard-cutting, while the
+    # timeline itself keeps a fully visible final state for the probes.
     return (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>\n'
-        f'{_BASE_CSS}\n{css}\n</style></head><body><div id="root">{body}</div>\n'
+        f"{_BASE_CSS}\n{css}\n</style></head>"
+        f'<body><div id="root" data-motion-exit="{exit_style}">{body}</div>\n'
         '<script src="vendor/gsap.min.js"></script>\n'
         f"<script>\nvar tl = gsap.timeline({{ paused: true }});\n{script}\n{register}\n</script></body></html>"
     )
@@ -220,10 +232,10 @@ def _decor_wave_flow(
 
     lift = 3.0 + intensity * 2.0
     css = f"""
-.band{{position:absolute;left:2%;right:2%;height:26%;border-radius:48%;opacity:.55}}
-.b1{{bottom:4%;background:linear-gradient(180deg,transparent,{palette.primary}59)}}
-.b2{{bottom:22%;background:linear-gradient(180deg,transparent,{palette.secondary}40);opacity:.42}}
-.b3{{bottom:40%;background:linear-gradient(180deg,transparent,{palette.paper}33);opacity:.34}}
+.band{{position:absolute;left:2%;right:2%;height:26%;border-radius:48%;opacity:.85}}
+.b1{{bottom:4%;background:linear-gradient(180deg,transparent,{palette.primary}8c)}}
+.b2{{bottom:22%;background:linear-gradient(180deg,transparent,{palette.secondary}66);opacity:.62}}
+.b3{{bottom:40%;background:linear-gradient(180deg,transparent,{palette.paper}59);opacity:.5}}
 """
     body = (
         "<i class='band b1'></i><i class='band b2'></i><i class='band b3'></i>"
