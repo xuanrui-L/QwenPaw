@@ -87,6 +87,10 @@ class AgentToolCall:
         compare=False,
         repr=False,
     )
+    # Retain the provider payload only until the Runtime persists the completed
+    # turn. Raw fragments are deliberately not durable events anymore.
+    raw_arguments: str = field(default="", compare=False, repr=False)
+    provider_chunk_count: int = field(default=0, compare=False, repr=False)
 
     def history_dict(self) -> dict[str, Any]:
         """Serialize the call for the driver's provider-independent turn history."""
@@ -111,9 +115,31 @@ class AgentModelTurn:
     thinking: str = ""
     tool_calls: tuple[AgentToolCall, ...] = ()
     provider_message_id: str | None = None
+    finish_reason: str = "completed"
+    usage: dict[str, Any] | None = field(default=None, compare=False)
 
 
 _ARGS_PREVIEW_CHARS = 160
+
+
+def _usage_payload(usage: Any) -> dict[str, Any] | None:
+    if usage is None:
+        return None
+    payload: dict[str, Any] = {}
+    for name in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_input_tokens",
+        "time",
+    ):
+        value = getattr(usage, name, None)
+        if isinstance(value, (int, float)):
+            payload[name] = value
+    metadata = getattr(usage, "metadata", None)
+    if isinstance(metadata, Mapping) and metadata:
+        payload["metadata"] = dict(metadata)
+    return payload or None
 
 
 def _parse_tool_arguments(
@@ -522,6 +548,7 @@ class AgentScopeAgentChatClient:
         streamed_tool_call_ids: set[str] = set()
         streamed_tool_names: dict[str, str] = {}
         pending_tool_inputs: dict[str, list[str]] = {}
+        provider_tool_chunk_counts: dict[str, int] = {}
 
         try:
             async with model_slot("text"):
@@ -567,6 +594,15 @@ class AgentScopeAgentChatClient:
                                         ]
                                         if guarded_tool_delta is not None:
                                             for delta in deltas:
+                                                provider_tool_chunk_counts[
+                                                    block.id
+                                                ] = (
+                                                    provider_tool_chunk_counts.get(
+                                                        block.id,
+                                                        0,
+                                                    )
+                                                    + 1
+                                                )
                                                 await guarded_tool_delta(
                                                     block.id,
                                                     effective_name,
@@ -574,6 +610,15 @@ class AgentScopeAgentChatClient:
                                                 )
                                             streamed_tool_call_ids.add(
                                                 block.id,
+                                            )
+                                        else:
+                                            provider_tool_chunk_counts[
+                                                block.id
+                                            ] = provider_tool_chunk_counts.get(
+                                                block.id,
+                                                0,
+                                            ) + len(
+                                                deltas,
                                             )
                                     else:
                                         pending_tool_inputs.setdefault(
@@ -720,6 +765,11 @@ class AgentScopeAgentChatClient:
                         ),
                         arguments_repaired=repaired,
                         strict_json_error=strict_error,
+                        raw_arguments=raw_arguments,
+                        provider_chunk_count=(
+                            provider_tool_chunk_counts.get(call_id, 0)
+                            or (1 if raw_arguments else 0)
+                        ),
                     ),
                 )
 
@@ -772,6 +822,14 @@ class AgentScopeAgentChatClient:
             provider_message_id=(
                 str(response.id) if getattr(response, "id", None) else None
             ),
+            finish_reason=str(
+                getattr(
+                    getattr(response, "finished_reason", None),
+                    "value",
+                    getattr(response, "finished_reason", "completed"),
+                ),
+            ),
+            usage=_usage_payload(getattr(response, "usage", None)),
         )
 
 

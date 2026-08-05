@@ -205,8 +205,30 @@ function visualVariantForVersion(
 }
 
 function visualVariantCardName(variant: VisualVariantDocument): string {
-  const label = visualVariantLabel(variant, 36);
-  return label.split(/[：:]/, 1)[0]?.trim() || label;
+  const variantName = variant.variant_id
+    .replace(/^(?:visual-variant:|variant:|var:)/, "")
+    .split(":")
+    .at(-1)
+    ?.trim();
+  if (!variantName) return visualVariantLabel(variant, 36);
+  if (variantName.toLocaleLowerCase() === "default") return "默认造型";
+  return variantName
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((word) => {
+      if (/^(?:nba|wnba|nfl|mlb|nhl|2d|3d)$/i.test(word))
+        return word.toLocaleUpperCase();
+      return `${word.charAt(0).toLocaleUpperCase()}${word.slice(1)}`;
+    })
+    .join(" ");
+}
+
+function visualSettingCardName(
+  entity: VisualEntityDocument,
+  variant: VisualVariantDocument | null,
+): string {
+  if (entity.kind !== "character" || !variant) return entity.name;
+  return visualVariantCardName(variant);
 }
 
 function assetItems(project: ProjectDocument): AssetItem[] {
@@ -290,6 +312,7 @@ function assetItems(project: ProjectDocument): AssetItem[] {
             )
         : [null];
       return variants.map((variant, variantIndex): AssetItem => {
+        const cardName = visualSettingCardName(entity, variant);
         const selectedVersionId =
           variant?.selected_artifact_version_id ??
           (!variant ? entity.selected_artifact_version_id : null);
@@ -308,7 +331,7 @@ function assetItems(project: ProjectDocument): AssetItem[] {
             : `visual-entity:${entity.entity_id}`,
           kind: "visual",
           name: entity.name,
-          cardName: variant ? visualVariantCardName(variant) : entity.name,
+          cardName,
           description:
             variant?.requirements ||
             entity.description ||

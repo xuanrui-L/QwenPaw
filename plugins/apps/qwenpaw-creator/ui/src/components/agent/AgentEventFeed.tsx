@@ -76,7 +76,7 @@ const RUN_STATUS_META: Record<
 const NESTED_SUBAGENT_DETAIL_EVENTS = new Set([
   "subagent.message_delta",
   "subagent.message_completed",
-  "subagent.tool_delta",
+  "subagent.tool_progress",
   "subagent.tool_started",
   "subagent.tool_completed",
 ]);
@@ -337,7 +337,7 @@ export default function AgentEventFeed() {
               "message.appended",
               "message.completed",
               "agent.message_delta",
-              "agent.tool_delta",
+              "agent.tool_progress",
               "agent.plan",
               "agent.tool_started",
               "agent.tool_completed",

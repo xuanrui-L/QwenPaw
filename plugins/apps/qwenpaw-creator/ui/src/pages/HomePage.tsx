@@ -343,7 +343,7 @@ export default function HomePage() {
               <HeroComposerCard />
             </div>
 
-            {/* Hidden until curated content ships. */}
+            {/* Bundled example projects; hidden when the catalogue is empty. */}
             <div className="hero-fade-up mt-8 w-full [animation-delay:0.24s]">
               <InspirationExamples />
             </div>

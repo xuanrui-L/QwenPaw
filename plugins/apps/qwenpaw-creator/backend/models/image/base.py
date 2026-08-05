@@ -200,9 +200,20 @@ class BaseImageModel(ABC):
         reference_image_urls: list[str] | None = None,
     ) -> str:
         """Generate an image, persist it, and return a /generated/... URL."""
-        if not self.api_key:
+        missing = [
+            name
+            for name, value in (
+                ("api_key", self.api_key),
+                ("base_url", getattr(self, "base_url", "")),
+                ("model", self.model_name),
+            )
+            if not value
+        ]
+        if missing:
             raise ModelError(
-                "creator_image_model.api_key or IMAGE_API_KEY is required",
+                "Creator image model configuration is incomplete: "
+                + ", ".join(missing)
+                + ". Configure creator_image_model before retrying.",
                 model_name=self.model_name,
             )
 
@@ -277,13 +288,14 @@ class BaseImageModel(ABC):
                 f"Image generation HTTP error: {e.response.status_code} - {detail[:500]}",
             )
             raise ModelError(
-                f"Image generation failed with status {e.response.status_code}: {detail[:500]}",
+                f"Image generation failed with status {e.response.status_code}: "
+                f"{detail[:500]}. Check creator_image_model configuration.",
                 model_name=self.model_name,
             )
         except Exception as e:
             logger.error(f"Image generation failed: {e}")
             raise ModelError(
-                f"Image generation failed: {str(e)}",
+                f"Image generation failed: {str(e)}. Check creator_image_model configuration.",
                 model_name=self.model_name,
             )
 

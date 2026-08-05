@@ -31,6 +31,7 @@ from services.runtime_files.models import (
 )
 
 from .assets import AssetFileStore
+from .candidate_normalization import normalize_project_candidate
 from .commit import PROTECTED_EXACT_POINTERS, ProjectCommitBoundary
 from .jq_transform import JqProjectTransformer
 from .models import Project, TimelineElement
@@ -48,6 +49,19 @@ _MAX_TEXT_PAGE_BYTES = 256 * 1024
 
 class AgentProjectToolError(RuntimeError):
     """Base error for the Project tool boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "PROJECT_TOOL_ERROR",
+        retryable: bool = False,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.details = dict(details or {})
 
 
 class UnknownAgentProjectTool(AgentProjectToolError):
@@ -189,6 +203,13 @@ class AgentProjectFileResult(_ToolModel):
 class AgentProjectCommitResult(AgentProjectSnapshotResult):
     transaction_id: str = Field(alias="transactionId", min_length=1)
     changed_pointers: list[str] = Field(alias="changedPointers")
+    # Redundant identity echoes stripped before validation; see
+    # ``candidate_normalization``. Tells the model what was removed so the
+    # habit is not silently reinforced.
+    normalized_pointers: list[str] = Field(
+        default_factory=list,
+        alias="normalizedPointers",
+    )
     review_id: str | None = Field(default=None, alias="reviewId")
 
 
@@ -249,6 +270,8 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "绝不能在 program 中给这些保护字段赋值；updated_at 由 Runtime 自动维护。"
             "不要以 `$jsonArgs | ...` 开始变换；输入 Project `.` 必须始终作为输出根对象。"
             "批量内容通过 jsonArgs 传入，program 只负责结构化赋值。"
+            "jsonArgs 中的 object 已经是 jq object，应直接赋值或合并；"
+            "仅当输入确实是 [{key,value}] 数组时才使用 from_entries。"
             "若单次参数体量极大（如数十个 Element），可拆分为少量几次调用以降低 JSON 出错风险。"
             "动态加法表达式在绑定 jq 变量前必须加括号，例如 "
             '("source:" + $logicalId) as $sourceKey；对象字段值中的运算也必须加括号。'
@@ -281,6 +304,7 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                         "通过 --argjson 传入的结构化 JSON；新增多项时间线内容时应把对象集合放这里，"
                         "避免在 program 中拼接大段 JSON。program 可使用 "
                         "$jsonArgs.elements，也兼容按 key 使用 $elements。"
+                        "object 参数已经是 jq object，不要再对它使用 from_entries。"
                     ),
                     "additionalProperties": True,
                 },
@@ -397,6 +421,29 @@ _PROJECT_SCHEMA_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
         "text 为空的装饰/媒体 Overlay 必须携带非空 prompt 或引用版本",
     ),
 )
+# Root-level model validators surface with an empty ``loc``, so path-prefix
+# hints never match them; these hints key on the error message instead.
+# More specific needles must come first.
+_PROJECT_SCHEMA_MESSAGE_HINTS: tuple[tuple[str, str], ...] = (
+    (
+        "visual variant binding references missing variant",
+        "绑定的 variantId 必须已存在于该实体的 variants.items 中；"
+        "先创建 Variant（并在 required_variant_ids 声明）再在 Element 中绑定，"
+        "或检查 variant id 拼写",
+    ),
+    (
+        "visual variant binding",
+        "visual_variant_refs 的每个 entityId 必须同时出现在同一 creation 的 "
+        "character_refs/prop_refs/scene_ref 中；先把实体加入引用列表"
+        "（或移除该绑定）再提交",
+    ),
+    (
+        "must not be authored via jq_project",
+        "artifact_slots_by_id 与 elements outputs 是媒体管线的写回区，"
+        "禁止用 jq_project 手写或补全；视频/分镜产物只能通过委派对应的"
+        "生成 Director 产生，生成完成后 Runtime 会自动写回",
+    ),
+)
 _MAX_SCHEMA_ERROR_LINES = 8
 
 
@@ -408,6 +455,7 @@ def _translate_project_schema_error(error: ValidationError) -> str:
     for item in items[:_MAX_SCHEMA_ERROR_LINES]:
         loc = tuple(str(part) for part in item.get("loc", ()))
         path = ".".join(loc) or "$"
+        message = str(item.get("msg", "invalid"))
         hint = ""
         for prefix, text in _PROJECT_SCHEMA_HINTS:
             if loc[: len(prefix)] == prefix or any(
@@ -417,12 +465,17 @@ def _translate_project_schema_error(error: ValidationError) -> str:
                 hint = f"（{text}）"
                 break
         else:
-            if item.get("type") == "extra_forbidden":
-                hint = (
-                    "（该字段不在 Project Schema 中，"
-                    "请对照 system prompt 里的 PROJECT_JSON_SCHEMA）"
-                )
-        lines.append(f"- {path}: {item.get('msg', 'invalid')}{hint}")
+            for needle, text in _PROJECT_SCHEMA_MESSAGE_HINTS:
+                if needle in message:
+                    hint = f"（{text}）"
+                    break
+            else:
+                if item.get("type") == "extra_forbidden":
+                    hint = (
+                        "（该字段不在 Project Schema 中，"
+                        "请对照 system prompt 里的 PROJECT_JSON_SCHEMA）"
+                    )
+        lines.append(f"- {path}: {message}{hint}")
     if len(items) > _MAX_SCHEMA_ERROR_LINES:
         lines.append(f"- ...另有 {len(items) - _MAX_SCHEMA_ERROR_LINES} 处错误")
     return (
@@ -597,6 +650,7 @@ class AgentProjectTools:
             string_args=request.string_args,
             json_args=request.json_args,
         )
+        normalized_pointers = normalize_project_candidate(candidate)
         base_data = base.project.model_dump(mode="json")
         changed_protected = [
             pointer
@@ -609,6 +663,8 @@ class AgentProjectTools:
                 "当前输出缺失或改变了 "
                 + ", ".join(changed_protected)
                 + "。不要以 `| $child` 或嵌套路径选择结束 jq program。",
+                code="JQ_RESULT_NOT_PROJECT_ROOT",
+                details={"changedProtectedPointers": changed_protected},
             )
         result = self.commits.commit(
             base=base,
@@ -625,6 +681,7 @@ class AgentProjectTools:
                 for change in result.changeset.changes
                 if change.json_pointer is not None
             ],
+            normalizedPointers=normalized_pointers,
             reviewId=result.review.review_id
             if result.review is not None
             else None,
@@ -683,7 +740,17 @@ class AgentProjectTools:
                 translated = _translate_jq_input_error(arguments, exc)
                 if translated is None:
                     raise
-                raise AgentProjectToolError(translated) from exc
+                raise AgentProjectToolError(
+                    translated,
+                    code="JQ_ARGUMENTS_MALFORMED",
+                    details={
+                        "validationErrors": exc.errors(
+                            include_context=False,
+                            include_input=False,
+                            include_url=False,
+                        ),
+                    },
+                ) from exc
             try:
                 result = self.jq_project(
                     project_id=request.project_id,
@@ -694,6 +761,14 @@ class AgentProjectTools:
             except ValidationError as exc:
                 raise AgentProjectToolError(
                     _translate_project_schema_error(exc),
+                    code="JQ_PROJECT_SCHEMA_INVALID",
+                    details={
+                        "validationErrors": exc.errors(
+                            include_context=False,
+                            include_input=False,
+                            include_url=False,
+                        ),
+                    },
                 ) from exc
         elif tool_name == ELEMENTS_AT_TOOL_NAME:
             request = ElementsAtToolInput.model_validate(dict(arguments))

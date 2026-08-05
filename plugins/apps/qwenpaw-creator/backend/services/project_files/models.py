@@ -250,6 +250,20 @@ class ArtifactSlot(StrictModel):
         return value
 
 
+# Every ArtifactSlot kind the media pipelines actually write. Slots are
+# Runtime write-back records: a kind outside this set (or an empty slot)
+# can only come from a hand-written jq_project transform fabricating a
+# result, which later collides with the real pipeline write-back.
+ARTIFACT_SLOT_KINDS = frozenset(
+    {
+        "element_video",
+        "final_video",
+        "r2v_storyboard_image",
+        "visual_asset_image",
+    },
+)
+
+
 class ArtifactVersion(StrictModel):
     version_id: EntityId
     slot_id: EntityId
@@ -383,6 +397,20 @@ class AssetIndex(StrictModel):
                 )
 
         for slot in self.artifact_slots_by_id.values():
+            if slot.kind not in ARTIFACT_SLOT_KINDS:
+                raise ValueError(
+                    f"artifact slot {slot.slot_id} has unknown kind "
+                    f"{slot.kind!r}; artifact slots are written back by "
+                    "the media pipeline and must not be authored via "
+                    "jq_project",
+                )
+            if not slot.version_ids:
+                raise ValueError(
+                    f"artifact slot {slot.slot_id} has no artifact "
+                    "versions; artifact slots are written back by the "
+                    "media pipeline and must not be authored via "
+                    "jq_project",
+                )
             for version_id in slot.version_ids:
                 version = _require_key(
                     self.artifact_versions_by_id,
@@ -1226,6 +1254,7 @@ class Project(StrictModel):
                 _validate_visual_variant_refs(
                     creation,
                     self.visual.entities.items,
+                    element_id=element_id,
                 )
                 for shot in creation.shots.items.values():
                     _validate_visual_refs(shot, visual_ids)
@@ -1559,6 +1588,8 @@ def _validate_visual_refs(
 def _validate_visual_variant_refs(
     value: R2VCreation,
     entities: dict[str, VisualEntity],
+    *,
+    element_id: str,
 ) -> None:
     referenced = {
         *value.character_refs,
@@ -1568,7 +1599,10 @@ def _validate_visual_variant_refs(
     for entity_id, variant_id in value.visual_variant_refs.items():
         if entity_id not in referenced:
             raise ValueError(
-                f"visual variant binding targets unreferenced entity {entity_id}",
+                f"element {element_id}: visual variant binding targets "
+                f"unreferenced entity {entity_id}; add it to this "
+                "creation's character_refs/prop_refs/scene_ref in the "
+                "same commit, or remove the visual_variant_refs entry",
             )
         entity = entities[entity_id]
         if (
@@ -1576,7 +1610,8 @@ def _validate_visual_variant_refs(
             or variant_id not in entity.variants.order
         ):
             raise ValueError(
-                f"visual variant binding references missing variant {variant_id}",
+                f"element {element_id}: visual variant binding references "
+                f"missing variant {variant_id}",
             )
 
 

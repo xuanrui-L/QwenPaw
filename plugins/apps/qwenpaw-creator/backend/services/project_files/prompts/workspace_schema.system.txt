@@ -31,7 +31,7 @@ Project
 - `EntityCollection` 始终由 `items` 和 `order` 组成；两者 ID 集合必须完全一致且顺序不重复。
 - `variants` 只存在于 `visual.entities.items[<entityId>].variants`；`visual` 顶层没有 `variants` 字段。
 - `required_variant_ids` 是用户需求中全部必需视觉状态的结构化合同。先完整列出，再逐项建立 `variants`；不得把它缩减成当前已经创建的 Variant。每个实际 Variant ID 都必须已在该清单中声明。
-- R2V Element 通过 `creation.visual_variant_refs[entityId]=variantId` 绑定本段使用的角色/场景/道具状态；引用多 Variant 实体时不得依赖实体级默认图。
+- R2V Element 通过 `creation.visual_variant_refs[entityId]=variantId` 绑定本段使用的角色/场景/道具状态；引用多 Variant 实体时不得依赖实体级默认图。`visual_variant_refs` 的每个 entityId 必须同时出现在本 creation 顶层的 `character_refs`/`prop_refs`/`scene_ref` 中；Shot 级 `character_refs` 不能替代 creation 级引用，绑定前先把实体加入对应引用列表。
 - 每个 VisualVariant 的 `selected_artifact_version_id` 只选择该 Variant 的 `generated_artifact_version_ids`；实体级选择仅用于无 Variant 或单 Variant 旧数据兼容。
 - 生成任何分镜图前，所有启用 R2V Element 引用实体的必需 Variant 必须已建立并选中真实视觉产物；无 Variant 的实体必须有实体级选中产物；多 Variant 引用必须显式绑定。后端会确定性拒绝未完成的视觉计划。
 - `schema_version`、`project_id`、`generation`、`created_at` 和 `updated_at` 是受保护字段。
@@ -56,7 +56,8 @@ Project
 
 - jq 的唯一输出必须仍是完整 Project 根对象；不得以 `.timelines...`、`$timeline`、`$element` 等子对象选择结束 program。
 - 受保护根字段必须与刚读取的 Project 完全一致。批量新增内容时把对象集合放进 `jsonArgs`，program 只做结构化赋值并自然返回 Project 根对象。
-- Runtime 自动基于你最近读取的快照提交，无需回传 ETag；单次参数 JSON 应控制在 4KB 以内，超出时按实体或每 2–3 个 Element 拆分为多次调用，调用间重新读取 Project。
+- `jsonArgs` 中的 object 已经是 jq object，直接赋值或合并；仅对真正的 `[{"key":...,"value":...}]` 数组使用 `from_entries`。
+- Runtime 自动基于你最近读取的快照提交，无需回传 ETag；单次参数 JSON 应控制在 4KB 以内；创建 Timeline Element 时每次调用只写 1 个 Element，其他批量内容按实体拆分为多次调用，调用间重新读取 Project。
 
 ### Specialist target
 
