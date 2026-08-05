@@ -79,6 +79,7 @@ const config: ModelConfigData = {
     policy_api_key: "",
   },
   executionAuthorization: { mode: "allow_all" },
+  creationCheckpoints: { mode: "skip" },
 };
 
 describe("ModelBadges", () => {

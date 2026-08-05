@@ -261,6 +261,7 @@ describe("new Creator API contract", () => {
         policy_api_key: "",
       },
       executionAuthorization: { mode: "required" },
+      creationCheckpoints: { mode: "required" },
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
