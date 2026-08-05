@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from domain.errors import ValidationError
-from models import config as model_config
 from schemas.assets import SourceIntelligenceIndex, SourceMemoryRef
 from services.execution_pricing import estimate_source_memory_cost
 from services.media import source_memory
@@ -149,18 +148,9 @@ def test_should_build_requires_video_over_threshold(
     tmp_path,
     monkeypatch,
 ) -> None:
+    del monkeypatch
     service = _service(tmp_path)
     project_root = tmp_path / "projects" / "project-1"
-    monkeypatch.setattr(
-        model_config,
-        "is_embedding_configured",
-        lambda: True,
-    )
-    monkeypatch.setattr(
-        source_memory.model_config,
-        "is_embedding_configured",
-        lambda: True,
-    )
     assert service.should_build(_index(), project_root)
     assert not service.should_build(
         _index(duration_ms=10 * 60 * 1000),
@@ -170,17 +160,19 @@ def test_should_build_requires_video_over_threshold(
     assert not service.should_build(short_image, project_root)
 
 
-def test_should_build_requires_embedding_configuration(
+def test_should_build_degrades_without_embedding_configuration(
     tmp_path,
     monkeypatch,
 ) -> None:
+    # A missing embedding backend no longer blocks the build: the
+    # pipeline persists a BM25-only text index instead.
     service = _service(tmp_path)
     monkeypatch.setattr(
         source_memory.model_config,
         "is_embedding_configured",
         lambda: False,
     )
-    assert not service.should_build(
+    assert service.should_build(
         _index(),
         tmp_path / "projects" / "project-1",
     )
@@ -190,14 +182,10 @@ def test_should_build_skips_when_memory_already_built(
     tmp_path,
     monkeypatch,
 ) -> None:
+    del monkeypatch
     service = _service(tmp_path)
     project_root = tmp_path / "projects" / "project-1"
     _write_fixture_memory(project_root, "intel-1")
-    monkeypatch.setattr(
-        source_memory.model_config,
-        "is_embedding_configured",
-        lambda: True,
-    )
     assert not service.should_build(_index(), project_root)
 
 
@@ -231,10 +219,14 @@ def test_load_memory_ref_invalidated_by_checksum(tmp_path) -> None:
     assert load_memory_ref(project_root, "intel-2", "checksum-1") is None
 
 
-def test_load_memory_ref_requires_artifacts(tmp_path) -> None:
+def test_load_memory_ref_requires_graph_artifact(tmp_path) -> None:
     project_root = tmp_path / "projects" / "project-1"
     directory = _write_fixture_memory(project_root, "intel-1")
+    # A missing embeddings.npz only degrades retrieval to BM25; the ref
+    # stays hydrated as long as the graph artifact survives.
     (directory / "embeddings.npz").unlink()
+    assert load_memory_ref(project_root, "intel-1", "checksum-1") is not None
+    (directory / "graph_memory.json").unlink()
     assert load_memory_ref(project_root, "intel-1", "checksum-1") is None
 
 
@@ -481,6 +473,27 @@ def test_query_memory_dispatches_all_nine_types(
         query="cat teamfight",
     )
     assert enumerated["result"]["total_matches"] > 0
+
+
+def test_query_memory_degrades_to_bm25_without_embeddings_artifact(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # Regression for the degraded-retrieval ladder: with the .npz gone,
+    # search_nodes must still answer from a BM25 index rebuilt out of
+    # graph_memory.json instead of erroring out.
+    service = _query_service(tmp_path, monkeypatch)
+    directory = memory_dir(tmp_path / "projects" / "project-1", "intel-1")
+    (directory / "embeddings.npz").unlink()
+    nodes = _run_query(
+        service,
+        query_type="search_nodes",
+        query="teamfight dragon",
+    )
+    assert nodes["available"] is True
+    assert nodes["result"]["results"][0]["node_id"] == "macro_0001:ev_101"
+    asr = _run_query(service, query_type="search_asr", query="团战 零换五")
+    assert asr["result"][0]["macro_id"] == "macro_0001"
 
 
 def test_query_memory_validates_arguments(tmp_path, monkeypatch) -> None:

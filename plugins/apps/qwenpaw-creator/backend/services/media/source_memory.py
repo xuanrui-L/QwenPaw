@@ -8,13 +8,15 @@ sources longer than the threshold get a background Task (behind execution
 authorization) that builds the vendored video-memory hierarchical graph:
 P1 ffmpeg frame-diff scene segmentation → P2 one VLM subgraph extraction
 per macro (bounded concurrency) in parallel with ASR transcription →
-P3 text-only aggregation plus full-node embedding. Artifacts live in
+P3 text-only aggregation plus full-node embedding (BM25-only text index
+when no embedding backend is configured). Artifacts live in
 ``runtime/source-intelligence/<index-id>/memory/`` and are invalidated by
 ``sourceChecksum``.
 
 Read path: ``query_source_memory`` dispatches nine query types over the
 vendored :class:`MemoryToolkit` with an in-process graph cache; semantic
-lookups embed the query on the fly through the Creator embedding client.
+lookups embed the query on the fly through the Creator embedding client
+and degrade to BM25 text search whenever embeddings are unavailable.
 """
 
 from __future__ import annotations
@@ -263,10 +265,11 @@ def load_memory_ref(
         return None
     if meta.get("sourceChecksum") != source_checksum:
         return None
-    if (
-        not (directory / GRAPH_FILENAME).is_file()
-        or not (directory / EMBEDDINGS_FILENAME).is_file()
-    ):
+    # graph_memory.json is the source of truth; a missing embeddings.npz
+    # only degrades retrieval to BM25 text search (_load_toolkit_sync
+    # rebuilds the sparse index from graph nodes), it must not invalidate
+    # the whole memory.
+    if not (directory / GRAPH_FILENAME).is_file():
         return None
     built_at = str(meta.get("builtAt") or "")
     macro_count = meta.get("macroCount")
@@ -665,8 +668,8 @@ class SourceMemoryService:
         duration_ms = index.media.duration_ms or 0
         if duration_ms <= memory_build_threshold_ms():
             return False
-        if not model_config.is_embedding_configured():
-            return False
+        # No embedding gate: without a configured embedding backend the
+        # build still runs and persists a BM25-only text index.
         return (
             load_memory_ref(
                 project_root,
@@ -1138,11 +1141,17 @@ class SourceMemoryService:
 
         nodes = memory.get_all_nodes()
         vectors: np.ndarray | None = None
-        if nodes:
+        if nodes and model_config.is_embedding_configured():
             embedded = await embedding_model.embed(
                 [str(node["text"]) for node in nodes],
             )
             vectors = np.asarray(embedded, dtype=np.float32)
+        elif nodes:
+            logger.warning(
+                "embedding not configured; persisting BM25-only text "
+                "index for task=%s",
+                job.task_id,
+            )
         index_obj = EmbeddingIndex()
         index_obj.build(nodes, vectors)
 
@@ -1760,10 +1769,21 @@ def _load_toolkit_sync(
     embeddings_path: Path,
 ) -> MemoryToolkit:
     memory = HierarchicalGraphMemory.load(str(graph_path))
-    index = None
-    if embeddings_path.is_file():
-        index = EmbeddingIndex()
+    index = EmbeddingIndex()
+    try:
         index.load(str(embeddings_path))
+    except Exception as error:  # pylint: disable=broad-except
+        # Degraded retrieval: a missing or corrupt .npz must not disable
+        # the memory — rebuild the sparse BM25 index from the graph nodes
+        # and serve text-only search (dense cosine stays off).
+        logger.warning(
+            "embeddings artifact unusable (%s); rebuilding BM25-only "
+            "index from %s",
+            error,
+            graph_path.name,
+        )
+        index = EmbeddingIndex()
+        index.build(memory.get_all_nodes(), None)
     return MemoryToolkit(memory, index)
 
 
@@ -1830,7 +1850,7 @@ super_id 过滤）缩小范围；
 _MEMORY_GUIDANCE_UNAVAILABLE = """\
 ## 长素材记忆
 
-本次委派的素材尚无层次图记忆（未达到时长阈值、embedding 未配置或构建未完成）。\
+本次委派的素材尚无层次图记忆（未达到时长阈值或构建未完成）。\
 `query_source_memory` 会返回 available=false；此时按常规流程直接观察原生媒体。"""
 
 
