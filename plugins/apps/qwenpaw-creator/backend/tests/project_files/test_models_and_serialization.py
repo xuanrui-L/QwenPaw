@@ -322,7 +322,7 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
 
     migrated = load_project_document(raw)
 
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert migrated.visual.entities.items[
         "char:hero"
     ].required_variant_ids == ["variant:peak"]

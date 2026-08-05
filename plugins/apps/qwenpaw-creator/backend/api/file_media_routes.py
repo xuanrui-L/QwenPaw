@@ -322,6 +322,8 @@ async def motion_document(
     """
 
     matches: list[tuple[Path, IndexedFile]] = []
+    # O(项目数) 扫描：本地单用户部署的项目数量有限，且命中后前端会长期
+    # immutable 缓存；若项目规模增长，应改为全局 file_id → 项目的索引。
     summaries = await asyncio.to_thread(services.projects.list)
     for summary in summaries:
         match = await asyncio.to_thread(
@@ -398,12 +400,16 @@ async def motion_document_poster(
             raise StorageIntegrityError(str(error)) from error
 
     html = await asyncio.to_thread(read_verified)
+    # ffmpeg 的 YUV 子采样要求偶数尺寸；ETag 必须反映实际渲染尺寸，
+    # 否则两个不同的奇数请求会产生同图不同 ETag 的缓存不一致。
+    actual_width = width // 2 * 2
+    actual_height = height // 2 * 2
     payload = await asyncio.to_thread(
         render_motion_poster,
         html,
         doc_format=doc_format,
-        box_width=width // 2 * 2,
-        box_height=height // 2 * 2,
+        box_width=actual_width,
+        box_height=actual_height,
     )
     if payload is None:
         raise NotFoundError("无法渲染动效海报帧")
@@ -412,7 +418,7 @@ async def motion_document_poster(
         media_type="image/png",
         headers={
             "Cache-Control": "public, max-age=31536000, immutable",
-            "ETag": f'"poster:{indexed.sha256}:{width}x{height}"',
+            "ETag": f'"poster:{indexed.sha256}:{actual_width}x{actual_height}"',
         },
     )
 

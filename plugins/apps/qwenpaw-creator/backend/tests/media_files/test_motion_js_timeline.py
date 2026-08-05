@@ -383,6 +383,28 @@ def _write_rgba_png(
     )
 
 
+def _write_rgb_png(
+    path: Path,
+    width: int,
+    height: int,
+    pixel: Callable[[int, int], tuple[int, int, int]],
+) -> None:
+    """Write one RGB PNG without an alpha plane, as Chromium does for
+    screenshots whose every pixel ended up fully opaque."""
+
+    raw = b"".join(
+        b"\x00" + b"".join(bytes(pixel(x, y)) for x in range(width))
+        for y in range(height)
+    )
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(raw))
+        + _png_chunk(b"IEND", b""),
+    )
+
+
 _FFMPEG = shutil.which("ffmpeg")
 
 # _verify_captured_frames samples frames {0, 2, 3} for frame_count=5.
@@ -741,6 +763,116 @@ class TestStaticDocumentGate:
             doc_format="html_js",
         )
         assert probe.ok
+
+    @pytest.mark.skipif(_FFMPEG is None, reason="ffmpeg is not installed")
+    def test_varying_frames_pass_static_gate_with_ffmpeg(
+        self,
+        monkeypatch,
+    ) -> None:
+        pixels = {
+            index: _drifting(index % 4) for index in range(self._SAMPLE_COUNT)
+        }
+        monkeypatch.setattr(
+            motion_overlay,
+            "_run_capture_worker",
+            _fake_probe_worker(pixels),
+        )
+        probe = probe_motion_document(
+            "<html><body>moving-doc-ffmpeg-sample</body></html>",
+            doc_format="html_js",
+            box_width=_BOX,
+            box_height=_BOX,
+            ffmpeg_path=_FFMPEG,
+        )
+        assert probe.ok
+
+    @pytest.mark.skipif(_FFMPEG is None, reason="ffmpeg is not installed")
+    def test_subpixel_wobble_rejected_as_static(self, monkeypatch) -> None:
+        # GSAP clearing an inline transform on the final keyframe leaves a
+        # one-channel-delta wobble: bytes differ, pixels don't move.
+        def wobble(x: int, y: int) -> tuple[int, int, int, int]:
+            value = 254 if (x, y) == (6, 6) else 255
+            inside = 5 <= x < 11 and 5 <= y < 11
+            return (value, 255, 255, 255) if inside else (0, 0, 0, 0)
+
+        pixels = {
+            index: _centered for index in range(self._SAMPLE_COUNT - 1)
+        }
+        pixels[self._SAMPLE_COUNT - 1] = wobble
+        monkeypatch.setattr(
+            motion_overlay,
+            "_run_capture_worker",
+            _fake_probe_worker(pixels),
+        )
+        probe = probe_motion_document(
+            "<html><body>wobble-doc-sample</body></html>",
+            doc_format="html_js",
+            box_width=_BOX,
+            box_height=_BOX,
+            ffmpeg_path=_FFMPEG,
+        )
+        assert not probe.ok
+        assert "完全静止" in probe.error
+
+
+@pytest.mark.skipif(_FFMPEG is None, reason="ffmpeg is not installed")
+class TestOpaqueFrameAlphaFallback:
+    """Fully opaque frames must not bypass the alpha truth gates."""
+
+    def test_rgb_png_reports_full_coverage_and_edge_contact(
+        self,
+        tmp_path,
+    ) -> None:
+        # Chromium writes RGB PNGs (no alpha plane) when every pixel is
+        # opaque; ``alphaextract`` fails on them, and the old sentinel
+        # (-1, -1) let exactly the full-bleed documents skip the gates.
+        frame = tmp_path / "opaque.png"
+        _write_rgb_png(frame, _BOX, _BOX, lambda _x, _y: (240, 240, 240))
+        coverage, edge = motion_overlay._frame_alpha_stats(
+            frame,
+            _FFMPEG,
+            _BOX,
+            _BOX,
+        )
+        assert coverage == pytest.approx(1.0)
+        assert edge == pytest.approx(1.0)
+
+    def test_probe_reports_edge_contact_for_opaque_frames(
+        self,
+        monkeypatch,
+    ) -> None:
+        def opaque_drifting(
+            shift: int,
+        ) -> Callable[[int, int], tuple[int, int, int]]:
+            def pixel(x: int, y: int) -> tuple[int, int, int]:
+                inside = 3 + shift <= x < 9 + shift and 5 <= y < 11
+                return (30, 30, 30) if inside else (240, 240, 240)
+
+            return pixel
+
+        sample_count = len(_PROBE_KEYFRAME_FRACTIONS) + 1
+
+        def runner(job, *, timeout_seconds):  # noqa: ARG001
+            for index in range(sample_count):
+                _write_rgb_png(
+                    Path(job["frames_dir"]) / f"{index:05d}.png",
+                    _BOX,
+                    _BOX,
+                    opaque_drifting(index % 4),
+                )
+            return {"count": 1, "totalMs": 2000.0, "managedExit": False}
+
+        monkeypatch.setattr(motion_overlay, "_run_capture_worker", runner)
+        probe = probe_motion_document(
+            "<html><body>opaque-doc-sample</body></html>",
+            doc_format="html_js",
+            box_width=_BOX,
+            box_height=_BOX,
+            ffmpeg_path=_FFMPEG,
+        )
+        assert probe.ok
+        assert probe.visible_coverage == pytest.approx(1.0)
+        assert probe.edge_contact == pytest.approx(1.0)
 
 
 @pytest.mark.skipif(_FFMPEG is None, reason="ffmpeg is not installed")

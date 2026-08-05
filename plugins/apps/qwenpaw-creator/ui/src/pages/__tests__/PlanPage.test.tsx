@@ -101,9 +101,11 @@ describe("PlanPage Timeline/Element frontend", () => {
     // are ai/clip/subtitle/audio = 4 tracks and no vertical scrolling is
     // needed.
     expect(screen.getByText(/4 轨/)).not.toHaveTextContent("可上下滚动");
+    // Four lanes fit without the scroll viewport, so the capped
+    // max-height wrapper must not be rendered.
     expect(
       container.querySelector('[class~="max-h-[320px]"]'),
-    ).toBeInTheDocument();
+    ).toBeNull();
     expect(screen.getAllByText("午饭名场面").length).toBeGreaterThan(0);
     expect(screen.getByText("分镜描述")).toBeInTheDocument();
     expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();

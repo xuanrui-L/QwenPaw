@@ -37,6 +37,7 @@ import tempfile
 import threading
 from typing import Any
 
+from domain.errors import ValidationError
 from services.media_files.motion_engine import (
     MOTION_PRELUDE_SCRIPT,
     engine_digest,
@@ -62,6 +63,12 @@ _PROBE_KEYFRAME_FRACTIONS = (0.05, 0.15, 0.3, 0.5, 0.7, 0.9, 1.0)
 # t=0 and t=duration.  Rejection thresholds over premultiplied RGBA.
 _LOOP_SEAM_MAX_MEAN_DIFF = 4.0
 _LOOP_SEAM_MAX_CHANGED_FRACTION = 0.05
+# Static detection compares every probe frame against t=0 and must stay far
+# below any real motion: a genuinely frozen document measures ~0.0002 mean
+# diff (GSAP clearing an inline transform), while the subtlest legitimate
+# loop already exceeds 0.05.
+_STATIC_MAX_MEAN_DIFF = 0.02
+_STATIC_MAX_CHANGED_FRACTION = 0.0005
 _LOOP_SEAM_CHANGED_CHANNEL_DELTA = 24
 _FFMPEG_TIMEOUT_SECONDS = 180
 _PROBE_TIMEOUT_SECONDS = 90
@@ -615,7 +622,15 @@ def _frame_alpha_stats(
     except Exception:  # noqa: BLE001 - inspection is best-effort
         return -1.0, -1.0
     if result.returncode != 0 or not result.stdout:
-        return -1.0, -1.0
+        # Fully opaque frames are written as RGB PNGs without an alpha
+        # plane, which makes ``alphaextract`` fail exactly for the
+        # documents that flood the whole viewport. Rebuild the plane from
+        # the RGBA raw decode (alpha defaults to 255) instead of giving
+        # such frames the benefit of the doubt.
+        rgba = _frame_rgba_bytes(frame, ffmpeg_path)
+        if rgba is None:
+            return -1.0, -1.0
+        return _alpha_plane_stats(bytes(rgba[3::4]), width, height)
     coverage, edge = _alpha_plane_stats(result.stdout, width, height)
     if coverage < 0.0:
         visible = sum(1 for byte in result.stdout if byte > 16)
@@ -754,6 +769,42 @@ def _loop_seam_stats(
     return diff_sum / (total_pixels * 4), changed / total_pixels
 
 
+def _frames_visually_static(
+    frame_paths: list[Path],
+    ffmpeg_path: str | None,
+) -> bool:
+    """True when every sampled frame is visually identical to the first.
+
+    Byte equality alone misses documents whose timeline only produces a
+    sub-perceptual wobble (e.g. GSAP clearing an inline transform on the
+    final keyframe), so frames that differ as bytes are re-compared at
+    pixel level with the dedicated static tolerances.
+    """
+
+    if len(frame_paths) <= 1:
+        return False
+    if len({path.read_bytes() for path in frame_paths}) == 1:
+        return True
+    if not ffmpeg_path:
+        return False
+    for other in frame_paths[1:]:
+        if other.read_bytes() == frame_paths[0].read_bytes():
+            continue
+        mean_diff, changed = _loop_seam_stats(
+            frame_paths[0],
+            other,
+            ffmpeg_path,
+        )
+        if mean_diff < 0.0:
+            return False
+        if (
+            mean_diff > _STATIC_MAX_MEAN_DIFF
+            or changed > _STATIC_MAX_CHANGED_FRACTION
+        ):
+            return False
+    return True
+
+
 def _verify_captured_frames(
     frames_dir: Path,
     *,
@@ -852,7 +903,10 @@ def probe_motion_document(
     try:
         engine_fields = _engine_job_fields(html, doc_format)
         engine_salt = _engine_salt(html, doc_format)
-    except Exception as exc:  # noqa: BLE001 - surface as probe failure
+    except ValidationError as exc:
+        # Expected contract failures (unknown/missing/corrupted vendor
+        # runtime) feed back to the design loop; programming errors must
+        # propagate instead of burning VLM regeneration cycles.
         return MotionDocumentProbe(False, str(exc))
     cache_key = (
         hashlib.sha256(html.encode("utf-8")).hexdigest(),
@@ -898,10 +952,9 @@ def probe_motion_document(
                 animation_count=0,
             )
         frame_paths = sorted(Path(probe_dir).glob("*.png"))
-        if (
-            doc_format == "html_js"
-            and len(frame_paths) > 1
-            and len({path.read_bytes() for path in frame_paths}) == 1
+        if doc_format == "html_js" and _frames_visually_static(
+            frame_paths,
+            ffmpeg_path,
         ):
             # Every sampled timestamp painted identical pixels: the seek
             # protocol is registered but drives no visible motion.
