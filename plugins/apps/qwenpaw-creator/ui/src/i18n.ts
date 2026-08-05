@@ -13,7 +13,9 @@ i18n.use(initReactI18next).init({
   lng:
     (typeof localStorage !== "undefined"
       ? localStorage.getItem("language")
-      : null) || "en",
+      : null) ||
+    (typeof navigator !== "undefined" ? navigator.language : null) ||
+    "en",
   fallbackLng: "en",
   supportedLngs: Object.keys(resources),
   interpolation: {

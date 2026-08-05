@@ -80,6 +80,8 @@ const config: ModelConfigData = {
     policy_api_key: "",
   },
   executionAuthorization: { mode: "allow_all" },
+  creationCheckpoints: { mode: "skip" },
+  mediaReview: { mode: "required" },
 };
 
 describe("ModelBadges", () => {

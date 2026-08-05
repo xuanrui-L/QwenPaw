@@ -1,5 +1,4 @@
 import type { CreatorApiError } from "@/contracts/creator";
-import i18n from "@/i18n";
 
 export const CREATOR_API_BASE = "/api/qwenpaw-creator";
 
@@ -14,7 +13,7 @@ export class CreatorHttpError extends Error {
   readonly details: Record<string, unknown>;
 
   constructor(status: number, error: Partial<CreatorApiError> = {}) {
-    super(error.message || i18n.t("api.requestFailed", { status }));
+    super(error.message || `Request failed (${status})`);
     this.name = "CreatorHttpError";
     this.status = status;
     this.code = error.code || `HTTP_${status}`;

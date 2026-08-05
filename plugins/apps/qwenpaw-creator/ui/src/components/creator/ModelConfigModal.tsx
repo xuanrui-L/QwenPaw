@@ -26,7 +26,7 @@ import {
 import {
   getModelConfig,
   saveModelConfig,
-  patchExecutionAuthorization,
+  patchPermissionMode,
   testModelConnection,
   getHostProviders,
   getHostProviderApiKey,
@@ -255,7 +255,56 @@ const DEFAULT_CONFIG: ModelConfigData = {
     policy_api_key: "",
   },
   executionAuthorization: { mode: "required" },
+  creationCheckpoints: { mode: "required" },
+  mediaReview: { mode: "required" },
 };
+
+// One-dimensional automation ladder projected onto the three persisted
+// permission fields. Index equals the slider position.
+const PERMISSION_MODES: {
+  labelKey: string;
+  descriptionKey: string;
+  checkpoints: "required" | "skip";
+  execution: "required" | "allow_all";
+  mediaReview: "required" | "auto_approve";
+}[] = [
+  {
+    labelKey: "modelConfig.permissionMode0Label",
+    descriptionKey: "modelConfig.permissionMode0Desc",
+    checkpoints: "required",
+    execution: "required",
+    mediaReview: "required",
+  },
+  {
+    labelKey: "modelConfig.permissionMode1Label",
+    descriptionKey: "modelConfig.permissionMode1Desc",
+    checkpoints: "skip",
+    execution: "required",
+    mediaReview: "required",
+  },
+  {
+    labelKey: "modelConfig.permissionMode2Label",
+    descriptionKey: "modelConfig.permissionMode2Desc",
+    checkpoints: "skip",
+    execution: "allow_all",
+    mediaReview: "required",
+  },
+  {
+    labelKey: "modelConfig.permissionMode3Label",
+    descriptionKey: "modelConfig.permissionMode3Desc",
+    checkpoints: "skip",
+    execution: "allow_all",
+    mediaReview: "auto_approve",
+  },
+];
+
+function permissionModeIndex(config: ModelConfigData): number {
+  if (config.executionAuthorization.mode === "allow_all") {
+    return config.mediaReview.mode === "auto_approve" ? 3 : 2;
+  }
+  if (config.creationCheckpoints.mode === "skip") return 1;
+  return 0;
+}
 
 function hasUsableApiKey(item: ModelConfigItem): boolean {
   return item.api_key !== undefined && item.api_key.length > 0;
@@ -320,19 +369,19 @@ interface Props {
 
 const CARD_META: {
   type: TabType;
-  labelKey: string;
+  label: string;
   icon: React.ReactNode;
   required: boolean;
 }[] = [
   {
     type: "llm",
-    labelKey: "modelConfig.llm",
+    label: "LLM 模型",
     icon: <Brain size={16} style={{ color: "var(--color-accent)" }} />,
     required: true,
   },
   {
     type: "vlm",
-    labelKey: "modelConfig.vlm",
+    label: "VLM 模型",
     icon: (
       <EyeOutlined
         style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
@@ -342,7 +391,7 @@ const CARD_META: {
   },
   {
     type: "grounding",
-    labelKey: "Grounding",
+    label: "Grounding",
     icon: (
       <GlobalOutlined
         style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
@@ -352,7 +401,7 @@ const CARD_META: {
   },
   {
     type: "asr",
-    labelKey: "modelConfig.asr",
+    label: "ASR 模型",
     icon: (
       <AudioOutlined
         style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
@@ -362,7 +411,7 @@ const CARD_META: {
   },
   {
     type: "image",
-    labelKey: "modelConfig.imageGen",
+    label: "图片生成模型",
     icon: (
       <PictureOutlined
         style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
@@ -372,7 +421,7 @@ const CARD_META: {
   },
   {
     type: "video",
-    labelKey: "modelConfig.videoGen",
+    label: "视频生成模型",
     icon: (
       <VideoCameraOutlined
         style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
@@ -386,6 +435,46 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const { t } = useTranslation();
   const [config, setConfig] = useState<ModelConfigData>(DEFAULT_CONFIG);
   const snapshotRef = useRef<ModelConfigData | null>(null);
+  // Latest-wins serialization for the permission slider: a drag across
+  // several stops fires one onChange per stop; concurrent saves could
+  // finish out of order and strand an intermediate stop on the server.
+  const permissionSaveRef = useRef<{
+    inflight: boolean;
+    queued: number | null;
+    baseline: ModelConfigData | null;
+  }>({ inflight: false, queued: null, baseline: null });
+
+  const savePermissionMode = useCallback(
+    async (index: number): Promise<void> => {
+      const state = permissionSaveRef.current;
+      const target = PERMISSION_MODES[index];
+      if (!target) return;
+      state.inflight = true;
+      try {
+        await patchPermissionMode({
+          execution: target.execution,
+          checkpoints: target.checkpoints,
+          mediaReview: target.mediaReview,
+        });
+        const queued = state.queued;
+        state.queued = null;
+        if (queued !== null && queued !== index) {
+          await savePermissionMode(queued);
+          return;
+        }
+        state.baseline = null;
+      } catch (err) {
+        const baseline = state.baseline;
+        state.baseline = null;
+        state.queued = null;
+        if (baseline) setConfig(baseline);
+        message.error((err as Error).message || t("modelConfig.permissionModeSaveFailed"));
+      } finally {
+        state.inflight = false;
+      }
+    },
+    [],
+  );
   const [activeTab, setActiveTab] = useState<TabType>("llm");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     llm: true,
@@ -447,6 +536,14 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           ...DEFAULT_CONFIG.executionAuthorization,
           ...data.executionAuthorization,
         },
+        creationCheckpoints: {
+          ...DEFAULT_CONFIG.creationCheckpoints,
+          ...data.creationCheckpoints,
+        },
+        mediaReview: {
+          ...DEFAULT_CONFIG.mediaReview,
+          ...data.mediaReview,
+        },
       };
       if (!VLM_PROTOCOLS.includes(merged.vlm.protocol))
         merged.vlm.protocol = VLM_PROTOCOLS[0];
@@ -484,11 +581,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     setReloading(true);
     try {
       await loadConfig();
-      message.success(t("modelConfig.configReloaded"));
+      message.success("配置已重新加载");
     } catch (err) {
-      message.error(
-        (err as Error).message || t("modelConfig.reloadConfigError"),
-      );
+      message.error((err as Error).message || "重新加载配置时发生错误");
     } finally {
       setReloading(false);
     }
@@ -591,7 +686,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         !vlmItem.model_name ||
         !hasUsableApiKey(vlmItem)
       ) {
-        message.warning(t("modelConfig.fillCompleteVlm"));
+        message.warning(
+          "请先填写完整的 VLM 模型配置（Base URL、API Key、模型名称）",
+        );
         return;
       }
 
@@ -605,20 +702,18 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           protocol: vlmItem.protocol,
         });
         if (data.ok) {
-          message.success(t("modelConfig.multimodalTestPassed"));
+          message.success("多模态测试通过，已启用 VLM");
           setTested((prev) => ({ ...prev, vlm: true }));
           setConfig((prev) => ({
             ...prev,
             vlm: { ...prev.vlm, enabled: true, multimodal: true },
           }));
         } else {
-          message.warning(data.error || t("modelConfig.multimodalTestFailed"));
+          message.warning(data.error || "多模态测试失败，该模型不支持图片输入");
           setTested((prev) => ({ ...prev, vlm: false }));
         }
       } catch (err) {
-        message.error(
-          (err as Error).message || t("modelConfig.multimodalTestError"),
-        );
+        message.error((err as Error).message || "测试多模态时发生错误");
         setTested((prev) => ({ ...prev, vlm: false }));
       } finally {
         setTestingVlmMultimodal(false);
@@ -643,7 +738,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         !llmItem.model_name ||
         !hasUsableApiKey(llmItem)
       ) {
-        message.warning(t("modelConfig.fillCompleteLlm"));
+        message.warning(
+          "请先填写完整的 LLM 模型配置（Base URL、API Key、模型名称）",
+        );
         return;
       }
 
@@ -659,7 +756,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           protocol: llmItem.protocol,
         });
         if (data.ok) {
-          message.success(t("modelConfig.multimodalTestPassedReuse"));
+          message.success("多模态测试通过，已复用 LLM 配置");
           setTested((prev) => ({ ...prev, vlm: true, llm: true }));
           setConfig((prev) => ({
             ...prev,
@@ -668,14 +765,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           }));
         } else {
           message.warning(
-            data.error || t("modelConfig.multimodalTestFailedReuse"),
+            data.error ||
+              "多模态测试失败，该模型不支持图片输入，无法复用 LLM 配置",
           );
           setTested((prev) => ({ ...prev, vlm: false }));
         }
       } catch (err) {
-        message.error(
-          (err as Error).message || t("modelConfig.multimodalTestError"),
-        );
+        message.error((err as Error).message || "测试多模态时发生错误");
         setTested((prev) => ({ ...prev, vlm: false }));
       } finally {
         setTestingLlmMultimodal(false);
@@ -695,7 +791,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           ? hasUsableApiKey(config.llm)
           : hasUsableApiKey(item);
       if (!item.base_url || !hasKey || !item.model_name) {
-        message.warning(t("modelConfig.fillComplete"));
+        message.warning(
+          "请先填写完整的模型配置（Base URL、API Key、模型名称）",
+        );
         return false;
       }
 
@@ -723,19 +821,17 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           provider: type === "asr" ? config.asr.provider : undefined,
         });
         if (data.ok) {
-          message.success(t("modelConfig.connectionTestSuccess"));
+          message.success("连接测试成功");
           setTested((prev) => ({ ...prev, [type]: true }));
           updateItem(type, "enabled", true);
           return true;
         } else {
-          message.warning(data.error || t("modelConfig.connectionTestFailed"));
+          message.warning(data.error || "连接测试失败");
           setTested((prev) => ({ ...prev, [type]: false }));
           return false;
         }
       } catch (err) {
-        message.error(
-          (err as Error).message || t("modelConfig.connectionTestError"),
-        );
+        message.error((err as Error).message || "测试连接时发生错误");
         setTested((prev) => ({ ...prev, [type]: false }));
         return false;
       } finally {
@@ -748,7 +844,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const handleGroundingTest = useCallback(async (): Promise<boolean> => {
     const item = groundingValidationModel(config);
     if (!item.base_url || !hasUsableApiKey(item) || !item.model_name) {
-      message.warning(t("modelConfig.groundingFillComplete"));
+      message.warning(
+        "请完整配置 Grounding 验证模型（Base URL、API Key、模型名称）",
+      );
       return false;
     }
 
@@ -775,19 +873,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         protocol: item.protocol,
       });
       if (!data.ok) {
-        message.warning(
-          data.error || t("modelConfig.groundingVerifyTestFailed"),
-        );
+        message.warning(data.error || "Grounding LLM 图片输入测试失败");
         setTested((prev) => ({ ...prev, groundingValidation: false }));
         return false;
       }
-      message.success(t("modelConfig.groundingVerifyTestSuccess"));
+      message.success("Grounding LLM 图片输入测试成功");
       setTested((prev) => ({ ...prev, groundingValidation: true }));
       return true;
     } catch (err) {
-      message.error(
-        (err as Error).message || t("modelConfig.groundingVerifyTestError"),
-      );
+      message.error((err as Error).message || "测试 Grounding LLM 时发生错误");
       setTested((prev) => ({ ...prev, groundingValidation: false }));
       return false;
     } finally {
@@ -800,7 +894,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     setSaving(true);
     try {
       const prev = snapshotRef.current;
-      if (!prev) throw new Error(t("modelConfig.snapshotLost"));
+      if (!prev) throw new Error("快照丢失，请重新打开配置");
 
       if (config.grounding.enabled) {
         const groundingModel = groundingValidationModel(config);
@@ -809,7 +903,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           !groundingModel.model_name ||
           !hasUsableApiKey(groundingModel)
         ) {
-          message.warning(t("modelConfig.groundingDefaultOn"));
+          message.warning(
+            "Grounding 默认开启，请完整配置验证模型，或关闭 Grounding",
+          );
           return;
         }
         const searchModel = groundingSearchModel(config);
@@ -824,7 +920,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           !config.grounding.serper_api_key &&
           !nativeSearchReady
         ) {
-          message.warning(t("modelConfig.groundingSearchNotConfigured"));
+          message.warning(
+            "Grounding 搜索未配置：请填写 Tavily/Serper API Key，或配置支持原生搜索的 Qwen/DashScope 模型",
+          );
           return;
         }
       }
@@ -856,16 +954,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         // (e.g. a generic LLM plus a Tavily key) could fail mid-sequence
         // and leave a partially saved configuration behind.
         const res = await saveModelConfig(config);
-        if (!res.ok) throw new Error(t("modelConfig.saveFailedServer"));
+        if (!res.ok) throw new Error("保存失败：服务端未确认写入");
       }
 
-      message.success(t("modelConfig.configSaved"));
+      message.success("配置已保存");
       snapshotRef.current = JSON.parse(JSON.stringify(config));
       onClose();
     } catch (error) {
-      const detail =
-        error instanceof Error ? error.message : t("common.unknownError");
-      message.error(t("modelConfig.saveFailed", { detail }));
+      const detail = error instanceof Error ? error.message : "未知错误";
+      message.error(`保存失败：${detail}`);
     } finally {
       setSaving(false);
     }
@@ -999,7 +1096,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           }}
         >
           <div>
-            <label className="field-label">{t("modelConfig.modelName")}</label>
+            <label className="field-label">模型名称</label>
             {hasPresetModels ? (
               <AutoComplete
                 value={item.model_name}
@@ -1013,7 +1110,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     ?.toLowerCase()
                     .includes(inputValue.toLowerCase())
                 }
-                placeholder={t("modelConfig.selectOrInputModel")}
+                placeholder="选择或输入模型"
               />
             ) : (
               <Input
@@ -1024,12 +1121,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             )}
           </div>
           <div>
-            <label className="field-label">{t("modelConfig.apiKey")}</label>
+            <label className="field-label">API Key</label>
             <Input.Password
               placeholder={
-                item.api_key === "__CREATOR_SECRET__"
-                  ? t("modelConfig.configured")
-                  : "sk-..."
+                item.api_key === "__CREATOR_SECRET__" ? "已配置" : "sk-..."
               }
               value={
                 item.api_key === "__CREATOR_SECRET__" ? "sk-****" : item.api_key
@@ -1038,7 +1133,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             />
           </div>
           <div>
-            <label className="field-label">{t("modelConfig.baseUrl")}</label>
+            <label className="field-label">Base URL</label>
             {hasBaseUrlOptions ? (
               <Select
                 value={item.base_url}
@@ -1059,9 +1154,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             )}
           </div>
           <div>
-            <label className="field-label">
-              {t("modelConfig.apiProtocol")}
-            </label>
+            <label className="field-label">API 协议</label>
             <Select
               value={item.protocol}
               onChange={(v) => handleProtocolChange(type, v)}
@@ -1070,7 +1163,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             {item.protocol === "自定义" && (
               <Input
                 className="mt-2"
-                placeholder={t("modelConfig.inputProtocolName")}
+                placeholder="输入协议名称"
                 value={item.custom_protocol}
                 onChange={(e) =>
                   updateItem(type, "custom_protocol", e.target.value)
@@ -1087,11 +1180,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 updateItem("asr", "reuse_llm_key", e.target.checked)
               }
             >
-              {t("modelConfig.reuseLlmApiKey")}
+              复用 LLM API Key
             </Checkbox>
             <Input
               style={{ width: 220 }}
-              placeholder={t("modelConfig.languageOptional")}
+              placeholder="语言（可选，如 zh）"
               value={config.asr.language}
               onChange={(e) => updateItem("asr", "language", e.target.value)}
             />
@@ -1104,7 +1197,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             loading={testing[type]}
             onClick={() => handleTest(type)}
           >
-            {t("modelConfig.testConnection")}
+            测试连通性
           </Button>
         </div>
       </>
@@ -1138,7 +1231,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               whiteSpace: "nowrap",
             }}
           >
-            {t("modelConfig.multimodalTesting")}
+            多模态测试中…
           </span>
         )}
       </>
@@ -1146,8 +1239,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   };
 
   const renderGroundingCard = (meta: (typeof CARD_META)[number]) => {
-    const { type, labelKey, icon } = meta;
-    const label = labelKey === "Grounding" ? "Grounding" : t(labelKey);
+    const { type, label, icon } = meta;
     const isExpanded = expanded.grounding;
     const verifier = groundingValidationModel(config);
     const searchModel = groundingSearchModel(config);
@@ -1191,7 +1283,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 borderRadius: 4,
               }}
             >
-              {t("modelConfig.searchVerifyDecoupled")}
+              搜索 / 验证解耦
             </span>
             {config.grounding.enabled &&
               (searchLabel || verifier.model_name) && (
@@ -1209,7 +1301,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     maxWidth: 140,
                   }}
                 >
-                  {searchLabel || t("modelConfig.notConfiguredSearch")}
+                  {searchLabel || "未配置搜索"}
                   {verifier.model_name ? ` · ${verifier.model_name}` : ""}
                 </span>
               )}
@@ -1231,7 +1323,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             >
               <input
                 type="checkbox"
-                aria-label={t("modelConfig.enableGrounding")}
+                aria-label="启用 Grounding"
                 checked={config.grounding.enabled}
                 onChange={(event) =>
                   updateGrounding("enabled", event.target.checked)
@@ -1259,9 +1351,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               gap: 16,
             }}
           >
-            <div style={{ fontSize: 13, fontWeight: 600 }}>
-              {t("modelConfig.search")}
-            </div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>1. 搜索</div>
             {/* 优先级链：Tavily 优先，Qwen 原生搜索回退 */}
             <div
               style={{
@@ -1285,7 +1375,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     flexShrink: 0,
                   }}
                 >
-                  {t("modelConfig.priority")}
+                  优先
                 </span>
                 <span
                   style={{
@@ -1294,7 +1384,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     color: "var(--color-text-primary)",
                   }}
                 >
-                  {t("modelConfig.tavilySearch")}
+                  Tavily 搜索
                 </span>
                 <span
                   style={{
@@ -1305,14 +1395,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   }}
                 >
                   {config.grounding.tavily_api_key
-                    ? t("modelConfig.tavilyConfigured")
-                    : t("modelConfig.tavilyNotConfigured")}
+                    ? "已配置"
+                    : "未配置，将直接使用原生搜索"}
                 </span>
               </div>
               <div>
-                <label className="field-label">
-                  {t("modelConfig.tavilyApiKeyOptional")}
-                </label>
+                <label className="field-label">Tavily API Key（可选）</label>
                 <Input.Password
                   placeholder="tvly-..."
                   value={config.grounding.tavily_api_key}
@@ -1357,7 +1445,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     flexShrink: 0,
                   }}
                 >
-                  {t("modelConfig.secondary")}
+                  次选
                 </span>
                 <span
                   style={{
@@ -1366,7 +1454,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     color: "var(--color-text-primary)",
                   }}
                 >
-                  {t("modelConfig.serperSearch")}
+                  Serper（Google）搜索
                 </span>
                 <span
                   style={{
@@ -1377,14 +1465,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   }}
                 >
                   {config.grounding.serper_api_key
-                    ? t("common.configured")
-                    : t("modelConfig.configuredSkipChannel")}
+                    ? "已配置"
+                    : "未配置，将跳过该渠道"}
                 </span>
               </div>
               <div>
-                <label className="field-label">
-                  {t("modelConfig.serperApiKeyOptional")}
-                </label>
+                <label className="field-label">Serper API Key（可选）</label>
                 <Input.Password
                   placeholder="serper key"
                   value={config.grounding.serper_api_key}
@@ -1429,7 +1515,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     flexShrink: 0,
                   }}
                 >
-                  {t("modelConfig.fallback")}
+                  回退
                 </span>
                 <Checkbox
                   checked={config.grounding.native_search_enabled}
@@ -1447,7 +1533,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       color: "var(--color-text-primary)",
                     }}
                   >
-                    {t("modelConfig.qwenDashScopeNativeSearch")}
+                    Qwen/DashScope 原生搜索
                   </span>
                 </Checkbox>
               </div>
@@ -1484,7 +1570,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                           color: "var(--color-text-secondary)",
                         }}
                       >
-                        {t("modelConfig.reuseLlmConfigForSearch")}
+                        复用 LLM 配置
                       </span>
                     </Checkbox>
                     <span
@@ -1496,13 +1582,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       }}
                     >
                       {searchModel.model_name
-                        ? t("modelConfig.currentModel", {
-                            model: searchModel.model_name,
-                          }) +
-                          (nativeSearchReady
-                            ? ""
-                            : t("modelConfig.notSupportNativeSearch"))
-                        : t("modelConfig.notConfiguredSearch")}
+                        ? `当前：${searchModel.model_name}${
+                            nativeSearchReady ? "" : "（不支持原生搜索）"
+                          }`
+                        : "未配置"}
                     </span>
                   </div>
                   {!config.grounding.search_reuse_llm && (
@@ -1514,9 +1597,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       }}
                     >
                       <div>
-                        <label className="field-label">
-                          {t("modelConfig.qwenSearchModel")}
-                        </label>
+                        <label className="field-label">Qwen 搜索模型</label>
                         <Input
                           placeholder="qwen3.7-plus"
                           value={config.grounding.search_model_name}
@@ -1529,9 +1610,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         />
                       </div>
                       <div>
-                        <label className="field-label">
-                          {t("modelConfig.qwenSearchApiKey")}
-                        </label>
+                        <label className="field-label">Qwen 搜索 API Key</label>
                         <Input.Password
                           placeholder="sk-search-..."
                           value={config.grounding.search_api_key}
@@ -1545,7 +1624,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       </div>
                       <div>
                         <label className="field-label">
-                          {t("modelConfig.qwenSearchBaseUrl")}
+                          Qwen 搜索 Base URL
                         </label>
                         <Input
                           placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -1559,9 +1638,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         />
                       </div>
                       <div>
-                        <label className="field-label">
-                          {t("modelConfig.searchAdapter")}
-                        </label>
+                        <label className="field-label">搜索 Adapter</label>
                         <Select
                           value={config.grounding.search_protocol}
                           onChange={(value) =>
@@ -1589,12 +1666,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 fontWeight: 600,
               }}
             >
-              {t("modelConfig.verify")}
+              2. 验证
             </div>
             <div>
-              <label className="field-label">
-                {t("modelConfig.verifyModelSource")}
-              </label>
+              <label className="field-label">验证模型来源</label>
               <Select
                 value={config.grounding.validation_source}
                 onChange={(value) => {
@@ -1602,18 +1677,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   updateGrounding("reuse_llm", value === "llm");
                 }}
                 options={[
-                  {
-                    value: "llm",
-                    label: t("modelConfig.reuseLlmConfigOption"),
-                  },
-                  {
-                    value: "vlm",
-                    label: t("modelConfig.reuseVlmConfigOption"),
-                  },
-                  {
-                    value: "custom",
-                    label: t("modelConfig.customVerifyModel"),
-                  },
+                  { value: "llm", label: "复用 LLM 配置" },
+                  { value: "vlm", label: "复用 VLM 配置" },
+                  { value: "custom", label: "自定义验证模型" },
                 ]}
               />
               {config.grounding.validation_source !== "custom" && (
@@ -1627,10 +1693,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   }}
                 >
                   {verifier.model_name
-                    ? t("modelConfig.currentModel", {
-                        model: verifier.model_name,
-                      })
-                    : t("modelConfig.notConfiguredSearch")}
+                    ? `当前：${verifier.model_name}`
+                    : "未配置"}
                 </div>
               )}
             </div>
@@ -1644,9 +1708,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 }}
               >
                 <div>
-                  <label className="field-label">
-                    {t("modelConfig.verifyModel")}
-                  </label>
+                  <label className="field-label">验证模型</label>
                   <Input
                     placeholder="model"
                     value={config.grounding.model_name}
@@ -1656,9 +1718,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   />
                 </div>
                 <div>
-                  <label className="field-label">
-                    {t("modelConfig.verifyModelApiKey")}
-                  </label>
+                  <label className="field-label">验证模型 API Key</label>
                   <Input.Password
                     placeholder="sk-..."
                     value={config.grounding.api_key}
@@ -1668,9 +1728,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   />
                 </div>
                 <div>
-                  <label className="field-label">
-                    {t("modelConfig.verifyModelBaseUrl")}
-                  </label>
+                  <label className="field-label">验证模型 Base URL</label>
                   <Input
                     placeholder="https://api.example.com"
                     value={config.grounding.base_url}
@@ -1680,9 +1738,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   />
                 </div>
                 <div>
-                  <label className="field-label">
-                    {t("modelConfig.apiProtocol")}
-                  </label>
+                  <label className="field-label">API 协议</label>
                   <Select
                     value={config.grounding.protocol}
                     onChange={(value) => updateGrounding("protocol", value)}
@@ -1702,7 +1758,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 loading={testing.grounding}
                 onClick={handleGroundingTest}
               >
-                {t("modelConfig.testVerifyModelImageInput")}
+                测试验证模型图片输入
               </Button>
             </div>
           </div>
@@ -1713,8 +1769,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
   const renderCard = (meta: (typeof CARD_META)[number]) => {
     if (meta.type === "grounding") return renderGroundingCard(meta);
-    const { type, labelKey, icon, required } = meta;
-    const label = t(labelKey);
+    const { type, label, icon, required } = meta;
     const isExpanded = expanded[type];
     const item = config[type] as ModelConfigItem;
     const usingLlm =
@@ -1784,7 +1839,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 borderRadius: 4,
               }}
             >
-              {required ? t("common.required") : t("common.optional")}
+              {required ? "必选" : "可选"}
             </span>
             {configured && (
               <span
@@ -1804,11 +1859,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 }}
               >
                 {!item.enabled
-                  ? t("modelConfig.disabledLabel")
+                  ? "（已关闭）"
                   : usingLlm
                   ? config.llm.model_name
                   : item.model_name}
-                {!isTested && item.enabled && t("modelConfig.notTestedLabel")}
+                {!isTested && item.enabled && "（未测试）"}
               </span>
             )}
           </div>
@@ -1850,9 +1905,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       cursor: "pointer",
                     }}
                   >
-                    {testingLlmMultimodal
-                      ? t("modelConfig.multimodalTesting")
-                      : t("modelConfig.reuseLlmConfig")}
+                    {testingLlmMultimodal ? "多模态测试中…" : "复用 LLM 配置"}
                   </span>
                 </Checkbox>
                 {testingLlmMultimodal && (
@@ -1862,7 +1915,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       color: "var(--color-text-tertiary)",
                     }}
                   >
-                    {t("modelConfig.sendImageToVerify")}
+                    发送图片请求验证 LLM 多模态能力
                   </span>
                 )}
               </div>
@@ -1907,7 +1960,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               color: "var(--color-text-primary)",
             }}
           >
-            {t("modelConfig.title")}
+            模型配置
           </span>
         </div>
         <button
@@ -1935,7 +1988,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               "var(--color-text-tertiary)";
             (e.currentTarget as HTMLButtonElement).style.background = "none";
           }}
-          aria-label={t("common.close")}
+          aria-label="关闭"
         >
           <CloseOutlined style={{ fontSize: 14 }} />
         </button>
@@ -1962,7 +2015,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               color: "var(--color-accent)",
             }}
           >
-            {t("modelConfig.setupGuideHint")}
+            不知道该配什么？查看各场景的模型要求与支持的提供商
           </summary>
           <div style={{ marginTop: 10 }}>
             <ModelSetupGuide />
@@ -1986,7 +2039,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 color: "var(--color-text-primary)",
               }}
             >
-              {t("modelConfig.executionAuth")}
+              {t("modelConfig.permissionModeTitle")}
+              {t(PERMISSION_MODES[permissionModeIndex(config)].labelKey)}
             </div>
             <div
               style={{
@@ -1996,33 +2050,75 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 color: "var(--color-text-tertiary)",
               }}
             >
-              {t("modelConfig.executionAuthDesc")}
+              {t(PERMISSION_MODES[permissionModeIndex(config)].descriptionKey)}
             </div>
           </div>
-          <label className="desktop-toggle" style={{ flexShrink: 0 }}>
+          <div
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "stretch",
+              width: 220,
+              gap: 4,
+            }}
+          >
             <input
-              type="checkbox"
-              aria-label={t("modelConfig.executionAuth")}
-              checked={config.executionAuthorization.mode === "required"}
-              onChange={async (event) => {
-                const mode = event.target.checked ? "required" : "allow_all";
+              type="range"
+              min={0}
+              max={3}
+              step={1}
+              aria-label={t("modelConfig.permissionModeTitle")}
+              aria-valuetext={
+                t(PERMISSION_MODES[permissionModeIndex(config)].labelKey)
+              }
+              value={permissionModeIndex(config)}
+              onChange={(event) => {
+                const index = Number(event.target.value);
+                const target = PERMISSION_MODES[index];
+                if (!target) return;
+                const state = permissionSaveRef.current;
+                // One rollback anchor per drag burst: the config before
+                // the first optimistic update.
+                if (state.baseline === null) state.baseline = config;
                 setConfig((previous) => ({
                   ...previous,
-                  executionAuthorization: { mode },
+                  executionAuthorization: { mode: target.execution },
+                  creationCheckpoints: { mode: target.checkpoints },
+                  mediaReview: { mode: target.mediaReview },
                 }));
-                try {
-                  await patchExecutionAuthorization(mode);
-                } catch (err) {
-                  message.error(
-                    (err as Error).message ||
-                      t("modelConfig.executionAuthSaveFailed"),
-                  );
+                if (state.inflight) {
+                  state.queued = index;
+                  return;
                 }
+                void savePermissionMode(index);
               }}
             />
-            <div className="track" />
-            <div className="thumb" />
-          </label>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: 11,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              {PERMISSION_MODES.map((mode, index) => (
+                <span
+                  key={mode.labelKey}
+                  style={
+                    index === permissionModeIndex(config)
+                      ? {
+                          color: "var(--color-text-primary)",
+                          fontWeight: 600,
+                        }
+                      : undefined
+                  }
+                >
+                  {t(mode.labelKey)}
+                </span>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Segmented tabs */}
@@ -2037,10 +2133,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               const verifier = groundingValidationModel(config);
               const searchLabel = groundingSearchLabel(config);
               subText = !config.grounding.enabled
-                ? t("common.disabled")
+                ? "已关闭"
                 : searchLabel && verifier.model_name
                 ? `${searchLabel} · ${verifier.model_name}`
-                : t("common.notConfigured");
+                : "未配置";
               subColor = !config.grounding.enabled
                 ? "var(--color-text-tertiary)"
                 : searchLabel && verifier.model_name
@@ -2053,24 +2149,18 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             ) {
               subText = tested.vlm
                 ? config.llm.model_name
-                : t("modelConfig.modelNotTested", {
-                    model: config.llm.model_name,
-                  });
+                : `${config.llm.model_name}（未测试）`;
               subColor = tested.vlm
                 ? "var(--color-success)"
                 : "var(--color-text-tertiary)";
             } else if (!item.enabled && hasModel) {
-              subText = t("modelConfig.modelDisabled", {
-                model: item.model_name,
-              });
+              subText = `${item.model_name}（已关闭）`;
               subColor = "var(--color-text-tertiary)";
             } else if (!hasModel) {
-              subText = t("common.notConfigured");
+              subText = "未配置";
               subColor = "var(--color-text-tertiary)";
             } else if (tested[meta.type] !== true) {
-              subText = t("modelConfig.modelNotTested", {
-                model: item.model_name,
-              });
+              subText = `${item.model_name}（未测试）`;
               subColor = "var(--color-danger)";
             } else {
               subText = item.model_name;
@@ -2088,11 +2178,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 }}
               >
                 <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  {meta.icon} {t(meta.labelKey)}
+                  {meta.icon} {meta.label.replace("模型", "")}
                   <span style={{ fontSize: 9, opacity: 0.5, fontWeight: 400 }}>
-                    {meta.required
-                      ? t("common.required")
-                      : t("common.optional")}
+                    {meta.required ? "必选" : "可选"}
                   </span>
                 </span>
                 <span
@@ -2122,14 +2210,14 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       <div className="action-bar">
         <div />
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Button onClick={handleCancel}>{t("common.cancel")}</Button>
+          <Button onClick={handleCancel}>取消</Button>
           <Button
             type="primary"
             icon={<ReloadOutlined />}
             loading={reloading}
             onClick={handleReload}
           >
-            {t("modelConfig.reloadConfig")}
+            重新加载配置
           </Button>
           <Button
             type="primary"
@@ -2137,7 +2225,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             loading={saving}
             onClick={handleSave}
           >
-            {t("modelConfig.saveConfig")}
+            保存配置
           </Button>
         </div>
       </div>

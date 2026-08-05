@@ -167,9 +167,7 @@ export default function ProjectLayout() {
   const startFileReviewPolling = useFileProjectReviewStore(
     (state) => state.startPolling,
   );
-  const activeFileReview = useFileProjectReviewStore(
-    (state) => state.reviews[0] ?? null,
-  );
+  const fileReviews = useFileProjectReviewStore((state) => state.reviews);
   const fileReviewSyncStatus = useFileProjectReviewStore(
     (state) => state.syncStatus,
   );
@@ -319,14 +317,19 @@ export default function ProjectLayout() {
   }, [events, id, refreshSession, refreshTasks]);
 
   useEffect(() => {
-    if (
-      !pendingReviewNavigation?.ready ||
-      fileReviewSyncStatus !== "healthy" ||
-      activeFileReview?.review_id !== pendingReviewNavigation.reviewId
-    )
+    if (!pendingReviewNavigation?.ready || fileReviewSyncStatus !== "healthy")
       return;
+    // Batched specialist work leaves several PENDING Reviews at once, so
+    // the freshly completed one is not necessarily the head of the list —
+    // requiring reviews[0] to match swallowed the popup whenever older
+    // Reviews were still open (哈兰勇闯偶综, 2026-08-05: six pending, zero
+    // popups). Find the target anywhere in the pending list instead.
+    const targetReview = fileReviews.find(
+      (review) => review.review_id === pendingReviewNavigation.reviewId,
+    );
+    if (!targetReview) return;
     setPendingReviewNavigation(null);
-    const locator = primaryReviewLocator(activeFileReview.operations);
+    const locator = primaryReviewLocator(targetReview.operations);
     if (!locator) return;
     if (locator.elementId) {
       useCreatorInteractionStore
@@ -338,7 +341,7 @@ export default function ProjectLayout() {
       field: locator.field ?? undefined,
       description: t("lib.reviewOrViewChanges"),
     });
-  }, [activeFileReview, fileReviewSyncStatus, id, pendingReviewNavigation]);
+  }, [fileReviews, fileReviewSyncStatus, id, pendingReviewNavigation]);
 
   // A background Header revalidation must not unmount the active route.  The
   // initial skeleton is only needed before the first authoritative Header is

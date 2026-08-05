@@ -472,8 +472,8 @@ function actionReason(envelope: CreatorActionEnvelope): string {
 }
 
 function waitingActionTitle(reason: string): string {
-  const subject = reason || i18n.t("agent.processing");
-  return i18n.t("agent.waitingInProgress", { subject });
+  if (!reason) return i18n.t("agent.waitingProcessing");
+  return i18n.t("agent.waitingInProgress", { subject: reason });
 }
 
 function actionTitle(envelope: CreatorActionEnvelope, active: boolean): string {
@@ -795,7 +795,7 @@ function specialistOutcomeMeta(outcome: SpecialistOutcome): {
   };
   const labels: Record<SpecialistOutcome, string> = {
     SUCCESS: i18n.t("agent.completed"),
-    BLOCKED: i18n.t("agent.failed"),
+    BLOCKED: i18n.t("agent.blocked"),
     FAILED: i18n.t("agent.failed"),
   };
   return { label: labels[outcome], tone: tones[outcome] };
@@ -813,7 +813,7 @@ function subagentTerminalMeta(
       return specialistOutcomeMeta("FAILED");
     case "STALE":
       return {
-        label: i18n.t("agent.failed"),
+        label: i18n.t("agent.stale"),
         tone: "bg-[var(--color-warning-soft)] text-[var(--color-warning)]",
       };
     case "CANCELLED":
@@ -824,10 +824,8 @@ function subagentTerminalMeta(
   }
 }
 
-const SUBAGENT_RUNNING_META = {
-  label: i18n.t("agent.processing"),
-  tone: "bg-[var(--color-warning-soft)] text-[var(--color-warning)]",
-};
+const SUBAGENT_RUNNING_META_TONE =
+  "bg-[var(--color-warning-soft)] text-[var(--color-warning)]";
 
 function SubagentMessageBubble({
   item,
@@ -1028,7 +1026,10 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
         label: t("agent.waitingReview"),
         tone: "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
       }
-    : terminal ?? SUBAGENT_RUNNING_META;
+    : terminal ?? {
+        label: t("agent.processing"),
+        tone: SUBAGENT_RUNNING_META_TONE,
+      };
   return (
     <div
       data-subagent-activity={activity.parentActionId}
@@ -1386,9 +1387,9 @@ function PlanCard({ data }: { data: PlanPresentation }) {
 function refTypeLabel(type: RefSearchItem["type"]): string {
   const labels: Record<RefSearchItem["type"], string> = {
     timeline: i18n.t("agent.mainTimeline"),
-    element: i18n.t("agent.elementCount", { count: "" }).replace(/\d*\s*/, ""),
+    element: i18n.t("agent.elementType"),
     asset: i18n.t("common.content"),
-    artifact: i18n.t("agent.artifacts", { count: "" }).replace(/\d*\s*/, ""),
+    artifact: i18n.t("agent.artifactType"),
     visual: i18n.t("common.setting"),
   };
   return labels[type] ?? "";

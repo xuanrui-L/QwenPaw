@@ -24,6 +24,16 @@ export default function LanguageToggle({ className }: LanguageToggleProps) {
     onClick: () => setLanguage(option.key),
   }));
 
+  const button = (
+    <button
+      type="button"
+      className={className}
+      aria-label={t("common.language")}
+    >
+      {language === "zh" ? "中" : "EN"}
+    </button>
+  );
+
   return (
     <Dropdown
       trigger={["click"]}
@@ -31,25 +41,7 @@ export default function LanguageToggle({ className }: LanguageToggleProps) {
       open={dropdownOpen}
       onOpenChange={setDropdownOpen}
     >
-      {dropdownOpen ? (
-        <button
-          type="button"
-          className={className}
-          aria-label={t("common.language")}
-        >
-          {language === "zh" ? "中" : "EN"}
-        </button>
-      ) : (
-        <Tooltip title={t("common.language")}>
-          <button
-            type="button"
-            className={className}
-            aria-label={t("common.language")}
-          >
-            {language === "zh" ? "中" : "EN"}
-          </button>
-        </Tooltip>
-      )}
+      {dropdownOpen ? button : <Tooltip title={t("common.language")}>{button}</Tooltip>}
     </Dropdown>
   );
 }

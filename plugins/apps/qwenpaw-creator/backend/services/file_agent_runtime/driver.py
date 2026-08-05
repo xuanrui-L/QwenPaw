@@ -33,10 +33,13 @@ from domain.errors import ConflictError, CreatorError, ReviewPendingError
 from models.config import (
     CREATION_CHECKPOINT_REQUIRED,
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    MEDIA_REVIEW_AUTO_APPROVE,
     get_creation_checkpoint_mode,
     get_execution_authorization_mode,
     get_mainline_max_model_turns,
+    get_media_review_mode,
     get_specialist_max_model_turns,
+    scale_mainline_max_model_turns,
     get_text_model_name,
     get_vlm_model_name,
     get_web_grounding_enabled,
@@ -61,6 +64,7 @@ from services.project_files.agent_tools import (
     AgentProjectToolContext,
     AgentProjectTools,
     JQ_PROJECT_TOOL_NAME,
+    PATCH_PROJECT_TOOL_NAME,
     READ_PROJECT_TOOL_NAME,
     agent_project_tool_manifest,
 )
@@ -171,7 +175,7 @@ MAX_PERSISTED_RAW_TOOL_ARGUMENT_BYTES = 256 * 1024
 _PROJECT_SNAPSHOT_RESULT_KIND = "project_snapshot"
 _PROJECT_CHANGE_RECEIPT_RESULT_KIND = "project_change_receipt"
 _PROJECT_SNAPSHOT_TOOL_NAMES = frozenset(
-    {READ_PROJECT_TOOL_NAME, JQ_PROJECT_TOOL_NAME},
+    {READ_PROJECT_TOOL_NAME, JQ_PROJECT_TOOL_NAME, PATCH_PROJECT_TOOL_NAME},
 )
 
 
@@ -352,6 +356,30 @@ def _tool_failure_result(
     if isinstance(details, Mapping) and details:
         error_payload["details"] = dict(details)
     return {"ok": False, "error": error_payload}
+
+
+def _unfinished_video_element_ids(project: Any) -> list[str]:
+    """Timeline r2v elements that do not have an accepted main video yet.
+
+    This is the YOLO completion criterion (and the seed of the future DAG
+    node state): an element whose creative facts exist but whose
+    ``element:{id}:main`` video slot has no selected version is unfinished.
+    """
+
+    finished_owners = {
+        slot.owner_ref
+        for slot in project.assets.artifact_slots_by_id.values()
+        if slot.kind == "element_video" and slot.selected_version_id
+    }
+    unfinished: list[str] = []
+    for timeline in project.timelines.items.values():
+        for element_id, element in timeline.elements_by_id.items():
+            creation = getattr(element, "creation", None)
+            if getattr(creation, "type", None) != "r2v":
+                continue
+            if f"element:{element_id}" not in finished_owners:
+                unfinished.append(element_id)
+    return sorted(unfinished)
 
 
 def _grounding_stable_id(prefix: str, project_id: str, identity: str) -> str:
@@ -1601,6 +1629,16 @@ class FileCreatorAgentRuntime:
                         context.review_boundary.interrupted_run_id
                     ),
                 )
+            elif not needs_review:
+                # Unattended (YOLO) projects treat a succeeded mainline as a
+                # checkpoint, not a finish line: resume until every element
+                # has its video (fused against runaway loops inside).
+                await self._queue_yolo_completion_resume(
+                    project_id=project_id,
+                    session_id=session.session_id,
+                    conversation_id=message.conversation_id,
+                    run_id=run_id,
+                )
             self._blocked_heads.pop(project_id, None)
         except asyncio.CancelledError:
             await self._cancel_run(
@@ -1753,7 +1791,26 @@ class FileCreatorAgentRuntime:
         malformed_jq_attempts = 0
         malformed_jq_fingerprints: set[str] = set()
         deterministic_failure_counts: dict[str, int] = {}
-        for _turn_number in range(1, self.max_model_turns + 1):
+        # Element-heavy projects legitimately need more mainline turns
+        # (one element per jq_project call plus one delegation each), so
+        # the runaway cap scales with the current timeline size instead of
+        # failing healthy long runs.
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            element_count = sum(
+                len(timeline.elements_by_id)
+                for timeline in snapshot.project.timelines.items.values()
+            )
+        except Exception:
+            element_count = 0
+        turn_budget = scale_mainline_max_model_turns(
+            self.max_model_turns,
+            element_count,
+        )
+        for _turn_number in range(1, turn_budget + 1):
             self._assert_epoch(project_id, run_id, epoch)
             _compact_wire_project_snapshots(messages)
             assistant_message_id = f"message-{uuid4().hex}"
@@ -2026,7 +2083,7 @@ class FileCreatorAgentRuntime:
                         tool_name=call.name,
                         result=result,
                     )
-                    if call.name == "jq_project":
+                    if call.name in {"jq_project", "patch_project"}:
                         await self._workspace_changed(
                             project_id,
                             session_id,
@@ -2107,7 +2164,7 @@ class FileCreatorAgentRuntime:
                         "another model turn",
                     )
         raise AgentModelError(
-            f"Creator Agent exceeded {self.max_model_turns} model turns",
+            f"Creator Agent exceeded {turn_budget} model turns",
         )
 
     async def _run_ground_prompt_context(
@@ -3228,7 +3285,7 @@ class FileCreatorAgentRuntime:
                         and review_id not in review_ids
                     ):
                         review_ids.append(review_id)
-                    if call.name == "jq_project":
+                    if call.name in {"jq_project", "patch_project"}:
                         await self._workspace_changed(
                             project_id,
                             session_id,
@@ -4301,6 +4358,117 @@ class FileCreatorAgentRuntime:
         )
 
     MAINLINE_RESUME_SOURCE = "mainline_resume"
+    YOLO_RESUME_SOURCE = "yolo_auto_resume"
+    # Fuse 1: never chain more unattended resumes than this since the last
+    # human message — a stuck project must fall back to a human.
+    YOLO_RESUME_MAX_CONSECUTIVE = 5
+
+    async def _queue_yolo_completion_resume(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        conversation_id: str,
+        run_id: str,
+    ) -> None:
+        """Keep an unattended (YOLO) project moving until it is finished.
+
+        A succeeded mainline run is a model decision to stop narrating, not
+        proof the project reached its goal: models habitually wrap up with a
+        progress report after a batch of work. Under media_review
+        auto_approve the operator asked for zero attendance, so when timeline
+        elements still lack their main video the Runtime injects the same
+        “继续” a supervising user would type. Two fuses stop runaway loops:
+        a consecutive-resume cap and a no-progress breaker.
+        """
+
+        if get_media_review_mode() != MEDIA_REVIEW_AUTO_APPROVE:
+            return
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return
+        unfinished = _unfinished_video_element_ids(snapshot.project)
+        if not unfinished:
+            return
+        messages = await asyncio.to_thread(
+            self.sessions.list_messages,
+            project_id,
+            session_id,
+            after_seq=0,
+            limit=None,
+        )
+        resume_streak = 0
+        last_resume_generation: int | None = None
+        for item in reversed(messages):
+            if item.role != "user":
+                continue
+            if item.source == self.YOLO_RESUME_SOURCE:
+                if resume_streak == 0:
+                    generation = item.metadata.get("projectGeneration")
+                    if isinstance(generation, int):
+                        last_resume_generation = generation
+                resume_streak += 1
+                continue
+            if item.source == self.MAINLINE_RESUME_SOURCE:
+                continue
+            break
+        if resume_streak >= self.YOLO_RESUME_MAX_CONSECUTIVE:
+            logger.warning(
+                "YOLO auto-resume stopped for %s: %d consecutive resumes "
+                "without a human message",
+                project_id,
+                resume_streak,
+            )
+            return
+        # Fuse 2: the previous auto-resume produced no committed progress,
+        # so another identical nudge would only burn model turns.
+        if last_resume_generation == snapshot.generation:
+            logger.warning(
+                "YOLO auto-resume stopped for %s: no progress since the "
+                "previous resume (generation %d)",
+                project_id,
+                snapshot.generation,
+            )
+            return
+        text = (
+            "【系统自动消息 · YOLO 持续执行】主线回合已结束，但项目尚未到达终态。\n"
+            "以下 Element 仍缺少成片视频："
+            + "、".join(unfinished)
+            + "。\n请从未完成的 Element 继续推进，不要重复已完成的工作；"
+            "全部完成后再进行收尾。"
+        )
+        appended = await asyncio.to_thread(
+            self.sessions.append_message,
+            project_id,
+            session_id,
+            conversation_id,
+            role="user",
+            content_parts=[{"type": "text", "text": text}],
+            source=self.YOLO_RESUME_SOURCE,
+            channel=MessageChannel.RUNTIME,
+            metadata={
+                "resumeAfterRunId": run_id,
+                "projectGeneration": snapshot.generation,
+                "unfinishedElements": unfinished,
+            },
+        )
+        await self._event(
+            project_id,
+            session_id,
+            "agent.yolo.resumed",
+            run_id,
+            appended.message,
+            {
+                "runId": run_id,
+                "messageSeq": appended.message.message_seq,
+                "unfinishedElements": unfinished,
+            },
+        )
+        self._wake.set()
 
     async def _queue_mainline_resume(
         self,
@@ -5378,6 +5546,30 @@ def _specialist_tool_recovery(
             "video_reference_version_ids, keep only generated "
             "artifact-version references such as the character design and "
             "storyboard images, then call r2v_generation again."
+        )
+    if name == "image_generation" and any(
+        marker in error.casefold()
+        for marker in (
+            "rejected by the safety system",
+            "content policy",
+            "content_policy_violation",
+        )
+    ):
+        # The image provider's safety system deterministically rejects the
+        # request; identical resubmission can never succeed. The dominant
+        # cause in practice is real-person photos travelling as reference
+        # images — including into scene/prop generations that do not need
+        # any face at all.
+        return (
+            "The image provider's safety system rejected this request — a "
+            "deterministic content policy, not a transient failure; do not "
+            "resubmit the same arguments. For scene or prop targets, remove "
+            "every reference image that contains a person before retrying. "
+            "For character targets, drop real-photo references "
+            "(asset-version IDs of downloaded or uploaded images) and use "
+            "already generated stylized artifact-version references — or a "
+            "text-only prompt — instead, then call image_generation again "
+            "with the adjusted references or a rephrased prompt."
         )
     if name == "jq_project":
         return _jq_project_recovery(code)
