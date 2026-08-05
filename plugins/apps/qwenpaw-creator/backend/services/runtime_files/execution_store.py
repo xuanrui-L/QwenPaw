@@ -997,7 +997,13 @@ class ProjectExecutionStore:
                 project_id,
                 authorization_id,
             )
-            if self._equivalent(existing, candidate):
+            # An approval-resume replays the same tool call: the candidate
+            # carries a fresh random token and no decision yet, so compare
+            # the request signature (not the full record) and hand back the
+            # already-decided authorization instead of failing the replay.
+            if self._authorization_request_signature(
+                existing,
+            ) == self._authorization_request_signature(candidate):
                 return existing
             raise ExecutionPayloadConflict(
                 "authorization_id was reused with a different request",

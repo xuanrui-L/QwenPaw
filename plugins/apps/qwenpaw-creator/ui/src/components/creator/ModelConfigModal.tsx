@@ -941,6 +941,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         "grounding",
         "asr",
         "tts",
+        "s2v",
         "image",
         "video",
       ] as TabType[]) {
