@@ -15,10 +15,7 @@ import type {
 import i18n from "@/i18n";
 
 export type ProjectSnapshotSyncStatus =
-  | "idle"
-  | "syncing"
-  | "not_found"
-  | ProjectServerSyncStatus;
+  "idle" | "syncing" | "not_found" | ProjectServerSyncStatus;
 
 export interface ProjectSnapshotPollOptions {
   activeIntervalMs: number;

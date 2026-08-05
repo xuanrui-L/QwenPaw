@@ -61,7 +61,7 @@ export function isUserAuthorityMessage(message: CreatorMessage): boolean {
   const source = message.source;
   return Boolean(
     source &&
-      (USER_AUTHORITY_SOURCES.has(source) || source.startsWith("frontend_")),
+    (USER_AUTHORITY_SOURCES.has(source) || source.startsWith("frontend_")),
   );
 }
 
@@ -142,7 +142,9 @@ function withoutLegacyFileRuntimePlaceholder(
   if (toolCalls.length === 0) return message.content;
   const names = toolCalls.map(toolCallName);
   if (names.some((name) => !name)) return message.content;
-  const placeholder = i18n.t("lib.prepareCallTool", { names: names.join("、") });
+  const placeholder = i18n.t("lib.prepareCallTool", {
+    names: names.join("、"),
+  });
   return message.content.filter(
     (part) => part.type !== "text" || part.text !== placeholder,
   );
@@ -497,8 +499,8 @@ export function toolCallPresentations(
           typeof toolCall.id === "string"
             ? toolCall.id
             : typeof toolCall.toolCallId === "string"
-            ? toolCall.toolCallId
-            : undefined;
+              ? toolCall.toolCallId
+              : undefined;
         if (!actionId) return;
         const call = ensure(actionId, message.messageSeq + index / 1_000);
         call.anchorMessageId = message.messageId;
@@ -522,8 +524,8 @@ export function toolCallPresentations(
         typeof message.metadata?.actionId === "string"
           ? message.metadata.actionId
           : typeof message.metadata?.toolCallId === "string"
-          ? message.metadata.toolCallId
-          : undefined;
+            ? message.metadata.toolCallId
+            : undefined;
       if (!actionId) return;
       const call = ensure(actionId, message.messageSeq);
       const parsedAction = isRecord(message.metadata?.parsedAction)
@@ -573,8 +575,8 @@ export function toolCallPresentations(
           typeof event.data.rejectedAssistantMessageId === "string"
             ? event.data.rejectedAssistantMessageId
             : typeof event.data.assistantMessageId === "string"
-            ? event.data.assistantMessageId
-            : undefined;
+              ? event.data.assistantMessageId
+              : undefined;
         if (rejectedMessageId) {
           for (const [actionId, call] of calls) {
             if (call.anchorMessageId === rejectedMessageId)
@@ -598,8 +600,8 @@ export function toolCallPresentations(
         typeof event.data.toolCallId === "string"
           ? event.data.toolCallId
           : typeof event.data.actionId === "string"
-          ? event.data.actionId
-          : undefined;
+            ? event.data.actionId
+            : undefined;
       if (!actionId) return;
       const call = ensure(
         actionId,
@@ -644,8 +646,8 @@ export function toolCallPresentations(
             typeof event.data.error === "string"
               ? event.data.error
               : typeof event.data.errorType === "string"
-              ? event.data.errorType
-              : call.error;
+                ? event.data.errorType
+                : call.error;
         }
       }
     });

@@ -182,7 +182,7 @@ const MentionInput = forwardRef<MentionInputHandle, MentionInputProps>(
       ) as HTMLElement | null;
       const thumb =
         pill && editorRef.current?.contains(pill)
-          ? pill.dataset.thumb ?? null
+          ? (pill.dataset.thumb ?? null)
           : null;
       setHoverThumb(thumb);
     };

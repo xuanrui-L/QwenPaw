@@ -111,12 +111,20 @@ export function ProjectImporter({
         const response = await importProject(file, (loaded, total) => {
           setPercent(total > 0 ? Math.round((loaded / total) * 100) : 0);
         });
-        message.success(t("importExport.importSuccess", { projectId: response.projectId }), 10);
+        message.success(
+          t("importExport.importSuccess", { projectId: response.projectId }),
+          10,
+        );
         reset();
         onClose();
         onImported?.();
       } catch (error) {
-        message.error(error instanceof Error ? error.message : t("importExport.importFailed"), 10);
+        message.error(
+          error instanceof Error
+            ? error.message
+            : t("importExport.importFailed"),
+          10,
+        );
         reset();
       }
     },
@@ -306,11 +314,11 @@ export function ExportProgressCard({
   const percent = done
     ? 100
     : progress.totalBytes
-    ? Math.min(
-        99,
-        Math.floor((progress.receivedBytes / progress.totalBytes) * 100),
-      )
-    : null;
+      ? Math.min(
+          99,
+          Math.floor((progress.receivedBytes / progress.totalBytes) * 100),
+        )
+      : null;
   const sizeText = progress.totalBytes
     ? `${formatBytes(progress.receivedBytes)} / ${formatBytes(
         progress.totalBytes,

@@ -92,9 +92,13 @@ function imageGenerationLabel(
 ): string {
   const name = resolvedTargetName(ref, project);
   if (ref.startsWith("element:") || ref.startsWith("timeline:"))
-    return name ? i18n.t("liveStatus.generatingStoryboardOf", { name }) : i18n.t("liveStatus.generatingStoryboard");
+    return name
+      ? i18n.t("liveStatus.generatingStoryboardOf", { name })
+      : i18n.t("liveStatus.generatingStoryboard");
   if (ref.startsWith("asset") || ref.startsWith("artifact"))
-    return name ? i18n.t("liveStatus.generatingVisualOf", { name }) : i18n.t("liveStatus.generatingVisual");
+    return name
+      ? i18n.t("liveStatus.generatingVisualOf", { name })
+      : i18n.t("liveStatus.generatingVisual");
   return i18n.t("liveStatus.generatingImage");
 }
 
@@ -103,7 +107,9 @@ function r2vGenerationLabel(
   project: ProjectDocument | null,
 ): string {
   const name = resolvedTargetName(ref, project);
-  return name ? i18n.t("liveStatus.generatingVideoOf", { name }) : i18n.t("liveStatus.generatingVideo");
+  return name
+    ? i18n.t("liveStatus.generatingVideoOf", { name })
+    : i18n.t("liveStatus.generatingVideo");
 }
 
 function runningToolLabel(
@@ -190,7 +196,9 @@ function activeMainToolLabel(
       // brief "正在安排" until the specialist reports in.
       const args = isRecord(call.arguments) ? call.arguments : undefined;
       const role = typeof args?.role === "string" ? args.role : "";
-      return role ? i18n.t("liveStatus.arrangingRole", { name: creatorRoleLabel(role) }) : i18n.t("liveStatus.assigningTask");
+      return role
+        ? i18n.t("liveStatus.arrangingRole", { name: creatorRoleLabel(role) })
+        : i18n.t("liveStatus.assigningTask");
     }
     if (internalProjectTools.has(call.tool)) continue;
     const label = runningToolLabel(call.tool, call.arguments, [], project);
@@ -213,7 +221,9 @@ function activeTaskLabel(
 ): string {
   const name = resolvedTargetName(task.targetRef, project);
   const kind = taskKindLabel(task.kind);
-  return name ? i18n.t("liveStatus.taskKindWorking", { name, kind }) : i18n.t("liveStatus.kindWorking", { kind });
+  return name
+    ? i18n.t("liveStatus.taskKindWorking", { name, kind })
+    : i18n.t("liveStatus.kindWorking", { kind });
 }
 
 function firstIncompleteActivity(

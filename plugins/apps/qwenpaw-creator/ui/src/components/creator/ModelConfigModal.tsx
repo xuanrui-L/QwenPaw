@@ -477,7 +477,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       await loadConfig();
       message.success(t("modelConfig.configReloaded"));
     } catch (err) {
-      message.error((err as Error).message || t("modelConfig.reloadConfigError"));
+      message.error(
+        (err as Error).message || t("modelConfig.reloadConfigError"),
+      );
     } finally {
       setReloading(false);
     }
@@ -605,7 +607,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           setTested((prev) => ({ ...prev, vlm: false }));
         }
       } catch (err) {
-        message.error((err as Error).message || t("modelConfig.multimodalTestError"));
+        message.error(
+          (err as Error).message || t("modelConfig.multimodalTestError"),
+        );
         setTested((prev) => ({ ...prev, vlm: false }));
       } finally {
         setTestingVlmMultimodal(false);
@@ -660,7 +664,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           setTested((prev) => ({ ...prev, vlm: false }));
         }
       } catch (err) {
-        message.error((err as Error).message || t("modelConfig.multimodalTestError"));
+        message.error(
+          (err as Error).message || t("modelConfig.multimodalTestError"),
+        );
         setTested((prev) => ({ ...prev, vlm: false }));
       } finally {
         setTestingLlmMultimodal(false);
@@ -718,7 +724,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           return false;
         }
       } catch (err) {
-        message.error((err as Error).message || t("modelConfig.connectionTestError"));
+        message.error(
+          (err as Error).message || t("modelConfig.connectionTestError"),
+        );
         setTested((prev) => ({ ...prev, [type]: false }));
         return false;
       } finally {
@@ -758,7 +766,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         protocol: item.protocol,
       });
       if (!data.ok) {
-        message.warning(data.error || t("modelConfig.groundingVerifyTestFailed"));
+        message.warning(
+          data.error || t("modelConfig.groundingVerifyTestFailed"),
+        );
         setTested((prev) => ({ ...prev, groundingValidation: false }));
         return false;
       }
@@ -766,7 +776,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       setTested((prev) => ({ ...prev, groundingValidation: true }));
       return true;
     } catch (err) {
-      message.error((err as Error).message || t("modelConfig.groundingVerifyTestError"));
+      message.error(
+        (err as Error).message || t("modelConfig.groundingVerifyTestError"),
+      );
       setTested((prev) => ({ ...prev, groundingValidation: false }));
       return false;
     } finally {
@@ -842,7 +854,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       snapshotRef.current = JSON.parse(JSON.stringify(config));
       onClose();
     } catch (error) {
-      const detail = error instanceof Error ? error.message : t("common.unknownError");
+      const detail =
+        error instanceof Error ? error.message : t("common.unknownError");
       message.error(t("modelConfig.saveFailed", { detail }));
     } finally {
       setSaving(false);
@@ -859,12 +872,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     type === "llm"
       ? LLM_PROTOCOLS
       : type === "vlm"
-      ? VLM_PROTOCOLS
-      : type === "asr"
-      ? ASR_PROTOCOLS
-      : type === "image"
-      ? IMAGE_PROTOCOLS
-      : VIDEO_PROTOCOLS;
+        ? VLM_PROTOCOLS
+        : type === "asr"
+          ? ASR_PROTOCOLS
+          : type === "image"
+            ? IMAGE_PROTOCOLS
+            : VIDEO_PROTOCOLS;
 
   const getPresetForType = (
     type: ModelType,
@@ -1005,7 +1018,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             <label className="field-label">{t("modelConfig.apiKey")}</label>
             <Input.Password
               placeholder={
-                item.api_key === "__CREATOR_SECRET__" ? t("modelConfig.configured") : "sk-..."
+                item.api_key === "__CREATOR_SECRET__"
+                  ? t("modelConfig.configured")
+                  : "sk-..."
               }
               value={
                 item.api_key === "__CREATOR_SECRET__" ? "sk-****" : item.api_key
@@ -1035,7 +1050,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             )}
           </div>
           <div>
-            <label className="field-label">{t("modelConfig.apiProtocol")}</label>
+            <label className="field-label">
+              {t("modelConfig.apiProtocol")}
+            </label>
             <Select
               value={item.protocol}
               onChange={(v) => handleProtocolChange(type, v)}
@@ -1233,7 +1250,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               gap: 16,
             }}
           >
-            <div style={{ fontSize: 13, fontWeight: 600 }}>{t("modelConfig.search")}</div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>
+              {t("modelConfig.search")}
+            </div>
             {/* 优先级链：Tavily 优先，Qwen 原生搜索回退 */}
             <div
               style={{
@@ -1282,7 +1301,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 </span>
               </div>
               <div>
-                <label className="field-label">{t("modelConfig.tavilyApiKeyOptional")}</label>
+                <label className="field-label">
+                  {t("modelConfig.tavilyApiKeyOptional")}
+                </label>
                 <Input.Password
                   placeholder="tvly-..."
                   value={config.grounding.tavily_api_key}
@@ -1352,7 +1373,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 </span>
               </div>
               <div>
-                <label className="field-label">{t("modelConfig.serperApiKeyOptional")}</label>
+                <label className="field-label">
+                  {t("modelConfig.serperApiKeyOptional")}
+                </label>
                 <Input.Password
                   placeholder="serper key"
                   value={config.grounding.serper_api_key}
@@ -1464,7 +1487,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       }}
                     >
                       {searchModel.model_name
-                        ? t("modelConfig.currentModel", { model: searchModel.model_name }) + (nativeSearchReady ? "" : t("modelConfig.notSupportNativeSearch"))
+                        ? t("modelConfig.currentModel", {
+                            model: searchModel.model_name,
+                          }) +
+                          (nativeSearchReady
+                            ? ""
+                            : t("modelConfig.notSupportNativeSearch"))
                         : t("modelConfig.notConfiguredSearch")}
                     </span>
                   </div>
@@ -1477,7 +1505,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       }}
                     >
                       <div>
-                        <label className="field-label">{t("modelConfig.qwenSearchModel")}</label>
+                        <label className="field-label">
+                          {t("modelConfig.qwenSearchModel")}
+                        </label>
                         <Input
                           placeholder="qwen3.7-plus"
                           value={config.grounding.search_model_name}
@@ -1490,7 +1520,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         />
                       </div>
                       <div>
-                        <label className="field-label">{t("modelConfig.qwenSearchApiKey")}</label>
+                        <label className="field-label">
+                          {t("modelConfig.qwenSearchApiKey")}
+                        </label>
                         <Input.Password
                           placeholder="sk-search-..."
                           value={config.grounding.search_api_key}
@@ -1518,7 +1550,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         />
                       </div>
                       <div>
-                        <label className="field-label">{t("modelConfig.searchAdapter")}</label>
+                        <label className="field-label">
+                          {t("modelConfig.searchAdapter")}
+                        </label>
                         <Select
                           value={config.grounding.search_protocol}
                           onChange={(value) =>
@@ -1549,7 +1583,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               {t("modelConfig.verify")}
             </div>
             <div>
-              <label className="field-label">{t("modelConfig.verifyModelSource")}</label>
+              <label className="field-label">
+                {t("modelConfig.verifyModelSource")}
+              </label>
               <Select
                 value={config.grounding.validation_source}
                 onChange={(value) => {
@@ -1557,9 +1593,18 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   updateGrounding("reuse_llm", value === "llm");
                 }}
                 options={[
-                  { value: "llm", label: t("modelConfig.reuseLlmConfigOption") },
-                  { value: "vlm", label: t("modelConfig.reuseVlmConfigOption") },
-                  { value: "custom", label: t("modelConfig.customVerifyModel") },
+                  {
+                    value: "llm",
+                    label: t("modelConfig.reuseLlmConfigOption"),
+                  },
+                  {
+                    value: "vlm",
+                    label: t("modelConfig.reuseVlmConfigOption"),
+                  },
+                  {
+                    value: "custom",
+                    label: t("modelConfig.customVerifyModel"),
+                  },
                 ]}
               />
               {config.grounding.validation_source !== "custom" && (
@@ -1573,7 +1618,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   }}
                 >
                   {verifier.model_name
-                    ? t("modelConfig.currentModel", { model: verifier.model_name })
+                    ? t("modelConfig.currentModel", {
+                        model: verifier.model_name,
+                      })
                     : t("modelConfig.notConfiguredSearch")}
                 </div>
               )}
@@ -1588,7 +1635,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 }}
               >
                 <div>
-                  <label className="field-label">{t("modelConfig.verifyModel")}</label>
+                  <label className="field-label">
+                    {t("modelConfig.verifyModel")}
+                  </label>
                   <Input
                     placeholder="model"
                     value={config.grounding.model_name}
@@ -1598,7 +1647,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   />
                 </div>
                 <div>
-                  <label className="field-label">{t("modelConfig.verifyModelApiKey")}</label>
+                  <label className="field-label">
+                    {t("modelConfig.verifyModelApiKey")}
+                  </label>
                   <Input.Password
                     placeholder="sk-..."
                     value={config.grounding.api_key}
@@ -1608,7 +1659,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   />
                 </div>
                 <div>
-                  <label className="field-label">{t("modelConfig.verifyModelBaseUrl")}</label>
+                  <label className="field-label">
+                    {t("modelConfig.verifyModelBaseUrl")}
+                  </label>
                   <Input
                     placeholder="https://api.example.com"
                     value={config.grounding.base_url}
@@ -1618,7 +1671,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   />
                 </div>
                 <div>
-                  <label className="field-label">{t("modelConfig.apiProtocol")}</label>
+                  <label className="field-label">
+                    {t("modelConfig.apiProtocol")}
+                  </label>
                   <Select
                     value={config.grounding.protocol}
                     onChange={(value) => updateGrounding("protocol", value)}
@@ -1658,15 +1713,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     const configured = !item.enabled
       ? false
       : usingLlm
-      ? true
-      : !!item.model_name;
+        ? true
+        : !!item.model_name;
     const isTested = tested[type] === true;
 
     const statusColor = !configured
       ? "var(--color-border)"
       : isTested
-      ? "var(--color-success)"
-      : "var(--color-danger)";
+        ? "var(--color-success)"
+        : "var(--color-danger)";
     const statusDot = (
       <span
         style={{
@@ -1742,8 +1797,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 {!item.enabled
                   ? `（${t("common.disabled")}）`
                   : usingLlm
-                  ? config.llm.model_name
-                  : item.model_name}
+                    ? config.llm.model_name
+                    : item.model_name}
                 {!isTested && item.enabled && `（${t("common.notTested")}）`}
               </span>
             )}
@@ -1786,7 +1841,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       cursor: "pointer",
                     }}
                   >
-                    {testingLlmMultimodal ? t("modelConfig.multimodalTesting") : t("modelConfig.reuseLlmConfig")}
+                    {testingLlmMultimodal
+                      ? t("modelConfig.multimodalTesting")
+                      : t("modelConfig.reuseLlmConfig")}
                   </span>
                 </Checkbox>
                 {testingLlmMultimodal && (
@@ -1947,7 +2004,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 try {
                   await patchExecutionAuthorization(mode);
                 } catch (err) {
-                  message.error((err as Error).message || t("modelConfig.executionAuthSaveFailed"));
+                  message.error(
+                    (err as Error).message ||
+                      t("modelConfig.executionAuthSaveFailed"),
+                  );
                 }
               }}
             />
@@ -1970,13 +2030,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               subText = !config.grounding.enabled
                 ? t("common.disabled")
                 : searchLabel && verifier.model_name
-                ? `${searchLabel} · ${verifier.model_name}`
-                : t("common.notConfigured");
+                  ? `${searchLabel} · ${verifier.model_name}`
+                  : t("common.notConfigured");
               subColor = !config.grounding.enabled
                 ? "var(--color-text-tertiary)"
                 : searchLabel && verifier.model_name
-                ? "var(--color-success)"
-                : "var(--color-text-tertiary)";
+                  ? "var(--color-success)"
+                  : "var(--color-text-tertiary)";
             } else if (
               meta.type === "vlm" &&
               config.vlm.use_llm &&
@@ -2015,7 +2075,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   {meta.icon} {t(meta.labelKey)}
                   <span style={{ fontSize: 9, opacity: 0.5, fontWeight: 400 }}>
-                    {meta.required ? t("common.required") : t("common.optional")}
+                    {meta.required
+                      ? t("common.required")
+                      : t("common.optional")}
                   </span>
                 </span>
                 <span

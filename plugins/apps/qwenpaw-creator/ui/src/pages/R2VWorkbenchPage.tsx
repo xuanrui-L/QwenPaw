@@ -289,9 +289,7 @@ export default function R2VWorkbenchPage() {
       <div className="flex h-full items-center justify-center bg-[var(--color-bg-layout)] px-6">
         <div className="max-w-sm text-center">
           <p className="text-sm font-semibold text-[var(--color-text-primary)]">
-            {element
-              ? t("r2v.notAIGenerated")
-              : t("r2v.elementNotFound")}
+            {element ? t("r2v.notAIGenerated") : t("r2v.elementNotFound")}
           </p>
           <button
             type="button"
@@ -357,7 +355,7 @@ export default function R2VWorkbenchPage() {
   const slotOf = (name: string): ArtifactSlotDocument | null => {
     const output = element.outputs[name];
     return output
-      ? project.assets.artifact_slots_by_id[output.slot_id] ?? null
+      ? (project.assets.artifact_slots_by_id[output.slot_id] ?? null)
       : null;
   };
   const storyboardSlot = slotOf("storyboard");
@@ -428,7 +426,9 @@ export default function R2VWorkbenchPage() {
       videoTask.error?.message ||
       videoTask.error?.detail ||
       videoTask.error?.code;
-    return typeof detail === "string" && detail ? detail : t("r2v.videoGenFailed");
+    return typeof detail === "string" && detail
+      ? detail
+      : t("r2v.videoGenFailed");
   })();
 
   const spanSeconds = element.span.duration_tick / timeline.ticks_per_second;
@@ -672,8 +672,8 @@ export default function R2VWorkbenchPage() {
             ? [normalizeVisualEntityId(draft.creation.scene_ref)]
             : []
           : field === "characters"
-          ? draft.creation.character_refs.map(normalizeVisualEntityId)
-          : draft.creation.prop_refs.map(normalizeVisualEntityId);
+            ? draft.creation.character_refs.map(normalizeVisualEntityId)
+            : draft.creation.prop_refs.map(normalizeVisualEntityId);
       for (const entityId of previousEntityIds) {
         if (nextEntityIds.includes(entityId)) continue;
         // Schema v3 persists bare entity IDs. Also clean prefixed keys from
@@ -824,7 +824,10 @@ export default function R2VWorkbenchPage() {
                 }`}
               >
                 {overLimit && <AlertTriangle className="h-3 w-3" />}
-                {t("r2v.totalDuration", { total: totalDuration, span: spanSeconds })}
+                {t("r2v.totalDuration", {
+                  total: totalDuration,
+                  span: spanSeconds,
+                })}
               </span>
             }
           >
@@ -1016,7 +1019,10 @@ export default function R2VWorkbenchPage() {
           <div className="grid grid-cols-3 gap-2">
             {[
               { label: t("r2v.duration"), value: `${totalDuration}s` },
-              { label: t("r2v.frameSize"), value: project.settings.aspect_ratio },
+              {
+                label: t("r2v.frameSize"),
+                value: project.settings.aspect_ratio,
+              },
               {
                 label: t("r2v.modelLabel"),
                 value: resolvedVideoModel ?? creation.recipe?.model ?? "R2V",

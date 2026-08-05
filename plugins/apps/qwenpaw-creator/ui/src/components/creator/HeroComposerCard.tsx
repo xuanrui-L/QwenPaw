@@ -112,7 +112,9 @@ export default function HeroComposerCard() {
           <Input
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
-            placeholder={t("home.modelName", { count: AUTO_PROJECT_NAME_LENGTH })}
+            placeholder={t("home.modelName", {
+              count: AUTO_PROJECT_NAME_LENGTH,
+            })}
             className="!rounded-none !border-x-0 !border-t-0 !border-b-[#EAE9E7] !bg-transparent !px-4 !py-3 !text-sm !leading-6 !shadow-none focus:!shadow-none"
           />
           <TextArea

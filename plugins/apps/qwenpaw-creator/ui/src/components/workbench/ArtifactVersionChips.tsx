@@ -31,7 +31,11 @@ export default function ArtifactVersionChips({
             type="button"
             data-artifact-version={version.version_id}
             onClick={() => onView(version.version_id)}
-            title={current ? t("workbench.currentVersion") : t("workbench.historyVersion")}
+            title={
+              current
+                ? t("workbench.currentVersion")
+                : t("workbench.historyVersion")
+            }
             className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
               active
                 ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
@@ -46,7 +50,9 @@ export default function ArtifactVersionChips({
               }`}
             />
             v{index + 1}
-            {current && <span className="opacity-70">{t("workbench.current")}</span>}
+            {current && (
+              <span className="opacity-70">{t("workbench.current")}</span>
+            )}
           </button>
         );
       })}

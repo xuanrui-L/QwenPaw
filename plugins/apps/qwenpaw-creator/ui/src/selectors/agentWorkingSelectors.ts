@@ -40,7 +40,8 @@ export function useAgentWorkingState(): AgentWorkingState {
       .filter((item) => !item.completed)
       .sort((left, right) => right.firstEventSeq - left.firstEventSeq)[0];
     if (activity) {
-      const task = activity.delegationText || i18n.t("store.executingDelegatedTask");
+      const task =
+        activity.delegationText || i18n.t("store.executingDelegatedTask");
       return {
         working: true,
         hint: activity.roleDisplayName

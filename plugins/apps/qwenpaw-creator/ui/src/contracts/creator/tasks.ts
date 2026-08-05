@@ -13,12 +13,7 @@ export type SpecialistRunStatus =
   | "CANCELLED";
 
 export type TaskStatus =
-  | "QUEUED"
-  | "RUNNING"
-  | "SUCCEEDED"
-  | "FAILED"
-  | "CANCELLED"
-  | "QUARANTINED";
+  "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED" | "QUARANTINED";
 
 export interface SpecialistRunView {
   id: string;
@@ -92,8 +87,7 @@ export interface ExecutionAuthorizationDecision {
   authorizationToken: string;
 }
 
-export interface ExecutionAuthorizationApproval
-  extends ExecutionAuthorizationDecision {
+export interface ExecutionAuthorizationApproval extends ExecutionAuthorizationDecision {
   provider: string;
   model: string;
   maxCost: number;

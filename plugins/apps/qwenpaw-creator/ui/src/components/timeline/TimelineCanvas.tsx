@@ -248,13 +248,13 @@ export default function TimelineCanvas({
     finalFrameReady &&
     Boolean(
       finalVideo &&
-        !finalVideo.error &&
-        finalVideo.readyState >= 2 &&
-        !finalVideo.seeking &&
-        (playing ||
-          Math.abs(
-            finalVideo.currentTime - playheadTick / timeline.ticks_per_second,
-          ) <= 0.35),
+      !finalVideo.error &&
+      finalVideo.readyState >= 2 &&
+      !finalVideo.seeking &&
+      (playing ||
+        Math.abs(
+          finalVideo.currentTime - playheadTick / timeline.ticks_per_second,
+        ) <= 0.35),
     );
 
   // ------------------------------------------------------------------
@@ -338,7 +338,9 @@ export default function TimelineCanvas({
       if (history?.kind === "undo") undoStack.current.push(history.entry);
       if (history?.kind === "redo") redoStack.current.push(history.entry);
       clearCommitted();
-      message.error(t("timeline.applyTimingFailed", { detail: (error as Error).message }));
+      message.error(
+        t("timeline.applyTimingFailed", { detail: (error as Error).message }),
+      );
       void pollOnce(project.project_id);
     }
   };
@@ -408,13 +410,13 @@ export default function TimelineCanvas({
       const video = videoRef.current;
       const ready = Boolean(
         video &&
-          !video.error &&
-          video.readyState >= 2 &&
-          !video.seeking &&
-          (playing ||
-            Math.abs(
-              video.currentTime - playheadTick / timeline.ticks_per_second,
-            ) <= 0.35),
+        !video.error &&
+        video.readyState >= 2 &&
+        !video.seeking &&
+        (playing ||
+          Math.abs(
+            video.currentTime - playheadTick / timeline.ticks_per_second,
+          ) <= 0.35),
       );
       setFinalFrameReady((current) => (current === ready ? current : ready));
     };
@@ -633,22 +635,27 @@ export default function TimelineCanvas({
     >
       <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <b className="text-[var(--color-text-primary)]">{t("timeline.timeline")}</b>
+          <b className="text-[var(--color-text-primary)]">
+            {t("timeline.timeline")}
+          </b>
           <span
             data-timeline-playhead-summary
             className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 font-semibold text-[var(--color-accent)]"
           >
             {/* Pure playhead semantics: derived from the timeline at the
                 playhead tick, never from an explicit selection. */}
-            {seconds(playheadTick, timeline.ticks_per_second)}s · {t("timeline.itemsAtMoment")}
-            {active.length}{t("timeline.items")}
+            {seconds(playheadTick, timeline.ticks_per_second)}s ·{" "}
+            {t("timeline.itemsAtMoment")}
+            {active.length}
+            {t("timeline.items")}
           </span>
           <span
             className={`rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 ${
               scrollable ? "ring-1 ring-[var(--color-border)]" : ""
             }`}
           >
-            {tracks.length} {t("timeline.track")}{scrollable ? t("timeline.scrollable") : ""}
+            {tracks.length} {t("timeline.track")}
+            {scrollable ? t("timeline.scrollable") : ""}
           </span>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 pr-3">
@@ -666,14 +673,18 @@ export default function TimelineCanvas({
             ) : (
               <ChevronDown className="h-3 w-3" />
             )}
-            {previewOpen ? t("timeline.collapsePreview") : t("timeline.videoPreview")}
+            {previewOpen
+              ? t("timeline.collapsePreview")
+              : t("timeline.videoPreview")}
           </button>
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
             className="rounded-md border border-[var(--color-border)] px-2 py-1 font-semibold text-[var(--color-text-secondary)]"
           >
-            {collapsed ? t("timeline.expandTimeline") : t("timeline.collapseTimeline")}
+            {collapsed
+              ? t("timeline.expandTimeline")
+              : t("timeline.collapseTimeline")}
           </button>
         </div>
       </div>
@@ -778,8 +789,8 @@ export default function TimelineCanvas({
                 ? t("timeline.notAffectedLabel")
                 : t("timeline.finalCut")
               : renderedVersion?.stale
-              ? t("timeline.contentUpdated")
-              : t("timeline.livePreview")}
+                ? t("timeline.contentUpdated")
+                : t("timeline.livePreview")}
           </div>
         </div>
       )}

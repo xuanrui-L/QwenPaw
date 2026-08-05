@@ -47,11 +47,7 @@ export interface ProjectSummary {
    * images, or an extracted keyframe when only a video exists.
    */
   coverVersionSource?:
-    | "artifact"
-    | "source"
-    | "artifact_frame"
-    | "source_frame"
-    | null;
+    "artifact" | "source" | "artifact_frame" | "source_frame" | null;
   /**
    * Newest rendered final cut, when the Project has one; drives the card
    * preview button on the home page.

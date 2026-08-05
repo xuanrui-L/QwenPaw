@@ -27,7 +27,9 @@ export function useBreadcrumbs(): Crumb[] {
   const parts = pathname.split("/").filter(Boolean);
   const routeSection = parts[2] || "";
   if (routeSection === "plan") {
-    const crumbs: Crumb[] = [{ label: t("nav.videoPlan"), path: `${base}/plan` }];
+    const crumbs: Crumb[] = [
+      { label: t("nav.videoPlan"), path: `${base}/plan` },
+    ];
     if (parts[3] === "element" && parts[4]) {
       // R2V workbench: /project/:id/plan/element/:elementId
       const elementId = decodeURIComponent(parts[4]);
@@ -48,7 +50,9 @@ export function useBreadcrumbs(): Crumb[] {
   }
 
   if (routeSection === "assets") {
-    const crumbs: Crumb[] = [{ label: t("nav.assets"), path: `${base}/assets` }];
+    const crumbs: Crumb[] = [
+      { label: t("nav.assets"), path: `${base}/assets` },
+    ];
     const selectedId = searchParams.get("select") || searchParams.get("asset");
     if (selectedId) {
       const selected =

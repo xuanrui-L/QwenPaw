@@ -223,7 +223,9 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
           <Input
             value={projectName}
             onChange={(e) => setProjectName(e.target.value)}
-            placeholder={t("home.modelName", { count: AUTO_PROJECT_NAME_LENGTH })}
+            placeholder={t("home.modelName", {
+              count: AUTO_PROJECT_NAME_LENGTH,
+            })}
             className="!rounded-none !border-x-0 !border-t-0 !bg-transparent !text-sm !font-semibold !shadow-none focus:!shadow-none"
           />
           <TextArea
@@ -372,7 +374,8 @@ export function ProjectComposer({ open, onClose }: ProjectComposerProps) {
           {isVideoEdit && (
             <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--color-border)] px-3 py-2">
               <span className="text-[11px] font-medium text-[var(--color-text-tertiary)]">
-                {t("home.contentType")}<sup className="text-[var(--color-accent)]">*</sup>
+                {t("home.contentType")}
+                <sup className="text-[var(--color-accent)]">*</sup>
               </span>
               {CONTENT_TYPE_OPTIONS.map((option) => (
                 <button

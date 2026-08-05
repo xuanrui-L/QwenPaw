@@ -229,14 +229,14 @@ function subagentActivityBase(
       eventStringArray(event.data, "targetRefs") ?? existing?.targetRefs ?? [],
     firstEventSeq: runChanged
       ? event.seq
-      : existing?.firstEventSeq ?? event.seq,
-    completed: runChanged ? false : existing?.completed ?? false,
+      : (existing?.firstEventSeq ?? event.seq),
+    completed: runChanged ? false : (existing?.completed ?? false),
     waitingReview: runChanged ? undefined : existing?.waitingReview,
     terminalKind: runChanged ? undefined : existing?.terminalKind,
     summaryText: runChanged ? undefined : existing?.summaryText,
     terminalEventSeq: runChanged ? undefined : existing?.terminalEventSeq,
-    messages: runChanged ? {} : existing?.messages ?? {},
-    tools: runChanged ? {} : existing?.tools ?? {},
+    messages: runChanged ? {} : (existing?.messages ?? {}),
+    tools: runChanged ? {} : (existing?.tools ?? {}),
   };
 }
 
@@ -596,7 +596,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               (item) => item.conversationId === preferredConversationId,
             )
               ? preferredConversationId
-              : conversations[0]?.conversationId ?? null;
+              : (conversations[0]?.conversationId ?? null);
           if (!activeConversationId) {
             const created = await createStableConversation(projectId);
             if (
@@ -1023,15 +1023,15 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 event.type === "agent.tool_completed") &&
               Boolean(
                 actionId &&
-                  (event.data.tool === "delegate_to_agent" ||
-                    subagentActivities[actionId]),
+                (event.data.tool === "delegate_to_agent" ||
+                  subagentActivities[actionId]),
               );
             const parentActionId =
               subagentDetail || subagentLifecycle
                 ? eventString(event.data, "parentActionId")
                 : delegateBoundary
-                ? actionId
-                : undefined;
+                  ? actionId
+                  : undefined;
             if (
               parentActionId &&
               (subagentDetail || subagentLifecycle || delegateBoundary)
@@ -1256,8 +1256,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 typeof event.data.assistantMessageId === "string"
                   ? event.data.assistantMessageId
                   : typeof event.data.messageId === "string"
-                  ? event.data.messageId
-                  : undefined;
+                    ? event.data.messageId
+                    : undefined;
               if (
                 assistantMessageId &&
                 streamingAssistantMessages[assistantMessageId]
@@ -1334,7 +1334,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                       firstEventSeq: existing?.firstEventSeq ?? event.seq,
                       deltas:
                         streamKind === "thinking"
-                          ? existing?.deltas ?? {}
+                          ? (existing?.deltas ?? {})
                           : {
                               ...(existing?.deltas ?? {}),
                               [deltaIndex]: delta,
@@ -1345,7 +1345,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                               ...(existing?.thinkingDeltas ?? {}),
                               [deltaIndex]: delta,
                             }
-                          : existing?.thinkingDeltas ?? {},
+                          : (existing?.thinkingDeltas ?? {}),
                       toolCall: existing?.toolCall,
                       createdAt: existing?.createdAt ?? event.at,
                     },
@@ -1460,8 +1460,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 );
               }
               const clientMessageId = event.data.clientMessageId as
-                | string
-                | undefined;
+                string | undefined;
               if (clientMessageId)
                 queuedUi = queuedUi.filter(
                   (item) => item.clientMessageId !== clientMessageId,
@@ -1470,7 +1469,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               const cursor =
                 typeof rawMessageSeq === "number"
                   ? Math.max(0, rawMessageSeq - 1)
-                  : messages.at(-1)?.messageSeq ?? 0;
+                  : (messages.at(-1)?.messageSeq ?? 0);
               messageRefreshAfter =
                 messageRefreshAfter == null
                   ? cursor
@@ -1484,8 +1483,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                 event.type === "creator.woken"
                   ? "RUNNING"
                   : ((event.data.status ?? event.data.to) as
-                      | CreatorSessionView["status"]
-                      | undefined);
+                      CreatorSessionView["status"] | undefined);
               if (status && session) {
                 session = { ...session, status, lastEventSeq: event.seq };
                 if (
@@ -1502,7 +1500,8 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
                           ...activity,
                           completed: true,
                           terminalKind: "CANCELLED" as const,
-                          summaryText: activity.summaryText ?? i18n.t("store.userAbort"),
+                          summaryText:
+                            activity.summaryText ?? i18n.t("store.userAbort"),
                           terminalEventSeq: event.seq,
                         },
                       };

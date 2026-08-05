@@ -141,7 +141,8 @@ function PlaceholderLayer({ layer }: { layer: ElementPlayback }) {
           className="rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
           style={{ color: meta.color, background: `${meta.color}26` }}
         >
-          {meta.label} · {status === "generating" ? t("livePreview.generating") : label}
+          {meta.label} ·{" "}
+          {status === "generating" ? t("livePreview.generating") : label}
         </span>
         {status === "generating" && (
           <div className="agent-working-shimmer mt-1 h-1 w-32 rounded-full bg-white/15" />

@@ -56,7 +56,10 @@ function statusOf(
   );
   if (related?.status === "RUNNING" || related?.status === "QUEUED") {
     return {
-      label: related.status === "RUNNING" ? t("elementList.generating") : t("elementList.waiting"),
+      label:
+        related.status === "RUNNING"
+          ? t("elementList.generating")
+          : t("elementList.waiting"),
       tone: "bg-[var(--color-warning-soft)] text-[var(--color-warning)]",
     };
   }
@@ -120,7 +123,9 @@ export default function ElementList({
         <div className="flex min-w-0 items-baseline gap-1.5">
           <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
             {selectionPinned
-              ? t("elementList.selectedItems", { count: activeElementIds.length })
+              ? t("elementList.selectedItems", {
+                  count: activeElementIds.length,
+                })
               : `${t("elementList.timePoint")}${sec(playheadTick, timeline.ticks_per_second)}s, ${activeElementIds.length}${t("elementList.items")}`}
           </h3>
           <span className="truncate text-[10px] text-[var(--color-text-tertiary)]">
@@ -209,7 +214,11 @@ export default function ElementList({
                         {active && (
                           <span
                             className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-accent)]"
-                            title={selectionPinned ? t("elementList.selected") : t("elementList.activeAtMoment")}
+                            title={
+                              selectionPinned
+                                ? t("elementList.selected")
+                                : t("elementList.activeAtMoment")
+                            }
                           />
                         )}
                       </div>

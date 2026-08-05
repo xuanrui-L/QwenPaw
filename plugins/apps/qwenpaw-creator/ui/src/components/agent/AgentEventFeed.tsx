@@ -37,7 +37,10 @@ type OriginRunStatus =
   | "error"
   | "cancelled";
 
-function runStatusMeta(status: OriginRunStatus): { label: string; tone: string } {
+function runStatusMeta(status: OriginRunStatus): {
+  label: string;
+  tone: string;
+} {
   const tones: Record<OriginRunStatus, string> = {
     running: "text-[var(--color-warning)] bg-[var(--color-warning-soft)]",
     waiting_confirm: "text-[var(--color-accent)] bg-[var(--color-accent-soft)]",
@@ -46,7 +49,8 @@ function runStatusMeta(status: OriginRunStatus): { label: string; tone: string }
     partial: "text-[var(--color-warning)] bg-[var(--color-warning-soft)]",
     timeout: "text-[var(--color-warning)] bg-[var(--color-warning-soft)]",
     error: "text-[var(--color-danger)] bg-[var(--color-danger-soft)]",
-    cancelled: "text-[var(--color-text-tertiary)] bg-[var(--color-bg-secondary)]",
+    cancelled:
+      "text-[var(--color-text-tertiary)] bg-[var(--color-bg-secondary)]",
   };
   const labels: Record<OriginRunStatus, string> = {
     running: i18n.t("agentEventFeed.executing"),
@@ -179,7 +183,8 @@ function EventCard({
         className="rounded-lg border border-[var(--color-accent)]/30 bg-[var(--color-accent-soft)] p-3 text-[11px] leading-5 text-[var(--color-text-primary)]"
       >
         <b className="block text-xs text-[var(--color-accent)]">
-          {i18n.t("agentEventFeed.executionPlan")}{summary}
+          {i18n.t("agentEventFeed.executionPlan")}
+          {summary}
         </b>
         {steps.length > 0 && (
           <ol className="mt-1 list-decimal space-y-0.5 pl-4 text-[var(--color-text-secondary)]">
@@ -220,7 +225,9 @@ function EventCard({
                 : "text-[var(--color-warning)]"
             }
           >
-            {completed ? i18n.t("agentEventFeed.done") : i18n.t("agentEventFeed.executing")}
+            {completed
+              ? i18n.t("agentEventFeed.done")
+              : i18n.t("agentEventFeed.executing")}
           </span>
         </div>
         {summary && (
@@ -246,8 +253,8 @@ function EventCard({
             failed
               ? "text-[var(--color-danger)]"
               : completed
-              ? "text-[var(--color-success)]"
-              : "text-[var(--color-accent)]"
+                ? "text-[var(--color-success)]"
+                : "text-[var(--color-accent)]"
           }
         >
           {completed ? "✓ " : failed ? "× " : "→ "}
@@ -272,8 +279,8 @@ function EventCard({
         error
           ? "text-[var(--color-danger)]"
           : success
-          ? "text-[var(--color-success)]"
-          : "text-[var(--color-text-secondary)]"
+            ? "text-[var(--color-success)]"
+            : "text-[var(--color-text-secondary)]"
       }`}
     >
       {summary}
@@ -498,7 +505,9 @@ export default function AgentEventFeed() {
                         navigateToLocator(projectId, jumpTarget.locator, {
                           review: true,
                           field: jumpTarget.field,
-                          description: t("agentEventFeed.productionConfirmOrView"),
+                          description: t(
+                            "agentEventFeed.productionConfirmOrView",
+                          ),
                         })
                       }
                       className="!h-6 !text-[11px]"

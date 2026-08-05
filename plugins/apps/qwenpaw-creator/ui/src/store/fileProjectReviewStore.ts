@@ -13,11 +13,7 @@ import type {
 import i18n from "@/i18n";
 
 export type FileProjectReviewSyncStatus =
-  | "idle"
-  | "syncing"
-  | "healthy"
-  | "degraded"
-  | "not_found";
+  "idle" | "syncing" | "healthy" | "degraded" | "not_found";
 
 export interface FileProjectReviewPollOptions {
   activeIntervalMs: number;
@@ -320,8 +316,10 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
       const review = state.reviews.find((r) => r.review_id === reviewId);
       if (!review || review.status !== "PENDING")
         throw new Error(i18n.t("store.noFileReview"));
-      if (state.decisionInFlight) throw new Error(i18n.t("store.reviewSubmitting"));
-      if (decisions.length === 0) throw new Error(i18n.t("store.needOneDecision"));
+      if (state.decisionInFlight)
+        throw new Error(i18n.t("store.reviewSubmitting"));
+      if (decisions.length === 0)
+        throw new Error(i18n.t("store.needOneDecision"));
 
       const ids = new Set(decisions.map((item) => item.operation_id));
       if (ids.size !== decisions.length)

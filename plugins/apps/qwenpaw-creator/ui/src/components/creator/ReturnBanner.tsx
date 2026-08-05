@@ -40,7 +40,9 @@ export default function ReturnBanner() {
 
   const top = stack[stack.length - 1];
   const sourceDescription =
-    top.description === "决策中心" ? t("returnBanner.reviewDecision") : top.description;
+    top.description === "决策中心"
+      ? t("returnBanner.reviewDecision")
+      : top.description;
 
   return (
     <div className="flex items-center justify-between gap-3 border-b border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-900 dark:border-blue-900/40 dark:bg-blue-950/40 dark:text-blue-200">

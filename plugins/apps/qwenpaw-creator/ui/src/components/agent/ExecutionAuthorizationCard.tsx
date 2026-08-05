@@ -67,19 +67,33 @@ function authorizationParameterSummary(
   const parameters = raw as Record<string, unknown>;
   const parts: string[] = [];
   if (parameters.durationSeconds) {
-    parts.push(i18n.t("executionAuth.duration", { duration: parameters.durationSeconds }));
+    parts.push(
+      i18n.t("executionAuth.duration", {
+        duration: parameters.durationSeconds,
+      }),
+    );
   }
   if (typeof parameters.resolution === "string") {
-    parts.push(i18n.t("executionAuth.resolutionLabel", { resolution: parameters.resolution.toUpperCase() }));
+    parts.push(
+      i18n.t("executionAuth.resolutionLabel", {
+        resolution: parameters.resolution.toUpperCase(),
+      }),
+    );
   }
   if (typeof parameters.ratio === "string") {
     parts.push(i18n.t("executionAuth.ratio", { ratio: parameters.ratio }));
   }
   if (typeof parameters.aspectRatio === "string") {
-    parts.push(i18n.t("executionAuth.frameSize", { size: parameters.aspectRatio }));
+    parts.push(
+      i18n.t("executionAuth.frameSize", { size: parameters.aspectRatio }),
+    );
   }
   if (typeof parameters.generateAudio === "boolean") {
-    parts.push(parameters.generateAudio ? i18n.t("executionAuth.withAudio") : i18n.t("executionAuth.withoutAudio"));
+    parts.push(
+      parameters.generateAudio
+        ? i18n.t("executionAuth.withAudio")
+        : i18n.t("executionAuth.withoutAudio"),
+    );
   }
   return parts.join(" · ");
 }
@@ -93,7 +107,9 @@ function humanizeRefTokens(
     /(?:visual-entity|artifact-version|asset-version|element|asset|source):[\w.-]+(?::[\w.-]+)*/g,
     (token) => {
       const label = creatorTargetLabel(token, project);
-      return label && label !== i18n.t("executionAuth.currentProject") ? `「${label}」` : token;
+      return label && label !== i18n.t("executionAuth.currentProject")
+        ? `「${label}」`
+        : token;
     },
   );
 }
@@ -236,7 +252,8 @@ export default function ExecutionAuthorizationCard({
               {t("executionAuth.productionConfirm")}
             </span>
             <span className="min-w-0 flex-1 truncate text-xs font-semibold text-[var(--color-text-primary)]">
-              {authorizationOperation(authorization)}{t("executionAuth.waitingConfirm")}
+              {authorizationOperation(authorization)}
+              {t("executionAuth.waitingConfirm")}
             </span>
             {jumpTarget && projectId && (
               <button
@@ -283,13 +300,17 @@ export default function ExecutionAuthorizationCard({
             <div className="mt-1.5 rounded-md border border-[var(--color-warning)]/30 bg-[var(--color-bg-primary)]/60 px-2 py-1.5">
               <p className="flex items-center gap-1 text-[11px] font-semibold leading-4 text-[var(--color-warning)]">
                 <Coins className="h-3 w-3" />
-                {t("executionAuth.estimatedCostLabel")} {billing.displayText ?? t("executionAuth.costUnknown")}
+                {t("executionAuth.estimatedCostLabel")}{" "}
+                {billing.displayText ?? t("executionAuth.costUnknown")}
               </p>
               {billing.formula && (
                 <p className="mt-0.5 text-[10px] leading-4 text-[var(--color-text-secondary)]">
-                  {t("executionAuth.calculation")}{billing.formula}
+                  {t("executionAuth.calculation")}
+                  {billing.formula}
                   {billing.pricingModel
-                    ? t("executionAuth.pricingModel", { model: billing.pricingModel })
+                    ? t("executionAuth.pricingModel", {
+                        model: billing.pricingModel,
+                      })
                     : ""}
                 </p>
               )}

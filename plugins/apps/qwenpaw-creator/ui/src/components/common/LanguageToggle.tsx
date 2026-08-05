@@ -25,8 +25,8 @@ export default function LanguageToggle({ className }: LanguageToggleProps) {
   }));
 
   return (
-    <Dropdown 
-      trigger={["click"]} 
+    <Dropdown
+      trigger={["click"]}
       menu={{ items: menuItems }}
       open={dropdownOpen}
       onOpenChange={setDropdownOpen}

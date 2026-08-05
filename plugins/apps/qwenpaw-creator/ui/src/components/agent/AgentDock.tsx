@@ -337,10 +337,14 @@ function MessageParts({
             {part.type === "audio"
               ? t("agent.audioAttachment")
               : part.type === "document"
-              ? t("agent.documentAttachment")
-              : part.type}{" "}
+                ? t("agent.documentAttachment")
+                : part.type}{" "}
             ·{" "}
-            {String(part.attachment.name || part.attachment.filename || t("agent.attachment"))}
+            {String(
+              part.attachment.name ||
+                part.attachment.filename ||
+                t("agent.attachment"),
+            )}
           </span>
         );
       })}
@@ -394,7 +398,11 @@ function ThinkingDisclosure({
           ) : (
             <CircleCheck className="h-3 w-3" />
           )}
-          {isReplaying ? t("agent.thinkingDone") : active ? t("agent.thinking") : t("agent.thinkingDone")}
+          {isReplaying
+            ? t("agent.thinkingDone")
+            : active
+              ? t("agent.thinking")
+              : t("agent.thinkingDone")}
         </span>
         {allowExpand && (
           <button
@@ -465,22 +473,28 @@ function actionReason(envelope: CreatorActionEnvelope): string {
 
 function waitingActionTitle(reason: string): string {
   const subject = reason || i18n.t("agent.processing");
-  const prefixed = /^(?:正在)?等待/.test(subject) ? subject : `${i18n.t("agent.waitingOutput").replace(/中$/, "")}${subject}`;
+  const prefixed = /^(?:正在)?等待/.test(subject)
+    ? subject
+    : `${i18n.t("agent.waitingOutput").replace(/中$/, "")}${subject}`;
   return prefixed.endsWith("中") ? prefixed : `${prefixed}中`;
 }
 
 function actionTitle(envelope: CreatorActionEnvelope, active: boolean): string {
   if (envelope.action === "tool_call") {
     const label = creatorToolLabel(envelope.tool || "");
-    return active ? `${label}${i18n.t("agent.processing")}` : `${label}${i18n.t("agent.completed")}`;
+    return active
+      ? `${label}${i18n.t("agent.processing")}`
+      : `${label}${i18n.t("agent.completed")}`;
   }
   if (envelope.action === "yield_until_runtime_event") {
     return waitingActionTitle(actionReason(envelope));
   }
   if (envelope.action === "complete_current_change")
     return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
-  if (envelope.action === "plan") return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
-  if (envelope.action === "final") return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
+  if (envelope.action === "plan")
+    return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
+  if (envelope.action === "final")
+    return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
   return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
 }
 
@@ -678,15 +692,14 @@ function ReviewFeedbackCard({ item }: { item: CreatorMessage }) {
             {regenerate ? t("agent.undoneAndRedo") : t("agent.undone")}
           </div>
           <div className="leading-4 text-[var(--color-text-tertiary)]">
-            {regenerate
-              ? t("agent.undoAndRedoDesc")
-              : t("agent.undoneDesc")}
+            {regenerate ? t("agent.undoAndRedoDesc") : t("agent.undoneDesc")}
           </div>
         </div>
       </div>
       {targetLabels.length > 0 && (
         <div className="mt-2 truncate text-[10px] text-[var(--color-text-tertiary)]">
-          {t("agent.targets")}{targetLabels.join("、")}
+          {t("agent.targets")}
+          {targetLabels.join("、")}
         </div>
       )}
       {note && (
@@ -774,7 +787,10 @@ function subagentThinkingText(item: SubagentStreamMessage): string {
   return item.completedThinking ?? orderedDeltas(item.thinkingDeltas);
 }
 
-function specialistOutcomeMeta(outcome: SpecialistOutcome): { label: string; tone: string } {
+function specialistOutcomeMeta(outcome: SpecialistOutcome): {
+  label: string;
+  tone: string;
+} {
   const tones: Record<SpecialistOutcome, string> = {
     SUCCESS: "bg-[var(--color-success-soft)] text-[var(--color-success)]",
     BLOCKED: "bg-[var(--color-warning-soft)] text-[var(--color-warning)]",
@@ -788,19 +804,26 @@ function specialistOutcomeMeta(outcome: SpecialistOutcome): { label: string; ton
   return { label: labels[outcome], tone: tones[outcome] };
 }
 
-function subagentTerminalMeta(kind: NonNullable<SubagentActivity["terminalKind"]>): { label: string; tone: string } {
+function subagentTerminalMeta(
+  kind: NonNullable<SubagentActivity["terminalKind"]>,
+): { label: string; tone: string } {
   switch (kind) {
-    case "SUCCESS": return specialistOutcomeMeta("SUCCESS");
-    case "BLOCKED": return specialistOutcomeMeta("BLOCKED");
-    case "FAILED": return specialistOutcomeMeta("FAILED");
-    case "STALE": return {
-      label: i18n.t("agent.failed"),
-      tone: "bg-[var(--color-warning-soft)] text-[var(--color-warning)]",
-    };
-    case "CANCELLED": return {
-      label: i18n.t("agent.cancelled"),
-      tone: "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]",
-    };
+    case "SUCCESS":
+      return specialistOutcomeMeta("SUCCESS");
+    case "BLOCKED":
+      return specialistOutcomeMeta("BLOCKED");
+    case "FAILED":
+      return specialistOutcomeMeta("FAILED");
+    case "STALE":
+      return {
+        label: i18n.t("agent.failed"),
+        tone: "bg-[var(--color-warning-soft)] text-[var(--color-warning)]",
+      };
+    case "CANCELLED":
+      return {
+        label: i18n.t("agent.cancelled"),
+        tone: "bg-[var(--color-bg-secondary)] text-[var(--color-text-tertiary)]",
+      };
   }
 }
 
@@ -900,8 +923,8 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
     resolvedStatus === "succeeded"
       ? "text-[var(--color-success)]"
       : resolvedStatus === "failed"
-      ? "text-[var(--color-danger)]"
-      : "text-[var(--color-text-tertiary)]";
+        ? "text-[var(--color-danger)]"
+        : "text-[var(--color-text-tertiary)]";
   const displayLabel = creatorToolLabel(item.tool);
   return (
     <div
@@ -925,10 +948,10 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
             {isReplaying
               ? ""
               : active
-              ? t("agent.processing")
-              : resolvedStatus === "succeeded"
-              ? t("agent.completed")
-              : t("agent.failed")}
+                ? t("agent.processing")
+                : resolvedStatus === "succeeded"
+                  ? t("agent.completed")
+                  : t("agent.failed")}
           </span>
           {active && item.receivedBytes !== undefined && (
             <span className="text-[9px] text-[var(--color-text-tertiary)]">
@@ -1007,7 +1030,7 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
         label: t("agent.waitingReview"),
         tone: "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
       }
-    : terminal ?? SUBAGENT_RUNNING_META;
+    : (terminal ?? SUBAGENT_RUNNING_META);
   return (
     <div
       data-subagent-activity={activity.parentActionId}
@@ -1046,14 +1069,14 @@ function SubagentActivityBubble({ activity }: { activity: SubagentActivity }) {
                 materializedTool={Boolean(
                   actionEnvelopeFromStreamText(subagentMessageText(entry.item))
                     ?.tool &&
-                    tools.some(
-                      (tool) =>
-                        tool.tool ===
-                          actionEnvelopeFromStreamText(
-                            subagentMessageText(entry.item),
-                          )?.tool &&
-                        tool.firstEventSeq >= entry.item.firstEventSeq,
-                    ),
+                  tools.some(
+                    (tool) =>
+                      tool.tool ===
+                        actionEnvelopeFromStreamText(
+                          subagentMessageText(entry.item),
+                        )?.tool &&
+                      tool.firstEventSeq >= entry.item.firstEventSeq,
+                  ),
                 )}
               />
             ) : (
@@ -1141,12 +1164,12 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
         ? activity.waitingReview
           ? "waiting_review"
           : activity.terminalKind === "FAILED" ||
-            activity.terminalKind === "BLOCKED"
-          ? "failed"
-          : activity.terminalKind === "CANCELLED" ||
-            activity.terminalKind === "STALE"
-          ? "cancelled"
-          : "succeeded"
+              activity.terminalKind === "BLOCKED"
+            ? "failed"
+            : activity.terminalKind === "CANCELLED" ||
+                activity.terminalKind === "STALE"
+              ? "cancelled"
+              : "succeeded"
         : "started"
       : status;
   // When the project reached a terminal state, force "started" tools terminal too.
@@ -1162,12 +1185,12 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
     resolvedStatus === "succeeded"
       ? "text-[var(--color-success)]"
       : resolvedStatus === "failed"
-      ? "text-[var(--color-danger)]"
-      : resolvedStatus === "cancelled"
-      ? "text-[var(--color-text-tertiary)]"
-      : resolvedStatus === "waiting_review"
-      ? "text-[var(--color-accent)]"
-      : "text-[var(--color-text-secondary)]";
+        ? "text-[var(--color-danger)]"
+        : resolvedStatus === "cancelled"
+          ? "text-[var(--color-text-tertiary)]"
+          : resolvedStatus === "waiting_review"
+            ? "text-[var(--color-accent)]"
+            : "text-[var(--color-text-secondary)]";
 
   let displayLabel: string;
   let subLabel: string | null = null;
@@ -1218,14 +1241,14 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
             {isReplaying
               ? ""
               : active
-              ? t("agent.processing")
-              : resolvedStatus === "succeeded"
-              ? t("agent.completed")
-              : resolvedStatus === "cancelled"
-              ? t("agent.cancelled")
-              : resolvedStatus === "waiting_review"
-              ? ` · ${t("agent.waitingReview")}`
-              : t("agent.failed")}
+                ? t("agent.processing")
+                : resolvedStatus === "succeeded"
+                  ? t("agent.completed")
+                  : resolvedStatus === "cancelled"
+                    ? t("agent.cancelled")
+                    : resolvedStatus === "waiting_review"
+                      ? ` · ${t("agent.waitingReview")}`
+                      : t("agent.failed")}
           </span>
           {subLabel && active && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">
@@ -1395,12 +1418,12 @@ function projectRefItems(
   const needle = query.trim().toLocaleLowerCase();
   const items: RefSearchItem[] = [];
   if (timeline) {
-      items.push({
-        ref: `timeline:${timeline.timeline_id}`,
-        name: i18n.t("agent.mainTimeline"),
-        type: "timeline",
-        uiLocator: { page: "plan" },
-      });
+    items.push({
+      ref: `timeline:${timeline.timeline_id}`,
+      name: i18n.t("agent.mainTimeline"),
+      type: "timeline",
+      uiLocator: { page: "plan" },
+    });
     Object.values(timeline.elements_by_id).forEach((element) =>
       items.push({
         ref: `element:${element.element_id}`,
@@ -1429,9 +1452,9 @@ function projectRefItems(
                 : undefined;
             })()
           : entity.variants.order.length === 0 &&
-            entity.selected_artifact_version_id
-          ? getArtifactVersionMediaUrl(entity.selected_artifact_version_id)
-          : undefined,
+              entity.selected_artifact_version_id
+            ? getArtifactVersionMediaUrl(entity.selected_artifact_version_id)
+            : undefined,
       uiLocator: { page: "assets", assetId: entity.entity_id },
     }),
   );
@@ -1518,7 +1541,8 @@ function WorkspacePanel() {
           <b className="text-[var(--color-text-primary)]">
             {status?.progress.label || "—"}
           </b>
-          {" · "}{t("agent.statusLabel")}{" "}
+          {" · "}
+          {t("agent.statusLabel")}{" "}
           <b className="text-[var(--color-text-primary)]">
             {creatorStatusLabel(session?.status)}
           </b>
@@ -1536,7 +1560,9 @@ function WorkspacePanel() {
         </p>
         <div className="mt-0.5 flex flex-wrap gap-1">
           {!project ? (
-            <span className="text-[var(--color-text-tertiary)]">{t("agent.noMaterials")}</span>
+            <span className="text-[var(--color-text-tertiary)]">
+              {t("agent.noMaterials")}
+            </span>
           ) : (
             <>
               <span className="rounded bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
@@ -1693,7 +1719,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
 
   const streaming = Boolean(
     session &&
-      ["RUNNING", "RESUMING", "INTERRUPT_REQUESTED"].includes(session.status),
+    ["RUNNING", "RESUMING", "INTERRUPT_REQUESTED"].includes(session.status),
   );
   const stoppable =
     Object.values(subagentActivities).some((activity) => !activity.completed) ||
@@ -1885,8 +1911,8 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
           type: selectedRef.startsWith("element:")
             ? "element"
             : selectedRef.startsWith("timeline:")
-            ? "timeline"
-            : "asset",
+              ? "timeline"
+              : "asset",
           uiLocator: {},
         },
       );
@@ -2242,7 +2268,9 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
               data-agent-dock-handle-toast
               className="agent-dock-handle-toast pointer-events-none absolute right-full top-1/2 mr-3 -translate-y-1/2 whitespace-nowrap rounded-full bg-[var(--color-warning)] px-2.5 py-1 text-[10px] font-semibold text-white shadow-lg"
             >
-              {t("agent.productionConfirmPending", { count: pendingAuthorizationCount })}
+              {t("agent.productionConfirmPending", {
+                count: pendingAuthorizationCount,
+              })}
               <span className="absolute left-full top-1/2 -translate-y-1/2 border-[5px] border-transparent border-l-[var(--color-warning)]" />
             </span>
           )}
@@ -2475,8 +2503,8 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                     liveStatus.state === "working"
                       ? "agent-live-shimmer font-medium"
                       : liveStatus.state === "stopping"
-                      ? "font-medium text-[var(--color-danger)]"
-                      : "text-[var(--color-text-tertiary)]"
+                        ? "font-medium text-[var(--color-danger)]"
+                        : "text-[var(--color-text-tertiary)]"
                   }`}
                 >
                   {liveStatus.label}
@@ -2526,8 +2554,8 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                           chip.thumbnailUrl
                             ? undefined
                             : manual
-                            ? t("agent.manualRef")
-                            : t("agent.autoContext")
+                              ? t("agent.manualRef")
+                              : t("agent.autoContext")
                         }
                       >
                         @{chip.name}

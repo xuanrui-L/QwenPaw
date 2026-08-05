@@ -115,12 +115,7 @@ export function packDisplayLanes(
 }
 
 export type TimelineTrackType =
-  | "subtitle"
-  | "motion"
-  | "clip"
-  | "ai"
-  | "transition"
-  | "audio";
+  "subtitle" | "motion" | "clip" | "ai" | "transition" | "audio";
 
 export const TRACK_ORDER: TimelineTrackType[] = [
   "ai",
@@ -135,12 +130,36 @@ export const TRACK_TYPE_META: Record<
   TimelineTrackType,
   { label: string; color: string; soft: string }
 > = {
-  ai: { label: i18n.t("timeline.trackTypes.ai"), color: "#ff7f16", soft: "rgba(255,127,22,.12)" },
-  clip: { label: i18n.t("timeline.trackTypes.clip"), color: "#3b82f6", soft: "rgba(59,130,246,.12)" },
-  subtitle: { label: i18n.t("timeline.trackTypes.subtitle"), color: "#8b5cf6", soft: "rgba(139,92,246,.12)" },
-  motion: { label: i18n.t("timeline.trackTypes.motion"), color: "#f59e0b", soft: "rgba(245,158,11,.12)" },
-  transition: { label: i18n.t("timeline.trackTypes.transition"), color: "#0d9488", soft: "rgba(13,148,136,.12)" },
-  audio: { label: i18n.t("timeline.trackTypes.audio"), color: "#12b76a", soft: "rgba(18,183,106,.12)" },
+  ai: {
+    label: i18n.t("timeline.trackTypes.ai"),
+    color: "#ff7f16",
+    soft: "rgba(255,127,22,.12)",
+  },
+  clip: {
+    label: i18n.t("timeline.trackTypes.clip"),
+    color: "#3b82f6",
+    soft: "rgba(59,130,246,.12)",
+  },
+  subtitle: {
+    label: i18n.t("timeline.trackTypes.subtitle"),
+    color: "#8b5cf6",
+    soft: "rgba(139,92,246,.12)",
+  },
+  motion: {
+    label: i18n.t("timeline.trackTypes.motion"),
+    color: "#f59e0b",
+    soft: "rgba(245,158,11,.12)",
+  },
+  transition: {
+    label: i18n.t("timeline.trackTypes.transition"),
+    color: "#0d9488",
+    soft: "rgba(13,148,136,.12)",
+  },
+  audio: {
+    label: i18n.t("timeline.trackTypes.audio"),
+    color: "#12b76a",
+    soft: "rgba(18,183,106,.12)",
+  },
 };
 
 /**
@@ -200,11 +219,11 @@ export function trackOrderedTimelineElements(
     const rightTrack = classifyElementTrack(right);
     const leftRank =
       leftTrack !== null
-        ? trackRank.get(leftTrack) ?? TRACK_ORDER.length
+        ? (trackRank.get(leftTrack) ?? TRACK_ORDER.length)
         : TRACK_ORDER.length;
     const rightRank =
       rightTrack !== null
-        ? trackRank.get(rightTrack) ?? TRACK_ORDER.length
+        ? (trackRank.get(rightTrack) ?? TRACK_ORDER.length)
         : TRACK_ORDER.length;
     return (
       leftRank - rightRank ||
@@ -350,7 +369,8 @@ export function selectedSlotVersion(
     name: slot.kind,
     slot,
     selected: slot.selected_version_id
-      ? project.assets.artifact_versions_by_id[slot.selected_version_id] ?? null
+      ? (project.assets.artifact_versions_by_id[slot.selected_version_id] ??
+        null)
       : null,
   };
 }
@@ -430,12 +450,24 @@ export const ELEMENT_TYPE_META: Record<
     soft: string;
   }
 > = {
-  r2v: { label: i18n.t("timeline.elementTypes.r2v"), color: "#ff7f16", soft: "rgba(255,127,22,.12)" },
-  edit: { label: i18n.t("timeline.elementTypes.edit"), color: "#3b82f6", soft: "rgba(59,130,246,.12)" },
+  r2v: {
+    label: i18n.t("timeline.elementTypes.r2v"),
+    color: "#ff7f16",
+    soft: "rgba(255,127,22,.12)",
+  },
+  edit: {
+    label: i18n.t("timeline.elementTypes.edit"),
+    color: "#3b82f6",
+    soft: "rgba(59,130,246,.12)",
+  },
   transition: {
     label: i18n.t("timeline.elementTypes.transition"),
     color: "#0d9488",
     soft: "rgba(13,148,136,.12)",
   },
-  audio: { label: i18n.t("timeline.elementTypes.audio"), color: "#12b76a", soft: "rgba(18,183,106,.12)" },
+  audio: {
+    label: i18n.t("timeline.elementTypes.audio"),
+    color: "#12b76a",
+    soft: "rgba(18,183,106,.12)",
+  },
 };

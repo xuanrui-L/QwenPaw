@@ -96,15 +96,20 @@ function operationSummary(
   const resolvedFieldLabel = fieldLabel(lastToken);
   const parts: string[] = [];
   if (locator.elementId)
-    parts.push(elementNames[locator.elementId] ?? `${i18n.t("fileReview.content")} ${locator.elementId}`);
-  else if (locator.assetId) parts.push(`${i18n.t("fileReview.asset")} ${locator.assetId}`);
+    parts.push(
+      elementNames[locator.elementId] ??
+        `${i18n.t("fileReview.content")} ${locator.elementId}`,
+    );
+  else if (locator.assetId)
+    parts.push(`${i18n.t("fileReview.asset")} ${locator.assetId}`);
   if (resolvedFieldLabel) parts.push(resolvedFieldLabel);
   return parts.length > 0 ? parts.join(" · ") : operationLocation(operation);
 }
 
 function previewText(value: unknown, limit = 26): string {
   if (value === null || value === undefined) return "—";
-  const text = typeof value === "string" ? value : JSON.stringify(value) ?? "—";
+  const text =
+    typeof value === "string" ? value : (JSON.stringify(value) ?? "—");
   const normalized = text.replace(/\s+/g, " ").trim();
   return normalized.length > limit
     ? `${normalized.slice(0, limit)}…`
@@ -153,13 +158,16 @@ function mediaLabel(locator: Record<string, string>): string {
   if (locator.artifactKind && artifactKindLabel(locator.artifactKind)) {
     return artifactKindLabel(locator.artifactKind);
   }
-  return locator.mediaType === "video" ? i18n.t("fileReview.video") : i18n.t("fileReview.image");
+  return locator.mediaType === "video"
+    ? i18n.t("fileReview.video")
+    : i18n.t("fileReview.image");
 }
 
 /** Compact title used by the decision tray's stacked stubs / indicator dots. */
 export function reviewTrayLabel(review: FileProjectReviewRecord): string {
   const locator = reviewMediaLocator(review);
-  if (locator) return `${mediaLabel(locator)}${i18n.t("fileReview.reviewLabel")}`;
+  if (locator)
+    return `${mediaLabel(locator)}${i18n.t("fileReview.reviewLabel")}`;
   const pending = review.operations.filter(
     (operation) => operation.decision === "PENDING",
   ).length;
@@ -245,8 +253,8 @@ export default function FileProjectReviewPanel({
         decision === "ACCEPT"
           ? t("fileReview.keptCount", { count: affectedUnits })
           : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
-          ? t("fileReview.undoneCount", { count: affectedUnits })
-          : t("fileReview.undoneCountSimple", { count: affectedUnits }),
+            ? t("fileReview.undoneCount", { count: affectedUnits })
+            : t("fileReview.undoneCountSimple", { count: affectedUnits }),
       );
       return true;
     } catch (error) {
@@ -289,7 +297,9 @@ export default function FileProjectReviewPanel({
             ) : (
               <FileDiff className="h-3.5 w-3.5 text-[var(--color-accent)]" />
             )}
-            {mediaLocator ? `${mediaLabel(mediaLocator)}${t("fileReview.reviewLabel")}` : t("fileReview.fileProjectReview")}
+            {mediaLocator
+              ? `${mediaLabel(mediaLocator)}${t("fileReview.reviewLabel")}`
+              : t("fileReview.fileProjectReview")}
             <span className="rounded-full bg-[var(--color-accent-soft)] px-1.5 py-0.5 text-[9px] text-[var(--color-accent)]">
               {pendingUnits} {t("fileReview.pendingReview")}
             </span>
@@ -328,7 +338,8 @@ export default function FileProjectReviewPanel({
           role="alert"
           className="mt-2 rounded-md bg-[var(--color-warning-soft)] px-2 py-1 text-[10px] text-[var(--color-warning)]"
         >
-          {t("fileReview.syncError")}{syncError}
+          {t("fileReview.syncError")}
+          {syncError}
         </p>
       )}
 

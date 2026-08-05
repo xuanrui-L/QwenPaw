@@ -51,7 +51,9 @@ const ProjectCard = memo(function ProjectCard({
   const { t } = useTranslation();
   var projectScenarioLabel = t("home.notSet");
   if (project.scenario !== undefined) {
-    const found = SCENARIO_OPTIONS.find((option) => option.key === project.scenario);
+    const found = SCENARIO_OPTIONS.find(
+      (option) => option.key === project.scenario,
+    );
     projectScenarioLabel = found ? t(found.labelKey) : project.scenario;
   }
   const canPreview = Boolean(project.finalVideoVersionId);
@@ -392,7 +394,11 @@ export default function HomePage() {
                 <button
                   onClick={handleSortOrderToggle}
                   className="cursor-pointer rounded-md border border-[#EAE9E7] bg-white p-1.5 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                  title={sortOrder === "asc" ? t("home.ascending") : t("home.descending")}
+                  title={
+                    sortOrder === "asc"
+                      ? t("home.ascending")
+                      : t("home.descending")
+                  }
                 >
                   {sortOrder === "asc" ? (
                     <ArrowUp className="h-4 w-4" />
@@ -475,7 +481,9 @@ export default function HomePage() {
         centered
         width={720}
         title={
-          previewProject ? `${previewProject.name} · ${t("common.preview")}` : t("common.preview")
+          previewProject
+            ? `${previewProject.name} · ${t("common.preview")}`
+            : t("common.preview")
         }
       >
         {previewProject?.finalVideoVersionId && (

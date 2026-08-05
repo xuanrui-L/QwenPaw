@@ -4,21 +4,12 @@
  * browser never invents a second representation of the persisted authority.
  */
 export type FileProjectChangeKind =
-  | "create"
-  | "update"
-  | "delete"
-  | "move"
-  | "reorder"
-  | "select_asset";
+  "create" | "update" | "delete" | "move" | "reorder" | "select_asset";
 
 export type FileProjectReviewStatus = "PENDING" | "RESOLVED" | "SUPERSEDED";
 
 export type FileProjectReviewOperationDecision =
-  | "PENDING"
-  | "ACCEPTED"
-  | "REJECTED"
-  | "REVISED"
-  | "SUPERSEDED_BY_USER_EDIT";
+  "PENDING" | "ACCEPTED" | "REJECTED" | "REVISED" | "SUPERSEDED_BY_USER_EDIT";
 
 export interface FileProjectReviewOperation {
   kind: FileProjectChangeKind;
@@ -61,8 +52,7 @@ export interface FileProjectReviewDecisionItem {
 }
 
 export type FileProjectReviewRejectionAction =
-  | "UNDO_ONLY"
-  | "UNDO_AND_REGENERATE";
+  "UNDO_ONLY" | "UNDO_AND_REGENERATE";
 
 export interface FileProjectReviewRejectionFeedback {
   action: FileProjectReviewRejectionAction;

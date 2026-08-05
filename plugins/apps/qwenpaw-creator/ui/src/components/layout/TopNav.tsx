@@ -73,7 +73,8 @@ export default function TopNav() {
             </span>
             <Tooltip title={masterScript} placement="right">
               <span className="block min-w-0 max-w-[180px] truncate text-[11px] font-normal leading-tight text-[var(--color-text-secondary)] md:max-w-[240px]">
-                {t("nav.originalScript")}{masterScriptPreview}
+                {t("nav.originalScript")}
+                {masterScriptPreview}
               </span>
             </Tooltip>
           </div>

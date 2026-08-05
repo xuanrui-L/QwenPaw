@@ -116,7 +116,8 @@ export default function KeyboardShortcutsPanel({
       </div>
       <div className="mt-4 pt-3 border-t border-[var(--color-border)] text-center">
         <span className="text-xs text-[var(--color-text-tertiary)]">
-          {t("keyboard.pressHint")} <KbdKey>?</KbdKey> {t("keyboard.openShortcuts")}
+          {t("keyboard.pressHint")} <KbdKey>?</KbdKey>{" "}
+          {t("keyboard.openShortcuts")}
         </span>
       </div>
     </Modal>

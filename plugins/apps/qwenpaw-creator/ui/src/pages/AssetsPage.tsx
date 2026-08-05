@@ -43,13 +43,7 @@ import { visualVariantLabel } from "@/lib/visualVariants";
 import { useTranslation } from "react-i18next";
 
 type FilterKey =
-  | "all"
-  | "source"
-  | "artifact"
-  | "visual"
-  | "image"
-  | "video"
-  | "audio";
+  "all" | "source" | "artifact" | "visual" | "image" | "video" | "audio";
 type AssetItem = {
   id: string;
   ref: string;
@@ -73,9 +67,7 @@ type AssetItem = {
   provenanceRefs: string[];
   metadata: Record<string, unknown>;
   raw:
-    | SourceAssetVersionDocument
-    | ArtifactVersionDocument
-    | VisualEntityDocument;
+    SourceAssetVersionDocument | ArtifactVersionDocument | VisualEntityDocument;
 };
 
 type AssetItemGroup = {
@@ -106,12 +98,12 @@ function fileMedia(
   const kind = type.startsWith("image/")
     ? "image"
     : type.startsWith("video/")
-    ? "video"
-    : type.startsWith("audio/")
-    ? "audio"
-    : type.startsWith("text/")
-    ? "text"
-    : "other";
+      ? "video"
+      : type.startsWith("audio/")
+        ? "audio"
+        : type.startsWith("text/")
+          ? "text"
+          : "other";
   return { kind, type };
 }
 
@@ -478,8 +470,8 @@ function kindLabel(item: AssetItem, t: (key: string) => string): string {
   return entity.kind === "character"
     ? t("assets.character")
     : entity.kind === "scene"
-    ? t("assets.scene")
-    : t("assets.prop");
+      ? t("assets.scene")
+      : t("assets.prop");
 }
 
 function mediaIcon(kind: string) {
@@ -534,11 +526,11 @@ function resolveProvenanceRef(
     // provenance therefore stays unresolved until it names visual-variant:.
     const versionId = entity
       ? entity.variants.order.length === 1
-        ? entity.variants.items[entity.variants.order[0]]
-            ?.selected_artifact_version_id ?? null
+        ? (entity.variants.items[entity.variants.order[0]]
+            ?.selected_artifact_version_id ?? null)
         : entity.variants.order.length === 0
-        ? entity.selected_artifact_version_id
-        : null
+          ? entity.selected_artifact_version_id
+          : null
       : null;
     const version = versionId
       ? project.assets.artifact_versions_by_id[versionId]
@@ -589,11 +581,10 @@ function visualEntityPromptTarget(
       entity.variants.items[requestedVariantId] &&
       requestedVariantId) ||
     (versionId &&
-      entity.variants.order.find(
-        (candidate) =>
-          entity.variants.items[
-            candidate
-          ]?.generated_artifact_version_ids.includes(versionId),
+      entity.variants.order.find((candidate) =>
+        entity.variants.items[
+          candidate
+        ]?.generated_artifact_version_ids.includes(versionId),
       )) ||
     entity.variants.order[0];
   const variant = variantId ? entity.variants.items[variantId] : null;
@@ -614,8 +605,8 @@ function generationPromptTarget(
     return visualEntityPromptTarget(
       entity,
       selected.variantId
-        ? entity.variants.items[selected.variantId]
-            ?.selected_artifact_version_id ?? null
+        ? (entity.variants.items[selected.variantId]
+            ?.selected_artifact_version_id ?? null)
         : entity.selected_artifact_version_id,
       selected.variantId,
     );
@@ -827,7 +818,9 @@ export default function AssetsPage() {
       message.success(t("assets.uploadSuccess"));
       await refreshAfterIngest();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : t("assets.uploadFailed"));
+      message.error(
+        error instanceof Error ? error.message : t("assets.uploadFailed"),
+      );
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -847,14 +840,18 @@ export default function AssetsPage() {
         postIngestAction: "ATTACH_SOURCE",
       });
       message.success(
-        inputKind === "url" ? t("assets.linkSubmitted") : t("assets.textSubmitted"),
+        inputKind === "url"
+          ? t("assets.linkSubmitted")
+          : t("assets.textSubmitted"),
       );
       setAddOpen(false);
       setInputName("");
       setInputValue("");
       await refreshAfterIngest();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : t("assets.addFailed"));
+      message.error(
+        error instanceof Error ? error.message : t("assets.addFailed"),
+      );
     } finally {
       setUploading(false);
     }
@@ -999,8 +996,8 @@ export default function AssetsPage() {
                               item.previewUrl
                                 ? "ready"
                                 : item.kind === "visual"
-                                ? "planned"
-                                : "unavailable"
+                                  ? "planned"
+                                  : "unavailable"
                             }
                             mediaClassName="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
                             placeholderClassName="flex flex-col items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]"
@@ -1018,15 +1015,15 @@ export default function AssetsPage() {
                                   item.variantState === "active"
                                     ? "bg-emerald-500 text-white"
                                     : item.variantState === "history"
-                                    ? "bg-black/60 text-white"
-                                    : "bg-amber-500 text-white"
+                                      ? "bg-black/60 text-white"
+                                      : "bg-amber-500 text-white"
                                 }`}
                               >
                                 {item.variantState === "active"
                                   ? t("assets.active")
                                   : item.variantState === "history"
-                                  ? t("assets.history")
-                                  : t("assets.unselected")}
+                                    ? t("assets.history")
+                                    : t("assets.unselected")}
                               </span>
                             )}
                             {item.stale && (
@@ -1066,9 +1063,7 @@ export default function AssetsPage() {
               <p className="text-sm font-medium text-[var(--color-text-secondary)]">
                 {t("assets.noAssets")}
               </p>
-              <p className="mt-1 text-xs">
-                {t("assets.noAssetsDesc")}
-              </p>
+              <p className="mt-1 text-xs">{t("assets.noAssetsDesc")}</p>
             </div>
           )}
         </section>
@@ -1098,8 +1093,8 @@ export default function AssetsPage() {
                       selected.previewUrl
                         ? "ready"
                         : selected.kind === "visual"
-                        ? "planned"
-                        : "unavailable"
+                          ? "planned"
+                          : "unavailable"
                     }
                     controls
                     mediaClassName="h-full w-full object-contain"
@@ -1129,7 +1124,10 @@ export default function AssetsPage() {
                 <dl className="space-y-2 text-xs">
                   {[
                     [t("assets.ref"), selected.ref],
-                    [t("assets.media"), selected.mediaType || selected.mediaKind],
+                    [
+                      t("assets.media"),
+                      selected.mediaType || selected.mediaKind,
+                    ],
                     [
                       t("common.duration"),
                       selected.durationSeconds == null
@@ -1257,7 +1255,9 @@ export default function AssetsPage() {
                           message.success(t("assets.promptSaved"));
                         } catch (error) {
                           message.error(
-                            t("assets.saveFailed", { detail: (error as Error).message }),
+                            t("assets.saveFailed", {
+                              detail: (error as Error).message,
+                            }),
                           );
                         }
                       }}
@@ -1292,7 +1292,11 @@ export default function AssetsPage() {
                         fetch(selected.previewUrl!)
                           .then((res) => {
                             if (!res.ok)
-                              throw new Error(t("assets.downloadFailed", { status: res.status }));
+                              throw new Error(
+                                t("assets.downloadFailed", {
+                                  status: res.status,
+                                }),
+                              );
                             return res.blob();
                           })
                           .then((blob) => {
@@ -1363,7 +1367,9 @@ export default function AssetsPage() {
             onChange={(event) => setInputValue(event.target.value)}
             autoSize={{ minRows: inputKind === "url" ? 2 : 6, maxRows: 10 }}
             placeholder={
-              inputKind === "url" ? t("assets.linkPlaceholder") : t("assets.textPlaceholder")
+              inputKind === "url"
+                ? t("assets.linkPlaceholder")
+                : t("assets.textPlaceholder")
             }
           />
         </div>

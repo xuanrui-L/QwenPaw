@@ -168,8 +168,8 @@ export default function InlineReviewDiff({ pointer }: { pointer: string }) {
         decision === "ACCEPT"
           ? t("inlineReview.kept")
           : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
-          ? t("inlineReview.undoneRedo")
-          : t("inlineReview.undone"),
+            ? t("inlineReview.undoneRedo")
+            : t("inlineReview.undone"),
       );
       return true;
     } catch (error) {

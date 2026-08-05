@@ -173,13 +173,21 @@ export function MockAgentChat() {
 export function MockAssetCards() {
   const { t } = useTranslation();
   const cards = [
-    { label: t("tourMocks.character"), name: t("tourMocks.mainCharacter"), tone: "bg-orange-100 text-orange-500" },
+    {
+      label: t("tourMocks.character"),
+      name: t("tourMocks.mainCharacter"),
+      tone: "bg-orange-100 text-orange-500",
+    },
     {
       label: t("tourMocks.scene"),
       name: t("tourMocks.sceneName"),
       tone: "bg-emerald-100 text-emerald-500",
     },
-    { label: t("tourMocks.artifact"), name: t("tourMocks.storyboardArtifact"), tone: "bg-sky-100 text-sky-500" },
+    {
+      label: t("tourMocks.artifact"),
+      name: t("tourMocks.storyboardArtifact"),
+      tone: "bg-sky-100 text-sky-500",
+    },
   ];
   return (
     <MockFrame>
@@ -294,9 +302,7 @@ export function LiveDockToggleDemo() {
           {open ? t("tourMocks.collapsePanel") : t("tourMocks.expandPanel")}
         </button>
         <span className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
-          {open
-            ? t("tourMocks.panelExpanded")
-            : t("tourMocks.panelCollapsed")}
+          {open ? t("tourMocks.panelExpanded") : t("tourMocks.panelCollapsed")}
         </span>
       </div>
     </MockFrame>

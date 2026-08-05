@@ -44,18 +44,20 @@ export const SCENARIO_OPTIONS: { key: CreatorScenario; labelKey: string }[] = [
   { key: "general", labelKey: "scenario.general" },
 ];
 
-export const SCENARIO_TERMS: Record<CreatorScenario, { descriptionKey: string }> =
-  {
-    general: {
-      descriptionKey: "scenario.exampleGeneral",
-    },
-    short_drama: {
-      descriptionKey: "scenario.exampleShortDrama",
-    },
-    video_edit: {
-      descriptionKey: "scenario.exampleEditing",
-    },
-  };
+export const SCENARIO_TERMS: Record<
+  CreatorScenario,
+  { descriptionKey: string }
+> = {
+  general: {
+    descriptionKey: "scenario.exampleGeneral",
+  },
+  short_drama: {
+    descriptionKey: "scenario.exampleShortDrama",
+  },
+  video_edit: {
+    descriptionKey: "scenario.exampleEditing",
+  },
+};
 
 export const CONTENT_TYPE_OPTIONS: { key: string; labelKey: string }[] = [
   { key: "pet_video", labelKey: "scenario.pet" },
@@ -163,8 +165,8 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
       scenario === "short_drama"
         ? ["vlm", "image", "video"]
         : scenario === "video_edit" || hasAttachments
-        ? ["vlm"]
-        : [];
+          ? ["vlm"]
+          : [];
     const missing: string[] = [];
     for (const type of required) {
       const item = config[type];

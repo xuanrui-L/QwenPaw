@@ -64,7 +64,7 @@ export default function PlanPage() {
   const selectedElementId = query.get("element");
   const selectedElement =
     selectedElementId && timeline
-      ? timeline.elements_by_id[selectedElementId] ?? null
+      ? (timeline.elements_by_id[selectedElementId] ?? null)
       : null;
   const elementDraft = useProjectDraft(
     selectedElement,
@@ -263,19 +263,19 @@ export default function PlanPage() {
   const activeComposeTask = useMemo(
     () =>
       timelineTargetRef
-        ? tasks.find(
+        ? (tasks.find(
             (task) =>
               task.kind === "compose" &&
               task.targetRef === timelineTargetRef &&
               (task.status === "QUEUED" || task.status === "RUNNING"),
-          ) ?? null
+          ) ?? null)
         : null,
     [tasks, timelineTargetRef],
   );
   const requestedComposeTask = useMemo(
     () =>
       requestedComposeTaskId
-        ? tasks.find((task) => task.id === requestedComposeTaskId) ?? null
+        ? (tasks.find((task) => task.id === requestedComposeTaskId) ?? null)
         : null,
     [requestedComposeTaskId, tasks],
   );
@@ -303,10 +303,13 @@ export default function PlanPage() {
     };
   }, [activeComposeTask]);
   const composeLabel = composeElementProgress
-    ? t("plan.composingLabel", { completed: composeElementProgress.completed, total: composeElementProgress.total })
+    ? t("plan.composingLabel", {
+        completed: composeElementProgress.completed,
+        total: composeElementProgress.total,
+      })
     : activeComposeTask
-    ? t("plan.composingShort")
-    : t("plan.preparingComposeShort");
+      ? t("plan.composingShort")
+      : t("plan.preparingComposeShort");
 
   const composeNow = useCallback(async () => {
     if (!timeline || isComposing) return;
@@ -344,7 +347,9 @@ export default function PlanPage() {
         setRequestedComposeTaskId(adopted.id);
       } else {
         setComposeFailed(true);
-        message.error(t("plan.composeFailed", { detail: (error as Error).message }));
+        message.error(
+          t("plan.composeFailed", { detail: (error as Error).message }),
+        );
       }
     } finally {
       setComposing(false);
@@ -423,8 +428,8 @@ export default function PlanPage() {
       typeof requestedComposeTask.error?.message === "string"
         ? requestedComposeTask.error.message
         : requestedComposeTask.status === "QUARANTINED"
-        ? t("plan.composeContentChanged")
-        : t("plan.composeNotCompleted");
+          ? t("plan.composeContentChanged")
+          : t("plan.composeNotCompleted");
     message.error(t("plan.composeFailed", { detail }));
   }, [id, pollOnce, requestedComposeTask]);
 
@@ -489,7 +494,9 @@ export default function PlanPage() {
       );
     } catch (error) {
       setExportProgress(null);
-      message.error(t("plan.exportFailed", { detail: (error as Error).message }));
+      message.error(
+        t("plan.exportFailed", { detail: (error as Error).message }),
+      );
     }
   }, [exporting, id]);
 
@@ -542,7 +549,9 @@ export default function PlanPage() {
         message.success(t("plan.applySuccess"));
       }
     } catch (error) {
-      message.error(t("plan.applyFailed", { detail: (error as Error).message }));
+      message.error(
+        t("plan.applyFailed", { detail: (error as Error).message }),
+      );
     }
   };
   const closeElementDetail = () => leaveDraft(() => navigate(base));
@@ -594,7 +603,9 @@ export default function PlanPage() {
             {project.settings.aspect_ratio}
           </span>
           <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)]">
-            {t("plan.items", { count: Object.keys(timeline.elements_by_id).length })}
+            {t("plan.items", {
+              count: Object.keys(timeline.elements_by_id).length,
+            })}
           </span>
           {composeFailed && !isComposing && (
             <button
@@ -633,7 +644,9 @@ export default function PlanPage() {
                 },
                 {
                   key: "export",
-                  label: exporting ? t("plan.exporting") : t("plan.exportProject"),
+                  label: exporting
+                    ? t("plan.exporting")
+                    : t("plan.exportProject"),
                   icon: <FileOutput className="h-3.5 w-3.5" />,
                   disabled: exporting,
                   onClick: () => void exportProject(),
@@ -648,14 +661,19 @@ export default function PlanPage() {
                 freshRender
                   ? t("plan.downloadFinalTitle")
                   : isComposing
-                  ? composeElementProgress
-                    ? t("plan.composing", { completed: composeElementProgress.completed, total: composeElementProgress.total })
-                    : t("plan.preparingCompose")
-                  : readiness.total === 0
-                  ? t("plan.noComposableContent")
-                  : readiness.notReady > 0
-                  ? t("plan.waitingForContent", { count: readiness.notReady })
-                  : t("plan.waitingForCompose")
+                    ? composeElementProgress
+                      ? t("plan.composing", {
+                          completed: composeElementProgress.completed,
+                          total: composeElementProgress.total,
+                        })
+                      : t("plan.preparingCompose")
+                    : readiness.total === 0
+                      ? t("plan.noComposableContent")
+                      : readiness.notReady > 0
+                        ? t("plan.waitingForContent", {
+                            count: readiness.notReady,
+                          })
+                        : t("plan.waitingForCompose")
               }
               className="relative inline-flex cursor-pointer items-center gap-1.5 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
             >

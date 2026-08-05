@@ -10,7 +10,10 @@ const resources = {
 
 i18n.use(initReactI18next).init({
   resources,
-  lng: (typeof localStorage !== "undefined" ? localStorage.getItem("language") : null) || "en",
+  lng:
+    (typeof localStorage !== "undefined"
+      ? localStorage.getItem("language")
+      : null) || "en",
   fallbackLng: "en",
   supportedLngs: Object.keys(resources),
   interpolation: {

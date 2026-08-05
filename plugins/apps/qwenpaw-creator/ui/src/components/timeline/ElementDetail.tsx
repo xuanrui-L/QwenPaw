@@ -115,13 +115,20 @@ function getTransitionEasingOptions(t: (key: string) => string) {
   ];
 }
 
-function taskStatus(element: TimelineElementDocument, tasks: TaskView[], t: (key: string) => string) {
+function taskStatus(
+  element: TimelineElementDocument,
+  tasks: TaskView[],
+  t: (key: string) => string,
+) {
   const task = tasks.find(
     (item) => item.targetRef === `element:${element.element_id}`,
   );
   if (task?.status === "RUNNING" || task?.status === "QUEUED")
     return {
-      label: task.status === "RUNNING" ? t("elementDetail.generating") : t("elementDetail.waiting"),
+      label:
+        task.status === "RUNNING"
+          ? t("elementDetail.generating")
+          : t("elementDetail.waiting"),
       tone: "text-[var(--color-warning)] bg-[var(--color-warning-soft)]",
     };
   if (task?.status === "FAILED" || task?.status === "QUARANTINED")
@@ -248,7 +255,9 @@ export default function ElementDetail({
             onClick={onApply}
             className="!h-[22px] !px-2 !font-[inherit] !text-[11px] !font-semibold !leading-[20px]"
           >
-            {dirtyCount > 0 ? t("elementDetail.applyChangesCount", { count: dirtyCount }) : t("elementDetail.applyChanges")}
+            {dirtyCount > 0
+              ? t("elementDetail.applyChangesCount", { count: dirtyCount })
+              : t("elementDetail.applyChanges")}
           </Button>
           {!element.enabled && (
             <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">
@@ -280,9 +289,7 @@ export default function ElementDetail({
             message={t("elementDetail.conflictTitle")}
             description={
               <div className="space-y-2">
-                <p>
-                  {t("elementDetail.conflictDesc")}
-                </p>
+                <p>{t("elementDetail.conflictDesc")}</p>
                 <Button size="small" onClick={onAcceptConflicts}>
                   {t("elementDetail.useMyChanges")}
                 </Button>
@@ -434,8 +441,8 @@ export default function ElementDetail({
                         key === "width" || key === "height"
                           ? 0.1
                           : key === "opacity"
-                          ? 0
-                          : undefined
+                            ? 0
+                            : undefined
                       }
                       max={key === "opacity" ? 100 : undefined}
                       value={
@@ -586,7 +593,7 @@ export default function ElementDetail({
                     title={decodeURIComponent(
                       project.assets.source_versions_by_id[
                         element.render_source.version_id
-                       ]?.name || t("elementDetail.currentSource"),
+                      ]?.name || t("elementDetail.currentSource"),
                     )}
                   >
                     {decodeURIComponent(
@@ -609,7 +616,8 @@ export default function ElementDetail({
                         timeline.ticks_per_second,
                       )}s`}
                   {" · "}
-                  {element.render_source.playback_rate} {t("elementDetail.speed")}
+                  {element.render_source.playback_rate}{" "}
+                  {t("elementDetail.speed")}
                 </div>
               )}
             </div>
@@ -728,7 +736,8 @@ export default function ElementDetail({
                 creation.source_asset_version_id
               ]?.name || t("elementDetail.currentAudio")}
               <br />
-              {t("elementDetail.volume")} {creation.gain_db} dB · {t("elementDetail.pan")} {creation.pan}
+              {t("elementDetail.volume")} {creation.gain_db} dB ·{" "}
+              {t("elementDetail.pan")} {creation.pan}
             </div>
           )}
         </section>
@@ -761,7 +770,9 @@ export default function ElementDetail({
                       <div className="flex items-center justify-between gap-2 bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px]">
                         <b>{outputLabel(output.name)}</b>
                         <span className="text-[var(--color-text-tertiary)]">
-                          {output.selected ? t("elementDetail.generated") : t("elementDetail.notGenerated")}
+                          {output.selected
+                            ? t("elementDetail.generated")
+                            : t("elementDetail.notGenerated")}
                         </span>
                       </div>
                       {url && mediaType.startsWith("image/") && (

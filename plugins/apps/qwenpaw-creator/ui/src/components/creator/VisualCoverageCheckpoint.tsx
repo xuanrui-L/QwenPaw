@@ -41,7 +41,10 @@ export default function VisualCoverageCheckpoint({
         ) : (
           <CircleCheck className="h-4 w-4 text-emerald-600" />
         )}
-        {t("visualCoverage.title", { covered: report.covered, total: report.total })}
+        {t("visualCoverage.title", {
+          covered: report.covered,
+          total: report.total,
+        })}
         <span className="font-normal text-[var(--color-text-secondary)]">
           {report.issueCount
             ? t("visualCoverage.issuesToCheck", { count: report.issueCount })
@@ -61,11 +64,13 @@ export default function VisualCoverageCheckpoint({
                 </div>
                 <div className="text-[var(--color-text-tertiary)]">
                   {t(KIND_LABEL_KEYS[item.entity.kind])} ·{" "}
-                  {item.referencedElementIds.length} {t("visualCoverage.elementRefs")}
+                  {item.referencedElementIds.length}{" "}
+                  {t("visualCoverage.elementRefs")}
                 </div>
                 {item.entity.required_variant_ids.length > 0 && (
                   <div className="text-[var(--color-text-tertiary)]">
-                    {t("visualCoverage.requiredVariants")} {item.definedRequiredCount}/
+                    {t("visualCoverage.requiredVariants")}{" "}
+                    {item.definedRequiredCount}/
                     {item.entity.required_variant_ids.length}
                   </div>
                 )}
@@ -82,12 +87,14 @@ export default function VisualCoverageCheckpoint({
             </div>
             {item.unassignedElementIds.length > 0 && (
               <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-700">
-                {item.unassignedElementIds.length} {t("visualCoverage.elementsUnspecified")}
+                {item.unassignedElementIds.length}{" "}
+                {t("visualCoverage.elementsUnspecified")}
               </div>
             )}
             {item.missingVariantIds.length > 0 && (
               <div className="mt-2 rounded bg-amber-50 px-2 py-1 text-amber-700">
-                {t("visualCoverage.missing")}{item.missingVariantIds.join("、")}
+                {t("visualCoverage.missing")}
+                {item.missingVariantIds.join("、")}
               </div>
             )}
             {item.variants.length > 0 && (
@@ -99,7 +106,8 @@ export default function VisualCoverageCheckpoint({
                   >
                     <span className="min-w-0 truncate">
                       {visualVariantLabel(variant.variant)} ·{" "}
-                      {variant.referencedElementIds.length} {t("visualCoverage.elements")}
+                      {variant.referencedElementIds.length}{" "}
+                      {t("visualCoverage.elements")}
                     </span>
                     <span
                       className={

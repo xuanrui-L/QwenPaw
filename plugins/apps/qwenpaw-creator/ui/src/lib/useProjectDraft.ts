@@ -133,7 +133,11 @@ function applyChange(target: unknown, change: DraftChange): void {
   for (const token of change.tokens.slice(0, -1)) {
     const child = parent[token];
     if (child === null || typeof child !== "object" || Array.isArray(child)) {
-      throw new Error(i18n.t("lib.draftPathNotExist", { path: relativePointer(change.tokens) }));
+      throw new Error(
+        i18n.t("lib.draftPathNotExist", {
+          path: relativePointer(change.tokens),
+        }),
+      );
     }
     parent = child as DraftRecord;
   }
@@ -252,8 +256,8 @@ export function useProjectDraft<T>(
         ...(change.op === "remove"
           ? { before: change.before }
           : change.op === "add"
-          ? { value: change.value, missingBefore: true }
-          : { before: change.before, value: change.value }),
+            ? { value: change.value, missingBefore: true }
+            : { before: change.before, value: change.value }),
       })),
     [changes, rootKey],
   );

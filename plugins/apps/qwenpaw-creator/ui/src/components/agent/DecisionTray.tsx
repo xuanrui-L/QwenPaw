@@ -221,7 +221,11 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
       <button
         type="button"
         aria-expanded={!collapsed}
-        aria-label={collapsed ? t("decisionTray.expandTray") : t("decisionTray.collapseTray")}
+        aria-label={
+          collapsed
+            ? t("decisionTray.expandTray")
+            : t("decisionTray.collapseTray")
+        }
         onClick={() => setCollapsed(!collapsed)}
         className="flex w-full items-center gap-2 px-3.5 py-1.5 text-left"
       >
@@ -251,7 +255,9 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
         >
           {urgent
             ? `${t("decisionTray.productionConfirmBlock")} ${pendingAuths.length} ${t("decisionTray.itemsBlocking")}${
-                reviewUnitCount > 0 ? ` · ${t("decisionTray.review")} ${reviewUnitCount}` : ""
+                reviewUnitCount > 0
+                  ? ` · ${t("decisionTray.review")} ${reviewUnitCount}`
+                  : ""
               }`
             : `${t("decisionTray.review")} ${reviewUnitCount}`}
         </span>
@@ -269,7 +275,8 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
               role="alert"
               className="mb-2 rounded-md bg-[var(--color-warning-soft)] px-2 py-1 text-[10px] text-[var(--color-warning)]"
             >
-              {t("decisionTray.loadFailed")}{authError}
+              {t("decisionTray.loadFailed")}
+              {authError}
             </p>
           )}
           {items.length > 1 && (
@@ -277,8 +284,14 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
               {(
                 [
                   ["all", `${t("decisionTray.all")} ${items.length}`],
-                  ["auth", `${t("decisionTray.productionConfirmTab")} ${pendingAuths.length}`],
-                  ["review", `${t("decisionTray.reviewTab")} ${pendingReviews.length}`],
+                  [
+                    "auth",
+                    `${t("decisionTray.productionConfirmTab")} ${pendingAuths.length}`,
+                  ],
+                  [
+                    "review",
+                    `${t("decisionTray.reviewTab")} ${pendingReviews.length}`,
+                  ],
                 ] as const
               )
                 .filter(
@@ -310,7 +323,11 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
                 type="button"
                 onClick={() => setListMode((mode) => !mode)}
                 className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)]"
-                title={listMode ? t("decisionTray.switchToStack") : t("decisionTray.switchToList")}
+                title={
+                  listMode
+                    ? t("decisionTray.switchToStack")
+                    : t("decisionTray.switchToList")
+                }
               >
                 {listMode ? (
                   <Layers className="h-3 w-3" />
@@ -369,7 +386,10 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
                       <button
                         key={item.key}
                         type="button"
-                        aria-label={t("decisionTray.decisionIndex", { index: index + 1, label: item.label })}
+                        aria-label={t("decisionTray.decisionIndex", {
+                          index: index + 1,
+                          label: item.label,
+                        })}
                         onClick={() => setFocusKey(item.key)}
                         className={`h-1.5 rounded-full transition-all ${
                           index === focusIndex

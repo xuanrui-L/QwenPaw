@@ -750,8 +750,8 @@ export default function TimelineTracks({
     const blockBackground = isTransition
       ? meta.soft
       : striped
-      ? `repeating-linear-gradient(135deg, ${meta.color}17 0 6px, transparent 6px 12px), ${meta.soft}`
-      : `linear-gradient(135deg, ${meta.color}1f, transparent 44%), ${meta.soft}`;
+        ? `repeating-linear-gradient(135deg, ${meta.color}17 0 6px, transparent 6px 12px), ${meta.soft}`
+        : `linear-gradient(135deg, ${meta.color}1f, transparent 44%), ${meta.soft}`;
     return (
       <button
         key={element.element_id}
@@ -783,8 +783,8 @@ export default function TimelineTracks({
             trim === "start"
               ? "trim-start"
               : trim === "end"
-              ? "trim-end"
-              : "move",
+                ? "trim-end"
+                : "move",
           );
         }}
         onPointerMove={moveBlockDrag}
@@ -819,8 +819,8 @@ export default function TimelineTracks({
           borderColor: selected
             ? undefined
             : playbackState === "failed"
-            ? "var(--color-danger)"
-            : `${meta.color}85`,
+              ? "var(--color-danger)"
+              : `${meta.color}85`,
           background: blockBackground,
         }}
       >
@@ -1090,9 +1090,9 @@ export default function TimelineTracks({
                                   {track.lanes.length > 1
                                     ? laneIndex + 1
                                     : track.type === "clip" ||
-                                      track.type === "audio"
-                                    ? 1
-                                    : ""}
+                                        track.type === "audio"
+                                      ? 1
+                                      : ""}
                                 </b>
                               </div>
                               <div className="relative min-w-0 flex-1">
