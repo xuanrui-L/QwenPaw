@@ -138,6 +138,66 @@ def test_protected_pointers_are_rejected():
         )
 
 
+def test_dotted_paths_are_a_lossless_alias():
+    """Field trip 2026-08-05: the model wrote collection='visual.entities'
+    (jq muscle memory) and burned the whole run on a formality. Dots with
+    no slash convert to a pointer without losing information, so they must
+    just work — for pointer ops and for upsert collections alike."""
+    document = Project.new(project_id="p", name="n").model_dump(mode="json")
+
+    apply_patch_ops(
+        document,
+        [
+            {"op": "replace", "path": "description", "value": "点分也行"},
+            {
+                "op": "upsert_entity",
+                "collection": "visual.entities",
+                "id": "char:hero",
+                "value": _entity("char:hero"),
+            },
+        ],
+    )
+    assert document["description"] == "点分也行"
+    assert document["visual"]["entities"]["order"] == ["char:hero"]
+
+    # Dotted aliases still cannot sidestep protected pointers.
+    with pytest.raises(PatchOpError, match="保护字段"):
+        apply_patch_ops(
+            document,
+            [{"op": "replace", "path": "generation", "value": 99}],
+        )
+
+    # Mixed shapes stay ambiguous and are refused with the field name.
+    with pytest.raises(PatchOpError, match="RFC 6901"):
+        apply_patch_ops(
+            document,
+            [
+                {
+                    "op": "replace",
+                    "path": "visual/entities.items",
+                    "value": {},
+                },
+            ],
+        )
+
+
+def test_upsert_errors_name_the_collection_field():
+    document = Project.new(project_id="p", name="n").model_dump(mode="json")
+
+    with pytest.raises(PatchOpError, match="collection"):
+        apply_patch_ops(
+            document,
+            [
+                {
+                    "op": "upsert_entity",
+                    "collection": "visual/entities.items",
+                    "id": "char:hero",
+                    "value": _entity("char:hero"),
+                },
+            ],
+        )
+
+
 def test_invoke_commits_flat_ops_end_to_end(tmp_path):
     tools = _tools(tmp_path)
 

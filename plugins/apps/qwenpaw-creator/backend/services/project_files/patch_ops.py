@@ -65,21 +65,44 @@ def apply_patch_ops(
             _apply_pointer_op(document, index, kind, op)
 
 
+def _normalize_pointer(index: int, pointer: str, *, label: str) -> str:
+    """Accept dotted paths as a lossless alias for JSON Pointers.
+
+    Models habitually write ``visual.entities`` (jq/JS muscle memory).
+    When the value has no slash at all, converting dots to ``/`` is an
+    unambiguous, information-preserving rewrite — refusing it only costs a
+    retry turn. Anything already pointer-shaped passes through untouched.
+    """
+
+    if not pointer:
+        raise PatchOpError(index, f"{label} 不能为空")
+    if pointer.startswith("/"):
+        return pointer
+    if "/" not in pointer:
+        return "/" + pointer.replace(".", "/")
+    raise PatchOpError(
+        index,
+        f"{label} 必须是 RFC 6901 JSON Pointer（如 /visual/entities），"
+        f"收到：{pointer!r}",
+    )
+
+
 def _resolve_parent(
     document: dict[str, Any],
     index: int,
     pointer: str,
+    *,
+    label: str = "path",
 ) -> tuple[Any, str]:
-    if not pointer.startswith("/"):
-        raise PatchOpError(index, f"path 必须以 / 开头：{pointer!r}")
+    pointer = _normalize_pointer(index, pointer, label=label)
     if is_protected_pointer(pointer):
         raise PatchOpError(
             index,
-            f"path {pointer!r} 是 Runtime 保护字段，禁止修改",
+            f"{label} {pointer!r} 是 Runtime 保护字段，禁止修改",
         )
     tokens = split_pointer(pointer)
     if not tokens:
-        raise PatchOpError(index, "path 不能指向 Project 根")
+        raise PatchOpError(index, f"{label} 不能指向 Project 根")
     node: Any = document
     for depth, token in enumerate(tokens[:-1]):
         if isinstance(node, dict):
@@ -198,7 +221,12 @@ def _apply_upsert_entity(
         raise PatchOpError(index, "upsert_entity 需要 id 字段")
     if "value" not in op or not isinstance(op["value"], Mapping):
         raise PatchOpError(index, "upsert_entity 的 value 必须是 object")
-    parent, leaf = _resolve_parent(document, index, collection_pointer)
+    parent, leaf = _resolve_parent(
+        document,
+        index,
+        collection_pointer,
+        label="collection",
+    )
     if isinstance(parent, dict) and leaf in parent:
         collection = parent[leaf]
     else:
