@@ -1333,7 +1333,14 @@ def render_motion_overlay(
     if not period_mode and frame_count > _MAX_FRAMES_PER_OVERLAY:
         frame_count = _MAX_FRAMES_PER_OVERLAY
         effective_fps = max(_MIN_EFFECTIVE_FPS, frame_count / duration)
-    if viewport_inset > 0:
+    # The viewport-safety override exists for legacy html_css templates
+    # whose free-form styling predates the truth gates: its wildcard
+    # [class*=text] !important font rules would stomp the precise
+    # two-axis clamps of html_js blueprint documents (posters render
+    # without it, so the final cut would silently diverge from every
+    # preview). Seek-driven documents are already guarded by the
+    # design-time and render-time probe gates and skip the injection.
+    if viewport_inset > 0 and doc_format != "html_js":
         inset_percent = min(12.0, max(0.0, viewport_inset * 100.0))
         safety_css = (
             "<style data-qwenpaw-viewport-safety>"

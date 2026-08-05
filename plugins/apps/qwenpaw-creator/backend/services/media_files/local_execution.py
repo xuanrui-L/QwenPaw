@@ -1988,7 +1988,10 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # v3: audio is filter-concatenated from decoded segments — the
             # stream-copied joints produced oversized AAC packets browsers
             # refuse to decode, freezing every seek past the first joint.
-            "rendererVersion": 3,
+            # v4: html_js overlays no longer receive the legacy
+            # viewport-safety CSS injection whose wildcard font overrides
+            # stomped the blueprint clamps in the composite only.
+            "rendererVersion": 4,
             "targetRef": resolved.target_ref,
             "inputs": [
                 {
