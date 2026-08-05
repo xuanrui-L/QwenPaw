@@ -50,7 +50,7 @@ Ported from `src/capabilities/video-memory/` into
 
 | Vendored file | Upstream origin | Modifications |
 |---|---|---|
-| `schema.py` | `skill/script/build_memory/schema.py` | dropped the legacy `hierarchical_graph_final.json` loader; comments trimmed |
+| `schema.py` | `skill/script/build_memory/schema.py` | dropped the legacy `hierarchical_graph_final.json` loader; comments trimmed; `load` split into `from_payload` + file IO so merged in-memory graphs reuse the same parser |
 | `prompts.py` | `skill/script/build_memory/prompts.py` | verbatim prompt constants |
 | `time_utils.py` | `skill/script/build_memory/time_utils.py` | verbatim |
 | `json_utils.py` | `skill/script/build_memory/llm_client.py` (`extract_json` only) | extracted the JSON-repair parser; the HTTP client itself is NOT vendored (rewritten as Creator-native clients) |
@@ -59,8 +59,9 @@ Ported from `src/capabilities/video-memory/` into
 | `aggregation.py` | `skill/script/build_memory/build_graph.py` (Phase 3) + `pipeline_worker.py` orchestration ideas | orchestration rewritten as `async` around an injected LLM callable; window/parse/fallback logic kept |
 | `embeddings.py` | `skill/script/build_memory/embeddings.py` | DashScope HTTP client removed (rewritten as `backend/models/embedding_model.py`); BM25 index, hybrid RRF search and `.npz` persistence kept; search accepts a precomputed query embedding; tokenizer splits CJK runs into character bigrams for exact short-phrase BM25 matches; zero-score BM25 candidates no longer earn a sparse RRF rank |
 | `toolkit.py` | `qwen_mm_plugins_video_memory/toolkit.py` + query logic of `loader.py` | EgoLife time system and cutoff support removed; methods return Python objects instead of JSON strings; embedding lookups take a precomputed query vector |
+| `merge.py` | `skill/script/build_memory/merge_memories.py` | CLI entry point, `*.memory` directory scanning and embeddings-file IO removed (the Creator source-memory service owns artifact discovery, caching and index construction); ID prefixing, mechanical root synthesis and embedding-node ID rewriting kept |
 
 Not vendored: `llm_client.py`, `env_config.py` (env-driven configuration is
-replaced by the Creator config tree), `merge_memories.py` (not in scope), the
-MCP server wrappers under `qwen_mm_plugins_video_memory/tools/` (their query
-logic is reachable through the vendored `toolkit.py`).
+replaced by the Creator config tree), the MCP server wrappers under
+`qwen_mm_plugins_video_memory/tools/` (their query logic is reachable through
+the vendored `toolkit.py`).

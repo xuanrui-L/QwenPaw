@@ -1059,3 +1059,642 @@ def test_review_projection_rejects_tampered_windows_and_new_entries(
     assert len(kept.semantic_entries) == 1
     assert kept.semantic_entries[0].start_ms == 60000
     assert kept.semantic_entries[0].end_ms == 120000
+
+
+# ── retrieval methodology guidance & enumerate tuning ───────────────────────
+
+
+def test_memory_guidance_carries_query_construction_protocol() -> None:
+    guidance = source_memory._MEMORY_GUIDANCE_AVAILABLE
+    # Upstream SKILL.md retrieval-quality rules must reach the agent.
+    assert "陈述句" in guidance
+    assert "minCosine" in guidance
+    assert "scope=project" in guidance
+    assert "enumerate" in guidance
+    assert "top-k" in guidance
+
+
+def test_query_memory_passes_enumerate_tuning(tmp_path, monkeypatch) -> None:
+    service = _query_service(tmp_path, monkeypatch)
+    captured: dict = {}
+    original = source_memory.MemoryToolkit.enumerate_events
+
+    def spy(self, query, min_cosine=0.5, max_results=120, **kwargs):
+        captured["min_cosine"] = min_cosine
+        captured["max_results"] = max_results
+        return original(
+            self,
+            query,
+            min_cosine=min_cosine,
+            max_results=max_results,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(source_memory.MemoryToolkit, "enumerate_events", spy)
+    _run_query(
+        service,
+        query_type="enumerate",
+        query="teamfight",
+        min_cosine=0.2,
+        max_results=7,
+    )
+    assert captured == {"min_cosine": 0.2, "max_results": 7}
+    # Out-of-range values clamp instead of erroring.
+    _run_query(
+        service,
+        query_type="enumerate",
+        query="teamfight",
+        min_cosine=5.0,
+        max_results=9999,
+    )
+    assert captured == {"min_cosine": 1.0, "max_results": 300}
+
+
+# ── chunk planning & stage checkpoints ──────────────────────────────────────
+
+
+def test_chunk_plan_splits_and_folds_short_tail() -> None:
+    assert source_memory._chunk_plan(1800.0) == [(0.0, 1800.0)]
+    assert source_memory._chunk_plan(7300.0) == [
+        (0.0, 3600.0),
+        (3600.0, 7200.0),
+        (7200.0, 7300.0),
+    ]
+    # A tail shorter than MIN_SCENE_SEC folds into the previous chunk.
+    assert source_memory._chunk_plan(7210.0) == [
+        (0.0, 3600.0),
+        (3600.0, 7210.0),
+    ]
+
+
+def test_checkpoint_roundtrip_is_checksum_gated(tmp_path) -> None:
+    path = tmp_path / "ckpt.json"
+    source_memory._write_checkpoint(path, "checksum-1", {"a": 1})
+    assert source_memory._load_checkpoint(path, "checksum-1") == {"a": 1}
+    # A different source invalidates the checkpoint silently.
+    assert source_memory._load_checkpoint(path, "checksum-2") is None
+    path.write_text("not json", encoding="utf-8")
+    assert source_memory._load_checkpoint(path, "checksum-1") is None
+
+
+def test_has_build_checkpoint_matches_segments_or_subgraphs(
+    tmp_path,
+) -> None:
+    project_root = tmp_path / "projects" / "project-1"
+    assert not source_memory.has_build_checkpoint(
+        project_root,
+        "intel-1",
+        "checksum-1",
+    )
+    directory = source_memory.build_dir(project_root, "intel-1")
+    source_memory._write_checkpoint(
+        directory
+        / source_memory.SUBGRAPH_CHECKPOINT_DIRNAME
+        / ("macro_0000.json"),
+        "checksum-1",
+        {"micro_events": []},
+    )
+    assert source_memory.has_build_checkpoint(
+        project_root,
+        "intel-1",
+        "checksum-1",
+    )
+    # Stale checksum means a different source: no resume.
+    assert not source_memory.has_build_checkpoint(
+        project_root,
+        "intel-1",
+        "checksum-2",
+    )
+
+
+def test_extract_subgraph_resumes_from_checkpoint(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from vendor.mm_plugins.video_memory.schema import MacroEvent
+
+    service = _service(tmp_path)
+    ckpt_dir = tmp_path / "subgraphs"
+    payload = {
+        "micro_events": [
+            {
+                "event_id": "ev_1",
+                "event_type": "action",
+                "time_range": [1.0, 2.0],
+                "subject": "cat",
+                "object": "",
+                "action": "jumps",
+                "description": "cat jumps",
+            },
+        ],
+        "entities": [],
+        "on_screen_texts": [],
+        "edges": [],
+    }
+    source_memory._write_checkpoint(
+        ckpt_dir / "macro_0000.json",
+        "checksum-1",
+        payload,
+    )
+
+    def must_not_clip(*_args, **_kwargs):
+        raise AssertionError("checkpointed macro must not re-clip")
+
+    monkeypatch.setattr(
+        source_memory,
+        "_clip_segment_for_transport_sync",
+        must_not_clip,
+    )
+    macro = MacroEvent(
+        macro_id="macro_0000",
+        label="scene",
+        time_range=[10.0, 40.0],
+    )
+    asyncio.run(
+        service._extract_subgraph(
+            macro,
+            tmp_path / "missing.mp4",
+            tmp_path,
+            asyncio.Semaphore(1),
+            ckpt_dir,
+            "checksum-1",
+        ),
+    )
+    assert macro.subgraph is not None
+    # Relative checkpoint times shift onto the macro window on resume.
+    assert macro.subgraph.micro_events[0].time_range == [11.0, 12.0]
+
+
+def test_extract_subgraph_persists_checkpoint_before_apply(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from vendor.mm_plugins.video_memory.schema import MacroEvent
+
+    service = _service(tmp_path)
+    ckpt_dir = tmp_path / "subgraphs"
+
+    def fake_clip(_local, out_path, _start, _end):
+        out_path.write_bytes(b"clip")
+        return out_path
+
+    async def fake_chat(_content, **_kwargs):
+        return json.dumps(
+            {
+                "micro_events": [
+                    {
+                        "event_id": "ev_1",
+                        "event_type": "action",
+                        "time_range": [1.0, 2.0],
+                        "subject": "cat",
+                        "object": "",
+                        "action": "jumps",
+                        "description": "cat jumps",
+                    },
+                ],
+                "entities": [],
+                "on_screen_texts": [],
+                "edges": [],
+            },
+        )
+
+    monkeypatch.setattr(
+        source_memory,
+        "_clip_segment_for_transport_sync",
+        fake_clip,
+    )
+    monkeypatch.setattr(source_memory.vlm_model, "chat_completion", fake_chat)
+    macro = MacroEvent(
+        macro_id="macro_0000",
+        label="scene",
+        time_range=[10.0, 40.0],
+    )
+    asyncio.run(
+        service._extract_subgraph(
+            macro,
+            tmp_path / "video.mp4",
+            tmp_path,
+            asyncio.Semaphore(1),
+            ckpt_dir,
+            "checksum-1",
+        ),
+    )
+    assert macro.subgraph.micro_events[0].time_range == [11.0, 12.0]
+    # Checkpoint keeps the raw RELATIVE payload (written pre-apply).
+    stored = source_memory._load_checkpoint(
+        ckpt_dir / "macro_0000.json",
+        "checksum-1",
+    )
+    assert stored["micro_events"][0]["time_range"] == [1.0, 2.0]
+
+
+def test_recover_requeues_when_checkpoints_exist(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # Interrupted mid-P2 with durable per-macro checkpoints: the resumed
+    # attempt only spends on the remaining macros, so it re-queues.
+    service = _service(tmp_path)
+    project_root = tmp_path / "projects" / "project-1"
+    directory = source_memory.build_dir(project_root, "intel-1")
+    source_memory._write_checkpoint(
+        directory
+        / source_memory.SUBGRAPH_CHECKPOINT_DIRNAME
+        / ("macro_0000.json"),
+        "checksum-1",
+        {"micro_events": []},
+    )
+    task = _running_task(tmp_path)
+    executions = _RecordingExecutions(task)
+    service.executions = executions
+    monkeypatch.setattr(
+        service.services.projects,
+        "list",
+        lambda: [SimpleNamespace(project_id="project-1")],
+        raising=False,
+    )
+    spawned: list = []
+    monkeypatch.setattr(service, "_spawn", spawned.append)
+
+    service.recover_interrupted()
+
+    assert executions.transitions[-1]["status"].name == "QUEUED"
+    assert len(spawned) == 1
+
+
+# ── transport-aware clip encoding ────────────────────────────────────────────
+
+
+def test_clip_transport_prefers_hq_on_dashscope(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "uses_dashscope_transport",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        source_memory,
+        "_clip_segment_hq_sync",
+        lambda *a: calls.append("hq") or a[1],
+    )
+    monkeypatch.setattr(
+        source_memory,
+        "_clip_segment_within_budget_sync",
+        lambda *a: calls.append("ladder") or a[1],
+    )
+    source_memory._clip_segment_for_transport_sync(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        0.0,
+        10.0,
+    )
+    assert calls == ["hq"]
+
+
+def test_clip_transport_falls_back_to_ladder(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "uses_dashscope_transport",
+        lambda: True,
+    )
+
+    def failing_hq(*_args):
+        calls.append("hq")
+        raise RuntimeError("encode failed")
+
+    monkeypatch.setattr(source_memory, "_clip_segment_hq_sync", failing_hq)
+    monkeypatch.setattr(
+        source_memory,
+        "_clip_segment_within_budget_sync",
+        lambda *a: calls.append("ladder") or a[1],
+    )
+    source_memory._clip_segment_for_transport_sync(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        0.0,
+        10.0,
+    )
+    assert calls == ["hq", "ladder"]
+
+
+def test_clip_transport_uses_ladder_off_dashscope(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        source_memory.vlm_model,
+        "uses_dashscope_transport",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        source_memory,
+        "_clip_segment_hq_sync",
+        lambda *a: calls.append("hq") or a[1],
+    )
+    monkeypatch.setattr(
+        source_memory,
+        "_clip_segment_within_budget_sync",
+        lambda *a: calls.append("ladder") or a[1],
+    )
+    source_memory._clip_segment_for_transport_sync(
+        tmp_path / "in.mp4",
+        tmp_path / "out.mp4",
+        0.0,
+        10.0,
+    )
+    assert calls == ["ladder"]
+
+
+# ── project-scope merged memory ──────────────────────────────────────────────
+
+
+def _merged_service(tmp_path, monkeypatch) -> SourceMemoryService:
+    project_root = tmp_path / "projects" / "project-1"
+    project_root.mkdir(parents=True, exist_ok=True)
+    _write_fixture_memory(project_root, "intel-1")
+    _write_fixture_memory(project_root, "intel-2")
+    project = SimpleNamespace(
+        sources=SimpleNamespace(
+            sources=SimpleNamespace(
+                items={
+                    "src-1": SimpleNamespace(
+                        logical_asset_id="asset-1",
+                        current_intelligence_version_id="iv-1",
+                    ),
+                    "src-2": SimpleNamespace(
+                        logical_asset_id="asset-2",
+                        current_intelligence_version_id="iv-2",
+                    ),
+                },
+            ),
+        ),
+        assets=SimpleNamespace(
+            intelligence_versions_by_id={
+                "iv-1": SimpleNamespace(
+                    intelligence_version_id="intel-1",
+                    source_checksum="checksum-1",
+                ),
+                "iv-2": SimpleNamespace(
+                    intelligence_version_id="intel-2",
+                    source_checksum="checksum-1",
+                ),
+            },
+        ),
+    )
+    services = SimpleNamespace(
+        root=tmp_path,
+        projects=SimpleNamespace(
+            project_root=lambda project_id: tmp_path / "projects" / project_id,
+            read=lambda project_id: SimpleNamespace(project=project),
+        ),
+    )
+    service = SourceMemoryService(services)
+
+    async def no_embedding(query_text: str):
+        del query_text
+        return None
+
+    monkeypatch.setattr(service, "_embed_query", no_embedding)
+    return service
+
+
+def test_project_scope_merges_all_built_memories(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service = _merged_service(tmp_path, monkeypatch)
+    result = _run_query(
+        service,
+        query_type="search_asr",
+        query="团战 零换五",
+        scope="project",
+    )
+    assert result["scope"] == "project"
+    assert result["sources"] == [
+        {"prefix": "s1", "assetId": "asset-1"},
+        {"prefix": "s2", "assetId": "asset-2"},
+    ]
+    hit_macros = {item["macro_id"] for item in result["result"]}
+    assert {"s1_macro_0001", "s2_macro_0001"} <= hit_macros
+    windows = {
+        (item["macroId"], item.get("assetId"))
+        for item in result["hitWindowsMs"]
+    }
+    assert ("s1_macro_0001", "asset-1") in windows
+    assert ("s2_macro_0001", "asset-2") in windows
+
+    # Prefixed super/subgraph drilldowns keep working across sources.
+    filtered = _run_query(
+        service,
+        query_type="macro_events",
+        macro_id="s2_super_00",
+        scope="project",
+    )
+    assert {item["macro_id"] for item in filtered["result"]} == {
+        "s2_macro_0000",
+        "s2_macro_0001",
+    }
+    subgraph = _run_query(
+        service,
+        query_type="subgraph",
+        macro_id="s1_macro_0000",
+        scope="project",
+    )
+    assert subgraph["result"]["macro_id"] == "s1_macro_0000"
+
+
+def test_project_scope_rejects_by_time_and_requires_memories(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service = _merged_service(tmp_path, monkeypatch)
+    with pytest.raises(ValidationError):
+        _run_query(
+            service,
+            query_type="by_time",
+            start_ms=0,
+            end_ms=1000,
+            scope="project",
+        )
+    with pytest.raises(ValidationError):
+        _run_query(service, query_type="summary", scope="bogus")
+
+    # No built memories in the project: explicit validation error.
+    project_root = tmp_path / "projects" / "project-1"
+    import shutil as _shutil
+
+    _shutil.rmtree(memory_dir(project_root, "intel-1"))
+    _shutil.rmtree(memory_dir(project_root, "intel-2"))
+    with pytest.raises(ValidationError):
+        _run_query(service, query_type="summary", scope="project")
+
+
+def test_project_scope_degrades_to_bm25_on_mixed_embeddings(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # One source loses its npz: the merged index degrades to BM25-only
+    # instead of failing or silently dropping that source's nodes.
+    service = _merged_service(tmp_path, monkeypatch)
+    project_root = tmp_path / "projects" / "project-1"
+    (memory_dir(project_root, "intel-2") / "embeddings.npz").unlink()
+    result = _run_query(
+        service,
+        query_type="search_asr",
+        query="团战 零换五",
+        scope="project",
+    )
+    assert {"s1_macro_0001", "s2_macro_0001"} <= {
+        item["macro_id"] for item in result["result"]
+    }
+
+
+def test_list_built_memories_skips_sources_without_memory(tmp_path) -> None:
+    project_root = tmp_path / "projects" / "project-1"
+    project_root.mkdir(parents=True, exist_ok=True)
+    _write_fixture_memory(project_root, "intel-1")
+    project = SimpleNamespace(
+        sources=SimpleNamespace(
+            sources=SimpleNamespace(
+                items={
+                    "src-1": SimpleNamespace(
+                        logical_asset_id="asset-1",
+                        current_intelligence_version_id="iv-1",
+                    ),
+                    "src-2": SimpleNamespace(
+                        logical_asset_id="asset-2",
+                        current_intelligence_version_id=None,
+                    ),
+                },
+            ),
+        ),
+        assets=SimpleNamespace(
+            intelligence_versions_by_id={
+                "iv-1": SimpleNamespace(
+                    intelligence_version_id="intel-1",
+                    source_checksum="checksum-1",
+                ),
+            },
+        ),
+    )
+    assert source_memory.list_built_memories(project_root, project) == [
+        ("asset-1", "intel-1", "checksum-1"),
+    ]
+
+
+def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    # 7300s source → 3 detection chunks; chunk 1 is pre-checkpointed and
+    # must not be re-detected. Macro ids stay globally sequential and
+    # the build directory is removed once artifacts are durable.
+    from vendor.mm_plugins.video_memory.schema import (
+        MicroEvent as VendorMicroEvent,
+        Subgraph as VendorSubgraph,
+        SuperEvent,
+        VideoRoot,
+    )
+
+    service = _service(tmp_path)
+    project_root = tmp_path / "projects" / "project-1"
+    local_path = tmp_path / "video.mp4"
+    local_path.write_bytes(b"video")
+    task = SimpleNamespace(
+        project_id="project-1",
+        task_id="task-1",
+        status=_task_status("QUEUED"),
+        last_attempt_seq=0,
+    )
+    service.executions = _RecordingExecutions(task)
+    job = source_memory.SourceMemoryBuildJob(
+        project_id="project-1",
+        task_id="task-1",
+        authorization_id=None,
+        index_id="intel-1",
+        asset_id="asset-1",
+        asset_version_id="version-1",
+        source_checksum="checksum-1",
+        duration_ms=7_300_000,
+        local_path=str(local_path),
+    )
+    ckpt_root = source_memory.build_dir(project_root, "intel-1")
+    source_memory._write_checkpoint(
+        ckpt_root / source_memory.SEGMENTS_CHECKPOINT_FILENAME,
+        "checksum-1",
+        {"0-3600": [[0.0, 1800.0], [1800.0, 3600.0]]},
+    )
+
+    detected: list[tuple[float, float]] = []
+
+    def fake_detect(_path, start_sec, end_sec):
+        detected.append((start_sec, end_sec))
+        return [(start_sec, end_sec)]
+
+    async def fake_transcript(_job):
+        return True, []
+
+    async def fake_extract(macro, *_args):
+        macro.subgraph = VendorSubgraph(
+            macro_id=macro.macro_id,
+            micro_events=[
+                VendorMicroEvent(
+                    event_id=f"{macro.macro_id}:ev",
+                    event_type="action",
+                    time_range=list(macro.time_range),
+                    subject="cat",
+                    object="",
+                    action="walks",
+                    description="stub event",
+                    macro_id=macro.macro_id,
+                ),
+            ],
+        )
+
+    async def fake_aggregate(macros, _call_llm):
+        root = VideoRoot(title="t", description="d")
+        supers = [
+            SuperEvent(
+                super_id="super_00",
+                label="all",
+                sub_macro_ids=[m.macro_id for m in macros],
+                time_range=[0.0, 7300.0],
+            ),
+        ]
+        return root, supers, [], []
+
+    async def fake_review(draft):
+        return draft
+
+    monkeypatch.setattr(source_memory, "_detect_segments_sync", fake_detect)
+    monkeypatch.setattr(service, "_index_transcript", fake_transcript)
+    monkeypatch.setattr(service, "_extract_subgraph", fake_extract)
+    monkeypatch.setattr(source_memory, "aggregate_hierarchy", fake_aggregate)
+    monkeypatch.setattr(service, "_review_projection", fake_review)
+    monkeypatch.setattr(
+        source_memory.model_config,
+        "is_embedding_configured",
+        lambda: False,
+    )
+
+    asyncio.run(service._execute(job))
+
+    # Chunk 1 came from the checkpoint; only chunks 2 and 3 detected.
+    assert detected == [(3600.0, 7200.0), (7200.0, 7300.0)]
+    ref = load_memory_ref(project_root, "intel-1", "checksum-1")
+    assert ref is not None
+    assert ref.macro_count == 4  # 2 checkpointed + 2 detected
+    graph = json.loads(
+        (memory_dir(project_root, "intel-1") / "graph_memory.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert [m["macro_id"] for m in graph["macro_events"]] == [
+        "macro_0000",
+        "macro_0001",
+        "macro_0002",
+        "macro_0003",
+    ]
+    assert not ckpt_root.exists()

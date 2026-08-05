@@ -42,6 +42,7 @@ from domain.enums import TaskKind, TaskStatus
 from domain.errors import ValidationError
 from models import asr_model, embedding_model, vlm_model
 from models import config as model_config
+from models.media_transport import DASHSCOPE_TEMP_UPLOAD_MAX_BYTES
 from schemas.assets import (
     SemanticIndexEntry,
     SourceIntelligenceIndex,
@@ -68,6 +69,11 @@ from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 from vendor.mm_plugins.video_memory.aggregation import aggregate_hierarchy
 from vendor.mm_plugins.video_memory.embeddings import EmbeddingIndex
 from vendor.mm_plugins.video_memory.json_utils import extract_json
+from vendor.mm_plugins.video_memory.merge import (
+    merged_graph_payload,
+    prefix_graph_payload,
+    prefix_index_nodes,
+)
 from vendor.mm_plugins.video_memory.prompts import (
     SUBGRAPH_CONSTRUCTION_PROMPT,
 )
@@ -114,6 +120,19 @@ CLIP_SIZE_BUDGET_CAP_BYTES = 6 * 1024 * 1024
 _BASE64_EXPANSION = 4.0 / 3.0
 _CLIP_BUDGET_HEADROOM_BYTES = 64 * 1024
 _CLIP_MIN_WORKABLE_BUDGET_BYTES = 256 * 1024
+
+# P2 clip transport for DashScope-bound VLMs: the clip travels through
+# the model-bound temporary OSS upload (48h TTL, <=1GB) instead of an
+# inline base64 body, so segments keep a high-quality encode mirroring
+# the upstream OSS pipeline (max_dim 1024, crf 28, source frame rate).
+HQ_CLIP_MAX_DIM = 1024
+HQ_CLIP_CRF = 28
+HQ_CLIP_MAX_BYTES = DASHSCOPE_TEMP_UPLOAD_MAX_BYTES
+
+# Chunked P1→P2 pipeline (upstream ``build_memory.sh --chunk-sec``):
+# multi-hour sources are detected hour by hour and each chunk's subgraph
+# extraction starts while the next chunk is still being detected.
+CHUNK_SEC = 3600.0
 
 
 def _clip_size_budget_bytes() -> int:
@@ -175,6 +194,14 @@ GRAPH_FILENAME = "graph_memory.json"
 EMBEDDINGS_FILENAME = "embeddings.npz"
 META_FILENAME = "memory_meta.json"
 PROJECTION_FILENAME = "projection.json"
+# Durable stage-level checkpoints (upstream keeps 01_macros.json /
+# asr_transcript.json / subgraphs/*.json): an interrupted build resumes
+# from persisted P1 segments, the billed ASR transcript and per-macro
+# subgraph payloads instead of replaying paid model calls.
+BUILD_DIR_NAME = "build"
+SEGMENTS_CHECKPOINT_FILENAME = "segments.json"
+TRANSCRIPT_CHECKPOINT_FILENAME = "transcript.json"
+SUBGRAPH_CHECKPOINT_DIRNAME = "subgraphs"
 
 SOURCE_MEMORY_OPERATION = "build_source_memory"
 
@@ -246,6 +273,64 @@ def memory_dir(project_root: Path, index_id: str) -> Path:
         / "source-intelligence"
         / index_id
         / MEMORY_DIR_NAME
+    )
+
+
+def build_dir(project_root: Path, index_id: str) -> Path:
+    """Durable stage-checkpoint directory for one memory build."""
+    return memory_dir(project_root, index_id) / BUILD_DIR_NAME
+
+
+def _load_checkpoint(path: Path, source_checksum: str) -> Any:
+    """Return the checkpointed payload, or None when absent/stale."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, Mapping):
+        return None
+    if raw.get("sourceChecksum") != source_checksum:
+        return None
+    return raw.get("data")
+
+
+def _write_checkpoint(path: Path, source_checksum: str, data: Any) -> None:
+    """Atomically persist one stage checkpoint keyed by source checksum."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(
+            {"sourceChecksum": source_checksum, "data": data},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+
+
+def has_build_checkpoint(
+    project_root: Path,
+    index_id: str,
+    source_checksum: str,
+) -> bool:
+    """True when any durable stage checkpoint matches this source."""
+    directory = build_dir(project_root, index_id)
+    if (
+        _load_checkpoint(
+            directory / SEGMENTS_CHECKPOINT_FILENAME,
+            source_checksum,
+        )
+        is not None
+    ):
+        return True
+    subgraph_root = directory / SUBGRAPH_CHECKPOINT_DIRNAME
+    try:
+        candidates = sorted(subgraph_root.glob("macro_*.json"))
+    except OSError:
+        return False
+    return any(
+        _load_checkpoint(candidate, source_checksum) is not None
+        for candidate in candidates
     )
 
 
@@ -398,6 +483,45 @@ def has_built_memory(
     return False
 
 
+def list_built_memories(
+    project_root: Path,
+    project: Any,
+) -> list[tuple[str, str, str]]:
+    """Every source whose current intelligence has a valid built memory.
+
+    Returns sorted ``(logical_asset_id, index_id, source_checksum)``
+    tuples — the enumeration surface for the project-scope merged
+    memory (upstream ``merge_memories`` directory scan equivalent).
+    """
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for source in project.sources.sources.items.values():
+        logical_asset_id = source.logical_asset_id
+        if not logical_asset_id or logical_asset_id in seen:
+            continue
+        seen.add(logical_asset_id)
+        selected = source.current_intelligence_version_id
+        if not selected:
+            continue
+        record = project.assets.intelligence_versions_by_id.get(selected)
+        if record is None:
+            continue
+        ref = load_memory_ref(
+            project_root,
+            record.intelligence_version_id,
+            record.source_checksum,
+        )
+        if ref is not None:
+            out.append(
+                (
+                    logical_asset_id,
+                    record.intelligence_version_id,
+                    record.source_checksum,
+                ),
+            )
+    return sorted(out)
+
+
 # ── ffmpeg helpers (Creator-owned IO around the vendored planning) ─────────
 
 
@@ -455,12 +579,20 @@ def _seek_jpeg(
 
 def _detect_segments_sync(
     local_path: Path,
-    duration_sec: float,
+    start_sec: float,
+    end_sec: float,
 ) -> list[tuple[float, float]]:
-    """Phase 1: parallel frame-diff scene detection (no API calls)."""
+    """Phase 1: parallel frame-diff scene detection for one time range
+    (no API calls). Chunked builds call this per chunk; chunk edges are
+    forced segment boundaries exactly like the upstream chunk pipeline."""
     ffmpeg = _require_ffmpeg()
-    n_frames = max(4, int(duration_sec * DETECT_FPS))
-    timestamps = [i / DETECT_FPS for i in range(n_frames)]
+    span = max(0.0, end_sec - start_sec)
+    n_frames = max(4, int(span * DETECT_FPS))
+    timestamps = [
+        start_sec + i / DETECT_FPS
+        for i in range(n_frames)
+        if start_sec + i / DETECT_FPS < end_sec
+    ] or [start_sec]
 
     def _extract(ts: float) -> tuple[float, bytes | None]:
         return ts, _seek_jpeg(
@@ -483,19 +615,42 @@ def _detect_segments_sync(
         if hls is not None:
             hls_frames.append((ts, hls))
     logger.info(
-        "source memory P1: %d/%d detection frames decoded",
+        "source memory P1: %d/%d detection frames decoded "
+        "(range %.0f-%.0fs)",
         len(hls_frames),
         n_frames,
+        start_sec,
+        end_sec,
     )
     cut_times, cut_scores = compute_cut_scores(hls_frames)
     return plan_segments(
         cut_times,
         cut_scores,
-        start_sec=0.0,
-        end_sec=duration_sec,
+        start_sec=start_sec,
+        end_sec=end_sec,
         min_scene_sec=MIN_SCENE_SEC,
         max_scene_sec=MAX_SCENE_SEC,
     )
+
+
+def _chunk_plan(duration_sec: float) -> list[tuple[float, float]]:
+    """Split the source into detection chunks of at most CHUNK_SEC.
+
+    A trailing remainder shorter than MIN_SCENE_SEC folds into the
+    previous chunk so no chunk yields degenerate segments."""
+    if duration_sec <= CHUNK_SEC:
+        return [(0.0, duration_sec)]
+    chunks: list[tuple[float, float]] = []
+    start = 0.0
+    while start < duration_sec:
+        end = min(start + CHUNK_SEC, duration_sec)
+        chunks.append((start, end))
+        start = end
+    if len(chunks) >= 2 and (chunks[-1][1] - chunks[-1][0]) < MIN_SCENE_SEC:
+        last = chunks.pop()
+        prev = chunks.pop()
+        chunks.append((prev[0], last[1]))
+    return chunks
 
 
 def _clip_segment_sync(
@@ -593,6 +748,103 @@ def _clip_segment_within_budget_sync(
     )
 
 
+def _clip_segment_hq_sync(
+    local_path: Path,
+    out_path: Path,
+    start_sec: float,
+    end_sec: float,
+) -> Path:
+    """High-quality segment encode for the DashScope temporary-OSS path.
+
+    Mirrors the upstream ``clip_and_upload_video`` settings (1024px,
+    crf 28) and keeps the source frame rate; the temporary upload takes
+    files up to 1GB so no inline base64 budget applies."""
+    ffmpeg = _require_ffmpeg()
+    duration = max(0.5, end_sec - start_sec)
+    scale = (
+        f"scale='min({HQ_CLIP_MAX_DIM},iw)':'min({HQ_CLIP_MAX_DIM},ih)':"
+        "force_original_aspect_ratio=decrease,"
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    )
+    command = [
+        ffmpeg,
+        "-y",
+        "-v",
+        "error",
+        "-ss",
+        str(start_sec),
+        "-t",
+        str(duration),
+        "-i",
+        str(local_path),
+        "-vf",
+        scale,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        str(HQ_CLIP_CRF),
+        "-an",
+        "-threads",
+        "4",
+        "-movflags",
+        "+faststart",
+        str(out_path),
+    ]
+    proc = subprocess.run(  # nosec B603
+        command,
+        capture_output=True,
+        timeout=1800,
+        check=False,
+    )
+    if proc.returncode != 0 or not out_path.exists():
+        raise RuntimeError(
+            "ffmpeg hq segment clip failed: "
+            f"{proc.stderr.decode('utf-8', 'replace')[-300:]}",
+        )
+    if out_path.stat().st_size > HQ_CLIP_MAX_BYTES:
+        raise RuntimeError(
+            "hq segment clip exceeds the temporary upload limit: "
+            f"{out_path.stat().st_size} bytes",
+        )
+    return out_path
+
+
+def _clip_segment_for_transport_sync(
+    local_path: Path,
+    out_path: Path,
+    start_sec: float,
+    end_sec: float,
+) -> Path:
+    """Pick the encode matching the active VLM transport channel.
+
+    DashScope providers upload through the model-bound temporary OSS and
+    get the high-quality encode; any HQ failure (or a non-DashScope
+    gateway) falls back to the inline base64 ladder."""
+    if vlm_model.uses_dashscope_transport():
+        try:
+            return _clip_segment_hq_sync(
+                local_path,
+                out_path,
+                start_sec,
+                end_sec,
+            )
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "hq clip failed for %s (%s); falling back to the inline "
+                "ladder",
+                out_path.name,
+                error,
+            )
+    return _clip_segment_within_budget_sync(
+        local_path,
+        out_path,
+        start_sec,
+        end_sec,
+    )
+
+
 def _segment_fps(duration_sec: float) -> float:
     """Match the Source Intelligence native sampling tiers."""
     if duration_sec <= 120:
@@ -654,6 +906,10 @@ class SourceMemoryService:
         self.executions = ProjectExecutionStore(services.root)
         self._jobs: dict[str, asyncio.Task[None]] = {}
         self._toolkits: dict[str, tuple[float, MemoryToolkit]] = {}
+        self._merged_toolkits: dict[
+            str,
+            tuple[tuple, MemoryToolkit, dict[str, str]],
+        ] = {}
         self._toolkits_lock = asyncio.Lock()
 
     # -- trigger -----------------------------------------------------------
@@ -963,7 +1219,7 @@ class SourceMemoryService:
 
     # -- build pipeline ------------------------------------------------------
 
-    async def _execute(  # pylint: disable=too-many-statements
+    async def _execute(  # pylint: disable=too-many-statements,too-many-branches,too-many-locals
         self,
         job: SourceMemoryBuildJob,
     ) -> None:
@@ -1031,70 +1287,103 @@ class SourceMemoryService:
                 f"source media is no longer available: {local_path}",
             )
         duration_sec = job.duration_ms / 1000.0
+        project_root = self.services.projects.project_root(job.project_id)
+        checkpoints = build_dir(project_root, job.index_id)
+        subgraph_ckpt_dir = checkpoints / SUBGRAPH_CHECKPOINT_DIRNAME
 
-        # Phase 1: local frame-diff segmentation.
-        segments = await asyncio.to_thread(
-            _detect_segments_sync,
+        # ASR first: every chunk's macros merge the transcript before
+        # their subgraph prompts are built. Standalone (billed)
+        # transcriptions are checkpointed and never replayed on resume.
+        transcript = await self._resolve_transcript(
+            job,
             local_path,
-            duration_sec,
-        )
-        macros = [
-            MacroEvent(
-                macro_id=f"macro_{i:04d}",
-                label=f"scene_{i:04d}",
-                time_range=[s, e],
-            )
-            for i, (s, e) in enumerate(segments)
-        ]
-        logger.info(
-            "source memory P1 done: task=%s macros=%d",
-            job.task_id,
-            len(macros),
+            checkpoints,
         )
 
-        # ASR: reuse the transcript the published index already carries
-        # (single billing, consistent text); transcribe only when the
-        # index never produced the ASR modality. Available-but-empty
-        # coverage (a silent source) is a legitimate final state and
-        # must not be billed again.
-        transcript: list[dict[str, float | str]] = []
-        asr_available, index_transcript = await self._index_transcript(job)
-        if asr_available:
-            transcript = index_transcript
-        elif model_config.get_asr_api_key():
-            try:
-                result = await asr_model.transcribe(local_path.as_uri())
-                transcript = [
-                    {
-                        "start_sec": segment.start_ms / 1000.0,
-                        "end_sec": segment.end_ms / 1000.0,
-                        "text": segment.text,
-                    }
-                    for segment in result.segments
-                ]
-            except Exception as error:  # pylint: disable=broad-except
-                logger.warning(
-                    "source memory ASR failed (non-fatal): %s",
-                    error,
-                )
-        _merge_asr_into_macros(macros, transcript)
-
+        # Chunked P1→P2 pipeline with durable stage checkpoints: each
+        # chunk is detected (or reloaded from its checkpoint) and its
+        # subgraph extraction starts immediately, overlapping the next
+        # chunk's detection — the upstream pipeline_worker behaviour.
+        chunks = _chunk_plan(duration_sec)
+        segments_ckpt_path = checkpoints / SEGMENTS_CHECKPOINT_FILENAME
+        cached_chunks = await asyncio.to_thread(
+            _load_checkpoint,
+            segments_ckpt_path,
+            job.source_checksum,
+        )
+        chunk_segments: dict[str, Any] = (
+            dict(cached_chunks) if isinstance(cached_chunks, Mapping) else {}
+        )
         semaphore = asyncio.Semaphore(SUBGRAPH_CONCURRENCY)
         work_root = Path(
             tempfile.mkdtemp(prefix=f"source-memory-{job.task_id[:24]}-"),
         )
+        macros: list[MacroEvent] = []
+        subgraph_jobs: list[asyncio.Task[None]] = []
         try:
-            await asyncio.gather(
-                *(
-                    self._extract_subgraph(
-                        macro,
+            macro_counter = 0
+            for chunk_start, chunk_end in chunks:
+                chunk_key = f"{chunk_start:.0f}-{chunk_end:.0f}"
+                cached = chunk_segments.get(chunk_key)
+                if isinstance(cached, list) and cached:
+                    segments = [
+                        (float(pair[0]), float(pair[1])) for pair in cached
+                    ]
+                else:
+                    segments = await asyncio.to_thread(
+                        _detect_segments_sync,
                         local_path,
-                        work_root,
-                        semaphore,
+                        chunk_start,
+                        chunk_end,
                     )
-                    for macro in macros
-                ),
+                    chunk_segments[chunk_key] = [
+                        [start, end] for start, end in segments
+                    ]
+                    await asyncio.to_thread(
+                        _write_checkpoint,
+                        segments_ckpt_path,
+                        job.source_checksum,
+                        chunk_segments,
+                    )
+                chunk_macros = []
+                for start, end in segments:
+                    chunk_macros.append(
+                        MacroEvent(
+                            macro_id=f"macro_{macro_counter:04d}",
+                            label=f"scene_{macro_counter:04d}",
+                            time_range=[start, end],
+                        ),
+                    )
+                    macro_counter += 1
+                _merge_asr_into_macros(chunk_macros, transcript)
+                macros.extend(chunk_macros)
+                subgraph_jobs.extend(
+                    asyncio.create_task(
+                        self._extract_subgraph(
+                            macro,
+                            local_path,
+                            work_root,
+                            semaphore,
+                            subgraph_ckpt_dir,
+                            job.source_checksum,
+                        ),
+                    )
+                    for macro in chunk_macros
+                )
+            logger.info(
+                "source memory P1 done: task=%s macros=%d chunks=%d",
+                job.task_id,
+                len(macros),
+                len(chunks),
             )
+            if subgraph_jobs:
+                await asyncio.gather(*subgraph_jobs)
+        except BaseException:
+            for pending in subgraph_jobs:
+                pending.cancel()
+            if subgraph_jobs:
+                await asyncio.gather(*subgraph_jobs, return_exceptions=True)
+            raise
         finally:
             await asyncio.to_thread(shutil.rmtree, work_root, True)
         extracted = sum(
@@ -1172,6 +1461,9 @@ class SourceMemoryService:
             len(nodes),
             projection,
         )
+        # Final artifacts are durable — the stage checkpoints have served
+        # their purpose and must not shadow a future rebuild.
+        await asyncio.to_thread(shutil.rmtree, checkpoints, True)
         await asyncio.to_thread(
             self.executions.append_attempt,
             job.project_id,
@@ -1242,19 +1534,92 @@ class SourceMemoryService:
             for segment in index.transcript
         ]
 
+    async def _resolve_transcript(
+        self,
+        job: SourceMemoryBuildJob,
+        local_path: Path,
+        checkpoints: Path,
+    ) -> list[dict[str, float | str]]:
+        """ASR transcript for the build, billed at most once.
+
+        Reuses the transcript the published index already carries
+        (single billing, consistent text); transcribes only when the
+        index never produced the ASR modality, checkpointing the billed
+        result so a resumed build never pays again. Available-but-empty
+        coverage (a silent source) is a legitimate final state and must
+        not be billed again."""
+        asr_available, index_transcript = await self._index_transcript(job)
+        if asr_available:
+            return index_transcript
+        if not model_config.get_asr_api_key():
+            return []
+        ckpt_path = checkpoints / TRANSCRIPT_CHECKPOINT_FILENAME
+        cached = await asyncio.to_thread(
+            _load_checkpoint,
+            ckpt_path,
+            job.source_checksum,
+        )
+        if isinstance(cached, list):
+            return [
+                {
+                    "start_sec": float(record["start_sec"]),
+                    "end_sec": float(record["end_sec"]),
+                    "text": str(record["text"]),
+                }
+                for record in cached
+                if isinstance(record, Mapping)
+            ]
+        transcript: list[dict[str, float | str]] = []
+        try:
+            result = await asr_model.transcribe(local_path.as_uri())
+            transcript = [
+                {
+                    "start_sec": segment.start_ms / 1000.0,
+                    "end_sec": segment.end_ms / 1000.0,
+                    "text": segment.text,
+                }
+                for segment in result.segments
+            ]
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "source memory ASR failed (non-fatal): %s",
+                error,
+            )
+            return []
+        await asyncio.to_thread(
+            _write_checkpoint,
+            ckpt_path,
+            job.source_checksum,
+            transcript,
+        )
+        return transcript
+
     async def _extract_subgraph(
         self,
         macro: MacroEvent,
         local_path: Path,
         work_root: Path,
         semaphore: asyncio.Semaphore,
+        checkpoint_dir: Path,
+        source_checksum: str,
     ) -> None:
+        # Resume path: a durable per-macro payload means this VLM call
+        # was already billed — apply it and never call again.
+        ckpt_path = checkpoint_dir / f"{macro.macro_id}.json"
+        cached = await asyncio.to_thread(
+            _load_checkpoint,
+            ckpt_path,
+            source_checksum,
+        )
+        if isinstance(cached, dict):
+            apply_subgraph_payload(macro, cached)
+            return
         async with semaphore:
             start, end = macro.time_range
             clip_path = work_root / f"{macro.macro_id}.mp4"
             try:
                 await asyncio.to_thread(
-                    _clip_segment_within_budget_sync,
+                    _clip_segment_for_transport_sync,
                     local_path,
                     clip_path,
                     start,
@@ -1305,6 +1670,14 @@ class SourceMemoryService:
             if payload is None:
                 macro.subgraph = Subgraph(macro_id=macro.macro_id)
                 return
+            # Persist before applying: apply_subgraph_payload mutates
+            # the payload's relative times in place.
+            await asyncio.to_thread(
+                _write_checkpoint,
+                ckpt_path,
+                source_checksum,
+                payload,
+            )
             apply_subgraph_payload(macro, payload)
 
     async def _review_projection(
@@ -1502,13 +1875,16 @@ class SourceMemoryService:
     # -- recovery ------------------------------------------------------------
 
     def recover_interrupted(self) -> None:
-        """Converge or fail interrupted builds; never replay billed work.
+        """Converge or resume interrupted builds; never replay billed work.
 
         A build cut while RUNNING is closed as FAILED. It is re-queued
-        only when complete artifacts are already durable (the follow-up
-        attempt converges without new model calls); otherwise it stays
-        FAILED and a rebuild requires a fresh commit/authorization.
-        QUEUED tasks resume their authorization wait as before.
+        when complete artifacts are already durable (the follow-up
+        attempt converges without new model calls) or when stage
+        checkpoints exist (the follow-up attempt resumes and only spends
+        on the remaining macros — within the original authorization's
+        estimate); otherwise it stays FAILED and a rebuild requires a
+        fresh commit/authorization. QUEUED tasks resume their
+        authorization wait as before.
         """
         for project_id in self._list_project_ids():
             try:
@@ -1523,10 +1899,14 @@ class SourceMemoryService:
                     if task.status is not TaskStatus.FAILED:
                         continue
                     job = self._job_from_task(task)
-                    if job is None or self._existing_ref(job) is None:
+                    if job is None or (
+                        self._existing_ref(job) is None
+                        and not self._has_checkpoint(job)
+                    ):
                         logger.warning(
                             "source memory build %s interrupted without "
-                            "durable artifacts; not retried automatically",
+                            "durable artifacts or checkpoints; not "
+                            "retried automatically",
                             task.task_id,
                         )
                         continue
@@ -1551,6 +1931,20 @@ class SourceMemoryService:
             ]
         except Exception:  # pylint: disable=broad-except
             return []
+
+    def _has_checkpoint(self, job: SourceMemoryBuildJob) -> bool:
+        """Durable stage checkpoints matching this build job exist."""
+        try:
+            project_root = self.services.projects.project_root(
+                job.project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return False
+        return has_build_checkpoint(
+            project_root,
+            job.index_id,
+            job.source_checksum,
+        )
 
     def _close_interrupted(self, task: TaskRecord) -> TaskRecord:
         """Close the attempt left RUNNING by a restart as FAILED."""
@@ -1611,7 +2005,7 @@ class SourceMemoryService:
 
     # -- query path ----------------------------------------------------------
 
-    async def query_memory(  # pylint: disable=too-many-branches
+    async def query_memory(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
         self,
         *,
         project_id: str,
@@ -1623,30 +2017,53 @@ class SourceMemoryService:
         start_ms: int | None = None,
         end_ms: int | None = None,
         top_k: int | None = None,
+        min_cosine: float | None = None,
+        max_results: int | None = None,
+        scope: str = "source",
     ) -> dict[str, Any]:
         if query_type not in QUERY_TYPES:
             raise ValidationError(
                 f"unknown query_type: {query_type}; expected one of "
                 f"{', '.join(QUERY_TYPES)}",
             )
-        from services.source_analysis import source_analysis_service
+        if scope not in ("source", "project"):
+            raise ValidationError(
+                f"unknown scope: {scope}; expected source or project",
+            )
+        prefix_assets: dict[str, str] | None = None
+        if scope == "project":
+            # Merged cross-source memory: per-source timelines are
+            # unrelated, so time-window queries stay per-source.
+            if query_type == "by_time":
+                raise ValidationError(
+                    "by_time 只支持 scope=source：各素材的时间轴互不相关",
+                )
+            toolkit, prefix_assets = await self._merged_toolkit_for(
+                project_id,
+            )
+            analysis_version_id = None
+        else:
+            from services.source_analysis import source_analysis_service
 
-        index = await asyncio.to_thread(
-            source_analysis_service(self.services).load,
-            project_id,
-            logical_asset_id,
-        )
-        if index.memory_ref is None:
-            return {
-                "ok": True,
-                "available": False,
-                "assetId": logical_asset_id,
-                "reason": ("该素材尚未构建长素材记忆；构建在素材理解完成后自动" "排队，需要执行授权通过后才会生成。"),
-            }
-        project_root = self.services.projects.project_root(project_id)
-        graph_path = project_root / index.memory_ref.graph_path
-        embeddings_path = project_root / index.memory_ref.embeddings_path
-        toolkit = await self._toolkit_for(graph_path, embeddings_path)
+            index = await asyncio.to_thread(
+                source_analysis_service(self.services).load,
+                project_id,
+                logical_asset_id,
+            )
+            if index.memory_ref is None:
+                return {
+                    "ok": True,
+                    "available": False,
+                    "assetId": logical_asset_id,
+                    "reason": (
+                        "该素材尚未构建长素材记忆；构建在素材理解完成后自动" "排队，需要执行授权通过后才会生成。"
+                    ),
+                }
+            project_root = self.services.projects.project_root(project_id)
+            graph_path = project_root / index.memory_ref.graph_path
+            embeddings_path = project_root / index.memory_ref.embeddings_path
+            toolkit = await self._toolkit_for(graph_path, embeddings_path)
+            analysis_version_id = index.id
         top = max(1, min(int(top_k or 10), 50))
         query_text = (query or "").strip()
         if query_type in {
@@ -1672,7 +2089,9 @@ class SourceMemoryService:
             result = toolkit.get_super_events()
         elif query_type == "macro_events":
             filter_id = (macro_id or "").strip()
-            if filter_id.startswith("super_"):
+            # Merged-memory super ids carry a source prefix
+            # ("s1_super_01"), so match the marker anywhere.
+            if "super_" in filter_id:
                 result = toolkit.get_macro_events(super_id=filter_id)
             else:
                 result = toolkit.get_macro_events()
@@ -1700,8 +2119,17 @@ class SourceMemoryService:
                 query_embedding=query_embedding,
             )
         elif query_type == "enumerate":
+            # min_cosine/max_results follow the upstream enumerate
+            # protocol: lower min_cosine and retry when the list looks
+            # undercounted.
+            floor = 0.5 if min_cosine is None else float(min_cosine)
+            floor = max(0.0, min(floor, 1.0))
+            cap = 120 if max_results is None else int(max_results)
+            cap = max(1, min(cap, 300))
             result = toolkit.enumerate_events(
                 query_text,
+                min_cosine=floor,
+                max_results=cap,
                 node_types=node_types,
                 query_embedding=query_embedding,
             )
@@ -1714,15 +2142,26 @@ class SourceMemoryService:
                 start_sec=start_ms / 1000.0,
                 end_sec=end_ms / 1000.0,
             )
-        return {
+        payload: dict[str, Any] = {
             "ok": True,
             "available": True,
             "assetId": logical_asset_id,
-            "analysisVersionId": index.id,
+            "analysisVersionId": analysis_version_id,
             "queryType": query_type,
+            "scope": scope,
             "result": result,
-            "hitWindowsMs": _collect_hit_windows(toolkit, result),
+            "hitWindowsMs": _collect_hit_windows(
+                toolkit,
+                result,
+                prefix_assets,
+            ),
         }
+        if prefix_assets is not None:
+            payload["sources"] = [
+                {"prefix": prefix, "assetId": asset_id}
+                for prefix, asset_id in sorted(prefix_assets.items())
+            ]
+        return payload
 
     @staticmethod
     async def _embed_query(query_text: str) -> np.ndarray | None:
@@ -1763,6 +2202,63 @@ class SourceMemoryService:
             self._toolkits[key] = (mtime, toolkit)
             return toolkit
 
+    async def _merged_toolkit_for(
+        self,
+        project_id: str,
+    ) -> tuple[MemoryToolkit, dict[str, str]]:
+        """Merged toolkit over every built memory in the project.
+
+        The merge is virtual (query-time, mtime-cached): graph payloads
+        are ID-prefixed per source and concatenated, embedding matrices
+        are stacked when every source has a usable, dimension-compatible
+        ``embeddings.npz``; otherwise retrieval degrades to a BM25-only
+        index over the merged nodes. Returns the toolkit plus the
+        prefix→logical-asset map used to attribute hits.
+        """
+        project_root = self.services.projects.project_root(project_id)
+        project = await asyncio.to_thread(
+            lambda: self.services.projects.read(project_id).project,
+        )
+        entries = await asyncio.to_thread(
+            list_built_memories,
+            project_root,
+            project,
+        )
+        if not entries:
+            raise ValidationError(
+                "scope=project 需要项目内至少一个已构建的长素材记忆",
+            )
+        fingerprint_parts: list[tuple[str, float]] = []
+        for _, index_id, _ in entries:
+            graph_path = memory_dir(project_root, index_id) / GRAPH_FILENAME
+            try:
+                fingerprint_parts.append(
+                    (str(graph_path), graph_path.stat().st_mtime),
+                )
+            except OSError as error:
+                raise ValidationError(
+                    f"graph memory 文件不可用: {graph_path.name}",
+                ) from error
+        fingerprint = tuple(fingerprint_parts)
+        cached = self._merged_toolkits.get(project_id)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1], cached[2]
+        async with self._toolkits_lock:
+            cached = self._merged_toolkits.get(project_id)
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1], cached[2]
+            toolkit, prefix_assets = await asyncio.to_thread(
+                _load_merged_toolkit_sync,
+                project_root,
+                entries,
+            )
+            self._merged_toolkits[project_id] = (
+                fingerprint,
+                toolkit,
+                prefix_assets,
+            )
+            return toolkit, prefix_assets
+
 
 def _load_toolkit_sync(
     graph_path: Path,
@@ -1787,11 +2283,82 @@ def _load_toolkit_sync(
     return MemoryToolkit(memory, index)
 
 
+def _load_merged_toolkit_sync(
+    project_root: Path,
+    entries: list[tuple[str, str, str]],
+) -> tuple[MemoryToolkit, dict[str, str]]:
+    """Build one merged toolkit from every built per-source memory.
+
+    Dense vectors survive the merge only when every source contributes a
+    loadable ``embeddings.npz`` of the same dimension (mixed embedding
+    configurations degrade the merged index to BM25-only — per-source
+    queries keep their own dense index either way).
+    """
+    prefixed_payloads: list[tuple[str, dict]] = []
+    prefix_assets: dict[str, str] = {}
+    merged_nodes: list[dict] = []
+    matrices: list[np.ndarray] = []
+    dense_ok = True
+    for position, (logical_asset_id, index_id, _) in enumerate(entries):
+        prefix = f"s{position + 1}"
+        prefix_assets[prefix] = logical_asset_id
+        directory = memory_dir(project_root, index_id)
+        payload = json.loads(
+            (directory / GRAPH_FILENAME).read_text(encoding="utf-8"),
+        )
+        prefix_graph_payload(payload, prefix)
+        prefixed_payloads.append((prefix, payload))
+        if not dense_ok:
+            continue
+        source_index = EmbeddingIndex()
+        try:
+            source_index.load(str(directory / EMBEDDINGS_FILENAME))
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "merged memory: embeddings for %s unusable (%s); "
+                "degrading to BM25-only",
+                index_id,
+                error,
+            )
+            dense_ok = False
+            continue
+        if source_index.embeddings is None or not source_index.nodes:
+            dense_ok = False
+            continue
+        if (
+            matrices
+            and matrices[0].shape[1] != source_index.embeddings.shape[1]
+        ):
+            logger.warning(
+                "merged memory: embedding dimensions differ across "
+                "sources; degrading to BM25-only",
+            )
+            dense_ok = False
+            continue
+        prefix_index_nodes(source_index.nodes, prefix)
+        merged_nodes.extend(source_index.nodes)
+        matrices.append(np.asarray(source_index.embeddings))
+    memory = HierarchicalGraphMemory.from_payload(
+        merged_graph_payload(prefixed_payloads),
+    )
+    index = EmbeddingIndex()
+    if dense_ok and matrices:
+        index.build(merged_nodes, np.vstack(matrices))
+    else:
+        index.build(memory.get_all_nodes(), None)
+    return MemoryToolkit(memory, index), prefix_assets
+
+
 def _collect_hit_windows(
     toolkit: MemoryToolkit,
     result: Any,
+    prefix_assets: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Macro time windows (ms) for every macro hit inside a query result."""
+    """Macro time windows (ms) for every macro hit inside a query result.
+
+    For merged (scope=project) results each window also carries the
+    ``assetId`` resolved from its macro-id source prefix, so callers can
+    verify against the right original media."""
     macro_ids: list[str] = []
 
     def visit(value: Any) -> None:
@@ -1821,13 +2388,17 @@ def _collect_hit_windows(
         macro = toolkit._macro_map.get(candidate)
         if macro is None or len(macro.time_range) < 2:
             continue
-        windows.append(
-            {
-                "macroId": candidate,
-                "startMs": int(macro.time_range[0] * 1000),
-                "endMs": int(macro.time_range[1] * 1000),
-            },
-        )
+        window: dict[str, Any] = {
+            "macroId": candidate,
+            "startMs": int(macro.time_range[0] * 1000),
+            "endMs": int(macro.time_range[1] * 1000),
+        }
+        if prefix_assets:
+            prefix = candidate.partition("_")[0]
+            asset_id = prefix_assets.get(prefix)
+            if asset_id:
+                window["assetId"] = asset_id
+        windows.append(window)
     return windows
 
 
@@ -1836,16 +2407,29 @@ def _collect_hit_windows(
 _MEMORY_GUIDANCE_AVAILABLE = """\
 ## 长素材记忆（query_source_memory）
 
-本次委派的素材已构建层次图记忆（Root → SuperEvent → MacroEvent → 子图节点），\
-可用 `query_source_memory` 工具按台词、语义或时间精确定位片段：
+本次委派的素材已构建层次图记忆（Root → SuperEvent → MacroEvent → 子图节点，\
+ID 形如 super_01 / macro_0003），可用 `query_source_memory` 工具按台词、语义或\
+时间精确定位片段：
 
 - 先用 `summary` / `super_events` 建立全局认知，再用 `macro_events`（可传 \
 super_id 过滤）缩小范围；
-- 台词线索用 `search_asr`，屏幕文字用 `search_ocr`，事件/实体语义用 \
-`search_nodes`，计数/枚举类问题用 `enumerate`，已知时间段用 `by_time`；
-- 命中后用 `subgraph` 下钻目标 macro 查看事件、实体与关系细节；
-- 返回的 `hitWindowsMs` 是候选时间窗；结论必须回到原片窄窗核验：按该窗口重新\
-观察原生视频帧确认内容一致后才可写入素材理解或回复。"""
+- 台词线索用 `search_asr`，屏幕文字用 `search_ocr`（两者是分离索引，不要拿 \
+`search_nodes` 查台词/屏幕文字原文），事件/实体语义用 `search_nodes`，\
+计数/枚举类问题用 `enumerate`，已知时间段用 `by_time`；
+- **检索文本写法**：`query` 用陈述句描述目标内容，不要写问句（写“主角在厨房\
+做饭”，不写“主角在哪里做饭？”）；多目标/多选项问题只取各选项共享的信息作为\
+检索词，排除彼此分歧的细节；
+- 命中后用 `subgraph` 下钻目标 macro 查看事件、实体与关系细节；典型配方是 \
+1 次 search + 1-2 次 subgraph，不要反复提交措辞相近的同一查询；一种索引搜不到\
+就换索引类型或换措辞，而不是重试原询；
+- **计数协议**：必须用 `enumerate` 逐条数显式命中，不要拿 `search_nodes` 的 \
+top-k 估数；若怀疑漏计，调低 `minCosine`（默认 0.5）并换措辞重试，合并相邻重复\
+项后再回原片核验边界条目；
+- 项目内有多个已构建记忆的长素材时，可传 `scope=project` 跨素材检索（结果 ID 带\
+来源前缀，`hitWindowsMs` 附 assetId；`by_time` 不支持跨素材）；
+- 记忆永远是粗粒度且可能不准的：不要直接拿 SuperEvent 摘要作答，也永远不要跳过\
+查询凭印象作答；返回的 `hitWindowsMs` 是候选时间窗，结论必须回到原片窄窗核验：\
+按该窗口重新观察原生视频帧确认内容一致后才可写入素材理解或回复。"""
 
 _MEMORY_GUIDANCE_UNAVAILABLE = """\
 ## 长素材记忆

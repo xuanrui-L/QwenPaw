@@ -356,7 +356,11 @@ _MEMORY_QUERY_ARGUMENTS = _arguments_schema(
         "query": {
             "type": "string",
             "minLength": 1,
-            "description": "search_*/enumerate 必传的检索文本。",
+            "description": (
+                "search_*/enumerate 必传的检索文本。用陈述句描述目标内容，"
+                "不要写问句；多目标问题只取各选项共享的信息，排除彼此"
+                "分歧的细节。"
+            ),
         },
         "nodeTypes": {
             "type": "array",
@@ -382,6 +386,29 @@ _MEMORY_QUERY_ARGUMENTS = _arguments_schema(
         "startMs": {"type": "integer", "minimum": 0},
         "endMs": {"type": "integer", "minimum": 1},
         "topK": {"type": "integer", "minimum": 1, "maximum": 50},
+        "minCosine": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": (
+                "仅 enumerate：密集命中的余弦阈值（默认 0.5）；枚举结果" "疑似漏计时调低后重试。"
+            ),
+        },
+        "maxResults": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "description": "仅 enumerate：枚举条目上限（默认 120）。",
+        },
+        "scope": {
+            "type": "string",
+            "enum": ["source", "project"],
+            "description": (
+                "默认 source 只查当前素材；project 合并项目内全部已构建"
+                "记忆跨素材检索（结果 ID 带来源前缀，hitWindowsMs 附 "
+                "assetId；by_time 不支持）。"
+            ),
+        },
     },
     ("queryType",),
 )
@@ -691,6 +718,17 @@ class FileSpecialistToolRegistry:
                     if payload.get("topK") is not None
                     else None
                 ),
+                min_cosine=(
+                    float(payload["minCosine"])
+                    if payload.get("minCosine") is not None
+                    else None
+                ),
+                max_results=(
+                    int(payload["maxResults"])
+                    if payload.get("maxResults") is not None
+                    else None
+                ),
+                scope=str(payload.get("scope") or "source"),
             )
             return SpecialistToolResult(payload=dict(result))
 

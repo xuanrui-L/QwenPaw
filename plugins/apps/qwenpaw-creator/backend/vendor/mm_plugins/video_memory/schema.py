@@ -5,7 +5,9 @@
 Vendored from Qwen-MM-Plugins commit 077aea6
 (src/capabilities/video-memory/skill/script/build_memory/schema.py).
 License: Apache-2.0; see backend/vendor/NOTICE.md.
-Modifications: dropped the legacy ``hierarchical_graph_final.json`` loader.
+Modifications: dropped the legacy ``hierarchical_graph_final.json`` loader;
+``load`` split into ``from_payload`` + file IO so merged in-memory graphs
+(Creator multi-source memory) reuse the same parser.
 """
 
 from __future__ import annotations
@@ -138,7 +140,10 @@ class HierarchicalGraphMemory:
     def load(cls, path: str) -> HierarchicalGraphMemory:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
+        return cls.from_payload(data)
 
+    @classmethod
+    def from_payload(cls, data: dict) -> HierarchicalGraphMemory:
         mem = cls()
         mem.video_key = data.get("video_key", "")
         mem.video_path = data.get("video_path", "")
