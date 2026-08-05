@@ -1327,7 +1327,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     flexShrink: 0,
                   }}
                 >
-                  次选
+                  {t("modelConfig.secondary")}
                 </span>
                 <span
                   style={{
@@ -1336,7 +1336,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     color: "var(--color-text-primary)",
                   }}
                 >
-                  Serper（Google）搜索
+                  {t("modelConfig.serperSearch")}
                 </span>
                 <span
                   style={{
@@ -1347,12 +1347,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   }}
                 >
                   {config.grounding.serper_api_key
-                    ? "已配置"
-                    : "未配置，将跳过该渠道"}
+                    ? t("common.configured")
+                    : t("modelConfig.configuredSkipChannel")}
                 </span>
               </div>
               <div>
-                <label className="field-label">Serper API Key（可选）</label>
+                <label className="field-label">{t("modelConfig.serperApiKeyOptional")}</label>
                 <Input.Password
                   placeholder="serper key"
                   value={config.grounding.serper_api_key}

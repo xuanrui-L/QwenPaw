@@ -227,7 +227,11 @@
       "dashscope": "DashScope",
       "openai": "OpenAI Protocol",
       "custom": "Custom"
-    }
+    },
+    "secondary": "Secondary",
+    "serperSearch": "Serper (Google) Search",
+    "configuredSkipChannel": "Not configured, will skip this channel",
+    "serperApiKeyOptional": "Serper API Key (Optional)"
   },
   "modelBadges": {
     "textModel": "Text Model",

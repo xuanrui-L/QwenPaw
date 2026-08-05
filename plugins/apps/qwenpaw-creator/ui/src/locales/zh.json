@@ -227,7 +227,11 @@
       "dashscope": "DashScope（百炼）",
       "openai": "OpenAI 协议",
       "custom": "自定义"
-    }
+    },
+    "secondary": "次选",
+    "serperSearch": "Serper（Google）搜索",
+    "configuredSkipChannel": "未配置，将跳过该渠道",
+    "serperApiKeyOptional": "Serper API Key（可选）"
   },
   "modelBadges": {
     "textModel": "文本模型",
@@ -573,11 +577,9 @@
     "executionPlan": "执行计划：",
     "scope": "范围：",
     "done": "完成",
-    "executing": "执行中",
     "productionFlow": "制作流程",
     "terminate": "终止",
     "currentProject": "当前项目",
-    "waitingReview": "等待审阅",
     "specialistsFailed": "项专业制作失败",
     "continue": "继续",
     "cancel": "取消",
