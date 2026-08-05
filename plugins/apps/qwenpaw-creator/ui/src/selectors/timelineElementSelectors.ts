@@ -115,7 +115,12 @@ export function packDisplayLanes(
 }
 
 export type TimelineTrackType =
-  "subtitle" | "motion" | "clip" | "ai" | "transition" | "audio";
+  | "subtitle"
+  | "motion"
+  | "clip"
+  | "ai"
+  | "transition"
+  | "audio";
 
 export const TRACK_ORDER: TimelineTrackType[] = [
   "ai",
@@ -213,11 +218,11 @@ export function trackOrderedTimelineElements(
     const rightTrack = classifyElementTrack(right);
     const leftRank =
       leftTrack !== null
-        ? (trackRank.get(leftTrack) ?? TRACK_ORDER.length)
+        ? trackRank.get(leftTrack) ?? TRACK_ORDER.length
         : TRACK_ORDER.length;
     const rightRank =
       rightTrack !== null
-        ? (trackRank.get(rightTrack) ?? TRACK_ORDER.length)
+        ? trackRank.get(rightTrack) ?? TRACK_ORDER.length
         : TRACK_ORDER.length;
     return (
       leftRank - rightRank ||
@@ -368,8 +373,7 @@ export function selectedSlotVersion(
     name: slot.kind,
     slot,
     selected: slot.selected_version_id
-      ? (project.assets.artifact_versions_by_id[slot.selected_version_id] ??
-        null)
+      ? project.assets.artifact_versions_by_id[slot.selected_version_id] ?? null
       : null,
   };
 }
@@ -435,7 +439,7 @@ export function elementCreationSummary(
       );
     case "transition": {
       const key = TRANSITION_KIND_LABEL[creation.transition_kind];
-      const label = key ? i18n.t(key) : (creation.transition_kind ?? "");
+      const label = key ? i18n.t(key) : creation.transition_kind ?? "";
       return `${label} ${i18n.t("timeline.elementSummary.transition")}`;
     }
     case "audio":
