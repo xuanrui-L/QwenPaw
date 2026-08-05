@@ -2,6 +2,8 @@
 """patch_project: flat ops assemble the document, the Runtime owns depth."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from services.project_files.agent_tools import (
@@ -221,6 +223,28 @@ def test_invoke_commits_flat_ops_end_to_end(tmp_path):
     entities = result["project"]["visual"]["entities"]
     assert entities["order"] == ["char:hero"]
     assert "/name" in result["changedPointers"]
+
+
+def test_invoke_accepts_double_encoded_ops_string(tmp_path):
+    """Field trip 2026-08-05: the model sent ops as a JSON string on its
+    first ever call. The string parses to the exact list, so decoding it
+    is lossless and must not burn a retry turn."""
+    tools = _tools(tmp_path)
+
+    ops = [{"op": "replace", "path": "/name", "value": "双重编码"}]
+    result = tools.invoke(
+        "patch_project",
+        {"projectId": "project-1", "ops": "\n" + json.dumps(ops) + "\n"},
+    )
+
+    assert result["project"]["name"] == "双重编码"
+
+    # A string that is not a JSON list keeps the loud schema failure.
+    with pytest.raises(AgentProjectToolError):
+        tools.invoke(
+            "patch_project",
+            {"projectId": "project-1", "ops": '{"op": "replace"}'},
+        )
 
 
 def test_invoke_reports_bad_op_without_committing(tmp_path):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from copy import deepcopy
+import json
 from typing import Any, Mapping
 import threading
 
@@ -21,6 +22,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -125,6 +127,21 @@ class PatchProjectToolInput(_ToolModel):
     # Each op is validated by ``apply_patch_ops`` so failures carry the
     # exact op index instead of an opaque pydantic location.
     ops: list[dict[str, Any]] = Field(min_length=1)
+
+    @field_validator("ops", mode="before")
+    @classmethod
+    def _decode_stringified_ops(cls, value: Any) -> Any:
+        # Field trip 2026-08-05: the model double-encoded ops as a JSON
+        # string on its very first call. When the string parses to a list
+        # the decode is lossless, so refusing it only costs a retry turn.
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                return value
+            if isinstance(decoded, list):
+                return decoded
+        return value
 
 
 class AgentProjectToolContext(_ToolModel):
@@ -927,7 +944,24 @@ class AgentProjectTools:
                     },
                 ) from exc
         elif tool_name == PATCH_PROJECT_TOOL_NAME:
-            request = PatchProjectToolInput.model_validate(dict(arguments))
+            try:
+                request = PatchProjectToolInput.model_validate(
+                    dict(arguments),
+                )
+            except ValidationError as exc:
+                raise AgentProjectToolError(
+                    "patch_project 参数无效：ops 必须是操作对象数组（如 "
+                    '[{"op": "replace", "path": "/name", "value": "..."}]），'
+                    "不能是字符串或单个对象。",
+                    code="PATCH_PROJECT_INPUT_INVALID",
+                    details={
+                        "validationErrors": exc.errors(
+                            include_context=False,
+                            include_input=False,
+                            include_url=False,
+                        ),
+                    },
+                ) from exc
             try:
                 result = self.patch_project(
                     project_id=request.project_id,
