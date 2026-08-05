@@ -1258,7 +1258,7 @@ describe("AgentDock origin/main visible fidelity", () => {
     expect(screen.getByText(/"summary": "读取完成"/)).toBeInTheDocument();
   });
 
-  it("renders native Sub-agent tool argument deltas in one live tool card", async () => {
+  it("renders canonical Sub-agent tool arguments in one live tool card", async () => {
     useAgentDockUiStore.getState().setOpen(true);
     useAgentDockUiStore.getState().setAllowExpandDetails(true);
     useCreatorSessionStore.setState((state) => ({
@@ -1304,9 +1304,9 @@ describe("AgentDock origin/main visible fidelity", () => {
           },
         },
         {
-          eventId: "native-tool-delta-0",
+          eventId: "native-tool-started-initial",
           seq: 2,
-          type: "subagent.tool_delta",
+          type: "subagent.tool_started",
           projectId: "p1",
           creatorSessionId: "session-1",
           at: "now",
@@ -1317,9 +1317,8 @@ describe("AgentDock origin/main visible fidelity", () => {
             messageId: "message-native-tool",
             toolCallId: "call-native-tool",
             tool: "read_project_file",
-            deltaIndex: 0,
-            argumentsDelta: '{"path":"story/',
-            state: "streaming",
+            arguments: { path: "story/outline.md" },
+            state: "started",
           },
         },
       ]),
@@ -1339,34 +1338,7 @@ describe("AgentDock origin/main visible fidelity", () => {
     expect(tool).toHaveTextContent("读取素材分析中");
     expect(
       tool.querySelector("[data-subagent-tool-arguments]"),
-    ).toHaveTextContent('{"path":"story/');
-
-    act(() =>
-      useCreatorSessionStore.getState().ingestEvent({
-        eventId: "native-tool-delta-1",
-        seq: 3,
-        type: "subagent.tool_delta",
-        projectId: "p1",
-        creatorSessionId: "session-1",
-        at: "now",
-        data: {
-          parentActionId: "delegate-native-tool",
-          runId: "run-native-tool",
-          role: "visual_development_agent",
-          messageId: "message-native-tool",
-          toolCallId: "call-native-tool",
-          tool: "read_project_file",
-          deltaIndex: 1,
-          argumentsDelta: 'outline.md"}',
-          state: "streaming",
-        },
-      }),
-    );
-    await waitFor(() =>
-      expect(
-        tool.querySelector("[data-subagent-tool-arguments]"),
-      ).toHaveTextContent('"path": "story/outline.md"'),
-    );
+    ).toHaveTextContent('"path": "story/outline.md"');
 
     act(() =>
       useCreatorSessionStore.getState().ingestEvents([

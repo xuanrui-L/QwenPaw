@@ -863,6 +863,11 @@ function SubagentMessageBubble({
   );
 }
 
+function formatToolArgumentBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+}
+
 function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
   const allowExpand = useAgentDockUiStore((state) => state.allowExpandDetails);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
@@ -881,13 +886,9 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
       : item.status;
   const active = resolvedStatus === "started";
   const { expanded, setExpanded } = useLiveDisclosure(active);
-  const rawArguments = Object.entries(item.argumentDeltas ?? {})
-    .sort(([left], [right]) => Number(left) - Number(right))
-    .map(([, value]) => value)
-    .join("");
   const renderedArguments = item.arguments
     ? JSON.stringify(item.arguments, null, 2)
-    : rawArguments;
+    : "";
   const hasArgs = Boolean(renderedArguments);
   const hasResult = item.result !== undefined && item.result !== null;
   const hasOutputEvents = item.outputEvents.length > 0;
@@ -926,6 +927,11 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
               ? "完成"
               : "失败"}
           </span>
+          {active && item.receivedBytes !== undefined && (
+            <span className="text-[9px] text-[var(--color-text-tertiary)]">
+              · 参数 {formatToolArgumentBytes(item.receivedBytes)}
+            </span>
+          )}
         </span>
         {hasDetails && allowExpand && (
           <button
@@ -1224,6 +1230,11 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           {estimatedDuration && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">
               {estimatedDuration}
+            </span>
+          )}
+          {active && data.receivedBytes !== undefined && (
+            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+              · 参数 {formatToolArgumentBytes(data.receivedBytes)}
             </span>
           )}
         </span>
@@ -1732,11 +1743,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                   name: item.toolCall.name,
                   ...(item.toolCall.arguments
                     ? { arguments: item.toolCall.arguments }
-                    : {
-                        argumentsDelta: orderedDeltas(
-                          item.toolCall.argumentDeltas,
-                        ),
-                      }),
+                    : {}),
                 },
                 actionId: item.toolCall.id,
               }
@@ -2422,6 +2429,11 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                     )}
                   </div>
                 ))}
+                {session?.status === "ERROR" && session?.error?.message && (
+                  <div className="mx-3 my-2 rounded-md bg-[var(--color-danger-soft)] px-3 py-2 text-[11px] leading-[1.5] text-[var(--color-danger)]">
+                    {session.error.message}
+                  </div>
+                )}
               </div>
               {showJump && (
                 <button

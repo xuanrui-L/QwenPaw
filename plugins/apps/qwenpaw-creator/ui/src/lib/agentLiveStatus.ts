@@ -278,11 +278,18 @@ export function deriveAgentLiveStatus(
       progressPercent: null,
     };
 
-  // CANCELLED/ERROR are terminal. IDLE remains actionable: an optimistic
+  // ERROR is terminal with a specific error message to surface.
+  if (session?.status === "ERROR")
+    return {
+      state: "idle",
+      label: session.error?.message || "执行失败",
+      progressPercent: null,
+    };
+
+  // CANCELLED is terminal. IDLE remains actionable: an optimistic
   // queued message must be visible while the backend transitions to RUNNING.
   if (
     session?.status === "CANCELLED" ||
-    session?.status === "ERROR" ||
     (session?.status === "IDLE" && !hasQueuedInput)
   )
     return {
