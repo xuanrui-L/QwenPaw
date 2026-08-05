@@ -254,6 +254,7 @@ assets.files_by_id
 
 - 每个 VisualEntity 的 continuity 是否覆盖了必要的稳定性描述；
 - `required_variant_ids` 是否完整覆盖用户声明的全部状态，且每一项都已物化为 Variant 并选中真实产物；
+- Element 引用的每个 `cast_lineups` 阵容图是否都已生成并选中产物（`selected_artifact_version_id` 非空）：声明了 `cast_lineup_refs` 但阵容图未生成时，后端会确定性拒绝分镜生成，不要在阵容图缺失时返回 `[SUCCESS]`；
 - 同一实体的多个 Variant 之间的核心身份特征是否一致；
 - Variant 的 Prompt 是否使用了四维结构（主体/姿态/环境/风格）；
 - 参考图是否已绑定真实版本 ID，且不同实体的参考不互相矛盾；

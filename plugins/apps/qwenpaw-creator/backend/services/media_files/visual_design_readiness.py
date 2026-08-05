@@ -23,6 +23,11 @@ class VisualDesignReadinessIssue:
             return f"{self.entity_id} 缺少必需 Variant {self.variant_id}"
         if self.code == "MISSING_VARIANT_BINDING":
             return f"{self.element_id} 未绑定 {self.entity_id} 的具体 Variant"
+        if self.code == "MISSING_CAST_LINEUP_IMAGE":
+            return (
+                f"{self.element_id} 引用的阵容图 {self.entity_id} 尚未生成："
+                f"先对 lineup 目标调用 image_generation"
+            )
         if self.variant_id is not None:
             return f"{self.entity_id}/{self.variant_id} 尚无使用中视觉产物"
         return f"{self.entity_id} 尚无使用中视觉产物"
@@ -109,6 +114,44 @@ def _entity_readiness_issues(
     return issues
 
 
+def _lineup_readiness_issues(
+    project: Project,
+) -> list[VisualDesignReadinessIssue]:
+    """Declared lineup references must be materialized before storyboards.
+
+    The chain-level skip keeps generation alive for elements that never
+    declared a lineup, but a declared ``cast_lineup_refs`` is the model's
+    own contract: field run 2026-08-05 showed the specialist finishing
+    individual artwork and skipping the lineup entirely, so storyboards
+    shipped without their group anchor. Anything skippable gets skipped —
+    hold the gate instead.
+    """
+
+    issues: list[VisualDesignReadinessIssue] = []
+    for timeline_id in project.timelines.order:
+        timeline = project.timelines.items[timeline_id]
+        for element_id, element in timeline.elements_by_id.items():
+            if not element.enabled or not isinstance(
+                element.creation,
+                R2VCreation,
+            ):
+                continue
+            for lineup_ref in element.creation.cast_lineup_refs:
+                lineup = project.visual.cast_lineups.items.get(lineup_ref)
+                if (
+                    lineup is None
+                    or lineup.selected_artifact_version_id is None
+                ):
+                    issues.append(
+                        VisualDesignReadinessIssue(
+                            code="MISSING_CAST_LINEUP_IMAGE",
+                            entity_id=lineup_ref,
+                            element_id=element_id,
+                        ),
+                    )
+    return issues
+
+
 def visual_design_readiness_issues(
     project: Project,
 ) -> tuple[VisualDesignReadinessIssue, ...]:
@@ -128,6 +171,7 @@ def visual_design_readiness_issues(
             continue
         entity = project.visual.entities.items[entity_id]
         issues.extend(_entity_readiness_issues(entity, element_references))
+    issues.extend(_lineup_readiness_issues(project))
 
     return tuple(issues)
 

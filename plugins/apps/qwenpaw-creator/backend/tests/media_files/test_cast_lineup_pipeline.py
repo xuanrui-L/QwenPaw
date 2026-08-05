@@ -20,12 +20,19 @@ from services.media_files.image_execution import (
     _lineup_character_reference_ids,
     _resolve_request,
 )
+from services.media_files.visual_design_readiness import (
+    assert_visual_design_ready_for_storyboards,
+    visual_design_readiness_issues,
+)
 from services.media_files.visual_reference_resolution import (
     resolve_r2v_visual_reference_version_ids,
 )
 from services.project_files.models import (
+    ElementLocation,
     Project,
     R2VCreation,
+    TimelineElement,
+    TimelineSpan,
     VisualCastLineup,
     VisualEntity,
     VisualVariant,
@@ -245,3 +252,77 @@ def test_project_assets_scope_admits_lineup_targets() -> None:
         target_ref="lineup:",
         admitted_target_refs=["project:assets"],
     )
+
+
+def _element_with_lineup_ref(*, lineup_refs: list[str]) -> TimelineElement:
+    return TimelineElement(
+        element_id="elem:duo",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=R2VCreation(
+            character_refs=["char:a", "char:b"],
+            visual_variant_refs={"char:a": "var:x", "char:b": "var:y"},
+            cast_lineup_refs=lineup_refs,
+        ),
+    )
+
+
+def test_storyboard_gate_blocks_declared_lineups_without_artwork() -> None:
+    """Field run 2026-08-05: the specialist finished individual artwork
+    and skipped the lineup entirely, so storyboards shipped without the
+    group anchor. A declared cast_lineup_refs is the model's own contract
+    and must hold the storyboard gate until the image exists."""
+    project = _project(
+        _entity("char:a", variants={"var:x": "art:a-main"}),
+        _entity("char:b", variants={"var:y": "art:b-main"}),
+    )
+    project.visual.cast_lineups.items["lineup:main"] = _lineup(
+        "char:a",
+        "char:b",
+    )
+    project.visual.cast_lineups.order.append("lineup:main")
+    project.timelines.items["timeline:main"].elements_by_id[
+        "elem:duo"
+    ] = _element_with_lineup_ref(lineup_refs=["lineup:main"])
+
+    issues = visual_design_readiness_issues(project)
+    assert [issue.code for issue in issues] == ["MISSING_CAST_LINEUP_IMAGE"]
+    with pytest.raises(ValidationError, match="阵容图 lineup:main 尚未生成"):
+        assert_visual_design_ready_for_storyboards(project)
+
+
+def test_storyboard_gate_opens_once_the_lineup_is_drawn() -> None:
+    project = _project(
+        _entity("char:a", variants={"var:x": "art:a-main"}),
+        _entity("char:b", variants={"var:y": "art:b-main"}),
+    )
+    project.visual.cast_lineups.items["lineup:main"] = _lineup(
+        "char:a",
+        "char:b",
+        selected="art:lineup-main",
+    )
+    project.visual.cast_lineups.order.append("lineup:main")
+    project.timelines.items["timeline:main"].elements_by_id[
+        "elem:duo"
+    ] = _element_with_lineup_ref(lineup_refs=["lineup:main"])
+
+    assert not visual_design_readiness_issues(project)
+
+
+def test_storyboard_gate_ignores_elements_without_lineup_refs() -> None:
+    # The chain-level skip stays available for elements that never
+    # declared a lineup — only declared references hold the gate.
+    project = _project(
+        _entity("char:a", variants={"var:x": "art:a-main"}),
+        _entity("char:b", variants={"var:y": "art:b-main"}),
+    )
+    project.visual.cast_lineups.items["lineup:main"] = _lineup(
+        "char:a",
+        "char:b",
+    )
+    project.visual.cast_lineups.order.append("lineup:main")
+    project.timelines.items["timeline:main"].elements_by_id[
+        "elem:duo"
+    ] = _element_with_lineup_ref(lineup_refs=[])
+
+    assert not visual_design_readiness_issues(project)
