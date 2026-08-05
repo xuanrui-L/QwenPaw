@@ -795,9 +795,7 @@ class TestStaticDocumentGate:
             inside = 5 <= x < 11 and 5 <= y < 11
             return (value, 255, 255, 255) if inside else (0, 0, 0, 0)
 
-        pixels = {
-            index: _centered for index in range(self._SAMPLE_COUNT - 1)
-        }
+        pixels = {index: _centered for index in range(self._SAMPLE_COUNT - 1)}
         pixels[self._SAMPLE_COUNT - 1] = wobble
         monkeypatch.setattr(
             motion_overlay,
