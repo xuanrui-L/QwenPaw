@@ -897,7 +897,7 @@ class AgentProjectTools:
         )
         self._remember(result.snapshot)
         snapshot = self._snapshot_result(result.snapshot)
-        return AgentProjectCommitResult(
+        commit_result = AgentProjectCommitResult(
             **snapshot.model_dump(mode="python"),
             transactionId=result.transaction_id,
             changedPointers=[
@@ -910,6 +910,12 @@ class AgentProjectTools:
             if result.review is not None
             else None,
         )
+        advisory = self._sync_review_advisory(commit_result)
+        if advisory is not None:
+            commit_result = commit_result.model_copy(
+                update={"review_advisory": advisory},
+            )
+        return commit_result
 
     def elements_at(
         self,
