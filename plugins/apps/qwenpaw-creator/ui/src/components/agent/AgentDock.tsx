@@ -41,6 +41,8 @@ import {
   type SubagentStreamTool,
 } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { useWorkGraphStore } from "@/store/workGraphStore";
+import WorkGraphPanel from "@/components/agent/WorkGraphPanel";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -1479,6 +1481,7 @@ function WorkspacePanel() {
   const events = useCreatorSessionStore((state) => state.events);
   const runs = useCreatorTaskViewStore((state) => state.runs);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
+  const workGraph = useWorkGraphStore((state) => state.graph);
   const project = useProjectSnapshotStore((state) => state.project);
   const timeline = selectPrimaryTimeline(project);
   const sourceCount = project
@@ -1553,44 +1556,51 @@ function WorkspacePanel() {
         </p>
       </div>
 
-      {(runs.length > 0 || tasks.length > 0) && (
-        <div>
-          <p className="font-semibold text-[var(--color-text-secondary)]">
-            专业制作进度
-          </p>
-          <ul className="mt-0.5 space-y-0.5">
-            {runs.slice(0, 4).map((run) => (
-              <li
-                key={run.id}
-                className="flex items-center gap-1.5 text-[var(--color-text-tertiary)]"
-              >
-                <span className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)]">
-                  {run.displayName} ·{" "}
-                  {run.targetRefs
-                    .map((ref) => creatorTargetLabel(ref, project))
-                    .join("、") || "当前项目"}
-                </span>
-                <span className="shrink-0 text-[9px]">
-                  {creatorStatusLabel(run.status)}
-                </span>
-              </li>
-            ))}
-            {tasks
-              .filter(
-                (task) => task.status === "QUEUED" || task.status === "RUNNING",
-              )
-              .slice(0, 3)
-              .map((task) => (
+      {project && workGraph && workGraph.nodes.length > 0 ? (
+        // The derived work graph supersedes the flat specialist list: the
+        // production DAG with per-node status, dependencies and actions.
+        <WorkGraphPanel projectId={project.project_id} />
+      ) : (
+        (runs.length > 0 || tasks.length > 0) && (
+          <div>
+            <p className="font-semibold text-[var(--color-text-secondary)]">
+              专业制作进度
+            </p>
+            <ul className="mt-0.5 space-y-0.5">
+              {runs.slice(0, 4).map((run) => (
                 <li
-                  key={task.id}
-                  className="truncate text-[var(--color-text-tertiary)]"
+                  key={run.id}
+                  className="flex items-center gap-1.5 text-[var(--color-text-tertiary)]"
                 >
-                  {taskKindLabel(task.kind)} →{" "}
-                  {creatorTargetLabel(task.targetRef, project)}
+                  <span className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)]">
+                    {run.displayName} ·{" "}
+                    {run.targetRefs
+                      .map((ref) => creatorTargetLabel(ref, project))
+                      .join("、") || "当前项目"}
+                  </span>
+                  <span className="shrink-0 text-[9px]">
+                    {creatorStatusLabel(run.status)}
+                  </span>
                 </li>
               ))}
-          </ul>
-        </div>
+              {tasks
+                .filter(
+                  (task) =>
+                    task.status === "QUEUED" || task.status === "RUNNING",
+                )
+                .slice(0, 3)
+                .map((task) => (
+                  <li
+                    key={task.id}
+                    className="truncate text-[var(--color-text-tertiary)]"
+                  >
+                    {taskKindLabel(task.kind)} →{" "}
+                    {creatorTargetLabel(task.targetRef, project)}
+                  </li>
+                ))}
+            </ul>
+          </div>
+        )
       )}
 
       {recentWrites.length > 0 && (

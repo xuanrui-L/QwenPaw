@@ -147,7 +147,7 @@ from .models import (
 from .native_media import source_intelligence_content_parts
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
-from .work_graph import WorkNodeStatus, derive_work_graph
+from .work_graph import derive_work_graph
 from .work_scheduler import WorkGraphScheduler
 from .subagents import (
     DELEGATE_TOOL_NAME,
@@ -4402,9 +4402,32 @@ class FileCreatorAgentRuntime:
             )
         except Exception:  # pylint: disable=broad-except
             return
-        unfinished = _unfinished_video_element_ids(snapshot.project)
-        if not unfinished and not after_failure:
+        try:
+            records = await asyncio.to_thread(
+                self.executions.list_tasks,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            records = []
+        graph = derive_work_graph(snapshot.project, tasks=records)
+        unfinished_nodes = graph.unfinished()
+        if not unfinished_nodes and not after_failure:
             return
+        # Let the machine take every dispatchable gap before deciding to
+        # spend a model turn: the scheduler fans out READY media nodes.
+        self.work_scheduler.wake(project_id)
+        model_required = graph.model_required_nodes()
+        if (
+            not after_failure
+            and self.work_scheduler.enabled()
+            and not model_required
+        ):
+            # Every remaining gap is machine-dispatchable (READY/RUNNING):
+            # the scheduler owns it; a resume would only burn model turns.
+            return
+        unfinished = [
+            node.label for node in (model_required or unfinished_nodes)
+        ]
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -4452,14 +4475,21 @@ class FileCreatorAgentRuntime:
                 "请回顾会话历史，从中断处继续执行，不要重复已完成的工作。"
             )
             if unfinished:
-                text += "\n以下 Element 仍缺少成片视频：" + "、".join(unfinished) + "。"
+                text += (
+                    "\n以下环节尚未完成："
+                    + "、".join(unfinished[:8])
+                    + "。可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派。"
+                )
         else:
+            reasons = []
+            for node in model_required[:8]:
+                why = node.error or "、".join(node.missing[:3]) or "待处理"
+                reasons.append(f"{node.label}（{why}）")
             text = (
-                "【系统自动消息 · YOLO 持续执行】主线回合已结束，但项目尚未到达终态。\n"
-                "以下 Element 仍缺少成片视频："
-                + "、".join(unfinished)
-                + "。\n请从未完成的 Element 继续推进，不要重复已完成的工作；"
-                "全部完成后再进行收尾。"
+                "【系统自动消息 · YOLO 持续执行】主线回合已结束，但以下环节需要"
+                "你处理（可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派）：\n"
+                + "\n".join(f"- {reason}" for reason in reasons)
+                + "\n请针对上述环节修复结构、补全 prompt 或调整参数；不要重复已完成的工作。"
             )
         appended = await asyncio.to_thread(
             self.sessions.append_message,
@@ -4474,6 +4504,9 @@ class FileCreatorAgentRuntime:
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
                 "unfinishedElements": unfinished,
+                "modelRequiredNodes": [
+                    node.node_id for node in model_required[:12]
+                ],
             },
         )
         await self._event(
