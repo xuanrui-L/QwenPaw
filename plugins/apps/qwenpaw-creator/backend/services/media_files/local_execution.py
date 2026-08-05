@@ -1084,6 +1084,65 @@ class FfmpegLocalMediaRunner:
             "".join(f"file '{_ffconcat_path(path)}'\n" for path in inputs),
             encoding="utf-8",
         )
+        # Segment AAC frame grids never line up exactly with their video
+        # duration, so stream-copying audio through the concat demuxer
+        # leaves sub-frame gaps at every joint. The mp4 muxer stretches
+        # the packet before each gap to cover it, and browsers abort
+        # decoding on such oversized packets — every seek past the first
+        # joint then hangs. Video packets are unaffected and stay copied;
+        # audio is re-concatenated from the decoded segments instead.
+        audio_flags = [self._probe_has_audio(path) for path in inputs]
+        if any(audio_flags):
+            audio_labels: list[str] = []
+            filter_parts: list[str] = []
+            for index, (path, has_audio) in enumerate(
+                zip(inputs, audio_flags),
+            ):
+                if has_audio:
+                    audio_labels.append(f"[{index + 1}:a]")
+                    continue
+                duration = self._probe_duration_seconds(path)
+                filter_parts.append(
+                    "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                    f"atrim=duration={duration:.6f}[silent{index}]",
+                )
+                audio_labels.append(f"[silent{index}]")
+            filter_parts.append(
+                "".join(audio_labels)
+                + f"concat=n={len(inputs)}:v=0:a=1,"
+                + "aresample=async=1:first_pts=0[outa]",
+            )
+            self._run(
+                [
+                    "-y",
+                    "-f",
+                    "concat",
+                    "-safe",
+                    "0",
+                    "-i",
+                    os.fspath(manifest),
+                    *(
+                        argument
+                        for path in inputs
+                        for argument in ("-i", os.fspath(path))
+                    ),
+                    "-filter_complex",
+                    ";".join(filter_parts),
+                    "-map",
+                    "0:v",
+                    "-c:v",
+                    "copy",
+                    "-map",
+                    "[outa]",
+                    "-c:a",
+                    "aac",
+                    "-movflags",
+                    "+faststart",
+                    os.fspath(output),
+                ],
+                cwd=work_dir,
+            )
+            return
         self._run(
             [
                 "-y",
@@ -1101,6 +1160,17 @@ class FfmpegLocalMediaRunner:
             ],
             cwd=work_dir,
         )
+
+    def _probe_duration_seconds(self, path: Path) -> float:
+        try:
+            duration = probe_media(
+                os.fspath(path),
+                ffmpeg_path=self.executable,
+                timeout=min(self.timeout_seconds, 30.0),
+            ).duration_seconds
+        except MediaProbeError:
+            duration = None
+        return duration if duration and duration > 0 else 1 / 30
 
     def _run(self, arguments: Sequence[str], *, cwd: Path) -> None:
         try:
@@ -1915,7 +1985,10 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # Renderer behaviour version: bump it when a semantic fix in the
             # rendering logic (e.g. the stale motion-document fallback) must
             # invalidate old renders and force recomposition.
-            "rendererVersion": 2,
+            # v3: audio is filter-concatenated from decoded segments — the
+            # stream-copied joints produced oversized AAC packets browsers
+            # refuse to decode, freezing every seek past the first joint.
+            "rendererVersion": 3,
             "targetRef": resolved.target_ref,
             "inputs": [
                 {

@@ -115,6 +115,20 @@ function mediaTargetSeconds(
   return media.sourceInSeconds + offset;
 }
 
+/**
+ * Clamp a metadata-derived seek target to what the mounted element can
+ * actually reach. Metadata duration may exceed the real decoded duration
+ * by a few frames; an unreachable target would otherwise keep the drift
+ * check failing forever and pin the "正在定位画面" notice.
+ */
+function reachableTargetSeconds(
+  target: number,
+  node: HTMLVideoElement,
+): number {
+  if (!Number.isFinite(node.duration)) return target;
+  return Math.min(target, Math.max(0, node.duration - 0.033));
+}
+
 function PlaceholderLayer({ layer }: { layer: ElementPlayback }) {
   const { element, status } = layer;
   const meta = resolveElementVisualMeta(element);
@@ -281,29 +295,34 @@ function motionMotif(
 }
 
 /** Resolve the document body: inline directly, externalized via fetch. */
-function useMotionDocumentHtml(
-  motion: MotionGraphicDocument | null,
-): string | null {
+function useMotionDocumentHtml(motion: MotionGraphicDocument | null): {
+  html: string | null;
+  failed: boolean;
+} {
   const inline = motion?.html ?? null;
   const fileId = motion?.html_file_id ?? null;
   const [fetched, setFetched] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     if (inline || !fileId) return undefined;
     let cancelled = false;
     setFetched(null);
+    setFailed(false);
     fetchMotionDocument(fileId)
       .then((text) => {
         if (!cancelled) setFetched(text);
       })
       .catch(() => {
-        if (!cancelled) setFetched(null);
+        // Fail open: an unreachable externalized body must release the
+        // readiness gate instead of pinning the preview notice forever.
+        if (!cancelled) setFailed(true);
       });
     return () => {
       cancelled = true;
     };
   }, [fileId, inline]);
-  if (inline) return inline;
-  return fileId ? fetched : null;
+  if (inline) return { html: inline, failed: false };
+  return { html: fileId ? fetched : null, failed };
 }
 
 function MotionOverlayLayer({
@@ -334,7 +353,9 @@ function MotionOverlayLayer({
   const isJsTimeline = motion?.format === "html_js";
   const posterFileId = isJsTimeline ? motion?.html_file_id ?? null : null;
   const [posterFailed, setPosterFailed] = useState(false);
-  const html = useMotionDocumentHtml(isJsTimeline ? null : motion ?? null);
+  const { html, failed: htmlFailed } = useMotionDocumentHtml(
+    isJsTimeline ? null : motion ?? null,
+  );
   const isTextOverlay =
     element.creation.type === "overlay" &&
     overlayContentKind(element.creation) === "copy" &&
@@ -381,6 +402,13 @@ function MotionOverlayLayer({
     onVisualReadyChange,
     visualKey,
   ]);
+  // An externalized html_css body whose fetch failed also fails open:
+  // there is nothing to render, so it must not hold the preview hostage.
+  useEffect(() => {
+    if (!isJsTimeline && htmlFailed) {
+      onVisualReadyChange(visualKey, true);
+    }
+  }, [isJsTimeline, htmlFailed, onVisualReadyChange, visualKey]);
 
   if (!motion) return null;
   if (isJsTimeline) {
@@ -601,23 +629,31 @@ export default function TimelineLivePreview({
       if (!visible || !playing || isBeyondSource) {
         // Pause when beyond source duration, out of view, or not playing
         if (!media.paused) media.pause();
-        if (visible && isBeyondSource && Number.isFinite(media.duration)) {
-          // Freeze on last frame when beyond source
-          media.currentTime = Math.min(
-            media.duration,
-            effectiveWindowSeconds - 0.033,
-          );
+        if (visible && isBeyondSource) {
+          // Freeze on the same last-window frame the readiness check
+          // expects: mediaTargetSeconds already clamps to the window end
+          // and includes the source-in offset. Writing a bare
+          // window-relative time here (without source-in) left the
+          // element seconds away from the drift target forever.
+          const frozen = reachableTargetSeconds(target, media);
+          if (Math.abs(media.currentTime - frozen) > 0.001) {
+            media.currentTime = frozen;
+          }
         } else if (
           !playing &&
           visible &&
-          Math.abs(media.currentTime - target) > DRIFT_TOLERANCE_SECONDS
+          Math.abs(media.currentTime - reachableTargetSeconds(target, media)) >
+            DRIFT_TOLERANCE_SECONDS
         ) {
-          media.currentTime = target;
+          media.currentTime = reachableTargetSeconds(target, media);
         }
         return;
       }
-      if (Math.abs(media.currentTime - target) > DRIFT_TOLERANCE_SECONDS) {
-        media.currentTime = target;
+      if (
+        Math.abs(media.currentTime - reachableTargetSeconds(target, media)) >
+        DRIFT_TOLERANCE_SECONDS
+      ) {
+        media.currentTime = reachableTargetSeconds(target, media);
       }
       if (media.paused) {
         media.play()?.catch(() => undefined);
@@ -683,7 +719,10 @@ export default function TimelineLivePreview({
           return (
             Math.abs(
               node.currentTime -
-                mediaTargetSeconds(layer, playheadTick, ticksPerSecond),
+                reachableTargetSeconds(
+                  mediaTargetSeconds(layer, playheadTick, ticksPerSecond),
+                  node,
+                ),
             ) > DRIFT_TOLERANCE_SECONDS
           );
         }

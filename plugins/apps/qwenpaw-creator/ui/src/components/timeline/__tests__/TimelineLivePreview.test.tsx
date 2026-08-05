@@ -542,4 +542,67 @@ describe("TimelineLivePreview", () => {
     ) as HTMLVideoElement;
     expect(editLayer.currentTime).toBeCloseTo(2, 3);
   });
+
+  it("freezes a trimmed clip on the frame the readiness check expects", () => {
+    // A clip cut from the middle of its source (source_in 2s, window 3s)
+    // whose span outlives the window: the frozen frame must live at
+    // source_in + window (the drift target), not at the bare window
+    // offset — that mismatch pinned the "正在定位画面" notice forever.
+    // jsdom reports duration=NaN which skipped the old freeze branch, so
+    // pin a finite decoded duration like a real browser.
+    const originalDuration = Object.getOwnPropertyDescriptor(
+      HTMLMediaElement.prototype,
+      "duration",
+    );
+    Object.defineProperty(HTMLMediaElement.prototype, "duration", {
+      configurable: true,
+      get: () => 5.04,
+    });
+    try {
+      const project = cloneProject();
+      const timeline = project.timelines.items["timeline:main"];
+      const source =
+        timeline.elements_by_id["edit-opening"].render_source ?? ({} as never);
+      Object.assign(source, {
+        source_in_tick: 2000,
+        source_out_tick: 5000,
+      });
+      const { container } = renderPreview(project, 4500);
+
+      const editLayer = container.querySelector(
+        '[data-live-layer="edit-opening"]',
+      ) as HTMLVideoElement;
+      expect(editLayer.currentTime).toBeCloseTo(2 + 3 - 0.033, 3);
+
+      // Release every mounted video layer; with the old freeze offset the
+      // trimmed clip stayed seconds away from the drift target and the
+      // notice below could never clear.
+      container
+        .querySelectorAll<HTMLVideoElement>("[data-live-layer]")
+        .forEach((video) => {
+          Object.defineProperty(video, "readyState", {
+            configurable: true,
+            value: 2,
+          });
+          fireEvent.loadedData(video);
+          fireEvent.seeked(video);
+        });
+      container
+        .querySelectorAll("[data-live-motion-overlay]")
+        .forEach((frame) => fireEvent.load(frame));
+      expect(
+        container.querySelector("[data-live-preview-incomplete]"),
+      ).not.toBeInTheDocument();
+    } finally {
+      if (originalDuration) {
+        Object.defineProperty(
+          HTMLMediaElement.prototype,
+          "duration",
+          originalDuration,
+        );
+      } else {
+        delete (HTMLMediaElement.prototype as { duration?: number }).duration;
+      }
+    }
+  });
 });
