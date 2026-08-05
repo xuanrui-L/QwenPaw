@@ -4375,6 +4375,7 @@ class FileCreatorAgentRuntime:
         session_id: str,
         conversation_id: str,
         run_id: str,
+        after_failure: bool = False,
     ) -> None:
         """Keep an unattended (YOLO) project moving until it is finished.
 
@@ -4385,6 +4386,11 @@ class FileCreatorAgentRuntime:
         elements still lack their main video the Runtime injects the same
         “继续” a supervising user would type. Two fuses stop runaway loops:
         a consecutive-resume cap and a no-progress breaker.
+
+        ``after_failure`` covers retryable faults (empty model turns,
+        transport blips): the failure itself proves the work is unfinished,
+        so the completion criterion is skipped — an early failure with no
+        elements yet must still resume.
         """
 
         if get_media_review_mode() != MEDIA_REVIEW_AUTO_APPROVE:
@@ -4397,7 +4403,7 @@ class FileCreatorAgentRuntime:
         except Exception:  # pylint: disable=broad-except
             return
         unfinished = _unfinished_video_element_ids(snapshot.project)
-        if not unfinished:
+        if not unfinished and not after_failure:
             return
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
@@ -4439,13 +4445,22 @@ class FileCreatorAgentRuntime:
                 snapshot.generation,
             )
             return
-        text = (
-            "【系统自动消息 · YOLO 持续执行】主线回合已结束，但项目尚未到达终态。\n"
-            "以下 Element 仍缺少成片视频："
-            + "、".join(unfinished)
-            + "。\n请从未完成的 Element 继续推进，不要重复已完成的工作；"
-            "全部完成后再进行收尾。"
-        )
+        if after_failure:
+            text = (
+                "【系统自动消息 · YOLO 持续执行】上一回合因瞬态故障中止"
+                "（如模型空响应或传输抖动），项目尚未完成。\n"
+                "请回顾会话历史，从中断处继续执行，不要重复已完成的工作。"
+            )
+            if unfinished:
+                text += "\n以下 Element 仍缺少成片视频：" + "、".join(unfinished) + "。"
+        else:
+            text = (
+                "【系统自动消息 · YOLO 持续执行】主线回合已结束，但项目尚未到达终态。\n"
+                "以下 Element 仍缺少成片视频："
+                + "、".join(unfinished)
+                + "。\n请从未完成的 Element 继续推进，不要重复已完成的工作；"
+                "全部完成后再进行收尾。"
+            )
         appended = await asyncio.to_thread(
             self.sessions.append_message,
             project_id,
@@ -4823,6 +4838,20 @@ class FileCreatorAgentRuntime:
             retryable=retryable,
             details={"runId": run_id, "messageSeq": request.message_seq},
         )
+        # Unattended (YOLO) projects must not stay parked on a transient
+        # model fault at 3am: a retryable failure gets the same completion
+        # check as a succeeded run. The resume fuses (consecutive cap and
+        # the no-progress generation breaker) bound a run that keeps dying
+        # at the same spot, so this cannot loop forever. Non-retryable
+        # failures still wait for a human.
+        if retryable:
+            await self._queue_yolo_completion_resume(
+                project_id=project_id,
+                session_id=session_id,
+                conversation_id=request.conversation_id,
+                run_id=run_id,
+                after_failure=True,
+            )
         await self._event(
             project_id,
             session_id,
