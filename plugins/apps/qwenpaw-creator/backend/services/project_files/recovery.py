@@ -56,7 +56,10 @@ from .commit import (
 )
 from .json_pointer import JsonChange, diff_json, pointers_overlap
 from .models import CURRENT_PROJECT_SCHEMA_VERSION, Project
-from .serialization import project_etag
+from .serialization import (
+    load_project_document,
+    project_document_etag,
+)
 from .store import ProjectSnapshot, ProjectStore
 
 logger = logging.getLogger("qwenpaw.creator.project_files.recovery")
@@ -545,12 +548,15 @@ class ProjectCommitRecoveryCoordinator:
             )
         base_data = copy.deepcopy(dict(base_value))
         candidate_data = copy.deepcopy(dict(candidate_value))
-        base_project = Project.model_validate(base_data)
+        base_project = load_project_document(base_data)
         if base_project.project_id != project_id:
             raise _IntegrityProblem(
                 "base Project identity does not match journal",
             )
-        if project_etag(base_project) != journal.base_etag:
+        if (
+            project_document_etag(base_data, project=base_project)
+            != journal.base_etag
+        ):
             raise _IntegrityProblem(
                 "base.json does not match journal base_etag",
             )
@@ -599,8 +605,8 @@ class ProjectCommitRecoveryCoordinator:
                 )
             latest_data = copy.deepcopy(dict(latest_value))
             final_data = copy.deepcopy(dict(final_value))
-            latest_project = Project.model_validate(latest_data)
-            final_project = Project.model_validate(final_data)
+            latest_project = load_project_document(latest_data)
+            final_project = load_project_document(final_data)
             if (
                 latest_project.project_id != project_id
                 or final_project.project_id != project_id
@@ -612,13 +618,19 @@ class ProjectCommitRecoveryCoordinator:
                 raise _IntegrityProblem(
                     "publish snapshots require publish_base_etag",
                 )
-            if project_etag(latest_project) != journal.publish_base_etag:
+            if (
+                project_document_etag(latest_data, project=latest_project)
+                != journal.publish_base_etag
+            ):
                 raise _IntegrityProblem(
                     "latest.json does not match publish_base_etag",
                 )
             if journal.final_etag is None:
                 raise _IntegrityProblem("final.json requires final_etag")
-            if project_etag(final_project) != journal.final_etag:
+            if (
+                project_document_etag(final_data, project=final_project)
+                != journal.final_etag
+            ):
                 raise _IntegrityProblem("final.json does not match final_etag")
             if final_project.generation == latest_project.generation:
                 if (
@@ -1096,7 +1108,10 @@ class ProjectCommitRecoveryCoordinator:
             should_update_aggregate = (
                 not no_change
                 or aggregate_round.value.status
-                in {TransactionStatus.ACTIVE, TransactionStatus.ABORTED}
+                in {
+                    TransactionStatus.ACTIVE,
+                    TransactionStatus.ABORTED,
+                }
             )
             if should_update_aggregate:
                 inputs.aggregate_round_store.compare_and_swap(

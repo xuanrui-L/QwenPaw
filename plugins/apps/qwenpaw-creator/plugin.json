@@ -144,6 +144,14 @@
             "help": "Optional primary text and image retrieval provider."
           },
           {
+            "name": "serper_api_key",
+            "label": "Serper API Key",
+            "type": "password",
+            "required": false,
+            "placeholder": "serper key",
+            "help": "Optional Google search provider tried after Tavily."
+          },
+          {
             "name": "native_search_enabled",
             "label": "Qwen Native Search Fallback",
             "type": "select",

@@ -161,7 +161,7 @@ describe("AssetsPage Project projection", () => {
     );
     project.visual.entities.items.cat.variants.items["variant:cat:night"] = {
       variant_id: "variant:cat:night",
-      requirements: "夜间造型：蓝色围巾、红色项圈",
+      requirements: "Pixar 3D风格。夜间造型：蓝色围巾、红色项圈",
       prompt: "夜间的圆润大橘猫",
       reference_asset_version_ids: [],
       reference_artifact_version_ids: [],
@@ -175,8 +175,21 @@ describe("AssetsPage Project projection", () => {
       name: "雨夜小巷",
       description: "湿润路面与暖色路灯",
       continuity: "保持同一街区结构",
-      required_variant_ids: [],
-      variants: { order: [], items: {} },
+      required_variant_ids: ["variant:scene:default"],
+      variants: {
+        order: ["variant:scene:default"],
+        items: {
+          "variant:scene:default": {
+            variant_id: "variant:scene:default",
+            requirements: "Pixar 3D风格。雨夜街区环境设定",
+            prompt: "雨夜小巷",
+            reference_asset_version_ids: [],
+            reference_artifact_version_ids: [],
+            generated_artifact_version_ids: [],
+            selected_artifact_version_id: null,
+          },
+        },
+      },
       selected_artifact_version_id: null,
     };
     project.visual.entities.items["prop:bell"] = {
@@ -185,8 +198,21 @@ describe("AssetsPage Project projection", () => {
       name: "红色铃铛",
       description: "主角项圈上的铃铛",
       continuity: "所有画面保持红色",
-      required_variant_ids: [],
-      variants: { order: [], items: {} },
+      required_variant_ids: ["variant:prop:default"],
+      variants: {
+        order: ["variant:prop:default"],
+        items: {
+          "variant:prop:default": {
+            variant_id: "variant:prop:default",
+            requirements: "Pixar 3D风格。红色铃铛道具设定",
+            prompt: "红色铃铛",
+            reference_asset_version_ids: [],
+            reference_artifact_version_ids: [],
+            generated_artifact_version_ids: [],
+            selected_artifact_version_id: null,
+          },
+        },
+      },
       selected_artifact_version_id: null,
     };
     seedProject(project);
@@ -203,9 +229,13 @@ describe("AssetsPage Project projection", () => {
       expect.stringContaining("道具"),
     ]);
     expect(groupLabels[0]).toContain("2 个造型");
-    expect(screen.getByText("夜间造型")).toBeInTheDocument();
-    expect(screen.getByText("雨夜小巷")).toBeInTheDocument();
-    expect(screen.getByText("红色铃铛")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Night" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "雨夜小巷" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "红色铃铛" }),
+    ).toBeInTheDocument();
     expect(screen.getAllByText("待生成")).toHaveLength(3);
 
     fireEvent.click(screen.getByRole("button", { name: "图片" }));

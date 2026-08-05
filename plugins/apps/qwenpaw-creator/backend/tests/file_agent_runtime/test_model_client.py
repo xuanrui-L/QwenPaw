@@ -16,6 +16,7 @@ from agentscope.message import (
 )
 from agentscope.model import DashScopeChatModel
 from agentscope.model._model_response import ChatResponse
+from agentscope.model._model_usage import ChatUsage
 import pytest
 
 from services.file_agent_runtime.model_client import (
@@ -30,7 +31,6 @@ from services.file_agent_runtime.model_client import (
     records_to_agentscope_messages,
 )
 from services.file_agent_runtime import model_client
-
 
 pytestmark = pytest.mark.unit
 
@@ -242,6 +242,12 @@ def test_agentscope_client_streams_native_blocks_and_raw_argument_deltas() -> (
                         ),
                     ],
                     is_last=True,
+                    usage=ChatUsage(
+                        input_tokens=123,
+                        output_tokens=45,
+                        time=1.5,
+                        cache_input_tokens=100,
+                    ),
                 )
 
             return chunks()
@@ -304,6 +310,17 @@ def test_agentscope_client_streams_native_blocks_and_raw_argument_deltas() -> (
         ("call-read-1", "read_project", '{"project'),
         ("call-read-1", "read_project", 'Id":"project-1"}'),
     ]
+    assert turn.tool_calls[0].raw_arguments == '{"projectId":"project-1"}'
+    assert turn.tool_calls[0].raw_arguments_bytes == 25
+    assert turn.tool_calls[0].provider_chunk_count == 2
+    assert turn.finish_reason == "completed"
+    assert turn.usage == {
+        "input_tokens": 123,
+        "output_tokens": 45,
+        "cache_creation_input_tokens": 0,
+        "cache_input_tokens": 100,
+        "time": 1.5,
+    }
 
 
 def test_agentscope_client_repairs_truncated_native_tool_argument_json() -> (

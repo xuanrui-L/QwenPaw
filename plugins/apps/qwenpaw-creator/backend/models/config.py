@@ -257,7 +257,15 @@ def _clear_user_config_cache():
     _USER_CONFIG_CACHE_FINGERPRINT = None
 
 
-_SECRET_FIELDS = ("api_key", "access_key_secret", "policy_api_key")
+# Mirrors api.model_routes._SECRET_FIELDS so runtime reads of
+# model_config.json can decrypt every field the API layer encrypts.
+_SECRET_FIELDS = (
+    "api_key",
+    "access_key_secret",
+    "policy_api_key",
+    "tavily_api_key",
+    "serper_api_key",
+)
 
 
 def _decrypt_config_secrets(data: dict) -> dict:
@@ -299,6 +307,44 @@ def get_creation_checkpoint_mode() -> str:
     if value == CREATION_CHECKPOINT_SKIP:
         return CREATION_CHECKPOINT_SKIP
     return CREATION_CHECKPOINT_REQUIRED
+
+
+DEFAULT_MAINLINE_MAX_MODEL_TURNS = 24
+DEFAULT_SPECIALIST_MAX_MODEL_TURNS = 16
+
+
+def _turn_limit(section: dict | None, key: str, default: int) -> int:
+    value = section.get(key) if isinstance(section, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return default
+
+
+def get_mainline_max_model_turns() -> int:
+    """Per-run model turn budget for the mainline Creator Agent loop.
+
+    A runaway guard, not a latency control: pathological loops are stopped
+    earlier by the repeated-deterministic-failure guard, so this cap only
+    decides whether long-but-healthy runs (one timeline element per
+    jq_project call) can finish. Override via the ``agent_runtime`` config
+    section; YOLO-style modes are expected to raise it.
+    """
+
+    return _turn_limit(
+        _get_user_config().get("agent_runtime"),
+        "mainline_max_model_turns",
+        DEFAULT_MAINLINE_MAX_MODEL_TURNS,
+    )
+
+
+def get_specialist_max_model_turns() -> int:
+    """Per-run model turn budget for one specialist (subagent) loop."""
+
+    return _turn_limit(
+        _get_user_config().get("agent_runtime"),
+        "specialist_max_model_turns",
+        DEFAULT_SPECIALIST_MAX_MODEL_TURNS,
+    )
 
 
 def _map_tool_to_section(tool_name: str) -> str:
@@ -590,6 +636,13 @@ def get_web_grounding_tavily_api_key() -> str:
     return _grounding_explicit(
         "tavily_api_key",
         ("TAVILY_API_KEY", "WEB_GROUNDING_TAVILY_API_KEY"),
+    )
+
+
+def get_web_grounding_serper_api_key() -> str:
+    return _grounding_explicit(
+        "serper_api_key",
+        ("SERPER_API_KEY", "WEB_GROUNDING_SERPER_API_KEY"),
     )
 
 

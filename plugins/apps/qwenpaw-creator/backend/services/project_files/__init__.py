@@ -52,7 +52,10 @@ from .serialization import (
     CanonicalJsonError,
     canonical_data,
     canonical_json_bytes,
+    load_project_document,
     load_project_json,
+    load_project_json_with_etag,
+    project_document_etag,
     project_etag,
     project_file_bytes,
 )
@@ -126,7 +129,10 @@ __all__ = [
     "agent_project_tool_manifest",
     "canonical_data",
     "canonical_json_bytes",
+    "load_project_document",
     "load_project_json",
+    "load_project_json_with_etag",
+    "project_document_etag",
     "project_etag",
     "project_file_bytes",
 ]
