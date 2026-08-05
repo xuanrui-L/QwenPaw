@@ -3718,7 +3718,19 @@ class FileR2VExecutionService:
                     and run.metadata.get("commandType")
                     == CreatorCommandType.GENERATE_R2V_VIDEO.value
                 ):
-                    await self._recover_run_admission_gap(run)
+                    try:
+                        await self._recover_run_admission_gap(run)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # One corrupt Project must not prevent unrelated
+                        # Projects from recovering during service startup.
+                        logger.exception(
+                            "R2V admission-gap recovery isolated failure "
+                            "for %s/%s",
+                            project_id,
+                            run.run_id,
+                        )
             for task in self.executions.list_tasks(project_id):
                 if task.kind is not TaskKind.R2V_GENERATION:
                     continue
@@ -3906,9 +3918,19 @@ async def start_file_media_execution_services(
             )
     await recover_interrupted_image_tasks(services)
     from .local_execution import recover_file_local_media_project
+    from services.project_files.store import ProjectIntegrityError
 
     for project_id in services.projects.discover_project_ids():
-        await recover_file_local_media_project(services, project_id)
+        try:
+            await recover_file_local_media_project(services, project_id)
+        except ProjectIntegrityError:
+            # One corrupt/foreign project.json must not veto the whole
+            # runtime: skipping keeps every healthy Project operational
+            # while the corrupt one is already surfaced by recovery logs.
+            logger.exception(
+                "skipping local media recovery for corrupt Project %s",
+                project_id,
+            )
     project_ids = services.projects.discover_project_ids()
     await asyncio.to_thread(
         reconcile_terminal_task_runs,
