@@ -86,6 +86,7 @@ from services.media_files.visual_reference_resolution import (
 )
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
+from services.run_review.media_review import schedule_media_review
 from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     canonical_json_bytes,
@@ -3507,6 +3508,16 @@ class FileR2VExecutionService:
                 "projectEtag": snapshot.etag,
                 "projectGeneration": snapshot.generation,
             }
+        )
+        # Run-review hook: every successful convergence (fresh render,
+        # idempotent replay, crash recovery) flows through this single
+        # point. Scheduling is advisory and idempotent: the switch, the
+        # command filter and the already-reviewed dedup live on the review
+        # side.
+        schedule_media_review(
+            self.services,
+            project_id=task.project_id,
+            published_result=success,
         )
         await self._finish_run(
             task.project_id,

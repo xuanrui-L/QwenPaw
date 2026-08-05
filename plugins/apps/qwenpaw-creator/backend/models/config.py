@@ -936,6 +936,23 @@ def is_self_review_enabled() -> bool:
     return _bool_env("CREATOR_SELF_REVIEW_ENABLED", False)
 
 
+# Code-level switches for the in-run review bypass (run_review). Advisory
+# only, independent from the final-render self review above; neither is
+# exposed through plugin.json, schemas or the frontend contract.
+SYNC_REVIEW_ENABLED = _bool_env("CREATOR_SYNC_REVIEW_ENABLED", False)
+MEDIA_REVIEW_ENABLED = _bool_env("CREATOR_MEDIA_REVIEW_ENABLED", False)
+
+
+def is_sync_review_enabled() -> bool:
+    """In-run synchronous review of low-cost text/motion artifacts."""
+    return _bool_env("CREATOR_SYNC_REVIEW_ENABLED", False)
+
+
+def is_media_review_enabled() -> bool:
+    """Async bypass review of generated image/video artifacts."""
+    return _bool_env("CREATOR_MEDIA_REVIEW_ENABLED", False)
+
+
 def _image_provider():
     """Return the active image provider instance (lazy import avoids cycles).
 

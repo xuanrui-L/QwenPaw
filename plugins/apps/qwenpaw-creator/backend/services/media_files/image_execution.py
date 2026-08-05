@@ -81,6 +81,7 @@ from services.media_files.visual_design_readiness import (
 )
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
+from services.run_review.media_review import schedule_media_review
 from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     canonical_json_bytes,
@@ -1816,8 +1817,8 @@ class FileImageExecutionService:
         except ExecutionStateConflict:
             return
 
-    @staticmethod
     def _result_from_task(
+        self,
         task: TaskRecord,
         *,
         replayed: bool,
@@ -1832,6 +1833,16 @@ class FileImageExecutionService:
             project_generation = int(result["projectGeneration"])
         except (KeyError, TypeError, ValueError) as exc:
             raise StorageIntegrityError("SUCCEEDED 图片 Task 缺少可重放结果") from exc
+        # Run-review hook: every successful convergence (fresh generation,
+        # idempotent replay, crash recovery) flows through this single
+        # point. Scheduling is advisory and idempotent: the switch, the
+        # command filter and the already-reviewed dedup live on the review
+        # side.
+        schedule_media_review(
+            self.services,
+            project_id=task.project_id,
+            published_result=result,
+        )
         return FileImageExecutionResult(
             task_id=task.task_id,
             run_id=str(task.run_id or ""),

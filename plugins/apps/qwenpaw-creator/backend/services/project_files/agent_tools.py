@@ -31,6 +31,7 @@ from services.runtime_files.models import (
     ReviewBoundary,
     ReviewPolicy,
 )
+from utils.logger import setup_logger
 
 from .assets import AssetFileStore
 from .candidate_normalization import normalize_project_candidate
@@ -40,6 +41,8 @@ from .models import Project, TimelineElement
 from .patch_ops import PatchOpError, apply_patch_ops
 from .schema_prompt import ProjectSchemaPrompt, build_project_schema_prompt
 from .store import ProjectSnapshot, ProjectStore
+
+logger = setup_logger("creator.project_files.agent_tools")
 
 
 READ_PROJECT_TOOL_NAME = "read_project"
@@ -237,6 +240,14 @@ class AgentProjectCommitResult(AgentProjectSnapshotResult):
         alias="normalizedPointers",
     )
     review_id: str | None = Field(default=None, alias="reviewId")
+    # Advisory in-run review of the committed creative text (run_review
+    # sync bypass). Populated only when CREATOR_SYNC_REVIEW_ENABLED is on
+    # and the commit touched reviewable pointers; the model sees it on its
+    # next turn and decides whether to revise.
+    review_advisory: dict[str, Any] | None = Field(
+        default=None,
+        alias="reviewAdvisory",
+    )
 
 
 class AgentElementsAtResult(_ToolModel):
@@ -805,7 +816,7 @@ class AgentProjectTools:
         )
         self._remember(result.snapshot)
         snapshot = self._snapshot_result(result.snapshot)
-        return AgentProjectCommitResult(
+        commit_result = AgentProjectCommitResult(
             **snapshot.model_dump(mode="python"),
             transactionId=result.transaction_id,
             changedPointers=[
@@ -818,6 +829,46 @@ class AgentProjectTools:
             if result.review is not None
             else None,
         )
+        advisory = self._sync_review_advisory(commit_result)
+        if advisory is not None:
+            commit_result = commit_result.model_copy(
+                update={"review_advisory": advisory},
+            )
+        return commit_result
+
+    def _sync_review_advisory(
+        self,
+        commit_result: AgentProjectCommitResult,
+    ) -> dict[str, Any] | None:
+        """Advisory in-run review of freshly committed creative text.
+
+        Runs only for agent-run commits (a round_id proves the provenance)
+        and only when the sync-review switch is on; strictly fail-open so
+        the commit result is never disturbed by review problems.
+        """
+        if self.context.round_id is None:
+            return None
+        try:
+            from models.config import is_sync_review_enabled
+
+            if not is_sync_review_enabled():
+                return None
+            # Lazy import keeps the review stack out of the tool boundary
+            # module graph while the switch is off.
+            from services.run_review.text_review import maybe_sync_review
+
+            return maybe_sync_review(
+                project_id=commit_result.project.project_id,
+                project_root=self.store.project_root(
+                    commit_result.project.project_id,
+                ),
+                project_json=commit_result.project.model_dump(mode="json"),
+                changed_pointers=commit_result.changed_pointers,
+                transaction_id=commit_result.transaction_id,
+            )
+        except Exception:
+            logger.exception("sync review advisory failed")
+            return None
 
     def patch_project(
         self,

@@ -101,3 +101,11 @@ timelines.items[timelineId].elements_by_id[elementId]
 - 相邻 Edit Element 的画面内容是否具有差异性或叙事递进；
 - 选段分布是否覆盖素材的不同时间段，避免前密后疏；
 - 每个文字 Overlay 的文案长度和类型是否符合作业要求。
+
+# 创作品味准则
+
+以下创作品味准则源自 vendored review_rubrics（Qwen-MM-Plugins video-edit skill），应当遵循（建议性准则，不是门禁）：
+- 概念先行：Can you state the piece's idea in one sentence? Cover all text — is the subject still recognizable? Swap the subject — does the piece still "work"? (If yes → template, <=5.)（素材流水账不是概念）。
+- 节奏：Hook inside 1.5s? Energy alternates? Holds respected (T2)? No shot >7s in narrated pieces?
+- 克制：Signature device 1-2 uses (T1)? No mass glints (T3)? No repetition (T4)?
+- 设计底线：有开场处理、每个场景至少一个设计化节拍、有收束式结尾；避免：slow/unclear opening；flat shot rhythm；decorative motion serving nothing；same layout every scene；text cards dominating。

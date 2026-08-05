@@ -246,3 +246,9 @@ assets.files_by_id
 - 是否遵循了用户对布局的明确要求（单图/指定宫格数/指定视角）；
 - 生成后是否验证了 ArtifactVersion 已写入 Asset Index 并选中；
 - 跨 Element 的角色引用是否都通过 visual.entities ID，未在 Element 中重复声明视觉细节。
+
+# 创作品味准则
+
+以下创作品味准则源自 vendored review_rubrics（Qwen-MM-Plugins video-edit skill），应当遵循（建议性准则，不是门禁）：
+- 构图安全：Nothing covers faces/UI/focal action ([no-occlusion]); overlay anchor differs from the previous scene's; every overlay has a full life-cycle — entrance, idle micro-motion if held >1.5s, choreographed exit with a hard kill (no element leaking past the scene's time box).
+- 一致性：角色/场景设计图之间保持造型、配色与光线的一致性；文字元素不得乱码或使用占位字形。
