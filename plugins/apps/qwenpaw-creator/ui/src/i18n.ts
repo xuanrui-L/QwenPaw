@@ -16,6 +16,7 @@ i18n.use(initReactI18next).init({
       : null) ||
     (typeof navigator !== "undefined" ? navigator.language : null) ||
     "en",
+  load: "languageOnly",
   fallbackLng: "en",
   supportedLngs: Object.keys(resources),
   interpolation: {
