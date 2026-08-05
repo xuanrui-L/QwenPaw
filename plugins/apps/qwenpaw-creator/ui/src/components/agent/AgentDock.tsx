@@ -487,11 +487,13 @@ function actionTitle(envelope: CreatorActionEnvelope, active: boolean): string {
     return waitingActionTitle(actionReason(envelope));
   }
   if (envelope.action === "complete_current_change")
-    return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
+    return active
+      ? i18n.t("agent.checkingChanges")
+      : i18n.t("agent.checkingDone");
   if (envelope.action === "plan")
-    return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
+    return active ? i18n.t("agent.planning") : i18n.t("agent.planGenerated");
   if (envelope.action === "final")
-    return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
+    return active ? i18n.t("agent.finalizing") : i18n.t("agent.replyGenerated");
   return active ? i18n.t("agent.processing") : i18n.t("agent.completed");
 }
 
@@ -726,12 +728,12 @@ function roleDisplayName(
     activity?.role || (typeof args?.role === "string" ? args.role : "");
   if (raw) {
     const label = creatorRoleLabel(raw);
-    if (label !== i18n.t("agent.processing")) return label;
+    if (label !== i18n.t("presentation.specialistProduction")) return label;
   }
   const displayName =
     activity?.roleDisplayName ||
     (typeof args?.roleDisplayName === "string" ? args.roleDisplayName : "");
-  return displayName || i18n.t("agent.processing");
+  return displayName || i18n.t("presentation.specialistProduction");
 }
 
 function delegationText(
@@ -1200,7 +1202,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
     if (activeTool) {
       subLabel = creatorToolLabel(activeTool.tool);
     }
-    displayLabel = role || t("agent.processing");
+    displayLabel = role || t("presentation.specialistProduction");
   } else {
     displayLabel = creatorToolLabel(tool);
   }
