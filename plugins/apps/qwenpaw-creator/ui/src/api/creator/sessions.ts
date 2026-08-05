@@ -7,8 +7,7 @@ import type {
   SendCreatorMessageRequest,
 } from "@/contracts/creator";
 import { creatorRequest, jsonBody, newClientId } from "./client";
-
-const DEFAULT_CONVERSATION_TITLE = "新对话";
+import i18n from "@/i18n";
 
 export function getCreatorSession(
   projectId: string,
@@ -35,7 +34,7 @@ export function createConversation(
     {
       method: "POST",
       headers: { "Idempotency-Key": clientRequestId },
-      body: jsonBody({ title: DEFAULT_CONVERSATION_TITLE }),
+      body: jsonBody({ title: i18n.t("api.newConversation") }),
     },
   );
 }

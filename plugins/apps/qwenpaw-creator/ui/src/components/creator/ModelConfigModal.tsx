@@ -980,12 +980,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     type === "llm"
       ? LLM_PROTOCOLS
       : type === "vlm"
-        ? VLM_PROTOCOLS
-        : type === "asr"
-          ? ASR_PROTOCOLS
-          : type === "image"
-            ? IMAGE_PROTOCOLS
-            : VIDEO_PROTOCOLS;
+      ? VLM_PROTOCOLS
+      : type === "asr"
+      ? ASR_PROTOCOLS
+      : type === "image"
+      ? IMAGE_PROTOCOLS
+      : VIDEO_PROTOCOLS;
 
   const getPresetForType = (
     type: ModelType,
@@ -1819,15 +1819,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     const configured = !item.enabled
       ? false
       : usingLlm
-        ? true
-        : !!item.model_name;
+      ? true
+      : !!item.model_name;
     const isTested = tested[type] === true;
 
     const statusColor = !configured
       ? "var(--color-border)"
       : isTested
-        ? "var(--color-success)"
-        : "var(--color-danger)";
+      ? "var(--color-success)"
+      : "var(--color-danger)";
     const statusDot = (
       <span
         style={{
@@ -1903,8 +1903,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 {!item.enabled
                   ? t("modelConfig.disabledLabel")
                   : usingLlm
-                    ? config.llm.model_name
-                    : item.model_name}
+                  ? config.llm.model_name
+                  : item.model_name}
                 {!isTested && item.enabled && t("modelConfig.notTestedLabel")}
               </span>
             )}
@@ -2179,13 +2179,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               subText = !config.grounding.enabled
                 ? t("modelConfig.disabled")
                 : searchLabel && verifier.model_name
-                  ? `${searchLabel} · ${verifier.model_name}`
-                  : t("modelConfig.notConfigured");
+                ? `${searchLabel} · ${verifier.model_name}`
+                : t("modelConfig.notConfigured");
               subColor = !config.grounding.enabled
                 ? "var(--color-text-tertiary)"
                 : searchLabel && verifier.model_name
-                  ? "var(--color-success)"
-                  : "var(--color-text-tertiary)";
+                ? "var(--color-success)"
+                : "var(--color-text-tertiary)";
             } else if (
               meta.type === "vlm" &&
               config.vlm.use_llm &&
