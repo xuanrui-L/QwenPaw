@@ -69,7 +69,7 @@ const PROVIDER_GUIDES: ProviderGuide[] = [
   {
     type: "ASR 语音识别",
     icon: <AudioOutlined style={{ fontSize: 12 }} />,
-    protocols: "DashScope Fun-ASR、OpenAI Whisper",
+    protocols: "DashScope Fun-ASR、DashScope Qwen3-ASR、OpenAI Whisper",
   },
 ];
 
