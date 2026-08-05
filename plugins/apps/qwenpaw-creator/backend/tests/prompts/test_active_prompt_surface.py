@@ -104,7 +104,8 @@ def test_creator_owns_timeline_element_planning() -> None:
     assert "结构完成后才进入视觉和媒体生产" in prompt
     assert "完整 Project 根对象" in prompt
     assert "jsonArgs" in prompt
-    assert "`updated_at` 由 Runtime 自动维护" in prompt
+    assert "Runtime 自动选择最新 Project 快照并维护受保护字段" in prompt
+    assert "根据结构化错误调整调用" in prompt
     assert "content_type=pet_video" in prompt
     assert "overlay_kind=pet_os" in prompt
     assert "x=0.5, y=0.5" in prompt

@@ -204,12 +204,7 @@ function nativeActionEnvelope(
         : { action, ...arguments_ }
       : { action, tool: name, arguments: arguments_ }
     : undefined;
-  const rawPayload =
-    typeof toolCall.argumentsDelta === "string"
-      ? toolCall.argumentsDelta
-      : arguments_
-      ? JSON.stringify(arguments_)
-      : "";
+  const rawPayload = arguments_ ? JSON.stringify(arguments_) : "";
   return {
     partIndex: -1,
     narration,
@@ -421,6 +416,9 @@ export interface ToolCallPresentation {
   tool: string;
   arguments?: Record<string, unknown>;
   argumentsText?: string;
+  receivedBytes?: number;
+  providerChunkCount?: number;
+  argumentStreamComplete?: boolean;
   result?: unknown;
   error?: string;
 }
@@ -435,7 +433,10 @@ interface MutableToolCall {
   failed: boolean;
   result?: unknown;
   error?: string;
-  argumentDeltas?: Record<number, string>;
+  argumentsText?: string;
+  receivedBytes?: number;
+  providerChunkCount?: number;
+  argumentStreamComplete?: boolean;
 }
 
 function textContent(message: CreatorMessage): string {
@@ -507,7 +508,7 @@ export function toolCallPresentations(
         const arguments_ = toolCall.arguments ?? function_?.arguments;
         if (isRecord(arguments_)) call.arguments = arguments_;
         else if (typeof arguments_ === "string") {
-          call.argumentDeltas = { 0: arguments_ };
+          call.argumentsText = arguments_;
           try {
             const parsed = JSON.parse(arguments_) as unknown;
             if (isRecord(parsed)) call.arguments = parsed;
@@ -583,7 +584,7 @@ export function toolCallPresentations(
       }
       if (
         ![
-          "agent.tool_delta",
+          "agent.tool_progress",
           "agent.tool_started",
           "agent.tool_completed",
           "agent.tool.started",
@@ -615,28 +616,16 @@ export function toolCallPresentations(
       ) {
         call.anchorMessageId = event.data.messageId;
       }
-      if (event.type === "agent.tool_delta") {
-        const deltaIndex = Number(event.data.deltaIndex);
-        if (
-          Number.isInteger(deltaIndex) &&
-          deltaIndex >= 0 &&
-          typeof event.data.argumentsDelta === "string"
-        ) {
-          call.argumentDeltas = {
-            ...(call.argumentDeltas ?? {}),
-            [deltaIndex]: event.data.argumentsDelta,
-          };
-          const raw = Object.entries(call.argumentDeltas)
-            .sort(([left], [right]) => Number(left) - Number(right))
-            .map(([, value]) => value)
-            .join("");
-          try {
-            const parsed = JSON.parse(raw) as unknown;
-            if (isRecord(parsed)) call.arguments = parsed;
-          } catch {
-            // Keep accumulating provider JSON until the final delta is complete.
-          }
-        }
+      if (event.type === "agent.tool_progress") {
+        if (typeof event.data.receivedBytes === "number")
+          call.receivedBytes = event.data.receivedBytes;
+        if (typeof event.data.providerChunkCount === "number")
+          call.providerChunkCount = event.data.providerChunkCount;
+        if (typeof event.data.complete === "boolean")
+          call.argumentStreamComplete = event.data.complete;
+      }
+      if (isRecord(event.data.arguments)) {
+        call.arguments = event.data.arguments;
       }
       if (
         event.type === "agent.tool_completed" ||
@@ -679,15 +668,17 @@ export function toolCallPresentations(
       status: call.failed ? "failed" : call.completed ? "succeeded" : "started",
       tool: call.tool,
       arguments: call.arguments,
-      ...(call.argumentDeltas
-        ? {
-            argumentsText: Object.entries(call.argumentDeltas)
-              .sort(([left], [right]) => Number(left) - Number(right))
-              .map(([, value]) => value)
-              .join(""),
-          }
-        : {}),
+      ...(call.argumentsText ? { argumentsText: call.argumentsText } : {}),
       result: call.result,
       error: call.error,
+      ...(call.receivedBytes !== undefined
+        ? { receivedBytes: call.receivedBytes }
+        : {}),
+      ...(call.providerChunkCount !== undefined
+        ? { providerChunkCount: call.providerChunkCount }
+        : {}),
+      ...(call.argumentStreamComplete !== undefined
+        ? { argumentStreamComplete: call.argumentStreamComplete }
+        : {}),
     }));
 }

@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Body, Header, Request, Response, status
+from pydantic import ValidationError as PydanticValidationError
 
 from domain.errors import ConflictError, StorageIntegrityError, ValidationError
 from models import config as model_config
@@ -1006,7 +1007,13 @@ async def patch_creation_checkpoints(
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
         merged["creation_checkpoints"] = {"mode": mode}
-        return ModelConfigData.model_validate(merged)
+        try:
+            return ModelConfigData.model_validate(merged)
+        except PydanticValidationError as exc:
+            first_error = exc.errors()[0] if exc.errors() else {}
+            field = ".".join(str(loc) for loc in first_error.get("loc", []))
+            message = first_error.get("msg", str(exc))
+            raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
 
     def transaction() -> None:
         mutate_model_config(mutate)
@@ -1027,7 +1034,13 @@ async def patch_execution_authorization(
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
         merged["execution_authorization"] = {"mode": mode}
-        return ModelConfigData.model_validate(merged)
+        try:
+            return ModelConfigData.model_validate(merged)
+        except PydanticValidationError as exc:
+            first_error = exc.errors()[0] if exc.errors() else {}
+            field = ".".join(str(loc) for loc in first_error.get("loc", []))
+            message = first_error.get("msg", str(exc))
+            raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
 
     def transaction() -> None:
         mutate_model_config(mutate)
@@ -1065,10 +1078,16 @@ async def patch_model_config_section(
         merged[section] = {**merged.get(section, {}), **data}
         if section == "llm":
             merged["llm"]["enabled"] = True
-        resolved = _resolve_secret_masks(
-            ModelConfigData.model_validate(merged),
-            current,
-        )
+        try:
+            resolved = _resolve_secret_masks(
+                ModelConfigData.model_validate(merged),
+                current,
+            )
+        except PydanticValidationError as exc:
+            first_error = exc.errors()[0] if exc.errors() else {}
+            field = ".".join(str(loc) for loc in first_error.get("loc", []))
+            message = first_error.get("msg", str(exc))
+            raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
         _ensure_grounding_model_configured(resolved)
         return resolved
 
@@ -1409,7 +1428,15 @@ async def get_real_api_key(section: str) -> dict[str, str]:
     API key to run connection tests, because it only stores the mask
     "__CREATOR_SECRET__".
     """
-    valid_sections = {"llm", "vlm", "asr", "image", "video", "grounding"}
+    valid_sections = {
+        "llm",
+        "vlm",
+        "asr",
+        "tts",
+        "image",
+        "video",
+        "grounding",
+    }
     if section not in valid_sections:
         raise ValidationError(
             f"不支持的配置项: {section}，必须是 {', '.join(valid_sections)} 之一",

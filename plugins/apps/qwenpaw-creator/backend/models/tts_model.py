@@ -251,6 +251,14 @@ async def synthesize(
                 f"{model} has no system voices; create a character voice "
                 "first and synthesize with its voice id",
             )
+        if active_voice not in capability.system_voices:
+            # Fail fast on a made-up voice name: the provider would reject
+            # it anyway, but only after the call burned an execution
+            # authorization round-trip.
+            raise ValueError(
+                f"unknown voice {active_voice!r} for {model}; available "
+                f"system voices: {', '.join(capability.system_voices)}",
+            )
     transport = require_capability(model).transport
     logger.info(
         "TTS synthesize: model=%s voice=%s chars=%d created=%s transport=%s",

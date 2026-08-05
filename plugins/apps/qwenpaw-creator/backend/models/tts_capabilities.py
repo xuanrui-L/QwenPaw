@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
+# flake8: noqa: E501
 """Capability table for the supported DashScope speech-synthesis models.
 
 The provider exposes two families that share nothing but the credential:
 
-- ``qwen-tts``: synthesis over HTTP ``multimodal-generation``; voice cloning
-  and voice design live on separate companion models (``-vc-`` / ``-vd-``) and
-  are managed through ``qwen-voice-enrollment`` / ``qwen-voice-design``.
+- ``qwen-tts``: synthesis over HTTP ``multimodal-generation``; voice cloning and
+  voice design live on separate companion models (``-vc-`` / ``-vd-``) and are
+  managed through ``qwen-voice-enrollment`` / ``qwen-voice-design``.
 - ``cosyvoice``: synthesis over WebSocket; one ``voice-enrollment`` surface
   handles both cloning and design, and the newest models ship no system voices
   at all, so a character voice must be created before anything can be spoken.
@@ -27,7 +28,7 @@ TtsTransport = Literal["http", "websocket"]
 
 @dataclass(frozen=True, slots=True)
 class TtsModelCapability:
-    """What one synthesis model supports, and what it enrolls against."""
+    """What one synthesis model supports and which models it enrolls against."""
 
     model: str
     family: TtsFamily

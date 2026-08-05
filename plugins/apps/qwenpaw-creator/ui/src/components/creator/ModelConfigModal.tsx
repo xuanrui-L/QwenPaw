@@ -598,6 +598,28 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             voice: keep || voices[0] || "",
           };
         }
+        if (field === "model_name" && typeof value === "string" && value) {
+          // Picking a preset model implies its provider endpoint: realign
+          // protocol and Base URL so choosing e.g. a Seedance model from a
+          // DashScope section never submits against the wrong gateway.
+          const presets = PRESETS_BY_TYPE[type];
+          const owner =
+            presets &&
+            Object.entries(presets).find(([, preset]) =>
+              preset.models.includes(value),
+            );
+          if (owner) {
+            const [presetProtocol, preset] = owner;
+            const item = updated[type] as ModelConfigItem;
+            if (item.protocol !== presetProtocol || !item.base_url) {
+              (updated as Record<ModelType, ModelConfigItem>)[type] = {
+                ...item,
+                protocol: presetProtocol,
+                base_url: preset.base_url,
+              };
+            }
+          }
+        }
         if (type === "llm" && prev.vlm.use_llm) {
           updated.vlm = { ...updated.vlm, use_llm: false, enabled: false };
         }

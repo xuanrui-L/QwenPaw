@@ -12,7 +12,10 @@ from services.project_files import (
     CanonicalJsonError,
     Project,
     canonical_json_bytes,
+    load_project_document,
     load_project_json,
+    load_project_json_with_etag,
+    project_document_etag,
     project_etag,
     project_file_bytes,
 )
@@ -179,13 +182,22 @@ def test_r2v_variant_binding_must_target_a_referenced_entity_and_variant():
     creation["visual_variant_refs"] = {
         "char:hero": "variant:missing",
     }
-    with pytest.raises(ValidationError, match="missing variant"):
+    with pytest.raises(
+        ValidationError,
+        match="element element:hero: .*missing variant variant:missing",
+    ):
         Project.model_validate(raw)
 
     creation["visual_variant_refs"] = {
         "char:other": "variant:fallen",
     }
-    with pytest.raises(ValidationError, match="unreferenced entity"):
+    with pytest.raises(
+        ValidationError,
+        match=(
+            "element element:hero: .*unreferenced entity char:other; "
+            "add it to this creation's character_refs"
+        ),
+    ):
         Project.model_validate(raw)
 
 
@@ -272,6 +284,56 @@ def test_canonical_serialization_is_stable_human_readable_and_round_trips():
     assert first.index(b'"schema_version"') < first.index(b'"project_id"')
     assert load_project_json(first) == project
     assert project_etag(load_project_json(first)) == project_etag(project)
+    loaded, source_etag = load_project_json_with_etag(first)
+    assert loaded == project
+    assert source_etag == project_etag(project)
+
+
+def test_legacy_document_etag_survives_in_memory_schema_migration():
+    project = Project.new(
+        project_id="project-legacy",
+        name="Legacy",
+        now=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+    )
+    project.visual.entities = EntityCollection(
+        items={
+            "char:hero": VisualEntity(
+                entity_id="char:hero",
+                kind="character",
+                name="Hero",
+                required_variant_ids=["variant:peak"],
+                variants=EntityCollection(
+                    items={
+                        "variant:peak": VisualVariant(
+                            variant_id="variant:peak",
+                        ),
+                    },
+                    order=["variant:peak"],
+                ),
+            ),
+        },
+        order=["char:hero"],
+    )
+    raw = Project.model_validate(project.model_dump(mode="json")).model_dump(
+        mode="json",
+    )
+    raw["schema_version"] = 3
+    del raw["visual"]["entities"]["items"]["char:hero"]["required_variant_ids"]
+    # Legacy documents predate the character voice field entirely.
+    del raw["visual"]["entities"]["items"]["char:hero"]["voice"]
+
+    migrated = load_project_document(raw)
+
+    assert migrated.schema_version == 4
+    assert migrated.visual.entities.items[
+        "char:hero"
+    ].required_variant_ids == ["variant:peak"]
+    assert project_document_etag(raw, project=migrated) == (
+        "sha256:62786303a10ac590a0bcd6036d4cd5c683a23e7660533334bb2547342724468b"
+    )
+    assert project_document_etag(raw, project=migrated) != project_etag(
+        migrated,
+    )
 
 
 def test_dynamic_map_keys_are_sorted_but_business_order_is_preserved():
@@ -357,3 +419,34 @@ def test_project_json_is_plain_json_with_no_runtime_state():
         "original_sound",
         "source_intelligence_version_id",
     }
+
+
+def test_fabricated_artifact_slots_are_rejected():
+    """Hand-written slots (unknown kind or empty shell) must not validate.
+
+    Reproduces the 2026-08 incident: the model fabricated video slots via
+    jq_project (kind ``r2v_video``, no versions) to claim completion, and
+    the real pipeline write-back later collided with them.
+    """
+
+    raw = Project.new(project_id="project-1", name="Initial").model_dump(
+        mode="json",
+    )
+    raw["assets"]["artifact_slots_by_id"]["element:el:x:main"] = {
+        "slot_id": "element:el:x:main",
+        "kind": "r2v_video",
+        "owner_ref": "element:el:x",
+        "version_ids": [],
+        "selected_version_id": None,
+        "metadata": {},
+    }
+    with pytest.raises(ValidationError, match="unknown kind"):
+        Project.model_validate(raw)
+
+    # A known kind with no versions is still an empty shell no pipeline
+    # ever writes.
+    raw["assets"]["artifact_slots_by_id"]["element:el:x:main"][
+        "kind"
+    ] = "element_video"
+    with pytest.raises(ValidationError, match="no artifact"):
+        Project.model_validate(raw)
