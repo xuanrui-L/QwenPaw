@@ -257,15 +257,7 @@ describe("origin/main visible shell fidelity", () => {
     installMockFetch([
       { match: "/models/config", response: { json: modelConfig } },
       {
-        match: "/models/config/execution-authorization",
-        response: { json: { ok: true } },
-      },
-      {
-        match: "/models/config/creation-checkpoints",
-        response: { json: { ok: true } },
-      },
-      {
-        match: "/models/config/media-review",
+        match: "/models/config/permission-mode",
         response: { json: { ok: true } },
       },
     ]);

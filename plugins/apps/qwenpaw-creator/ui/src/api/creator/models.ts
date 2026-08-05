@@ -124,6 +124,23 @@ export function patchMediaReview(
   });
 }
 
+export function patchPermissionMode(mode: {
+  execution: "required" | "allow_all";
+  checkpoints: "required" | "skip";
+  mediaReview: "required" | "auto_approve";
+}): Promise<{ ok: boolean }> {
+  const id = newClientId("permission-mode");
+  return creatorRequest("/models/config/permission-mode", {
+    method: "PATCH",
+    headers: { "Idempotency-Key": id },
+    body: jsonBody({
+      execution_authorization: mode.execution,
+      creation_checkpoints: mode.checkpoints,
+      media_review: mode.mediaReview,
+    }),
+  });
+}
+
 export function getRealApiKey(section: string): Promise<{ api_key: string }> {
   return creatorRequest(`/models/real-api-key/${section}`);
 }

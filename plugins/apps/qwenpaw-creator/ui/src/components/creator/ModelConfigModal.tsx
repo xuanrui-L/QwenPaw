@@ -25,9 +25,7 @@ import {
 import {
   getModelConfig,
   saveModelConfig,
-  patchExecutionAuthorization,
-  patchCreationCheckpoints,
-  patchMediaReview,
+  patchPermissionMode,
   testModelConnection,
   getHostProviders,
   getHostProviderApiKey,
@@ -425,6 +423,46 @@ const CARD_META: {
 export default function ModelConfigModal({ open, onClose }: Props) {
   const [config, setConfig] = useState<ModelConfigData>(DEFAULT_CONFIG);
   const snapshotRef = useRef<ModelConfigData | null>(null);
+  // Latest-wins serialization for the permission slider: a drag across
+  // several stops fires one onChange per stop; concurrent saves could
+  // finish out of order and strand an intermediate stop on the server.
+  const permissionSaveRef = useRef<{
+    inflight: boolean;
+    queued: number | null;
+    baseline: ModelConfigData | null;
+  }>({ inflight: false, queued: null, baseline: null });
+
+  const savePermissionMode = useCallback(
+    async (index: number): Promise<void> => {
+      const state = permissionSaveRef.current;
+      const target = PERMISSION_MODES[index];
+      if (!target) return;
+      state.inflight = true;
+      try {
+        await patchPermissionMode({
+          execution: target.execution,
+          checkpoints: target.checkpoints,
+          mediaReview: target.mediaReview,
+        });
+        const queued = state.queued;
+        state.queued = null;
+        if (queued !== null && queued !== index) {
+          await savePermissionMode(queued);
+          return;
+        }
+        state.baseline = null;
+      } catch (err) {
+        const baseline = state.baseline;
+        state.baseline = null;
+        state.queued = null;
+        if (baseline) setConfig(baseline);
+        message.error((err as Error).message || "授权模式保存失败");
+      } finally {
+        state.inflight = false;
+      }
+    },
+    [],
+  );
   const [activeTab, setActiveTab] = useState<TabType>("llm");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     llm: true,
@@ -1941,26 +1979,29 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               max={3}
               step={1}
               aria-label="执行确认模式"
+              aria-valuetext={
+                PERMISSION_MODES[permissionModeIndex(config)].label
+              }
               value={permissionModeIndex(config)}
-              onChange={async (event) => {
+              onChange={(event) => {
                 const index = Number(event.target.value);
                 const target = PERMISSION_MODES[index];
                 if (!target) return;
-                const previousConfig = config;
+                const state = permissionSaveRef.current;
+                // One rollback anchor per drag burst: the config before
+                // the first optimistic update.
+                if (state.baseline === null) state.baseline = config;
                 setConfig((previous) => ({
                   ...previous,
                   executionAuthorization: { mode: target.execution },
                   creationCheckpoints: { mode: target.checkpoints },
                   mediaReview: { mode: target.mediaReview },
                 }));
-                try {
-                  await patchExecutionAuthorization(target.execution);
-                  await patchCreationCheckpoints(target.checkpoints);
-                  await patchMediaReview(target.mediaReview);
-                } catch (err) {
-                  setConfig(previousConfig);
-                  message.error((err as Error).message || "授权模式保存失败");
+                if (state.inflight) {
+                  state.queued = index;
+                  return;
                 }
+                void savePermissionMode(index);
               }}
             />
             <div

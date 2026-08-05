@@ -188,6 +188,51 @@ def test_creation_checkpoints_mode_round_trips_through_assembly(
     assert reloaded.creation_checkpoints.mode == "skip"
 
 
+def test_permission_mode_patch_is_atomic(tmp_path, monkeypatch) -> None:
+    """One PATCH persists all three ladder fields in a single transaction.
+
+    Split per-field PATCHes could strand a mixed state when one call
+    fails (worst case: media_review=auto_approve hiding behind a
+    conservative-looking slider position).
+    """
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    config_path = (tmp_path / "config" / "model_config.json").resolve()
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+
+    asyncio.run(
+        model_routes.patch_permission_mode(
+            {
+                "execution_authorization": "allow_all",
+                "creation_checkpoints": "skip",
+                "media_review": "auto_approve",
+            },
+        ),
+    )
+
+    loaded = model_routes.load_model_config(include_environment=False)
+    assert loaded.execution_authorization.mode == "allow_all"
+    assert loaded.creation_checkpoints.mode == "skip"
+    assert loaded.media_review.mode == "auto_approve"
+
+    # Any invalid field rejects the whole request before mutation.
+    with pytest.raises(ValidationError, match="media_review"):
+        asyncio.run(
+            model_routes.patch_permission_mode(
+                {
+                    "execution_authorization": "required",
+                    "creation_checkpoints": "required",
+                    "media_review": "yes-please",
+                },
+            ),
+        )
+    unchanged = model_routes.load_model_config(include_environment=False)
+    assert unchanged.execution_authorization.mode == "allow_all"
+    assert unchanged.media_review.mode == "auto_approve"
+
+
 def test_load_migrates_legacy_grounding_model_to_search_and_validation(
     tmp_path,
     monkeypatch,
