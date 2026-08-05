@@ -12,6 +12,7 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument, TaskView } from "@/contracts/creator";
+import i18n from "@/i18n";
 
 function cloneProject(): ProjectDocument {
   return structuredClone(projectDocument);
@@ -262,7 +263,15 @@ describe("PlanPage Timeline/Element frontend", () => {
     fireEvent.pointerDown(chart, { pointerId: 1, clientX: x });
     fireEvent.pointerUp(chart, { pointerId: 1, clientX: x });
 
-    expect(screen.getByText("该时刻有 5 项内容：")).toBeInTheDocument();
+    expect(
+      container.querySelector("[data-timeline-point-candidates]"),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector("[data-timeline-point-candidates]")?.textContent,
+    ).toContain("该时刻有");
+    expect(
+      container.querySelector("[data-timeline-point-candidates]")?.textContent,
+    ).toContain("5");
     expect(chart.nextElementSibling).toBe(
       container.querySelector("[data-timeline-point-candidates]"),
     );

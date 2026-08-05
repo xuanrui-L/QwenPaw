@@ -997,7 +997,13 @@ class ProjectExecutionStore:
                 project_id,
                 authorization_id,
             )
-            if self._equivalent(existing, candidate):
+            # authorization_id is derived deterministically from the
+            # request, so identical retries replay the durable record:
+            # compare the request signature, which ignores the per-call
+            # random token and the decision lifecycle fields.
+            if self._authorization_request_signature(
+                existing,
+            ) == self._authorization_request_signature(candidate):
                 return existing
             raise ExecutionPayloadConflict(
                 "authorization_id was reused with a different request",

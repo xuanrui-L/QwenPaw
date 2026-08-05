@@ -33,10 +33,13 @@ from domain.errors import ConflictError, CreatorError, ReviewPendingError
 from models.config import (
     CREATION_CHECKPOINT_REQUIRED,
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    MEDIA_REVIEW_AUTO_APPROVE,
     get_creation_checkpoint_mode,
     get_execution_authorization_mode,
     get_mainline_max_model_turns,
+    get_media_review_mode,
     get_specialist_max_model_turns,
+    scale_mainline_max_model_turns,
     get_text_model_name,
     get_vlm_model_name,
     get_web_grounding_enabled,
@@ -49,12 +52,19 @@ from models.config import (
     get_video_backend,
     get_video_model_name,
 )
-from models.media_transport import validate_reference_image_bytes
+from models.media_transport import (
+    read_reference_media,
+    validate_reference_image_bytes,
+)
+from services.object_grounding import ground_image_objects
+from services.object_grounding import object_grounding_image_suffix
+from services.object_grounding import render_object_grounding_annotation
 from services.project_files.agent_tools import (
     AgentProjectToolError,
     AgentProjectToolContext,
     AgentProjectTools,
     JQ_PROJECT_TOOL_NAME,
+    PATCH_PROJECT_TOOL_NAME,
     READ_PROJECT_TOOL_NAME,
     agent_project_tool_manifest,
 )
@@ -67,6 +77,7 @@ from services.project_files.models import (
     Project,
     SourceAssetVersion,
 )
+from services.project_files.remote_cache import public_source_url
 from services.runtime_files.models import (
     ChangeOrigin,
     CreatorMessageRecord,
@@ -83,6 +94,7 @@ from services.runtime_files.execution_store import (
     ProjectExecutionStore,
 )
 from services.runtime_files.errors import RecordNotFoundError
+from services.runtime_files.atomic_store import atomic_replace_bytes
 from services.execution_pricing import (
     CostEstimate,
     estimate_execution_cost,
@@ -101,6 +113,10 @@ from services.runtime_files.session_store import (
 )
 from services.web_grounding import ground_prompt_context
 from utils.logger import setup_logger
+from utils.paths import media_path_from_url
+from utils.paths import media_task_scope
+from utils.paths import media_url_for
+from utils.paths import unique_task_work_path
 
 from .checkpoints import (
     CHECKPOINT_PROVIDER,
@@ -141,6 +157,7 @@ from .subagents import (
 logger = setup_logger("creator.agent_runtime")
 
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
+OBJECT_GROUNDING_TOOL_NAME = "ground_image_objects"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
@@ -158,7 +175,7 @@ MAX_PERSISTED_RAW_TOOL_ARGUMENT_BYTES = 256 * 1024
 _PROJECT_SNAPSHOT_RESULT_KIND = "project_snapshot"
 _PROJECT_CHANGE_RECEIPT_RESULT_KIND = "project_change_receipt"
 _PROJECT_SNAPSHOT_TOOL_NAMES = frozenset(
-    {READ_PROJECT_TOOL_NAME, JQ_PROJECT_TOOL_NAME},
+    {READ_PROJECT_TOOL_NAME, JQ_PROJECT_TOOL_NAME, PATCH_PROJECT_TOOL_NAME},
 )
 
 
@@ -341,6 +358,30 @@ def _tool_failure_result(
     return {"ok": False, "error": error_payload}
 
 
+def _unfinished_video_element_ids(project: Any) -> list[str]:
+    """Timeline r2v elements that do not have an accepted main video yet.
+
+    This is the YOLO completion criterion (and the seed of the future DAG
+    node state): an element whose creative facts exist but whose
+    ``element:{id}:main`` video slot has no selected version is unfinished.
+    """
+
+    finished_owners = {
+        slot.owner_ref
+        for slot in project.assets.artifact_slots_by_id.values()
+        if slot.kind == "element_video" and slot.selected_version_id
+    }
+    unfinished: list[str] = []
+    for timeline in project.timelines.items.values():
+        for element_id, element in timeline.elements_by_id.items():
+            creation = getattr(element, "creation", None)
+            if getattr(creation, "type", None) != "r2v":
+                continue
+            if f"element:{element_id}" not in finished_owners:
+                unfinished.append(element_id)
+    return sorted(unfinished)
+
+
 def _grounding_stable_id(prefix: str, project_id: str, identity: str) -> str:
     value = uuid5(
         NAMESPACE_URL,
@@ -391,6 +432,25 @@ def _grounding_visual_is_usable(source: Mapping[str, Any]) -> bool:
     )
 
 
+def _object_grounding_version_ref(value: str) -> tuple[str, str] | None:
+    ref = str(value or "").strip()
+    for prefix, kind in (
+        ("asset-version:", "asset"),
+        ("artifact-version:", "artifact"),
+    ):
+        if ref.startswith(prefix):
+            version_id = ref.removeprefix(prefix).strip()
+            return (kind, version_id) if version_id else None
+    parsed = urlparse(ref)
+    if parsed.scheme not in {"asset", "artifact"} or not parsed.netloc:
+        return None
+    identity = unquote(parsed.netloc)
+    if "@" not in identity:
+        return None
+    version_id = identity.rsplit("@", 1)[-1].strip()
+    return (parsed.scheme, version_id) if version_id else None
+
+
 def _ground_prompt_context_tool_manifest() -> dict[str, Any]:
     return {
         "type": "function",
@@ -438,10 +498,55 @@ def _ground_prompt_context_tool_manifest() -> dict[str, Any]:
     }
 
 
+def _object_grounding_tool_manifest() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": OBJECT_GROUNDING_TOOL_NAME,
+            "description": (
+                "使用 Creator VLM 检测并定位一张图片中的指定对象。返回每个对象的 "
+                "0-1000 归一化 bbox 和原图像素 bbox；需要可视化时可生成带框标注图。"
+                "imageRef 接受本轮附件中的 asset-version/artifact-version ref、"
+                "asset:// 或 artifact:// workspace ref、安全公网图片 URL，或当前 "
+                "Project 的 /generated URL。不要传本机文件路径。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "projectId": {"type": "string", "minLength": 1},
+                    "imageRef": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "要检测的 exact AssetVersion/ArtifactVersion workspace "
+                            "ref、安全公网图片 URL，或当前 Project 的 /generated URL。"
+                        ),
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1000,
+                        "description": (
+                            "要检测的对象，例如 all cats、the red car、画面中的所有人。"
+                        ),
+                    },
+                    "returnImage": {
+                        "type": "boolean",
+                        "description": "是否生成带检测框的临时标注图。",
+                    },
+                },
+                "required": ["projectId", "imageRef", "prompt"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _creator_agent_tool_manifest() -> list[dict[str, Any]]:
     manifest = [*agent_project_tool_manifest()]
     if get_web_grounding_enabled():
         manifest.append(_ground_prompt_context_tool_manifest())
+    manifest.append(_object_grounding_tool_manifest())
     manifest.append(delegate_tool_manifest())
     return manifest
 
@@ -1524,6 +1629,16 @@ class FileCreatorAgentRuntime:
                         context.review_boundary.interrupted_run_id
                     ),
                 )
+            elif not needs_review:
+                # Unattended (YOLO) projects treat a succeeded mainline as a
+                # checkpoint, not a finish line: resume until every element
+                # has its video (fused against runaway loops inside).
+                await self._queue_yolo_completion_resume(
+                    project_id=project_id,
+                    session_id=session.session_id,
+                    conversation_id=message.conversation_id,
+                    run_id=run_id,
+                )
             self._blocked_heads.pop(project_id, None)
         except asyncio.CancelledError:
             await self._cancel_run(
@@ -1676,7 +1791,26 @@ class FileCreatorAgentRuntime:
         malformed_jq_attempts = 0
         malformed_jq_fingerprints: set[str] = set()
         deterministic_failure_counts: dict[str, int] = {}
-        for _turn_number in range(1, self.max_model_turns + 1):
+        # Element-heavy projects legitimately need more mainline turns
+        # (one element per jq_project call plus one delegation each), so
+        # the runaway cap scales with the current timeline size instead of
+        # failing healthy long runs.
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            element_count = sum(
+                len(timeline.elements_by_id)
+                for timeline in snapshot.project.timelines.items.values()
+            )
+        except Exception:
+            element_count = 0
+        turn_budget = scale_mainline_max_model_turns(
+            self.max_model_turns,
+            element_count,
+        )
+        for _turn_number in range(1, turn_budget + 1):
             self._assert_epoch(project_id, run_id, epoch)
             _compact_wire_project_snapshots(messages)
             assistant_message_id = f"message-{uuid4().hex}"
@@ -1914,6 +2048,11 @@ class FileCreatorAgentRuntime:
                             request=request,
                             arguments=call.arguments,
                         )
+                    elif call.name == OBJECT_GROUNDING_TOOL_NAME:
+                        result = await self._run_object_grounding(
+                            request=request,
+                            arguments=call.arguments,
+                        )
                     else:
                         result = await asyncio.to_thread(
                             tools.invoke,
@@ -1944,7 +2083,7 @@ class FileCreatorAgentRuntime:
                         tool_name=call.name,
                         result=result,
                     )
-                    if call.name == "jq_project":
+                    if call.name in {"jq_project", "patch_project"}:
                         await self._workspace_changed(
                             project_id,
                             session_id,
@@ -2025,7 +2164,7 @@ class FileCreatorAgentRuntime:
                         "another model turn",
                     )
         raise AgentModelError(
-            f"Creator Agent exceeded {self.max_model_turns} model turns",
+            f"Creator Agent exceeded {turn_budget} model turns",
         )
 
     async def _run_ground_prompt_context(
@@ -2111,6 +2250,197 @@ class FileCreatorAgentRuntime:
             request_id=request.message_id,
             result=result,
         )
+
+    def _read_object_grounding_project_image(
+        self,
+        project_id: str,
+        image_ref: str,
+    ) -> tuple[bytes | None, str | None]:
+        parsed_ref = _object_grounding_version_ref(image_ref)
+        if parsed_ref is None:
+            raise FileAgentRuntimeError(
+                "ground_image_objects imageRef is not a supported Project ref",
+            )
+        kind, version_id = parsed_ref
+        snapshot = self.services.projects.read(project_id)
+        if kind == "asset":
+            version = snapshot.project.assets.source_versions_by_id.get(
+                version_id,
+            )
+        else:
+            version = snapshot.project.assets.artifact_versions_by_id.get(
+                version_id,
+            )
+        if version is None:
+            raise FileAgentRuntimeError(
+                f"ground_image_objects image version does not exist: {version_id}",
+            )
+        if not str(version.media_type or "").casefold().startswith("image/"):
+            raise FileAgentRuntimeError(
+                f"ground_image_objects imageRef is not an image: {version_id}",
+            )
+        if version.file_id:
+            indexed = snapshot.project.assets.files_by_id.get(version.file_id)
+            if indexed is None:
+                raise FileAgentRuntimeError(
+                    f"ground_image_objects image file is missing from the index: {version_id}",
+                )
+            if indexed.sha256 != version.checksum:
+                raise FileAgentRuntimeError(
+                    f"ground_image_objects image checksum does not match the index: {version_id}",
+                )
+            content = AssetFileStore(
+                self.services.projects.project_root(project_id),
+            ).read_verified(indexed)
+            return content, None
+        if kind == "asset" and isinstance(version, SourceAssetVersion):
+            remote_url = public_source_url(version)
+            if remote_url:
+                return None, remote_url
+        raise FileAgentRuntimeError(
+            f"ground_image_objects image bytes are unavailable: {version_id}",
+        )
+
+    async def _resolve_object_grounding_image(
+        self,
+        project_id: str,
+        image_ref: str,
+    ) -> bytes:
+        ref = str(image_ref or "").strip()
+        if ref.startswith(("http://", "https://")):
+            content, _filename = await read_reference_media(
+                ref,
+                max_bytes=GROUNDING_VISUAL_MAX_BYTES,
+            )
+        elif ref.startswith("/generated/"):
+            path = media_path_from_url(ref)
+            project_root = self.services.projects.project_root(
+                project_id,
+            ).resolve()
+            try:
+                path.resolve().relative_to(project_root)
+            except ValueError as exc:
+                raise FileAgentRuntimeError(
+                    "ground_image_objects cannot read generated media outside the current Project",
+                ) from exc
+            content, _filename = await read_reference_media(
+                ref,
+                max_bytes=GROUNDING_VISUAL_MAX_BYTES,
+            )
+        else:
+            content, remote_url = await asyncio.to_thread(
+                self._read_object_grounding_project_image,
+                project_id,
+                ref,
+            )
+            if content is None:
+                if not remote_url:
+                    raise FileAgentRuntimeError(
+                        "ground_image_objects image bytes are unavailable",
+                    )
+                content, _filename = await read_reference_media(
+                    remote_url,
+                    max_bytes=GROUNDING_VISUAL_MAX_BYTES,
+                )
+        if len(content) > GROUNDING_VISUAL_MAX_BYTES:
+            raise FileAgentRuntimeError(
+                f"ground_image_objects image exceeds {GROUNDING_VISUAL_MAX_BYTES} bytes",
+            )
+        try:
+            validate_reference_image_bytes(content)
+        except ValueError as exc:
+            raise FileAgentRuntimeError(
+                "ground_image_objects image cannot be decoded",
+            ) from exc
+        return content
+
+    @staticmethod
+    def _write_object_grounding_runtime_image(
+        *,
+        project_id: str,
+        request_id: str,
+        content: bytes,
+        subdir: str,
+        prefix: str,
+        suffix: str,
+    ) -> str:
+        with media_task_scope(request_id, project_id=project_id):
+            path = unique_task_work_path(
+                subdir,
+                suffix,
+                prefix=prefix,
+                task_id=request_id,
+            )
+            atomic_replace_bytes(path, content)
+            return media_url_for(path)
+
+    async def _run_object_grounding(
+        self,
+        *,
+        request: CreatorMessageRecord,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        image_ref = str(arguments.get("imageRef") or "").strip()
+        prompt = str(arguments.get("prompt") or "").strip()
+        return_image = arguments.get("returnImage", False)
+        if not image_ref:
+            raise FileAgentRuntimeError(
+                "ground_image_objects requires imageRef",
+            )
+        if not prompt:
+            raise FileAgentRuntimeError(
+                "ground_image_objects requires prompt",
+            )
+        if len(prompt) > 1000:
+            raise FileAgentRuntimeError(
+                "ground_image_objects prompt exceeds 1000 characters",
+            )
+        if not isinstance(return_image, bool):
+            raise FileAgentRuntimeError(
+                "ground_image_objects returnImage must be boolean",
+            )
+        content = await self._resolve_object_grounding_image(
+            request.project_id,
+            image_ref,
+        )
+        suffix = object_grounding_image_suffix(content)
+        input_url = await asyncio.to_thread(
+            self._write_object_grounding_runtime_image,
+            project_id=request.project_id,
+            request_id=request.message_id,
+            content=content,
+            subdir="object-grounding",
+            prefix="input-",
+            suffix=suffix,
+        )
+        result = await ground_image_objects(
+            content,
+            input_url,
+            prompt,
+        )
+        response: dict[str, Any] = {
+            "ok": True,
+            "status": "success",
+            "imageRef": image_ref,
+            "inputImageUrl": input_url,
+            **result,
+        }
+        if return_image:
+            annotated = await asyncio.to_thread(
+                render_object_grounding_annotation,
+                content,
+                list(result.get("detections") or []),
+            )
+            response["annotatedImageUrl"] = await asyncio.to_thread(
+                self._write_object_grounding_runtime_image,
+                project_id=request.project_id,
+                request_id=request.message_id,
+                content=annotated,
+                subdir="object-grounding",
+                prefix="annotated-",
+                suffix=".png",
+            )
+        return response
 
     async def _promote_grounding_visuals(
         self,
@@ -2955,7 +3285,7 @@ class FileCreatorAgentRuntime:
                         and review_id not in review_ids
                     ):
                         review_ids.append(review_id)
-                    if call.name == "jq_project":
+                    if call.name in {"jq_project", "patch_project"}:
                         await self._workspace_changed(
                             project_id,
                             session_id,
@@ -4028,6 +4358,117 @@ class FileCreatorAgentRuntime:
         )
 
     MAINLINE_RESUME_SOURCE = "mainline_resume"
+    YOLO_RESUME_SOURCE = "yolo_auto_resume"
+    # Fuse 1: never chain more unattended resumes than this since the last
+    # human message — a stuck project must fall back to a human.
+    YOLO_RESUME_MAX_CONSECUTIVE = 5
+
+    async def _queue_yolo_completion_resume(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        conversation_id: str,
+        run_id: str,
+    ) -> None:
+        """Keep an unattended (YOLO) project moving until it is finished.
+
+        A succeeded mainline run is a model decision to stop narrating, not
+        proof the project reached its goal: models habitually wrap up with a
+        progress report after a batch of work. Under media_review
+        auto_approve the operator asked for zero attendance, so when timeline
+        elements still lack their main video the Runtime injects the same
+        “继续” a supervising user would type. Two fuses stop runaway loops:
+        a consecutive-resume cap and a no-progress breaker.
+        """
+
+        if get_media_review_mode() != MEDIA_REVIEW_AUTO_APPROVE:
+            return
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return
+        unfinished = _unfinished_video_element_ids(snapshot.project)
+        if not unfinished:
+            return
+        messages = await asyncio.to_thread(
+            self.sessions.list_messages,
+            project_id,
+            session_id,
+            after_seq=0,
+            limit=None,
+        )
+        resume_streak = 0
+        last_resume_generation: int | None = None
+        for item in reversed(messages):
+            if item.role != "user":
+                continue
+            if item.source == self.YOLO_RESUME_SOURCE:
+                if resume_streak == 0:
+                    generation = item.metadata.get("projectGeneration")
+                    if isinstance(generation, int):
+                        last_resume_generation = generation
+                resume_streak += 1
+                continue
+            if item.source == self.MAINLINE_RESUME_SOURCE:
+                continue
+            break
+        if resume_streak >= self.YOLO_RESUME_MAX_CONSECUTIVE:
+            logger.warning(
+                "YOLO auto-resume stopped for %s: %d consecutive resumes "
+                "without a human message",
+                project_id,
+                resume_streak,
+            )
+            return
+        # Fuse 2: the previous auto-resume produced no committed progress,
+        # so another identical nudge would only burn model turns.
+        if last_resume_generation == snapshot.generation:
+            logger.warning(
+                "YOLO auto-resume stopped for %s: no progress since the "
+                "previous resume (generation %d)",
+                project_id,
+                snapshot.generation,
+            )
+            return
+        text = (
+            "【系统自动消息 · YOLO 持续执行】主线回合已结束，但项目尚未到达终态。\n"
+            "以下 Element 仍缺少成片视频："
+            + "、".join(unfinished)
+            + "。\n请从未完成的 Element 继续推进，不要重复已完成的工作；"
+            "全部完成后再进行收尾。"
+        )
+        appended = await asyncio.to_thread(
+            self.sessions.append_message,
+            project_id,
+            session_id,
+            conversation_id,
+            role="user",
+            content_parts=[{"type": "text", "text": text}],
+            source=self.YOLO_RESUME_SOURCE,
+            channel=MessageChannel.RUNTIME,
+            metadata={
+                "resumeAfterRunId": run_id,
+                "projectGeneration": snapshot.generation,
+                "unfinishedElements": unfinished,
+            },
+        )
+        await self._event(
+            project_id,
+            session_id,
+            "agent.yolo.resumed",
+            run_id,
+            appended.message,
+            {
+                "runId": run_id,
+                "messageSeq": appended.message.message_seq,
+                "unfinishedElements": unfinished,
+            },
+        )
+        self._wake.set()
 
     async def _queue_mainline_resume(
         self,
@@ -4668,6 +5109,8 @@ def _runtime_action_result_kind(
         return _PROJECT_SNAPSHOT_RESULT_KIND
     if not failed and tool_name == GROUND_PROMPT_CONTEXT_TOOL_NAME:
         return "web_grounding"
+    if not failed and tool_name == OBJECT_GROUNDING_TOOL_NAME:
+        return "object_grounding"
     return None
 
 
@@ -5103,6 +5546,30 @@ def _specialist_tool_recovery(
             "video_reference_version_ids, keep only generated "
             "artifact-version references such as the character design and "
             "storyboard images, then call r2v_generation again."
+        )
+    if name == "image_generation" and any(
+        marker in error.casefold()
+        for marker in (
+            "rejected by the safety system",
+            "content policy",
+            "content_policy_violation",
+        )
+    ):
+        # The image provider's safety system deterministically rejects the
+        # request; identical resubmission can never succeed. The dominant
+        # cause in practice is real-person photos travelling as reference
+        # images — including into scene/prop generations that do not need
+        # any face at all.
+        return (
+            "The image provider's safety system rejected this request — a "
+            "deterministic content policy, not a transient failure; do not "
+            "resubmit the same arguments. For scene or prop targets, remove "
+            "every reference image that contains a person before retrying. "
+            "For character targets, drop real-photo references "
+            "(asset-version IDs of downloaded or uploaded images) and use "
+            "already generated stylized artifact-version references — or a "
+            "text-only prompt — instead, then call image_generation again "
+            "with the adjusted references or a rephrased prompt."
         )
     if name == "jq_project":
         return _jq_project_recovery(code)
