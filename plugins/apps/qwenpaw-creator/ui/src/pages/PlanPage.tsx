@@ -632,7 +632,7 @@ export default function PlanPage() {
             <RefreshCw
               className={`h-3.5 w-3.5 ${isComposing ? "animate-spin" : ""}`}
             />
-            {isComposing ? "合成中..." : "合成成片"}
+              {isComposing ? t("lib.composing") : t("lib.composeFinalCut")}
           </button>
           {/* Download-final-cut and export-project share one split entry. */}
           <Dropdown

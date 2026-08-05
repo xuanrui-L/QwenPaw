@@ -40,7 +40,7 @@ export default function ReturnBanner() {
 
   const top = stack[stack.length - 1];
   const sourceDescription =
-    top.description === "决策中心"
+        top.description === t("lib.decisionCenter")
       ? t("returnBanner.reviewDecision")
       : top.description;
 

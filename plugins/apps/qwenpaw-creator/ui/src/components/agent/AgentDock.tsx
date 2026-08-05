@@ -955,7 +955,7 @@ function NestedSubagentToolCard({ item }: { item: SubagentStreamTool }) {
           </span>
           {active && item.receivedBytes !== undefined && (
             <span className="text-[9px] text-[var(--color-text-tertiary)]">
-              · 参数 {formatToolArgumentBytes(item.receivedBytes)}
+              {i18n.t("lib.arguments")}{formatToolArgumentBytes(item.receivedBytes)}
             </span>
           )}
         </span>
@@ -1262,7 +1262,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           )}
           {active && data.receivedBytes !== undefined && (
             <span className="text-[10px] text-[var(--color-text-tertiary)]">
-              · 参数 {formatToolArgumentBytes(data.receivedBytes)}
+              {i18n.t("lib.arguments")}{formatToolArgumentBytes(data.receivedBytes)}
             </span>
           )}
         </span>

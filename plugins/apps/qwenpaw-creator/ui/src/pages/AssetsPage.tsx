@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, message, Modal, Tabs } from "antd";
+import i18n from "@/i18n";
 import {
   Box,
   Clapperboard,
@@ -212,7 +213,7 @@ function visualVariantCardName(variant: VisualVariantDocument): string {
     .at(-1)
     ?.trim();
   if (!variantName) return visualVariantLabel(variant, 36);
-  if (variantName.toLocaleLowerCase() === "default") return "默认造型";
+  if (variantName.toLocaleLowerCase() === "default") return i18n.t("assets.defaultLook");
   return variantName
     .split(/[-_]+/)
     .filter(Boolean)
@@ -242,7 +243,7 @@ function assetItems(project: ProjectDocument): AssetItem[] {
       description: String(
         source.metadata.description ||
           source.metadata.user_notes ||
-          "用户导入的来源素材",
+          i18n.t("assets.userImportedSource"),
       ),
       mediaKind: source.media_kind,
       mediaType: source.media_type,
@@ -270,7 +271,7 @@ function assetItems(project: ProjectDocument): AssetItem[] {
         kind: "artifact",
         name: artifact.name || artifact.version_id,
         description: artifact.stale
-          ? artifact.stale_reason || "该产物依赖的 Project 内容已经变化"
+          ? artifact.stale_reason || i18n.t("assets.staleDescription")
           : `${artifact.kind} · generation ${artifact.based_on_generation}`,
         mediaKind: media.kind,
         mediaType: media.type,
@@ -337,7 +338,7 @@ function assetItems(project: ProjectDocument): AssetItem[] {
             variant?.requirements ||
             entity.description ||
             entity.continuity ||
-            `${entity.kind} 视觉设定`,
+            `${entity.kind} ${i18n.t("assets.visualSettingSuffix")}`,
           mediaKind: media.kind,
           mediaType: media.type,
           previewUrl: artifact
@@ -420,13 +421,13 @@ function visualItemGroups(
       characterGroups.push({
         key: `character:${entityId}`,
         label: entity.name,
-        badge: "角色",
+        badge: i18n.t("assets.character"),
         countLabel:
           requiredCount > 0
             ? definedCount === requiredCount
-              ? `${definedCount} 个造型`
-              : `${definedCount}/${requiredCount} 个造型`
-            : "1 项设定",
+              ? i18n.t("assets.charactersCount", { count: definedCount })
+              : i18n.t("assets.charactersOfCount", { defined: definedCount, required: requiredCount })
+            : i18n.t("assets.oneSetting"),
         items: entityItems,
       });
     } else if (entity.kind === "scene") {
@@ -442,8 +443,8 @@ function visualItemGroups(
       ? [
           {
             key: "visual-scenes",
-            label: "场景",
-            countLabel: `${sceneItems.length} 项设定`,
+            label: i18n.t("assets.scene"),
+            countLabel: i18n.t("assets.sceneSettings", { count: sceneItems.length }),
             items: sceneItems,
           },
         ]
@@ -452,8 +453,8 @@ function visualItemGroups(
       ? [
           {
             key: "visual-props",
-            label: "道具",
-            countLabel: `${propItems.length} 项设定`,
+            label: i18n.t("assets.prop"),
+            countLabel: i18n.t("assets.propSettings", { count: propItems.length }),
             items: propItems,
           },
         ]
@@ -462,8 +463,8 @@ function visualItemGroups(
       ? [
           {
             key: "visual-other",
-            label: "其他设定",
-            countLabel: `${unassigned.length} 项设定`,
+            label: i18n.t("assets.otherSettings"),
+            countLabel: i18n.t("assets.otherSettingsCount", { count: unassigned.length }),
             items: unassigned,
           },
         ]
@@ -601,7 +602,7 @@ function visualEntityPromptTarget(
   return {
     pointer: `/visual/entities/items/${entity.entity_id}/variants/items/${variant.variant_id}/prompt`,
     value: variant.prompt,
-    label: "生成 Prompt",
+    label: i18n.t("assets.generationPrompt"),
   };
 }
 
@@ -651,19 +652,19 @@ function generationPromptTarget(
         ? {
             pointer: `${base}/video_prompt`,
             value: element.creation.video_prompt,
-            label: "视频生成 Prompt",
+            label: i18n.t("assets.videoGenPrompt"),
           }
         : {
             pointer: `${base}/storyboard_prompt`,
             value: element.creation.storyboard_prompt,
-            label: "分镜图生成 Prompt",
+            label: i18n.t("assets.storyboardGenPrompt"),
           };
     }
     if (element.creation.type === "overlay") {
       return {
         pointer: `${base}/prompt`,
         value: element.creation.prompt,
-        label: "生成 Prompt",
+        label: i18n.t("assets.generationPrompt"),
       };
     }
   }

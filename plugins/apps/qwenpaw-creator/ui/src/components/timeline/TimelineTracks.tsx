@@ -408,8 +408,8 @@ export default function TimelineTracks({
     const attachment = {
       kind: isPoint ? ("timeline_point" as const) : ("timeline_range" as const),
       text: isPoint
-        ? `${startText}s · ${selectedElements.length} 项同时出现的内容`
-        : `${startText}s – ${endText}s · ${selectedElements.length} 项时间线内容`,
+        ? `${startText}s · ${selectedElements.length} ${t("timeline.itemsAtSameTime")}`
+        : `${startText}s – ${endText}s · ${selectedElements.length} ${t("timeline.timelineItems")}`,
       ref: timelineRef(timeline),
       field: isPoint
         ? `${timelineRef(timeline)}@${selection.startTick}`
@@ -419,7 +419,7 @@ export default function TimelineTracks({
       path: projectJsonPointer("timelines", "items", timeline.timeline_id),
       start: selection.startTick,
       end: selection.endTick,
-      label: isPoint ? "时间点" : "时间区间",
+      label: isPoint ? t("timeline.timePoint") : t("timeline.timeRange"),
       timelineId: timeline.timeline_id,
       startTick: selection.startTick,
       endTick: selection.endTick,
@@ -549,7 +549,7 @@ export default function TimelineTracks({
         authorityTimeline,
         drag.lastChanges.slice(0, 1),
       );
-      message.warning(follow.ok === false ? follow.reason : "该调整无法应用");
+      message.warning(follow.ok === false ? follow.reason : t("timeline.adjustmentFailed"));
       onDragOverridesChange(null);
       return;
     }
@@ -758,7 +758,7 @@ export default function TimelineTracks({
         type="button"
         data-element-block={element.element_id}
         data-element-block-state={playbackState}
-        title={`${element.label || "时间线内容"} · ${seconds(
+            title={`${element.label || t("timeline.timelineContent")} · ${seconds(
           element.span.start_tick,
           timeline.ticks_per_second,
         )}s – ${seconds(
@@ -770,7 +770,7 @@ export default function TimelineTracks({
             : ` · ${ELEMENT_PLAYBACK_STATUS_LABEL[playbackState]}`
         }${
           editable
-            ? " · 可拖拽移动，选中后拖动两端裁剪；Shift+拖动选取时间段"
+            ? t("timeline.draggableHint")
             : ""
         }`}
         onPointerDown={(event) => {
@@ -870,7 +870,7 @@ export default function TimelineTracks({
                   className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-danger)] align-middle"
                 />
               )}
-              {element.label || "时间线内容"}
+              {element.label || t("timeline.timelineContent")}
             </span>
             <span className="pointer-events-none truncate whitespace-nowrap text-[9px] font-medium opacity-75">
               {seconds(element.span.start_tick, timeline.ticks_per_second)}s –{" "}
@@ -1040,13 +1040,13 @@ export default function TimelineTracks({
                     >
                       <span className="flex items-center gap-1.5">
                         <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--color-warning)]" />
-                        Agent 正在编排时间轴，内容生成后会自动出现
+                        {t("timeline.agentArranging")}
                       </span>
                       <div className="agent-working-shimmer h-1.5 w-3/5 rounded-full bg-[var(--color-bg-secondary)]" />
                     </div>
                   ) : (
                     <div className="flex h-14 items-center justify-center text-xs text-[var(--color-text-tertiary)]">
-                      时间轴中还没有内容
+                      {t("timeline.timelineEmpty")}
                     </div>
                   )
                 ) : (
@@ -1061,7 +1061,7 @@ export default function TimelineTracks({
                               className="relative flex h-11 border-b border-[var(--color-border)]/65 last:border-b-0"
                             >
                               <div
-                                title={`${track.label}（点击选取整行）`}
+                                title={`${track.label}${t("timeline.clickSelectRow")}`}
                                 onPointerDown={(event) =>
                                   event.stopPropagation()
                                 }
@@ -1147,13 +1147,13 @@ export default function TimelineTracks({
                                 type="button"
                                 data-transition-junction={transition.element_id}
                                 title={`${
-                                  transition.label || "转场"
+                                  transition.label || t("timeline.transition")
                                 } · ${kindLabel} · ${seconds(
                                   transition.span.duration_tick,
                                   timeline.ticks_per_second,
                                 )}s${
                                   editable
-                                    ? " · 点击编辑，可在重叠区内拖动"
+                                    ? t("timeline.clickEditHint")
                                     : ""
                                 }`}
                                 onPointerDown={(event) =>
@@ -1295,7 +1295,7 @@ export default function TimelineTracks({
                 className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
               >
                 <MessageSquarePlus className="h-3.5 w-3.5" />
-                添加到对话
+                {t("timeline.addToConversation")}
               </button>
             </div>,
             document.body,
@@ -1308,7 +1308,7 @@ export default function TimelineTracks({
           className="flex flex-nowrap items-center gap-1.5 overflow-x-auto border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)]/70 px-3 py-2 text-[11px]"
         >
           <span className="mr-1 shrink-0 text-[var(--color-text-tertiary)]">
-            该时刻有 {pointCandidates.length} 项内容：
+            {t("timeline.itemsAtMoment", { count: pointCandidates.length })}
           </span>
           {pointCandidates.map((element) => {
             const meta = resolveElementVisualMeta(element);

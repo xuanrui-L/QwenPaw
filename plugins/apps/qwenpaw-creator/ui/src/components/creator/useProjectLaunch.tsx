@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 import { Modal, message } from "antd";
 import type {
   CreatorContentPart,
@@ -88,7 +89,7 @@ async function waitForTask(
         throw new Error(
           taskErrorMessage(
             task.error,
-            `素材处理失败（${creatorStatusLabel(task.status)}）`,
+            i18n.t("lib.sourceProcessingFailed", { status: creatorStatusLabel(task.status) }),
           ),
         );
       }
@@ -118,7 +119,7 @@ function remoteUrlContentPart(url: string): CreatorContentPart {
   try {
     pathname = new URL(url).pathname.toLowerCase();
   } catch {
-    return { type: "text", text: `远程素材 URL：${url}` };
+      return { type: "text", text: i18n.t("lib.remoteSourceUrl", { url }) };
   }
   if (/\.(png|jpe?g|webp|gif|bmp|avif)$/.test(pathname)) {
     return { type: "image_url", image_url: { url } };
@@ -126,7 +127,7 @@ function remoteUrlContentPart(url: string): CreatorContentPart {
   if (/\.(mp4|mov|m4v|webm|mkv|avi|mpeg|mpg)$/.test(pathname)) {
     return { type: "video_url", video_url: { url } };
   }
-  return { type: "text", text: `远程素材 URL：${url}` };
+  return { type: "text", text: i18n.t("lib.remoteSourceUrl", { url }) };
 }
 
 /**
@@ -379,7 +380,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
             if (terminal.has(view.status)) {
               if (view.status !== "SUCCEEDED")
                 throw new Error(
-                  `文件夹导入失败（${creatorStatusLabel(view.status)}）`,
+                  i18n.t("lib.folderImportFailed", { status: creatorStatusLabel(view.status) }),
                 );
               refs.push(
                 ...view.items.map(
@@ -388,7 +389,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
               );
               if (view.failures.length > 0) {
                 message.warning(
-                  `文件夹导入完成，跳过 ${view.failures.length} 个文件`,
+                  i18n.t("lib.folderImportSkipped", { count: view.failures.length }),
                 );
               }
               break;
@@ -396,7 +397,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
             await wait(800);
           }
         } catch (error) {
-          message.warning(`文件夹导入失败：${(error as Error).message}`);
+          message.warning(i18n.t("lib.folderImportError", { detail: (error as Error).message }));
         }
       }
 
@@ -416,7 +417,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
           refs.push(...taskRefs);
         } catch (error) {
           message.warning(
-            `附件「${att.file.name}」入库失败：${(error as Error).message}`,
+            i18n.t("lib.attachmentIngestFailed", { name: att.file.name, detail: (error as Error).message }),
           );
         }
       }
@@ -441,9 +442,7 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
             : [];
           refs.push(...taskRefs);
         } catch (error) {
-          message.warning(
-            `附件「${att.url}」入库失败：${(error as Error).message}`,
-          );
+          message.warning(i18n.t("lib.attachmentIngestFailed", { name: att.url, detail: (error as Error).message }));
         }
       }
 

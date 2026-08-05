@@ -904,7 +904,7 @@ export default function R2VWorkbenchPage() {
                 >
                   <img
                     src={storyboardUrl}
-                    alt="分镜图"
+                    alt={t("lib.storyboard")}
                     className="w-full rounded-lg border border-[var(--color-border)]"
                   />
                 </div>

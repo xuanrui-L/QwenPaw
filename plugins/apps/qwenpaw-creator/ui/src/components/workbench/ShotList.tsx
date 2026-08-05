@@ -63,7 +63,7 @@ export default function ShotList({
               <div
                 data-creator-field={`element:${elementId}/shot:${shotId}/description`}
                 data-creator-path={shotPointer(shotId, "description")}
-                data-creator-field-label={`镜头${index + 1} · 描述`}
+                data-creator-field-label={t("lib.shotDescription", { index: index + 1 })}
               >
                 <TextArea
                   value={shot.description}
@@ -85,7 +85,7 @@ export default function ShotList({
                 <span
                   data-creator-field={`element:${elementId}/shot:${shotId}/camera`}
                   data-creator-path={shotPointer(shotId, "camera")}
-                  data-creator-field-label={`镜头${index + 1} · 运镜`}
+                  data-creator-field-label={t("lib.shotCamera", { index: index + 1 })}
                   className="contents"
                 >
                   <Input
@@ -104,7 +104,7 @@ export default function ShotList({
                 <span
                   data-creator-field={`element:${elementId}/shot:${shotId}/framing`}
                   data-creator-path={shotPointer(shotId, "framing")}
-                  data-creator-field-label={`镜头${index + 1} · 景别`}
+                  data-creator-field-label={t("lib.shotFraming", { index: index + 1 })}
                   className="contents"
                 >
                   <Input
@@ -123,7 +123,7 @@ export default function ShotList({
                 <span
                   data-creator-field={`element:${elementId}/shot:${shotId}/duration_seconds`}
                   data-creator-path={shotPointer(shotId, "duration_seconds")}
-                  data-creator-field-label={`镜头${index + 1} · 时长`}
+                  data-creator-field-label={t("lib.shotDuration", { index: index + 1 })}
                 >
                   <InputNumber
                     min={1}

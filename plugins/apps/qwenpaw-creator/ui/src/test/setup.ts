@@ -3,7 +3,8 @@ import { afterEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import i18n from "@/i18n";
 
-i18n.changeLanguage("zh");
+await i18n.init();
+await i18n.changeLanguage("zh");
 
 // antd/rc-component need these browser APIs under jsdom; polyfill them.
 if (!("ResizeObserver" in globalThis)) {

@@ -545,7 +545,7 @@ export default function ElementDetail({
                         >
                           <b className="text-[var(--color-text-primary)]">
                             {String(index + 1).padStart(2, "0")} ·{" "}
-                            {shot.camera || "镜头"}
+                            {shot.camera || t("lib.camera")}
                           </b>
                           <p>{shot.description}</p>
                         </div>
@@ -778,7 +778,7 @@ export default function ElementDetail({
                       {url && mediaType.startsWith("image/") && (
                         <img
                           src={url}
-                          alt={`${output.name} 输出`}
+                          alt={`${output.name} ${t("lib.output")}`}
                           className="max-h-56 w-full bg-black object-contain"
                         />
                       )}

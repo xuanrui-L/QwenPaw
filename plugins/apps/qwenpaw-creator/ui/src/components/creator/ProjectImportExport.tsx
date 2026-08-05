@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 import { Modal, Progress, message } from "antd";
 import { X } from "lucide-react";
 import {
@@ -41,11 +42,11 @@ function importProject(
         try {
           resolve(JSON.parse(xhr.responseText) as ProjectImportResponse);
         } catch {
-          reject(new Error("导入失败：无法解析服务端响应"));
+          reject(new Error(i18n.t("lib.importFailedParse")));
         }
         return;
       }
-      let msg = `导入失败：HTTP ${xhr.status}`;
+      let msg = i18n.t("lib.importFailedHttp", { status: xhr.status });
       try {
         const body = JSON.parse(xhr.responseText);
         if (body?.message) msg = body.message;
@@ -54,8 +55,8 @@ function importProject(
       }
       reject(new Error(msg));
     };
-    xhr.onerror = () => reject(new Error("导入失败：网络错误"));
-    xhr.onabort = () => reject(new Error("导入失败：已取消"));
+      xhr.onerror = () => reject(new Error(i18n.t("lib.importFailedNetwork")));
+      xhr.onabort = () => reject(new Error(i18n.t("lib.importFailedCancelled")));
 
     xhr.send(form);
   });
@@ -229,10 +230,10 @@ export async function saveExportFile(
     },
   );
   if (!response.ok) {
-    throw new Error(`导出失败：HTTP ${response.status}`);
+      throw new Error(i18n.t("lib.exportFailedHttp", { status: response.status }));
   }
   if (!response.body) {
-    throw new Error("导出失败：没有数据");
+      throw new Error(i18n.t("lib.exportFailedNoData"));
   }
 
   let filename = `${projectId}.zip`;

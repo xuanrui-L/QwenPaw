@@ -5,6 +5,7 @@ import type {
 } from "@/contracts/creator";
 import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
+import i18n from "@/i18n";
 
 export type SpanDragMode = "move" | "trim-start" | "trim-end";
 
@@ -289,9 +290,7 @@ export function transitionFollowChanges(
     if (!window) {
       return {
         ok: false,
-        reason: `调整后「${
-          element.label || element.element_id
-        }」转场的前后画面不再重叠，请先调整或停用该转场`,
+        reason: i18n.t("lib.transitionOverlapError", { name: element.label || element.element_id }),
       };
     }
     const minTick = minDurationTick(timeline.ticks_per_second);
