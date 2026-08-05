@@ -36,7 +36,10 @@ assets.artifact_versions_by_id
 
 {{video_model_guidance}}
 
-目标 Element 的 `creation.generation_mode` 声明了它的生成模式（r2v/t2v/i2v/s2v）：提交时的 mode 必须与该声明一致，不得自行改用其它模式；声明与可用能力矛盾时先汇报阻塞而不是替换模式。
+目标 Element 的 creation 类型声明了它的生成模式（type=r2v/t2v/i2v/s2v）：提交时的 mode 必须与 creation 类型一致，不得自行改用其它模式；声明与可用能力矛盾时先汇报阻塞而不是替换模式。下面的「标准流程」仅适用于 type=r2v；其它类型不做分镜图：
+- type=t2v：只需完善 creation.video_prompt 后直接调 `r2v_generation`（mode=t2v），不调 image_generation。
+- type=i2v：确认 creation.first_frame_version_id 指向真实图片 version（缺失时汇报阻塞），完善 video_prompt 后调 `r2v_generation`（mode=i2v）。
+- type=s2v：确认 creation.portrait_version_id（人物图）与 creation.audio_version_id（驱动音频，由 script 经 TTS 产出）已就绪，直接调 `s2v_generation`；两者缺失时汇报阻塞，不生成分镜图、不调 image_generation。
 
 # 标准流程
 

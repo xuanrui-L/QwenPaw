@@ -95,7 +95,7 @@ def test_creator_owns_timeline_element_planning() -> None:
     prompt = load_file_agent_prompt("creator_agent.system")
     for responsibility in (
         "Timeline Element",
-        "creation.type=r2v/edit/overlay/transition/audio",
+        "creation.type=r2v/t2v/i2v/s2v/edit/overlay/transition/audio",
         "单个 R2V Element 不超过 15 秒",
         "elements_at",
         "jq_project",

@@ -59,9 +59,12 @@ from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     ArtifactSlot,
     ArtifactVersion,
+    I2VCreation,
     IndexedFile,
     Project,
     R2VCreation,
+    S2VCreation,
+    T2VCreation,
 )
 from services.media_files.element_adapter import (
     bind_candidate_output,
@@ -707,14 +710,32 @@ def _resolve_request(
     element_id = _target_element_id(target_ref)
     timeline, element = find_timeline_element(project, element_id)
     creation = element.creation
-    if not isinstance(creation, R2VCreation):
-        raise ValidationError("仅 R2V Element 可以生成 R2V 视频")
     mode = _validated_request_mode(arguments)
+    # Each creation type declares exactly one generation mode; the request
+    # mode must match it so a t2v element can never be submitted as r2v.
+    creation_by_mode = {
+        "r2v": R2VCreation,
+        "video_edit": R2VCreation,
+        "t2v": T2VCreation,
+        "i2v": I2VCreation,
+    }
+    expected = creation_by_mode.get(mode)
+    if expected is None or not isinstance(creation, expected):
+        raise ValidationError(
+            f"mode={mode} 与目标 Element 的 creation.type={creation.type} 不匹配；"
+            "生成模式由 Element 的 creation 类型声明，不可在提交时替换",
+        )
     first_frame_ref = str(arguments.get("firstFrameRef") or "").strip()
+    if mode == "i2v" and not first_frame_ref:
+        # The declared first frame on the element is the default input.
+        first_frame_ref = str(
+            getattr(creation, "first_frame_version_id", None) or "",
+        ).strip()
     video_ref = str(arguments.get("videoRef") or "").strip()
     if mode == "i2v" and not first_frame_ref:
         raise ValidationError(
-            "i2v 模式必须提供 firstFrameRef（exact 图片 version id）",
+            "i2v 模式必须提供 firstFrameRef（exact 图片 version id）或在 "
+            "creation.first_frame_version_id 声明首帧",
         )
     if mode == "video_edit" and not video_ref:
         raise ValidationError(
@@ -867,18 +888,31 @@ def _resolve_s2v_request(
     project = snapshot.project
     element_id = _target_element_id(target_ref)
     _, element = find_timeline_element(project, element_id)
-    if not isinstance(element.creation, R2VCreation):
-        raise ValidationError("仅 R2V Element 可以生成数字人视频")
-    image_ref = str(arguments.get("characterImageRef") or "").strip()
-    audio_ref = str(arguments.get("audioAssetRef") or "").strip()
+    creation = element.creation
+    if not isinstance(creation, S2VCreation):
+        raise ValidationError(
+            "仅 creation.type=s2v 的 Element 可以生成数字人视频",
+        )
+    # Explicit refs win; the element's declared portrait/audio are the
+    # defaults so the tool call carries no redundant arguments.
+    image_ref = str(
+        arguments.get("characterImageRef")
+        or creation.portrait_version_id
+        or "",
+    ).strip()
+    audio_ref = str(
+        arguments.get("audioAssetRef") or creation.audio_version_id or "",
+    ).strip()
     if not image_ref:
         raise ValidationError(
-            "s2v_generation 需要 characterImageRef（exact 人像图 version id）",
+            "s2v_generation 需要人像图：传 characterImageRef 或在 "
+            "creation.portrait_version_id 声明（exact 图片 version id）",
         )
     if not audio_ref:
         raise ValidationError(
-            "s2v_generation 需要 audioAssetRef（exact 音频 version id，"
-            "可直接使用 tts_generation 产出的 version）",
+            "s2v_generation 需要驱动音频：传 audioAssetRef 或在 "
+            "creation.audio_version_id 声明（可直接使用 tts_generation "
+            "产出的 version）",
         )
     resolution = normalize_s2v_resolution(
         str(arguments.get("resolution") or "480P"),

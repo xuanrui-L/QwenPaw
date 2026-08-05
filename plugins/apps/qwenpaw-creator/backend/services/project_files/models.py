@@ -31,7 +31,7 @@ from pydantic import (
 )
 
 
-CURRENT_PROJECT_SCHEMA_VERSION = 4
+CURRENT_PROJECT_SCHEMA_VERSION = 5
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
@@ -675,11 +675,6 @@ class R2VCreation(StrictModel):
     """Declarative R2V creative facts, independent of the executing Agent."""
 
     type: Literal["r2v"] = "r2v"
-    # Which generation mode this element is planned for. The workbench and
-    # the submit tool both read it, so a t2v/i2v/s2v element never presents
-    # (or executes) as a reference-to-video one. "r2v" keeps the historical
-    # default for existing projects.
-    generation_mode: Literal["r2v", "t2v", "i2v", "s2v"] = "r2v"
     intent: str = ""
     narrative: str = ""
     continuity: str = ""
@@ -711,6 +706,59 @@ class R2VCreation(StrictModel):
                     "R2V creation shot requires camera and framing",
                 )
         return self
+
+
+class T2VCreation(StrictModel):
+    """Pure text-to-video creative facts.
+
+    The provider consumes nothing but the prompt, so the model carries only
+    the narrative planning facts that produce it — no shots, storyboard or
+    reference stacks.
+    """
+
+    type: Literal["t2v"] = "t2v"
+    intent: str = ""
+    narrative: str = ""
+    continuity: str = ""
+    video_prompt: str = ""
+    recipe: GenerationRecipe | None = None
+
+
+class I2VCreation(StrictModel):
+    """First-frame-to-video creative facts.
+
+    The provider consumes exactly one first-frame image plus the prompt;
+    the frame is an exact version reference, not a storyboard pipeline.
+    """
+
+    type: Literal["i2v"] = "i2v"
+    intent: str = ""
+    narrative: str = ""
+    continuity: str = ""
+    first_frame_version_id: EntityId | None = None
+    video_prompt: str = ""
+    recipe: GenerationRecipe | None = None
+
+
+class S2VCreation(StrictModel):
+    """Digital-human (speech-to-video) creative facts.
+
+    wan2.2-s2v consumes a portrait image and a driving audio track; the
+    script is the necessary intermediate that produces that audio via TTS.
+    Nothing else reaches the provider, so nothing else is modelled.
+    """
+
+    type: Literal["s2v"] = "s2v"
+    intent: str = ""
+    # Visual entity whose portrait (and enrolled voice) drives the clip.
+    character_ref: EntityId | None = None
+    # Exact image version used as the s2v reference portrait.
+    portrait_version_id: EntityId | None = None
+    # Spoken lines; TTS turns them into the driving audio below.
+    script: str = ""
+    # Exact audio version that drives the lip-sync.
+    audio_version_id: EntityId | None = None
+    recipe: GenerationRecipe | None = None
 
 
 class EditCreation(StrictModel):
@@ -869,6 +917,9 @@ class AudioCreation(StrictModel):
 
 ElementCreation = Annotated[
     R2VCreation
+    | T2VCreation
+    | I2VCreation
+    | S2VCreation
     | EditCreation
     | OverlayCreation
     | TransitionCreation
@@ -991,7 +1042,7 @@ class Timeline(StrictModel):
 
 
 class Project(StrictModel):
-    schema_version: Literal[4] = CURRENT_PROJECT_SCHEMA_VERSION
+    schema_version: Literal[5] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
     generation: int = Field(default=0, ge=0)
     created_at: UtcDateTime

@@ -76,11 +76,14 @@ from services.project_files.models import (
     AudioCreation,
     EditCreation,
     ElementOutputRenderSource,
+    I2VCreation,
     IndexedFile,
     OverlayCreation,
     Project,
     R2VCreation,
+    S2VCreation,
     SourceVersionRenderSource,
+    T2VCreation,
     Timeline,
     TimelineElement,
     TransitionCreation,
@@ -1762,7 +1765,7 @@ def _timeline_execution(
     creation_types = (
         (EditCreation,)
         if command is CreatorCommandType.EXECUTE_EDIT
-        else (R2VCreation, EditCreation)
+        else (R2VCreation, T2VCreation, I2VCreation, S2VCreation, EditCreation)
     )
     visual_elements = sorted(
         (
@@ -1804,8 +1807,12 @@ def _timeline_execution(
             end_seconds = (
                 render_source.source_out_tick / timeline.ticks_per_second
             )
-        elif isinstance(element.creation, R2VCreation):
-            # For R2V elements, use the span duration to allow length adjustment
+        elif isinstance(
+            element.creation,
+            (R2VCreation, T2VCreation, I2VCreation, S2VCreation),
+        ):
+            # For generated-video elements, use the span duration to allow
+            # length adjustment
             start_seconds = 0.0
             end_seconds = (
                 element.span.duration_tick / timeline.ticks_per_second

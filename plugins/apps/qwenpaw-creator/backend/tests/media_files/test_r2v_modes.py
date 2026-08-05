@@ -15,9 +15,12 @@ from services.project_files.review import ReviewDecisionItem
 from services.project_files.models import (
     ElementLocation,
     EntityCollection,
+    I2VCreation,
     Project,
     R2VCreation,
+    S2VCreation,
     Shot,
+    T2VCreation,
     TimelineElement,
     TimelineSpan,
 )
@@ -35,6 +38,9 @@ _MP4 = b"\x00\x00\x00\x18ftypmp42" + b"mode-video" * 64
 
 PROJECT_ID = "r2v-mode-project"
 ELEMENT_ID = "r2v-mode-1"
+# Second element carrying the mode-specific creation type under test; the
+# r2v element above keeps producing the storyboard image used as input.
+MODE_ELEMENT_ID = "video-mode-1"
 
 
 class _ImageProvider:
@@ -96,13 +102,27 @@ def _r2v_element() -> TimelineElement:
     )
 
 
-def _services(tmp_path, monkeypatch) -> CreatorFileServices:
+def _services(
+    tmp_path,
+    monkeypatch,
+    extra_creation=None,
+) -> CreatorFileServices:
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
     services = CreatorFileServices.create(tmp_path.resolve())
     project = Project.new(project_id=PROJECT_ID, name="R2V Modes")
     project.timelines.items["timeline:main"].elements_by_id[
         ELEMENT_ID
     ] = _r2v_element()
+    if extra_creation is not None:
+        project.timelines.items["timeline:main"].elements_by_id[
+            MODE_ELEMENT_ID
+        ] = TimelineElement(
+            element_id=MODE_ELEMENT_ID,
+            label="模式镜头",
+            span=TimelineSpan(start_tick=4_000, duration_tick=4_000),
+            location=ElementLocation(),
+            creation=extra_creation,
+        )
     services.projects.create(
         Project.model_validate(project.model_dump(mode="json")),
     )
@@ -148,6 +168,7 @@ def _run_video(
     arguments: dict,
     idempotency_key: str,
     s2v: bool = False,
+    element_id: str = ELEMENT_ID,
 ):
     async def scenario():
         worker = FileR2VExecutionService(
@@ -158,7 +179,7 @@ def _run_video(
         )
         dispatched = await worker.dispatch(
             project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
+            target_ref=f"element:{element_id}",
             arguments=arguments,
             idempotency_key=idempotency_key,
             s2v=s2v,
@@ -180,11 +201,16 @@ def test_t2v_dispatch_skips_storyboard_and_passes_mode(
 ) -> None:
     """t2v needs no storyboard selection and forwards mode to the provider."""
 
-    services = _services(tmp_path, monkeypatch)
+    services = _services(
+        tmp_path,
+        monkeypatch,
+        extra_creation=T2VCreation(video_prompt="动画，猫从左向右追逐老鼠"),
+    )
     provider = _CapturingR2VProvider()
     task = _run_video(
         services,
         provider,
+        element_id=MODE_ELEMENT_ID,
         arguments={
             "mode": "t2v",
             "durationSeconds": 5,
@@ -205,12 +231,17 @@ def test_i2v_dispatch_resolves_first_frame_version(
     tmp_path,
     monkeypatch,
 ) -> None:
-    services = _services(tmp_path, monkeypatch)
+    services = _services(
+        tmp_path,
+        monkeypatch,
+        extra_creation=I2VCreation(video_prompt="猫从首帧开始奔跑"),
+    )
     storyboard_version_id = _generate_storyboard(services)
     provider = _CapturingR2VProvider()
     task = _run_video(
         services,
         provider,
+        element_id=MODE_ELEMENT_ID,
         arguments={
             "mode": "i2v",
             "firstFrameRef": storyboard_version_id,
@@ -301,11 +332,16 @@ def test_video_edit_rejected_for_wan_models(tmp_path, monkeypatch) -> None:
 
 
 def test_i2v_requires_first_frame_ref(tmp_path, monkeypatch) -> None:
-    services = _services(tmp_path, monkeypatch)
+    services = _services(
+        tmp_path,
+        monkeypatch,
+        extra_creation=I2VCreation(video_prompt="猫从首帧开始奔跑"),
+    )
     with pytest.raises(ValidationError, match="firstFrameRef"):
         _run_video(
             services,
             _CapturingR2VProvider(),
+            element_id=MODE_ELEMENT_ID,
             arguments={"mode": "i2v", "durationSeconds": 5},
             idempotency_key="video-i2v-missing",
         )
@@ -351,13 +387,18 @@ def test_s2v_dispatch_consumes_tts_audio_and_character_image(
 ) -> None:
     """s2v rides the same durable poller with exact image + audio versions."""
 
-    services = _services(tmp_path, monkeypatch)
+    services = _services(
+        tmp_path,
+        monkeypatch,
+        extra_creation=S2VCreation(script="你好，数字人"),
+    )
     image_version_id = _generate_storyboard(services)
     audio_version_id = _register_tts_audio(services, monkeypatch)
     provider = _CapturingR2VProvider()
     task = _run_video(
         services,
         provider,
+        element_id=MODE_ELEMENT_ID,
         arguments={
             "characterImageRef": image_version_id,
             "audioAssetRef": audio_version_id,
@@ -375,18 +416,25 @@ def test_s2v_dispatch_consumes_tts_audio_and_character_image(
     assert submitted["resolution"] == "480P"
     finished = services.projects.read(PROJECT_ID).project
     element = finished.timelines.items["timeline:main"].elements_by_id[
-        ELEMENT_ID
+        MODE_ELEMENT_ID
     ]
-    assert element.outputs["main"].slot_id == f"element:{ELEMENT_ID}:main"
+    assert (
+        element.outputs["main"].slot_id == f"element:{MODE_ELEMENT_ID}:main"
+    )
 
 
 def test_s2v_dispatch_requires_audio_ref(tmp_path, monkeypatch) -> None:
-    services = _services(tmp_path, monkeypatch)
+    services = _services(
+        tmp_path,
+        monkeypatch,
+        extra_creation=S2VCreation(script="你好，数字人"),
+    )
     image_version_id = _generate_storyboard(services)
     with pytest.raises(ValidationError, match="audioAssetRef"):
         _run_video(
             services,
             _CapturingR2VProvider(),
+            element_id=MODE_ELEMENT_ID,
             arguments={"characterImageRef": image_version_id},
             idempotency_key="s2v-missing-audio",
             s2v=True,

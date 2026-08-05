@@ -32,6 +32,7 @@ import type {
   ProjectDocument,
   TaskView,
   TimelineElementDocument,
+  VideoCreationDocument,
   VideoGenerationMode,
 } from "@/contracts/creator";
 
@@ -51,27 +52,23 @@ const FIELD_LABEL: Record<ReferenceField, string> = {
 // reference-to-video when the element declares something else.
 export const GENERATION_MODE_META: Record<
   VideoGenerationMode,
-  { label: string; subtitle: string; referenceHint: string | null }
+  { label: string; subtitle: string }
 > = {
   r2v: {
     label: "参考生视频",
     subtitle: "AI 生成画面子界面，继承分镜、引用资产和产物版本。",
-    referenceHint: null,
   },
   t2v: {
     label: "文本生视频",
     subtitle: "纯文本生成：视频由 video prompt 驱动，不携带任何参考素材。",
-    referenceHint: "t2v 模式不使用参考素材；以下绑定仅供分镜与一致性参考，不会随视频提交。",
   },
   i2v: {
     label: "首帧生视频",
     subtitle: "首帧生成：以选定的首帧图为起点生成运动，画幅跟随首帧。",
-    referenceHint: "i2v 模式只提交首帧图（默认取已选分镜图版本），其它引用不随视频提交。",
   },
   s2v: {
     label: "数字人口播",
     subtitle: "数字人生成：人像画面 + 驱动音频合成对口型视频，提交前先跑免费人像检测。",
-    referenceHint: "s2v 模式以人像图（取已选分镜图版本）与音频驱动，不提交其它参考素材。",
   },
 };
 
@@ -221,10 +218,17 @@ export default function R2VWorkbenchPage() {
     ],
   );
   const element = elementDraft.value;
-  const creation = element?.creation.type === "r2v" ? element.creation : null;
-  // Declared generation mode drives every mode-specific surface below;
-  // legacy documents without the field behave as r2v.
-  const generationMode = creation?.generation_mode ?? "r2v";
+  // Every generated-video creation type owns this workbench route; the
+  // narrowed creation drives which mode surface renders below.
+  const creation =
+    element &&
+    (element.creation.type === "r2v" ||
+      element.creation.type === "t2v" ||
+      element.creation.type === "i2v" ||
+      element.creation.type === "s2v")
+      ? (element.creation as VideoCreationDocument)
+      : null;
+  const generationMode: VideoGenerationMode = creation?.type ?? "r2v";
   const [viewedSbId, setViewedSbId] = useState<string | null>(null);
   const [viewedVideoId, setViewedVideoId] = useState<string | null>(null);
   const [resolvedVideoModel, setResolvedVideoModel] = useState<string | null>(
@@ -357,20 +361,22 @@ export default function R2VWorkbenchPage() {
     });
   const applyDraft = async () => {
     if (!elementDraft.operations.length) return;
-    const invalidShot = creation.shots.order
-      .map((shotId) => creation.shots.items[shotId])
-      .find(
-        (shot) =>
-          !shot ||
-          !shot.description.trim() ||
-          !shot.camera?.trim() ||
-          !shot.framing?.trim() ||
-          shot.duration_seconds == null ||
-          shot.duration_seconds <= 0,
-      );
-    if (invalidShot) {
-      message.error("每个 Shot 都需要描述、运镜、景别和有效时长");
-      return;
+    if (creation.type === "r2v") {
+      const invalidShot = creation.shots.order
+        .map((shotId) => creation.shots.items[shotId])
+        .find(
+          (shot) =>
+            !shot ||
+            !shot.description.trim() ||
+            !shot.camera?.trim() ||
+            !shot.framing?.trim() ||
+            shot.duration_seconds == null ||
+            shot.duration_seconds <= 0,
+        );
+      if (invalidShot) {
+        message.error("每个 Shot 都需要描述、运镜、景别和有效时长");
+        return;
+      }
     }
     try {
       const response = await patchProject(id, elementDraft.operations);
@@ -463,6 +469,297 @@ export default function R2VWorkbenchPage() {
   })();
 
   const spanSeconds = element.span.duration_tick / timeline.ticks_per_second;
+
+  // ── Mode-specific workbenches ─────────────────────────────────────────
+  // t2v/i2v/s2v carry none of the shot/storyboard/reference machinery, so
+  // they render their own surface built from exactly the provider inputs.
+  if (creation.type !== "r2v") {
+    const modeCreation = creation;
+    const imageOptions = [
+      ...Object.values(project.assets.artifact_versions_by_id)
+        .filter((version) =>
+          project.assets.files_by_id[version.file_id]?.media_type.startsWith(
+            "image/",
+          ),
+        )
+        .map((version) => ({
+          value: version.version_id,
+          label: version.name || version.version_id,
+          url: getArtifactVersionMediaUrl(version.version_id),
+        })),
+      ...Object.values(project.assets.source_versions_by_id)
+        .filter((version) => version.media_kind === "image")
+        .map((version) => ({
+          value: version.version_id,
+          label: version.name || version.version_id,
+          url: getAssetVersionMediaUrl(version.version_id),
+        })),
+    ];
+    const audioOptions = [
+      ...Object.values(project.assets.source_versions_by_id)
+        .filter((version) => version.media_kind === "audio")
+        .map((version) => ({
+          value: version.version_id,
+          label: version.name || version.version_id,
+          url: getAssetVersionMediaUrl(version.version_id),
+        })),
+      ...Object.values(project.assets.artifact_versions_by_id)
+        .filter((version) =>
+          project.assets.files_by_id[version.file_id]?.media_type.startsWith(
+            "audio/",
+          ),
+        )
+        .map((version) => ({
+          value: version.version_id,
+          label: version.name || version.version_id,
+          url: getArtifactVersionMediaUrl(version.version_id),
+        })),
+    ];
+    const imageUrlOf = (versionId: string | null) =>
+      imageOptions.find((option) => option.value === versionId)?.url ?? null;
+    const audioUrlOf = (versionId: string | null) =>
+      audioOptions.find((option) => option.value === versionId)?.url ?? null;
+    const updateModeField = (field: string, value: string | null) =>
+      updateElement((draft) => {
+        (draft.creation as unknown as Record<string, unknown>)[field] = value;
+      });
+
+    return (
+      <div
+        data-mode-workbench={modeCreation.type}
+        className="flex h-full flex-col overflow-hidden bg-[var(--color-bg-layout)]"
+      >
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)]/60 px-5 py-3 backdrop-blur">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={backToPlan}
+              className="icon-button shrink-0"
+              aria-label="返回视频方案"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+            </button>
+            <div className="min-w-0">
+              <h2 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+                {`视频方案 / ${elementLabel} / 制作工作台`}
+                <span
+                  data-generation-mode={modeCreation.type}
+                  className="ml-2 inline-block rounded-full border border-[var(--color-border-secondary)] px-2 py-[1px] align-middle text-[10px] font-medium text-[var(--color-text-secondary)]"
+                >
+                  {GENERATION_MODE_META[modeCreation.type].label}
+                </span>
+              </h2>
+              <p className="mt-0.5 truncate text-xs text-[var(--color-text-secondary)]">
+                {GENERATION_MODE_META[modeCreation.type].subtitle}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="small"
+              disabled={!elementDraft.dirty || patching}
+              onClick={elementDraft.discard}
+              className="!h-[22px] !px-2 !font-[inherit] !text-[11px] !font-semibold !leading-[20px]"
+            >
+              放弃修改
+            </Button>
+            <Button
+              size="small"
+              type="primary"
+              loading={patching}
+              disabled={
+                !elementDraft.dirty || elementDraft.conflictPaths.length > 0
+              }
+              onClick={() => void applyDraft()}
+              className="!h-[22px] !px-2 !font-[inherit] !text-[11px] !font-semibold !leading-[20px]"
+            >
+              {elementDraft.dirty
+                ? `应用修改（${elementDraft.dirtyCount}）`
+                : "应用修改"}
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid min-h-0 flex-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+            {modeCreation.type === "s2v" ? (
+              <>
+                <Panel title="人物图（s2v 参考）">
+                  <div className="space-y-2">
+                    <Select
+                      size="small"
+                      className="!w-full"
+                      placeholder="选择单人正脸人物图 version"
+                      value={modeCreation.portrait_version_id}
+                      disabled={patching}
+                      options={imageOptions}
+                      onChange={(value) =>
+                        updateModeField("portrait_version_id", value ?? null)
+                      }
+                      allowClear
+                    />
+                    {imageUrlOf(modeCreation.portrait_version_id) && (
+                      <img
+                        src={imageUrlOf(modeCreation.portrait_version_id)!}
+                        alt="人物图"
+                        className="max-h-56 rounded-lg border border-[var(--color-border)]"
+                      />
+                    )}
+                  </div>
+                </Panel>
+                <Panel title="台词">
+                  <PromptTextArea
+                    label="台词（经 TTS 合成为驱动音频）"
+                    value={modeCreation.script}
+                    field="script"
+                    path={elementPointer("creation", "script")}
+                    disabled={patching}
+                    onChange={(value) => updateModeField("script", value)}
+                  />
+                </Panel>
+                <Panel title="驱动音频">
+                  <div className="space-y-2">
+                    <Select
+                      size="small"
+                      className="!w-full"
+                      placeholder="选择驱动音频 version（可由台词 TTS 产出）"
+                      value={modeCreation.audio_version_id}
+                      disabled={patching}
+                      options={audioOptions}
+                      onChange={(value) =>
+                        updateModeField("audio_version_id", value ?? null)
+                      }
+                      allowClear
+                    />
+                    {audioUrlOf(modeCreation.audio_version_id) && (
+                      <audio
+                        controls
+                        src={audioUrlOf(modeCreation.audio_version_id)!}
+                        className="w-full"
+                      />
+                    )}
+                  </div>
+                </Panel>
+              </>
+            ) : (
+              <>
+                {modeCreation.type === "i2v" && (
+                  <Panel title="首帧图（i2v 参考）">
+                    <div className="space-y-2">
+                      <Select
+                        size="small"
+                        className="!w-full"
+                        placeholder="选择首帧图片 version"
+                        value={modeCreation.first_frame_version_id}
+                        disabled={patching}
+                        options={imageOptions}
+                        onChange={(value) =>
+                          updateModeField(
+                            "first_frame_version_id",
+                            value ?? null,
+                          )
+                        }
+                        allowClear
+                      />
+                      {imageUrlOf(modeCreation.first_frame_version_id) && (
+                        <img
+                          src={
+                            imageUrlOf(modeCreation.first_frame_version_id)!
+                          }
+                          alt="首帧图"
+                          className="max-h-56 rounded-lg border border-[var(--color-border)]"
+                        />
+                      )}
+                    </div>
+                  </Panel>
+                )}
+                <Panel title="Video Prompt">
+                  <PromptTextArea
+                    label="视频 Prompt"
+                    value={modeCreation.video_prompt}
+                    field="video_prompt"
+                    path={elementPointer("creation", "video_prompt")}
+                    disabled={patching}
+                    onChange={(value) =>
+                      updateModeField("video_prompt", value)
+                    }
+                  />
+                </Panel>
+              </>
+            )}
+
+            <Panel
+              title="视频结果"
+              badge={
+                <ArtifactVersionChips
+                  versions={videoVersions}
+                  currentId={videoSlot?.selected_version_id}
+                  viewingId={effectiveVideoId}
+                  onView={setViewedVideoId}
+                />
+              }
+            >
+              <div className="space-y-2">
+                {videoUrl ? (
+                  <video
+                    src={videoUrl}
+                    controls
+                    className="max-h-72 w-full rounded-lg border border-[var(--color-border)] bg-black"
+                  />
+                ) : (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">
+                    尚无生成结果。
+                  </p>
+                )}
+                {viewedVideo &&
+                  videoSlot &&
+                  viewedVideo.version_id !== videoSlot.selected_version_id && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      disabled={elementDraft.dirty || patching}
+                      onClick={() =>
+                        void setCurrentVersion(videoSlot, viewedVideo)
+                      }
+                      className="!text-[11px]"
+                    >
+                      设为当前
+                    </Button>
+                  )}
+              </div>
+            </Panel>
+          </div>
+
+          <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: "时长", value: `${spanSeconds}s` },
+                { label: "画幅", value: project.settings.aspect_ratio },
+                {
+                  label: "模型",
+                  value:
+                    resolvedVideoModel ?? modeCreation.recipe?.model ?? "—",
+                },
+              ].map((cell) => (
+                <div
+                  key={cell.label}
+                  className="rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-card)] p-3 text-center"
+                >
+                  <p className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {cell.label}
+                  </p>
+                  <p className="mt-0.5 truncate text-xs font-semibold text-[var(--color-text-primary)]">
+                    {cell.value}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const totalDuration = creation.shots.order.length
     ? creation.shots.order.reduce(
         (total, shotId) =>
@@ -885,13 +1182,7 @@ export default function R2VWorkbenchPage() {
           </Panel>
 
           <Panel
-            title={
-              generationMode === "s2v"
-                ? "人像画面（口播首帧）"
-                : generationMode === "i2v"
-                ? "首帧图与分镜Prompt"
-                : "分镜Prompt与分镜图"
-            }
+            title="分镜Prompt与分镜图"
             badge={
               <ArtifactVersionChips
                 versions={storyboardVersions}
@@ -1083,14 +1374,6 @@ export default function R2VWorkbenchPage() {
           </div>
 
           <Panel title={`输入引用（${inputRefs.length}）`}>
-            {modeMeta.referenceHint && (
-              <p
-                data-generation-mode-hint
-                className="mb-2 rounded-md bg-[var(--color-bg-tertiary)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]"
-              >
-                {modeMeta.referenceHint}
-              </p>
-            )}
             {inputRefs.length === 0 ? (
               <p className="text-xs text-[var(--color-text-tertiary)]">
                 暂无引用资产。

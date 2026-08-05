@@ -186,8 +186,6 @@ export type VideoGenerationMode = "r2v" | "t2v" | "i2v" | "s2v";
 
 export interface R2VCreationDocument extends ProjectJsonRecord {
   type: "r2v";
-  // Declared generation mode; legacy documents omit it and mean "r2v".
-  generation_mode?: VideoGenerationMode;
   intent: string;
   narrative: string;
   continuity: string;
@@ -201,6 +199,38 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   storyboard_reference_version_ids: string[];
   video_prompt: string;
   video_reference_version_ids: string[];
+}
+
+export interface T2VCreationDocument extends ProjectJsonRecord {
+  type: "t2v";
+  intent: string;
+  narrative: string;
+  continuity: string;
+  video_prompt: string;
+  recipe: GenerationRecipeDocument | null;
+}
+
+export interface I2VCreationDocument extends ProjectJsonRecord {
+  type: "i2v";
+  intent: string;
+  narrative: string;
+  continuity: string;
+  first_frame_version_id: string | null;
+  video_prompt: string;
+  recipe: GenerationRecipeDocument | null;
+}
+
+export interface S2VCreationDocument extends ProjectJsonRecord {
+  type: "s2v";
+  intent: string;
+  // Visual entity whose portrait (and enrolled voice) drives the clip.
+  character_ref: string | null;
+  // Exact image version used as the s2v reference portrait.
+  portrait_version_id: string | null;
+  // Spoken lines; TTS turns them into the driving audio below.
+  script: string;
+  audio_version_id: string | null;
+  recipe: GenerationRecipeDocument | null;
 }
 
 export interface EditCreationDocument extends ProjectJsonRecord {
@@ -254,10 +284,20 @@ export interface AudioCreationDocument extends ProjectJsonRecord {
 
 export type ElementCreationDocument =
   | R2VCreationDocument
+  | T2VCreationDocument
+  | I2VCreationDocument
+  | S2VCreationDocument
   | EditCreationDocument
   | OverlayCreationDocument
   | TransitionCreationDocument
   | AudioCreationDocument;
+
+// Creation types produced by a video generation provider.
+export type VideoCreationDocument =
+  | R2VCreationDocument
+  | T2VCreationDocument
+  | I2VCreationDocument
+  | S2VCreationDocument;
 
 export interface ElementOutputDocument extends ProjectJsonRecord {
   slot_id: string;

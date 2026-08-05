@@ -453,8 +453,9 @@ _S2V_ARGUMENTS = _arguments_schema(
             "minLength": 1,
             "description": (
                 "人像图的 exact version id（单人、正脸、清晰，单边 400–7000px，"
-                "支持真人/卡通）。工具会先跑免费的人像检测，未通过时直接返回"
-                "原因且不产生费用。"
+                "支持真人/卡通）。缺省时使用目标 Element "
+                "creation.portrait_version_id 声明的人物图。工具会先跑免费的"
+                "人像检测，未通过时直接返回原因且不产生费用。"
             ),
         },
         "audioAssetRef": {
@@ -462,7 +463,8 @@ _S2V_ARGUMENTS = _arguments_schema(
             "minLength": 1,
             "description": (
                 "驱动音频的 exact 音频 version id，可直接使用 tts_generation "
-                "产出的 audio version（含复刻音色合成）；建议 ≤20 秒人声。"
+                "产出的 audio version（含复刻音色合成）；缺省时使用目标 "
+                "Element creation.audio_version_id 声明的音频；建议 ≤20 秒人声。"
             ),
         },
         "resolution": {
@@ -471,7 +473,7 @@ _S2V_ARGUMENTS = _arguments_schema(
             "description": "输出分辨率，缺省 480P（更快更便宜）。",
         },
     },
-    ("characterImageRef", "audioAssetRef"),
+    (),
 )
 
 

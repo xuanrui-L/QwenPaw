@@ -299,6 +299,104 @@ def _migrate_v3_to_v4(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[3] = _migrate_v3_to_v4
 
 
+def _timeline_elements(document: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+    timelines = _dict_field(_dict_field(document, "timelines"), "items")
+    for timeline in timelines.values():
+        elements = _dict_field(timeline, "elements_by_id")
+        for element in elements.values():
+            if isinstance(element, dict):
+                yield element
+
+
+def _selected_slot_version(
+    document: Mapping[str, Any],
+    element: Mapping[str, Any],
+    output_name: str,
+) -> str | None:
+    outputs = element.get("outputs")
+    if not isinstance(outputs, dict):
+        return None
+    slot_ref = outputs.get(output_name)
+    if not isinstance(slot_ref, dict):
+        return None
+    slot_id = slot_ref.get("slot_id")
+    slots = _dict_field(_dict_field(document, "assets"), "artifact_slots_by_id")
+    slot = slots.get(slot_id)
+    if not isinstance(slot, dict):
+        return None
+    selected = slot.get("selected_version_id")
+    return selected if isinstance(selected, str) and selected else None
+
+
+def _migrate_v4_to_v5(document: dict[str, Any]) -> dict[str, Any]:
+    """Split mode-tagged r2v creations into their own creation types.
+
+    Schema v4 expressed t2v/i2v/s2v as ``creation.type=r2v`` plus a
+    ``generation_mode`` tag, dragging the whole shot/storyboard/reference
+    stack along even though those providers never consume it. v5 gives each
+    mode a model of exactly what its provider uses; an s2v element's
+    selected "storyboard" (its portrait frame) becomes the declared
+    portrait reference and the slot mapping is dropped as a non-product.
+    """
+
+    for element in _timeline_elements(document):
+        creation = _dict_field(element, "creation")
+        if creation.get("type") != "r2v":
+            continue
+        mode = creation.pop("generation_mode", "r2v") or "r2v"
+        if mode == "r2v":
+            continue
+        base = {
+            "intent": creation.get("intent") or "",
+            "narrative": creation.get("narrative") or "",
+            "continuity": creation.get("continuity") or "",
+            "video_prompt": creation.get("video_prompt") or "",
+            "recipe": creation.get("recipe"),
+        }
+        if mode == "t2v":
+            element["creation"] = {"type": "t2v", **base}
+        elif mode == "i2v":
+            element["creation"] = {
+                "type": "i2v",
+                **base,
+                "first_frame_version_id": _selected_slot_version(
+                    document,
+                    element,
+                    "storyboard",
+                ),
+            }
+        elif mode == "s2v":
+            characters = creation.get("character_refs")
+            element["creation"] = {
+                "type": "s2v",
+                "intent": base["intent"],
+                "character_ref": (
+                    characters[0]
+                    if isinstance(characters, list) and characters
+                    else None
+                ),
+                "portrait_version_id": _selected_slot_version(
+                    document,
+                    element,
+                    "storyboard",
+                ),
+                "script": "",
+                "audio_version_id": None,
+                "recipe": creation.get("recipe"),
+            }
+        if mode in ("t2v", "s2v"):
+            # These providers take no storyboard: drop the output mapping
+            # (the artifact itself stays addressable in the asset layer).
+            outputs = element.get("outputs")
+            if isinstance(outputs, dict):
+                outputs.pop("storyboard", None)
+    document["schema_version"] = 5
+    return document
+
+
+PROJECT_MIGRATIONS[4] = _migrate_v4_to_v5
+
+
 def migrate_project_document(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Return a detached document at the current Project schema version.
 

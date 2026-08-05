@@ -229,6 +229,9 @@ export default function PlanPage() {
       (element) =>
         element.enabled &&
         (element.creation.type === "r2v" ||
+          element.creation.type === "t2v" ||
+          element.creation.type === "i2v" ||
+          element.creation.type === "s2v" ||
           element.creation.type === "edit" ||
           (element.creation.type === "overlay" &&
             overlayContentKind(element.creation) !== "copy")),

@@ -69,10 +69,9 @@ def test_s2v_tool_registered_with_key(monkeypatch) -> None:
     assert spec.wait.value == "TASK"
     assert spec.provider_kind == "s2v"
     arguments = spec.parameters["properties"]["arguments"]
-    assert set(arguments["required"]) == {
-        "characterImageRef",
-        "audioAssetRef",
-    }
+    # Refs default from the s2v element's declared portrait/audio, so the
+    # tool call itself has no required arguments.
+    assert set(arguments["required"]) == set()
     assert arguments["properties"]["resolution"]["enum"] == ["480P", "720P"]
 
 

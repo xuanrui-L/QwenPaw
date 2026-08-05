@@ -831,7 +831,10 @@ export default function ElementDetail({
             })()}
         </section>
 
-        {creation.type === "r2v" && (
+        {(creation.type === "r2v" ||
+          creation.type === "t2v" ||
+          creation.type === "i2v" ||
+          creation.type === "s2v") && (
           <section className="rounded-xl border border-[var(--color-border)] p-3">
             <h4 className="mb-3 flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
               <Film className="h-3.5 w-3.5 text-[var(--color-accent)]" />
@@ -894,7 +897,10 @@ export default function ElementDetail({
         )}
       </div>
 
-      {creation.type === "r2v" && (
+      {(creation.type === "r2v" ||
+        creation.type === "t2v" ||
+        creation.type === "i2v" ||
+        creation.type === "s2v") && (
         <footer className="flex shrink-0 items-center justify-end border-t border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 py-3">
           <Button
             type="primary"
@@ -903,9 +909,12 @@ export default function ElementDetail({
             onClick={() => onOpenWorkbench(element)}
           >
             {`进入制作工作台（${
-              { r2v: "参考生视频", t2v: "文本生视频", i2v: "首帧生视频", s2v: "数字人口播" }[
-                creation.generation_mode ?? "r2v"
-              ]
+              {
+                r2v: "参考生视频",
+                t2v: "文本生视频",
+                i2v: "首帧生视频",
+                s2v: "数字人口播",
+              }[creation.type]
             }）`}
           </Button>
         </footer>

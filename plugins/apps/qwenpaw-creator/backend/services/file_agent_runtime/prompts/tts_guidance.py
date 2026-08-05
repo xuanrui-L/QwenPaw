@@ -48,7 +48,7 @@ def delegator_guidance() -> str:
         "创建 creation.type=audio 的 Element 并重新合成成片。旁白/配音需求直接"
         "委派它到 timeline:<timelineId>，在任务中写明旁白文案要求，并要求按"
         "镜头/语义分段生成、每段 span 对齐对应画面；自带人声的区间（如"
-        " generation_mode=s2v 的数字人口播）不安排旁白；不需要用户提供音频文件。",
+        " creation.type=s2v 的数字人口播）不安排旁白；不需要用户提供音频文件。",
     ]
     if capability.has_system_voices:
         lines.append(
@@ -139,7 +139,7 @@ def _editing_guidance(capability, scenario: str) -> str:
         " 4–5 字），生成后用返回的 durationSeconds 校准 span。",
     )
     lines.append(
-        "- 自带人声的区间不安排旁白：数字人口播（generation_mode=s2v）的"
+        "- 自带人声的区间不安排旁白：数字人口播（creation.type=s2v）的"
         " span 内视频自身就是人声，台词/现场声为内容重点的片段同理；"
         "旁白 Element 的 span 不得与这些区间重叠。",
     )

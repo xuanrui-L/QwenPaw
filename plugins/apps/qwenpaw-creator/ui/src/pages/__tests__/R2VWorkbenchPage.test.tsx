@@ -129,23 +129,36 @@ describe("R2V Workbench page", () => {
 
   it("presents an s2v element as the digital-human workbench, not r2v", () => {
     const project = cloneProject();
-    const creation =
-      project.timelines.items["timeline:main"].elements_by_id["r2v-window"]
-        .creation;
-    if (creation.type !== "r2v") throw new Error("fixture R2V Element missing");
-    creation.generation_mode = "s2v";
+    const element =
+      project.timelines.items["timeline:main"].elements_by_id["r2v-window"];
+    element.creation = {
+      type: "s2v",
+      intent: "口播开场",
+      character_ref: "cat",
+      portrait_version_id: "sb-window-v1",
+      script: "大家好，欢迎收看。",
+      audio_version_id: null,
+      recipe: null,
+    };
     seedProject(project);
 
     const { container } = renderWorkbench();
 
     expect(
+      container.querySelector('[data-mode-workbench="s2v"]'),
+    ).toBeInTheDocument();
+    expect(
       container.querySelector('[data-generation-mode="s2v"]'),
     ).toHaveTextContent("数字人口播");
-    expect(
-      screen.getByText(/数字人生成：人像画面 \+ 驱动音频/),
-    ).toBeInTheDocument();
-    expect(screen.getByText("人像画面（口播首帧）")).toBeInTheDocument();
-    expect(screen.getByText(/s2v 模式以人像图/)).toBeInTheDocument();
+    // The s2v surface models exactly the provider inputs…
+    expect(screen.getByText("人物图（s2v 参考）")).toBeInTheDocument();
+    expect(screen.getByText("台词")).toBeInTheDocument();
+    expect(screen.getByText("驱动音频")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("大家好，欢迎收看。")).toBeInTheDocument();
+    // …and none of the r2v shot/storyboard machinery.
+    expect(screen.queryByText(/Shot 列表/)).toBeNull();
+    expect(screen.queryByText("分镜Prompt与分镜图")).toBeNull();
+    expect(screen.queryByText("资产绑定")).toBeNull();
   });
 
   it("shows the runtime-resolved video model instead of creation.recipe.model", async () => {

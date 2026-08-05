@@ -163,6 +163,9 @@ export function classifyElementTrack(
   const { creation } = element;
   switch (creation.type) {
     case "r2v":
+    case "t2v":
+    case "i2v":
+    case "s2v":
       return "ai";
     case "edit":
       return "clip";
@@ -406,7 +409,11 @@ export function elementCreationSummary(
 ): string {
   switch (creation.type) {
     case "r2v":
+    case "t2v":
+    case "i2v":
       return creation.narrative || creation.intent || creation.video_prompt;
+    case "s2v":
+      return creation.script || creation.intent;
     case "edit":
       return creation.intent || creation.reason;
     case "overlay":
@@ -430,6 +437,21 @@ export const ELEMENT_TYPE_META: Record<
   }
 > = {
   r2v: { label: "AI 生成画面", color: "#ff7f16", soft: "rgba(255,127,22,.12)" },
+  t2v: {
+    label: "文本生视频",
+    color: "#ff7f16",
+    soft: "rgba(255,127,22,.12)",
+  },
+  i2v: {
+    label: "首帧生视频",
+    color: "#ff7f16",
+    soft: "rgba(255,127,22,.12)",
+  },
+  s2v: {
+    label: "数字人口播",
+    color: "#ff7f16",
+    soft: "rgba(255,127,22,.12)",
+  },
   edit: { label: "素材剪辑", color: "#3b82f6", soft: "rgba(59,130,246,.12)" },
   transition: {
     label: "转场",
