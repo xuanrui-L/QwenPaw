@@ -16,7 +16,6 @@ from httpx import ASGITransport, AsyncClient
 from api.dependencies import CreatorErrorRoute
 from domain.errors import CreatorError
 
-
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 PLUGIN_ENTRYPOINT = WORKSPACE_ROOT / "qwenpaw-creator" / "backend" / "main.py"
 PLUGIN_MANIFEST = WORKSPACE_ROOT / "qwenpaw-creator" / "plugin.json"
@@ -149,6 +148,7 @@ def test_plugin_manifest_declares_every_creator_config_tool(
     assert set(grounding_fields) == {
         "enabled",
         "tavily_api_key",
+        "serper_api_key",
         "native_search_enabled",
         "search_reuse_llm",
         "search_api_key",
@@ -161,6 +161,7 @@ def test_plugin_manifest_declares_every_creator_config_tool(
         "base_url",
     }
     assert grounding_fields["tavily_api_key"]["type"] == "password"
+    assert grounding_fields["serper_api_key"]["type"] == "password"
 
     module = _load_plugin_entrypoint(monkeypatch)
     assert not hasattr(module, "_ensure_config_tools_registered")

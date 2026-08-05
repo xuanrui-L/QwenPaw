@@ -102,6 +102,45 @@ export function patchExecutionAuthorization(
   });
 }
 
+export function patchCreationCheckpoints(
+  mode: "required" | "skip",
+): Promise<{ ok: boolean }> {
+  const id = newClientId("creation-checkpoints");
+  return creatorRequest("/models/config/creation-checkpoints", {
+    method: "PATCH",
+    headers: { "Idempotency-Key": id },
+    body: jsonBody({ mode }),
+  });
+}
+
+export function patchMediaReview(
+  mode: "required" | "auto_approve",
+): Promise<{ ok: boolean }> {
+  const id = newClientId("media-review");
+  return creatorRequest("/models/config/media-review", {
+    method: "PATCH",
+    headers: { "Idempotency-Key": id },
+    body: jsonBody({ mode }),
+  });
+}
+
+export function patchPermissionMode(mode: {
+  execution: "required" | "allow_all";
+  checkpoints: "required" | "skip";
+  mediaReview: "required" | "auto_approve";
+}): Promise<{ ok: boolean }> {
+  const id = newClientId("permission-mode");
+  return creatorRequest("/models/config/permission-mode", {
+    method: "PATCH",
+    headers: { "Idempotency-Key": id },
+    body: jsonBody({
+      execution_authorization: mode.execution,
+      creation_checkpoints: mode.checkpoints,
+      media_review: mode.mediaReview,
+    }),
+  });
+}
+
 export function getRealApiKey(section: string): Promise<{ api_key: string }> {
   return creatorRequest(`/models/real-api-key/${section}`);
 }

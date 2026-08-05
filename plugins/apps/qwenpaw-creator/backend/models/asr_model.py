@@ -52,6 +52,24 @@ def _endpoint(base_url: str, suffix: str) -> str:
     return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
 
 
+_FUN_ASR_TRANSCRIPTION_SUFFIX = "services/audio/asr/transcription"
+
+
+def _fun_asr_base(base_url: str) -> str:
+    """Return the API root for Fun-ASR submit/poll joins.
+
+    Token-portal style configs store the full transcription endpoint in the
+    ASR base URL; strip that known suffix so ``_endpoint`` never doubles the
+    path (the proxy rejects the doubled path with 403) and task polling hits
+    ``/tasks/{id}`` on the correct root.
+    """
+    trimmed = base_url.rstrip("/")
+    suffix = "/" + _FUN_ASR_TRANSCRIPTION_SUFFIX
+    if trimmed.endswith(suffix):
+        return trimmed[: -len(suffix)]
+    return trimmed
+
+
 def _sentences(payload: Mapping[str, Any]) -> tuple[ASRSegment, ...]:
     values: list[ASRSegment] = []
     for transcript in payload.get("transcripts") or ():
@@ -137,6 +155,7 @@ def _extract_audio_from_video(
         capture_output=True,
         text=True,
         timeout=600,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -233,7 +252,7 @@ async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
 
 
 async def _fun_asr(media_url: str) -> ASRResult:
-    base = config.get_asr_base_url()
+    base = _fun_asr_base(config.get_asr_base_url())
     key = config.get_asr_api_key()
     model = config.get_asr_model_name() or "fun-asr"
     if not key:
@@ -517,6 +536,7 @@ def _silence_cut_points(
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -702,6 +722,7 @@ def _extract_chunk_window(
         capture_output=True,
         text=True,
         timeout=600,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -958,6 +979,7 @@ def _extract_audio_chunks(source: Path, directory: Path) -> list[Path]:
         capture_output=True,
         text=True,
         timeout=600,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RuntimeError(

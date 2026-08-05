@@ -26,7 +26,7 @@ import {
 import {
   getModelConfig,
   saveModelConfig,
-  patchExecutionAuthorization,
+  patchPermissionMode,
   testModelConnection,
   getHostProviders,
   getHostProviderApiKey,
@@ -78,7 +78,11 @@ const VLM_PROTOCOLS = [
   "小米 MiMo",
   "自定义",
 ];
-const ASR_PROTOCOLS = ["DashScope Fun-ASR", "OpenAI Whisper"];
+const ASR_PROTOCOLS = [
+  "DashScope Fun-ASR",
+  "DashScope Qwen3-ASR",
+  "OpenAI Whisper",
+];
 const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
@@ -114,6 +118,11 @@ const ASR_PRESETS: Record<string, ProtocolPreset> = {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
     freeze_url: true,
     models: ["fun-asr"],
+  },
+  "DashScope Qwen3-ASR": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    freeze_url: true,
+    models: ["qwen3-asr-flash"],
   },
   "OpenAI Whisper": {
     base_url: "https://api.openai.com/v1",
@@ -209,6 +218,7 @@ const DEFAULT_CONFIG: ModelConfigData = {
     reuse_llm: true,
     validation_source: "llm",
     tavily_api_key: "",
+    serper_api_key: "",
     native_search_enabled: true,
     search_provider: "dashscope_qwen",
     search_reuse_llm: true,
@@ -263,7 +273,57 @@ const DEFAULT_CONFIG: ModelConfigData = {
     policy_api_key: "",
   },
   executionAuthorization: { mode: "required" },
+  creationCheckpoints: { mode: "required" },
+  mediaReview: { mode: "required" },
 };
+
+// One-dimensional automation ladder projected onto the three persisted
+// permission fields. Index equals the slider position.
+const PERMISSION_MODES: {
+  label: string;
+  description: string;
+  checkpoints: "required" | "skip";
+  execution: "required" | "allow_all";
+  mediaReview: "required" | "auto_approve";
+}[] = [
+  {
+    label: "全程确认",
+    description: "创作检查点逐站确认，高花费模型执行逐次授权。",
+    checkpoints: "required",
+    execution: "required",
+    mediaReview: "required",
+  },
+  {
+    label: "仅高花费确认",
+    description: "跳过创作检查点，仅在高花费模型执行前确认。",
+    checkpoints: "skip",
+    execution: "required",
+    mediaReview: "required",
+  },
+  {
+    label: "自动生成",
+    description: "生成不再逐次询问；产物仍需人工审阅，分镜过审后自动继续视频。",
+    checkpoints: "skip",
+    execution: "allow_all",
+    mediaReview: "required",
+  },
+  {
+    label: "YOLO",
+    description:
+      "完全无人值守：审阅自动通过，持续执行直至成片——质量不设防，注意成本。",
+    checkpoints: "skip",
+    execution: "allow_all",
+    mediaReview: "auto_approve",
+  },
+];
+
+function permissionModeIndex(config: ModelConfigData): number {
+  if (config.executionAuthorization.mode === "allow_all") {
+    return config.mediaReview.mode === "auto_approve" ? 3 : 2;
+  }
+  if (config.creationCheckpoints.mode === "skip") return 1;
+  return 0;
+}
 
 function hasUsableApiKey(item: ModelConfigItem): boolean {
   return item.api_key !== undefined && item.api_key.length > 0;
@@ -309,6 +369,7 @@ export function supportsQwenNativeSearch(item: ModelConfigItem): boolean {
 function groundingSearchLabel(config: ModelConfigData): string {
   const providers: string[] = [];
   if (config.grounding.tavily_api_key) providers.push("tavily");
+  if (config.grounding.serper_api_key) providers.push("serper");
   const searchModel = groundingSearchModel(config);
   if (
     config.grounding.native_search_enabled &&
@@ -402,6 +463,46 @@ const CARD_META: {
 export default function ModelConfigModal({ open, onClose }: Props) {
   const [config, setConfig] = useState<ModelConfigData>(DEFAULT_CONFIG);
   const snapshotRef = useRef<ModelConfigData | null>(null);
+  // Latest-wins serialization for the permission slider: a drag across
+  // several stops fires one onChange per stop; concurrent saves could
+  // finish out of order and strand an intermediate stop on the server.
+  const permissionSaveRef = useRef<{
+    inflight: boolean;
+    queued: number | null;
+    baseline: ModelConfigData | null;
+  }>({ inflight: false, queued: null, baseline: null });
+
+  const savePermissionMode = useCallback(
+    async (index: number): Promise<void> => {
+      const state = permissionSaveRef.current;
+      const target = PERMISSION_MODES[index];
+      if (!target) return;
+      state.inflight = true;
+      try {
+        await patchPermissionMode({
+          execution: target.execution,
+          checkpoints: target.checkpoints,
+          mediaReview: target.mediaReview,
+        });
+        const queued = state.queued;
+        state.queued = null;
+        if (queued !== null && queued !== index) {
+          await savePermissionMode(queued);
+          return;
+        }
+        state.baseline = null;
+      } catch (err) {
+        const baseline = state.baseline;
+        state.baseline = null;
+        state.queued = null;
+        if (baseline) setConfig(baseline);
+        message.error((err as Error).message || "授权模式保存失败");
+      } finally {
+        state.inflight = false;
+      }
+    },
+    [],
+  );
   const [activeTab, setActiveTab] = useState<TabType>("llm");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({
     llm: true,
@@ -462,6 +563,14 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         executionAuthorization: {
           ...DEFAULT_CONFIG.executionAuthorization,
           ...data.executionAuthorization,
+        },
+        creationCheckpoints: {
+          ...DEFAULT_CONFIG.creationCheckpoints,
+          ...data.creationCheckpoints,
+        },
+        mediaReview: {
+          ...DEFAULT_CONFIG.mediaReview,
+          ...data.mediaReview,
         },
       };
       if (!VLM_PROTOCOLS.includes(merged.vlm.protocol))
@@ -562,6 +671,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       }
       if (
         field === "tavily_api_key" ||
+        field === "serper_api_key" ||
         field === "native_search_enabled" ||
         field === "search_reuse_llm" ||
         field === "search_api_key" ||
@@ -845,9 +955,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           !!searchModel.model_name &&
           hasUsableApiKey(searchModel) &&
           supportsQwenNativeSearch(searchModel);
-        if (!config.grounding.tavily_api_key && !nativeSearchReady) {
+        if (
+          !config.grounding.tavily_api_key &&
+          !config.grounding.serper_api_key &&
+          !nativeSearchReady
+        ) {
           message.warning(
-            "Grounding 搜索未配置：请填写 Tavily API Key，或配置支持原生搜索的 Qwen/DashScope 模型",
+            "Grounding 搜索未配置：请填写 Tavily/Serper API Key，或配置支持原生搜索的 Qwen/DashScope 模型",
           );
           return;
         }
@@ -1201,7 +1315,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       !!searchModel.base_url &&
       hasUsableApiKey(searchModel) &&
       supportsQwenNativeSearch(searchModel);
-    const searchReady = !!config.grounding.tavily_api_key || nativeSearchReady;
+    const searchReady =
+      !!config.grounding.tavily_api_key ||
+      !!config.grounding.serper_api_key ||
+      nativeSearchReady;
     const searchLabel = groundingSearchLabel(config);
 
     return (
@@ -1353,6 +1470,76 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   value={config.grounding.tavily_api_key}
                   onChange={(event) =>
                     updateGrounding("tavily_api_key", event.target.value)
+                  }
+                />
+              </div>
+            </div>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                margin: "-8px 0 -8px 16px",
+                fontSize: 13,
+                lineHeight: 1,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              ↓
+            </div>
+            {/* Second choice: Serper (Google search), tried after Tavily. */}
+            <div
+              style={{
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                padding: "12px 14px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "1px 6px",
+                    borderRadius: 4,
+                    background: "var(--color-bg-secondary)",
+                    color: "var(--color-text-secondary)",
+                    flexShrink: 0,
+                  }}
+                >
+                  次选
+                </span>
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  Serper（Google）搜索
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: config.grounding.serper_api_key
+                      ? "var(--color-success)"
+                      : "var(--color-text-tertiary)",
+                  }}
+                >
+                  {config.grounding.serper_api_key
+                    ? "已配置"
+                    : "未配置，将跳过该渠道"}
+                </span>
+              </div>
+              <div>
+                <label className="field-label">Serper API Key（可选）</label>
+                <Input.Password
+                  placeholder="serper key"
+                  value={config.grounding.serper_api_key}
+                  onChange={(event) =>
+                    updateGrounding("serper_api_key", event.target.value)
                   }
                 />
               </div>
@@ -1916,7 +2103,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 color: "var(--color-text-primary)",
               }}
             >
-              高花费模型执行授权
+              执行确认模式：
+              {PERMISSION_MODES[permissionModeIndex(config)].label}
             </div>
             <div
               style={{
@@ -1926,30 +2114,75 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 color: "var(--color-text-tertiary)",
               }}
             >
-              开启后，高花费模型的执行需要确认。
+              {PERMISSION_MODES[permissionModeIndex(config)].description}
             </div>
           </div>
-          <label className="desktop-toggle" style={{ flexShrink: 0 }}>
+          <div
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "stretch",
+              width: 220,
+              gap: 4,
+            }}
+          >
             <input
-              type="checkbox"
-              aria-label="高花费模型执行授权"
-              checked={config.executionAuthorization.mode === "required"}
-              onChange={async (event) => {
-                const mode = event.target.checked ? "required" : "allow_all";
+              type="range"
+              min={0}
+              max={3}
+              step={1}
+              aria-label="执行确认模式"
+              aria-valuetext={
+                PERMISSION_MODES[permissionModeIndex(config)].label
+              }
+              value={permissionModeIndex(config)}
+              onChange={(event) => {
+                const index = Number(event.target.value);
+                const target = PERMISSION_MODES[index];
+                if (!target) return;
+                const state = permissionSaveRef.current;
+                // One rollback anchor per drag burst: the config before
+                // the first optimistic update.
+                if (state.baseline === null) state.baseline = config;
                 setConfig((previous) => ({
                   ...previous,
-                  executionAuthorization: { mode },
+                  executionAuthorization: { mode: target.execution },
+                  creationCheckpoints: { mode: target.checkpoints },
+                  mediaReview: { mode: target.mediaReview },
                 }));
-                try {
-                  await patchExecutionAuthorization(mode);
-                } catch (err) {
-                  message.error((err as Error).message || "授权设置保存失败");
+                if (state.inflight) {
+                  state.queued = index;
+                  return;
                 }
+                void savePermissionMode(index);
               }}
             />
-            <div className="track" />
-            <div className="thumb" />
-          </label>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: 11,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              {PERMISSION_MODES.map((mode, index) => (
+                <span
+                  key={mode.label}
+                  style={
+                    index === permissionModeIndex(config)
+                      ? {
+                          color: "var(--color-text-primary)",
+                          fontWeight: 600,
+                        }
+                      : undefined
+                  }
+                >
+                  {mode.label}
+                </span>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Segmented tabs */}

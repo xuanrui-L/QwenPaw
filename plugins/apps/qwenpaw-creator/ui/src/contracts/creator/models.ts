@@ -21,6 +21,7 @@ export interface GroundingConfig extends ModelConfigItem {
   reuse_llm: boolean;
   validation_source: "llm" | "vlm" | "custom";
   tavily_api_key: string;
+  serper_api_key: string;
   native_search_enabled: boolean;
   search_provider: "dashscope_qwen";
   search_reuse_llm: boolean;
@@ -45,6 +46,12 @@ export interface ModelConfigData {
   oss: OssConfig;
   executionAuthorization: {
     mode: "required" | "allow_all";
+  };
+  creationCheckpoints: {
+    mode: "required" | "skip";
+  };
+  mediaReview: {
+    mode: "required" | "auto_approve";
   };
 }
 

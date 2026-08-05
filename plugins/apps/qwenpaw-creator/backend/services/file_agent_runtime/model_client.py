@@ -166,6 +166,9 @@ def _parse_tool_arguments(
     else:
         if isinstance(parsed, dict):
             return parsed, None, False, None
+    benign = _parse_with_benign_trailing_closers(raw, decode_error)
+    if benign is not None:
+        return benign, None, False, None
     strict_error = (
         f"JSONDecodeError: {decode_error}"
         if decode_error is not None
@@ -195,6 +198,36 @@ def _parse_tool_arguments(
 
 AgentTextDeltaCallback = Callable[[str], Awaitable[None]]
 AgentToolDeltaCallback = Callable[[str, str, str], Awaitable[None]]
+
+
+def _parse_with_benign_trailing_closers(
+    raw: str,
+    decode_error: json.JSONDecodeError | None,
+) -> dict[str, Any] | None:
+    """Accept a complete JSON object followed only by stray closers.
+
+    Long streamed tool arguments sometimes end with one surplus ``}`` or
+    ``]`` (a bracket-count slip, not truncation). When the prefix before
+    the decode error parses to a complete object and the remainder holds
+    zero information — nothing but closers and whitespace — executing the
+    prefix is provably lossless, so the call must not pay a repair-and-
+    retry turn. Any other trailing content means real payload was cut off
+    and keeps the strict failure path.
+    """
+
+    if decode_error is None or "Extra data" not in decode_error.msg:
+        return None
+    boundary = decode_error.pos
+    remainder = raw[boundary:].strip()
+    if remainder and set(remainder) - {"}", "]", " ", "\t", "\r", "\n"}:
+        return None
+    try:
+        parsed = json.loads(raw[:boundary])
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
 
 
 def _guard_text_callback(
@@ -531,6 +564,7 @@ class AgentScopeAgentChatClient:
         _empty_retries_remaining: int = 1,
         _rate_limit_retries_remaining: int = 3,
         _transient_retries_remaining: int = 2,
+        _markup_retries_remaining: int = 2,
     ) -> AgentModelTurn:
         native_messages = records_to_agentscope_messages(messages)
         allowed_names = {
@@ -634,6 +668,36 @@ class AgentScopeAgentChatClient:
                             "AgentScope Creator stream is missing its final response",
                         )
                     response = final
+        except NonNativeToolMarkupError as exc:
+            # Same class of stochastic stream degradation as an empty
+            # response: the model narrates its tool call as XML-ish text.
+            # A fresh turn usually recovers; killing the run must be the
+            # last resort, not the first response.
+            if _markup_retries_remaining > 0:
+                logger.warning(
+                    "Model emitted textual tool-call markup in a TextBlock, "
+                    "retrying (%d retries remaining)",
+                    _markup_retries_remaining,
+                )
+                return await self.complete(
+                    messages=messages,
+                    tools=tools,
+                    on_text_delta=on_text_delta,
+                    on_thinking_delta=on_thinking_delta,
+                    on_tool_call_delta=on_tool_call_delta,
+                    _empty_retries_remaining=_empty_retries_remaining,
+                    _rate_limit_retries_remaining=(
+                        _rate_limit_retries_remaining
+                    ),
+                    _transient_retries_remaining=(
+                        _transient_retries_remaining
+                    ),
+                    _markup_retries_remaining=_markup_retries_remaining - 1,
+                )
+            raise AgentModelError(
+                "Creator Agent returned textual tool-call markup instead of "
+                "an AgentScope ToolCallBlock",
+            ) from exc
         except (
             AgentModelError,
             AgentModelConfigurationError,
@@ -777,6 +841,27 @@ class AgentScopeAgentChatClient:
         try:
             await text_stream.finalize(text)
         except NonNativeToolMarkupError as exc:
+            if _markup_retries_remaining > 0:
+                logger.warning(
+                    "Model emitted textual tool-call markup in final text, "
+                    "retrying (%d retries remaining)",
+                    _markup_retries_remaining,
+                )
+                return await self.complete(
+                    messages=messages,
+                    tools=tools,
+                    on_text_delta=on_text_delta,
+                    on_thinking_delta=on_thinking_delta,
+                    on_tool_call_delta=on_tool_call_delta,
+                    _empty_retries_remaining=_empty_retries_remaining,
+                    _rate_limit_retries_remaining=(
+                        _rate_limit_retries_remaining
+                    ),
+                    _transient_retries_remaining=(
+                        _transient_retries_remaining
+                    ),
+                    _markup_retries_remaining=_markup_retries_remaining - 1,
+                )
             raise AgentModelError(
                 "Creator Agent returned textual tool-call markup instead of an "
                 "AgentScope ToolCallBlock",
