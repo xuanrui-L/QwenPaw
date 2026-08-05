@@ -444,8 +444,13 @@ function visualItemGroups(
   items: AssetItem[],
 ): AssetItemGroup[] {
   const itemsByEntity = new Map<string, AssetItem[]>();
+  const lineupItems: AssetItem[] = [];
   const unassigned: AssetItem[] = [];
   for (const item of items) {
+    if (item.ref.startsWith("lineup:")) {
+      lineupItems.push(item);
+      continue;
+    }
     if (!item.entityId) {
       unassigned.push(item);
       continue;
@@ -513,6 +518,16 @@ function visualItemGroups(
           },
         ]
       : []),
+    ...(lineupItems.length
+      ? [
+          {
+            key: "visual-lineups",
+            label: "阵容图",
+            countLabel: `${lineupItems.length} 张`,
+            items: lineupItems,
+          },
+        ]
+      : []),
     ...(unassigned.length
       ? [
           {
@@ -529,6 +544,7 @@ function visualItemGroups(
 function kindLabel(item: AssetItem): string {
   if (item.kind === "source") return "来源";
   if (item.kind === "artifact") return "产物";
+  if (item.ref.startsWith("lineup:")) return "阵容图";
   const entity = item.raw as VisualEntityDocument;
   return entity.kind === "character"
     ? "角色"
@@ -664,6 +680,17 @@ function generationPromptTarget(
   project: ProjectDocument,
   selected: AssetItem,
 ): PromptTarget | null {
+  if (selected.ref.startsWith("lineup:")) {
+    // Lineup cards reuse kind "visual" for filtering, but their raw is a
+    // VisualCastLineupDocument — no variants tree to walk. Their editable
+    // "prompt" is the relative_notes the lineup image is drawn from.
+    const lineup = selected.raw as VisualCastLineupDocument;
+    return {
+      pointer: `/visual/cast_lineups/items/${lineup.lineup_id}/relative_notes`,
+      value: lineup.relative_notes,
+      label: "相对关系说明",
+    };
+  }
   if (selected.kind === "visual") {
     const entity = selected.raw as VisualEntityDocument;
     return visualEntityPromptTarget(
