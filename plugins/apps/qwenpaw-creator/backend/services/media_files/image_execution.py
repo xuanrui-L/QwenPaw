@@ -68,6 +68,11 @@ from services.media_files.review_admission import (
     assert_media_review_admission,
     media_review_policy,
 )
+from services.media_files.transient_errors import (
+    MAX_TRANSIENT_RETRY_SLOTS,
+    is_transient_task_error,
+    transient_retry_slot_key,
+)
 from services.media_files.visual_reference_resolution import (
     resolve_r2v_visual_reference_version_ids,
 )
@@ -205,25 +210,6 @@ def _fingerprint(value: Mapping[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(canonical_json_bytes(value)).hexdigest()}"
 
 
-# Transient provider failures may be retried on a derived durable slot;
-# deterministic rejections (safety refusals, validation errors) never are.
-# Markers are matched case-insensitively against the persisted task error.
-_TRANSIENT_ERROR_MARKERS = (
-    "connection",
-    "timeout",
-    "timed out",
-    "temporarily unavailable",
-    "service unavailable",
-    "bad gateway",
-    "gateway timeout",
-    "too many requests",
-    "status 429",
-    "status 502",
-    "status 503",
-    "status 504",
-)
-_MAX_TRANSIENT_RETRY_SLOTS = 3
-
 # Deterministic provider-side content refusals. Field data (2026-08-05,
 # 22 consecutive 400s): the model *narrates* removing the person-photo
 # references while resending the identical ref list every call, so the
@@ -262,13 +248,6 @@ def _safety_rejection_note(resolved: _ResolvedRequest) -> str:
         "可识别描述（姓名、球队/机构名、可定位的真实事件），改用虚构化的"
         "外貌与气质描述。"
     )
-
-
-def _is_transient_task_error(error: Mapping[str, Any] | None) -> bool:
-    if not isinstance(error, Mapping):
-        return False
-    message = str(error.get("message") or "").casefold()
-    return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
 
 
 def _terminated_task_conflict(
@@ -887,12 +866,8 @@ class FileImageExecutionService:
         # of derived retry slots for transient failures only; deterministic
         # rejections (safety refusals, validation) keep the terminal wall.
         existing_task = None
-        for attempt in range(_MAX_TRANSIENT_RETRY_SLOTS + 1):
-            slot_key = (
-                idempotency_key
-                if attempt == 0
-                else f"{idempotency_key}#transient-retry-{attempt}"
-            )
+        for attempt in range(MAX_TRANSIENT_RETRY_SLOTS + 1):
+            slot_key = transient_retry_slot_key(idempotency_key, attempt)
             ids = self._ids(project_id, slot_key)
             try:
                 existing_task = await asyncio.to_thread(
@@ -920,7 +895,7 @@ class FileImageExecutionService:
                     replayed=True,
                 )
             if existing_task.status is TaskStatus.FAILED and (
-                _is_transient_task_error(existing_task.error)
+                is_transient_task_error(existing_task.error)
             ):
                 continue
             raise _terminated_task_conflict(existing_task)
