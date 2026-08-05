@@ -520,6 +520,102 @@ def test_csv_source_enters_document_flow_end_to_end(tmp_path) -> None:
     assert any("finale" in item.text for item in doc_text)
 
 
+def test_carriage_return_text_survives_commit_integrity_check(
+    tmp_path,
+) -> None:
+    # Regression: the indexed text is persisted/verified byte-for-byte.
+    # pdfium emits \r\n for line breaks inside a text block, and commits
+    # previously failed the sha256 integrity check on every attempt
+    # (read_text() collapsed \r\n to \n), locking the source-intelligence
+    # agent into a retry loop.
+    def _multiline_pdf() -> bytes:
+        import io
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_pdf import PdfPages
+
+        buffer = io.BytesIO()
+        with PdfPages(buffer) as pdf:
+            fig = plt.figure(figsize=(4, 3))
+            fig.text(
+                0.1,
+                0.5,
+                "Scene 1: cat enters frame\n"
+                "Scene 2: camera pulls back\n"
+                "Scene 3: rooftop finale",
+            )
+            pdf.savefig(fig)
+            plt.close(fig)
+        return buffer.getvalue()
+
+    services, asset_id, version_id = _services_with_source(
+        tmp_path,
+        name="windows-notes.pdf",
+        content=_multiline_pdf(),
+        media_type="application/pdf",
+    )
+    service = SourceMediaAnalysisService(services)
+    read_context = _running_context(
+        service,
+        services,
+        asset_id,
+        tool_call_id="cr-read",
+    )
+
+    async def scenario():
+        read_result = await service.read_source_document(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            arguments={"fileRef": f"asset-version:{version_id}"},
+            context=read_context,
+        )
+        service.executions.append_specialist_message(
+            "project-1",
+            read_context.specialist_run_id,
+            message_id="tool-cr-result",
+            role="tool",
+            content_parts=[
+                {"type": "text", "text": json.dumps(read_result)},
+            ],
+            metadata={"tool": "read_document", "toolCallId": "cr-read"},
+        )
+        commit_context = _running_context(
+            service,
+            services,
+            asset_id,
+            tool_call_id="cr-commit",
+        )
+        committed = await service.commit_agent_intelligence(
+            project_id="project-1",
+            target_ref=f"asset:{asset_id}",
+            command_id="cr-commit-1",
+            context=commit_context,
+            arguments={
+                "summary": "三场景备忘：入画、拉远、屋顶收束。",
+                "shots": [_document_shot(1, "全文概括。")],
+                "entities": [],
+                "semanticEntries": [],
+                "moduleResultRefs": {"document": read_result["resultRef"]},
+            },
+        )
+        return read_result, committed
+
+    read_result, committed = asyncio.run(scenario())
+
+    coverage = read_result["textCoverage"]
+    stored = document_indexed_text_path(
+        services.projects.project_root("project-1"),
+        read_result["sourceChecksum"],
+        read_result["resultRef"],
+    ).read_bytes()
+    assert b"\r" in stored, "fixture must exercise carriage returns"
+    assert len(stored.decode("utf-8")) == coverage["indexedChars"]
+    assert committed["status"] == "SUCCEEDED"
+
+
 def test_srt_text_only_document_flow(tmp_path) -> None:
     services, asset_id, version_id = _services_with_source(
         tmp_path,

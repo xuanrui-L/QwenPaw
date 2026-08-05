@@ -676,10 +676,11 @@ class SourceMediaAnalysisService:
             result_ref,
         )
         indexed_text_path.parent.mkdir(parents=True, exist_ok=True)
+        # Byte-level write: text-mode IO would translate newlines and break
+        # the sha256 integrity contract for sources containing \r.
         await asyncio.to_thread(
-            indexed_text_path.write_text,
-            rendered.indexed_text,
-            "utf-8",
+            indexed_text_path.write_bytes,
+            rendered.indexed_text.encode("utf-8"),
         )
         return {
             "ok": True,
@@ -1032,13 +1033,17 @@ class SourceMediaAnalysisService:
                         "文档索引文本的 Runtime 文件缺失，无法提交；请重新调用 "
                         "read_document 后再提交",
                     )
-                document_indexed_text = await asyncio.to_thread(
-                    indexed_text_path.read_text,
+                # Byte-level read: read_text() applies universal-newline
+                # translation (\r\n/\r -> \n), which changes both length and
+                # sha256 for documents whose text layer contains \r and made
+                # this integrity check reject every commit.
+                document_indexed_text_bytes = await asyncio.to_thread(
+                    indexed_text_path.read_bytes,
+                )
+                document_indexed_text = document_indexed_text_bytes.decode(
                     "utf-8",
                 )
-                actual_sha = sha256(
-                    document_indexed_text.encode("utf-8"),
-                ).hexdigest()
+                actual_sha = sha256(document_indexed_text_bytes).hexdigest()
                 if (
                     len(document_indexed_text) != indexed_chars
                     or actual_sha != text_coverage.sha256
@@ -1067,10 +1072,11 @@ class SourceMediaAnalysisService:
                     )
             else:
                 if indexed_text_path.is_file():
-                    document_indexed_text = await asyncio.to_thread(
-                        indexed_text_path.read_text,
-                        "utf-8",
-                    )
+                    document_indexed_text = (
+                        await asyncio.to_thread(
+                            indexed_text_path.read_bytes,
+                        )
+                    ).decode("utf-8")
                 else:
                     document_indexed_text = str(
                         module.get("textExcerpt") or "",
