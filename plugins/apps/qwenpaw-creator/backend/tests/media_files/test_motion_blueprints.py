@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access,redefined-outer-name,unused-argument
 """Blueprint catalog: rendering contract and design-validation wiring."""
 
 from __future__ import annotations
