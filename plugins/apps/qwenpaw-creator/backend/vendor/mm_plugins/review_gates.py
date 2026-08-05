@@ -27,6 +27,9 @@ Creator modification: the upstream ``exit 2`` DELIVERY-BLOCKING semantics is
 not ported — gate failures become structured findings for the advisory run
 review; nothing here ever blocks publishing. The plan gate (gate 4 upstream)
 is not ported either: Creator plan context is supplied by the runtime.
+ffmpeg/ffprobe run with stdin detached — inside a background service process
+an ffmpeg reading the tty is suspended by SIGTTIN together with its whole
+process group (the upstream scripts only ever ran in a foreground shell).
 """
 
 from __future__ import annotations
@@ -101,6 +104,9 @@ def _require_tool(name: str) -> str:
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
+        # Detach stdin so ffmpeg is not suspended by SIGTTIN when it reads
+        # the tty from a background process group.
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=_FFMPEG_TIMEOUT_SECONDS,

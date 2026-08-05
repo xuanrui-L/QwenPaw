@@ -18,7 +18,10 @@ Creator modifications: ``sys.exit`` becomes ``FrameStatsError``; a
 single-image helper reuses the same signalstats parse for still artifacts;
 the reported YBITDEPTH is clamped to >=8 — ffmpeg's signalstats emits the
 EFFECTIVE bit depth of the frame content (flat synthetic frames read as
-low as 3), which would inflate the normalization on real >=8-bit sources.
+low as 3), which would inflate the normalization on real >=8-bit sources;
+ffmpeg runs with stdin detached — inside a background service process an
+ffmpeg reading the tty is suspended by SIGTTIN together with its whole
+process group (the upstream script only ever ran in a foreground shell).
 """
 
 from __future__ import annotations
@@ -55,6 +58,7 @@ def probe_duration(path: Path) -> float:
                     "default=nw=1:nk=1",
                     str(path),
                 ],
+                stdin=subprocess.DEVNULL,
                 timeout=_FFMPEG_TIMEOUT_SECONDS,
             )
             .decode()
@@ -135,13 +139,20 @@ def _run_signalstats(
                     "-",
                 ],
                 check=True,
+                # Detach stdin so ffmpeg is not suspended by SIGTTIN when it
+                # reads the tty from a background process group.
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=_FFMPEG_TIMEOUT_SECONDS,
             )
         except (subprocess.SubprocessError, OSError) as exc:
             raise FrameStatsError("signalstats sampling failed") from exc
-        return _parse_signalstats(meta.read_text(encoding="utf-8"))
+        # signalstats lines are pure ASCII; source metadata echoed into the
+        # print file may carry arbitrary bytes, so decode permissively.
+        return _parse_signalstats(
+            meta.read_text(encoding="utf-8", errors="replace"),
+        )
     finally:
         meta.unlink(missing_ok=True)
 

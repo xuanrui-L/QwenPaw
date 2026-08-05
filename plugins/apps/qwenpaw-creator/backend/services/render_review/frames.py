@@ -102,6 +102,9 @@ def _run_frame_grab(
     ]
     return subprocess.run(
         command,
+        # Detach stdin so ffmpeg is not suspended by SIGTTIN when it reads
+        # the tty from a background process group.
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=_FFMPEG_TIMEOUT_SECONDS,
@@ -257,6 +260,9 @@ def probe_audio_profile(video_path: Path) -> AudioProfile:
     ]
     result = subprocess.run(
         command,
+        # Detach stdin so ffmpeg is not suspended by SIGTTIN when it reads
+        # the tty from a background process group.
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=_FFMPEG_TIMEOUT_SECONDS,
