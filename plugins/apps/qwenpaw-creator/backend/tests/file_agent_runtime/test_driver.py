@@ -888,6 +888,7 @@ def _edit_client(*, description: str):
             "read_project",
             "read_project_file",
             "jq_project",
+            "patch_project",
             "ground_prompt_context",
             "ground_image_objects",
             "elements_at",
@@ -1354,6 +1355,34 @@ def test_r2v_real_face_rejection_gets_targeted_recovery() -> None:
         "Task task-2 ended as FAILED: provider timeout",
     )
     assert "video_reference_version_ids" not in generic
+
+
+def test_image_safety_rejection_gets_targeted_recovery() -> None:
+    """A provider safety refusal names the reference-image fix.
+
+    Deterministic safety rejections (for example real-person photos used
+    as references) can never succeed with identical arguments; the
+    recovery must say to drop person-bearing references instead of the
+    generic retry text.
+    """
+
+    targeted = _specialist_tool_recovery(
+        "image_generation",
+        "Task task-1 ended as FAILED: {'code': 'IMAGE_GENERATION_FAILED', "
+        "'message': 'Image generation failed with status 400: Your request "
+        "was rejected by the safety system.'}",
+    )
+    assert "safety system" in targeted
+    assert "do not resubmit the same arguments" in targeted.casefold()
+    assert "remove" in targeted.casefold()
+    assert "scene or prop" in targeted
+
+    # Other image failures keep the generic guidance.
+    generic = _specialist_tool_recovery(
+        "image_generation",
+        "Task task-2 ended as FAILED: provider timeout",
+    )
+    assert "safety system" not in generic
 
 
 def test_extra_data_recovery_names_the_premature_close() -> None:
@@ -2373,6 +2402,7 @@ def test_parent_authors_timeline_elements_without_planning_specialists(
             "read_project",
             "read_project_file",
             "jq_project",
+            "patch_project",
             "ground_prompt_context",
             "ground_image_objects",
             "elements_at",

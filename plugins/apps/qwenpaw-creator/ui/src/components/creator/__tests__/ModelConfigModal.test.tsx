@@ -236,4 +236,50 @@ describe("ModelConfigModal configuration lifecycle", () => {
     expect(screen.queryByText("tavily/qwen3.7-plus")).not.toBeInTheDocument();
     expect(screen.queryByText("复用 qwen3.7-plus")).not.toBeInTheDocument();
   });
+
+  it("fills the qwen3-asr preset base url and model when the protocol is picked", async () => {
+    installMockFetch([
+      {
+        match: "/models/config",
+        method: "GET",
+        response: { json: emptyConfig },
+      },
+    ]);
+
+    render(<ModelConfigModal open onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /ASR/ }));
+    // Open the ASR protocol select, which shows the Fun-ASR default.
+    const protocolSelector = screen
+      .getByText("DashScope Fun-ASR")
+      .closest(".ant-select");
+    expect(protocolSelector).not.toBeNull();
+    fireEvent.mouseDown(protocolSelector!.querySelector(".ant-select-input")!);
+    await waitFor(() => {
+      expect(
+        document.querySelector(
+          '.ant-select-item-option[title="DashScope Qwen3-ASR"]',
+        ),
+      ).not.toBeNull();
+    });
+    fireEvent.click(
+      document.querySelector(
+        '.ant-select-item-option[title="DashScope Qwen3-ASR"]',
+      )!,
+    );
+
+    // The preset fills the model candidate and locks the official base url.
+    await waitFor(() => {
+      const values = screen
+        .getAllByRole("combobox")
+        .map((input) => (input as HTMLInputElement).value);
+      expect(values).toContain("qwen3-asr-flash");
+    });
+    const baseUrl = screen
+      .getAllByPlaceholderText("https://api.example.com")
+      .find((input) => (input as HTMLInputElement).disabled) as
+      | HTMLInputElement
+      | undefined;
+    expect(baseUrl?.value).toBe("https://dashscope.aliyuncs.com/api/v1");
+  });
 });

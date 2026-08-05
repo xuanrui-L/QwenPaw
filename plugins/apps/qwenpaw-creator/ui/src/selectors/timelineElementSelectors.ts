@@ -11,6 +11,7 @@ import {
   splitTransitionsForDisplay,
   type TransitionJunction,
 } from "@/lib/timelineEditing";
+import i18n from "@/i18n";
 
 export interface DisplayLane {
   id: string;
@@ -134,12 +135,36 @@ export const TRACK_TYPE_META: Record<
   TimelineTrackType,
   { label: string; color: string; soft: string }
 > = {
-  ai: { label: "AI 画面", color: "#ff7f16", soft: "rgba(255,127,22,.12)" },
-  clip: { label: "素材剪辑", color: "#3b82f6", soft: "rgba(59,130,246,.12)" },
-  subtitle: { label: "字幕", color: "#8b5cf6", soft: "rgba(139,92,246,.12)" },
-  motion: { label: "动效", color: "#f59e0b", soft: "rgba(245,158,11,.12)" },
-  transition: { label: "转场", color: "#0d9488", soft: "rgba(13,148,136,.12)" },
-  audio: { label: "音频", color: "#12b76a", soft: "rgba(18,183,106,.12)" },
+  ai: {
+    label: "timeline.trackTypes.ai",
+    color: "#ff7f16",
+    soft: "rgba(255,127,22,.12)",
+  },
+  clip: {
+    label: "timeline.trackTypes.clip",
+    color: "#3b82f6",
+    soft: "rgba(59,130,246,.12)",
+  },
+  subtitle: {
+    label: "timeline.trackTypes.subtitle",
+    color: "#8b5cf6",
+    soft: "rgba(139,92,246,.12)",
+  },
+  motion: {
+    label: "timeline.trackTypes.motion",
+    color: "#f59e0b",
+    soft: "rgba(245,158,11,.12)",
+  },
+  transition: {
+    label: "timeline.trackTypes.transition",
+    color: "#0d9488",
+    soft: "rgba(13,148,136,.12)",
+  },
+  audio: {
+    label: "timeline.trackTypes.audio",
+    color: "#12b76a",
+    soft: "rgba(18,183,106,.12)",
+  },
 };
 
 /**
@@ -228,19 +253,29 @@ export function resolveElementVisualMeta(element: TimelineElementDocument): {
   soft: string;
 } {
   const trackType = classifyElementTrack(element);
-  if (trackType) return TRACK_TYPE_META[trackType];
+  if (trackType) {
+    const meta = TRACK_TYPE_META[trackType];
+    return { ...meta, label: i18n.t(meta.label) };
+  }
   if (element.creation.type === "overlay") {
     const kind = element.creation.overlay_kind;
     if (kind === "pet_os" || kind === "interview_summary") {
-      return TRACK_TYPE_META.subtitle;
+      const meta = TRACK_TYPE_META.subtitle;
+      return { ...meta, label: i18n.t(meta.label) };
     }
     if (kind === "motion" || kind === "media") {
-      return TRACK_TYPE_META.motion;
+      const meta = TRACK_TYPE_META.motion;
+      return { ...meta, label: i18n.t(meta.label) };
     }
   }
-  return ELEMENT_TYPE_META[
-    element.creation.type as Exclude<ElementCreationDocument["type"], "overlay">
-  ];
+  const meta =
+    ELEMENT_TYPE_META[
+      element.creation.type as Exclude<
+        ElementCreationDocument["type"],
+        "overlay"
+      >
+    ];
+  return { ...meta, label: i18n.t(meta.label) };
 }
 
 export function groupElementsByTracks(
@@ -290,7 +325,7 @@ export function groupElementsByTracks(
     }
     return {
       type,
-      label: meta.label,
+      label: i18n.t(meta.label),
       color: meta.color,
       soft: meta.soft,
       lanes: laneMap.map((lane, index) => ({
@@ -392,13 +427,13 @@ export function resolveTimelineRender(
  * "fade" is a synonym of crossfade.
  */
 export const TRANSITION_KIND_LABEL: Record<string, string> = {
-  crossfade: "交叉溶解",
-  fade: "交叉溶解",
-  fadeblack: "经黑场",
-  fadewhite: "经白场",
-  dissolve: "颗粒溶解",
-  wipeleft: "左划",
-  cut: "硬切",
+  crossfade: "timeline.transitionKinds.crossfade",
+  fade: "timeline.transitionKinds.fade",
+  fadeblack: "timeline.transitionKinds.fadeblack",
+  fadewhite: "timeline.transitionKinds.fadewhite",
+  dissolve: "timeline.transitionKinds.dissolve",
+  wipeleft: "timeline.transitionKinds.wipeleft",
+  cut: "timeline.transitionKinds.cut",
 };
 
 export function elementCreationSummary(
@@ -411,13 +446,13 @@ export function elementCreationSummary(
       return creation.intent || creation.reason;
     case "overlay":
       return creation.text || creation.prompt || creation.overlay_kind;
-    case "transition":
-      return `${
-        TRANSITION_KIND_LABEL[creation.transition_kind] ??
-        creation.transition_kind
-      } 转场`;
+    case "transition": {
+      const key = TRANSITION_KIND_LABEL[creation.transition_kind];
+      const label = key ? i18n.t(key) : creation.transition_kind ?? "";
+      return `${label} ${i18n.t("timeline.elementSummary.transition")}`;
+    }
     case "audio":
-      return "时间线音频";
+      return i18n.t("timeline.elementSummary.audio");
   }
 }
 
@@ -429,12 +464,24 @@ export const ELEMENT_TYPE_META: Record<
     soft: string;
   }
 > = {
-  r2v: { label: "AI 生成画面", color: "#ff7f16", soft: "rgba(255,127,22,.12)" },
-  edit: { label: "素材剪辑", color: "#3b82f6", soft: "rgba(59,130,246,.12)" },
+  r2v: {
+    label: "timeline.elementTypes.r2v",
+    color: "#ff7f16",
+    soft: "rgba(255,127,22,.12)",
+  },
+  edit: {
+    label: "timeline.elementTypes.edit",
+    color: "#3b82f6",
+    soft: "rgba(59,130,246,.12)",
+  },
   transition: {
-    label: "转场",
+    label: "timeline.elementTypes.transition",
     color: "#0d9488",
     soft: "rgba(13,148,136,.12)",
   },
-  audio: { label: "音频", color: "#12b76a", soft: "rgba(18,183,106,.12)" },
+  audio: {
+    label: "timeline.elementTypes.audio",
+    color: "#12b76a",
+    soft: "rgba(18,183,106,.12)",
+  },
 };

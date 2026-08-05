@@ -39,6 +39,8 @@ EXECUTION_AUTHORIZATION_REQUIRED = "required"
 EXECUTION_AUTHORIZATION_ALLOW_ALL = "allow_all"
 CREATION_CHECKPOINT_REQUIRED = "required"
 CREATION_CHECKPOINT_SKIP = "skip"
+MEDIA_REVIEW_REQUIRED = "required"
+MEDIA_REVIEW_AUTO_APPROVE = "auto_approve"
 CREATOR_CONFIG_TOOLS = (
     CREATOR_TEXT_CONFIG_TOOL,
     CREATOR_IMAGE_CONFIG_TOOL,
@@ -309,6 +311,22 @@ def get_creation_checkpoint_mode() -> str:
     return CREATION_CHECKPOINT_REQUIRED
 
 
+def get_media_review_mode() -> str:
+    """Return the persisted mode for generated-media reviews.
+
+    ``auto_approve`` is the last gate of the fully unattended (YOLO)
+    ladder: generated media is accepted straight into the Project without
+    a pending Review. Until VLM quality checks land, this trades quality
+    control for wall time, so the safe default stays ``required``.
+    """
+
+    section = _get_user_config().get("media_review")
+    value = section.get("mode") if isinstance(section, dict) else None
+    if value == MEDIA_REVIEW_AUTO_APPROVE:
+        return MEDIA_REVIEW_AUTO_APPROVE
+    return MEDIA_REVIEW_REQUIRED
+
+
 DEFAULT_MAINLINE_MAX_MODEL_TURNS = 24
 DEFAULT_SPECIALIST_MAX_MODEL_TURNS = 16
 
@@ -344,6 +362,26 @@ def get_specialist_max_model_turns() -> int:
         _get_user_config().get("agent_runtime"),
         "specialist_max_model_turns",
         DEFAULT_SPECIALIST_MAX_MODEL_TURNS,
+    )
+
+
+# One element consumes several mainline turns (create, delegate, resume),
+# so a fixed cap misfires on large projects: the scaled floor keeps the
+# runaway guard while letting long-but-healthy runs finish. Baseline covers
+# read/ground/strategy/entities; the per-element share covers structure
+# authoring plus delegation.
+TURN_SCALING_BASELINE = 8
+TURN_SCALING_PER_ELEMENT = 3
+
+
+def scale_mainline_max_model_turns(base: int, element_count: int) -> int:
+    """Raise the mainline budget for element-heavy projects, never lower it."""
+
+    if element_count <= 0:
+        return base
+    return max(
+        base,
+        TURN_SCALING_BASELINE + TURN_SCALING_PER_ELEMENT * element_count,
     )
 
 

@@ -41,6 +41,7 @@ import { formatSeconds } from "@/lib/timecode";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useCreatorEditBufferStore } from "@/store/creatorEditBufferStore";
 import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
+import { useTranslation } from "react-i18next";
 
 interface TimelineCanvasProps {
   project: ProjectDocument;
@@ -116,6 +117,7 @@ export default function TimelineCanvas({
   onSelectElement,
   onActiveElementIdsChange,
 }: TimelineCanvasProps) {
+  const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [muted, setMuted] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -320,15 +322,15 @@ export default function TimelineCanvas({
       }
       clearCommitted();
       if (response.editImpact?.regenerationRequired) {
-        message.success("时间调整已应用；相关生成结果已标记为需要重新生成");
+        message.success(t("timeline.timingAppliedRegenRequired"));
       } else if (response.editImpact?.renderTimelineIds.length) {
-        message.success("时间调整已应用；正在重新合成成片");
+        message.success(t("timeline.timingAppliedRecomposing"));
         // Auto-trigger recompose so the final render stays in sync
         void renderTimeline(project.project_id, timeline.timeline_id).catch(
           () => undefined,
         );
       } else {
-        message.success("时间调整已应用");
+        message.success(t("timeline.timingApplied"));
       }
     } catch (error) {
       // A failed replay must not lose history: the entry goes back onto
@@ -336,7 +338,9 @@ export default function TimelineCanvas({
       if (history?.kind === "undo") undoStack.current.push(history.entry);
       if (history?.kind === "redo") redoStack.current.push(history.entry);
       clearCommitted();
-      message.error(`应用时间调整失败：${(error as Error).message}`);
+      message.error(
+        t("timeline.applyTimingFailed", { detail: (error as Error).message }),
+      );
       void pollOnce(project.project_id);
     }
   };
@@ -368,8 +372,8 @@ export default function TimelineCanvas({
       if (!spansMatch(latest, expected)) {
         message.warning(
           kind === "undo"
-            ? "时间线已被其他修改更新，已取消撤销以免覆盖新内容"
-            : "时间线已被其他修改更新，已取消重做以免覆盖新内容",
+            ? t("timeline.undoCancelled")
+            : t("timeline.redoCancelled"),
         );
         return;
       }
@@ -631,22 +635,27 @@ export default function TimelineCanvas({
     >
       <div className="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <b className="text-[var(--color-text-primary)]">时间轴</b>
+          <b className="text-[var(--color-text-primary)]">
+            {t("timeline.timeline")}
+          </b>
           <span
             data-timeline-playhead-summary
             className="rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 font-semibold text-[var(--color-accent)]"
           >
             {/* Pure playhead semantics: derived from the timeline at the
                 playhead tick, never from an explicit selection. */}
-            {seconds(playheadTick, timeline.ticks_per_second)}s · 该时刻有
-            {active.length}项内容
+            {seconds(playheadTick, timeline.ticks_per_second)}s ·{" "}
+            {t("timeline.itemsAtMoment")}
+            {active.length}
+            {t("timeline.items")}
           </span>
           <span
             className={`rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 ${
               scrollable ? "ring-1 ring-[var(--color-border)]" : ""
             }`}
           >
-            {tracks.length} 轨{scrollable ? " · 可上下滚动" : ""}
+            {tracks.length} {t("timeline.track")}
+            {scrollable ? t("timeline.scrollable") : ""}
           </span>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 pr-3">
@@ -664,14 +673,18 @@ export default function TimelineCanvas({
             ) : (
               <ChevronDown className="h-3 w-3" />
             )}
-            {previewOpen ? "收起预览" : "视频预览"}
+            {previewOpen
+              ? t("timeline.collapsePreview")
+              : t("timeline.videoPreview")}
           </button>
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
             className="rounded-md border border-[var(--color-border)] px-2 py-1 font-semibold text-[var(--color-text-secondary)]"
           >
-            {collapsed ? "展开时间轴" : "收起时间轴"}
+            {collapsed
+              ? t("timeline.expandTimeline")
+              : t("timeline.collapseTimeline")}
           </button>
         </div>
       </div>
@@ -734,7 +747,7 @@ export default function TimelineCanvas({
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_center,#28221e_0,#151210_64%,#0d0b0a_100%)] text-center text-sm text-white/58">
-              <span>暂无成片预览</span>
+              <span>{t("timeline.noPreview")}</span>
             </div>
           )}
           {previewMode === "final" && renderUrl && !finalPreviewReady && (
@@ -746,10 +759,10 @@ export default function TimelineCanvas({
             >
               <Loader2 className="h-7 w-7 animate-spin text-white/75" />
               <span className="text-sm font-semibold text-white/90">
-                正在定位画面
+                {t("timeline.locatingFrame")}
               </span>
               <span className="text-xs leading-5 text-white/60">
-                成片已渲染完成，正在加载该时间点的画面，无需重新渲染。
+                {t("timeline.renderDoneDesc")}
               </span>
             </div>
           )}
@@ -759,9 +772,9 @@ export default function TimelineCanvas({
             title={
               previewMode === "final"
                 ? renderedVersion?.stale
-                  ? "当前时间点未受本次修改影响，显示上一版已完成成片"
-                  : "正在播放已合成的成片"
-                : "实时拼装与成片同口径渲染；成片合成后自动切换"
+                  ? t("timeline.notAffected")
+                  : t("timeline.playingFinal")
+                : t("timeline.liveRenderDesc")
             }
           >
             <span
@@ -773,11 +786,11 @@ export default function TimelineCanvas({
             />
             {previewMode === "final"
               ? renderedVersion?.stale
-                ? "未受影响 · 已完成画面"
-                : "成片"
+                ? t("timeline.notAffectedLabel")
+                : t("timeline.finalCut")
               : renderedVersion?.stale
-              ? "内容已更新 · 实时预览"
-              : "实时预览"}
+              ? t("timeline.contentUpdated")
+              : t("timeline.livePreview")}
           </div>
         </div>
       )}
@@ -797,7 +810,7 @@ export default function TimelineCanvas({
               );
             }}
             className="flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
-            aria-label="后退 1 秒"
+            aria-label={t("timeline.skipBack1s")}
           >
             <SkipBack className="h-3.5 w-3.5" />
           </button>
@@ -805,7 +818,7 @@ export default function TimelineCanvas({
             type="button"
             onClick={togglePlayback}
             className="flex h-7 w-7 items-center justify-center rounded-lg bg-[var(--color-accent)] text-white"
-            aria-label="播放或暂停预览"
+            aria-label={t("timeline.playPause")}
           >
             {playing ? (
               <Pause className="h-3.5 w-3.5" />
@@ -824,7 +837,7 @@ export default function TimelineCanvas({
               );
             }}
             className="flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
-            aria-label="前进 1 秒"
+            aria-label={t("timeline.skipForward1s")}
           >
             <SkipForward className="h-3.5 w-3.5" />
           </button>
@@ -832,7 +845,7 @@ export default function TimelineCanvas({
             type="button"
             onClick={() => setMuted((value) => !value)}
             className="flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
-            aria-label={muted ? "取消静音" : "静音"}
+            aria-label={muted ? t("timeline.unmute") : t("timeline.mute")}
           >
             {muted ? (
               <VolumeX className="h-3.5 w-3.5" />
@@ -845,14 +858,14 @@ export default function TimelineCanvas({
             data-preview-scrubber
             role="slider"
             tabIndex={0}
-            aria-label="拖动预览时间轴"
+            aria-label={t("timeline.dragTimeline")}
             aria-valuemin={0}
             aria-valuemax={timelineDuration}
             aria-valuenow={Math.min(playheadTick, timelineDuration)}
             aria-valuetext={`${seconds(
               playheadTick,
               timeline.ticks_per_second,
-            )} 秒`}
+            )} ${t("timeline.seconds")}`}
             onPointerDown={beginPreviewScrub}
             onPointerMove={movePreviewScrub}
             onPointerUp={(event) => finishPreviewScrub(event, true)}
@@ -886,7 +899,7 @@ export default function TimelineCanvas({
         </div>
         <label
           className="flex cursor-pointer items-center gap-1.5 text-[var(--color-text-secondary)]"
-          title="拖动内容时自动吸附到相邻内容边缘与播放头"
+          title={t("timeline.snapTooltip")}
         >
           <button
             type="button"
@@ -900,7 +913,7 @@ export default function TimelineCanvas({
             }`}
           >
             <Magnet className="h-3.5 w-3.5" />
-            吸附
+            {t("timeline.snap")}
           </button>
         </label>
         <div className="flex items-center gap-0.5">
@@ -910,7 +923,7 @@ export default function TimelineCanvas({
             disabled={zoom <= ZOOM_MIN}
             onClick={() => adjustZoom(-ZOOM_STEP)}
             className="flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-30"
-            aria-label="缩小时间轴"
+            aria-label={t("timeline.zoomOut")}
           >
             <ZoomOut className="h-3.5 w-3.5" />
           </button>
@@ -926,7 +939,7 @@ export default function TimelineCanvas({
             disabled={zoom >= ZOOM_MAX}
             onClick={() => adjustZoom(ZOOM_STEP)}
             className="flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-30"
-            aria-label="放大时间轴"
+            aria-label={t("timeline.zoomIn")}
           >
             <ZoomIn className="h-3.5 w-3.5" />
           </button>
