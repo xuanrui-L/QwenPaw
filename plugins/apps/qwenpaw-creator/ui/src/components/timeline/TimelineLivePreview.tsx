@@ -356,10 +356,10 @@ function MotionOverlayLayer({
   // cannot exist in committed Projects (the schema rejects them), so
   // the poster is the only html_js preview surface.
   const isJsTimeline = motion?.format === "html_js";
-  const posterFileId = isJsTimeline ? motion?.html_file_id ?? null : null;
+  const posterFileId = isJsTimeline ? (motion?.html_file_id ?? null) : null;
   const [posterFailed, setPosterFailed] = useState(false);
   const { html, failed: htmlFailed } = useMotionDocumentHtml(
-    isJsTimeline ? null : motion ?? null,
+    isJsTimeline ? null : (motion ?? null),
   );
   const isTextOverlay =
     element.creation.type === "overlay" &&
