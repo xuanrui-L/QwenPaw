@@ -41,7 +41,11 @@ export default function LanguageToggle({ className }: LanguageToggleProps) {
       open={dropdownOpen}
       onOpenChange={setDropdownOpen}
     >
-      {dropdownOpen ? button : <Tooltip title={t("common.language")}>{button}</Tooltip>}
+      {dropdownOpen ? (
+        button
+      ) : (
+        <Tooltip title={t("common.language")}>{button}</Tooltip>
+      )}
     </Dropdown>
   );
 }
