@@ -77,6 +77,7 @@ from services.project_files.models import (
     EditCreation,
     ElementOutputRenderSource,
     IndexedFile,
+    MotionClipCreation,
     OverlayCreation,
     Project,
     R2VCreation,
@@ -161,6 +162,10 @@ class LocalMediaInput:
     location: Mapping[str, Any] | None = None
     overlays: tuple[Mapping[str, Any], ...] = ()
     motions: tuple[Mapping[str, Any], ...] = ()
+    # A full-canvas motion document that IS the segment's picture (pure
+    # motion-graphics cut): the renderer paints it over an opaque base
+    # for the whole span instead of cutting from a media file.
+    motion_clip: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +316,43 @@ class FfmpegLocalMediaRunner:
                         freeze_duration = target_duration - source_duration
 
                 segment = segment_dir / f"{index:06d}.mp4"
+                if item.motion_clip is not None:
+                    # A pure motion-graphics segment: the document paints
+                    # the whole picture, so the base is a silent opaque
+                    # canvas and the clip renders full-frame on top.
+                    self._render_motion_clip_segment(
+                        item,
+                        segment,
+                        canvas_size=spec.canvas_size,
+                        segment_duration=segment_duration,
+                        work_dir=spec.work_dir,
+                    )
+                    for warning in self._apply_overlay(item, segment):
+                        overlay_warnings.append(
+                            f"{item.source_ref or item.version_id}: "
+                            f"{warning}",
+                        )
+                    for warning in self._apply_motion_overlays(item, segment):
+                        overlay_warnings.append(
+                            f"{item.source_ref or item.version_id}: "
+                            f"{warning}",
+                        )
+                    concat_inputs.append(segment)
+                    segment_durations.append(segment_duration)
+                    if spec.on_element_done is not None:
+                        for element_id in input_element_ids[index]:
+                            remaining_element_occurrences[element_id] -= 1
+                        completed_elements = sum(
+                            remaining == 0
+                            for remaining in (
+                                remaining_element_occurrences.values()
+                            )
+                        )
+                        spec.on_element_done(
+                            completed_elements,
+                            total_elements,
+                        )
+                    continue
                 # A still image can carry a segment (pure motion-graphics
                 # cuts render generated backdrops with overlays on top).
                 # ffmpeg needs -loop 1 to keep emitting frames and -t to
@@ -927,6 +969,73 @@ class FfmpegLocalMediaRunner:
             os.replace(rendered, segment)
         return warnings
 
+    def _render_motion_clip_segment(
+        self,
+        item: LocalMediaInput,
+        segment: Path,
+        *,
+        canvas_size: tuple[int, int],
+        segment_duration: float,
+        work_dir: Path,
+    ) -> None:
+        """Rasterize one full-canvas motion document into a segment.
+
+        The document paints the segment's whole picture, so a failed
+        render aborts the execution: unlike a lost decoration there is
+        no base footage to fall back to.
+        """
+
+        payload = item.motion_clip
+        assert payload is not None
+        html = str(payload.get("html") or "")
+        if not html.strip():
+            raise ValidationError(
+                f"动效片段 {item.source_ref} 的文档为空，无法合成",
+            )
+        width, height = canvas_size
+        base_args = [
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            (
+                f"color=c=black:s={width}x{height}:r=30"
+                f":d={segment_duration:.6f}"
+            ),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            os.fspath(segment),
+        ]
+        self._run(base_args, cwd=work_dir)
+        rendered = segment.with_name(f"{segment.stem}-clip.mp4")
+        result = render_motion_overlay(
+            ffmpeg_path=self.executable,
+            input_path=segment,
+            output_path=rendered,
+            html=html,
+            fps=int(payload.get("fps") or 24),
+            loop=bool(payload.get("loop", True)),
+            video_size=canvas_size,
+            appear_at=0.0,
+            duration=segment_duration,
+            location=None,
+            doc_format=str(payload.get("format") or "html_css"),
+            full_canvas=True,
+        )
+        if not result.success:
+            rendered.unlink(missing_ok=True)
+            raise ValidationError(
+                f"动效片段 {item.source_ref} 渲染失败，已中止合成（纯动效片段没有可回退的"
+                f"底层画面）: {result.error or '未知错误'}",
+            )
+        os.replace(rendered, segment)
+
     @staticmethod
     def _normalized_motion(
         item: LocalMediaInput,
@@ -1276,6 +1385,7 @@ class _FrozenInput:
     location: Mapping[str, Any] | None = None
     overlays: tuple[Mapping[str, Any], ...] = ()
     motions: tuple[Mapping[str, Any], ...] = ()
+    motion_clip: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1791,6 +1901,92 @@ def _edit_motion_overlays(
     return tuple(motions)
 
 
+def _append_motion_clip_input(
+    *,
+    project: Project,
+    timeline: Timeline,
+    element: TimelineElement,
+    order: int,
+    inputs: list[_FrozenInput],
+    read_set: list[dict[str, Any]],
+    selections: list[dict[str, Any]],
+    durations: list[float | None],
+) -> None:
+    """Resolve one full-canvas motion clip element into a frozen input.
+
+    The document is the segment's whole picture, so it must already be
+    designed and externalized (content-addressed) before composition;
+    an undesigned clip dead-ends the command instead of shipping a
+    silent black segment.
+    """
+
+    creation = element.creation
+    assert isinstance(creation, MotionClipCreation)
+    motion = creation.motion
+    if motion is None:
+        raise ConflictError(
+            f"动效片段 {element.element_id} 尚未完成动效设计，请先运行动效设计管线",
+        )
+    if motion.html_file_id is None:
+        raise ConflictError(
+            f"动效片段 {element.element_id} 的文档未外部化，请通过动效设计管线重新生成",
+        )
+    indexed = project.assets.files_by_id.get(motion.html_file_id)
+    if indexed is None:
+        raise StorageIntegrityError(
+            f"动效片段引用的 IndexedFile 不存在: {motion.html_file_id}",
+        )
+    span_seconds = element.span.duration_tick / timeline.ticks_per_second
+    payload = {
+        "element_id": element.element_id,
+        **_motion_document_payload(project, motion),
+        "fps": motion.fps,
+        "loop": motion.loop,
+        "location": None,
+        "appear_at": 0.0,
+        "duration": span_seconds,
+    }
+    inputs.append(
+        _FrozenInput(
+            version_id=f"motion-clip-{element.element_id}",
+            indexed=indexed,
+            checksum=f"sha256:{indexed.sha256}",
+            source_ref=f"element:{element.element_id}",
+            media_type="text/html",
+            start_seconds=0.0,
+            end_seconds=span_seconds,
+            location=(
+                element.location.model_dump(mode="json")
+                if element.location is not None
+                else None
+            ),
+            overlays=_edit_overlays(project, timeline, element),
+            motions=_edit_motion_overlays(project, timeline, element),
+            motion_clip=payload,
+        ),
+    )
+    read_set.append(
+        _read_set_item(
+            "motion-document",
+            motion.html_file_id,
+            indexed,
+            f"sha256:{indexed.sha256}",
+        ),
+    )
+    selections.append(
+        {
+            "sourceRef": f"element:{element.element_id}",
+            "versionId": f"motion-clip-{element.element_id}",
+            "order": order,
+            "startTick": element.span.start_tick,
+            "durationTick": element.span.duration_tick,
+            "sourceInTick": None,
+            "sourceOutTick": None,
+        },
+    )
+    durations.append(span_seconds)
+
+
 def _timeline_execution(
     *,
     project: Project,
@@ -1798,10 +1994,10 @@ def _timeline_execution(
     target_ref: str,
     command: CreatorCommandType,
 ) -> _ResolvedExecution:
-    creation_types = (
+    creation_types: tuple[type, ...] = (
         (EditCreation,)
         if command is CreatorCommandType.EXECUTE_EDIT
-        else (R2VCreation, EditCreation)
+        else (R2VCreation, EditCreation, MotionClipCreation)
     )
     visual_elements = sorted(
         (
@@ -1826,6 +2022,18 @@ def _timeline_execution(
     selections: list[dict[str, Any]] = []
     durations: list[float | None] = []
     for order, element in enumerate(visual_elements, 1):
+        if isinstance(element.creation, MotionClipCreation):
+            _append_motion_clip_input(
+                project=project,
+                timeline=timeline,
+                element=element,
+                order=order,
+                inputs=inputs,
+                read_set=read_set,
+                selections=selections,
+                durations=durations,
+            )
+            continue
         indexed, version, version_kind = _resolved_element_input(
             project,
             element,
@@ -2051,6 +2259,18 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
                     "motions": [
                         _fingerprint_motion(motion) for motion in item.motions
                     ],
+                    # Key omitted for media-backed inputs so every
+                    # fingerprint computed before motion clips existed
+                    # stays byte-identical (no mass recomposition).
+                    **(
+                        {
+                            "motionClip": _fingerprint_motion(
+                                item.motion_clip,
+                            ),
+                        }
+                        if item.motion_clip is not None
+                        else {}
+                    ),
                 }
                 for item in resolved.inputs
             ],
@@ -2766,6 +2986,15 @@ class FileLocalMediaExecutionService:
                             motion,
                         )
                         for motion in frozen.motions
+                    ),
+                    motion_clip=(
+                        _materialized_motion(
+                            base.project,
+                            file_store,
+                            frozen.motion_clip,
+                        )
+                        if frozen.motion_clip is not None
+                        else None
                     ),
                 ),
             )

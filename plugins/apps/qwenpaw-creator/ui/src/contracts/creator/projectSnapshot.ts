@@ -234,6 +234,15 @@ export interface TransitionCreationDocument extends ProjectJsonRecord {
   easing: string;
 }
 
+// A full-canvas motion document that carries the segment's whole picture
+// (pure motion-graphics cut, no footage behind it).
+export interface MotionClipCreationDocument extends ProjectJsonRecord {
+  type: "motion_clip";
+  intent: string;
+  prompt: string;
+  motion?: MotionGraphicDocument | null;
+}
+
 export interface AudioCreationDocument extends ProjectJsonRecord {
   type: "audio";
   source_asset_version_id: string;
@@ -245,6 +254,7 @@ export type ElementCreationDocument =
   | R2VCreationDocument
   | EditCreationDocument
   | OverlayCreationDocument
+  | MotionClipCreationDocument
   | TransitionCreationDocument
   | AudioCreationDocument;
 

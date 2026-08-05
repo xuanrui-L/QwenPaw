@@ -812,6 +812,7 @@ def _verify_captured_frames(
     box_width: int,
     box_height: int,
     ffmpeg_path: str,
+    full_canvas: bool = False,
 ) -> str | None:
     """Post-render truth gate over the captured output frames.
 
@@ -843,7 +844,9 @@ def _verify_captured_frames(
         )
         if coverage < 0.0:
             return None
-        if edge > _CAPTURE_MAX_EDGE_CONTACT:
+        # A full-canvas motion clip IS the picture: touching the box edge
+        # is its normal state, so only the empty-frame rule applies.
+        if not full_canvas and edge > _CAPTURE_MAX_EDGE_CONTACT:
             return (
                 f"动效渲染真值自查失败: 第 {index} 帧可见内容越出透明盒边缘"
                 f"（边缘接触率 {edge:.0%}），拒绝入库"
@@ -851,6 +854,13 @@ def _verify_captured_frames(
         coverages.append(coverage)
     if all(coverage <= 0.0 for coverage in coverages):
         return "动效渲染真值自查失败: 抽检的首/中/尾帧全部为空帧，拒绝入库"
+    if full_canvas and min(coverages) < 0.85:
+        # The document is the segment's whole picture: a "card" floating
+        # on the transparent box would ship black bars into the final cut.
+        return (
+            f"动效渲染真值自查失败: 全屏动效片段的画面只覆盖了视口的 "
+            f"{min(coverages):.0%}，根容器必须铺满整个视口（禁止外边距/内缩/圆角卡片）"
+        )
     return None
 
 
@@ -1270,6 +1280,7 @@ def render_motion_overlay(
     location: Mapping[str, Any] | None = None,
     viewport_inset: float = 0.0,
     doc_format: str = "html_css",
+    full_canvas: bool = False,
 ) -> OverlayRenderResult:
     """Render one motion document and composite it over a prepared segment."""
 
@@ -1401,7 +1412,11 @@ def render_motion_overlay(
         engine_salt=engine_salt,
         period_mode=period_mode,
     )
-    cache_key = hashlib.sha256(frame_identity.encode("utf-8")).hexdigest()
+    cache_key = hashlib.sha256(
+        (frame_identity + ("|full_canvas" if full_canvas else "")).encode(
+            "utf-8",
+        ),
+    ).hexdigest()
     # v2: seek exit progress switched to the real playhead; html_css
     # identities carry no engine salt, so the namespace bump is what
     # invalidates their pre-fix cached frames.
@@ -1448,6 +1463,7 @@ def render_motion_overlay(
                 box_width=box_width,
                 box_height=box_height,
                 ffmpeg_path=ffmpeg_path,
+                full_canvas=full_canvas,
             )
         if error is not None:
             shutil.rmtree(staged_dir, ignore_errors=True)

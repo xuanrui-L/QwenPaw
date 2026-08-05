@@ -74,6 +74,7 @@ from services.project_files.models import (
     EditCreation,
     ElementLocation,
     IndexedFile,
+    MotionClipCreation,
     MotionGraphic,
     OverlayCreation,
     Project,
@@ -163,6 +164,35 @@ _JS_TIMELINE_CODE_RULES = """代码要求（html_js 动态时间线方案）：
 - 不要使用 emoji 字符（渲染环境无法可靠显示），需要具象图形时用 CSS 画出来（圆角矩形、border-radius、clip-path、多层渐变组合）。
 - 文档会被渲染到一个固定尺寸的透明盒子里；请给 html 和 body 显式设置 width:100% 与 height:100%，用 vh/百分比布局让内容撑满根容器。
 - location 已经负责把整个透明盒子放到最终画面的正确位置和大小；HTML 内绝对不要再次用 location 做二次定位或缩放。"""
+
+_CLIP_SYSTEM_PROMPT = (
+    """你是一位顶级 motion graphics 导演（参考 hyperframes：用 HTML 直接导出视频）。你要为一个“纯动效片段”设计完整画面：这个 HTML 文档就是成片里这一段的全部画面，没有任何实拍或插画底图。
+
+画面设计原则：
+- 这不是叠加卡片：根容器必须铺满整个视口（inset:0、width:100%、height:100%），绝对禁止外边距、内缩、圆角、缩放容器；画面必须触达视口四条边，渲染器会拒绝覆盖率不足的“卡片式”文档。
+- 文档必须自带完整背景：用多层 CSS 渐变/径向光晕/几何纹理铺满整个视口，不透明，绝不能露出黑色底。背景自身也要有缓慢的动态（渐变位移、光晕呼吸）。
+- 分层编排：背景层 + 中景主体图形（几何组合、描边 draw-on、动态 mask）+ 前景细节（粒子、线条、光点），至少三层深度；风格现代精致，对标电影预告片与高级综艺包装，禁止土味纯色方块和廉价剪贴画。
+- 从第一帧起背景就完整可见；主体图形在开头 15% 内优雅入场，中段持续演化（不是入场后定格），末态保持完整画面。
+- 文字只在创意意图明确要求时出现（如标题卡），否则纯图形表达；字幕另有独立 Overlay 承担。
+- loop=true 时 GSAP 时间线必须首尾像素状态完全一致（渲染器逐像素比对 t=0 与 t=duration）；入场型片段用 loop=false，__hf.duration 填片段实际秒数。
+
+"""
+    + _JS_TIMELINE_CODE_RULES
+    + """
+
+输出要求：只输出一个 JSON 对象，不要输出任何其他文字或代码围栏：
+{
+  "needed": true,
+  "skip_reason": "",
+  "concept": "一句话描述这一段的画面设计与运动编排",
+  "format": "html_js",
+  "html": "完整 HTML 文档字符串",
+  "fps": 24,
+  "loop": true 或 false,
+  "location": {"x": 0.5, "y": 0.5, "width": 1.0, "height": 1.0, "anchor_x": 0.5, "anchor_y": 0.5, "opacity": 1.0}
+}
+location 固定填全屏（如上）：这个文档就是整个画面。"""
+)
 
 _DECOR_SYSTEM_PROMPT = (
     """你是一位顶级视频包装动效设计师（motion graphics designer）。你会看到一个视频片段按时间顺序抽取的真实画面帧和剪辑意图，需要先判断这个片段是否真的值得叠加装饰动效，值得时再基于画面自由创作一段 GSAP 动态动效。
@@ -1198,14 +1228,82 @@ async def design_motion_overlays(
         ),
         key=lambda element: (element.span.start_tick, element.element_id),
     )[:_MAX_SEGMENTS]
-    if not edit_elements and not text_overlays:
+    motion_clips = sorted(
+        (
+            element
+            for element in timeline.elements_by_id.values()
+            if element.enabled
+            and isinstance(element.creation, MotionClipCreation)
+            and (
+                element.creation.motion is None
+                or (requested is not None and element.element_id in requested)
+            )
+        ),
+        key=lambda element: (element.span.start_tick, element.element_id),
+    )[:_MAX_SEGMENTS]
+    if not edit_elements and not text_overlays and not motion_clips:
         raise ValidationError(
-            "Timeline 没有可设计的 Edit Element 或文字 Overlay Element",
+            "Timeline 没有可设计的 Edit Element、文字 Overlay 或动效片段 Element",
         )
 
     designed: list[TimelineElement] = []
     styled: dict[str, tuple[MotionGraphic, ElementLocation]] = {}
+    clip_styled: dict[str, MotionGraphic] = {}
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT_DESIGNS)
+
+    async def design_motion_clip(
+        element: TimelineElement,
+        clip_index: int,
+    ) -> dict[str, Any]:
+        """Design one full-canvas pure motion segment picture."""
+
+        creation = element.creation
+        assert isinstance(creation, MotionClipCreation)
+        entry = {"elementId": element.element_id}
+        segment_duration = (
+            element.span.duration_tick / timeline.ticks_per_second
+        )
+        neighbour_concepts = [
+            f"第 {index + 1} 段："
+            f"{getattr(clip.creation, 'prompt', '') or getattr(clip.creation, 'intent', '')}"
+            for index, clip in enumerate(motion_clips)
+            if clip.element_id != element.element_id
+        ]
+        task_lines = [
+            f"这是片子的第 {clip_index + 1} 段纯动效片段，时长约 "
+            f"{segment_duration:.1f} 秒，画布 {canvas_size[0]}x{canvas_size[1]}。",
+            f"创意意图：{creation.prompt or creation.intent or '自由发挥'}",
+        ]
+        if brief:
+            task_lines.append(f"整片创意 brief：{brief}")
+        if neighbour_concepts:
+            task_lines.append(
+                "其他片段的意图（保持风格连贯但画面各异）：" + "；".join(neighbour_concepts),
+            )
+        async with semaphore:
+            try:
+                design = await _design_document(
+                    system_prompt=_CLIP_SYSTEM_PROMPT,
+                    task_text="\n".join(task_lines),
+                    frame_paths=[],
+                    canvas_size=canvas_size,
+                    default_loop=False,
+                    # The document IS the picture: it must flood the whole
+                    # viewport (a "card" with margins or rounded corners
+                    # fails this gate), while edge contact is its normal
+                    # state.
+                    min_coverage=0.90,
+                    max_edge_contact=1.0,
+                    max_attempts=_TEXT_CARD_DESIGN_ATTEMPTS,
+                    ffmpeg_path=ffmpeg_path,
+                )
+            except Exception as exc:
+                return {**entry, "status": "failed", "error": str(exc)}
+        if isinstance(design, str):
+            return {**entry, "status": "skipped", "skipReason": design}
+        motion, _location, concept = design
+        clip_styled[element.element_id] = motion
+        return {**entry, "status": "designed", "concept": concept}
 
     def fallback_text_style(
         overlay: TimelineElement,
@@ -1615,6 +1713,14 @@ async def design_motion_overlays(
             ),
         ),
     )
+    clip_results = list(
+        await asyncio.gather(
+            *(
+                design_motion_clip(element, clip_index)
+                for clip_index, element in enumerate(motion_clips)
+            ),
+        ),
+    )
     # Design decorations in timeline order so each decision can see motifs
     # already used earlier in the story and avoid accidental repetition.
     segment_results: list[dict[str, Any]] = []
@@ -1629,12 +1735,13 @@ async def design_motion_overlays(
             ),
         )
 
-    if not designed and not styled:
+    if not designed and not styled and not clip_styled:
         return {
             "ok": True,
             "designedCount": 0,
             "storySummary": story_summary,
             "textOverlays": text_results,
+            "motionClips": clip_results,
             "segments": segment_results,
             "generation": snapshot.generation,
             "etag": snapshot.etag,
@@ -1683,6 +1790,16 @@ async def design_motion_overlays(
                 mode="json",
             )
             raw["location"] = location.model_dump(mode="json")
+        for clip_id, motion in clip_styled.items():
+            raw = elements.get(clip_id)
+            if not isinstance(raw, dict):
+                continue
+            raw["creation"]["motion"] = externalize(motion).model_dump(
+                mode="json",
+            )
+            # The document paints the whole canvas; any stale location
+            # box would shrink the picture.
+            raw["location"] = None
         files_by_id = candidate["assets"]["files_by_id"]
         for file_id, indexed in indexed_files.items():
             if file_id not in files_by_id:
@@ -1709,9 +1826,10 @@ async def design_motion_overlays(
     )
     return {
         "ok": True,
-        "designedCount": len(designed) + len(styled),
+        "designedCount": len(designed) + len(styled) + len(clip_styled),
         "storySummary": story_summary,
         "textOverlays": text_results,
+        "motionClips": clip_results,
         "segments": segment_results,
         "generation": committed.generation,
         "etag": committed.etag,

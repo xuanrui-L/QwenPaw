@@ -858,6 +858,30 @@ class TransitionCreation(StrictModel):
         return self
 
 
+class MotionClipCreation(StrictModel):
+    """A full-canvas motion document that carries a segment's whole picture.
+
+    Pure motion-graphics cuts (no real or generated footage) place these
+    elements on the main visual track: the document paints its own backdrop
+    and animation, and the renderer rasterizes it over an opaque base for
+    the Element's span. ``prompt`` holds the design brief while ``motion``
+    is empty, awaiting the motion design pipeline.
+    """
+
+    type: Literal["motion_clip"] = "motion_clip"
+    intent: str = ""
+    prompt: str = ""
+    motion: MotionGraphic | None = None
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> MotionClipCreation:
+        if not self.prompt.strip() and self.motion is None:
+            raise ValueError(
+                "motion clip requires prompt or motion document",
+            )
+        return self
+
+
 class AudioCreation(StrictModel):
     """An exact audio version placed directly on the Timeline."""
 
@@ -878,6 +902,7 @@ ElementCreation = Annotated[
     R2VCreation
     | EditCreation
     | OverlayCreation
+    | MotionClipCreation
     | TransitionCreation
     | AudioCreation,
     Field(discriminator="type"),
@@ -1310,57 +1335,15 @@ class Project(StrictModel):
                     creation.reference_version_ids,
                     "overlay reference",
                 )
-                if (
-                    creation.motion is not None
-                    and creation.motion.format == "html_js"
-                    and creation.motion.html is not None
-                ):
-                    # html_js documents may only enter a committed Project
-                    # through the motion design pipeline, which probes the
-                    # __hf contract and externalizes the body to a
-                    # content-addressed file. Accepting inline script
-                    # documents here would bypass every render truth gate
-                    # until composition time.
-                    raise ValueError(
-                        f"element {element_id!r} carries an inline html_js "
-                        "motion document; html_js motions must be created "
-                        "through the motion design pipeline "
-                        "(design_motion_overlays), which validates the "
-                        "window.__hf contract and externalizes the document "
-                        "before commit",
-                    )
-                if (
-                    creation.motion is not None
-                    and creation.motion.html_file_id is not None
-                ):
-                    # An externalized reference is only trusted when it
-                    # provably identifies a content-addressed motion
-                    # document published by the design pipeline: the file
-                    # id must derive from the indexed checksum, so a
-                    # dangling id or a repointed IndexedFile cannot smuggle
-                    # an unprobed document past the design gates.
-                    reference = creation.motion.html_file_id
-                    indexed = self.assets.files_by_id.get(reference)
-                    if indexed is None:
-                        raise ValueError(
-                            f"element {element_id!r} references motion "
-                            f"document {reference!r} that does not exist in "
-                            "assets.files_by_id",
-                        )
-                    if (
-                        indexed.kind != "large_text"
-                        or indexed.schema_name != "motion_document"
-                        or indexed.file_id
-                        != motion_document_file_id(indexed.sha256)
-                        or indexed.relative_uri
-                        != f"assets/motion/{indexed.sha256}.html"
-                    ):
-                        raise ValueError(
-                            f"element {element_id!r} references "
-                            f"{reference!r} which is not a content-addressed "
-                            "motion document published by the motion design "
-                            "pipeline",
-                        )
+                self._validate_committed_motion_document(
+                    element_id,
+                    creation.motion,
+                )
+            elif isinstance(creation, MotionClipCreation):
+                self._validate_committed_motion_document(
+                    element_id,
+                    creation.motion,
+                )
             elif isinstance(creation, AudioCreation):
                 _require_key(
                     source_versions,
@@ -1458,6 +1441,56 @@ class Project(StrictModel):
     ) -> list[TimelineElement]:
         timeline = _require_key(self.timelines.items, timeline_id, "timeline")
         return timeline.elements_at(tick, include_disabled=include_disabled)
+
+    def _validate_committed_motion_document(
+        self,
+        element_id: str,
+        motion: MotionGraphic | None,
+    ) -> None:
+        if motion is None:
+            return
+        if motion.format == "html_js" and motion.html is not None:
+            # html_js documents may only enter a committed Project through
+            # the motion design pipeline, which probes the __hf contract
+            # and externalizes the body to a content-addressed file.
+            # Accepting inline script documents here would bypass every
+            # render truth gate until composition time.
+            raise ValueError(
+                f"element {element_id!r} carries an inline html_js "
+                "motion document; html_js motions must be created "
+                "through the motion design pipeline "
+                "(design_motion_overlays), which validates the "
+                "window.__hf contract and externalizes the document "
+                "before commit",
+            )
+        if motion.html_file_id is not None:
+            # An externalized reference is only trusted when it provably
+            # identifies a content-addressed motion document published by
+            # the design pipeline: the file id must derive from the
+            # indexed checksum, so a dangling id or a repointed
+            # IndexedFile cannot smuggle an unprobed document past the
+            # design gates.
+            reference = motion.html_file_id
+            indexed = self.assets.files_by_id.get(reference)
+            if indexed is None:
+                raise ValueError(
+                    f"element {element_id!r} references motion "
+                    f"document {reference!r} that does not exist in "
+                    "assets.files_by_id",
+                )
+            if (
+                indexed.kind != "large_text"
+                or indexed.schema_name != "motion_document"
+                or indexed.file_id != motion_document_file_id(indexed.sha256)
+                or indexed.relative_uri
+                != f"assets/motion/{indexed.sha256}.html"
+            ):
+                raise ValueError(
+                    f"element {element_id!r} references "
+                    f"{reference!r} which is not a content-addressed "
+                    "motion document published by the motion design "
+                    "pipeline",
+                )
 
     @classmethod
     def new(
