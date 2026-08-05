@@ -102,6 +102,17 @@ export function patchExecutionAuthorization(
   });
 }
 
+export function patchCreationCheckpoints(
+  mode: "required" | "skip",
+): Promise<{ ok: boolean }> {
+  const id = newClientId("creation-checkpoints");
+  return creatorRequest("/models/config/creation-checkpoints", {
+    method: "PATCH",
+    headers: { "Idempotency-Key": id },
+    body: jsonBody({ mode }),
+  });
+}
+
 export function getRealApiKey(section: string): Promise<{ api_key: string }> {
   return creatorRequest(`/models/real-api-key/${section}`);
 }

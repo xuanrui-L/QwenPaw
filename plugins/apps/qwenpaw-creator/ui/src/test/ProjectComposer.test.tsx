@@ -80,6 +80,7 @@ const configuredModelConfig: ModelConfigData = {
     policy_api_key: "",
   },
   executionAuthorization: { mode: "allow_all" },
+  creationCheckpoints: { mode: "skip" },
 };
 
 function installComposerMockFetch(

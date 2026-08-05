@@ -45,6 +45,9 @@ export interface ModelConfigData {
   executionAuthorization: {
     mode: "required" | "allow_all";
   };
+  creationCheckpoints: {
+    mode: "required" | "skip";
+  };
 }
 
 export interface ModelConnectionTestRequest {
