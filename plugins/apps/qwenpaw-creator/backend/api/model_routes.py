@@ -359,6 +359,9 @@ def _assemble_model_config(
     checkpoints = configs.get("creation_checkpoints")
     if isinstance(checkpoints, dict):
         base["creation_checkpoints"].update(checkpoints)
+    media_review = configs.get("media_review")
+    if isinstance(media_review, dict):
+        base["media_review"].update(media_review)
     if base["vlm"].get("use_llm"):
         for field in ("base_url", "api_key", "model_name"):
             if not base["vlm"].get(field):
@@ -945,6 +948,33 @@ async def patch_creation_checkpoints(
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
         merged["creation_checkpoints"] = {"mode": mode}
+        try:
+            return ModelConfigData.model_validate(merged)
+        except PydanticValidationError as exc:
+            first_error = exc.errors()[0] if exc.errors() else {}
+            field = ".".join(str(loc) for loc in first_error.get("loc", []))
+            message = first_error.get("msg", str(exc))
+            raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
+
+    def transaction() -> None:
+        mutate_model_config(mutate)
+        _notify_agent_model_config_changed()
+
+    await asyncio.to_thread(transaction)
+    return {"ok": True}
+
+
+@router.patch("/config/media-review")
+async def patch_media_review(
+    data: dict[str, Any] = Body(...),
+) -> dict[str, bool]:
+    mode = data.get("mode")
+    if mode not in ("required", "auto_approve"):
+        raise ValidationError("mode 必须是 'required' 或 'auto_approve'")
+
+    def mutate(current: ModelConfigData) -> ModelConfigData:
+        merged = current.model_dump()
+        merged["media_review"] = {"mode": mode}
         try:
             return ModelConfigData.model_validate(merged)
         except PydanticValidationError as exc:

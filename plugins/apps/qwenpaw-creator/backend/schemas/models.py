@@ -112,6 +112,18 @@ class CreationCheckpointConfig(StrictModel):
     mode: Literal["required", "skip"] = "required"
 
 
+class MediaReviewConfig(StrictModel):
+    """Quality gate for generated media (images/videos).
+
+    ``required`` parks every generated artifact behind a pending Review;
+    ``auto_approve`` accepts it straight into the Project — the last stop
+    of the fully unattended (YOLO) ladder, with no quality backstop until
+    VLM checks land.
+    """
+
+    mode: Literal["required", "auto_approve"] = "required"
+
+
 class OssConfig(StrictModel):
     """QwenPaw Creator media OSS configuration stored in model_config.json."""
 
@@ -139,6 +151,10 @@ class ModelConfigData(StrictModel):
     creation_checkpoints: CreationCheckpointConfig = Field(
         default_factory=CreationCheckpointConfig,
         alias="creationCheckpoints",
+    )
+    media_review: MediaReviewConfig = Field(
+        default_factory=MediaReviewConfig,
+        alias="mediaReview",
     )
 
 

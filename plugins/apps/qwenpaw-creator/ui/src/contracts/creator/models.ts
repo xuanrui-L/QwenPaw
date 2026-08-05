@@ -48,6 +48,9 @@ export interface ModelConfigData {
   creationCheckpoints: {
     mode: "required" | "skip";
   };
+  mediaReview: {
+    mode: "required" | "auto_approve";
+  };
 }
 
 export interface ModelConnectionTestRequest {

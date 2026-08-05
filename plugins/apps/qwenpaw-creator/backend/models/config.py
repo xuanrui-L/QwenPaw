@@ -39,6 +39,8 @@ EXECUTION_AUTHORIZATION_REQUIRED = "required"
 EXECUTION_AUTHORIZATION_ALLOW_ALL = "allow_all"
 CREATION_CHECKPOINT_REQUIRED = "required"
 CREATION_CHECKPOINT_SKIP = "skip"
+MEDIA_REVIEW_REQUIRED = "required"
+MEDIA_REVIEW_AUTO_APPROVE = "auto_approve"
 CREATOR_CONFIG_TOOLS = (
     CREATOR_TEXT_CONFIG_TOOL,
     CREATOR_IMAGE_CONFIG_TOOL,
@@ -299,6 +301,22 @@ def get_creation_checkpoint_mode() -> str:
     if value == CREATION_CHECKPOINT_SKIP:
         return CREATION_CHECKPOINT_SKIP
     return CREATION_CHECKPOINT_REQUIRED
+
+
+def get_media_review_mode() -> str:
+    """Return the persisted mode for generated-media reviews.
+
+    ``auto_approve`` is the last gate of the fully unattended (YOLO)
+    ladder: generated media is accepted straight into the Project without
+    a pending Review. Until VLM quality checks land, this trades quality
+    control for wall time, so the safe default stays ``required``.
+    """
+
+    section = _get_user_config().get("media_review")
+    value = section.get("mode") if isinstance(section, dict) else None
+    if value == MEDIA_REVIEW_AUTO_APPROVE:
+        return MEDIA_REVIEW_AUTO_APPROVE
+    return MEDIA_REVIEW_REQUIRED
 
 
 DEFAULT_MAINLINE_MAX_MODEL_TURNS = 24

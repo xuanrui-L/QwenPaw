@@ -83,7 +83,10 @@ from services.media_files.element_adapter import (
     find_timeline_element,
     selected_element_output,
 )
-from services.media_files.review_admission import assert_media_review_admission
+from services.media_files.review_admission import (
+    assert_media_review_admission,
+    media_review_policy,
+)
 from services.project_files.remote_cache import (
     public_source_url,
     resolve_remote_cache,
@@ -2624,14 +2627,20 @@ class FileLocalMediaExecutionService:
                     self._apply_result(candidate, result)
                     # Final composition is deterministic assembly (every input
                     # was reviewed individually), so it skips the review flow;
-                    # all other local media artifacts stay reviewed.
+                    # other local media artifacts follow the operator's media
+                    # review mode. An AUTO_FIX round cannot carry a boundary.
                     is_final_compose = (
                         result.get("commandType")
                         == CreatorCommandType.COMPOSE_FINAL_VIDEO.value
                     )
+                    review_policy = (
+                        ReviewPolicy.AUTO_FIX
+                        if is_final_compose
+                        else media_review_policy()
+                    )
                     review_boundary = (
                         None
-                        if is_final_compose
+                        if review_policy is not ReviewPolicy.REQUIRE_REVIEW
                         else self.services.commits.runtime_review_boundary(
                             task.project_id,
                             run_id=str(task.run_id),
@@ -2642,11 +2651,7 @@ class FileLocalMediaExecutionService:
                         base=current,
                         candidate=candidate,
                         origin=ChangeOrigin.RUNTIME_TASK,
-                        review_policy=(
-                            ReviewPolicy.AUTO_FIX
-                            if is_final_compose
-                            else ReviewPolicy.REQUIRE_REVIEW
-                        ),
+                        review_policy=review_policy,
                         review_boundary=review_boundary,
                         caused_by_request_id=latest.caused_by_request_id,
                         round_id=ids["round_id"],

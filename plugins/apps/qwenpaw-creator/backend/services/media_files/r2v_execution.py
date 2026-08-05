@@ -69,7 +69,10 @@ from services.media_files.element_adapter import (
     selected_element_output,
     target_element_id,
 )
-from services.media_files.review_admission import assert_media_review_admission
+from services.media_files.review_admission import (
+    assert_media_review_admission,
+    media_review_policy,
+)
 from services.media_files.visual_reference_resolution import (
     resolve_r2v_visual_reference_version_ids,
 )
@@ -3329,20 +3332,24 @@ class FileR2VExecutionService:
                         return "STALE", latest, current
                     candidate = current.project.model_dump(mode="json")
                     self._apply_result(candidate, result)
-                    # Generated video must always be reviewed before it is
-                    # treated as accepted: gate this commit behind a review.
+                    # Generated video is reviewed before acceptance unless
+                    # the operator opted into unattended auto-approval; an
+                    # AUTO_FIX round must not carry a ReviewBoundary.
+                    review_policy = media_review_policy()
                     review_boundary = (
                         self.services.commits.runtime_review_boundary(
                             task.project_id,
                             run_id=str(task.run_id),
                             request_id=latest.caused_by_request_id,
                         )
+                        if review_policy is ReviewPolicy.REQUIRE_REVIEW
+                        else None
                     )
                     commit = self.services.commits.commit(
                         base=current,
                         candidate=candidate,
                         origin=ChangeOrigin.RUNTIME_TASK,
-                        review_policy=ReviewPolicy.REQUIRE_REVIEW,
+                        review_policy=review_policy,
                         review_boundary=review_boundary,
                         caused_by_request_id=latest.caused_by_request_id,
                         round_id=stable["round_id"],

@@ -80,6 +80,7 @@ const config: ModelConfigData = {
   },
   executionAuthorization: { mode: "allow_all" },
   creationCheckpoints: { mode: "skip" },
+  mediaReview: { mode: "required" },
 };
 
 describe("ModelBadges", () => {

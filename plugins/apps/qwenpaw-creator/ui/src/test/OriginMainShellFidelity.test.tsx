@@ -82,6 +82,7 @@ const modelConfig = {
   },
   executionAuthorization: { mode: "allow_all" },
   creationCheckpoints: { mode: "skip" },
+  mediaReview: { mode: "auto_approve" },
 };
 
 describe("origin/main visible shell fidelity", () => {
@@ -263,6 +264,10 @@ describe("origin/main visible shell fidelity", () => {
         match: "/models/config/creation-checkpoints",
         response: { json: { ok: true } },
       },
+      {
+        match: "/models/config/media-review",
+        response: { json: { ok: true } },
+      },
     ]);
     const { container } = render(<ModelConfigModal open onClose={vi.fn()} />);
     await waitFor(() =>
@@ -277,12 +282,12 @@ describe("origin/main visible shell fidelity", () => {
       screen.getByRole("button", { name: /保存配置/ }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /取\s*消/ })).toBeInTheDocument();
-    // allow_all + skip maps to the highest automation stop.
+    // allow_all + skip + auto_approve maps to the top (YOLO) stop.
     const permissionSlider = screen.getByRole("slider", {
       name: "执行确认模式",
     });
-    expect(permissionSlider).toHaveValue("2");
-    expect(screen.getByText(/全部放行/)).toBeInTheDocument();
+    expect(permissionSlider).toHaveValue("3");
+    expect(screen.getByText(/完全无人值守/)).toBeInTheDocument();
     fireEvent.change(permissionSlider, { target: { value: "0" } });
     expect(permissionSlider).toHaveValue("0");
     expect(screen.getByText(/逐次授权/)).toBeInTheDocument();

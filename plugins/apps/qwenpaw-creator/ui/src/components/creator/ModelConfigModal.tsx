@@ -27,6 +27,7 @@ import {
   saveModelConfig,
   patchExecutionAuthorization,
   patchCreationCheckpoints,
+  patchMediaReview,
   testModelConnection,
   getHostProviders,
   getHostProviderApiKey,
@@ -246,38 +247,53 @@ const DEFAULT_CONFIG: ModelConfigData = {
   },
   executionAuthorization: { mode: "required" },
   creationCheckpoints: { mode: "required" },
+  mediaReview: { mode: "required" },
 };
 
-// One-dimensional automation ladder projected onto the two persisted
+// One-dimensional automation ladder projected onto the three persisted
 // permission fields. Index equals the slider position.
 const PERMISSION_MODES: {
   label: string;
   description: string;
   checkpoints: "required" | "skip";
   execution: "required" | "allow_all";
+  mediaReview: "required" | "auto_approve";
 }[] = [
   {
     label: "全程确认",
     description: "创作检查点逐站确认，高花费模型执行逐次授权。",
     checkpoints: "required",
     execution: "required",
+    mediaReview: "required",
   },
   {
     label: "仅高花费确认",
     description: "跳过创作检查点，仅在高花费模型执行前确认。",
     checkpoints: "skip",
     execution: "required",
+    mediaReview: "required",
   },
   {
-    label: "全自动",
-    description: "全部放行：分镜审阅通过后自动继续视频生成，不再逐次询问。",
+    label: "自动生成",
+    description: "生成不再逐次询问；产物仍需人工审阅，分镜过审后自动继续视频。",
     checkpoints: "skip",
     execution: "allow_all",
+    mediaReview: "required",
+  },
+  {
+    label: "YOLO",
+    description:
+      "完全无人值守：审阅也自动通过，产物直接入库——质量不设防，注意成本。",
+    checkpoints: "skip",
+    execution: "allow_all",
+    mediaReview: "auto_approve",
   },
 ];
 
 function permissionModeIndex(config: ModelConfigData): number {
-  if (config.executionAuthorization.mode === "allow_all") return 2;
+  if (config.executionAuthorization.mode === "allow_all") {
+    return config.mediaReview.mode === "auto_approve" ? 3 : 2;
+  }
   if (config.creationCheckpoints.mode === "skip") return 1;
   return 0;
 }
@@ -473,6 +489,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         creationCheckpoints: {
           ...DEFAULT_CONFIG.creationCheckpoints,
           ...data.creationCheckpoints,
+        },
+        mediaReview: {
+          ...DEFAULT_CONFIG.mediaReview,
+          ...data.mediaReview,
         },
       };
       if (!VLM_PROTOCOLS.includes(merged.vlm.protocol))
@@ -1918,7 +1938,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             <input
               type="range"
               min={0}
-              max={2}
+              max={3}
               step={1}
               aria-label="执行确认模式"
               value={permissionModeIndex(config)}
@@ -1931,10 +1951,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   ...previous,
                   executionAuthorization: { mode: target.execution },
                   creationCheckpoints: { mode: target.checkpoints },
+                  mediaReview: { mode: target.mediaReview },
                 }));
                 try {
                   await patchExecutionAuthorization(target.execution);
                   await patchCreationCheckpoints(target.checkpoints);
+                  await patchMediaReview(target.mediaReview);
                 } catch (err) {
                   setConfig(previousConfig);
                   message.error((err as Error).message || "授权模式保存失败");

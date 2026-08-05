@@ -81,6 +81,7 @@ const configuredModelConfig: ModelConfigData = {
   },
   executionAuthorization: { mode: "allow_all" },
   creationCheckpoints: { mode: "skip" },
+  mediaReview: { mode: "required" },
 };
 
 function installComposerMockFetch(

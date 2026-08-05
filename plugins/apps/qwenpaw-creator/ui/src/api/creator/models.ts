@@ -113,6 +113,17 @@ export function patchCreationCheckpoints(
   });
 }
 
+export function patchMediaReview(
+  mode: "required" | "auto_approve",
+): Promise<{ ok: boolean }> {
+  const id = newClientId("media-review");
+  return creatorRequest("/models/config/media-review", {
+    method: "PATCH",
+    headers: { "Idempotency-Key": id },
+    body: jsonBody({ mode }),
+  });
+}
+
 export function getRealApiKey(section: string): Promise<{ api_key: string }> {
   return creatorRequest(`/models/real-api-key/${section}`);
 }
