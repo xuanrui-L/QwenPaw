@@ -916,6 +916,7 @@
     "modelGuideVideoGen": "Video Generation",
     "modelGuideVideoGenProtocols": "DashScope (wan2.x r2v, happyhorse-1.x-r2v), Volcano Engine (doubao-seedance-2.x)",
     "modelGuideAsrTitle": "ASR Speech Recognition",
+    "modelGuideAsrProtocols": "DashScope Fun-ASR, DashScope Qwen3-ASR, OpenAI Whisper",
     "modelGuideWhatModels": "What models for what scenarios?",
     "modelGuideProviders": "Currently supported providers / protocols",
     "modelGuideSetupDesc": "Fill in Base URL, API Key and Model Name in 'Model Configuration', enable after passing 'Test Connection'; VLM can directly reuse multimodal-capable LLM configuration."

@@ -916,6 +916,7 @@
     "modelGuideVideoGen": "视频生成",
     "modelGuideVideoGenProtocols": "DashScope（百炼：wan2.x r2v、happyhorse-1.x-r2v）、Volcano Engine（火山引擎：doubao-seedance-2.x）",
     "modelGuideAsrTitle": "ASR 语音识别",
+    "modelGuideAsrProtocols": "DashScope Fun-ASR、DashScope Qwen3-ASR、OpenAI Whisper",
     "modelGuideWhatModels": "什么场景需要配什么模型？",
     "modelGuideProviders": "当前支持的提供商 / 协议",
     "modelGuideSetupDesc": "在「模型配置」中填写 Base URL、API Key 与模型名称，并通过「测试连通性」后启用；VLM 可直接复用支持多模态的 LLM 配置。"

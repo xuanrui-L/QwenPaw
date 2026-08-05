@@ -71,7 +71,7 @@ function getProviderGuides(t: (key: string) => string): ProviderGuide[] {
     {
       type: t("onboarding.modelGuideAsrTitle"),
       icon: <AudioOutlined style={{ fontSize: 12 }} />,
-      protocols: "DashScope Fun-ASR、DashScope Qwen3-ASR、OpenAI Whisper",
+      protocols: t("onboarding.modelGuideAsrProtocols"),
     },
   ];
 }
