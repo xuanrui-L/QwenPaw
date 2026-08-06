@@ -130,7 +130,7 @@ export default function ModelSetupGuide({
           {getScenarioGuides(t).map((item) => (
             <li
               key={item.scenario}
-              className="flex flex-wrap items-baseline gap-x-1.5 rounded-md bg-[var(--color-bg-secondary)] px-2 py-1"
+              className="flex flex-wrap items-baseline gap-x-1.5 rounded-[8px] bg-[var(--color-bg-layout)] px-2.5 py-1.5"
             >
               <span className="shrink-0 font-semibold text-[var(--color-text-primary)]">
                 {item.scenario}
@@ -162,7 +162,7 @@ export default function ModelSetupGuide({
           {getProviderGuides(t).map((item) => (
             <li
               key={item.type}
-              className="flex flex-wrap items-baseline gap-x-1.5 rounded-md bg-[var(--color-bg-secondary)] px-2 py-1"
+              className="flex flex-wrap items-baseline gap-x-1.5 rounded-[8px] bg-[var(--color-bg-layout)] px-2.5 py-1.5"
             >
               <span className="flex shrink-0 items-center gap-1 font-semibold text-[var(--color-text-primary)]">
                 {item.icon}
