@@ -1698,3 +1698,16 @@ def test_execute_runs_chunked_pipeline_with_segment_checkpoints(
         "macro_0003",
     ]
     assert not ckpt_root.exists()
+
+
+def test_ffmpeg_invocations_detach_stdin() -> None:
+    # A background-job host delivers SIGTTIN to any child reading the
+    # TTY: every ffmpeg subprocess must run with stdin detached or the
+    # whole build silently stops (observed live: clips stuck in "TN").
+    import inspect
+
+    source = inspect.getsource(source_memory)
+    runs = source.count("subprocess.run(")
+    detached = source.count("stdin=subprocess.DEVNULL")
+    assert runs == 3
+    assert detached == runs

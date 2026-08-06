@@ -571,6 +571,7 @@ def _seek_jpeg(
             capture_output=True,
             timeout=timeout,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return None
@@ -703,6 +704,7 @@ def _clip_segment_sync(
         capture_output=True,
         timeout=1800,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0 or not out_path.exists():
         raise RuntimeError(
@@ -797,6 +799,7 @@ def _clip_segment_hq_sync(
         capture_output=True,
         timeout=1800,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     if proc.returncode != 0 or not out_path.exists():
         raise RuntimeError(
