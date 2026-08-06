@@ -1894,7 +1894,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     const searchLabel = groundingSearchLabel(config);
 
     return (
-      <div key={type} className="glass-card">
+      <div
+        key={type}
+        className="glass-card"
+        style={{ boxShadow: "var(--shadow-xs)" }}
+      >
         <div
           onClick={() => toggleExpand("grounding")}
           style={{
@@ -1907,8 +1911,21 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             borderBottom: isExpanded ? "1px solid var(--color-border)" : "none",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {icon}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 10,
+                background: "var(--color-bg-secondary)",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              {icon}
+            </span>
             <span style={{ fontSize: 14, fontWeight: 600 }}>{t(labelKey)}</span>
             <span
               style={{
@@ -2584,7 +2601,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     );
 
     return (
-      <div key={type} className="glass-card">
+      <div
+        key={type}
+        className="glass-card"
+        style={{ boxShadow: "var(--shadow-xs)" }}
+      >
         <div
           onClick={() => toggleExpand(type)}
           style={{
@@ -2601,11 +2622,24 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             style={{
               display: "flex",
               alignItems: "flex-start",
-              gap: 10,
+              gap: 12,
               minWidth: 0,
             }}
           >
-            {icon}
+            <span
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 10,
+                background: "var(--color-bg-secondary)",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              {icon}
+            </span>
             <div
               style={{
                 display: "flex",
@@ -3045,10 +3079,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           style={{
             flex: 1,
             overflowY: "auto",
-            padding: "16px 22px 24px",
+            padding: "20px 24px 28px",
             display: "flex",
             flexDirection: "column",
-            gap: 12,
+            gap: 14,
+            background: "var(--color-bg-layout)",
           }}
         >
           {(activePane === "lang" ||
@@ -3061,8 +3096,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   <div>
                     <div
                       style={{
-                        fontSize: 14,
-                        fontWeight: 600,
+                        fontSize: 15,
+                        fontWeight: 700,
                         color: "var(--color-text-primary)",
                       }}
                     >
@@ -3085,9 +3120,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       flexWrap: "wrap",
                       alignItems: "baseline",
                       gap: 6,
-                      borderRadius: 6,
-                      background: "var(--color-bg-secondary)",
-                      padding: "4px 8px",
+                      borderRadius: 8,
+                      background: "var(--color-bg-primary)",
+                      border: "1px solid var(--color-border)",
+                      padding: "5px 10px",
                       fontSize: 11,
                       color: "var(--color-text-tertiary)",
                       alignSelf: "flex-start",
@@ -3111,7 +3147,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     return meta ? renderCard(meta) : null;
                   })}
                   {activePane === "media" && (
-                    <div className="glass-card">
+                    <div
+                      className="glass-card"
+                      style={{ boxShadow: "var(--shadow-xs)" }}
+                    >
                       <div
                         onClick={() => toggleExpand("translate")}
                         style={{
@@ -3130,16 +3169,29 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                           style={{
                             display: "flex",
                             alignItems: "flex-start",
-                            gap: 10,
+                            gap: 12,
                             minWidth: 0,
                           }}
                         >
-                          <TranslationOutlined
+                          <span
                             style={{
-                              color: "var(--color-text-tertiary)",
-                              fontSize: 16,
+                              width: 34,
+                              height: 34,
+                              borderRadius: 10,
+                              background: "var(--color-bg-secondary)",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              flexShrink: 0,
                             }}
-                          />
+                          >
+                            <TranslationOutlined
+                              style={{
+                                color: "var(--color-text-tertiary)",
+                                fontSize: 16,
+                              }}
+                            />
+                          </span>
                           <div
                             style={{
                               display: "flex",
@@ -3261,8 +3313,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               <div>
                 <div
                   style={{
-                    fontSize: 14,
-                    fontWeight: 600,
+                    fontSize: 15,
+                    fontWeight: 700,
                     color: "var(--color-text-primary)",
                   }}
                 >
@@ -3321,8 +3373,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         borderRadius: 14,
                         background: "var(--color-bg-primary)",
                         boxShadow: selected
-                          ? "0 2px 10px rgba(255, 127, 22, 0.08)"
-                          : "none",
+                          ? "0 2px 10px rgba(255, 127, 22, 0.12)"
+                          : "var(--shadow-xs)",
                         padding: "13px 16px",
                         cursor: "pointer",
                         transition: "all 0.15s",
@@ -3506,8 +3558,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   <div>
                     <div
                       style={{
-                        fontSize: 14,
-                        fontWeight: 600,
+                        fontSize: 15,
+                        fontWeight: 700,
                         color: "var(--color-text-primary)",
                       }}
                     >
@@ -3536,7 +3588,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       background:
                         yolo && !anyReviewTier
                           ? "var(--color-warning-soft)"
-                          : "var(--color-bg-secondary)",
+                          : "var(--color-bg-primary)",
                       border: `1px solid ${
                         yolo && !anyReviewTier
                           ? "rgba(247, 144, 9, 0.3)"
@@ -3575,7 +3627,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     <div
                       key={tier.key}
                       className="glass-card"
-                      style={{ padding: "14px 16px" }}
+                      style={{
+                        padding: "14px 16px",
+                        boxShadow: "var(--shadow-xs)",
+                      }}
                       data-review-tier={tier.key}
                     >
                       <div
@@ -3714,8 +3769,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               <div>
                 <div
                   style={{
-                    fontSize: 14,
-                    fontWeight: 600,
+                    fontSize: 15,
+                    fontWeight: 700,
                     color: "var(--color-text-primary)",
                   }}
                 >
@@ -3732,7 +3787,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   {t("modelConfig.paneGuideDesc")}
                 </div>
               </div>
-              <ModelSetupGuide />
+              <div
+                className="glass-card"
+                style={{
+                  padding: "16px 18px",
+                  boxShadow: "var(--shadow-xs)",
+                }}
+              >
+                <ModelSetupGuide />
+              </div>
             </>
           )}
         </div>
