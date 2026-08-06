@@ -46,7 +46,12 @@ def _entity(entity_id: str, variants: dict[str, str | None]) -> VisualEntity:
     )
 
 
-def _services(tmp_path, monkeypatch, *, ready_variants: int) -> CreatorFileServices:
+def _services(
+    tmp_path,
+    monkeypatch,
+    *,
+    ready_variants: int,
+) -> CreatorFileServices:
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
     services = CreatorFileServices.create(tmp_path.resolve())
     project = Project.new(project_id=PROJECT_ID, name="Scheduler")
@@ -60,16 +65,22 @@ def _services(tmp_path, monkeypatch, *, ready_variants: int) -> CreatorFileServi
 
 
 class _RecordingDispatch:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        error: str = "provider down",
+    ) -> None:
         self.calls: list[dict] = []
         self._fail = fail
+        self._error = error
         self.started = asyncio.Event()
 
     async def __call__(self, services, **kwargs):
         self.calls.append(kwargs)
         self.started.set()
         if self._fail:
-            raise RuntimeError("provider down")
+            raise RuntimeError(self._error)
         return {"ok": True}
 
 
@@ -104,12 +115,8 @@ def test_tick_dispatches_up_to_media_parallelism(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
     assert len(dispatch.calls) == 3
-    assert all(
-        call["command"] == "GENERATE_ASSET" for call in dispatch.calls
-    )
-    variant_ids = {
-        call["arguments"]["variantId"] for call in dispatch.calls
-    }
+    assert all(call["command"] == "GENERATE_ASSET" for call in dispatch.calls)
+    variant_ids = {call["arguments"]["variantId"] for call in dispatch.calls}
     assert len(variant_ids) == 3  # three distinct nodes, no duplicates
 
 
@@ -178,7 +185,7 @@ def test_scheduler_is_inert_outside_allow_all(tmp_path, monkeypatch):
     graph = asyncio.run(scenario())
 
     assert graph is None
-    assert dispatch.calls == []
+    assert not dispatch.calls
 
 
 def test_idempotency_key_is_node_and_fingerprint_stable(
@@ -198,3 +205,46 @@ def test_idempotency_key_is_node_and_fingerprint_stable(
 
     key = dispatch.calls[0]["idempotency_key"]
     assert key.startswith("dag-visual:char:a:var:0-")
+
+
+def test_transient_dispatch_failures_reopen_the_ledger_bounded(
+    tmp_path,
+    monkeypatch,
+):
+    """Field run 2026-08-06: five storyboards died of provider timeouts
+    and the ledger locked them as if deterministic. Transient faults
+    reopen the ledger up to the retry limit; the idempotency slot makes
+    the retry resume the same task."""
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    dispatch = _RecordingDispatch(
+        fail=True,
+        error="Image generation timed out after 240s",
+    )
+    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
+
+    async def scenario():
+        for _ in range(4):  # initial + 2 transient retries + 1 extra tick
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+
+    asyncio.run(scenario())
+
+    # 1 initial dispatch + 2 bounded transient retries, then locked.
+    assert len(dispatch.calls) == 3
+
+
+def test_deterministic_failures_stay_locked(tmp_path, monkeypatch):
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    dispatch = _RecordingDispatch(fail=True, error="safety system rejected")
+    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
+
+    async def scenario():
+        for _ in range(3):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+
+    asyncio.run(scenario())
+
+    assert len(dispatch.calls) == 1

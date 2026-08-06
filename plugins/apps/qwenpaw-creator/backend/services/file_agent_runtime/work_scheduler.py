@@ -49,6 +49,27 @@ logger = setup_logger("creator.work_scheduler")
 # Loop exits after this long without a wake; any later wake restarts it.
 _IDLE_EXIT_SECONDS = 300.0
 
+# Transient dispatch failures (provider timeouts, 5xx, rate limits) may
+# reopen the ledger this many times per (node, fingerprint); deterministic
+# failures (safety rejections, validation) stay locked until inputs change.
+_TRANSIENT_RETRY_LIMIT = 2
+
+_TRANSIENT_ERROR_MARKERS = (
+    "timed out",
+    "timeout",
+    "rate limit",
+    "429",
+    "status 5",
+    "connection",
+    "temporarily",
+)
+
+
+def _is_transient_dispatch_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_ERROR_MARKERS)
+
+
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
 
 DispatchHook = Callable[[str, WorkGraph], Awaitable[None]]
@@ -74,6 +95,7 @@ class WorkGraphScheduler:
         self._loops: dict[str, asyncio.Task[None]] = {}
         # (project_id, node_id, fingerprint) -> already dispatched once.
         self._dispatched: set[tuple[str, str, str]] = set()
+        self._transient_retries: dict[tuple[str, str, str], int] = {}
         self._inflight: dict[str, set[str]] = {}
 
     # -- lifecycle -----------------------------------------------------
@@ -174,7 +196,7 @@ class WorkGraphScheduler:
             1 for node in graph.nodes if node.status.value == "running"
         )
         capacity = get_media_parallelism() - running - len(inflight)
-        for node in graph.ready_media_nodes():
+        for node in self._dispatch_candidates(project_id, graph):
             if capacity <= 0:
                 break
             fingerprint = node.dispatch_fingerprint or node.node_id
@@ -191,6 +213,43 @@ class WorkGraphScheduler:
             await self._on_tick(project_id, graph)
         return graph
 
+    def _dispatch_candidates(
+        self,
+        project_id: str,
+        graph: WorkGraph,
+    ) -> list[WorkNode]:
+        """READY media nodes plus transiently-failed ones within budget.
+
+        A node whose last task died of a provider timeout / 5xx / rate
+        limit is FAILED on the graph but not deterministically so — the
+        durable idempotency slot resumes the same task, so a bounded
+        retry costs nothing extra. Deterministic failures (safety,
+        validation) never re-enter.
+        """
+
+        candidates = list(graph.ready_media_nodes())
+        for node in graph.nodes:
+            if (
+                node.status.value != "failed"
+                or node.command is None
+                or not node.error
+            ):
+                continue
+            if not _is_transient_dispatch_error(RuntimeError(node.error)):
+                continue
+            fingerprint = node.dispatch_fingerprint or node.node_id
+            ledger_key = (project_id, node.node_id, fingerprint)
+            if self._transient_retries.get(ledger_key, 0) >= (
+                _TRANSIENT_RETRY_LIMIT
+            ):
+                continue
+            self._transient_retries[ledger_key] = (
+                self._transient_retries.get(ledger_key, 0) + 1
+            )
+            self._dispatched.discard(ledger_key)
+            candidates.append(node)
+        return candidates
+
     async def _dispatch(
         self,
         project_id: str,
@@ -206,15 +265,41 @@ class WorkGraphScheduler:
         try:
             await self.dispatch_node(project_id, node, fingerprint)
         except Exception as exc:  # pylint: disable=broad-except
-            # The task record carries the durable failure; the graph will
-            # surface it as FAILED and the ledger prevents a paid retry
-            # until the node's inputs change.
-            logger.warning(
-                "work-graph dispatch failed project=%s node=%s: %s",
-                project_id,
-                node.node_id,
-                exc,
-            )
+            ledger_key = (project_id, node.node_id, fingerprint)
+            if (
+                _is_transient_dispatch_error(exc)
+                and self._transient_retries.get(ledger_key, 0)
+                < _TRANSIENT_RETRY_LIMIT
+            ):
+                # Field run 2026-08-06: the first live fan-out lost five
+                # storyboards to provider timeouts and the ledger locked
+                # them as if the failure were deterministic. Transient
+                # faults reopen the ledger (bounded) so the next tick
+                # retries; the durable idempotency slot resumes the same
+                # task instead of paying twice.
+                self._transient_retries[ledger_key] = (
+                    self._transient_retries.get(ledger_key, 0) + 1
+                )
+                self._dispatched.discard(ledger_key)
+                logger.warning(
+                    "work-graph dispatch transient failure project=%s "
+                    "node=%s (retry %d/%d): %s",
+                    project_id,
+                    node.node_id,
+                    self._transient_retries[ledger_key],
+                    _TRANSIENT_RETRY_LIMIT,
+                    exc,
+                )
+            else:
+                # The task record carries the durable failure; the graph
+                # will surface it as FAILED and the ledger prevents a paid
+                # retry until the node's inputs change.
+                logger.warning(
+                    "work-graph dispatch failed project=%s node=%s: %s",
+                    project_id,
+                    node.node_id,
+                    exc,
+                )
         finally:
             self._inflight.get(project_id, set()).discard(node.node_id)
             self.wake(project_id)
