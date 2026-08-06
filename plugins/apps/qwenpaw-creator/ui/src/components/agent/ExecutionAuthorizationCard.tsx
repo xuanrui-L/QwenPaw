@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { message } from "antd";
-import { Coins, Eye, PlayCircle } from "lucide-react";
+import { Eye, PlayCircle } from "lucide-react";
 import type {
   ExecutionAuthorizationApproval,
   ExecutionAuthorizationView,
@@ -17,18 +17,6 @@ const BUTTON_BASE =
 const BUTTON_PRIMARY = `${BUTTON_BASE} bg-[var(--color-accent)] text-white hover:opacity-90`;
 const BUTTON_GHOST = `${BUTTON_BASE} border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]`;
 
-export interface AuthorizationBilling {
-  estimatedCost?: number | null;
-  currency?: string;
-  displayText?: string;
-  unitPrice?: string;
-  formula?: string;
-  pricingModel?: string;
-  pricingSource?: string;
-  approximate?: boolean;
-  notes?: string[];
-}
-
 export function authorizationApprovalPayload(
   authorization: ExecutionAuthorizationView,
 ): ExecutionAuthorizationApproval {
@@ -36,17 +24,11 @@ export function authorizationApprovalPayload(
     authorizationToken: authorization.authorizationToken,
     provider: authorization.provider,
     model: authorization.model,
-    maxCost: authorization.estimatedCost ?? 0,
+    // Local price estimation was removed (stale price tables mislead);
+    // the backend treats 0 as "no client-side cost bound".
+    maxCost: 0,
     maxCandidates: authorization.maxCandidates,
   };
-}
-
-export function authorizationBilling(
-  authorization: ExecutionAuthorizationView,
-): AuthorizationBilling | null {
-  const billing = authorization.scope.billing;
-  if (!billing || typeof billing !== "object") return null;
-  return billing as AuthorizationBilling;
 }
 
 function authorizationOperation(
@@ -103,15 +85,10 @@ export function authorizationDetail(
   const messageText = authorization.scope.message;
   if (typeof messageText === "string" && messageText.trim())
     return humanizeRefTokens(messageText, project);
-  const detail = `${authorizationOperation(
-    authorization,
-  )} · ${creatorTargetLabel(authorization.targetRef, project)} · ${
-    authorization.provider
-  }/${authorization.model}`;
-  const billing = authorizationBilling(authorization);
-  return billing?.displayText
-    ? `${detail} · 预计费用 ${billing.displayText}`
-    : detail;
+  return `${authorizationOperation(authorization)} · ${creatorTargetLabel(
+    authorization.targetRef,
+    project,
+  )} · ${authorization.provider}/${authorization.model}`;
 }
 
 /**
@@ -178,7 +155,6 @@ export default function ExecutionAuthorizationCard({
   const [busy, setBusy] = useState(false);
   if (authorization.status !== "PENDING") return null;
 
-  const billing = authorizationBilling(authorization);
   const parameterSummary = authorizationParameterSummary(authorization);
   const jumpTarget = authorizationJumpTarget(authorization, project);
 
@@ -224,7 +200,7 @@ export default function ExecutionAuthorizationCard({
     >
       <OnboardingHint hintKey="executionAuthorization" className="mb-2">
         首次说明：Agent
-        即将调用付费生成模型，下方已给出预估费用。点击「继续」才会真正执行，「取消」则终止本次制作；可在模型配置中关闭此确认。
+        即将调用付费生成模型。点击「继续」才会真正执行，「取消」则终止本次制作；可在模型配置中关闭此确认。
       </OnboardingHint>
       <div className="flex items-start gap-2.5">
         <div className="min-w-0 flex-1">
@@ -277,34 +253,9 @@ export default function ExecutionAuthorizationCard({
               </div>
             )}
           </dl>
-          {billing ? (
-            <div className="mt-1.5 rounded-md border border-[var(--color-warning)]/30 bg-[var(--color-bg-primary)]/60 px-2 py-1.5">
-              <p className="flex items-center gap-1 text-[11px] font-semibold leading-4 text-[var(--color-warning)]">
-                <Coins className="h-3 w-3" />
-                预计费用 {billing.displayText ?? "费用未知"}
-              </p>
-              {billing.formula && (
-                <p className="mt-0.5 text-[10px] leading-4 text-[var(--color-text-secondary)]">
-                  计算：{billing.formula}
-                  {billing.pricingModel
-                    ? `（按 ${billing.pricingModel} 计价）`
-                    : ""}
-                </p>
-              )}
-              {(billing.notes ?? []).map((note) => (
-                <p
-                  key={note}
-                  className="text-[10px] leading-4 text-[var(--color-text-tertiary)]"
-                >
-                  {note}
-                </p>
-              ))}
-            </div>
-          ) : (
-            <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
-              {authorizationDetail(authorization, project)}
-            </p>
-          )}
+          <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[var(--color-text-tertiary)]">
+            {authorizationDetail(authorization, project)}
+          </p>
         </div>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">

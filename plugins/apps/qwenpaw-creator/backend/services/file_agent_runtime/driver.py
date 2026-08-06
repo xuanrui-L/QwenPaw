@@ -95,10 +95,6 @@ from services.runtime_files.execution_store import (
 )
 from services.runtime_files.errors import RecordNotFoundError
 from services.runtime_files.atomic_store import atomic_replace_bytes
-from services.execution_pricing import (
-    CostEstimate,
-    estimate_execution_cost,
-)
 from services.observability import trace_event, traced_async
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
@@ -4022,12 +4018,6 @@ class FileCreatorAgentRuntime:
         target_ref = str(arguments.get("targetRef") or "project:unknown")
         provider, model = _execution_provider_model(spec)
         tool_arguments = dict(arguments.get("arguments") or {})
-        estimate = estimate_execution_cost(
-            provider_kind=spec.provider_kind,
-            provider=provider,
-            model=model,
-            arguments=tool_arguments,
-        )
         record = ExecutionAuthorizationRecord(
             authorization_id=authorization_id,
             project_id=project_id,
@@ -4043,19 +4033,16 @@ class FileCreatorAgentRuntime:
                 provider=provider,
                 model=model,
                 tool_arguments=tool_arguments,
-                estimate=estimate,
             ),
             scope={
                 "operation": spec.name,
                 "targetRefs": [target_ref],
                 "parameters": tool_arguments,
                 "promptPreview": _prompt_preview(tool_arguments, limit=200),
-                "billing": estimate.as_payload() if estimate else None,
             },
             requested_provider=provider,
             requested_model=model,
             requested_candidates=1,
-            estimated_cost=estimate.estimated_cost if estimate else None,
             caused_by_request_id=tools.context.caused_by_request_id,
             caused_by_message_id=request.message_id,
             caused_by_message_seq=request.message_seq,
@@ -4082,8 +4069,6 @@ class FileCreatorAgentRuntime:
                 "provider": provider,
                 "model": model,
                 "summary": authorization.summary,
-                "estimatedCost": authorization.estimated_cost,
-                "billing": estimate.as_payload() if estimate else None,
                 "toolCallId": call_id,
             },
         )
@@ -5722,9 +5707,13 @@ def _authorization_summary(
     provider: str,
     model: str,
     tool_arguments: Mapping[str, Any],
-    estimate: CostEstimate | None,
 ) -> str:
-    """One human-readable line telling the user exactly what will run."""
+    """One human-readable line telling the user exactly what will run.
+
+    Deliberately no price estimate: locally transcribed price tables go
+    stale silently and an authoritative-looking wrong number misleads
+    worse than no number. Call counts are the honest metric.
+    """
 
     label = _AUTHORIZATION_OPERATION_LABELS.get(spec.name, f"执行 {spec.name}")
     parts = [f"{label}：{target_ref}", f"模型 {provider}/{model}"]
@@ -5745,8 +5734,6 @@ def _authorization_summary(
             parts.append(
                 "有声" if tool_arguments.get("generateAudio") else "无声",
             )
-    if estimate is not None:
-        parts.append(f"预计费用 {estimate.display_text}（{estimate.formula}）")
     return " · ".join(parts)
 
 
