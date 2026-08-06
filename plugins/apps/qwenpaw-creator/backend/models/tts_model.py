@@ -31,6 +31,7 @@ from urllib.parse import urlparse
 import httpx
 
 from models import config
+from utils.exceptions import ModelError
 from models.media_transport import upload_local_file_to_dashscope_temp
 from models.tts_capabilities import TtsModelCapability, require_capability
 from utils.logger import setup_logger
@@ -142,12 +143,13 @@ async def _post_json(
                 # Surface the provider's own explanation: "400 Bad Request"
                 # alone tells neither the agent nor the user what to fix.
                 detail = response.text[:400]
-                raise RuntimeError(
+                raise ModelError(
                     f"TTS request failed (HTTP {response.status_code}): "
                     f"{detail}",
+                    retryable=response.status_code >= 500,
                 )
             return response.json()
-    raise RuntimeError("TTS request retries exhausted")
+    raise ModelError("TTS request retries exhausted")
 
 
 def _download_audio(url: str) -> tuple[bytes, str]:
@@ -156,7 +158,7 @@ def _download_audio(url: str) -> tuple[bytes, str]:
         download_remote_file(url, str(target))
         content = target.read_bytes()
     if not content:
-        raise RuntimeError("TTS returned an empty audio payload")
+        raise ModelError("TTS returned an empty audio payload")
     media_type = mimetypes.guess_type(urlparse(url).path)[0] or "audio/wav"
     if not media_type.startswith("audio/"):
         media_type = "audio/wav"
@@ -222,7 +224,10 @@ def _synthesize_over_websocket(
     audio = b"".join(chunks)
     if not audio:
         detail = failure[0] if failure else "no audio was streamed"
-        raise RuntimeError(f"TTS websocket synthesis failed: {detail}")
+        raise ModelError(
+            f"TTS websocket synthesis failed: {detail}",
+            model_name=model,
+        )
     return audio, "audio/mpeg"
 
 
@@ -247,6 +252,11 @@ async def synthesize(
     key = _require_key()
     capability = _active_capability()
     if voice_id:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{3,199}", voice_id):
+            raise ValueError(
+                f"voice_id looks malformed: {voice_id!r}; pass the id "
+                "returned by voice creation",
+            )
         model = (voice_model or "").strip() or capability.clone_model()
         active_voice = voice_id
     else:
@@ -318,7 +328,7 @@ async def synthesize(
     audio = output.get("audio") or {}
     audio_url = str(audio.get("url") or "")
     if not audio_url:
-        raise RuntimeError(f"TTS response has no audio url: {output}")
+        raise ModelError(f"TTS response has no audio url: {output}")
     content, media_type = await asyncio.to_thread(_download_audio, audio_url)
     usage = data.get("usage") or {}
     return TTSSynthesis(
@@ -502,7 +512,7 @@ def _require_voice_id(data: Mapping[str, Any]) -> str:
     output = data.get("output") or {}
     value = str(output.get("voice_id") or output.get("voice") or "")
     if not value:
-        raise RuntimeError(f"voice creation returned no voice id: {output}")
+        raise ModelError(f"voice creation returned no voice id: {output}")
     return value
 
 

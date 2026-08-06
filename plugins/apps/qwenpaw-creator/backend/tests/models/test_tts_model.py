@@ -275,3 +275,28 @@ def test_created_voice_uses_its_own_models_transport(monkeypatch) -> None:
     )
     assert captured["model"] == "cosyvoice-v3.5-plus"
     assert result.media_type == "audio/mpeg"
+
+
+def test_malformed_voice_id_fails_fast(monkeypatch) -> None:
+    """An empty or garbage voice_id must not burn a provider round-trip."""
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    for bad in ("   ", "全角音色名", "-starts-with-dash", "a b c"):
+        with pytest.raises(ValueError, match="voice_id"):
+            asyncio.run(tts_model.synthesize("你好世界", voice_id=bad))
+
+
+def test_provider_failures_raise_model_error(monkeypatch) -> None:
+    """Provider-facing failures carry ModelError retry semantics: a 4xx is
+    permanent, so pollers fail fast instead of waiting out the budget."""
+
+    from utils.exceptions import ModelError
+
+    async def fail_post(url, *, api_key, payload, timeout_seconds):
+        raise ModelError("TTS request failed (HTTP 400): bad", retryable=False)
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setattr(tts_model, "_post_json", fail_post)
+    with pytest.raises(ModelError) as caught:
+        asyncio.run(tts_model.synthesize("你好世界", voice="Serena"))
+    assert caught.value.retryable is False

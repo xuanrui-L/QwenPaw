@@ -982,7 +982,12 @@ def _billing_driver(project, project_root, *, fail: bool = False):
     class _Projects:
         def read(self, project_id):
             if fail:
-                raise RuntimeError("project temporarily unreadable")
+                # A store-level failure (CreatorError family): the billing
+                # helper treats it as "duration unknown" and blocks the
+                # payable authorization; programming errors now propagate.
+                from domain.errors import NotFoundError
+
+                raise NotFoundError("project temporarily unreadable")
 
             class _Snapshot:
                 pass

@@ -4104,7 +4104,11 @@ class FileCreatorAgentRuntime:
                 self.services.projects.project_root(project_id),
                 video_ref,
             )
-        except Exception as error:  # noqa: BLE001 - reported as unknown below
+        # Expected resolution failures (missing version, unreadable
+        # metadata) fall back to "unknown duration", which surfaces as a
+        # readable ValidationError below. Programming errors must propagate
+        # instead of masquerading as a bad user request.
+        except (CreatorError, ValueError, OSError) as error:
             logger.warning(
                 "could not resolve the video_edit input duration | "
                 "project=%s ref=%s: %s",
