@@ -132,6 +132,7 @@ def test_same_inputs_are_never_redispatched(tmp_path, monkeypatch):
         # Second tick: the node is FAILED-by-ledger; inputs unchanged.
         await scheduler.tick(PROJECT_ID)
         await _drain()
+        await scheduler.shutdown()
 
     asyncio.run(scenario())
 
@@ -161,6 +162,9 @@ def test_changed_prompt_reopens_dispatch(tmp_path, monkeypatch):
         )
         await scheduler.tick(PROJECT_ID)
         await _drain()
+        # Failed dispatches wake a background project loop; stop it so
+        # asyncio.run teardown never races a pending 300s idle wait.
+        await scheduler.shutdown()
 
     asyncio.run(scenario())
 
@@ -227,6 +231,7 @@ def test_transient_dispatch_failures_reopen_the_ledger_bounded(
         for _ in range(4):  # initial + 2 transient retries + 1 extra tick
             await scheduler.tick(PROJECT_ID)
             await _drain()
+        await scheduler.shutdown()
 
     asyncio.run(scenario())
 
@@ -244,6 +249,7 @@ def test_deterministic_failures_stay_locked(tmp_path, monkeypatch):
         for _ in range(3):
             await scheduler.tick(PROJECT_ID)
             await _drain()
+        await scheduler.shutdown()
 
     asyncio.run(scenario())
 

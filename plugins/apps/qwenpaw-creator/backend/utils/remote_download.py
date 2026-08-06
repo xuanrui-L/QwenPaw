@@ -96,20 +96,24 @@ def download_remote_file(url: str, local_path: str) -> None:
                 str(error)[:200],
             )
             try:
-                size_bytes, _media_type, _final_url = (
-                    safe_curl_download_to_file(
-                        url,
-                        temporary,
-                        max_bytes=MAX_BYTES,
-                        timeout_seconds=TIMEOUT_SECONDS,
-                        connect_timeout_seconds=CONNECT_TIMEOUT_SECONDS,
-                    )
+                (
+                    size_bytes,
+                    _media_type,
+                    _final_url,
+                ) = safe_curl_download_to_file(
+                    url,
+                    temporary,
+                    max_bytes=MAX_BYTES,
+                    timeout_seconds=TIMEOUT_SECONDS,
+                    connect_timeout_seconds=CONNECT_TIMEOUT_SECONDS,
                 )
             except SafeRemoteDownloadError as curl_error:
+                # curl_error.__context__ keeps the original httpx failure;
+                # the message carries both for log-only consumers.
                 raise RuntimeError(
                     "Remote file download failed: "
-                    f"{str(error)[:200]}; curl fallback: "
-                    f"{str(curl_error)[:200]}",
+                    f"{type(error).__name__}: {str(error)[:200]}; "
+                    f"curl fallback: {str(curl_error)[:200]}",
                 ) from curl_error
         except SafeRemoteDownloadError as error:
             hint = ""

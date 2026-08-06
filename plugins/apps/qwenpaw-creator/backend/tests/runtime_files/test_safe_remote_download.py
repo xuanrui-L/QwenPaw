@@ -264,7 +264,7 @@ def test_curl_download_maps_failures_and_removes_partial_file(
 ) -> None:
     destination = tmp_path / "file.bin"
 
-    def failing_runner(command, **_kwargs):
+    def failing_runner(_command, **_kwargs):
         destination.write_bytes(b"partial")
         return SimpleNamespace(
             returncode=7,

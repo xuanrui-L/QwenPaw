@@ -275,7 +275,7 @@ def _resolved_public_endpoint(
             raise SafeRemoteDownloadError("远程 URL 主机无法解析") from error
         addresses = [str(record[4][0]) for record in records if record[4]]
         if not addresses:
-            raise SafeRemoteDownloadError("远程 URL 主机无法解析")
+            raise SafeRemoteDownloadError("远程 URL 主机无法解析") from None
         for address in addresses:
             require_public_ip(address)
         return host, port, addresses[0]
@@ -298,9 +298,11 @@ def safe_curl_download_to_file(
 
     Network fallback for stacks where httpx cannot establish the route
     (observed with DashScope OSS result URLs) while the system curl can.
-    Redirects are followed in Python so every hop re-runs URL validation,
-    and the connection is pinned to a pre-validated resolved IP through
-    ``--resolve``, keeping DNS-rebinding out of the curl hop.
+    Redirects are followed in Python so every hop re-runs URL validation.
+    For hostname URLs the connection is pinned to a pre-validated resolved
+    IP through ``--resolve``, keeping DNS rebinding out of the curl hop;
+    IP-literal URLs are already validated by ``require_public_ip`` and
+    curl connects to that literal directly.
 
     Returns ``(size_bytes, media_type, final_url)``; the partial file is
     removed on every failure.
@@ -357,6 +359,7 @@ def safe_curl_download_to_file(
                 capture_output=True,
                 text=True,
                 timeout=max(1.0, remaining) + 10.0,
+                check=False,
             )
             fields = (completed.stdout or "").strip().split("\t")
             status = int(fields[0] or 0) if fields and fields[0] else 0
