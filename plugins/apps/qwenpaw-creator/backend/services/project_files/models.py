@@ -1571,6 +1571,7 @@ class Project(StrictModel):
                 self._validate_committed_motion_document(
                     element_id,
                     creation.motion,
+                    require_externalized=True,
                 )
             elif isinstance(creation, AudioCreation):
                 _require_key(
@@ -1674,9 +1675,22 @@ class Project(StrictModel):
         self,
         element_id: str,
         motion: MotionGraphic | None,
+        *,
+        require_externalized: bool = False,
     ) -> None:
         if motion is None:
             return
+        if require_externalized and motion.html is not None:
+            # Main-track motion clips render exclusively from externalized
+            # documents; accepting a hand-written inline body here would
+            # only fail later at composition time, wasting a whole design
+            # round. Fail closed at commit instead.
+            raise ValueError(
+                f"element {element_id!r} carries an inline motion clip "
+                "document; motion clip documents must be created through "
+                "the motion design pipeline (design_motion_overlays), "
+                "which probes and externalizes the document before commit",
+            )
         if motion.format == "html_js" and motion.html is not None:
             # html_js documents may only enter a committed Project through
             # the motion design pipeline, which probes the __hf contract

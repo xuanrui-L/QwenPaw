@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -104,25 +105,14 @@ from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
     ensure_media_call_budget,
 )
-from services.runtime_files.media_probe import MediaProbeError, probe_media
 from services.external_skills import (
-    EXTERNAL_SKILL_MAX_MODEL_TURNS,
     EXTERNAL_SKILL_TOOL_NAMES,
-    IMPORT_SKILL_ARTIFACTS_TOOL_NAME,
-    READ_SKILL_FILE_TOOL_NAME,
-    RUN_SKILL_SCRIPT_TOOL_NAME,
     VIEW_SKILL_TOOL_NAME,
-    WRITE_SKILL_FILE_TOOL_NAME,
     LoadedSkill,
-    SkillExecutionError,
-    execute_skill_script,
     external_skill_tool_manifests,
     load_skills as load_external_skills,
-    read_skill_file as read_external_skill_file,
-    resolve_skill_artifact,
     render_external_skills_context,
     view_skill as view_external_skill,
-    write_skill_file as write_external_skill_file,
 )
 from services.observability import trace_event, traced_async
 from services.source_analysis import SourceAgentToolContext
@@ -195,7 +185,6 @@ _BILLING_SENSITIVE_ARGUMENTS = ("durationSeconds", "resolution", "mode")
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
 OBJECT_GROUNDING_TOOL_NAME = "ground_image_objects"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
-SKILL_ARTIFACT_MAX_BYTES = 512 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
 DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 180.0
@@ -308,14 +297,6 @@ def _tool_call_transport_metadata(call: AgentToolCall) -> dict[str, Any]:
                 },
             )
     return payload
-
-
-def _skill_stable_id(prefix: str, project_id: str, identity: str) -> str:
-    value = uuid5(
-        NAMESPACE_URL,
-        f"qwenpaw-creator:skill-artifact:{prefix}:{project_id}:{identity}",
-    ).hex
-    return f"{prefix}-{value}"
 
 
 def _specialist_waiting_review_summary(
@@ -1534,7 +1515,7 @@ class FileCreatorAgentRuntime:
             self.sessions.get_project_session_snapshot,
             project_id,
         )
-        goal = await self._goal_for_message(session, message)
+        goal, goal_created = await self._goal_for_message(session, message)
         snapshot = await asyncio.to_thread(
             self.services.projects.read,
             project_id,
@@ -1558,14 +1539,56 @@ class FileCreatorAgentRuntime:
             input_etag=snapshot.etag,
         )
         await asyncio.to_thread(self.runs.create, record)
-        await asyncio.to_thread(
-            self.sessions.activate_run,
-            project_id,
-            session.session_id,
-            goal_id=goal.goal_id,
-            run_id=run_id,
-            status=CreatorSessionStatus.RUNNING,
-        )
+        try:
+            await asyncio.to_thread(
+                self.sessions.activate_run,
+                project_id,
+                session.session_id,
+                goal_id=goal.goal_id,
+                run_id=run_id,
+                status=CreatorSessionStatus.RUNNING,
+            )
+        except SessionStateConflict as exc:
+            # A concurrent dispatcher (another process sharing this runtime
+            # root, or a stale coordinator surviving a hot reinstall) won
+            # the durable lease first. Without compensation the loser
+            # leaks a QUEUED run forever and, when it also minted a fresh
+            # Goal, leaves that Goal ACTIVE with no run that could ever
+            # settle it — the Session then looks busy indefinitely.
+            logger.warning(
+                "duplicate admission lost the session lease: project=%s "
+                "run=%s goal=%s: %s",
+                project_id,
+                run_id,
+                goal.goal_id,
+                exc,
+            )
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    self.runs.transition,
+                    project_id,
+                    run_id,
+                    expected_status=AgentRunStatus.QUEUED,
+                    status=AgentRunStatus.CANCELLED,
+                    updates={
+                        "error": {
+                            "code": "DUPLICATE_ADMISSION",
+                            "message": (
+                                "a concurrent dispatcher already owns this "
+                                "Session; duplicate run cancelled"
+                            ),
+                        },
+                    },
+                )
+            if goal_created:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        self.sessions.set_goal_status,
+                        project_id,
+                        goal.goal_id,
+                        CreatorGoalStatus.CANCELLED,
+                    )
+            return
         await asyncio.to_thread(
             self.sessions.set_goal_status,
             project_id,
@@ -2054,11 +2077,6 @@ class FileCreatorAgentRuntime:
 
             for call in turn.tool_calls:
                 tool_call_count += 1
-                if call.name in EXTERNAL_SKILL_TOOL_NAMES:
-                    effective_max_turns = max(
-                        effective_max_turns,
-                        EXTERNAL_SKILL_MAX_MODEL_TURNS,
-                    )
                 tool_failed = False
                 malformed_budget_exhausted = False
                 repeated_failure_exhausted = False
@@ -2173,13 +2191,6 @@ class FileCreatorAgentRuntime:
                         )
                     elif call.name in EXTERNAL_SKILL_TOOL_NAMES:
                         result = await self._run_external_skill_tool(
-                            project_id=project_id,
-                            session_id=session_id,
-                            run_id=run_id,
-                            epoch=epoch,
-                            request=request,
-                            tools=tools,
-                            call_id=call.call_id,
                             name=call.name,
                             arguments=call.arguments,
                         )
@@ -2840,17 +2851,10 @@ class FileCreatorAgentRuntime:
     async def _run_external_skill_tool(
         self,
         *,
-        project_id: str,
-        session_id: str,
-        run_id: str,
-        epoch: int,
-        request: CreatorMessageRecord,
-        tools: AgentProjectTools,
-        call_id: str,
         name: str,
         arguments: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Serve one external-skill tool call from the main Agent.
+        """Serve one skill viewer call from the main Agent.
 
         Skill failures surface as regular tool errors through the generic
         handler; they never abort the run or the session.
@@ -2859,460 +2863,14 @@ class FileCreatorAgentRuntime:
         skill_name = str(arguments.get("skill") or "").strip()
         if not skill_name:
             raise FileAgentRuntimeError(f"{name} requires skill")
-        if name == VIEW_SKILL_TOOL_NAME:
-            return await asyncio.to_thread(
-                view_external_skill,
-                skill_name=skill_name,
-            )
-        if name == READ_SKILL_FILE_TOOL_NAME:
-            return await asyncio.to_thread(
-                read_external_skill_file,
-                project_id=project_id,
-                skill_name=skill_name,
-                path=str(arguments.get("path") or ""),
-            )
-        if name == WRITE_SKILL_FILE_TOOL_NAME:
-            content = arguments.get("content")
-            if not isinstance(content, str):
-                raise FileAgentRuntimeError(
-                    "write_skill_file content must be a string",
-                )
-            return await asyncio.to_thread(
-                write_external_skill_file,
-                project_id=project_id,
-                skill_name=skill_name,
-                path=str(arguments.get("path") or ""),
-                content=content,
-            )
-        if name == IMPORT_SKILL_ARTIFACTS_TOOL_NAME:
-            raw_paths = arguments.get("paths")
-            if (
-                not isinstance(raw_paths, list)
-                or not raw_paths
-                or not all(
-                    isinstance(item, str) and item.strip()
-                    for item in raw_paths
-                )
-            ):
-                raise FileAgentRuntimeError(
-                    "import_skill_artifacts paths must be a non-empty "
-                    "string array",
-                )
-            return await asyncio.to_thread(
-                self._import_skill_artifacts_sync,
-                project_id,
-                request.message_id,
-                skill_name,
-                [item.strip() for item in raw_paths],
-            )
-        if name != RUN_SKILL_SCRIPT_TOOL_NAME:
+        if name != VIEW_SKILL_TOOL_NAME:
             raise FileAgentRuntimeError(
                 f"unhandled external skill tool: {name}",
             )
-        script = str(arguments.get("script") or "").strip()
-        if not script:
-            raise FileAgentRuntimeError("run_skill_script requires script")
-        raw_args = arguments.get("args")
-        if raw_args is not None and (
-            not isinstance(raw_args, list)
-            or not all(isinstance(item, str) for item in raw_args)
-        ):
-            raise FileAgentRuntimeError(
-                "run_skill_script args must be a string array",
-            )
-        timeout_raw = arguments.get("timeoutSeconds")
-        if timeout_raw is not None and not isinstance(timeout_raw, int):
-            raise FileAgentRuntimeError(
-                "run_skill_script timeoutSeconds must be an integer",
-            )
-        authorization_id = await self._await_skill_execution_authorization(
-            project_id=project_id,
-            session_id=session_id,
-            run_id=run_id,
-            epoch=epoch,
-            request=request,
-            tools=tools,
-            call_id=call_id,
+        return await asyncio.to_thread(
+            view_external_skill,
             skill_name=skill_name,
-            script=script,
-            args=list(raw_args or []),
-            timeout_seconds=timeout_raw,
         )
-        result = await execute_skill_script(
-            project_id=project_id,
-            skill_name=skill_name,
-            script=script,
-            args=list(raw_args or []),
-            timeout_seconds=timeout_raw,
-        )
-        self._assert_epoch(project_id, run_id, epoch)
-        if authorization_id is not None:
-            result["executionAuthorizationId"] = authorization_id
-        return result
-
-    async def _await_skill_execution_authorization(
-        self,
-        *,
-        project_id: str,
-        session_id: str,
-        run_id: str,
-        epoch: int,
-        request: CreatorMessageRecord,
-        tools: AgentProjectTools,
-        call_id: str,
-        skill_name: str,
-        script: str,
-        args: list[str],
-        timeout_seconds: int | None,
-    ) -> str | None:
-        """Gate skill script execution behind a durable user approval.
-
-        Mirrors the specialist execution-authorization contract (same event
-        names and record shape) so the existing decision tray renders it
-        without any frontend change; no specialist run is parked because
-        the tool belongs to the main Agent.
-        """
-
-        if (
-            get_execution_authorization_mode()
-            == EXECUTION_AUTHORIZATION_ALLOW_ALL
-        ):
-            return None
-        execution_request_id = _specialist_tool_request_id(
-            run_id,
-            RUN_SKILL_SCRIPT_TOOL_NAME,
-            {"skill": skill_name, "script": script, "args": args},
-            invocation_id=call_id,
-        )
-        authorization_id = (
-            "authorization-"
-            + uuid5(
-                NAMESPACE_URL,
-                f"qwenpaw-creator:skill-authorization:{project_id}:{execution_request_id}",
-            ).hex
-        )
-        summary = f"执行外置 Skill 脚本：{skill_name}/{script}" + (
-            f" · 参数 {len(args)} 个" if args else ""
-        )
-        record = ExecutionAuthorizationRecord(
-            authorization_id=authorization_id,
-            project_id=project_id,
-            round_id=tools.context.round_id or f"agent-round-{run_id}",
-            run_id=run_id,
-            execution_request_id=execution_request_id,
-            operation=RUN_SKILL_SCRIPT_TOOL_NAME,
-            target_scope=[f"project:{project_id}"],
-            authorization_token=secrets.token_urlsafe(32),
-            summary=summary,
-            scope={
-                "operation": RUN_SKILL_SCRIPT_TOOL_NAME,
-                "skill": skill_name,
-                "script": script,
-                "args": args,
-                "timeoutSeconds": timeout_seconds,
-            },
-            requested_provider="external_skill",
-            requested_model=skill_name,
-            requested_candidates=1,
-            caused_by_request_id=tools.context.caused_by_request_id,
-            caused_by_message_id=request.message_id,
-            caused_by_message_seq=request.message_seq,
-            review_policy=tools.context.review_policy,
-            metadata={"toolCallId": call_id, "parentRunId": run_id},
-        )
-        try:
-            authorization = await asyncio.to_thread(
-                self.executions.create_execution_authorization,
-                record,
-            )
-        except ExecutionStoreError:
-            # A retried identical call re-reads its durable authorization.
-            authorization = await asyncio.to_thread(
-                self.executions.get_execution_authorization,
-                project_id,
-                authorization_id,
-            )
-        await self._event(
-            project_id,
-            session_id,
-            "execution.authorization_required",
-            run_id,
-            request,
-            {
-                "runId": run_id,
-                "authorizationId": authorization.authorization_id,
-                "authorizationToken": authorization.authorization_token,
-                "executionRequestId": authorization.execution_request_id,
-                "operation": authorization.operation,
-                "targetRef": f"project:{project_id}",
-                "provider": "external_skill",
-                "model": skill_name,
-                "summary": authorization.summary,
-                "estimatedCost": authorization.estimated_cost,
-                "billing": None,
-                "toolCallId": call_id,
-            },
-        )
-        logger.info(
-            "approval required: project=%s run=%s tool=%s call_id=%s "
-            "skill=%s script=%s",
-            project_id,
-            run_id,
-            RUN_SKILL_SCRIPT_TOOL_NAME,
-            call_id,
-            skill_name,
-            script,
-        )
-        while authorization.status is ExecutionAuthorizationStatus.PENDING:
-            self._assert_epoch(project_id, run_id, epoch)
-            await asyncio.sleep(min(self.poll_interval_seconds, 0.5))
-            authorization = await asyncio.to_thread(
-                self.executions.get_execution_authorization,
-                project_id,
-                authorization.authorization_id,
-            )
-        await self._event(
-            project_id,
-            session_id,
-            "execution.authorization_decided",
-            run_id,
-            request,
-            {
-                "runId": run_id,
-                "authorizationId": authorization.authorization_id,
-                "status": authorization.status.value,
-                "toolCallId": call_id,
-            },
-        )
-        if authorization.status is not ExecutionAuthorizationStatus.APPROVED:
-            raise FileAgentRuntimeError(
-                f"execution authorization {authorization.status.value.lower()}",
-            )
-        return authorization.authorization_id
-
-    @staticmethod
-    def _validate_skill_artifact_media(
-        local_path: Path,
-        media_kind: str,
-    ) -> str | None:
-        """Verify real decodable content before indexing; return a reason.
-
-        A broken skill must not pollute the Asset Index with arbitrary
-        bytes behind a media extension, so the artifact goes through the
-        existing inspection paths (ffprobe/ffmpeg for audio/video, the
-        reference-image validator for images).
-        """
-
-        try:
-            if media_kind == "image":
-                validate_reference_image_bytes(local_path.read_bytes())
-                return None
-            probe = probe_media(str(local_path))
-            if media_kind == "video" and not (probe.width and probe.height):
-                return "no decodable video stream"
-            if media_kind == "audio" and not probe.has_audio:
-                return "no decodable audio stream"
-            if not probe.duration_seconds:
-                return "media has no positive duration"
-            return None
-        except (ValueError, MediaProbeError) as exc:
-            return f"media validation failed: {exc}"
-
-    def _import_skill_artifacts_sync(
-        self,
-        project_id: str,
-        request_id: str,
-        skill_name: str,
-        paths: list[str],
-    ) -> dict[str, Any]:
-        """Register produced skill media through the asset import pathway."""
-
-        imported: list[dict[str, Any]] = []
-        issues: list[str] = []
-        changed = False
-        project_root = self.services.projects.project_root(project_id)
-        file_store = AssetFileStore(project_root)
-        with self.services.projects.lifecycle_lock(project_id):
-            base = self.services.projects.read(project_id)
-            candidate = base.project.model_dump(mode="json")
-            files = candidate["assets"]["files_by_id"]
-            versions = candidate["assets"]["source_versions_by_id"]
-            created_at = datetime.now(UTC)
-            for raw_path in paths:
-                try:
-                    local_path = resolve_skill_artifact(
-                        project_id=project_id,
-                        skill_name=skill_name,
-                        path=raw_path,
-                    )
-                except SkillExecutionError as exc:
-                    issues.append(f"{raw_path}: {exc}")
-                    continue
-                stat = local_path.stat()
-                if stat.st_size <= 0:
-                    issues.append(f"{raw_path}: empty file")
-                    continue
-                if stat.st_size > SKILL_ARTIFACT_MAX_BYTES:
-                    issues.append(
-                        f"{raw_path}: file too large ({stat.st_size} bytes)",
-                    )
-                    continue
-                media_type = (
-                    mimetypes.guess_type(local_path.name)[0] or ""
-                ).casefold()
-                media_kind = media_type.split("/", 1)[0]
-                if media_kind not in {"video", "audio", "image"}:
-                    issues.append(
-                        f"{raw_path}: unsupported media type "
-                        f"{media_type or 'unknown'}",
-                    )
-                    continue
-                validation_error = self._validate_skill_artifact_media(
-                    local_path,
-                    media_kind,
-                )
-                if validation_error is not None:
-                    issues.append(f"{raw_path}: {validation_error}")
-                    continue
-                with local_path.open("rb") as stream:
-                    staged = file_store.stage_stream(
-                        stream,
-                        staging_id=f"skill-{uuid4().hex[:16]}",
-                    )
-                checksum = staged.sha256
-                size_bytes = staged.size_bytes
-                identity = f"{skill_name}:{checksum}"
-                logical_asset_id = _skill_stable_id(
-                    "asset",
-                    project_id,
-                    identity,
-                )
-                version_id = _skill_stable_id(
-                    "asset-version",
-                    project_id,
-                    identity,
-                )
-                file_id = _skill_stable_id("file", project_id, identity)
-                suffix = local_path.suffix.casefold()
-                if not suffix or not suffix[1:].isalnum():
-                    suffix = mimetypes.guess_extension(media_type) or ".bin"
-                relative_uri = PurePosixPath(
-                    "assets",
-                    "sources",
-                    f"{file_id}{suffix}",
-                ).as_posix()
-                indexed = IndexedFile(
-                    file_id=file_id,
-                    kind="source_original",
-                    relative_uri=relative_uri,
-                    sha256=checksum,
-                    size_bytes=size_bytes,
-                    media_type=media_type,
-                    created_at=created_at,
-                )
-                version = SourceAssetVersion(
-                    version_id=version_id,
-                    logical_asset_id=logical_asset_id,
-                    name=local_path.name[:160],
-                    file_id=file_id,
-                    checksum=checksum,
-                    media_kind=media_kind,  # type: ignore[arg-type]
-                    media_type=media_type,
-                    created_at=created_at,
-                    metadata={
-                        "sourceKind": "external_skill_artifact",
-                        "skill": skill_name,
-                        "sandboxPath": raw_path,
-                        "requestId": request_id,
-                    },
-                )
-                indexed_json = indexed.model_dump(mode="json")
-                version_json = version.model_dump(mode="json")
-                existing_file = files.get(file_id)
-                existing_version = versions.get(version_id)
-                if existing_file is not None:
-                    existing_created_at = existing_file.get("created_at")
-                    if existing_created_at is not None:
-                        indexed_json["created_at"] = existing_created_at
-                    if existing_file != indexed_json:
-                        file_store.abandon(staged)
-                        issues.append(
-                            f"{raw_path}: skill artifact file id collision",
-                        )
-                        continue
-                if existing_version is not None:
-                    existing = SourceAssetVersion.model_validate(
-                        existing_version,
-                    )
-                    if (
-                        existing.logical_asset_id != logical_asset_id
-                        or existing.checksum != checksum
-                        or existing.file_id != file_id
-                    ):
-                        file_store.abandon(staged)
-                        issues.append(
-                            f"{raw_path}: skill artifact version collision",
-                        )
-                        continue
-                if existing_file is None:
-                    try:
-                        file_store.publish(
-                            staged,
-                            relative_uri,
-                            expected_sha256=checksum,
-                            expected_size_bytes=size_bytes,
-                        )
-                    except AssetAlreadyExists:
-                        file_store.abandon(staged)
-                    files[file_id] = indexed_json
-                    changed = True
-                else:
-                    file_store.abandon(staged)
-                if existing_version is None:
-                    versions[version_id] = version_json
-                    changed = True
-                imported.append(
-                    {
-                        "path": raw_path,
-                        "workspace_ref": workspace_asset_ref(
-                            logical_asset_id,
-                            version_id,
-                        ),
-                        "logical_asset_id": logical_asset_id,
-                        "source_asset_version_id": version_id,
-                        "file_id": file_id,
-                        "mediaType": media_type,
-                        "sizeBytes": size_bytes,
-                    },
-                )
-            if changed:
-                commit = self.services.commits.commit(
-                    base=base,
-                    candidate=candidate,
-                    origin=ChangeOrigin.RUNTIME_TASK,
-                    review_policy=ReviewPolicy.AUTO_FIX,
-                    caused_by_request_id=request_id,
-                    round_id=_skill_stable_id(
-                        "round",
-                        project_id,
-                        f"{skill_name}:{request_id}",
-                    ),
-                    transaction_id=_skill_stable_id(
-                        "transaction",
-                        project_id,
-                        f"{skill_name}:{request_id}",
-                    ),
-                    advance_accepted_baseline=True,
-                    _lifecycle_lock_held=True,
-                )
-                self.services.poller.note_commit(commit.snapshot)
-        return {
-            "ok": True,
-            "status": "success" if imported else "skipped",
-            "imported_count": len(imported),
-            "imported": imported,
-            "issues": issues,
-        }
 
     async def _run_subagent(
         self,
@@ -5187,6 +4745,8 @@ class FileCreatorAgentRuntime:
         session: Any,
         message: CreatorMessageRecord,
     ):
+        """Resolve the Goal owning this message; returns (goal, created)."""
+
         if session.active_goal_id is not None:
             try:
                 goal = await asyncio.to_thread(
@@ -5208,8 +4768,8 @@ class FileCreatorAgentRuntime:
                 goal is not None
                 and goal.status is not CreatorGoalStatus.COMPLETED
             ):
-                return goal
-        return await asyncio.to_thread(
+                return goal, False
+        created = await asyncio.to_thread(
             self.sessions.create_goal,
             message.project_id,
             session.session_id,
@@ -5219,6 +4779,7 @@ class FileCreatorAgentRuntime:
             goal_id=f"goal-{uuid4().hex}",
             metadata={"source": "file_agent_runtime"},
         )
+        return created, True
 
     MAINLINE_RESUME_SOURCE = "mainline_resume"
     YOLO_RESUME_SOURCE = "yolo_auto_resume"

@@ -463,6 +463,7 @@ def _validated_design(
     raw: Mapping[str, Any],
     *,
     required_text: str | None = None,
+    allow_visible_text: bool = False,
     default_loop: bool = True,
     canvas_size: tuple[int, int] | None = None,
 ) -> tuple[MotionGraphic, ElementLocation, str] | str:
@@ -470,6 +471,9 @@ def _validated_design(
 
     ``required_text`` switches to text-card mode: the design is always
     needed and the given text must appear verbatim in the document.
+    ``allow_visible_text`` marks full-canvas scene documents (motion
+    clips): they may carry copy when the creative intent asks for it,
+    unlike decorations which must stay text-free.
     """
 
     if required_text is None:
@@ -596,14 +600,18 @@ def _validated_design(
     visible = unescape(
         re.sub(r"\s+", "", re.sub(r"<[^>]+>", " ", body)),
     )
-    if required_text is None and visible:
+    if required_text is None and not allow_visible_text and visible:
         raise ValidationError(
             "装饰动效不允许包含任何可见文字；请改用纯 CSS 图形表达，不要生成对话气泡或标题卡",
         )
-    if required_text is None and re.search(
-        r"\bcontent\s*:\s*(['\"])(?!\s*\1).+?\1",
-        html,
-        re.IGNORECASE | re.DOTALL,
+    if (
+        required_text is None
+        and not allow_visible_text
+        and re.search(
+            r"\bcontent\s*:\s*(['\"])(?!\s*\1).+?\1",
+            html,
+            re.IGNORECASE | re.DOTALL,
+        )
     ):
         raise ValidationError(
             "装饰动效不允许通过 CSS content 生成可见文字或符号；请用 CSS 几何图形表达",
@@ -621,6 +629,7 @@ def _validated_design(
             )
     elif (
         not uses_blueprint
+        and not allow_visible_text
         and doc_format != "html_js"
         and motif not in SUPPORTED_MOTIFS
     ):
@@ -820,6 +829,7 @@ async def _design_document(
     frame_paths: list[Path],
     canvas_size: tuple[int, int],
     required_text: str | None = None,
+    allow_visible_text: bool = False,
     default_loop: bool = True,
     min_coverage: float = 0.0,
     max_edge_contact: float = 1.0,
@@ -857,6 +867,7 @@ async def _design_document(
             design = _validated_design(
                 parsed,
                 required_text=required_text,
+                allow_visible_text=allow_visible_text,
                 default_loop=default_loop,
                 canvas_size=canvas_size,
             )
@@ -1294,6 +1305,10 @@ async def design_motion_overlays(
                     frame_paths=[],
                     canvas_size=canvas_size,
                     default_loop=False,
+                    # A scene document may carry copy (title cards, teaching
+                    # panels) when the creative intent asks for it; only
+                    # decorations must stay text-free.
+                    allow_visible_text=True,
                     # The document IS the picture: it must flood the whole
                     # viewport (a "card" with margins or rounded corners
                     # fails this gate), while edge contact is its normal

@@ -108,6 +108,20 @@ class TestValidatedDesignTextMode:
         motion, _location, _concept = design
         assert motion.loop is False
 
+    def test_scene_mode_allows_visible_text(self) -> None:
+        """Full-canvas motion clips may carry copy (teaching panels,
+        title cards); only decorations must stay text-free."""
+
+        raw = {**self._BASE, "needed": True, "html": _HTML}
+        with pytest.raises(ValidationError, match="不允许包含任何可见文字"):
+            _validated_design(raw, default_loop=False)
+        design = _validated_design(
+            raw,
+            allow_visible_text=True,
+            default_loop=False,
+        )
+        assert not isinstance(design, str)
+
     def test_extra_visible_text_is_rejected(self) -> None:
         raw = {
             **self._BASE,

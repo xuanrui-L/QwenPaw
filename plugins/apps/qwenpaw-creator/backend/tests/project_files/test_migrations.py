@@ -203,6 +203,38 @@ def test_inline_html_js_motion_is_rejected_at_the_commit_boundary() -> None:
         load_project_json(json.dumps(raw))
 
 
+def test_inline_motion_clip_document_is_rejected_at_commit() -> None:
+    # Main-track motion clips render exclusively from externalized
+    # documents; a hand-written inline body (any format) would only fail
+    # at composition time, so commit fails closed instead.
+    raw = _raw_project()
+    timeline = raw["timelines"]["items"]["timeline:main"]
+    timeline["elements_by_id"]["clip-inline"] = {
+        "element_id": "clip-inline",
+        "label": "手写动效段",
+        "enabled": True,
+        "span": {"start_tick": 0, "duration_tick": 100},
+        "location": None,
+        "z_index": 0,
+        "creation": {
+            "type": "motion_clip",
+            "intent": "",
+            "prompt": "开场题面",
+            "motion": {
+                "format": "html_css",
+                "html": "<html><body>" + "x" * 40 + "</body></html>",
+                "fps": 24,
+                "loop": False,
+            },
+        },
+        "outputs": {},
+        "render_source": None,
+        "provenance_refs": [],
+    }
+    with pytest.raises(ValueError, match="inline motion clip"):
+        Project.model_validate(raw)
+
+
 def test_externalized_html_js_motion_loads() -> None:
     raw = _raw_project()
     checksum = "a" * 64
