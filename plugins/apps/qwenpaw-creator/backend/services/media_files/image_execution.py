@@ -58,6 +58,7 @@ from services.project_files.models import (
     VisualEntity,
     VisualVariant,
 )
+from services.media_files.call_budget import ensure_media_call_budget
 from services.media_files.element_adapter import (
     bind_candidate_output,
     find_timeline_element,
@@ -1997,6 +1998,9 @@ async def execute_file_image_command(
 ) -> FileImageExecutionResult:
     """Small route/tool entry point with an injectable provider for tests."""
 
+    # Wallet fuse: every dispatch path (specialist delegation, work-graph
+    # scheduler, manual retry) funnels through here.
+    ensure_media_call_budget(services, project_id)
     worker = FileImageExecutionService(services, provider=provider)
     return await worker.execute(
         project_id=project_id,

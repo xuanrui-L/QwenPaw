@@ -15,8 +15,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Response
 
 from domain.errors import NotFoundError, ValidationError
+from models.config import get_media_call_budget
 from services.file_agent_runtime.work_graph import derive_work_graph
 from services.file_agent_runtime.work_scheduler import WorkGraphScheduler
+from services.media_files.call_budget import media_call_count
 from services.project_files.facade import CreatorFileServices
 from services.project_files.store import ProjectNotFound
 from services.runtime_files.execution_store import ProjectExecutionStore
@@ -42,6 +44,9 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
         "projectId": project_id,
         "generation": graph.generation,
         "counts": graph.counts(),
+        # Honest spend metric: billable provider calls, never estimated money.
+        "mediaCalls": media_call_count(services, project_id),
+        "mediaCallBudget": get_media_call_budget(),
         "nodes": [
             {
                 "id": node.node_id,

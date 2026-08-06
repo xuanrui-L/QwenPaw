@@ -162,6 +162,16 @@ export default function WorkGraphPanel({ projectId }: { projectId: string }) {
             并行 {running}
           </span>
         )}
+        <span
+          className={
+            graph.mediaCalls >= graph.mediaCallBudget
+              ? "text-[10px] font-normal text-[var(--color-danger,#ef4444)]"
+              : "text-[10px] font-normal text-[var(--color-text-tertiary)]"
+          }
+          title="已发起的付费媒体生成调用次数 / 项目上限（可在配置 agent_runtime.media_call_budget 调整）"
+        >
+          媒体调用 {graph.mediaCalls}/{graph.mediaCallBudget}
+        </span>
       </p>
       <div className="mt-0.5 space-y-1">
         {lanes.map(([lane, nodes]) => (

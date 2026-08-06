@@ -26,5 +26,7 @@ export interface WorkGraphView {
   projectId: string;
   generation: number;
   counts: Record<string, number>;
+  mediaCalls: number;
+  mediaCallBudget: number;
   nodes: WorkGraphNode[];
 }

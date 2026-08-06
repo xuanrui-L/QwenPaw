@@ -30,6 +30,10 @@ from models.config import (
     get_execution_authorization_mode,
     get_media_parallelism,
 )
+from services.media_files.call_budget import (
+    MediaCallBudgetExhausted,
+    ensure_media_call_budget,
+)
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
     WorkNode,
@@ -91,7 +95,10 @@ class WorkGraphScheduler:
         for task in list(self._loops.values()):
             try:
                 await task
-            except (asyncio.CancelledError, Exception):  # pylint: disable=broad-except
+            except (
+                asyncio.CancelledError,
+                Exception,
+            ):  # pylint: disable=broad-except
                 pass
         self._loops.clear()
 
@@ -112,8 +119,6 @@ class WorkGraphScheduler:
             event.clear()
             try:
                 await self.tick(project_id)
-            except asyncio.CancelledError:
-                raise
             except Exception:  # pylint: disable=broad-except
                 logger.exception(
                     "work-graph tick failed for %s",
@@ -147,10 +152,26 @@ class WorkGraphScheduler:
             return None
         graph = derive_work_graph(snapshot.project, tasks=tasks)
         inflight = self._inflight.setdefault(project_id, set())
+        try:
+            # Wallet fuse: a spent budget pauses automatic dispatch; the
+            # media entry points enforce it too, this just avoids creating
+            # failed tasks.
+            await asyncio.to_thread(
+                ensure_media_call_budget,
+                self.services,
+                project_id,
+            )
+        except MediaCallBudgetExhausted as exc:
+            logger.warning(
+                "work-graph dispatch paused for %s: %s",
+                project_id,
+                exc,
+            )
+            if self._on_tick is not None:
+                await self._on_tick(project_id, graph)
+            return graph
         running = sum(
-            1
-            for node in graph.nodes
-            if node.status.value == "running"
+            1 for node in graph.nodes if node.status.value == "running"
         )
         capacity = get_media_parallelism() - running - len(inflight)
         for node in graph.ready_media_nodes():
@@ -184,8 +205,6 @@ class WorkGraphScheduler:
         )
         try:
             await self.dispatch_node(project_id, node, fingerprint)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # pylint: disable=broad-except
             # The task record carries the durable failure; the graph will
             # surface it as FAILED and the ledger prevents a paid retry
@@ -229,27 +248,52 @@ class WorkGraphScheduler:
 
 async def _default_image_dispatch(
     services: CreatorFileServices,
-    **kwargs: Any,
+    *,
+    project_id: str,
+    command: str,
+    target_ref: str,
+    arguments: dict[str, Any],
+    idempotency_key: str,
 ) -> Any:
     # Imported lazily: media executors pull heavy provider dependencies.
-    from services.media_files.image_execution import (  # pylint: disable=import-outside-toplevel
+    # pylint: disable=import-outside-toplevel
+    from services.media_files.image_execution import (
         execute_file_image_command,
     )
 
-    return await execute_file_image_command(services, **kwargs)
+    return await execute_file_image_command(
+        services,
+        project_id=project_id,
+        command=command,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+    )
 
 
 async def _default_r2v_dispatch(
     services: CreatorFileServices,
-    **kwargs: Any,
+    *,
+    project_id: str,
+    command: str | None = None,
+    target_ref: str,
+    arguments: dict[str, Any],
+    idempotency_key: str,
 ) -> Any:
-    from services.media_files.r2v_execution import (  # pylint: disable=import-outside-toplevel
+    # pylint: disable=import-outside-toplevel
+    from services.media_files.r2v_execution import (
         execute_file_r2v_command,
     )
 
     # The r2v entry point has a single command and takes no command kwarg.
-    kwargs.pop("command", None)
-    return await execute_file_r2v_command(services, **kwargs)
+    del command
+    return await execute_file_r2v_command(
+        services,
+        project_id=project_id,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+    )
 
 
 __all__ = ["WorkGraphScheduler"]

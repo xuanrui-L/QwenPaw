@@ -330,6 +330,30 @@ def get_media_review_mode() -> str:
 DEFAULT_MAINLINE_MAX_MODEL_TURNS = 24
 DEFAULT_SPECIALIST_MAX_MODEL_TURNS = 16
 DEFAULT_MEDIA_PARALLELISM = 3
+DEFAULT_MEDIA_CALL_BUDGET = 200
+
+
+def get_media_call_budget() -> int:
+    """Per-project cap on billable media generation calls.
+
+    The wallet fuse for unattended operation: call counts are the honest
+    spend metric (local price tables were removed — they go stale and
+    mislead). The default is deliberately loose; it exists to stop a
+    runaway project, not to police normal use.
+    """
+
+    section = _get_user_config().get("agent_runtime")
+    value = (
+        section.get("media_call_budget")
+        if isinstance(
+            section,
+            dict,
+        )
+        else None
+    )
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_MEDIA_CALL_BUDGET
 
 
 def get_media_parallelism() -> int:
@@ -341,10 +365,14 @@ def get_media_parallelism() -> int:
     """
 
     section = _get_user_config().get("agent_runtime")
-    value = section.get("media_parallelism") if isinstance(
-        section,
-        dict,
-    ) else None
+    value = (
+        section.get("media_parallelism")
+        if isinstance(
+            section,
+            dict,
+        )
+        else None
+    )
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return DEFAULT_MEDIA_PARALLELISM

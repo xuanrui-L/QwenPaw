@@ -95,6 +95,10 @@ from services.runtime_files.execution_store import (
 )
 from services.runtime_files.errors import RecordNotFoundError
 from services.runtime_files.atomic_store import atomic_replace_bytes
+from services.media_files.call_budget import (
+    MediaCallBudgetExhausted,
+    ensure_media_call_budget,
+)
 from services.observability import trace_event, traced_async
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
@@ -4353,7 +4357,7 @@ class FileCreatorAgentRuntime:
     # human message — a stuck project must fall back to a human.
     YOLO_RESUME_MAX_CONSECUTIVE = 5
 
-    async def _queue_yolo_completion_resume(
+    async def _queue_yolo_completion_resume(  # pylint: disable=too-many-return-statements
         self,
         *,
         project_id: str,
@@ -4401,6 +4405,21 @@ class FileCreatorAgentRuntime:
         # Let the machine take every dispatchable gap before deciding to
         # spend a model turn: the scheduler fans out READY media nodes.
         self.work_scheduler.wake(project_id)
+        try:
+            await asyncio.to_thread(
+                ensure_media_call_budget,
+                self.services,
+                project_id,
+            )
+        except MediaCallBudgetExhausted as exc:
+            # A spent wallet fuse paralyzes every media path — a resume
+            # would only make the model walk into the same wall.
+            logger.warning(
+                "YOLO auto-resume stopped for %s: %s",
+                project_id,
+                exc,
+            )
+            return
         model_required = graph.model_required_nodes()
         if (
             not after_failure
