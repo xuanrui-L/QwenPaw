@@ -335,6 +335,7 @@
     "videoModeEdit": "video_edit editing",
     "ttsFamilyNoteQwen": "Qwen-TTS family: system voices synthesize directly; cloning/design binds to family companion models and created voices are picked up automatically. Voices never cross families.",
     "ttsFamilyNoteCosy": "CosyVoice family: no system voices — clone or design a voice before synthesis; voices cannot be shared with the Qwen-TTS family.",
+    "leaveBlankKeep": "Leave blank to keep current key",
     "reusingKeyPlaceholder": "Reusing the {{model}} API Key",
     "translateCardTitle": "In-image Text Translation",
     "translateCardBrief": "Recognizes and replaces in-image text with the target language · keeps the layout",

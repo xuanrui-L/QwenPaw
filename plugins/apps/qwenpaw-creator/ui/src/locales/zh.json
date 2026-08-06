@@ -335,6 +335,7 @@
     "videoModeEdit": "video_edit 视频编辑",
     "ttsFamilyNoteQwen": "Qwen-TTS 家族：系统音色可直接合成；声音复刻/设计绑定同家族伴随模型，创建后自动选用。两家族音色互不通用。",
     "ttsFamilyNoteCosy": "CosyVoice 家族：无系统音色，需先复刻或设计音色后才能合成；音色不能与 Qwen-TTS 家族混用。",
+    "leaveBlankKeep": "留空以保持当前密钥",
     "reusingKeyPlaceholder": "已复用 {{model}} API Key",
     "translateCardTitle": "图内文字翻译",
     "translateCardBrief": "识别并替换图中文字为目标语言 · 保留排版",

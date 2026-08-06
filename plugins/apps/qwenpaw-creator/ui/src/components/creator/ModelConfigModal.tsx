@@ -1546,6 +1546,30 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     }
   };
 
+  // Host-console convention for stored secrets: the field stays empty with
+  // a “leave blank to keep” hint; typing replaces the key and clearing the
+  // field falls back to the stored credential instead of erasing it.
+  const secretInput = (
+    current: string,
+    storedInSnapshot: boolean,
+    emptyPlaceholder: string,
+    commit: (value: string) => void,
+  ) => (
+    <Input.Password
+      visibilityToggle={false}
+      placeholder={
+        current === "__CREATOR_SECRET__"
+          ? t("modelConfig.leaveBlankKeep")
+          : emptyPlaceholder
+      }
+      value={current === "__CREATOR_SECRET__" ? "" : current}
+      onChange={(event) => {
+        const next = event.target.value;
+        commit(next === "" && storedInSnapshot ? "__CREATOR_SECRET__" : next);
+      }}
+    />
+  );
+
   const renderFields = (type: ModelType) => {
     const item = config[type] as ModelConfigItem;
     const preset = getPresetForType(type, item.protocol);
@@ -1642,20 +1666,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 })}
               />
             ) : (
-              <Input.Password
-                visibilityToggle={false}
-                placeholder={
-                  item.api_key === "__CREATOR_SECRET__"
-                    ? t("modelConfig.configured")
-                    : "sk-..."
-                }
-                value={
-                  item.api_key === "__CREATOR_SECRET__"
-                    ? "sk-****"
-                    : item.api_key
-                }
-                onChange={(e) => updateItem(type, "api_key", e.target.value)}
-              />
+              secretInput(
+                item.api_key,
+                (snapshotRef.current?.[type] as ModelConfigItem | undefined)
+                  ?.api_key === "__CREATOR_SECRET__",
+                "sk-...",
+                (value) => updateItem(type, "api_key", value),
+              )
             )}
           </div>
           <div>
@@ -2091,22 +2108,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 <label className="field-label">
                   {t("modelConfig.tavilyApiKeyOptional")}
                 </label>
-                <Input.Password
-                  visibilityToggle={false}
-                  placeholder={
-                    config.grounding.tavily_api_key === "__CREATOR_SECRET__"
-                      ? t("modelConfig.configured")
-                      : "tvly-..."
-                  }
-                  value={
-                    config.grounding.tavily_api_key === "__CREATOR_SECRET__"
-                      ? "sk-****"
-                      : config.grounding.tavily_api_key
-                  }
-                  onChange={(event) =>
-                    updateGrounding("tavily_api_key", event.target.value)
-                  }
-                />
+                {secretInput(
+                  config.grounding.tavily_api_key,
+                  snapshotRef.current?.grounding.tavily_api_key ===
+                    "__CREATOR_SECRET__",
+                  "tvly-...",
+                  (value) => updateGrounding("tavily_api_key", value),
+                )}
               </div>
             </div>
             <div
@@ -2172,22 +2180,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 <label className="field-label">
                   {t("modelConfig.serperApiKeyOptional")}
                 </label>
-                <Input.Password
-                  visibilityToggle={false}
-                  placeholder={
-                    config.grounding.serper_api_key === "__CREATOR_SECRET__"
-                      ? t("modelConfig.configured")
-                      : "serper key"
-                  }
-                  value={
-                    config.grounding.serper_api_key === "__CREATOR_SECRET__"
-                      ? "sk-****"
-                      : config.grounding.serper_api_key
-                  }
-                  onChange={(event) =>
-                    updateGrounding("serper_api_key", event.target.value)
-                  }
-                />
+                {secretInput(
+                  config.grounding.serper_api_key,
+                  snapshotRef.current?.grounding.serper_api_key ===
+                    "__CREATOR_SECRET__",
+                  "serper key",
+                  (value) => updateGrounding("serper_api_key", value),
+                )}
               </div>
             </div>
             <div
@@ -2328,27 +2327,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         <label className="field-label">
                           {t("modelConfig.qwenSearchApiKey")}
                         </label>
-                        <Input.Password
-                          visibilityToggle={false}
-                          placeholder={
-                            config.grounding.search_api_key ===
-                            "__CREATOR_SECRET__"
-                              ? t("modelConfig.configured")
-                              : "sk-search-..."
-                          }
-                          value={
-                            config.grounding.search_api_key ===
-                            "__CREATOR_SECRET__"
-                              ? "sk-****"
-                              : config.grounding.search_api_key
-                          }
-                          onChange={(event) =>
-                            updateGrounding(
-                              "search_api_key",
-                              event.target.value,
-                            )
-                          }
-                        />
+                        {secretInput(
+                          config.grounding.search_api_key,
+                          snapshotRef.current?.grounding.search_api_key ===
+                            "__CREATOR_SECRET__",
+                          "sk-search-...",
+                          (value) => updateGrounding("search_api_key", value),
+                        )}
                       </div>
                       <div>
                         <label className="field-label">
@@ -2466,22 +2451,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   <label className="field-label">
                     {t("modelConfig.verifyModelApiKey")}
                   </label>
-                  <Input.Password
-                    visibilityToggle={false}
-                    placeholder={
-                      config.grounding.api_key === "__CREATOR_SECRET__"
-                        ? t("modelConfig.configured")
-                        : "sk-..."
-                    }
-                    value={
-                      config.grounding.api_key === "__CREATOR_SECRET__"
-                        ? "sk-****"
-                        : config.grounding.api_key
-                    }
-                    onChange={(event) =>
-                      updateGrounding("api_key", event.target.value)
-                    }
-                  />
+                  {secretInput(
+                    config.grounding.api_key,
+                    snapshotRef.current?.grounding.api_key ===
+                      "__CREATOR_SECRET__",
+                    "sk-...",
+                    (value) => updateGrounding("api_key", value),
+                  )}
                 </div>
                 <div>
                   <label className="field-label">
