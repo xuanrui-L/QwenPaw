@@ -2092,8 +2092,17 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   {t("modelConfig.tavilyApiKeyOptional")}
                 </label>
                 <Input.Password
-                  placeholder="tvly-..."
-                  value={config.grounding.tavily_api_key}
+                  visibilityToggle={false}
+                  placeholder={
+                    config.grounding.tavily_api_key === "__CREATOR_SECRET__"
+                      ? t("modelConfig.configured")
+                      : "tvly-..."
+                  }
+                  value={
+                    config.grounding.tavily_api_key === "__CREATOR_SECRET__"
+                      ? "sk-****"
+                      : config.grounding.tavily_api_key
+                  }
                   onChange={(event) =>
                     updateGrounding("tavily_api_key", event.target.value)
                   }
@@ -2164,8 +2173,17 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   {t("modelConfig.serperApiKeyOptional")}
                 </label>
                 <Input.Password
-                  placeholder="serper key"
-                  value={config.grounding.serper_api_key}
+                  visibilityToggle={false}
+                  placeholder={
+                    config.grounding.serper_api_key === "__CREATOR_SECRET__"
+                      ? t("modelConfig.configured")
+                      : "serper key"
+                  }
+                  value={
+                    config.grounding.serper_api_key === "__CREATOR_SECRET__"
+                      ? "sk-****"
+                      : config.grounding.serper_api_key
+                  }
                   onChange={(event) =>
                     updateGrounding("serper_api_key", event.target.value)
                   }
@@ -2311,8 +2329,19 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                           {t("modelConfig.qwenSearchApiKey")}
                         </label>
                         <Input.Password
-                          placeholder="sk-search-..."
-                          value={config.grounding.search_api_key}
+                          visibilityToggle={false}
+                          placeholder={
+                            config.grounding.search_api_key ===
+                            "__CREATOR_SECRET__"
+                              ? t("modelConfig.configured")
+                              : "sk-search-..."
+                          }
+                          value={
+                            config.grounding.search_api_key ===
+                            "__CREATOR_SECRET__"
+                              ? "sk-****"
+                              : config.grounding.search_api_key
+                          }
                           onChange={(event) =>
                             updateGrounding(
                               "search_api_key",
@@ -2438,8 +2467,17 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     {t("modelConfig.verifyModelApiKey")}
                   </label>
                   <Input.Password
-                    placeholder="sk-..."
-                    value={config.grounding.api_key}
+                    visibilityToggle={false}
+                    placeholder={
+                      config.grounding.api_key === "__CREATOR_SECRET__"
+                        ? t("modelConfig.configured")
+                        : "sk-..."
+                    }
+                    value={
+                      config.grounding.api_key === "__CREATOR_SECRET__"
+                        ? "sk-****"
+                        : config.grounding.api_key
+                    }
                     onChange={(event) =>
                       updateGrounding("api_key", event.target.value)
                     }
