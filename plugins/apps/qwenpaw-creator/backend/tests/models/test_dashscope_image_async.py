@@ -78,6 +78,53 @@ def test_sync_answer_and_errors_pass_through_without_polling() -> None:
     assert DashScopeImageModel._submitted_task_id(rate_limited) is None
 
 
+# ── async-rejected accounts fall back to the sync transport ───────────────
+
+
+def test_async_rejection_falls_back_to_sync_and_caches(monkeypatch) -> None:
+    """403 'does not support asynchronous calls' → sync resubmit, cached.
+
+    Observed live on 2026-08-06: the account-level API rejected the async
+    header outright, so the transport must retry without it and remember
+    the discovery instead of probing on every image.
+    """
+    monkeypatch.setattr(DashScopeImageModel, "_async_unsupported", False)
+    model = _model()
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.headers))
+        if request.headers.get("x-dashscope-async") == "enable":
+            return httpx.Response(
+                403,
+                text="current user api does not support asynchronous calls",
+            )
+        return httpx.Response(
+            200,
+            json={"output": {"choices": [{"message": {}}]}},
+        )
+
+    async def scenario() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            return await model._request(client, "p", "16:9", [])
+
+    first = asyncio.run(scenario())
+    assert first.status_code == 200
+    assert len(calls) == 2  # async probe + sync resubmit
+    assert DashScopeImageModel._async_unsupported is True
+
+    second = asyncio.run(scenario())
+    assert second.status_code == 200
+    assert len(calls) == 3  # cached: straight to sync, no probe
+
+
+def test_unrelated_403_is_not_mistaken_for_async_rejection() -> None:
+    denied = _response(403, {"message": "invalid api key"})
+    assert DashScopeImageModel._async_rejected(denied) is False
+
+
 # ── poll loop ──────────────────────────────────────────────────────────────
 
 
