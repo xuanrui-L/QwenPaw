@@ -182,6 +182,10 @@ async def _startup() -> None:
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
+        # Initialize AgentTrack for feedback OTel span export
+        from services.feedback import init_agenttrack
+
+        await asyncio.to_thread(init_agenttrack)
     except BaseException as exc:
         trace_event(
             "creator.runtime.startup_failed",

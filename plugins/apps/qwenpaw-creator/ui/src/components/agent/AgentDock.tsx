@@ -68,6 +68,7 @@ import {
 } from "@/lib/creatorMessagePresentation";
 import { deriveAgentLiveStatus } from "@/lib/agentLiveStatus";
 import AgentEventFeed from "./AgentEventFeed";
+import CreatorFeedbackBar from "./CreatorFeedbackBar";
 import DecisionTray from "./DecisionTray";
 import MentionInput, { type MentionInputHandle } from "./MentionInput";
 import { reviewPendingUnits } from "./FileProjectReviewPanel";
@@ -616,6 +617,10 @@ function ConversationMessage({ item }: { item: CreatorMessage }) {
           envelope.action === "complete_current_change") && (
           <ActionDisclosure envelope={envelope} active={streaming} />
         )}
+      {/* Feedback bar for completed assistant messages */}
+      {!streaming && content.length > 0 && !envelope && (
+        <CreatorFeedbackBar message={item} />
+      )}
     </div>
   );
 }

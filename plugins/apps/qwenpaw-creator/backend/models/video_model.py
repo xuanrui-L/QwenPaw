@@ -70,8 +70,14 @@ async def _resolve_reference_media_url(
     or ``asset://`` IDs for ``video_url`` parts, so public HTTP(S) media is
     passed through untouched and local reference videos are rejected with
     an actionable error.
+    dogfooding proxy: public HTTP(S) URLs are passed through untouched;
+    local files are rejected because the proxy does not expose a
+    DashScope-compatible upload policy endpoint.
     """
     model_name = model_config.get_video_model_name()
+    base_url = model_config.get_video_base_url()
+    is_dogfooding = model_config._is_dogfooding_proxy(base_url)
+
     if url.startswith("/generated/"):
         filename = (
             Path(urlparse(url).path).name
@@ -91,6 +97,38 @@ async def _resolve_reference_media_url(
             f"Reference media must be /generated, file://, http://, or https:// before provider-bound transport: {url}",
             model_name=model_name,
         )
+
+    # DogFooding proxy: public URLs pass through; local files are inlined
+    # as Base64 data URLs (DashScope HappyHorse supports data: URIs up to
+    # 20 MB per image; videos still require public HTTP(S) URLs).
+    DOGFOODING_REFERENCE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+    if is_dogfooding:
+        if url.startswith(("http://", "https://")):
+            kind = _reference_media_kind(filename)
+            logger.info(
+                f"DogFooding proxy: passing public reference media through | "
+                f"filename={filename}, kind={kind}",
+            )
+            return url, kind
+        content, filename = await read_reference_media(
+            url,
+            max_bytes=DOGFOODING_REFERENCE_IMAGE_MAX_BYTES,
+        )
+        kind = _reference_media_kind(filename)
+        if kind == "video":
+            raise ModelError(
+                "DogFooding proxy does not support video references via "
+                "Base64; please use a public HTTP(S) URL for video "
+                f"references ({filename})",
+                model_name=model_name,
+            )
+        resolved_url = reference_media_data_url(content, filename)
+        logger.info(
+            f"DogFooding proxy: inlined reference media as Base64 data URL | "
+            f"filename={filename}, bytes={len(content)}",
+        )
+        return resolved_url, kind
 
     try:
         if backend == "seedance2" and url.startswith(("http://", "https://")):

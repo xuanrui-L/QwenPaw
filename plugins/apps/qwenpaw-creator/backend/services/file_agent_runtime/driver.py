@@ -1113,6 +1113,14 @@ class FileCreatorAgentRuntime:
             self.sessions.get_project_session_snapshot,
             project_id,
         )
+        # Set conversation context for feedback tracking
+        from services.feedback import set_conversation_context
+
+        set_conversation_context(
+            project_id=project_id,
+            conversation_id=message.conversation_id,
+            session_id=session.session_id,
+        )
         goal = await self._goal_for_message(session, message)
         snapshot = await asyncio.to_thread(
             self.services.projects.read,
@@ -1473,6 +1481,21 @@ class FileCreatorAgentRuntime:
                 on_tool_call_delta=persist_tool_delta,
             )
             self._assert_epoch(project_id, run_id, epoch)
+
+            # Record LLM turn for feedback tracking
+            from services.feedback import record_llm_turn
+
+            record_llm_turn(
+                user_message_id=request.message_id,
+                assistant_message_id=assistant_message_id,
+                model_name=get_text_model_name(),
+                prompt_messages=list(messages),
+                response_content=turn.content or "",
+                tool_calls_count=len(turn.tool_calls),
+                input_tokens=turn.input_tokens,
+                output_tokens=turn.output_tokens,
+            )
+
             if len(turn.tool_calls) > 1:
                 raise AgentModelError(
                     "Creator Agent returned more than one tool call in one turn",

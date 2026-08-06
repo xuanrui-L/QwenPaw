@@ -403,10 +403,27 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   }, []);
 
   const DOGFOODING_PROTOCOL = "AgentScope Dogfooding";
-  const DOGFOODING_PRESET: ProtocolPreset = {
-    base_url: dogfoodingStatus?.base_url ?? "http://proxy.agentscope.design/v1",
-    freeze_url: true,
-    models: [dogfoodingStatus?.model ?? "Peach-07-17-DogFooding"],
+  const getDogfoodingPreset = (type: ModelType): ProtocolPreset => {
+    const baseUrl =
+      dogfoodingStatus?.base_url ?? "http://proxy.agentscope.design/v1";
+    if (type === "video") {
+      return {
+        base_url: baseUrl,
+        freeze_url: true,
+        models: [
+          "wan3.0-video-DogFooding",
+          "happyhorse-1.1-t2v-DogFooding",
+          "happyhorse-1.1-i2v-DogFooding",
+          "happyhorse-1.1-r2v-DogFooding",
+          "happyhorse-1.0-video-edit-DogFooding",
+        ],
+      };
+    }
+    return {
+      base_url: baseUrl,
+      freeze_url: true,
+      models: [dogfoodingStatus?.model ?? "Peach-07-17-DogFooding"],
+    };
   };
 
   // Resolve the real API key (for connection tests).
@@ -979,7 +996,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   ): ProtocolPreset | null => {
     if (protocol === DOGFOODING_PROTOCOL) {
       if (type === "llm" || type === "vlm" || type === "video") {
-        return DOGFOODING_PRESET;
+        return getDogfoodingPreset(type);
       }
       return null;
     }
@@ -1009,7 +1026,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     protocol: string,
   ): { value: string; label: string }[] => {
     if (protocol === DOGFOODING_PROTOCOL) {
-      const preset = DOGFOODING_PRESET;
+      const preset = getDogfoodingPreset(type);
       return preset.models.map((m) => ({ value: m, label: m }));
     }
     if (type === "llm" || type === "vlm") {

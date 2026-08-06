@@ -1123,6 +1123,14 @@ def _probe_payload(
         if "dashscope" in body.protocol.casefold() or "百炼" in body.protocol:
             return _dashscope_policy_probe(body, headers)
         return _openai_model_probe(body, headers)
+    if body.type == "video" and "dogfooding" in body.protocol.casefold():
+        # DogFooding proxy probe: zero-cost GET /v1/models verifies
+        # endpoint, API key and model binding without submitting a task.
+        return (
+            f"{base}/models",
+            headers,
+            {"_get_probe": True},
+        )
     if "volcano" in body.protocol.casefold() or "火山" in body.protocol:
         # Zero-cost Ark probe: the task-list API is read-only and free,
         # unlike posting a real generation task.

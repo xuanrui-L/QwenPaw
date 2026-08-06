@@ -1028,8 +1028,15 @@ def get_image_generations_url() -> str:
     return _image_provider().generation_url
 
 
+def _is_dogfooding_proxy(base_url: str) -> bool:
+    """Return True when the base URL points at the DogFooding proxy."""
+    return "proxy.agentscope.design" in base_url.lower()
+
+
 def get_video_submit_url() -> str:
     base = get_video_base_url().rstrip("/")
+    if _is_dogfooding_proxy(base):
+        return f"{base}/video/generations/jobs"
     backend = get_video_backend()
     _validate_video_backend_url(backend, base)
     if backend == "seedance2":
@@ -1041,6 +1048,8 @@ def get_video_submit_url() -> str:
 def get_video_task_url(task_id: str) -> str:
     """Return the full URL for checking the configured video generation task."""
     base = get_video_base_url().rstrip("/")
+    if _is_dogfooding_proxy(base):
+        return f"{base}/video/generations/jobs/{task_id}"
     backend = get_video_backend()
     _validate_video_backend_url(backend, base)
     if backend == "seedance2":

@@ -124,6 +124,12 @@ class OssConfig(StrictModel):
     policy_api_key: str = ""
 
 
+class FeedbackConfig(StrictModel):
+    """Feedback recording and OTel span export configuration."""
+
+    enabled: bool = False
+
+
 class ModelConfigData(StrictModel):
     llm: LlmConfig
     vlm: VlmConfig
@@ -140,6 +146,7 @@ class ModelConfigData(StrictModel):
         default_factory=CreationCheckpointConfig,
         alias="creationCheckpoints",
     )
+    feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
 
 
 class ModelConnectionTestRequest(StrictModel):

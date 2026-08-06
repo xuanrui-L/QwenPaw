@@ -45,6 +45,9 @@ export interface ModelConfigData {
   executionAuthorization: {
     mode: "required" | "allow_all";
   };
+  feedback?: {
+    enabled: boolean;
+  };
 }
 
 export interface ModelConnectionTestRequest {

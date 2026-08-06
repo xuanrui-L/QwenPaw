@@ -24,6 +24,7 @@ from .file_session_routes import router as file_sessions_router
 from .file_source_intelligence_routes import (
     router as file_source_intelligence_router,
 )
+from .feedback_routes import router as feedback_router
 from .model_routes import bind_creator_tool_config
 from .model_routes import router as model_router
 from .project_file_routes import router as project_files_router
@@ -49,6 +50,7 @@ router.include_router(file_sessions_router)
 router.include_router(file_execution_router)
 router.include_router(file_media_router)
 router.include_router(model_router)
+router.include_router(feedback_router)
 
 
 @router.get("/health", tags=["infrastructure"])

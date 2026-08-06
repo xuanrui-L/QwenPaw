@@ -111,6 +111,8 @@ class AgentModelTurn:
     thinking: str = ""
     tool_calls: tuple[AgentToolCall, ...] = ()
     provider_message_id: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 _ARGS_PREVIEW_CHARS = 160
@@ -765,6 +767,14 @@ class AgentScopeAgentChatClient:
                         separators=(",", ":"),
                     ),
                 )
+
+        # Extract usage data from response
+        input_tokens = 0
+        output_tokens = 0
+        if hasattr(response, "usage") and response.usage:
+            input_tokens = getattr(response.usage, "input_tokens", 0) or 0
+            output_tokens = getattr(response.usage, "output_tokens", 0) or 0
+
         return AgentModelTurn(
             content=text or None,
             thinking=thinking,
@@ -772,6 +782,8 @@ class AgentScopeAgentChatClient:
             provider_message_id=(
                 str(response.id) if getattr(response, "id", None) else None
             ),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
 
