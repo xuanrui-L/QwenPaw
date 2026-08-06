@@ -1,90 +1,65 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
 # pylint: disable=protected-access,consider-using-from-import
-# pylint: disable=use-implicit-booleaness-not-comparison
-"""External skills: config schema, isolated loading, injection and sandbox."""
+"""Agent skills: loading resilience, catalog rendering and the viewer tool."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
-import time
 from pathlib import Path
 
 import pytest
 
 from models import config
-from schemas.skills import SkillEntry, SkillRequirementKind
+from schemas.skills import SkillEntry
 import services.external_skills as external_skills
 from services.external_skills import (
     SKILL_CONTEXT_MAX_CHARS,
-    SKILL_STREAM_TRUNCATE_BYTES,
     SkillExecutionError,
-    execute_skill_script,
     external_skill_tool_manifests,
     load_skills,
     parse_skill_md,
-    read_skill_file,
     render_external_skills_context,
-    resolve_skill_artifact,
-    write_skill_file,
+    view_skill,
+)
+from services.file_agent_runtime import (
+    AgentModelTurn,
+    AgentRunStatus,
+    AgentToolCall,
+    CallbackAgentChatClient,
+    FileCreatorAgentRuntime,
 )
 from services.file_agent_runtime.prompts import render_creator_system_prompt
+from services.project_files.facade import CreatorFileServices
+from services.project_files.models import Project
 
 pytestmark = pytest.mark.unit
 
+PROJECT_ID = "project-1"
+SESSION_ID = "session-1"
+
 _SKILL_MD = """---
 name: demo-skill
-description: |
-  Use when the user asks for a demo artifact.
+description: Use when the user asks for a demo tutorial.
 ---
 
 # Demo Skill
 
-Run scripts/echo.py.
+Domain knowledge body: structure scenes as motion_clip Elements.
 """
 
 
 def _write_skill(root: Path, *, skill_md: str = _SKILL_MD) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "SKILL.md").write_text(skill_md, encoding="utf-8")
-    scripts = root / "scripts"
-    scripts.mkdir(exist_ok=True)
-    (scripts / "echo.py").write_text(
-        "import os, sys\n"
-        "print('hello', *sys.argv[1:])\n"
-        "print('SECRET=' + os.environ.get('DEMO_SKILL_TOKEN', '<unset>'))\n"
-        "print('LEAK=' + os.environ.get('DEMO_SKILL_PRIVATE', '<unset>'))\n",
-        encoding="utf-8",
-    )
-    (scripts / "sleepy.py").write_text(
-        "import time\ntime.sleep(30)\n",
-        encoding="utf-8",
-    )
-    (scripts / "noisy.py").write_text(
-        "import sys\nsys.stdout.write('x' * 200000)\n",
-        encoding="utf-8",
-    )
-    (scripts / "artifact.py").write_text(
-        "from pathlib import Path\n"
-        "Path('dist').mkdir(exist_ok=True)\n"
-        "Path('dist/output.mp4').write_bytes(b'fake-mp4-bytes')\n"
-        "print('done')\n",
-        encoding="utf-8",
-    )
     return root
 
 
-def _configure(
-    tmp_path: Path,
-    monkeypatch,
-    entries: list[dict],
-) -> Path:
+def _configure(tmp_path: Path, monkeypatch, entries: list[dict]) -> Path:
     data_root = tmp_path / "creator-data"
     (data_root / "config").mkdir(parents=True, exist_ok=True)
-    config_path = data_root / "config" / "skills_config.json"
-    config_path.write_text(
+    (data_root / "config" / "skills_config.json").write_text(
         json.dumps({"skills": entries}, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -102,113 +77,226 @@ def _reset_caches():
     external_skills._clear_load_cache()
 
 
-# ── SkillEntry schema ────────────────────────────────────────────────────────
+# ── Schema and SKILL.md parsing ──────────────────────────────────────────────
 
 
-def test_skill_entry_schema_accepts_full_shape() -> None:
+def test_skill_entry_schema() -> None:
     entry = SkillEntry.model_validate(
-        {
-            "name": "edu-agent",
-            "path": "/tmp/skill",
-            "enabled": True,
-            "description": "math videos",
-            "env": ["DASHSCOPE_API_KEY"],
-            "requirements": [
-                {"kind": "binary", "value": "ffmpeg"},
-                {"kind": "node_min", "value": "18"},
-                {"kind": "env", "value": "DASHSCOPE_API_KEY"},
-            ],
-        },
+        {"name": "edu-agent", "path": "/tmp/skill", "enabled": False},
     )
-    assert entry.requirements[1].kind is SkillRequirementKind.NODE_MIN
-    assert entry.env == ["DASHSCOPE_API_KEY"]
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [
-        {"name": "", "path": "/tmp/x"},
-        {"name": "Bad Name!", "path": "/tmp/x"},
+    assert entry.name == "edu-agent" and entry.enabled is False
+    for raw in (
+        {"name": "Bad Name!", "path": "/tmp/skill"},
         {"name": "ok", "path": ""},
-        {
-            "name": "ok",
-            "path": "/tmp/x",
-            "requirements": [{"kind": "nope", "value": "x"}],
-        },
-        {"name": "ok", "path": "/tmp/x", "extra_field": 1},
-    ],
-)
-def test_skill_entry_schema_rejects_invalid(raw: dict) -> None:
-    with pytest.raises(Exception):
-        SkillEntry.model_validate(raw)
+        {"name": "ok", "path": "/tmp/skill", "extra": True},
+    ):
+        with pytest.raises(Exception):
+            SkillEntry.model_validate(raw)
 
 
-# ── skills_config.json loading ───────────────────────────────────────────────
+def test_parse_skill_md() -> None:
+    parsed = parse_skill_md(_SKILL_MD)
+    assert parsed["name"] == "demo-skill"
+    assert parsed["description"].startswith("Use when")
+    assert parsed["body"].startswith("# Demo Skill")
+    with pytest.raises(ValueError):
+        parse_skill_md("# no front matter\n")
 
 
-def test_load_skills_config_reads_and_caches(tmp_path, monkeypatch) -> None:
-    skill_root = _write_skill(tmp_path / "demo")
-    data_root = _configure(
+# ── Loading resilience ───────────────────────────────────────────────────────
+
+
+def test_broken_entries_stay_isolated(tmp_path, monkeypatch) -> None:
+    """Bad path / bad SKILL.md / invalid entry never raise, only mark."""
+
+    good = _write_skill(tmp_path / "good")
+    bad_md = tmp_path / "bad-md"
+    bad_md.mkdir()
+    (bad_md / "SKILL.md").write_text("no front matter", encoding="utf-8")
+    _configure(
         tmp_path,
         monkeypatch,
-        [{"name": "demo-skill", "path": str(skill_root), "enabled": True}],
+        [
+            {"name": "good", "path": str(good), "enabled": True},
+            {"name": "ghost", "path": str(tmp_path / "nope"), "enabled": True},
+            {"name": "bad-md", "path": str(bad_md), "enabled": True},
+            {"name": "off", "path": str(good), "enabled": False},
+            {"name": "Bad Entry ~~"},
+        ],
     )
-    entries = config.load_skills_config()
-    assert [item.name for item in entries] == ["demo-skill"]
-    # Rewrite the file: fingerprint invalidation reloads the document.
-    (data_root / "config" / "skills_config.json").write_text(
-        json.dumps({"skills": []}),
-        encoding="utf-8",
-    )
-    os.utime(
-        data_root / "config" / "skills_config.json",
-        ns=(1, 1),
-    )
-    assert config.load_skills_config() == []
+    loaded = {skill.entry.name: skill for skill in load_skills()}
+    assert loaded["good"].available
+    assert not loaded["ghost"].available and loaded["ghost"].reason
+    assert not loaded["bad-md"].available
+    assert "off" not in loaded  # disabled entries are skipped entirely
+    invalid = next(s for s in loaded.values() if "invalid" in (s.reason or ""))
+    assert not invalid.available
 
 
-def test_load_skills_config_isolates_broken_documents(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    data_root = _configure(tmp_path, monkeypatch, [])
-    path = data_root / "config" / "skills_config.json"
-    path.write_text("{not json", encoding="utf-8")
-    config._clear_skills_config_cache()
-    assert config.load_skills_config() == []
-    issues = config.load_skills_config_issues()
-    assert len(issues) == 1
-    assert "parse failed" in issues[0]["reason"]
-    path.write_text(
-        json.dumps(
+def test_unmet_requirement_marks_unavailable(tmp_path, monkeypatch) -> None:
+    skill_root = _write_skill(tmp_path / "demo")
+    _configure(
+        tmp_path,
+        monkeypatch,
+        [
             {
-                "skills": [
-                    {"name": "no-path-entry"},
-                    {"name": "ok-entry", "path": str(tmp_path)},
-                    {"name": "ok-entry", "path": str(tmp_path)},
+                "name": "demo-skill",
+                "path": str(skill_root),
+                "enabled": True,
+                "requirements": [
+                    {"kind": "binary", "value": "definitely-not-a-binary"},
                 ],
             },
-        ),
-        encoding="utf-8",
+        ],
     )
-    config._clear_skills_config_cache()
-    assert [item.name for item in config.load_skills_config()] == ["ok-entry"]
-    issues = config.load_skills_config_issues()
-    assert [item["name"] for item in issues] == ["no-path-entry", "ok-entry"]
-    assert "schema validation failed" in issues[0]["reason"]
-    assert "duplicate skill name" in issues[1]["reason"]
+    (skill,) = load_skills()
+    assert not skill.available
+    assert "definitely-not-a-binary" in (skill.reason or "")
 
 
-def test_invalid_config_entries_surface_as_unavailable_skills(
+# ── Builtin (code-vendored) skills ───────────────────────────────────────────
+
+_REAL_BUILTIN_ROOT = (
+    Path(external_skills.__file__).resolve().parent.parent / "skills"
+)
+
+
+def test_builtin_skill_loads_and_config_can_shadow(
     tmp_path,
     monkeypatch,
 ) -> None:
-    data_root = _configure(tmp_path, monkeypatch, [])
-    (data_root / "config" / "skills_config.json").write_text(
+    _configure(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(
+        external_skills,
+        "_BUILTIN_SKILLS_ROOT",
+        _REAL_BUILTIN_ROOT,
+    )
+    external_skills._clear_load_cache()
+    loaded = {skill.entry.name: skill for skill in load_skills()}
+    skill = loaded["edu-math-tutorial"]
+    assert skill.available
+    # Domain knowledge for the native pipeline: scenes are motion_clip
+    # Elements and narration scripts stay re-synthesizable.
+    assert "motion_clip" in skill.skill_md
+    assert "creation.script" in skill.skill_md
+    # A same-name config entry shadows the builtin, even when disabled.
+    _configure(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "name": "edu-math-tutorial",
+                "path": str(tmp_path / "missing"),
+                "enabled": False,
+            },
+        ],
+    )
+    names = [item.entry.name for item in load_skills()]
+    assert "edu-math-tutorial" not in names
+
+
+# ── Catalog, viewer and manifests ────────────────────────────────────────────
+
+
+def test_catalog_viewer_and_manifests(tmp_path, monkeypatch) -> None:
+    skill_root = _write_skill(tmp_path / "demo")
+    _configure(
+        tmp_path,
+        monkeypatch,
+        [
+            {"name": "demo-skill", "path": str(skill_root), "enabled": True},
+            {"name": "ghost", "path": str(tmp_path / "nope"), "enabled": True},
+        ],
+    )
+    context = render_external_skills_context()
+    assert context.startswith("<agent-skills>")
+    assert "<name>demo-skill</name>" in context
+    assert "ghost" not in context  # unavailable skills stay hidden
+    assert "# Demo Skill" not in context  # the body is never inlined
+    prompt = render_creator_system_prompt(project_id=PROJECT_ID)
+    assert "<agent-skills>" in prompt
+    result = view_skill(skill_name="demo-skill")
+    assert result["ok"] is True and result["truncated"] is False
+    assert result["content"] == (skill_root / "SKILL.md").read_text(
+        encoding="utf-8",
+    )
+    with pytest.raises(SkillExecutionError):
+        view_skill(skill_name="ghost")
+    manifests = external_skill_tool_manifests(load_skills())
+    assert [m["function"]["name"] for m in manifests] == ["view_skill"]
+    schema = manifests[0]["function"]["parameters"]
+    assert schema["properties"]["skill"]["enum"] == ["demo-skill"]
+    assert "projectId" not in schema["required"]
+    assert not external_skill_tool_manifests([])
+
+
+def test_catalog_respects_total_budget(tmp_path, monkeypatch) -> None:
+    entries = []
+    for index in range(40):
+        skill_md = _SKILL_MD.replace(
+            "Use when the user asks for a demo tutorial.",
+            f"Use when scenario {index} needs " + ("blah " * 120),
+        ).replace("name: demo-skill", f"name: demo-{index}")
+        root = _write_skill(tmp_path / f"skill-{index}", skill_md=skill_md)
+        entries.append(
+            {"name": f"demo-{index}", "path": str(root), "enabled": True},
+        )
+    _configure(tmp_path, monkeypatch, entries)
+    context = render_external_skills_context()
+    assert 0 < len(context) <= SKILL_CONTEXT_MAX_CHARS
+
+
+# ── Driver loop: progressive disclosure end to end ───────────────────────────
+
+
+def _create_project(tmp_path, *, initial_goal: str):
+    services = CreatorFileServices.create(tmp_path.resolve())
+
+    def initialize(staged_root) -> None:
+        services.sessions.initialize_staged_project(
+            staged_root,
+            PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id="conversation-1",
+            initial_goal=initial_goal,
+            goal_id="goal-1",
+            initial_message_id="message-initial",
+            initial_client_message_id="client-initial",
+        )
+
+    snapshot = services.projects.create(
+        Project.new(project_id=PROJECT_ID, name="Initial"),
+        initialize_staged_project=initialize,
+    )
+    services.poller.note_commit(snapshot)
+    return services
+
+
+async def _wait_for(predicate, *, timeout: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition was not met in time")
+        await asyncio.sleep(0.02)
+
+
+def test_driver_progressive_disclosure(tmp_path, monkeypatch) -> None:
+    """The prompt carries only the catalog; view_skill returns the body
+    verbatim without requesting any execution authorization."""
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+    skill_root = _write_skill(tmp_path / "demo-src")
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "skills_config.json").write_text(
         json.dumps(
             {
                 "skills": [
-                    {"name": "malformed entry ~~ not valid"},
+                    {
+                        "name": "demo-skill",
+                        "path": str(skill_root),
+                        "enabled": True,
+                    },
+                    {"name": "broken entry ~~ not valid"},
                 ],
             },
         ),
@@ -216,647 +304,61 @@ def test_invalid_config_entries_surface_as_unavailable_skills(
     )
     config._clear_skills_config_cache()
     external_skills._clear_load_cache()
-    loaded = load_skills()
-    assert len(loaded) == 1
-    assert loaded[0].status == "unavailable"
-    assert "invalid configuration entry" in (loaded[0].reason or "")
-    # Invalid placeholders never inject context nor expose tools.
-    assert render_external_skills_context(loaded) == ""
-    assert external_skill_tool_manifests(loaded) == []
+    turn = 0
 
-
-def test_load_skills_config_missing_file_or_root(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    monkeypatch.delenv("CREATOR_DATA_ROOT", raising=False)
-    monkeypatch.delenv("CREATOR_SKILLS_CONFIG_PATH", raising=False)
-    config._clear_skills_config_cache()
-    assert config.load_skills_config() == []
-    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path / "empty-root"))
-    config._clear_skills_config_cache()
-    assert config.load_skills_config() == []
-
-
-# ── SKILL.md parsing ─────────────────────────────────────────────────────────
-
-
-def test_parse_skill_md_extracts_front_matter_and_body() -> None:
-    parsed = parse_skill_md(_SKILL_MD)
-    assert parsed["name"] == "demo-skill"
-    assert "demo artifact" in parsed["description"]
-    assert parsed["body"].startswith("# Demo Skill")
-
-
-@pytest.mark.parametrize(
-    "text",
-    ["no front matter at all", "---\n- just\n- a list\n---\nbody"],
-)
-def test_parse_skill_md_rejects_malformed(text: str) -> None:
-    with pytest.raises(ValueError):
-        parse_skill_md(text)
-
-
-# ── Isolated loading ─────────────────────────────────────────────────────────
-
-
-def test_load_skills_marks_missing_path_unavailable(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [
-            {
-                "name": "ghost",
-                "path": str(tmp_path / "does-not-exist"),
-                "enabled": True,
-            },
-        ],
-    )
-    loaded = load_skills()
-    assert len(loaded) == 1
-    assert loaded[0].status == "unavailable"
-    assert "not a directory" in (loaded[0].reason or "")
-
-
-def test_load_skills_marks_bad_skill_md_unavailable(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    broken = tmp_path / "broken"
-    broken.mkdir()
-    (broken / "SKILL.md").write_text("no front matter", encoding="utf-8")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [{"name": "broken", "path": str(broken), "enabled": True}],
-    )
-    loaded = load_skills()
-    assert loaded[0].status == "unavailable"
-    assert "front matter" in (loaded[0].reason or "")
-
-
-def test_load_skills_marks_missing_requirements_unavailable(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    skill_root = _write_skill(tmp_path / "demo")
-    monkeypatch.delenv("DEMO_SKILL_MISSING_ENV", raising=False)
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [
-            {
-                "name": "demo-skill",
-                "path": str(skill_root),
-                "enabled": True,
-                "requirements": [
-                    {"kind": "binary", "value": "surely-not-a-binary-xyz"},
-                ],
-            },
-            {
-                "name": "demo-skill-env",
-                "path": str(skill_root),
-                "enabled": True,
-                "requirements": [
-                    {"kind": "env", "value": "DEMO_SKILL_MISSING_ENV"},
-                ],
-            },
-        ],
-    )
-    loaded = load_skills()
-    assert [item.status for item in loaded] == ["unavailable", "unavailable"]
-    assert "surely-not-a-binary-xyz" in (loaded[0].reason or "")
-    assert "DEMO_SKILL_MISSING_ENV" in (loaded[1].reason or "")
-    # Unmet requirements must tell the operator how to fix them because
-    # npx/uvx never install system binaries or env variables on their own.
-    assert "install it manually" in (loaded[0].reason or "")
-    assert "export it" in (loaded[1].reason or "")
-
-
-def test_load_skills_skips_disabled_entries(tmp_path, monkeypatch) -> None:
-    skill_root = _write_skill(tmp_path / "demo")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [{"name": "demo-skill", "path": str(skill_root), "enabled": False}],
-    )
-    assert load_skills() == []
-    assert render_external_skills_context() == ""
-
-
-# ── Context injection ────────────────────────────────────────────────────────
-
-
-def test_context_injects_available_and_hides_unavailable(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    skill_root = _write_skill(tmp_path / "demo")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [
-            {"name": "demo-skill", "path": str(skill_root), "enabled": True},
-            {
-                "name": "ghost",
-                "path": str(tmp_path / "missing"),
-                "enabled": True,
-            },
-        ],
-    )
-    context = render_external_skills_context()
-    # AgentScope-style progressive disclosure: the catalog only lists
-    # names/descriptions and points the agent at the viewer tool.
-    assert context.startswith("<agent-skills>")
-    assert context.rstrip().endswith("</agent-skills>")
-    assert "<name>demo-skill</name>" in context
-    assert "view_skill" in context
-    assert "ghost" not in context
-    assert len(context) <= SKILL_CONTEXT_MAX_CHARS
-
-
-def test_view_skill_returns_full_markdown(tmp_path, monkeypatch) -> None:
-    skill_root = _write_skill(tmp_path / "demo")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [{"name": "demo-skill", "path": str(skill_root), "enabled": True}],
-    )
-    result = external_skills.view_skill(skill_name="demo-skill")
-    assert result["ok"] is True
-    assert result["skill"] == "demo-skill"
-    assert result["truncated"] is False
-    assert result["content"] == (skill_root / "SKILL.md").read_text(
-        encoding="utf-8",
-    )
-    with pytest.raises(SkillExecutionError):
-        external_skills.view_skill(skill_name="ghost")
-
-
-def test_context_truncates_over_budget(tmp_path, monkeypatch) -> None:
-    entries = []
-    for index in range(40):
-        skill_md = _SKILL_MD.replace(
-            "Use when the user asks for a demo artifact.",
-            f"Use when scenario {index}: " + ("blah " * 120),
-        )
-        root = _write_skill(tmp_path / f"demo-{index}", skill_md=skill_md)
-        entries.append(
-            {"name": f"demo-{index}", "path": str(root), "enabled": True},
-        )
-    _configure(tmp_path, monkeypatch, entries)
-    context = render_external_skills_context()
-    assert len(context) <= SKILL_CONTEXT_MAX_CHARS
-    assert "demo-0" in context
-    assert "demo-39" not in context
-
-
-def test_creator_prompt_renders_with_and_without_skills(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    skill_root = _write_skill(tmp_path / "demo")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [{"name": "demo-skill", "path": str(skill_root), "enabled": True}],
-    )
-    rendered = render_creator_system_prompt(project_id="project-x")
-    assert "demo-skill" in rendered
-    # A broken configuration must not break session prompt assembly.
-    _configure(tmp_path, monkeypatch, [])
-    rendered = render_creator_system_prompt(project_id="project-x")
-    assert "demo-skill" not in rendered
-    assert rendered.startswith("# 定位")
-
-
-def test_tool_manifests_only_when_available(tmp_path, monkeypatch) -> None:
-    skill_root = _write_skill(tmp_path / "demo")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [
-            {"name": "demo-skill", "path": str(skill_root), "enabled": True},
-            {
-                "name": "ghost",
-                "path": str(tmp_path / "missing"),
-                "enabled": True,
-            },
-        ],
-    )
-    manifests = external_skill_tool_manifests(load_skills())
-    names = [item["function"]["name"] for item in manifests]
-    assert names == [
-        "view_skill",
-        "read_skill_file",
-        "write_skill_file",
-        "run_skill_script",
-        "import_skill_artifacts",
-    ]
-    enum = manifests[0]["function"]["parameters"]["properties"]["skill"][
-        "enum"
-    ]
-    assert enum == ["demo-skill"]
-    # The runtime injects the authoritative Project identity, so the
-    # model is never required to echo projectId back on skill tools.
-    for item in manifests:
-        assert "projectId" not in item["function"]["parameters"]["required"]
-    assert external_skill_tool_manifests([]) == []
-
-
-# ── Sandbox execution ────────────────────────────────────────────────────────
-
-
-_PROJECT = "project-test-1"
-
-
-def _demo_config(tmp_path, monkeypatch, **entry_extra) -> Path:
-    skill_root = _write_skill(tmp_path / "demo")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [
-            {
-                "name": "demo-skill",
-                "path": str(skill_root),
-                "enabled": True,
-                **entry_extra,
-            },
-        ],
-    )
-    return skill_root
-
-
-def test_execute_skill_script_runs_in_sandbox_copy(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    skill_root = _demo_config(tmp_path, monkeypatch)
-    result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            script="scripts/echo.py",
-            args=["a1"],
-        ),
-    )
-    assert result["ok"] is True
-    assert result["exitCode"] == 0
-    assert "hello a1" in result["stdout"]
-    workdir = Path(result["workdir"])
-    assert workdir != skill_root
-    assert workdir.name == "demo-skill"
-    # The working copy is scoped per Project.
-    assert workdir.parent.name == _PROJECT
-    assert (workdir / "SKILL.md").is_file()
-
-
-def test_sandbox_is_isolated_per_project(tmp_path, monkeypatch) -> None:
-    _demo_config(tmp_path, monkeypatch)
-
-    async def scenario():
-        first = await execute_skill_script(
-            project_id="project-a",
-            skill_name="demo-skill",
-            script="scripts/artifact.py",
-        )
-        second = await execute_skill_script(
-            project_id="project-b",
-            skill_name="demo-skill",
-            script="scripts/echo.py",
-        )
-        return first, second
-
-    first, second = asyncio.run(scenario())
-    assert Path(first["workdir"]) != Path(second["workdir"])
-    # project-a produced an artifact; project-b's sandbox has none.
-    assert (Path(first["workdir"]) / "dist" / "output.mp4").is_file()
-    assert not (Path(second["workdir"]) / "dist").exists()
-    with pytest.raises(SkillExecutionError):
-        resolve_skill_artifact(
-            project_id="project-b",
-            skill_name="demo-skill",
-            path="dist/output.mp4",
-        )
-
-
-def test_sandbox_copy_carries_upstream_attribution(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    # Upstream layout: LICENSE/NOTICE live above the skill directory.
-    upstream = tmp_path / "upstream"
-    skill_root = _write_skill(upstream / "src" / "capabilities" / "demo")
-    apache_text = "Apache License\nVersion 2.0, January 2004\n"
-    (upstream / "LICENSE").write_text(apache_text, encoding="utf-8")
-    (upstream / "NOTICE").write_text("Qwen-MM-Plugins", encoding="utf-8")
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [{"name": "demo-skill", "path": str(skill_root), "enabled": True}],
-    )
-    result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            script="scripts/echo.py",
-        ),
-    )
-    workdir = Path(result["workdir"])
-    assert (workdir / "UPSTREAM_LICENSE").read_text() == apache_text
-    assert (workdir / "UPSTREAM_NOTICE").read_text() == "Qwen-MM-Plugins"
-    provenance = (workdir / external_skills.PROVENANCE_FILENAME).read_text()
-    assert "Apache-2.0" in provenance
-    assert str(skill_root) in provenance
-
-
-def test_provenance_never_mislabels_or_crosses_repo_boundary(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """The generic skill path must produce honest license statements."""
-
-    # An MIT-licensed skill must be labeled MIT, never Apache.
-    mit_repo = tmp_path / "mit-repo"
-    mit_root = _write_skill(mit_repo / "skill")
-    (mit_repo / "LICENSE").write_text(
-        "MIT License\n\nPermission is hereby granted, free of charge...",
-        encoding="utf-8",
-    )
-    # A skill inside its own repository (marked by .git) must not pick
-    # up an ancestor LICENSE from an unrelated outer project, and with
-    # no license found the provenance must not claim any license.
-    outer = tmp_path / "outer"
-    outer.mkdir()
-    (outer / "LICENSE").write_text(
-        "Apache License\nVersion 2.0, January 2004\n",
-        encoding="utf-8",
-    )
-    inner_repo = outer / "inner-repo"
-    bare_root = _write_skill(inner_repo / "skill")
-    (inner_repo / ".git").mkdir()
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [
-            {"name": "mit-skill", "path": str(mit_root), "enabled": True},
-            {"name": "bare-skill", "path": str(bare_root), "enabled": True},
-        ],
-    )
-    mit_result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="mit-skill",
-            script="scripts/echo.py",
-        ),
-    )
-    mit_dir = Path(mit_result["workdir"])
-    mit_provenance = (
-        mit_dir / external_skills.PROVENANCE_FILENAME
-    ).read_text()
-    assert "- License: MIT" in mit_provenance
-    assert "Apache" not in mit_provenance
-    bare_result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="bare-skill",
-            script="scripts/echo.py",
-        ),
-    )
-    bare_dir = Path(bare_result["workdir"])
-    assert not (bare_dir / "UPSTREAM_LICENSE").exists()
-    bare_provenance = (
-        bare_dir / external_skills.PROVENANCE_FILENAME
-    ).read_text()
-    assert "no LICENSE file was found" in bare_provenance
-    assert "Apache" not in bare_provenance
-
-
-def test_execute_skill_script_env_allowlist(tmp_path, monkeypatch) -> None:
-    _demo_config(tmp_path, monkeypatch, env=["DEMO_SKILL_TOKEN"])
-    monkeypatch.setenv("DEMO_SKILL_TOKEN", "tok-123")
-    monkeypatch.setenv("DEMO_SKILL_PRIVATE", "must-not-leak")
-    result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            script="scripts/echo.py",
-        ),
-    )
-    assert "SECRET=tok-123" in result["stdout"]
-    assert "LEAK=<unset>" in result["stdout"]
-
-
-def test_execute_skill_script_rejects_path_escape(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _demo_config(tmp_path, monkeypatch)
-    for candidate in ("../outside.py", "/etc/passwd", "scripts/../../x.py"):
-        with pytest.raises(SkillExecutionError):
-            asyncio.run(
-                execute_skill_script(
-                    project_id=_PROJECT,
-                    skill_name="demo-skill",
-                    script=candidate,
+    async def callback(messages, tools):
+        nonlocal turn
+        names = {item["function"]["name"] for item in tools}
+        assert "view_skill" in names
+        assert "<name>demo-skill</name>" in messages[0]["content"]
+        # Progressive disclosure: the SKILL.md body never rides the prompt,
+        # and the broken config entry is invisible to the model.
+        assert "# Demo Skill" not in messages[0]["content"]
+        assert "broken entry" not in messages[0]["content"]
+        turn += 1
+        if turn == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="view-1",
+                        name="view_skill",
+                        arguments={"skill": "demo-skill"},
+                    ),
                 ),
             )
-    with pytest.raises(SkillExecutionError, match="invalid project id"):
-        asyncio.run(
-            execute_skill_script(
-                project_id="../escape",
-                skill_name="demo-skill",
-                script="scripts/echo.py",
+        return AgentModelTurn(content="已阅读 skill 说明。")
+
+    async def scenario():
+        services = _create_project(tmp_path, initial_goal="查看 demo skill")
+        driver = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(callback),
+            poll_interval_seconds=0.01,
+        )
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: (
+                services.sessions.get_project_session(
+                    PROJECT_ID,
+                ).last_consumed_message_seq
+                == 1
             ),
         )
-
-
-def test_execute_skill_script_timeout_kills_process(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _demo_config(tmp_path, monkeypatch)
-    result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            script="scripts/sleepy.py",
-            timeout_seconds=1,
-        ),
-    )
-    assert result["ok"] is False
-    assert result["timedOut"] is True
-    assert "timed out" in result["error"]
-
-
-def test_execute_skill_script_cancellation_reaps_child(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """A cancelled Agent run must not leave the skill process behind."""
-
-    skill_root = _demo_config(tmp_path, monkeypatch)
-    (skill_root / "scripts" / "pidfile.py").write_text(
-        "import os, pathlib, time\n"
-        "pathlib.Path('child.pid').write_text(str(os.getpid()))\n"
-        "time.sleep(60)\n",
-        encoding="utf-8",
-    )
-
-    async def scenario() -> int:
-        task = asyncio.ensure_future(
-            execute_skill_script(
-                project_id=_PROJECT,
-                skill_name="demo-skill",
-                script="scripts/pidfile.py",
-            ),
+        await driver.wait_until_idle(PROJECT_ID)
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        runs = driver.runs.list(PROJECT_ID)
+        authorizations = driver.executions.list_execution_authorizations(
+            PROJECT_ID,
         )
-        pid_file = (
-            Path(os.environ["CREATOR_DATA_ROOT"])
-            / "skills-runtime"
-            / _PROJECT
-            / "demo-skill"
-            / "child.pid"
-        )
-        for _ in range(200):
-            if pid_file.is_file() and pid_file.read_text().strip():
-                break
-            await asyncio.sleep(0.05)
-        child_pid = int(pid_file.read_text().strip())
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        return child_pid
+        await driver.stop()
+        return messages, runs, authorizations
 
-    child_pid = asyncio.run(scenario())
-    for _ in range(50):
-        try:
-            os.kill(child_pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.1)
-    else:
-        pytest.fail(f"skill child {child_pid} survived cancellation")
-
-
-def test_execute_skill_script_bounds_output_while_reading(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Multi-megabyte output is drained without being kept in memory."""
-
-    skill_root = _demo_config(tmp_path, monkeypatch)
-    (skill_root / "scripts" / "flood.py").write_text(
-        "import sys\n"
-        "chunk = 'y' * 65536\n"
-        "for _ in range(160):\n"  # ~10MB in total
-        "    sys.stdout.write(chunk)\n",
-        encoding="utf-8",
-    )
-    result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            script="scripts/flood.py",
-        ),
-    )
-    assert result["ok"] is True
-    assert result["stdoutTruncated"] is True
-    assert len(result["stdout"].encode("utf-8")) <= SKILL_STREAM_TRUNCATE_BYTES
-
-
-def test_execute_skill_script_truncates_output(tmp_path, monkeypatch) -> None:
-    _demo_config(tmp_path, monkeypatch)
-    result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            script="scripts/noisy.py",
-        ),
-    )
-    assert result["stdoutTruncated"] is True
-    assert len(result["stdout"].encode("utf-8")) <= SKILL_STREAM_TRUNCATE_BYTES
-
-
-def test_execute_skill_script_refuses_unavailable_skill(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _configure(
-        tmp_path,
-        monkeypatch,
-        [
-            {
-                "name": "ghost",
-                "path": str(tmp_path / "missing"),
-                "enabled": True,
-            },
-        ],
-    )
-    with pytest.raises(SkillExecutionError, match="unavailable"):
-        asyncio.run(
-            execute_skill_script(
-                project_id=_PROJECT,
-                skill_name="ghost",
-                script="scripts/x.py",
-            ),
-        )
-    with pytest.raises(SkillExecutionError, match="not configured"):
-        asyncio.run(
-            execute_skill_script(
-                project_id=_PROJECT,
-                skill_name="nope",
-                script="scripts/x.py",
-            ),
-        )
-
-
-def test_skill_file_read_write_and_artifact_resolution(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _demo_config(tmp_path, monkeypatch)
-    read = read_skill_file(
-        project_id=_PROJECT,
-        skill_name="demo-skill",
-        path="SKILL.md",
-    )
-    assert read["ok"] is True
-    assert "Demo Skill" in read["content"]
-    written = write_skill_file(
-        project_id=_PROJECT,
-        skill_name="demo-skill",
-        path="notes/PLAN.md",
-        content="# plan",
-    )
-    assert written["ok"] is True
-    with pytest.raises(SkillExecutionError):
-        write_skill_file(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            path="../escape.md",
-            content="x",
-        )
-    result = asyncio.run(
-        execute_skill_script(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            script="scripts/artifact.py",
-        ),
-    )
-    assert "dist/output.mp4" in result["changedFiles"]
-    artifact = resolve_skill_artifact(
-        project_id=_PROJECT,
-        skill_name="demo-skill",
-        path="dist/output.mp4",
-    )
-    assert artifact.read_bytes() == b"fake-mp4-bytes"
-    with pytest.raises(SkillExecutionError):
-        resolve_skill_artifact(
-            project_id=_PROJECT,
-            skill_name="demo-skill",
-            path="dist/nope.mp4",
-        )
+    messages, runs, authorizations = asyncio.run(scenario())
+    assert runs[0].status is AgentRunStatus.SUCCEEDED
+    tool_results = [item for item in messages if item.role == "tool"]
+    payload = json.loads(tool_results[0].content_parts[0].text or "{}")
+    assert payload["ok"] is True
+    assert payload["content"] == _SKILL_MD
+    # Viewing domain knowledge is read-only: no authorization records.
+    assert authorizations == []
