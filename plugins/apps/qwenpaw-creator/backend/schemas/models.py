@@ -68,6 +68,8 @@ class S2vConfig(ModelConfigItem):
     protocol: str = "DashScope（百炼）"
     detect_model_name: str = ""
     reuse_llm_key: bool = True
+
+
 class EmbeddingConfig(ModelConfigItem):
     """Long-source memory embedding backend (DashScope native)."""
 

@@ -31,9 +31,9 @@ from urllib.parse import urlparse
 import httpx
 
 from models import config
-from utils.exceptions import ModelError
 from models.media_transport import upload_local_file_to_dashscope_temp
 from models.tts_capabilities import TtsModelCapability, require_capability
+from utils.exceptions import ModelError
 from utils.logger import setup_logger
 from utils.paths import local_path_from_file_url
 from utils.remote_download import download_remote_file

@@ -336,7 +336,9 @@ def _migrate_v4_drop_overlay_kind(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[4] = _migrate_v4_drop_overlay_kind
 
 
-def _timeline_elements(document: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+def _timeline_elements(
+    document: Mapping[str, Any],
+) -> Iterator[dict[str, Any]]:
     timelines = _dict_field(_dict_field(document, "timelines"), "items")
     for timeline in timelines.values():
         elements = _dict_field(timeline, "elements_by_id")
@@ -357,7 +359,10 @@ def _selected_slot_version(
     if not isinstance(slot_ref, dict):
         return None
     slot_id = slot_ref.get("slot_id")
-    slots = _dict_field(_dict_field(document, "assets"), "artifact_slots_by_id")
+    slots = _dict_field(
+        _dict_field(document, "assets"),
+        "artifact_slots_by_id",
+    )
     slot = slots.get(slot_id)
     if not isinstance(slot, dict):
         return None

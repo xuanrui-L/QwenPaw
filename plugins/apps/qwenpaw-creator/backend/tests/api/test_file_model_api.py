@@ -277,6 +277,8 @@ def test_real_api_key_supports_every_speech_section(
     assert tts.status_code == 200
     assert tts.json() == {"api_key": "sk-tts-own"}
     assert bogus.status_code == 422
+
+
 def test_permission_mode_patch_is_atomic(tmp_path, monkeypatch) -> None:
     """One PATCH persists all three ladder fields in a single transaction.
 

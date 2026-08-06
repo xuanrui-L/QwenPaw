@@ -1244,6 +1244,8 @@ def is_s2v_configured() -> bool:
     """
 
     return bool(get_s2v_api_key())
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.environ.get(name, "").strip()
     if not raw:

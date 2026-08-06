@@ -483,10 +483,11 @@ export default function R2VWorkbenchPage() {
     const modeCreation = creation;
     const imageOptions = [
       ...Object.values(project.assets.artifact_versions_by_id)
-        .filter((version) =>
-          project.assets.files_by_id[version.file_id]?.media_type.startsWith(
-            "image/",
-          ),
+        .filter(
+          (version) =>
+            project.assets.files_by_id[version.file_id]?.media_type.startsWith(
+              "image/",
+            ),
         )
         .map((version) => ({
           value: version.version_id,
@@ -510,10 +511,11 @@ export default function R2VWorkbenchPage() {
           url: getAssetVersionMediaUrl(version.version_id),
         })),
       ...Object.values(project.assets.artifact_versions_by_id)
-        .filter((version) =>
-          project.assets.files_by_id[version.file_id]?.media_type.startsWith(
-            "audio/",
-          ),
+        .filter(
+          (version) =>
+            project.assets.files_by_id[version.file_id]?.media_type.startsWith(
+              "audio/",
+            ),
         )
         .map((version) => ({
           value: version.version_id,
@@ -695,9 +697,7 @@ export default function R2VWorkbenchPage() {
                     field="video_prompt"
                     path={elementPointer("creation", "video_prompt")}
                     disabled={patching}
-                    onChange={(value) =>
-                      updateModeField("video_prompt", value)
-                    }
+                    onChange={(value) => updateModeField("video_prompt", value)}
                   />
                 </Panel>
               </>

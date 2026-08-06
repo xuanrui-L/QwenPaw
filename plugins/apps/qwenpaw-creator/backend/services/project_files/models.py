@@ -501,6 +501,7 @@ class VisualEntity(StrictModel):
         if self.voice is not None and self.kind != "character":
             raise ValueError("only character entities can bind a voice")
         return self
+
     # The identity master: new variants reference this variant's selected
     # artifact first so the character does not drift across costumes and
     # stages.

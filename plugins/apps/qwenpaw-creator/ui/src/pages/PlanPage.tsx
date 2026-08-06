@@ -562,8 +562,7 @@ export default function PlanPage() {
             speechRate: draft.creation.speech_rate ?? 1.0,
             budgetSeconds: Number(
               (
-                draft.span.duration_tick /
-                (timeline?.ticks_per_second || 1000)
+                draft.span.duration_tick / (timeline?.ticks_per_second || 1000)
               ).toFixed(1),
             ),
           }

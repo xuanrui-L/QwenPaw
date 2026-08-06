@@ -419,9 +419,7 @@ def test_s2v_dispatch_consumes_tts_audio_and_character_image(
     element = finished.timelines.items["timeline:main"].elements_by_id[
         MODE_ELEMENT_ID
     ]
-    assert (
-        element.outputs["main"].slot_id == f"element:{MODE_ELEMENT_ID}:main"
-    )
+    assert element.outputs["main"].slot_id == f"element:{MODE_ELEMENT_ID}:main"
 
 
 def test_s2v_dispatch_requires_audio_ref(tmp_path, monkeypatch) -> None:

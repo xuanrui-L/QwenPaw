@@ -153,7 +153,10 @@ describe("ModelConfigModal model presets", () => {
       const label = screen
         .getAllByText("模型名称")
         .map((node) => node.parentElement?.querySelector("input"))
-        .find((input): input is HTMLInputElement => input instanceof HTMLInputElement && input.value === "wan2.7-r2v");
+        .find(
+          (input): input is HTMLInputElement =>
+            input instanceof HTMLInputElement && input.value === "wan2.7-r2v",
+        );
       expect(label).toBeTruthy();
       return label as HTMLInputElement;
     });

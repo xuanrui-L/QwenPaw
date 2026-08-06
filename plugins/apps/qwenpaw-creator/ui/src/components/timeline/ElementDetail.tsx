@@ -765,8 +765,7 @@ export default function ElementDetail({
               // provider: length follows the script, so the editable script
               // shows its time budget and overruns are flagged here.
               const overBudget =
-                plausibleDuration != null &&
-                plausibleDuration > spanSec + 0.05;
+                plausibleDuration != null && plausibleDuration > spanSec + 0.05;
               const scriptText = creation.script || textPreview;
               // Only the CosyVoice family exposes a numeric speed knob;
               // qwen-tts length is controlled through the script alone.
