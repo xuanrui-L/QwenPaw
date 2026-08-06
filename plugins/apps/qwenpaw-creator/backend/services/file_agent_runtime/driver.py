@@ -111,6 +111,7 @@ from services.external_skills import (
     IMPORT_SKILL_ARTIFACTS_TOOL_NAME,
     READ_SKILL_FILE_TOOL_NAME,
     RUN_SKILL_SCRIPT_TOOL_NAME,
+    VIEW_SKILL_TOOL_NAME,
     WRITE_SKILL_FILE_TOOL_NAME,
     LoadedSkill,
     SkillExecutionError,
@@ -120,6 +121,7 @@ from services.external_skills import (
     read_skill_file as read_external_skill_file,
     resolve_skill_artifact,
     render_external_skills_context,
+    view_skill as view_external_skill,
     write_skill_file as write_external_skill_file,
 )
 from services.observability import trace_event, traced_async
@@ -2857,6 +2859,11 @@ class FileCreatorAgentRuntime:
         skill_name = str(arguments.get("skill") or "").strip()
         if not skill_name:
             raise FileAgentRuntimeError(f"{name} requires skill")
+        if name == VIEW_SKILL_TOOL_NAME:
+            return await asyncio.to_thread(
+                view_external_skill,
+                skill_name=skill_name,
+            )
         if name == READ_SKILL_FILE_TOOL_NAME:
             return await asyncio.to_thread(
                 read_external_skill_file,

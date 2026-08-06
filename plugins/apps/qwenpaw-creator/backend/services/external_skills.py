@@ -51,6 +51,7 @@ SKILL_NEW_FILES_LIMIT = 100
 EXTERNAL_SKILL_MAX_MODEL_TURNS = 96
 
 RUN_SKILL_SCRIPT_TOOL_NAME = "run_skill_script"
+VIEW_SKILL_TOOL_NAME = "view_skill"
 READ_SKILL_FILE_TOOL_NAME = "read_skill_file"
 WRITE_SKILL_FILE_TOOL_NAME = "write_skill_file"
 IMPORT_SKILL_ARTIFACTS_TOOL_NAME = "import_skill_artifacts"
@@ -58,6 +59,7 @@ IMPORT_SKILL_ARTIFACTS_TOOL_NAME = "import_skill_artifacts"
 EXTERNAL_SKILL_TOOL_NAMES = frozenset(
     {
         RUN_SKILL_SCRIPT_TOOL_NAME,
+        VIEW_SKILL_TOOL_NAME,
         READ_SKILL_FILE_TOOL_NAME,
         WRITE_SKILL_FILE_TOOL_NAME,
         IMPORT_SKILL_ARTIFACTS_TOOL_NAME,
@@ -296,22 +298,27 @@ def _skill_context_block(skill: LoadedSkill) -> str:
         skill.entry.description or parsed["description"] or "（无描述）"
     ).strip()
     return (
-        f"### 外置 Skill: {skill.entry.name}\n"
-        f"- 触发时机: {description}\n"
-        f"- 调用方式: 先用 `{READ_SKILL_FILE_TOOL_NAME}` 读取该 skill 的 "
-        "SKILL.md 全文并严格按其流程执行；需要向沙箱写入你撰写的文件时用 "
-        f"`{WRITE_SKILL_FILE_TOOL_NAME}`；执行 skill 内脚本用 "
-        f"`{RUN_SKILL_SCRIPT_TOOL_NAME}`（script 为 skill 根目录内相对路径）；"
-        f"产物媒体文件用 `{IMPORT_SKILL_ARTIFACTS_TOOL_NAME}` 导入 Project 资产。"
+        "<skill>\n"
+        f"<name>{skill.entry.name}</name>\n"
+        f"<description>{description}</description>\n"
+        "</skill>"
     )
 
 
+# Mirrors the AgentScope skill-viewer contract: the prompt only carries a
+# name/description catalog and the agent must pull the full SKILL.md via
+# the viewer tool before following a skill.
 _CONTEXT_HEADER = (
-    "# 外置 Skill\n"
-    "以下手动配置的外置 skill 已可用。当用户请求命中某个 skill 的触发时机时，"
-    "优先使用该 skill 完成任务：所有 skill 文件读写与脚本执行都发生在其独立"
-    "沙箱工作副本内，与 Project 工作区互不影响；最终产物必须用 "
-    f"`{IMPORT_SKILL_ARTIFACTS_TOOL_NAME}` 导入后才能在 Project 中引用。"
+    "<agent-skills>\n"
+    "以下是当前可用的外置 Agent Skill。当用户请求命中某个 skill 的适用场景时，"
+    "优先使用该 skill 完成任务。\n"
+    "**IMPORTANT**: Skill 不是工具，不能直接调用。要使用某个 skill，必须先用 "
+    f"`{VIEW_SKILL_TOOL_NAME}` 工具读取它的完整说明（SKILL.md），然后严格按说明"
+    "使用其提供的脚本与资源。skill 的文件读写与脚本执行都发生在其独立沙箱"
+    "工作副本内，与 Project 工作区互不影响；最终产物必须用 "
+    f"`{IMPORT_SKILL_ARTIFACTS_TOOL_NAME}` 导入后才能在 Project 中引用。\n"
+    "\n"
+    "# Available Skills:"
 )
 
 
@@ -333,12 +340,14 @@ def render_external_skills_context(
         if not available:
             return ""
         parts = [_CONTEXT_HEADER]
+        footer = "\n</agent-skills>"
+        budget = SKILL_CONTEXT_MAX_CHARS - len(footer)
         used = len(_CONTEXT_HEADER)
         truncated = False
         for skill in available:
             block = "\n\n" + _skill_context_block(skill)
-            if used + len(block) > SKILL_CONTEXT_MAX_CHARS:
-                remaining = SKILL_CONTEXT_MAX_CHARS - used
+            if used + len(block) > budget:
+                remaining = budget - used
                 if remaining > 0:
                     parts.append(block[:remaining])
                 truncated = True
@@ -361,6 +370,7 @@ def render_external_skills_context(
                 "external skills context truncated at %s chars",
                 SKILL_CONTEXT_MAX_CHARS,
             )
+        parts.append(footer)
         return "".join(parts)
     except Exception:
         logger.exception(
@@ -758,6 +768,30 @@ async def execute_skill_script(
     return result
 
 
+def view_skill(*, skill_name: str) -> dict[str, Any]:
+    """Return the full SKILL.md of one available skill (viewer tool).
+
+    Mirrors the AgentScope built-in skill viewer: the prompt catalog only
+    lists names and descriptions, and the agent pulls the authoritative
+    instructions on demand through this read-only tool.
+    """
+
+    skill = _require_available(skill_name)
+    markdown = skill.skill_md
+    truncated = len(markdown.encode("utf-8")) > SKILL_FILE_READ_MAX_BYTES
+    if truncated:
+        markdown = markdown.encode("utf-8")[:SKILL_FILE_READ_MAX_BYTES].decode(
+            "utf-8",
+            errors="replace",
+        )
+    return {
+        "ok": True,
+        "skill": skill.entry.name,
+        "content": markdown,
+        "truncated": truncated,
+    }
+
+
 def read_skill_file(
     *,
     project_id: str,
@@ -877,6 +911,21 @@ def external_skill_tool_manifests(
         "description": "已配置且可用的外置 skill 名称。",
     }
     return [
+        {
+            "type": "function",
+            "function": {
+                "name": VIEW_SKILL_TOOL_NAME,
+                "description": (
+                    "读取一个外置 skill 的完整说明（SKILL.md 全文）。使用任何 "
+                    "skill 前必须先调用本工具获取其流程，再严格按说明执行。"
+                    "只读，不修改任何内容。"
+                ),
+                "parameters": _flat_schema(
+                    {"skill": skill_property},
+                    ["skill"],
+                ),
+            },
+        },
         {
             "type": "function",
             "function": {

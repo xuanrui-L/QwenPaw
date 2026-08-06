@@ -198,6 +198,80 @@ def test_broken_skill_config_never_breaks_the_agent_run(
     assert runs[0].status is AgentRunStatus.SUCCEEDED
 
 
+def test_view_skill_returns_markdown_without_authorization(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The viewer is the progressive-disclosure entry: read-only, no gate."""
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+    skill_root = _write_demo_skill(tmp_path / "demo-src")
+    _write_skills_config(
+        tmp_path,
+        [{"name": "demo-skill", "path": str(skill_root), "enabled": True}],
+    )
+    turn = 0
+
+    async def callback(messages, tools):
+        nonlocal turn
+        names = {item["function"]["name"] for item in tools}
+        assert "view_skill" in names
+        # Progressive disclosure: the system prompt carries the catalog
+        # entry, never the SKILL.md body.
+        assert "<name>demo-skill</name>" in messages[0]["content"]
+        assert "scripts/echo.py" not in messages[0]["content"]
+        turn += 1
+        if turn == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="view-1",
+                        name="view_skill",
+                        arguments={"skill": "demo-skill"},
+                    ),
+                ),
+            )
+        return AgentModelTurn(content="已阅读 skill 说明。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="查看 demo skill",
+        )
+        driver = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(callback),
+            poll_interval_seconds=0.01,
+        )
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: (
+                services.sessions.get_project_session(
+                    PROJECT_ID,
+                ).last_consumed_message_seq
+                == 1
+            ),
+        )
+        await driver.wait_until_idle(PROJECT_ID)
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        runs = driver.runs.list(PROJECT_ID)
+        authorizations = driver.executions.list_execution_authorizations(
+            PROJECT_ID,
+        )
+        await driver.stop()
+        return messages, runs, authorizations
+
+    messages, runs, authorizations = asyncio.run(scenario())
+    assert runs[0].status is AgentRunStatus.SUCCEEDED
+    tool_results = [item for item in messages if item.role == "tool"]
+    payload = json.loads(tool_results[0].content_parts[0].text or "{}")
+    assert payload["ok"] is True
+    assert payload["content"] == _SKILL_MD
+    # Viewing a skill is read-only and never requests authorization.
+    assert authorizations == []
+
+
 def test_run_skill_script_requires_authorization_then_executes(
     tmp_path,
     monkeypatch,

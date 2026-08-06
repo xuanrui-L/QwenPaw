@@ -368,10 +368,32 @@ def test_context_injects_available_and_hides_unavailable(
         ],
     )
     context = render_external_skills_context()
-    assert "demo-skill" in context
-    assert "run_skill_script" in context
+    # AgentScope-style progressive disclosure: the catalog only lists
+    # names/descriptions and points the agent at the viewer tool.
+    assert context.startswith("<agent-skills>")
+    assert context.rstrip().endswith("</agent-skills>")
+    assert "<name>demo-skill</name>" in context
+    assert "view_skill" in context
     assert "ghost" not in context
     assert len(context) <= SKILL_CONTEXT_MAX_CHARS
+
+
+def test_view_skill_returns_full_markdown(tmp_path, monkeypatch) -> None:
+    skill_root = _write_skill(tmp_path / "demo")
+    _configure(
+        tmp_path,
+        monkeypatch,
+        [{"name": "demo-skill", "path": str(skill_root), "enabled": True}],
+    )
+    result = external_skills.view_skill(skill_name="demo-skill")
+    assert result["ok"] is True
+    assert result["skill"] == "demo-skill"
+    assert result["truncated"] is False
+    assert result["content"] == (skill_root / "SKILL.md").read_text(
+        encoding="utf-8",
+    )
+    with pytest.raises(SkillExecutionError):
+        external_skills.view_skill(skill_name="ghost")
 
 
 def test_context_truncates_over_budget(tmp_path, monkeypatch) -> None:
@@ -428,6 +450,7 @@ def test_tool_manifests_only_when_available(tmp_path, monkeypatch) -> None:
     manifests = external_skill_tool_manifests(load_skills())
     names = [item["function"]["name"] for item in manifests]
     assert names == [
+        "view_skill",
         "read_skill_file",
         "write_skill_file",
         "run_skill_script",
