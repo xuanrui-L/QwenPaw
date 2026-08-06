@@ -93,6 +93,7 @@ const configuredModelConfig: ModelConfigData = {
     protocol: "DashScope（百炼）",
     custom_protocol: "",
     translate_model: "",
+    reuse_llm_key: true,
   },
   video: {
     enabled: true,
@@ -101,6 +102,7 @@ const configuredModelConfig: ModelConfigData = {
     base_url: "https://example.test/video",
     protocol: "DashScope（百炼）",
     custom_protocol: "",
+    reuse_llm_key: true,
   },
   oss: {
     enabled: false,

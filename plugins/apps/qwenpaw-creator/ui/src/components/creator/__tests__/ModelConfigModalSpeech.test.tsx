@@ -90,6 +90,7 @@ const baseConfig: ModelConfigData = {
     protocol: "OpenAI 协议",
     custom_protocol: "",
     translate_model: "",
+    reuse_llm_key: true,
   },
   video: {
     enabled: false,
@@ -98,6 +99,7 @@ const baseConfig: ModelConfigData = {
     base_url: "",
     protocol: "DashScope（百炼）",
     custom_protocol: "",
+    reuse_llm_key: true,
   },
   oss: {
     enabled: false,

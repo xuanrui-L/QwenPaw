@@ -275,6 +275,7 @@ describe("new Creator API contract", () => {
         protocol: "OpenAI 协议",
         custom_protocol: "",
         translate_model: "",
+        reuse_llm_key: true,
       },
       video: {
         enabled: false,
@@ -283,6 +284,7 @@ describe("new Creator API contract", () => {
         base_url: "",
         protocol: "Volcano Engine（火山引擎）",
         custom_protocol: "",
+        reuse_llm_key: true,
       },
       oss: {
         enabled: false,

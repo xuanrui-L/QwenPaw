@@ -38,6 +38,7 @@ from models.image.base import (
     BaseImageModel,
     _configured_int,
     _configured_value,
+    _image_api_key,
     download_remote_image,
     format_http_error_detail,
 )
@@ -104,8 +105,9 @@ class DashScopeImageModel(BaseImageModel):
                     os.environ.get("IMAGE_MODEL_NAME", DEFAULT_MODEL_NAME),
                 ),
             ),
-            api_key=_configured_value(
-                "api_key",
+            # Explicit key first; else reuse the DashScope text-model key
+            # when image.reuse_llm_key (default on) allows it.
+            api_key=_image_api_key(
                 "DASHSCOPE_IMAGE_API_KEY",
                 os.environ.get(
                     "DASHSCOPE_IMAGE_API_KEY",

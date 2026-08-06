@@ -55,9 +55,11 @@ export interface ModelConfigData {
     // Optional in-image text translation model (mode=translate), DashScope
     // provider only; empty means the backend default qwen-mt-image.
     translate_model: string;
+    // Reuse the DashScope text-model credential by default (like tts/s2v).
+    reuse_llm_key: boolean;
   };
   embedding: ModelConfigItem & { reuse_vlm_key: boolean };
-  video: ModelConfigItem;
+  video: ModelConfigItem & { reuse_llm_key: boolean };
   oss: OssConfig;
   executionAuthorization: {
     mode: "required" | "allow_all";

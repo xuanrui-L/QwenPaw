@@ -57,6 +57,7 @@ const emptyConfig = {
     base_url: "",
     protocol: "Volcano Engine（火山引擎）",
     custom_protocol: "",
+    reuse_llm_key: true,
   },
   oss: {
     enabled: false,

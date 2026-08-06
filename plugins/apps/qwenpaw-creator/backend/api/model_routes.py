@@ -29,6 +29,7 @@ from schemas.models import (
     ExecutionAuthorizationConfig,
     GroundingConfig,
     ImageConfig,
+    VideoConfig,
     LlmConfig,
     ModelConfigData,
     ModelConfigItem,
@@ -251,7 +252,7 @@ def _defaults() -> ModelConfigData:
         ),
         image=ImageConfig(
             enabled=False,
-            protocol="OpenAI 协议",
+            protocol="DashScope（百炼）",
         ),
         embedding=EmbeddingConfig(
             enabled=False,
@@ -260,9 +261,9 @@ def _defaults() -> ModelConfigData:
             protocol="DashScope（百炼）",
             reuse_vlm_key=True,
         ),
-        video=ModelConfigItem(
+        video=VideoConfig(
             enabled=False,
-            protocol="Volcano Engine（火山引擎）",
+            protocol="DashScope（百炼）",
         ),
         oss=OssConfig(),
         execution_authorization=ExecutionAuthorizationConfig(mode="required"),

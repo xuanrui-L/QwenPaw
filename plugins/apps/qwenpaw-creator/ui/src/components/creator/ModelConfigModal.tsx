@@ -97,6 +97,27 @@ const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
 
+// Default endpoints for LLM/VLM protocols when the host provider registry
+// is unavailable (standalone deployments). Values are copied verbatim from
+// src/qwenpaw/providers/provider_manager.py — keep in sync with the host.
+const LLM_PROTOCOL_FALLBACK_BASE_URLS: Record<string, string> = {
+  "DashScope（百炼）": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  "Aliyun Token Plan":
+    "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  "Aliyun Coding Plan": "https://coding.dashscope.aliyuncs.com/v1",
+  DeepSeek: "https://api.deepseek.com",
+  "OpenAI 协议": "https://api.openai.com/v1",
+  "Anthropic Claude": "https://api.anthropic.com",
+  "Google Gemini": "https://generativelanguage.googleapis.com",
+  MiniMax: "https://api.minimaxi.com/anthropic",
+  "Kimi（月之暗面）": "https://api.moonshot.cn/v1",
+  "智谱 AI": "https://open.bigmodel.cn/api/paas/v4",
+  "SiliconFlow（硅基流动）": "https://api.siliconflow.cn/v1",
+  "ModelScope（魔搭）": "https://api-inference.modelscope.cn/v1",
+  "Volcano Engine（火山引擎）": "https://ark.cn-beijing.volces.com/api/v3",
+  "小米 MiMo": "https://token-plan-cn.xiaomimimo.com/v1",
+};
+
 // Presets seed a default endpoint when the user picks a protocol/model;
 // the URL always stays editable for self-hosted or proxied deployments.
 interface ProtocolPreset {
@@ -165,7 +186,14 @@ const EMBEDDING_PRESETS: Record<string, ProtocolPreset> = {
 const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
+    // qwen-image-3.0 is the current Bailian flagship, so it leads the
+    // catalogue and becomes the default pick on protocol selection.
     models: [
+      "qwen-image-3.0-pro",
+      "qwen-image-2.0-pro",
+      "qwen-image-2.0",
+      "qwen-image-max",
+      "qwen-image-plus",
       "wan2.7-image-pro",
       "wan2.7-image",
       "wan2.6-t2i",
@@ -175,11 +203,6 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
       "wan2.2-t2i-flash",
       "wan2.1-t2i-plus",
       "wan2.1-t2i-turbo",
-      "qwen-image-3.0-pro",
-      "qwen-image-2.0-pro",
-      "qwen-image-2.0",
-      "qwen-image-max",
-      "qwen-image-plus",
       "z-image-turbo",
     ],
   },
@@ -192,12 +215,10 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
 const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    models: [
-      "wan2.7-r2v",
-      "wan2.6-r2v-flash",
-      "wan2.6-r2v",
-      "happyhorse-1.1-r2v",
-    ],
+    // Family base names: the backend derives the per-mode sibling
+    // (wan2.7 → wan2.7-t2v/-i2v/-r2v) at submission, so no mode suffix
+    // is configured here.
+    models: ["wan2.7", "happyhorse-1.1"],
   },
   "Volcano Engine（火山引擎）": {
     base_url: "https://ark.cn-beijing.volces.com",
@@ -311,17 +332,19 @@ const DEFAULT_CONFIG: ModelConfigData = {
     model_name: "",
     api_key: "",
     base_url: "",
-    protocol: "OpenAI 协议",
+    protocol: "DashScope（百炼）",
     custom_protocol: "",
     translate_model: "",
+    reuse_llm_key: true,
   },
   video: {
     enabled: false,
     model_name: "",
     api_key: "",
     base_url: "",
-    protocol: "Volcano Engine（火山引擎）",
+    protocol: "DashScope（百炼）",
     custom_protocol: "",
+    reuse_llm_key: true,
   },
   oss: {
     enabled: false,
@@ -420,9 +443,11 @@ const PANE_OF_TYPE: Record<TabType, SettingsPane> = {
 // Mirror of backend models/video_capabilities.py (VIDEO_MODE_MATRIX and
 // video_backend_key): a configured family model derives its per-mode
 // siblings at submission time, so the card can show which capabilities the
-// chosen family covers. Keep in sync with the backend matrix.
+// chosen family covers. Keep in sync with the backend matrix. Note:
+// happyhorse-1.1 has no -video-edit sibling on Bailian (verified via the
+// zero-cost sync probe), so video_edit is not advertised for the family.
 const VIDEO_MODE_MATRIX: Record<string, string[]> = {
-  happyhorse: ["r2v", "t2v", "i2v", "video_edit"],
+  happyhorse: ["r2v", "t2v", "i2v"],
   wan: ["r2v", "t2v", "i2v"],
   seedance2: ["r2v"],
 };
@@ -845,6 +870,25 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         if (!preset) return;
         if (!item.base_url) item.base_url = preset.base_url;
         if (!item.model_name && preset.models.length === 1)
+          item.model_name = preset.models[0];
+      });
+      // LLM/VLM: seed the protocol's registry default endpoint so a fresh
+      // section shows where it will connect instead of an empty field.
+      (["llm", "vlm"] as const).forEach((type) => {
+        const item = merged[type];
+        if (!item.base_url) {
+          item.base_url = LLM_PROTOCOL_FALLBACK_BASE_URLS[item.protocol] ?? "";
+        }
+      });
+      // Image/video: seed the protocol preset's endpoint and lead model
+      // (qwen-image-3.0-pro / the wan2.7 family) so a fresh section starts
+      // from the current Bailian defaults instead of empty fields.
+      (["image", "video"] as const).forEach((type) => {
+        const item = merged[type] as ModelConfigItem;
+        const preset = PRESETS_BY_TYPE[type]?.[item.protocol];
+        if (!preset) return;
+        if (!item.base_url) item.base_url = preset.base_url;
+        if (!item.model_name && preset.models.length > 0)
           item.model_name = preset.models[0];
       });
       const initialTested: Record<string, boolean> = {};
@@ -1395,7 +1439,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       const providerId = PROTOCOL_TO_PROVIDER_ID[protocol];
       if (!providerId) return null;
       const provider = hostProviders.find((p) => p.id === providerId);
-      if (!provider) return null;
+      if (!provider) {
+        // Standalone deployments have no host registry; fall back to the
+        // registry-verbatim default endpoint so picking a protocol still
+        // seeds a usable Base URL.
+        const fallback = LLM_PROTOCOL_FALLBACK_BASE_URLS[protocol];
+        return fallback ? { base_url: fallback, models: [] } : null;
+      }
       return {
         base_url: provider.base_url,
         models: [
@@ -1504,6 +1554,25 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     const modelOptions = getModelOptions(type, item.protocol);
     const hasPresetModels = modelOptions.length > 0;
     const hasBaseUrlOptions = (preset?.base_url_options?.length ?? 0) > 0;
+    // DashScope sections ride the text-model credential by default; while
+    // the persisted reuse flag is on, the key field says so instead of
+    // asking for a second copy of the same secret.
+    const reuseFlag =
+      type === "asr"
+        ? config.asr.reuse_llm_key
+        : type === "tts"
+        ? config.tts.reuse_llm_key
+        : type === "s2v"
+        ? config.s2v.reuse_llm_key
+        : type === "image"
+        ? config.image.reuse_llm_key
+        : type === "video"
+        ? config.video.reuse_llm_key
+        : type === "embedding"
+        ? config.embedding.reuse_vlm_key
+        : null;
+    const reuseSourceLabel = type === "embedding" ? "VLM" : "LLM";
+    const reusingKey = reuseFlag === true;
 
     return (
       <>
@@ -1514,6 +1583,26 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             gap: "0 16px",
           }}
         >
+          <div>
+            <label className="field-label">
+              {t("modelConfig.apiProtocol")}
+            </label>
+            <Select
+              value={item.protocol}
+              onChange={(v) => handleProtocolChange(type, v)}
+              options={protocolsFor(type).map((p) => ({ value: p, label: p }))}
+            />
+            {item.protocol === "自定义" && (
+              <Input
+                className="mt-2"
+                placeholder={t("modelConfig.inputProtocolName")}
+                value={item.custom_protocol}
+                onChange={(e) =>
+                  updateItem(type, "custom_protocol", e.target.value)
+                }
+              />
+            )}
+          </div>
           <div>
             <label className="field-label">{t("modelConfig.modelName")}</label>
             {hasPresetModels ? (
@@ -1546,17 +1635,30 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           </div>
           <div>
             <label className="field-label">API Key</label>
-            <Input.Password
-              placeholder={
-                item.api_key === "__CREATOR_SECRET__"
-                  ? t("modelConfig.configured")
-                  : "sk-..."
-              }
-              value={
-                item.api_key === "__CREATOR_SECRET__" ? "sk-****" : item.api_key
-              }
-              onChange={(e) => updateItem(type, "api_key", e.target.value)}
-            />
+            {reusingKey ? (
+              <Input
+                disabled
+                value=""
+                placeholder={t("modelConfig.reusingKeyPlaceholder", {
+                  model: reuseSourceLabel,
+                })}
+              />
+            ) : (
+              <Input.Password
+                visibilityToggle={false}
+                placeholder={
+                  item.api_key === "__CREATOR_SECRET__"
+                    ? t("modelConfig.configured")
+                    : "sk-..."
+                }
+                value={
+                  item.api_key === "__CREATOR_SECRET__"
+                    ? "sk-****"
+                    : item.api_key
+                }
+                onChange={(e) => updateItem(type, "api_key", e.target.value)}
+              />
+            )}
           </div>
           <div>
             <label className="field-label">Base URL</label>
@@ -1578,27 +1680,25 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               />
             )}
           </div>
-          <div>
-            <label className="field-label">
-              {t("modelConfig.apiProtocol")}
-            </label>
-            <Select
-              value={item.protocol}
-              onChange={(v) => handleProtocolChange(type, v)}
-              options={protocolsFor(type).map((p) => ({ value: p, label: p }))}
-            />
-            {item.protocol === "自定义" && (
-              <Input
-                className="mt-2"
-                placeholder={t("modelConfig.inputProtocolName")}
-                value={item.custom_protocol}
-                onChange={(e) =>
-                  updateItem(type, "custom_protocol", e.target.value)
-                }
-              />
-            )}
-          </div>
         </div>
+        {(type === "image" || type === "video") &&
+          (item.protocol.toLowerCase().includes("dashscope") ||
+            item.protocol.includes("百炼")) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+              <Checkbox
+                checked={
+                  type === "image"
+                    ? config.image.reuse_llm_key
+                    : config.video.reuse_llm_key
+                }
+                onChange={(e) =>
+                  updateItem(type, "reuse_llm_key", e.target.checked)
+                }
+              >
+                {t("modelConfig.reuseLlmApiKey")}
+              </Checkbox>
+            </div>
+          )}
         {type === "asr" && (
           <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
             <Checkbox
@@ -1708,41 +1808,6 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             </p>
           </div>
         )}
-        {type === "image" &&
-          (item.protocol.toLowerCase().includes("dashscope") ||
-            item.protocol.includes("百炼")) && (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr 1fr",
-                gap: "0 16px",
-              }}
-            >
-              <div>
-                <label className="field-label">图内文字翻译模型（可选）</label>
-                <Input
-                  placeholder="qwen-mt-image"
-                  value={config.image.translate_model}
-                  onChange={(e) =>
-                    updateItem("image", "translate_model", e.target.value)
-                  }
-                />
-              </div>
-              <p
-                style={{
-                  gridColumn: "1 / -1",
-                  margin: "2px 0 0",
-                  fontSize: 11,
-                  lineHeight: 1.6,
-                  color: "var(--color-text-tertiary)",
-                }}
-              >
-                image_generation 的 translate
-                模式用此模型翻译图内文字并保留排版； 留空时使用默认的
-                qwen-mt-image，与图像模型共用同一个 API Key。
-              </p>
-            </div>
-          )}
         {type === "embedding" && (
           <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
             <Checkbox
@@ -2798,7 +2863,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       open={open}
       onCancel={handleCancel}
       footer={null}
-      width={800}
+      width={1000}
       centered
       closable={false}
       styles={{ body: { padding: 0 } }}
@@ -3022,6 +3087,58 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     const meta = CARD_META.find((item) => item.type === type);
                     return meta ? renderCard(meta) : null;
                   })}
+                  {activePane === "perception" && (
+                    <div
+                      className="glass-card"
+                      style={{ padding: "14px 18px" }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 600,
+                          color: "var(--color-text-primary)",
+                        }}
+                      >
+                        {t("modelConfig.translateCardTitle")}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "var(--color-text-tertiary)",
+                          marginTop: 2,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        {t("modelConfig.translateCardBrief")}
+                      </div>
+                      <div style={{ marginTop: 10, maxWidth: 380 }}>
+                        <label className="field-label">
+                          {t("modelConfig.translateModelLabel")}
+                        </label>
+                        <Input
+                          placeholder="qwen-mt-image"
+                          value={config.image.translate_model}
+                          onChange={(event) =>
+                            updateItem(
+                              "image",
+                              "translate_model",
+                              event.target.value,
+                            )
+                          }
+                        />
+                      </div>
+                      <p
+                        style={{
+                          margin: "8px 0 0",
+                          fontSize: 11,
+                          lineHeight: 1.6,
+                          color: "var(--color-text-tertiary)",
+                        }}
+                      >
+                        {t("modelConfig.translateCardNote")}
+                      </p>
+                    </div>
+                  )}
                 </>
               );
             })()}

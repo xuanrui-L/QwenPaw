@@ -1348,12 +1348,32 @@ def get_image_translate_model_name() -> str:
 
 
 def get_video_api_key() -> str:
-    return _configured_value(
+    """Video credential: explicit value first, else optionally reuse LLM.
+
+    Bailian video generation runs on the same DashScope credential as the
+    text model, so when no video-specific key is configured and the
+    persisted ``video.reuse_llm_key`` flag (default on) allows it, the text
+    key is reused — mirroring the tts/s2v sections.
+    """
+
+    configured = _configured_value(
         CREATOR_VIDEO_CONFIG_TOOL,
         "api_key",
         "VIDEO_API_KEY",
         VIDEO_API_KEY,
     )
+    if configured:
+        return configured
+    # Reuse only applies to the DashScope (wan/happyhorse) backend: a
+    # Volcano Engine deployment has its own credential namespace.
+    if get_video_backend() != "wan":
+        return ""
+    section = _get_user_config().get("video", {})
+    reuse = not isinstance(section, dict) or section.get(
+        "reuse_llm_key",
+        True,
+    )
+    return get_text_api_key() if reuse else ""
 
 
 def get_video_base_url() -> str:

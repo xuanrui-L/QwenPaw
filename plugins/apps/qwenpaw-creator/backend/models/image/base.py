@@ -170,6 +170,25 @@ def _configured_int(
     )
 
 
+def _image_api_key(env_name: str, default: str = "") -> str:
+    """Image credential: explicit value first, else optionally reuse LLM.
+
+    Bailian image generation runs on the same DashScope credential as the
+    text model, so when no image-specific key is configured and the
+    persisted ``image.reuse_llm_key`` flag (default on) allows it, the text
+    key is reused — mirroring the tts/s2v sections.
+    """
+    configured = _configured_value("api_key", env_name, default)
+    if configured:
+        return configured
+    section = model_config._get_user_config().get("image", {})
+    reuse = not isinstance(section, dict) or section.get(
+        "reuse_llm_key",
+        True,
+    )
+    return model_config.get_text_api_key() if reuse else ""
+
+
 def _validated_mode(
     mode: str,
     *,

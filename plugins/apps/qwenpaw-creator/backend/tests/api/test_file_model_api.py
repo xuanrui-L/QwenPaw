@@ -374,6 +374,46 @@ def test_self_review_patch_merges_tiers(tmp_path, monkeypatch) -> None:
     assert unchanged.self_review.sync_enabled is True
 
 
+def test_video_api_key_reuses_llm_for_dashscope(tmp_path, monkeypatch) -> None:
+    """Without a video key the DashScope (wan/happyhorse) backend reuses the
+    text credential by default; opting out or running on Volcano never
+    borrows the Bailian key."""
+
+    from models import config as model_config
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    config_path = (tmp_path / "config" / "model_config.json").resolve()
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    for env in ("VIDEO_API_KEY", "TEXT_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    payload = _config()
+    payload["video"] = {
+        "enabled": True,
+        "model_name": "wan2.7",
+        "base_url": "https://dashscope.aliyuncs.com/api/v1",
+        "protocol": "DashScope（百炼）",
+    }
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    model_config._clear_user_config_cache()
+    assert model_config.get_video_api_key() == "secret"
+
+    payload["video"]["reuse_llm_key"] = False
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    model_config._clear_user_config_cache()
+    assert model_config.get_video_api_key() == ""
+
+    payload["video"] = {
+        "enabled": True,
+        "model_name": "doubao-seedance-2.0-pro",
+        "base_url": "https://ark.cn-beijing.volces.com",
+        "protocol": "Volcano Engine（火山引擎）",
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    model_config._clear_user_config_cache()
+    assert model_config.get_video_api_key() == ""
+
+
 def test_load_migrates_legacy_grounding_model_to_search_and_validation(
     tmp_path,
     monkeypatch,

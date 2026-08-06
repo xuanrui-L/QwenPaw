@@ -55,6 +55,15 @@ class ImageConfig(ModelConfigItem):
     """
 
     translate_model: str = ""
+    # Bailian image generation runs on the same DashScope credential as the
+    # text model; reuse it by default like tts/s2v instead of asking twice.
+    reuse_llm_key: bool = True
+
+
+class VideoConfig(ModelConfigItem):
+    """Video generation configuration (family model, per-mode derivation)."""
+
+    reuse_llm_key: bool = True
 
 
 class S2vConfig(ModelConfigItem):
@@ -206,7 +215,7 @@ class ModelConfigData(StrictModel):
     s2v: S2vConfig = Field(default_factory=S2vConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     image: ImageConfig
-    video: ModelConfigItem
+    video: VideoConfig
     oss: OssConfig = Field(default_factory=OssConfig)
     execution_authorization: ExecutionAuthorizationConfig = Field(
         default_factory=ExecutionAuthorizationConfig,

@@ -71,6 +71,7 @@ const modelConfig = {
     base_url: "https://example.test/video",
     protocol: "DashScope（百炼）",
     custom_protocol: "",
+    reuse_llm_key: true,
   },
   oss: {
     enabled: false,
@@ -305,7 +306,7 @@ describe("origin/main visible shell fidelity", () => {
     fireEvent.focus(keyInput);
     expect(keyInput).toHaveValue("saved-secret");
     expect(container.ownerDocument.querySelector(".ant-modal")).toHaveStyle({
-      width: "800px",
+      width: "1000px",
     });
   });
 });
