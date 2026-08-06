@@ -1089,6 +1089,7 @@
     "modelGuideS2vProtocols": "DashScope（百炼）：wan2.2-s2v，提交前免费人像检测（wan2.2-s2v-detect）",
     "modelGuideEmbeddingTitle": "Embedding",
     "modelGuideEmbeddingProtocols": "DashScope（百炼）：qwen3-vl-embedding，用于素材检索与长源记忆",
+    "modelGuideGoConfigure": "去配置 →",
     "modelGuideWhatModels": "什么场景需要配什么模型？",
     "modelGuideProviders": "当前支持的提供商 / 协议",
     "modelGuideSetupDesc": "在「模型配置」中填写 Base URL、API Key 与模型名称，并通过「测试连通性」后启用；VLM 可直接复用支持多模态的 LLM 配置。"

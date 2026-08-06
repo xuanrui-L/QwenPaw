@@ -3794,7 +3794,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   boxShadow: "var(--shadow-xs)",
                 }}
               >
-                <ModelSetupGuide />
+                <ModelSetupGuide
+                  onNavigateToModel={(type) => jumpToModel(type as TabType)}
+                />
               </div>
             </>
           )}

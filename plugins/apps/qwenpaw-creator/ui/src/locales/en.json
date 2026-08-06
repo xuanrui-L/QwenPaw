@@ -1089,6 +1089,7 @@
     "modelGuideS2vProtocols": "DashScope: wan2.2-s2v with the free face-detect gate (wan2.2-s2v-detect)",
     "modelGuideEmbeddingTitle": "Embedding",
     "modelGuideEmbeddingProtocols": "DashScope: qwen3-vl-embedding for source retrieval and long-source memory",
+    "modelGuideGoConfigure": "Configure →",
     "modelGuideWhatModels": "What models for what scenarios?",
     "modelGuideProviders": "Currently supported providers / protocols",
     "modelGuideSetupDesc": "Fill in Base URL, API Key and Model Name in 'Model Configuration', enable after passing 'Test Connection'; VLM can directly reuse multimodal-capable LLM configuration."
