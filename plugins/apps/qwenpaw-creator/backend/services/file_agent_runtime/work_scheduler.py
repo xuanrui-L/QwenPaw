@@ -34,6 +34,7 @@ from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
     ensure_media_call_budget,
 )
+from services.media_files.transient_errors import is_transient_error_message
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
     WorkNode,
@@ -66,8 +67,13 @@ _TRANSIENT_ERROR_MARKERS = (
 
 
 def _is_transient_dispatch_error(exc: Exception) -> bool:
+    # Honor the shared media-side classifier too (it covers markers like
+    # "bad file descriptor" and "service unavailable"), so a failure the
+    # media layer would retry is never locked as deterministic here.
     text = str(exc).lower()
-    return any(marker in text for marker in _TRANSIENT_ERROR_MARKERS)
+    return any(
+        marker in text for marker in _TRANSIENT_ERROR_MARKERS
+    ) or is_transient_error_message(text)
 
 
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}

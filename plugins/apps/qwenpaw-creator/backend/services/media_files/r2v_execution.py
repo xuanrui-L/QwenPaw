@@ -1943,6 +1943,17 @@ class FileR2VExecutionService:
             # Process shutdown intentionally preserves durable active state.
             raise
         except Exception as error:
+            # The durable Task record keeps the failure, but without this
+            # line the server log showed a RUNNING -> FAILED transition with
+            # no ERROR anywhere — diagnosing field failures required digging
+            # through runtime task.json files.
+            logger.error(
+                "r2v supervisor failed: project=%s task=%s error=%s",
+                project_id,
+                task_id,
+                error,
+                exc_info=True,
+            )
             try:
                 task = await asyncio.to_thread(
                     self.executions.get_task,
@@ -1956,7 +1967,12 @@ class FileR2VExecutionService:
                     retryable=_is_transient_materialize_error(error),
                 )
             except BaseException:
-                pass
+                logger.exception(
+                    "r2v supervisor failure could not be persisted: "
+                    "project=%s task=%s",
+                    project_id,
+                    task_id,
+                )
 
     async def _submit(self, task: TaskRecord, state: R2VTaskState) -> bool:
         now = float(self.clock())
@@ -2522,6 +2538,13 @@ class FileR2VExecutionService:
                 normalized = max(0.05, min(0.89, float(progress)))
             except (TypeError, ValueError):
                 normalized = latest.progress or 0.05
+            # Skip the no-op CAS write: providers rarely report progress, so
+            # this used to rewrite the Task record (under the exclusive
+            # project lock, with a task-transition log line) on every ~2s
+            # poll with an unchanged payload — field logs showed ~1.8k such
+            # writes per day and they were the dominant lock hot spot.
+            if latest.progress == normalized:
+                return
             await asyncio.to_thread(
                 self.executions.transition_task,
                 task.project_id,

@@ -20,6 +20,9 @@ TRANSIENT_ERROR_MARKERS = (
     "bad gateway",
     "gateway timeout",
     "too many requests",
+    # EBADF from a torn-down socket during download: the transport failed,
+    # not the request — field runs showed httpx surfacing it mid-transfer.
+    "bad file descriptor",
     "status 429",
     "status 502",
     "status 503",

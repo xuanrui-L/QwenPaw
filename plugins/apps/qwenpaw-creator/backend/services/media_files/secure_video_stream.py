@@ -837,7 +837,20 @@ class SecureR2VVideoMaterializer:
                     if temporary_name is not None:
                         scratch.remove(temporary_name)
         except OSError as error:
-            raise ValidationError("provider 视频安全物化失败") from error
+            # Keep the OS-level detail in the message: the transient-failure
+            # classifier matches on it (e.g. "bad file descriptor",
+            # "connection reset"), and a bare label previously turned every
+            # transport hiccup into a deterministic, never-retried failure
+            # after the provider had already paid for the generation.
+            logger.error(
+                "video materialize os error: project=%s task=%s error=%s",
+                project_id,
+                task_id,
+                error,
+            )
+            raise ValidationError(
+                f"provider 视频安全物化失败: {error}",
+            ) from error
         finally:
             if acquired:
                 self.semaphore.release()

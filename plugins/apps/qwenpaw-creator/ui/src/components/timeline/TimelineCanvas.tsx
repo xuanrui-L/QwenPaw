@@ -62,6 +62,10 @@ const ZOOM_MAX = 4;
 /** Undo history depth for immediate write-back span edits. */
 const HISTORY_LIMIT = 50;
 const ZOOM_STEP = 0.5;
+/** A final render that already painted a ready frame keeps that frame during
+ * transient seeks/buffer stalls; the opaque locating cover only appears when
+ * the gap persists this long. First loads still cover immediately. */
+const FINAL_COVER_DELAY_MS = 300;
 
 /** One committed span edit: inverse spans plus the values it applied. */
 interface SpanHistoryEntry {
@@ -256,6 +260,34 @@ export default function TimelineCanvas({
             finalVideo.currentTime - playheadTick / timeline.ticks_per_second,
           ) <= 0.35),
     );
+  // Debounced locating cover: once this render URL has shown a ready frame,
+  // a transient seek or buffer stall keeps the last frame on screen instead
+  // of flashing the opaque cover for a few frames.
+  const hadReadyFinalFrame = useRef(false);
+  const [finalCoverArmed, setFinalCoverArmed] = useState(true);
+  useEffect(() => {
+    hadReadyFinalFrame.current = false;
+  }, [renderUrl]);
+  useEffect(() => {
+    if (finalPreviewReady) {
+      hadReadyFinalFrame.current = true;
+      setFinalCoverArmed(false);
+      return;
+    }
+    if (!hadReadyFinalFrame.current) {
+      setFinalCoverArmed(true);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setFinalCoverArmed(true),
+      FINAL_COVER_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [finalPreviewReady]);
+  // First paint has no effect pass yet: the no-ready-frame rule keeps a
+  // fresh load covered from the very first frame.
+  const showFinalCover =
+    !finalPreviewReady && (finalCoverArmed || !hadReadyFinalFrame.current);
 
   // ------------------------------------------------------------------
   // Direct write-back: span changes coming from the track surface commit to
@@ -748,7 +780,7 @@ export default function TimelineCanvas({
               <span>{t("timeline.noPreview")}</span>
             </div>
           )}
-          {previewMode === "final" && renderUrl && !finalPreviewReady && (
+          {previewMode === "final" && renderUrl && showFinalCover && (
             <div
               data-final-preview-incomplete
               role="status"

@@ -962,7 +962,7 @@ describe("PlanPage Timeline/Element frontend", () => {
       ).replace(/\s+/g, "");
     // The canvas summary always derives from the playhead (0s here).
     const derivedAtZero = summary();
-    expect(derivedAtZero).toContain("0s·该时刻有");
+    expect(derivedAtZero).toContain("0s·2项内容");
 
     // Whole-lane click: pinned selection semantics, not "active at 0s".
     fireEvent.click(

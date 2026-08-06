@@ -49,6 +49,16 @@ interface TimelineLivePreviewProps {
 
 /** Max allowed drift (seconds) between a video layer and the playhead before pulling it back. */
 const DRIFT_TOLERANCE_SECONDS = 0.3;
+/** Looser drift bound while playing: decode hiccups recover on their own and
+ * every correction seek makes the element report `seeking`, so aggressive
+ * pull-backs caused visible "locating frame" flashes mid-playback. */
+const PLAYING_DRIFT_TOLERANCE_SECONDS = 0.75;
+/** Minimum spacing between correction seeks on one element while playing. */
+const PLAYING_SEEK_INTERVAL_MS = 1_000;
+/** A transiently incomplete frame (seek/buffer on an already-complete
+ * composite) keeps showing the last painted frame this long before the
+ * opaque notice takes over. Cold starts still cover immediately. */
+const INCOMPLETE_NOTICE_DELAY_MS = 300;
 const RETIRED_MOTION_MOTIFS = new Set([
   "speed_lines",
   "side_eye",
@@ -476,7 +486,10 @@ function MotionOverlayLayer({
  * element's span/z_index/location without waiting for final composition.
  * Whenever any visible layer is still generating, loading or seeking, an
  * opaque full-frame notice covers the pre-mounted background layers so users
- * never see a half-assembled frame with missing layers.
+ * never see a half-assembled frame with missing layers. Once a complete
+ * frame has been painted, transient regressions (drift-correction seeks,
+ * short buffer stalls) keep the last frame on screen and only surface the
+ * notice when the gap persists beyond INCOMPLETE_NOTICE_DELAY_MS.
  */
 export default function TimelineLivePreview({
   project,
@@ -501,6 +514,7 @@ export default function TimelineLivePreview({
   );
   const clock = useRef<{ baseTick: number; baseTime: number } | null>(null);
   const lastEmittedTick = useRef(playheadTick);
+  const lastCorrectionSeekAt = useRef(new Map<string, number>());
   const stageRef = useRef<HTMLDivElement>(null);
   const [stageWidth, setStageWidth] = useState(1280);
   const [stageHeight, setStageHeight] = useState(720);
@@ -657,9 +671,19 @@ export default function TimelineLivePreview({
       }
       if (
         Math.abs(media.currentTime - reachableTargetSeconds(target, media)) >
-        DRIFT_TOLERANCE_SECONDS
+        PLAYING_DRIFT_TOLERANCE_SECONDS
       ) {
-        media.currentTime = reachableTargetSeconds(target, media);
+        // Rate-limit correction seeks: each one flips the element into
+        // `seeking` and repeated pull-backs on a slow decoder turned into a
+        // visible stutter loop. The rAF clock keeps this effect running, so
+        // a skipped correction is retried on a later frame.
+        const now = performance.now();
+        const lastSeek =
+          lastCorrectionSeekAt.current.get(layer.element.element_id) ?? 0;
+        if (!media.seeking && now - lastSeek >= PLAYING_SEEK_INTERVAL_MS) {
+          lastCorrectionSeekAt.current.set(layer.element.element_id, now);
+          media.currentTime = reachableTargetSeconds(target, media);
+        }
       }
       if (media.paused) {
         media.play()?.catch(() => undefined);
@@ -767,6 +791,36 @@ export default function TimelineLivePreview({
       (layer) => layer.element.element_id,
     ),
   ).size;
+
+  // Debounced notice: a composite that was already complete keeps its last
+  // painted frame during transient seeks/buffering instead of flashing the
+  // opaque cover for a few frames. Semantic gaps (layers still generating)
+  // and cold starts (nothing painted yet) cover immediately — a
+  // half-assembled frame must never be presented as content.
+  const hadCompleteFrame = useRef(false);
+  const [noticeVisible, setNoticeVisible] = useState(true);
+  const noticeImmediate =
+    semanticIncompleteLayers.length > 0 || !hadCompleteFrame.current;
+  useEffect(() => {
+    if (!previewIncomplete) {
+      if (anyVisible) hadCompleteFrame.current = true;
+      setNoticeVisible(false);
+      return;
+    }
+    if (noticeImmediate) {
+      setNoticeVisible(true);
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setNoticeVisible(true),
+      INCOMPLETE_NOTICE_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [anyVisible, noticeImmediate, previewIncomplete]);
+  // First paint has no effect pass yet: fall back to the immediate rule so a
+  // cold start is covered from the very first frame.
+  const showIncompleteNotice =
+    previewIncomplete && (noticeVisible || noticeImmediate);
 
   return (
     <div
@@ -887,7 +941,7 @@ export default function TimelineLivePreview({
           }
           return <PlaceholderLayer key={elementId} layer={layer} />;
         })}
-        {previewIncomplete && (
+        {showIncompleteNotice && (
           <div
             data-live-preview-incomplete
             role="status"

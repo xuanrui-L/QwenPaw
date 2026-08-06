@@ -101,12 +101,14 @@ async def download_remote_image(remote_url: str, model_name: str) -> str:
     except httpx.TransportError as exc:
         # Model Studio returns a short-lived OSS URL that must be downloaded
         # promptly.  Some local/network stacks cannot establish the OSS route
-        # through httpx even though curl can.  Reuse the project's bounded,
-        # redirect-following curl transport as a network fallback; HTTP status
+        # through httpx even though curl can.  Fall back to the shared
+        # download boundary, which retries through the bounded, SSRF-validated
+        # curl transport when its own httpx attempt also fails; HTTP status
         # failures remain authoritative and are not retried through a second
         # client.
         logger.warning(
-            "Image URL httpx transport failed; retrying with bounded curl: %s",
+            "Image URL httpx transport failed; retrying with fallback "
+            "transport (httpx sync, then bounded curl): %s",
             type(exc).__name__,
         )
         temporary = unique_task_work_path(

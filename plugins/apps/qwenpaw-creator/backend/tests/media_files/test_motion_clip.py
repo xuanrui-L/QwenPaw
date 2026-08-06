@@ -6,6 +6,7 @@ picture (pure motion-graphics cuts)."""
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import shutil
 import subprocess
 
@@ -26,6 +27,7 @@ from services.project_files.models import (
 
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
+_PLAYWRIGHT = importlib.util.find_spec("playwright") is not None
 
 _CLIP_HTML = (
     "<!DOCTYPE html><html><head><style>"
@@ -66,6 +68,10 @@ def test_motion_clip_element_round_trips() -> None:
 @pytest.mark.skipif(
     _FFMPEG is None or _FFPROBE is None,
     reason="ffmpeg is not installed",
+)
+@pytest.mark.skipif(
+    not _PLAYWRIGHT,
+    reason="playwright is not installed (motion frames render through it)",
 )
 def test_motion_clip_segment_renders_the_document_as_the_picture(
     tmp_path,

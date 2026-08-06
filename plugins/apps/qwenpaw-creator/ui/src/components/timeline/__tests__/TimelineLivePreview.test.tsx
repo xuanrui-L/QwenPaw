@@ -1,4 +1,4 @@
-import { fireEvent, render } from "@testing-library/react";
+import { act, fireEvent, render } from "@testing-library/react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import TimelineLivePreview, {
   motionExitProgress,
@@ -231,6 +231,60 @@ describe("TimelineLivePreview", () => {
     expect(
       container.querySelector("[data-live-preview-incomplete]"),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps the last complete frame during a transient seek before covering", () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = renderPreview(cloneProject(), 7000);
+      const visibleVideos = [
+        ...container.querySelectorAll<HTMLVideoElement>(
+          "[data-live-layer]:not(.invisible)",
+        ),
+      ];
+      visibleVideos.forEach((video) => {
+        Object.defineProperty(video, "readyState", {
+          configurable: true,
+          value: 2,
+        });
+        fireEvent.loadedData(video);
+        fireEvent.seeked(video);
+      });
+      expect(
+        container.querySelector("[data-live-preview-incomplete]"),
+      ).not.toBeInTheDocument();
+
+      // A drift-correction seek on an already-complete composite keeps the
+      // last painted frame instead of flashing the opaque notice.
+      const [firstVideo] = visibleVideos;
+      Object.defineProperty(firstVideo, "seeking", {
+        configurable: true,
+        value: true,
+      });
+      fireEvent.seeking(firstVideo);
+      expect(
+        container.querySelector("[data-live-preview-incomplete]"),
+      ).not.toBeInTheDocument();
+
+      // Only a persistent gap surfaces the notice.
+      act(() => {
+        vi.advanceTimersByTime(400);
+      });
+      expect(
+        container.querySelector("[data-live-preview-incomplete]"),
+      ).toHaveTextContent("正在定位画面");
+
+      Object.defineProperty(firstVideo, "seeking", {
+        configurable: true,
+        value: false,
+      });
+      fireEvent.seeked(firstVideo);
+      expect(
+        container.querySelector("[data-live-preview-incomplete]"),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recognizes an already-decoded cached video again after the layer remounts", () => {
