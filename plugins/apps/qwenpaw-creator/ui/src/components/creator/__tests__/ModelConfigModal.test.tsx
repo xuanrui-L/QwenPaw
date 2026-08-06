@@ -115,8 +115,8 @@ describe("ModelConfigModal configuration lifecycle", () => {
     ]);
     render(<ModelConfigModal open onClose={onClose} />);
 
-    await waitFor(() => expect(screen.getAllByText("未配置")).toHaveLength(5));
-    const keyInput = screen.getByPlaceholderText("sk-...");
+    // The language pane opens with the LLM card already expanded.
+    const keyInput = await screen.findByPlaceholderText("sk-...");
     expect(keyInput).toHaveAttribute("type", "password");
     expect(
       screen.queryByRole("button", { name: "显示" }),
@@ -170,12 +170,11 @@ describe("ModelConfigModal configuration lifecycle", () => {
     ]);
     render(<ModelConfigModal open onClose={onClose} />);
 
+    fireEvent.click(await screen.findByRole("button", { name: /感知与检索/ }));
     expect(
-      await screen.findByRole("button", {
-        name: /Grounding.*tavily\/qwen3\.7-plus/,
-      }),
+      await screen.findByText(/tavily\/qwen3\.7-plus/),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Grounding/ }));
+    fireEvent.click(screen.getByText("Grounding"));
     expect(screen.getByText("1. 搜索")).toBeInTheDocument();
     expect(screen.getByText("2. 验证")).toBeInTheDocument();
     expect(
@@ -228,12 +227,11 @@ describe("ModelConfigModal configuration lifecycle", () => {
 
     render(<ModelConfigModal open onClose={vi.fn()} />);
 
-    expect(
-      await screen.findByRole("button", {
-        name: /Grounding.*qwen3\.7-plus/,
-      }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("tavily/qwen3.7-plus")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: /感知与检索/ }));
+    await waitFor(() =>
+      expect(screen.queryAllByText(/qwen3\.7-plus/).length).toBeGreaterThan(0),
+    );
+    expect(screen.queryByText(/tavily\/qwen3\.7-plus/)).not.toBeInTheDocument();
     expect(screen.queryByText("复用 qwen3.7-plus")).not.toBeInTheDocument();
   });
 
@@ -248,7 +246,8 @@ describe("ModelConfigModal configuration lifecycle", () => {
 
     render(<ModelConfigModal open onClose={vi.fn()} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /ASR/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /感知与检索/ }));
+    fireEvent.click(await screen.findByText("ASR 模型"));
     // Open the ASR protocol select, which shows the Fun-ASR default.
     const protocolSelector = screen
       .getByText("DashScope Fun-ASR")

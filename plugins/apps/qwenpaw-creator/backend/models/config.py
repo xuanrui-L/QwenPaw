@@ -1253,31 +1253,54 @@ def _bool_env(name: str, default: bool) -> bool:
     return raw.casefold() in {"1", "true", "yes", "on"}
 
 
-# Code-level master switch for the render self-review module (WT4). Not
-# exposed through plugin.json, schemas or the frontend contract.
+# Startup snapshots of the env-only review switches, kept for historical
+# imports. Runtime decisions go through the ``is_*_review_enabled()``
+# functions below, which also honour the persisted ``self_review`` section
+# of model_config.json when the environment variable is not explicitly set.
 SELF_REVIEW_ENABLED = _bool_env("CREATOR_SELF_REVIEW_ENABLED", False)
 
 
+def _review_tier_enabled(env_name: str, config_key: str) -> bool:
+    """Resolve one review tier: explicit env wins, else persisted config.
+
+    An explicitly set environment variable (even ``0``/``false``) keeps
+    full control so existing deployments behave exactly as before; only
+    when it is absent does the ``self_review`` section of the user's
+    model_config.json decide, defaulting to off.
+    """
+    raw = os.environ.get(env_name, "").strip()
+    if raw:
+        return raw.casefold() in {"1", "true", "yes", "on"}
+    section = _get_user_config().get("self_review")
+    if isinstance(section, dict):
+        return bool(section.get(config_key, False))
+    return False
+
+
 def is_self_review_enabled() -> bool:
-    """Read the switch live so tests and restarts pick up env changes."""
-    return _bool_env("CREATOR_SELF_REVIEW_ENABLED", False)
+    """Final-cut render review (tier 3): env override, else user config."""
+    return _review_tier_enabled(
+        "CREATOR_SELF_REVIEW_ENABLED",
+        "render_enabled",
+    )
 
 
-# Code-level switches for the in-run review bypass (run_review). Advisory
-# only, independent from the final-render self review above; neither is
-# exposed through plugin.json, schemas or the frontend contract.
+# Startup snapshots of the in-run review switches (see note above).
 SYNC_REVIEW_ENABLED = _bool_env("CREATOR_SYNC_REVIEW_ENABLED", False)
 MEDIA_REVIEW_ENABLED = _bool_env("CREATOR_MEDIA_REVIEW_ENABLED", False)
 
 
 def is_sync_review_enabled() -> bool:
     """In-run synchronous review of low-cost text/motion artifacts."""
-    return _bool_env("CREATOR_SYNC_REVIEW_ENABLED", False)
+    return _review_tier_enabled("CREATOR_SYNC_REVIEW_ENABLED", "sync_enabled")
 
 
 def is_media_review_enabled() -> bool:
     """Async bypass review of generated image/video artifacts."""
-    return _bool_env("CREATOR_MEDIA_REVIEW_ENABLED", False)
+    return _review_tier_enabled(
+        "CREATOR_MEDIA_REVIEW_ENABLED",
+        "media_enabled",
+    )
 
 
 def _image_provider():

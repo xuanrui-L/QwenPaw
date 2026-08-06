@@ -296,6 +296,11 @@ describe("new Creator API contract", () => {
       executionAuthorization: { mode: "required" },
       creationCheckpoints: { mode: "required" },
       mediaReview: { mode: "required" },
+      selfReview: {
+        sync_enabled: false,
+        media_enabled: false,
+        render_enabled: false,
+      },
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({

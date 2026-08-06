@@ -168,6 +168,23 @@ class MediaReviewConfig(StrictModel):
     mode: Literal["required", "auto_approve"] = "required"
 
 
+class SelfReviewConfig(StrictModel):
+    """Advisory model-driven review tiers along the creation pipeline.
+
+    Mirrors the three independent review modules: ``sync_enabled`` reviews
+    low-cost text artifacts before costly generation (run_review sync),
+    ``media_enabled`` reviews each generated image/video artifact
+    (run_review media), and ``render_enabled`` runs the final-cut
+    six-dimension review (render_review). An explicitly set
+    ``CREATOR_*_REVIEW_ENABLED`` environment switch still overrides the
+    persisted value so existing deployments keep their behaviour.
+    """
+
+    sync_enabled: bool = False
+    media_enabled: bool = False
+    render_enabled: bool = False
+
+
 class OssConfig(StrictModel):
     """QwenPaw Creator media OSS configuration stored in model_config.json."""
 
@@ -202,6 +219,10 @@ class ModelConfigData(StrictModel):
     media_review: MediaReviewConfig = Field(
         default_factory=MediaReviewConfig,
         alias="mediaReview",
+    )
+    self_review: SelfReviewConfig = Field(
+        default_factory=SelfReviewConfig,
+        alias="selfReview",
     )
 
 

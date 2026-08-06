@@ -170,6 +170,21 @@ export function patchPermissionMode(mode: {
   });
 }
 
+export function patchSelfReview(
+  tiers: Partial<{
+    sync_enabled: boolean;
+    media_enabled: boolean;
+    render_enabled: boolean;
+  }>,
+): Promise<{ ok: boolean }> {
+  const id = newClientId("self-review");
+  return creatorRequest("/models/config/self-review", {
+    method: "PATCH",
+    headers: { "Idempotency-Key": id },
+    body: jsonBody(tiers),
+  });
+}
+
 export function getRealApiKey(section: string): Promise<{ api_key: string }> {
   return creatorRequest(`/models/real-api-key/${section}`);
 }

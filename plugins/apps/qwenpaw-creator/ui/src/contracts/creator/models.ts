@@ -68,6 +68,13 @@ export interface ModelConfigData {
   mediaReview: {
     mode: "required" | "auto_approve";
   };
+  // Advisory self-review tiers (run_review sync/media + render_review).
+  // Explicit CREATOR_*_REVIEW_ENABLED env switches still override at runtime.
+  selfReview: {
+    sync_enabled: boolean;
+    media_enabled: boolean;
+    render_enabled: boolean;
+  };
 }
 
 export interface ModelConnectionTestRequest {

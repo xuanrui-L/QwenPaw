@@ -405,6 +405,9 @@ def _assemble_model_config(
     media_review = configs.get("media_review")
     if isinstance(media_review, dict):
         base["media_review"].update(media_review)
+    self_review = configs.get("self_review")
+    if isinstance(self_review, dict):
+        base["self_review"].update(self_review)
     if base["vlm"].get("use_llm"):
         for field in ("base_url", "api_key", "model_name"):
             if not base["vlm"].get(field):
@@ -1176,6 +1179,57 @@ async def patch_execution_authorization(
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
         merged["execution_authorization"] = {"mode": mode}
+        try:
+            return ModelConfigData.model_validate(merged)
+        except PydanticValidationError as exc:
+            first_error = exc.errors()[0] if exc.errors() else {}
+            field = ".".join(str(loc) for loc in first_error.get("loc", []))
+            message = first_error.get("msg", str(exc))
+            raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
+
+    def transaction() -> None:
+        mutate_model_config(mutate)
+        _notify_agent_model_config_changed()
+
+    await asyncio.to_thread(transaction)
+    return {"ok": True}
+
+
+@router.patch("/config/self-review")
+async def patch_self_review(
+    data: dict[str, Any] = Body(...),
+) -> dict[str, bool]:
+    """Persist the advisory self-review tiers in one write.
+
+    Accepts any subset of ``sync_enabled`` / ``media_enabled`` /
+    ``render_enabled`` booleans and merges them into the ``self_review``
+    section, so toggling one tier never clobbers the others. Explicitly
+    set ``CREATOR_*_REVIEW_ENABLED`` environment switches still override
+    the persisted values at runtime (see ``models.config``).
+    """
+
+    tier_keys = ("sync_enabled", "media_enabled", "render_enabled")
+    updates: dict[str, bool] = {}
+    for tier in tier_keys:
+        if tier not in data:
+            continue
+        value = data[tier]
+        if not isinstance(value, bool):
+            raise ValidationError(f"{tier} 必须是布尔值")
+        updates[tier] = value
+    unknown = set(data) - set(tier_keys)
+    if unknown:
+        raise ValidationError(f"不支持的字段: {', '.join(sorted(unknown))}")
+    if not updates:
+        raise ValidationError(
+            "至少提供 sync_enabled / media_enabled / render_enabled 之一",
+        )
+
+    def mutate(current: ModelConfigData) -> ModelConfigData:
+        merged = current.model_dump()
+        section = dict(merged.get("self_review") or {})
+        section.update(updates)
+        merged["self_review"] = section
         try:
             return ModelConfigData.model_validate(merged)
         except PydanticValidationError as exc:

@@ -84,6 +84,11 @@ const modelConfig = {
   executionAuthorization: { mode: "allow_all" },
   creationCheckpoints: { mode: "skip" },
   mediaReview: { mode: "auto_approve" },
+  selfReview: {
+    sync_enabled: false,
+    media_enabled: false,
+    render_enabled: false,
+  },
 };
 
 describe("origin/main visible shell fidelity", () => {
@@ -267,23 +272,30 @@ describe("origin/main visible shell fidelity", () => {
       expect(screen.getAllByText("qwen3.7-plus").length).toBeGreaterThan(0),
     );
     expect(screen.getByText("模型配置")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /LLM/ })).toHaveClass(
-      "segmented-tab",
-      "active",
+    // The settings nav lands on the language pane with the LLM card open.
+    expect(screen.getByRole("button", { name: /语言与理解/ })).toHaveAttribute(
+      "aria-current",
+      "true",
     );
     expect(
       screen.getByRole("button", { name: /保存配置/ }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /关闭/ })).toBeInTheDocument();
-    // allow_all + skip + auto_approve maps to the top (YOLO) stop.
-    const permissionSlider = screen.getByRole("slider", {
-      name: "执行确认模式：",
-    });
-    expect(permissionSlider).toHaveValue("3");
+    // allow_all + skip + auto_approve maps to the top (YOLO) stop of the
+    // execution-mode cards.
+    fireEvent.click(screen.getByRole("button", { name: /执行模式/ }));
+    expect(screen.getByRole("radio", { name: /YOLO/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
     expect(screen.getByText(/完全无人值守/)).toBeInTheDocument();
-    fireEvent.change(permissionSlider, { target: { value: "0" } });
-    expect(permissionSlider).toHaveValue("0");
+    fireEvent.click(screen.getByRole("radio", { name: /全程确认/ }));
+    expect(screen.getByRole("radio", { name: /全程确认/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
     expect(screen.getByText(/逐次授权/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /语言与理解/ }));
     const keyInput = screen.getByPlaceholderText("sk-...");
     expect(keyInput).toHaveValue("saved-secret");
     expect(keyInput).toHaveAttribute("type", "password");

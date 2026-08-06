@@ -324,6 +324,56 @@ def test_permission_mode_patch_is_atomic(tmp_path, monkeypatch) -> None:
     assert unchanged.media_review.mode == "auto_approve"
 
 
+def test_self_review_patch_merges_tiers(tmp_path, monkeypatch) -> None:
+    """Each PATCH merges into the section so tiers never clobber each other,
+    and the runtime switches follow the persisted values when the
+    corresponding environment variables are not explicitly set."""
+
+    from models import config as model_config
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    config_path = (tmp_path / "config" / "model_config.json").resolve()
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    for env in (
+        "CREATOR_SELF_REVIEW_ENABLED",
+        "CREATOR_SYNC_REVIEW_ENABLED",
+        "CREATOR_MEDIA_REVIEW_ENABLED",
+    ):
+        monkeypatch.delenv(env, raising=False)
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+
+    asyncio.run(model_routes.patch_self_review({"render_enabled": True}))
+    asyncio.run(model_routes.patch_self_review({"sync_enabled": True}))
+
+    loaded = model_routes.load_model_config(include_environment=False)
+    assert loaded.self_review.render_enabled is True
+    assert loaded.self_review.sync_enabled is True
+    assert loaded.self_review.media_enabled is False
+
+    # Runtime switches follow the persisted tiers without env overrides.
+    assert model_config.is_self_review_enabled() is True
+    assert model_config.is_sync_review_enabled() is True
+    assert model_config.is_media_review_enabled() is False
+
+    # An explicitly set env var wins in both directions.
+    monkeypatch.setenv("CREATOR_SELF_REVIEW_ENABLED", "0")
+    assert model_config.is_self_review_enabled() is False
+    monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "1")
+    assert model_config.is_media_review_enabled() is True
+
+    # Invalid payloads reject before mutation.
+    with pytest.raises(ValidationError, match="布尔值"):
+        asyncio.run(model_routes.patch_self_review({"sync_enabled": "yes"}))
+    with pytest.raises(ValidationError, match="不支持的字段"):
+        asyncio.run(model_routes.patch_self_review({"bogus": True}))
+    with pytest.raises(ValidationError, match="至少提供"):
+        asyncio.run(model_routes.patch_self_review({}))
+    unchanged = model_routes.load_model_config(include_environment=False)
+    assert unchanged.self_review.render_enabled is True
+    assert unchanged.self_review.sync_enabled is True
+
+
 def test_load_migrates_legacy_grounding_model_to_search_and_validation(
     tmp_path,
     monkeypatch,
