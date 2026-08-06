@@ -91,9 +91,10 @@ const S2V_PROTOCOLS = ["DashScope（百炼）"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
 
+// Presets seed a default endpoint when the user picks a protocol/model;
+// the URL always stays editable for self-hosted or proxied deployments.
 interface ProtocolPreset {
   base_url: string;
-  freeze_url: boolean;
   models: string[];
   base_url_options?: { label: string; value: string }[];
 }
@@ -120,17 +121,14 @@ const PROTOCOL_TO_PROVIDER_ID: Record<string, string> = {
 const ASR_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope Fun-ASR": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    freeze_url: true,
     models: ["fun-asr"],
   },
   "DashScope Qwen3-ASR": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    freeze_url: true,
     models: ["qwen3-asr-flash"],
   },
   "OpenAI Whisper": {
     base_url: "https://api.openai.com/v1",
-    freeze_url: true,
     models: ["whisper-1"],
   },
 };
@@ -138,7 +136,6 @@ const ASR_PRESETS: Record<string, ProtocolPreset> = {
 const TTS_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    freeze_url: true,
     // Filled from the backend capability table so the UI never offers a model
     // this build cannot drive.
     models: [],
@@ -148,7 +145,6 @@ const TTS_PRESETS: Record<string, ProtocolPreset> = {
 const S2V_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    freeze_url: true,
     models: ["wan2.2-s2v"],
   },
 };
@@ -156,7 +152,6 @@ const S2V_PRESETS: Record<string, ProtocolPreset> = {
 const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    freeze_url: true,
     models: [
       "wan2.7-image-pro",
       "wan2.7-image",
@@ -177,7 +172,6 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   },
   "OpenAI 协议": {
     base_url: "https://api.openai.com/v1",
-    freeze_url: true,
     models: ["gpt-image-2"],
   },
 };
@@ -185,7 +179,6 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
 const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    freeze_url: true,
     models: [
       "wan2.7-r2v",
       "wan2.6-r2v-flash",
@@ -195,7 +188,6 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   },
   "Volcano Engine（火山引擎）": {
     base_url: "https://ark.cn-beijing.volces.com",
-    freeze_url: true,
     models: ["doubao-seedance-2.0-pro", "doubao-seedance-2.0-lite"],
   },
 };
@@ -1148,7 +1140,6 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       if (!provider) return null;
       return {
         base_url: provider.base_url,
-        freeze_url: provider.freeze_url,
         models: [
           ...provider.models.map((m) => m.id),
           ...provider.extra_models.map((m) => m.id),
@@ -1253,7 +1244,6 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     const preset = getPresetForType(type, item.protocol);
     const modelOptions = getModelOptions(type, item.protocol);
     const hasPresetModels = modelOptions.length > 0;
-    const urlDisabled = preset?.freeze_url || false;
     const hasBaseUrlOptions = (preset?.base_url_options?.length ?? 0) > 0;
 
     return (
@@ -1307,7 +1297,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           <div>
             <label className="field-label">Base URL</label>
             {hasBaseUrlOptions ? (
-              <Select
+              <AutoComplete
                 value={item.base_url}
                 onChange={(v) => updateItem(type, "base_url", v)}
                 options={preset!.base_url_options!.map((opt) => ({
@@ -1320,7 +1310,6 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               <Input
                 placeholder="https://api.example.com"
                 value={item.base_url}
-                disabled={urlDisabled}
                 onChange={(e) => updateItem(type, "base_url", e.target.value)}
               />
             )}

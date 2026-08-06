@@ -278,6 +278,8 @@ export interface TransitionCreationDocument extends ProjectJsonRecord {
 export interface AudioCreationDocument extends ProjectJsonRecord {
   type: "audio";
   source_asset_version_id: string;
+  /** TTS narration keeps its script here; uploaded audio leaves it empty. */
+  script?: string;
   gain_db: number;
   pan: number;
 }

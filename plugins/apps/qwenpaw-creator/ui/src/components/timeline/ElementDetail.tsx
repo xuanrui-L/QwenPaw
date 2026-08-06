@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Alert, Button, Input, InputNumber, Select, message } from "antd";
+import { useMemo } from "react";
+import { Alert, Button, Input, InputNumber, Select } from "antd";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import {
@@ -29,7 +29,6 @@ import {
 import { outputLabel } from "@/lib/creatorPresentation";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
-import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 
 interface ElementDetailProps {
   project: ProjectDocument;
@@ -52,70 +51,6 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
     <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
       {children}
     </span>
-  );
-}
-
-/** Editable narration script for TTS-produced audio elements. Confirming a
- * change hands the rewrite to the Creative Assistant, which re-synthesizes
- * the audio through the normal authorization/review pipeline and swaps the
- * element onto the new version — the UI never bills a model directly. */
-function TtsScriptEditor({
-  elementId,
-  elementLabel,
-  initialText,
-}: {
-  elementId: string;
-  elementLabel: string;
-  initialText: string;
-}) {
-  const { t } = useTranslation();
-  const [text, setText] = useState(initialText);
-  const [submitting, setSubmitting] = useState(false);
-  const dirty = text.trim() !== initialText.trim();
-  const submit = async () => {
-    setSubmitting(true);
-    try {
-      await useCreatorSessionStore.getState().sendMessage({
-        message: t("elementDetail.ttsRegenerateMessage", {
-          element: `element:${elementId}`,
-          label: elementLabel,
-          text: text.trim(),
-        }),
-      });
-      message.success(t("elementDetail.ttsRegenerateQueued"));
-    } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : String(error),
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  };
-  return (
-    <div className="mt-1.5 space-y-1.5">
-      <Input.TextArea
-        value={text}
-        autoSize={{ minRows: 2, maxRows: 6 }}
-        disabled={submitting}
-        onChange={(event) => setText(event.target.value)}
-        className="!text-xs"
-      />
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] text-[var(--color-text-tertiary)]">
-          {t("elementDetail.ttsRegenerateHint")}
-        </span>
-        <Button
-          size="small"
-          type="primary"
-          loading={submitting}
-          disabled={!dirty || !text.trim()}
-          onClick={() => void submit()}
-          className="!text-[11px]"
-        >
-          {t("elementDetail.ttsRegenerateConfirm")}
-        </Button>
-      </div>
-    </div>
   );
 }
 
@@ -822,6 +757,17 @@ export default function ElementDetail({
                 audioVersion.duration_seconds < 4 * 3600
                   ? audioVersion.duration_seconds
                   : null;
+              const spanSec = sec(
+                element.span.duration_tick,
+                timeline.ticks_per_second,
+              );
+              // Synthesized narration has no explicit duration knob on the
+              // provider: length follows the script, so the editable script
+              // shows its time budget and overruns are flagged here.
+              const overBudget =
+                plausibleDuration != null &&
+                plausibleDuration > spanSec + 0.05;
+              const scriptText = creation.script || textPreview;
               return (
                 <div className="space-y-3">
                   <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
@@ -829,19 +775,51 @@ export default function ElementDetail({
                       <b className="text-[var(--color-text-primary)]">
                         {audioVersion?.name || "音频素材"}
                       </b>
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      <span
+                        className={`text-[10px] ${
+                          overBudget
+                            ? "font-semibold text-[var(--color-warning)]"
+                            : "text-[var(--color-text-tertiary)]"
+                        }`}
+                      >
                         {plausibleDuration != null
-                          ? `${plausibleDuration.toFixed(1)}s`
+                          ? t("elementDetail.audioBudget", {
+                              actual: plausibleDuration.toFixed(1),
+                              budget: spanSec,
+                            })
                           : "时长以试听为准"}
                       </span>
                     </div>
-                    {textPreview && (
-                      <TtsScriptEditor
-                        key={`${element.element_id}:${creation.source_asset_version_id}`}
-                        elementId={element.element_id}
-                        elementLabel={element.label || element.element_id}
-                        initialText={textPreview}
-                      />
+                    {overBudget && (
+                      <p className="mt-1 text-[10px] text-[var(--color-warning)]">
+                        {t("elementDetail.audioOverBudget")}
+                      </p>
+                    )}
+                    {scriptText && (
+                      <div
+                        data-creator-field={`element:${element.element_id}/creation/script`}
+                        data-creator-path={pointer("creation", "script")}
+                        className="mt-1.5 space-y-1"
+                      >
+                        <Input.TextArea
+                          value={scriptText}
+                          autoSize={{ minRows: 2, maxRows: 6 }}
+                          disabled={applying}
+                          onChange={(event) =>
+                            onChange((draft) => {
+                              if (draft.creation.type === "audio")
+                                draft.creation.script = event.target.value;
+                            })
+                          }
+                          className="!text-xs"
+                        />
+                        <InlineReviewDiff
+                          pointer={pointer("creation", "script")}
+                        />
+                        <p className="text-[10px] text-[var(--color-text-tertiary)]">
+                          {t("elementDetail.ttsScriptHint")}
+                        </p>
+                      </div>
                     )}
                     {(voiceName || ttsModel) && (
                       <p className="mt-1 text-[10px] text-[var(--color-text-tertiary)]">

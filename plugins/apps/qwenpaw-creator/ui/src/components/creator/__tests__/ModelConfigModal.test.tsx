@@ -268,7 +268,8 @@ describe("ModelConfigModal configuration lifecycle", () => {
       )!,
     );
 
-    // The preset fills the model candidate and locks the official base url.
+    // The preset fills the model candidate and seeds the official base
+    // url while keeping it editable for self-hosted deployments.
     await waitFor(() => {
       const values = screen
         .getAllByRole("combobox")
@@ -277,9 +278,12 @@ describe("ModelConfigModal configuration lifecycle", () => {
     });
     const baseUrl = screen
       .getAllByPlaceholderText("https://api.example.com")
-      .find((input) => (input as HTMLInputElement).disabled) as
-      | HTMLInputElement
-      | undefined;
-    expect(baseUrl?.value).toBe("https://dashscope.aliyuncs.com/api/v1");
+      .find(
+        (input) =>
+          (input as HTMLInputElement).value ===
+          "https://dashscope.aliyuncs.com/api/v1",
+      ) as HTMLInputElement | undefined;
+    expect(baseUrl).toBeTruthy();
+    expect(baseUrl!.disabled).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import { navigate, useParams, useSearchParams } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
+import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { getArtifactVersionMediaUrl, renderTimeline } from "@/api/creator";
 import {
   elementsAtTick,
@@ -543,10 +544,35 @@ export default function PlanPage() {
       message.error(t("plan.overlayTextEmpty"));
       return;
     }
+    // A narration script edit needs the assistant to re-synthesize the
+    // audio after the patch lands; captured before markApplied clears it.
+    const scriptEdit =
+      draft.creation.type === "audio" &&
+      draft.creation.script?.trim() &&
+      elementDraft.operations.some((operation) =>
+        operation.path.endsWith("/creation/script"),
+      )
+        ? {
+            elementId: draft.element_id,
+            label: draft.label || draft.element_id,
+            text: draft.creation.script.trim(),
+            budgetSeconds: Number(
+              (
+                draft.span.duration_tick /
+                (timeline?.ticks_per_second || 1000)
+              ).toFixed(1),
+            ),
+          }
+        : null;
     try {
       const response = await patchProject(id, elementDraft.operations);
       elementDraft.markApplied();
-      if (response.editImpact?.regenerationRequired) {
+      if (scriptEdit) {
+        void useCreatorSessionStore.getState().sendMessage({
+          message: t("plan.ttsRegenerateMessage", scriptEdit),
+        });
+        message.success(t("plan.ttsRegenerateQueued"));
+      } else if (response.editImpact?.regenerationRequired) {
         message.success(t("plan.applySuccessRegenRequired"));
       } else if (response.editImpact?.renderTimelineIds.length) {
         message.success(t("plan.applySuccessPreviewUpdated"));

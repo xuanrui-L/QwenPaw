@@ -904,6 +904,10 @@ class AudioCreation(StrictModel):
 
     type: Literal["audio"] = "audio"
     source_asset_version_id: EntityId
+    # TTS-produced narration keeps its script here: editing the script and
+    # applying the change re-synthesizes the audio. Uploaded/footage audio
+    # leaves it empty.
+    script: str = ""
     gain_db: float = 0.0
     pan: float = Field(default=0.0, ge=-1, le=1)
 
