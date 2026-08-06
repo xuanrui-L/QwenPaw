@@ -178,8 +178,7 @@ def _variant_status(
         return WorkNodeStatus.DONE, None
     failure = failed.get(key)
     if failure is not None and (
-        (failure.metadata or {}).get("variantId")
-        in (None, variant.variant_id)
+        (failure.metadata or {}).get("variantId") in (None, variant.variant_id)
     ):
         return WorkNodeStatus.FAILED, failure
     return WorkNodeStatus.READY, None
@@ -190,9 +189,7 @@ def _upstream_missing(
     statuses: Mapping[str, WorkNodeStatus],
 ) -> tuple[str, ...]:
     return tuple(
-        dep
-        for dep in dep_ids
-        if statuses.get(dep) is not WorkNodeStatus.DONE
+        dep for dep in dep_ids if statuses.get(dep) is not WorkNodeStatus.DONE
     )
 
 
@@ -230,11 +227,16 @@ def _artifact_is_stale(
     return False
 
 
-def derive_work_graph(
+def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
     project: Project,
     tasks: Sequence[Any] = (),
 ) -> WorkGraph:
-    """Project the production DAG from durable facts. Pure function."""
+    """Project the production DAG from durable facts. Pure function.
+
+    Deliberately one long node-construction pass: every lane reads the
+    same freshly built ``statuses`` map, and splitting it would thread
+    half a dozen accumulators through helpers for no clarity gain.
+    """
 
     active, failed = _active_task_index(tasks)
     nodes: list[WorkNode] = []
@@ -378,6 +380,17 @@ def derive_work_graph(
                 creation.visual_variant_refs.items(),
             ):
                 deps.append(f"visual:{entity_id}:{variant_id}")
+            # Field run 2026-08-06: the graph marked storyboards READY on
+            # explicit variant bindings alone while the execution gate
+            # refused them — scene/prop entities referenced by the shots
+            # had no artwork yet. The dependency set must mirror
+            # visual_design_readiness exactly: every referenced entity,
+            # not only the explicitly bound ones.
+            gate_missing = _storyboard_gate_dependencies(
+                project,
+                creation,
+                deps,
+            )
 
             storyboard_id = f"storyboard:{element_id}"
             storyboard_slot = _slot_selected(
@@ -387,7 +400,7 @@ def derive_work_graph(
             key = (TaskKind.IMAGE_GENERATION.value, f"element:{element_id}")
             task = active.get(key)
             failure = failed.get(key)
-            missing = _upstream_missing(deps, statuses)
+            missing = (*_upstream_missing(deps, statuses), *gate_missing)
             upstream_selected = _element_upstream_selected(project, creation)
             if task is not None:
                 status = WorkNodeStatus.RUNNING
@@ -485,9 +498,7 @@ def derive_work_graph(
                         if status is WorkNodeStatus.FAILED
                         else None
                     ),
-                    missing=(
-                        (storyboard_id,) if not storyboard_done else ()
-                    ),
+                    missing=((storyboard_id,) if not storyboard_done else ()),
                     locator={"page": "plan", "elementId": element_id},
                     command="GENERATE_R2V_VIDEO",
                     target_ref=f"element:{element_id}",
@@ -503,7 +514,6 @@ def derive_work_graph(
     # ---- Final compose ------------------------------------------------
     if video_node_ids:
         missing = _upstream_missing(video_node_ids, statuses)
-        compose_key = (TaskKind.COMPOSE.value, "timeline:timeline:main")
         task = next(
             (
                 item
@@ -547,6 +557,52 @@ def derive_work_graph(
         )
 
     return WorkGraph(nodes=tuple(nodes), generation=project.generation)
+
+
+def _storyboard_gate_dependencies(
+    project: Project,
+    creation: R2VCreation,
+    deps: list[str],
+) -> tuple[str, ...]:
+    """Mirror visual_design_readiness for one element's storyboard.
+
+    Machine-dispatchable gaps (unselected required variants) are appended
+    to ``deps`` as media node ids the scheduler can solve; model-only
+    gaps (undefined variants, missing multi-variant bindings, entities
+    with no variants at all — schema invariant: declared variants always
+    live in required_variant_ids) come back as plain-text reasons that
+    route to the completion resume.
+    """
+
+    gate_missing: list[str] = []
+    referenced = dict.fromkeys(
+        [
+            *creation.character_refs,
+            *([creation.scene_ref] if creation.scene_ref is not None else []),
+            *creation.prop_refs,
+        ],
+    )
+    for ref in referenced:
+        entity = project.visual.entities.items.get(ref)
+        if entity is None:
+            continue
+        if not entity.required_variant_ids:
+            if entity.selected_artifact_version_id is None:
+                gate_missing.append(f"{ref} 尚无使用中视觉产物")
+            continue
+        for required_id in entity.required_variant_ids:
+            variant = entity.variants.items.get(required_id)
+            node = f"visual:{ref}:{required_id}"
+            if variant is None:
+                gate_missing.append(f"{ref}/{required_id} 尚未定义")
+            elif variant.selected_artifact_version_id is None:
+                if node not in deps:
+                    deps.append(node)
+        if len(entity.required_variant_ids) > 1 and not (
+            creation.visual_variant_refs.get(ref)
+        ):
+            gate_missing.append(f"{ref} 缺少 variant 绑定")
+    return tuple(gate_missing)
 
 
 def _entity_has_artwork(entity: Any) -> bool:

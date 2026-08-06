@@ -334,6 +334,64 @@ def test_waiting_review_never_counts_as_running() -> None:
     assert graph.by_id["storyboard:elem:one"].status is WorkNodeStatus.READY
 
 
+def test_storyboard_waits_for_all_referenced_entities_not_just_bindings() -> (
+    None
+):
+    """Field run 2026-08-06: the graph said READY, the execution gate said
+    no — shots referenced scene entities that had no artwork yet. The
+    graph's dependency set must mirror visual_design_readiness."""
+    project = _project()
+    project.visual.entities.items["char:a"] = _entity(
+        "char:a",
+        {"var:x": "art:a"},
+    )
+    project.visual.entities.order.append("char:a")
+    # Scene without required variants and without artwork: entity-level
+    # readiness, machine-solvable through its single variant.
+    scene = _entity("scene:home", {"var:day": None})
+    project.visual.entities.items["scene:home"] = scene
+    project.visual.entities.order.append("scene:home")
+    _add_element(
+        project,
+        _element(
+            "elem:one",
+            character_refs=["char:a"],
+            scene_ref="scene:home",
+            visual_variant_refs={"char:a": "var:x"},
+        ),
+    )
+
+    graph = derive_work_graph(project)
+    storyboard = graph.by_id["storyboard:elem:one"]
+    assert storyboard.status is WorkNodeStatus.GATED
+    assert "visual:scene:home:var:day" in storyboard.missing
+    # The gap is a media node: the scheduler can solve it, no model turn.
+    assert storyboard not in graph.model_required_nodes()
+
+    # Scene artwork lands (single-variant entities auto-select at entity
+    # level on write-back, mirrored here): the storyboard opens up.
+    scene.variants.items["var:day"].selected_artifact_version_id = "art:s"
+    scene.selected_artifact_version_id = "art:s"
+    graph = derive_work_graph(project)
+    assert graph.by_id["storyboard:elem:one"].status is WorkNodeStatus.READY
+
+
+def test_unset_entity_selection_is_a_model_gap_not_a_dispatch() -> None:
+    project = _project()
+    scene = _entity("scene:home", {})
+    # No variants at all: the model must define one before anything is
+    # drawable — a gap the scheduler must not paper over.
+    project.visual.entities.items["scene:home"] = scene
+    project.visual.entities.order.append("scene:home")
+    _add_element(project, _element("elem:one", scene_ref="scene:home"))
+
+    graph = derive_work_graph(project)
+    storyboard = graph.by_id["storyboard:elem:one"]
+    assert storyboard.status is WorkNodeStatus.GATED
+    assert any("尚无使用中视觉产物" in reason for reason in storyboard.missing)
+    assert storyboard in graph.model_required_nodes()
+
+
 def test_ready_media_nodes_exclude_compose() -> None:
     project = _project()
     _add_element(project, _element("elem:one"))
@@ -354,5 +412,5 @@ def test_ready_media_nodes_exclude_compose() -> None:
 
     graph = derive_work_graph(project)
     assert graph.by_id["compose:final"].status is WorkNodeStatus.READY
-    assert graph.ready_media_nodes() == ()
+    assert not graph.ready_media_nodes()
     assert graph.unfinished() == (graph.by_id["compose:final"],)
