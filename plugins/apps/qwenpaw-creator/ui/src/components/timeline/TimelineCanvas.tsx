@@ -645,7 +645,7 @@ export default function TimelineCanvas({
             {/* Pure playhead semantics: derived from the timeline at the
                 playhead tick, never from an explicit selection. */}
             {seconds(playheadTick, timeline.ticks_per_second)}s ·{" "}
-            {t("timeline.itemsAtMomentBadge", { count: active.length })}
+            {t("timeline.itemsCount", { count: active.length })}
           </span>
           <span
             className={`rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 ${

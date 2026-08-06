@@ -114,7 +114,8 @@ def test_project_assets_scope_admits_image_asset_children(tmp_path) -> None:
 
     assert spec is not None
     assert "enum" not in target
-    assert target["pattern"] == r"^asset:.+$"
+    # Cast lineups joined the Project-assets scope alongside entities.
+    assert target["pattern"] == r"^(asset|lineup):.+$"
     assert "不能直接使用 project:assets" in target["description"]
     assert image_arguments["properties"]["variantId"]["minLength"] == 1
     assert "多个" in image_arguments["properties"]["variantId"]["description"]
@@ -198,7 +199,7 @@ def test_ai_edit_rules_are_dynamic_specialist_prompt_not_runtime_state() -> (
 
     assert "当前内容类型是 `interview`" in prompt
     assert "60 至 120 秒" in prompt
-    assert "interview_summary" in prompt
+    assert "采访要点台词卡" in prompt
     assert "不超过 30 个汉字" in prompt
     # Pure orchestration role: the prompt must not mention removed
     # composition tools.

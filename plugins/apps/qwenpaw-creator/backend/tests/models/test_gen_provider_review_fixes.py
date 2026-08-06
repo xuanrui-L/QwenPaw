@@ -570,28 +570,6 @@ def test_authorization_snapshots_the_effective_model(monkeypatch) -> None:
         model_config.reset_request_tool_configs(token)
 
 
-def test_video_edit_pricing_follows_the_input_video(monkeypatch) -> None:
-    """video_edit is billed by its input length, not by durationSeconds."""
-
-    from services.execution_pricing import estimate_execution_cost
-
-    long_input = estimate_execution_cost(
-        provider_kind="video",
-        provider="wan",
-        model="happyhorse-1.1-video-edit",
-        # 40s input truncated to the provider's 15s keep-window.
-        arguments={"mode": "video_edit", "durationSeconds": 15},
-    )
-    requested = estimate_execution_cost(
-        provider_kind="video",
-        provider="wan",
-        model="happyhorse-1.1-video-edit",
-        arguments={"mode": "video_edit", "durationSeconds": 5},
-    )
-    assert long_input is not None and requested is not None
-    assert long_input.estimated_cost > requested.estimated_cost
-
-
 # ── video_edit input duration ────────────────────────────────────────────────
 
 

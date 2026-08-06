@@ -60,7 +60,6 @@ def _elements() -> dict:
             "z_index": 10,
             "creation": {
                 "type": "overlay",
-                "overlay_kind": "pet_os",
                 "text": "今天也要元气满满",
                 "vibe": "warm",
                 "prompt": "",

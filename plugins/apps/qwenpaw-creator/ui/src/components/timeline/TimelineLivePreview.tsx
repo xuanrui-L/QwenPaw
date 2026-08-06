@@ -9,10 +9,15 @@ import {
 import { Clock3, ImageOff, Loader2 } from "lucide-react";
 import type {
   ElementLocationDocument,
+  MotionGraphicDocument,
   ProjectDocument,
   TaskView,
   TimelineDocument,
 } from "@/contracts/creator";
+import {
+  fetchMotionDocument,
+  getMotionDocumentPosterUrl,
+} from "@/api/creator/media";
 import type { ElementPlayback } from "@/selectors/elementPlaybackSelectors";
 import {
   ELEMENT_PLAYBACK_STATUS_LABEL,
@@ -112,6 +117,20 @@ function mediaTargetSeconds(
   return media.sourceInSeconds + offset;
 }
 
+/**
+ * Clamp a metadata-derived seek target to what the mounted element can
+ * actually reach. Metadata duration may exceed the real decoded duration
+ * by a few frames; an unreachable target would otherwise keep the drift
+ * check failing forever and pin the "正在定位画面" notice.
+ */
+function reachableTargetSeconds(
+  target: number,
+  node: HTMLVideoElement,
+): number {
+  if (!Number.isFinite(node.duration)) return target;
+  return Math.min(target, Math.max(0, node.duration - 0.033));
+}
+
 function PlaceholderLayer({ layer }: { layer: ElementPlayback }) {
   const { t } = useTranslation();
   const { element, status } = layer;
@@ -189,7 +208,8 @@ function TextOverlayLayer({
       className="absolute"
       style={locationBoxStyle(element.location)}
     >
-      {element.creation.overlay_kind !== "interview_summary" ? (
+      {element.creation.vibe !== "summary" &&
+      element.creation.overlay_kind !== "interview_summary" ? (
         <PetOsBubble
           text={element.creation.text}
           vibe={element.creation.vibe}
@@ -259,6 +279,56 @@ function pawTrailCompatibilityCss(): string {
   return "[data-motion-motif=paw_trail] .p4,[data-motion-motif=paw_trail] .p5{display:none!important}[data-motion-motif=paw_trail] .toe{width:20%!important;height:20%!important}[data-motion-motif=paw_trail] .t1{left:2%!important;top:28%!important}[data-motion-motif=paw_trail] .t2{left:27%!important;top:7%!important}[data-motion-motif=paw_trail] .t3{left:auto!important;right:27%!important;top:3%!important}[data-motion-motif=paw_trail] .t4{left:auto!important;right:2%!important;top:24%!important}[data-motion-motif=paw_trail] .p1,[data-motion-motif=paw_trail] .p2,[data-motion-motif=paw_trail] .p3{opacity:0;animation:qwenpaw-paw-appear .36s cubic-bezier(.2,.85,.2,1) forwards!important}[data-motion-motif=paw_trail] .p1{animation-delay:.08s!important}[data-motion-motif=paw_trail] .p2{animation-delay:.38s!important}[data-motion-motif=paw_trail] .p3{animation-delay:.68s!important}[data-motion-motif=alert_mark] .bar{top:29%!important;height:29%!important}[data-motion-motif=alert_mark] .dot{left:45%!important;top:62%!important;width:10%!important}@keyframes qwenpaw-paw-appear{0%{opacity:0}100%{opacity:1}}";
 }
 
+function hasMotionDocument(
+  motion: MotionGraphicDocument | null | undefined,
+): motion is MotionGraphicDocument {
+  return Boolean(motion && (motion.html || motion.html_file_id));
+}
+
+/** Stable content identity for one motion document (inline or externalized). */
+function motionDocumentKey(motion: MotionGraphicDocument): string {
+  return motion.html_file_id ?? motion.html ?? "";
+}
+
+function motionMotif(
+  motion: MotionGraphicDocument,
+  html: string | null,
+): string | undefined {
+  if (typeof motion.motif === "string" && motion.motif) return motion.motif;
+  return html ? motionDataSetting(html, "motif") : undefined;
+}
+
+/** Resolve the document body: inline directly, externalized via fetch. */
+function useMotionDocumentHtml(motion: MotionGraphicDocument | null): {
+  html: string | null;
+  failed: boolean;
+} {
+  const inline = motion?.html ?? null;
+  const fileId = motion?.html_file_id ?? null;
+  const [fetched, setFetched] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (inline || !fileId) return undefined;
+    let cancelled = false;
+    setFetched(null);
+    setFailed(false);
+    fetchMotionDocument(fileId)
+      .then((text) => {
+        if (!cancelled) setFetched(text);
+      })
+      .catch(() => {
+        // Fail open: an unreachable externalized body must release the
+        // readiness gate instead of pinning the preview notice forever.
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fileId, inline]);
+  if (inline) return { html: inline, failed: false };
+  return { html: fileId ? fetched : null, failed };
+}
+
 function MotionOverlayLayer({
   layer,
   playheadTick,
@@ -279,9 +349,22 @@ function MotionOverlayLayer({
   const { element } = layer;
   const motion =
     element.creation.type === "overlay" ? element.creation.motion : null;
+  // js-timeline documents never execute in the preview (the iframe
+  // sandbox forbids scripts and vendored runtimes cannot resolve from
+  // srcDoc); a backend-rendered settled poster stands in instead, and
+  // readiness comes from that real image load. Inline html_js bodies
+  // cannot exist in committed Projects (the schema rejects them), so
+  // the poster is the only html_js preview surface.
+  const isJsTimeline = motion?.format === "html_js";
+  const posterFileId = isJsTimeline ? motion?.html_file_id ?? null : null;
+  const [posterFailed, setPosterFailed] = useState(false);
+  const { html, failed: htmlFailed } = useMotionDocumentHtml(
+    isJsTimeline ? null : motion ?? null,
+  );
   const isTextOverlay =
     element.creation.type === "overlay" &&
-    overlayContentKind(element.creation) === "copy";
+    overlayContentKind(element.creation) === "copy" &&
+    Boolean(element.creation.text.trim());
   const localTimeMs =
     (Math.max(0, playheadTick - element.span.start_tick) / ticksPerSecond) *
     1000;
@@ -290,8 +373,7 @@ function MotionOverlayLayer({
   const pausedSeekTimeMs = playing ? null : localTimeMs;
   const durationMs = (element.span.duration_tick / ticksPerSecond) * 1000;
   const exitStyle =
-    motion?.exit ??
-    (motion?.html ? motionDataSetting(motion.html, "exit") : undefined);
+    motion?.exit ?? (html ? motionDataSetting(html, "exit") : undefined);
   const exitProgress = motionExitProgress(exitStyle, localTimeMs, durationMs);
   const boxStyle = locationBoxStyle(element.location);
   const exitScale = exitStyle === "shrink" ? 1 - exitProgress * 0.18 : 1;
@@ -310,15 +392,66 @@ function MotionOverlayLayer({
   useEffect(() => {
     return () => onVisualReadyChange(visualKey, false);
   }, [onVisualReadyChange, visualKey]);
+  // A js timeline whose poster cannot be served fails closed: it
+  // renders nothing but releases the readiness gate, because the
+  // decoration is additive polish and may not hold the whole preview
+  // hostage. Its document body never renders without the seek engine.
+  useEffect(() => {
+    if (isJsTimeline && (!posterFileId || posterFailed)) {
+      onVisualReadyChange(visualKey, true);
+    }
+  }, [
+    isJsTimeline,
+    posterFileId,
+    posterFailed,
+    onVisualReadyChange,
+    visualKey,
+  ]);
+  // An externalized html_css body whose fetch failed also fails open:
+  // there is nothing to render, so it must not hold the preview hostage.
+  useEffect(() => {
+    if (!isJsTimeline && htmlFailed) {
+      onVisualReadyChange(visualKey, true);
+    }
+  }, [isJsTimeline, htmlFailed, onVisualReadyChange, visualKey]);
 
-  if (!motion?.html) return null;
-  const motif = motionDataSetting(motion.html, "motif");
+  if (!motion) return null;
+  if (isJsTimeline) {
+    if (!posterFileId || posterFailed) return null;
+    const motif = motionMotif(motion, null);
+    if (motif && RETIRED_MOTION_MOTIFS.has(motif)) return null;
+    return (
+      <img
+        data-live-motion-overlay={element.element_id}
+        data-live-motion-poster="true"
+        src={getMotionDocumentPosterUrl(
+          posterFileId,
+          Math.round(1280 * (element.location?.width ?? 1)),
+          Math.round(720 * (element.location?.height ?? 1)),
+        )}
+        alt={element.label || "动态动效"}
+        onLoad={() => onVisualReadyChange(visualKey, true)}
+        onError={() => setPosterFailed(true)}
+        className="pointer-events-none absolute border-0 bg-transparent"
+        style={{
+          ...boxStyle,
+          opacity:
+            exitStyle === "none"
+              ? baseOpacity
+              : baseOpacity * (1 - exitProgress),
+          transform: `${boxStyle.transform ?? ""} scale(${exitScale})`.trim(),
+        }}
+      />
+    );
+  }
+  if (!html) return null;
+  const motif = motionMotif(motion, html);
   if (motif && RETIRED_MOTION_MOTIFS.has(motif)) return null;
   return (
     <iframe
       ref={iframeRef}
       data-live-motion-overlay={element.element_id}
-      srcDoc={motionPreviewDocument(motion.html, isTextOverlay)}
+      srcDoc={motionPreviewDocument(html, isTextOverlay)}
       title={element.label || t("livePreview.motionEffect")}
       // No scripts allowed; allow-same-origin exists only so the parent page
       // can sync the CSS animation timeline.
@@ -502,23 +635,31 @@ export default function TimelineLivePreview({
       if (!visible || !playing || isBeyondSource) {
         // Pause when beyond source duration, out of view, or not playing
         if (!media.paused) media.pause();
-        if (visible && isBeyondSource && Number.isFinite(media.duration)) {
-          // Freeze on last frame when beyond source
-          media.currentTime = Math.min(
-            media.duration,
-            effectiveWindowSeconds - 0.033,
-          );
+        if (visible && isBeyondSource) {
+          // Freeze on the same last-window frame the readiness check
+          // expects: mediaTargetSeconds already clamps to the window end
+          // and includes the source-in offset. Writing a bare
+          // window-relative time here (without source-in) left the
+          // element seconds away from the drift target forever.
+          const frozen = reachableTargetSeconds(target, media);
+          if (Math.abs(media.currentTime - frozen) > 0.001) {
+            media.currentTime = frozen;
+          }
         } else if (
           !playing &&
           visible &&
-          Math.abs(media.currentTime - target) > DRIFT_TOLERANCE_SECONDS
+          Math.abs(media.currentTime - reachableTargetSeconds(target, media)) >
+            DRIFT_TOLERANCE_SECONDS
         ) {
-          media.currentTime = target;
+          media.currentTime = reachableTargetSeconds(target, media);
         }
         return;
       }
-      if (Math.abs(media.currentTime - target) > DRIFT_TOLERANCE_SECONDS) {
-        media.currentTime = target;
+      if (
+        Math.abs(media.currentTime - reachableTargetSeconds(target, media)) >
+        DRIFT_TOLERANCE_SECONDS
+      ) {
+        media.currentTime = reachableTargetSeconds(target, media);
       }
       if (media.paused) {
         media.play()?.catch(() => undefined);
@@ -584,7 +725,10 @@ export default function TimelineLivePreview({
           return (
             Math.abs(
               node.currentTime -
-                mediaTargetSeconds(layer, playheadTick, ticksPerSecond),
+                reachableTargetSeconds(
+                  mediaTargetSeconds(layer, playheadTick, ticksPerSecond),
+                  node,
+                ),
             ) > DRIFT_TOLERANCE_SECONDS
           );
         }
@@ -595,15 +739,13 @@ export default function TimelineLivePreview({
         if (media) return true;
         if (
           element.creation.type === "overlay" &&
-          element.creation.motion?.html
+          hasMotionDocument(element.creation.motion)
         ) {
-          const motif = motionDataSetting(
-            element.creation.motion.html,
-            "motif",
-          );
+          const overlayMotion = element.creation.motion;
+          const motif = motionMotif(overlayMotion, overlayMotion.html ?? null);
           if (motif && RETIRED_MOTION_MOTIFS.has(motif)) return false;
           return !readyMotionKeys.has(
-            `${element.element_id}:${element.creation.motion.html}`,
+            `${element.element_id}:${motionDocumentKey(overlayMotion)}`,
           );
         }
         return false;
@@ -718,7 +860,7 @@ export default function TimelineLivePreview({
           if (status === "ready") {
             if (
               element.creation.type === "overlay" &&
-              element.creation.motion?.html
+              hasMotionDocument(element.creation.motion)
             ) {
               return (
                 <MotionOverlayLayer
@@ -727,7 +869,9 @@ export default function TimelineLivePreview({
                   playheadTick={playheadTick}
                   ticksPerSecond={ticksPerSecond}
                   playing={playing}
-                  visualKey={`${elementId}:${element.creation.motion.html}`}
+                  visualKey={`${elementId}:${motionDocumentKey(
+                    element.creation.motion,
+                  )}`}
                   onVisualReadyChange={handleMotionVisualReady}
                 />
               );

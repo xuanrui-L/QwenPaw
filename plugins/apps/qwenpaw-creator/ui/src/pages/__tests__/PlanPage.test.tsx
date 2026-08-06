@@ -97,11 +97,14 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getAllByText("20s").length).toBeGreaterThan(0);
     expect(screen.getByText("16:9")).toBeInTheDocument();
     expect(screen.getByText("6 项内容")).toBeInTheDocument();
-    // The transition now renders as a junction badge, so only 5 track rows remain.
-    expect(screen.getByText(/5 轨/)).toHaveTextContent("可上下滚动");
-    expect(
-      container.querySelector('[class~="max-h-[320px]"]'),
-    ).toBeInTheDocument();
+    // The transition renders as a junction badge, and both fixture
+    // overlays carry copy (styled captions stay captions), so the rows
+    // are ai/clip/subtitle/audio = 4 tracks and no vertical scrolling is
+    // needed.
+    expect(screen.getByText(/4 轨/)).not.toHaveTextContent("可上下滚动");
+    // Four lanes fit without the scroll viewport, so the capped
+    // max-height wrapper must not be rendered.
+    expect(container.querySelector('[class~="max-h-[320px]"]')).toBeNull();
     expect(screen.getAllByText("午饭名场面").length).toBeGreaterThan(0);
     expect(screen.getByText("分镜描述")).toBeInTheDocument();
     expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();
@@ -265,7 +268,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     ).toBeInTheDocument();
     expect(
       container.querySelector("[data-timeline-point-candidates]")?.textContent,
-    ).toContain("该时刻有");
+    ).toContain("项内容");
     expect(
       container.querySelector("[data-timeline-point-candidates]")?.textContent,
     ).toContain("5");
@@ -959,7 +962,8 @@ describe("PlanPage Timeline/Element frontend", () => {
       ).replace(/\s+/g, "");
     // The canvas summary always derives from the playhead (0s here).
     const derivedAtZero = summary();
-    expect(derivedAtZero).toContain("0s·该时刻有");
+    expect(derivedAtZero).toContain("0s·");
+    expect(derivedAtZero).toContain("项内容");
 
     // Whole-lane click: pinned selection semantics, not "active at 0s".
     fireEvent.click(

@@ -68,6 +68,7 @@ from services.project_files.models import (
     S2VCreation,
     T2VCreation,
 )
+from services.media_files.call_budget import ensure_media_call_budget
 from services.media_files.element_adapter import (
     bind_candidate_output,
     find_timeline_element,
@@ -90,6 +91,7 @@ from services.media_files.visual_reference_resolution import (
 )
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
+from services.run_review.media_review import schedule_media_review
 from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     canonical_json_bytes,
@@ -4017,6 +4019,16 @@ class FileR2VExecutionService:
                 "projectGeneration": snapshot.generation,
             }
         )
+        # Run-review hook: every successful convergence (fresh render,
+        # idempotent replay, crash recovery) flows through this single
+        # point. Scheduling is advisory and idempotent: the switch, the
+        # command filter and the already-reviewed dedup live on the review
+        # side.
+        schedule_media_review(
+            self.services,
+            project_id=task.project_id,
+            published_result=success,
+        )
         await self._finish_run(
             task.project_id,
             str(task.run_id),
@@ -4340,7 +4352,19 @@ class FileR2VExecutionService:
                     and run.metadata.get("commandType")
                     == CreatorCommandType.GENERATE_R2V_VIDEO.value
                 ):
-                    await self._recover_run_admission_gap(run)
+                    try:
+                        await self._recover_run_admission_gap(run)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # One corrupt Project must not prevent unrelated
+                        # Projects from recovering during service startup.
+                        logger.exception(
+                            "R2V admission-gap recovery isolated failure "
+                            "for %s/%s",
+                            project_id,
+                            run.run_id,
+                        )
             for task in self.executions.list_tasks(project_id):
                 if task.kind is not TaskKind.R2V_GENERATION:
                     continue
@@ -4581,9 +4605,19 @@ async def start_file_media_execution_services(
             )
     await recover_interrupted_image_tasks(services)
     from .local_execution import recover_file_local_media_project
+    from services.project_files.store import ProjectIntegrityError
 
     for project_id in services.projects.discover_project_ids():
-        await recover_file_local_media_project(services, project_id)
+        try:
+            await recover_file_local_media_project(services, project_id)
+        except ProjectIntegrityError:
+            # One corrupt/foreign project.json must not veto the whole
+            # runtime: skipping keeps every healthy Project operational
+            # while the corrupt one is already surfaced by recovery logs.
+            logger.exception(
+                "skipping local media recovery for corrupt Project %s",
+                project_id,
+            )
     project_ids = services.projects.discover_project_ids()
     await asyncio.to_thread(
         reconcile_terminal_task_runs,
@@ -4629,6 +4663,9 @@ async def execute_file_r2v_command(
     idempotency_key: str,
     expected_object_versions: Sequence[str] = (),
 ) -> FileR2VDispatch:
+    # Wallet fuse: every dispatch path (specialist delegation, work-graph
+    # scheduler, manual retry) funnels through here.
+    ensure_media_call_budget(services, project_id)
     return await file_r2v_execution_service(services).dispatch(
         project_id=project_id,
         target_ref=target_ref,

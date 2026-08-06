@@ -299,6 +299,43 @@ def _migrate_v3_to_v4(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[3] = _migrate_v3_to_v4
 
 
+def _migrate_v4_drop_overlay_kind(document: dict[str, Any]) -> dict[str, Any]:
+    """v4 -> v5: overlay roles derive from data, not an overlay_kind tag.
+
+    ``pet_os``/``interview_summary`` overlays already carry authoritative
+    ``text``; ``motion``/``media`` overlays are text-free.  The interview
+    presentation choice is the one fact only the tag carried, so it is
+    preserved as ``vibe="summary"`` (the renderer and frontend both key
+    interview styling off that value) before the tag is dropped.
+    """
+
+    timelines = document.get("timelines")
+    items = timelines.get("items") if isinstance(timelines, dict) else None
+    if isinstance(items, dict):
+        for timeline in items.values():
+            if not isinstance(timeline, dict):
+                continue
+            elements = timeline.get("elements_by_id")
+            if not isinstance(elements, dict):
+                continue
+            for element in elements.values():
+                if not isinstance(element, dict):
+                    continue
+                creation = element.get("creation")
+                if (
+                    isinstance(creation, dict)
+                    and creation.get("type") == "overlay"
+                ):
+                    kind = creation.pop("overlay_kind", None)
+                    if kind == "interview_summary":
+                        creation["vibe"] = "summary"
+    document["schema_version"] = 5
+    return document
+
+
+PROJECT_MIGRATIONS[4] = _migrate_v4_drop_overlay_kind
+
+
 def _timeline_elements(document: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
     timelines = _dict_field(_dict_field(document, "timelines"), "items")
     for timeline in timelines.values():
@@ -328,7 +365,7 @@ def _selected_slot_version(
     return selected if isinstance(selected, str) and selected else None
 
 
-def _migrate_v4_to_v5(document: dict[str, Any]) -> dict[str, Any]:
+def _migrate_v5_to_v6(document: dict[str, Any]) -> dict[str, Any]:
     """Split mode-tagged r2v creations into their own creation types.
 
     Schema v4 expressed t2v/i2v/s2v as ``creation.type=r2v`` plus a
@@ -390,11 +427,11 @@ def _migrate_v4_to_v5(document: dict[str, Any]) -> dict[str, Any]:
             outputs = element.get("outputs")
             if isinstance(outputs, dict):
                 outputs.pop("storyboard", None)
-    document["schema_version"] = 5
+    document["schema_version"] = 6
     return document
 
 
-PROJECT_MIGRATIONS[4] = _migrate_v4_to_v5
+PROJECT_MIGRATIONS[5] = _migrate_v5_to_v6
 
 
 def migrate_project_document(raw: Mapping[str, Any]) -> dict[str, Any]:

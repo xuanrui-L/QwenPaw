@@ -333,6 +333,53 @@ def get_media_review_mode() -> str:
 
 DEFAULT_MAINLINE_MAX_MODEL_TURNS = 24
 DEFAULT_SPECIALIST_MAX_MODEL_TURNS = 16
+DEFAULT_MEDIA_PARALLELISM = 3
+DEFAULT_MEDIA_CALL_BUDGET = 200
+
+
+def get_media_call_budget() -> int:
+    """Per-project cap on billable media generation calls.
+
+    The wallet fuse for unattended operation: call counts are the honest
+    spend metric (local price tables were removed — they go stale and
+    mislead). The default is deliberately loose; it exists to stop a
+    runaway project, not to police normal use.
+    """
+
+    section = _get_user_config().get("agent_runtime")
+    value = (
+        section.get("media_call_budget")
+        if isinstance(
+            section,
+            dict,
+        )
+        else None
+    )
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_MEDIA_CALL_BUDGET
+
+
+def get_media_parallelism() -> int:
+    """Per-project cap on concurrently dispatched media tasks.
+
+    The work-graph scheduler fans out READY media nodes up to this many
+    at once; the global model_slot semaphores still bound each provider
+    kind underneath, so this is the coarse project-level knob.
+    """
+
+    section = _get_user_config().get("agent_runtime")
+    value = (
+        section.get("media_parallelism")
+        if isinstance(
+            section,
+            dict,
+        )
+        else None
+    )
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return DEFAULT_MEDIA_PARALLELISM
 
 
 def _turn_limit(section: dict | None, key: str, default: int) -> int:
@@ -1128,6 +1175,38 @@ def is_s2v_configured() -> bool:
     """
 
     return bool(get_s2v_api_key())
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    return raw.casefold() in {"1", "true", "yes", "on"}
+
+
+# Code-level master switch for the render self-review module (WT4). Not
+# exposed through plugin.json, schemas or the frontend contract.
+SELF_REVIEW_ENABLED = _bool_env("CREATOR_SELF_REVIEW_ENABLED", False)
+
+
+def is_self_review_enabled() -> bool:
+    """Read the switch live so tests and restarts pick up env changes."""
+    return _bool_env("CREATOR_SELF_REVIEW_ENABLED", False)
+
+
+# Code-level switches for the in-run review bypass (run_review). Advisory
+# only, independent from the final-render self review above; neither is
+# exposed through plugin.json, schemas or the frontend contract.
+SYNC_REVIEW_ENABLED = _bool_env("CREATOR_SYNC_REVIEW_ENABLED", False)
+MEDIA_REVIEW_ENABLED = _bool_env("CREATOR_MEDIA_REVIEW_ENABLED", False)
+
+
+def is_sync_review_enabled() -> bool:
+    """In-run synchronous review of low-cost text/motion artifacts."""
+    return _bool_env("CREATOR_SYNC_REVIEW_ENABLED", False)
+
+
+def is_media_review_enabled() -> bool:
+    """Async bypass review of generated image/video artifacts."""
+    return _bool_env("CREATOR_MEDIA_REVIEW_ENABLED", False)
 
 
 def _image_provider():

@@ -15,6 +15,7 @@ import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useNavigationStore } from "@/store/navigationStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
+import { useWorkGraphStore } from "@/store/workGraphStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import TopNav from "./TopNav";
 import ReturnBanner from "@/components/creator/ReturnBanner";
@@ -297,6 +298,8 @@ export default function ProjectLayout() {
       )
     ) {
       void refreshTasks(id);
+      // Task/subagent lifecycle changes move work-graph node states too.
+      void useWorkGraphStore.getState().refresh(id);
     }
     if (
       pendingEvents.some(

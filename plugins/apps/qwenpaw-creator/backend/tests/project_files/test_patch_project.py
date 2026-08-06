@@ -247,6 +247,42 @@ def test_invoke_accepts_double_encoded_ops_string(tmp_path):
         )
 
 
+def test_invoke_repairs_stringified_ops_with_a_bracket_slip(tmp_path):
+    """Second field trip 2026-08-05: the stringified array itself carried
+    a missing comma, so strict decode bounced it with a misleading
+    'must not be a string' and the model resent verbatim into the
+    breaker. json_repair recovers structure-only slips."""
+    tools = _tools(tmp_path)
+
+    # Two ops with the separating comma dropped — the shape of the real
+    # payload's defect.
+    broken = (
+        '[{"op": "replace", "path": "/name", "value": "修复后"}'
+        ' {"op": "replace", "path": "/description", "value": "缺逗号"}]'
+    )
+    result = tools.invoke(
+        "patch_project",
+        {"projectId": "project-1", "ops": broken},
+    )
+
+    assert result["project"]["name"] == "修复后"
+    assert result["project"]["description"] == "缺逗号"
+
+
+def test_unrepairable_string_ops_error_names_the_syntax_defect(tmp_path):
+    tools = _tools(tmp_path)
+
+    with pytest.raises(AgentProjectToolError) as caught:
+        tools.invoke(
+            "patch_project",
+            # Repairs to a dict, not a list — stays refused, but the
+            # message must point at the string + syntax defect.
+            {"projectId": "project-1", "ops": '{"op": "replace",}'},
+        )
+    message = str(caught.value)
+    assert "字符串" in message
+
+
 def test_invoke_reports_bad_op_without_committing(tmp_path):
     tools = _tools(tmp_path)
 

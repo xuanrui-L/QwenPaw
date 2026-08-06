@@ -188,7 +188,6 @@ export const projectDocument: ProjectDocument = {
             z_index: 10,
             creation: {
               type: "overlay",
-              overlay_kind: "motion",
               text: "小猫出发",
               vibe: "轻快",
               prompt: "文字轻盈浮现",
@@ -220,7 +219,6 @@ export const projectDocument: ProjectDocument = {
             z_index: 11,
             creation: {
               type: "overlay",
-              overlay_kind: "pet_os",
               text: "午饭在哪里？",
               vibe: "俏皮",
               prompt: "漫画气泡弹出",

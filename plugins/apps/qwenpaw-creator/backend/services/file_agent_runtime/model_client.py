@@ -561,7 +561,7 @@ class AgentScopeAgentChatClient:
         on_text_delta: AgentTextDeltaCallback | None = None,
         on_thinking_delta: AgentTextDeltaCallback | None = None,
         on_tool_call_delta: AgentToolDeltaCallback | None = None,
-        _empty_retries_remaining: int = 1,
+        _empty_retries_remaining: int = 2,
         _rate_limit_retries_remaining: int = 3,
         _transient_retries_remaining: int = 2,
         _markup_retries_remaining: int = 2,

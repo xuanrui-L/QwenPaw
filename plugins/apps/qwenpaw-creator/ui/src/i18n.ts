@@ -8,23 +8,27 @@ const resources = {
   en: { translation: en },
 };
 
-// Storage access is defensive: some jsdom/vitest combinations expose a
-// localStorage global whose methods are not callable functions.
-const storedLanguage = (() => {
+// Node >= 22 exposes a global localStorage stub whose methods throw until
+// the experimental web storage is configured; only trust a functional one
+// (the browser / jsdom implementation).
+function storedLanguage(): string | null {
   try {
-    const storage = globalThis.localStorage as Storage | undefined;
-    return typeof storage?.getItem === "function"
-      ? storage.getItem("language")
-      : null;
+    if (
+      typeof localStorage !== "undefined" &&
+      typeof localStorage.getItem === "function"
+    ) {
+      return localStorage.getItem("language");
+    }
   } catch {
-    return null;
+    // Fall through to navigator/default detection.
   }
-})();
+  return null;
+}
 
 i18n.use(initReactI18next).init({
   resources,
   lng:
-    storedLanguage ||
+    storedLanguage() ||
     (typeof navigator !== "undefined" ? navigator.language : null) ||
     "en",
   load: "languageOnly",

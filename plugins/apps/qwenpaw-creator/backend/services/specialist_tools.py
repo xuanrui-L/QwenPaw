@@ -50,7 +50,7 @@ class SpecialistToolWait(StrEnum):
 
 
 _PROJECT_ASSETS_TARGET_REF = "project:assets"
-_ASSET_TARGET_REF_PATTERN = r"^asset:.+$"
+_ASSET_TARGET_REF_PATTERN = r"^(asset|lineup):.+$"
 _SOURCE_PROJECT_TOOL_NAMES = frozenset({"read_project", "read_project_file"})
 
 
@@ -90,7 +90,11 @@ class SpecialistToolSpec:
             role=role,
             admitted_target_refs=admitted_target_refs,
         ):
-            return target_ref.startswith("asset:") and bool(target_ref[6:])
+            # Cast lineups are visual assets too: a Project-assets run may
+            # generate the group anchor alongside individual entity images.
+            return (
+                target_ref.startswith("asset:") and bool(target_ref[6:])
+            ) or (target_ref.startswith("lineup:") and bool(target_ref[7:]))
         return target_ref in admitted_target_refs
 
     def manifest(
@@ -116,7 +120,8 @@ class SpecialistToolSpec:
                     target["pattern"] = _ASSET_TARGET_REF_PATTERN
                     target["description"] = (
                         "必须使用本 Project 中已存在的 exact "
-                        "asset:<VisualEntity.entity_id>，不能直接使用 "
+                        "asset:<VisualEntity.entity_id>（或阵容图 "
+                        "lineup:<VisualCastLineup.lineup_id>），不能直接使用 "
                         "project:assets，也不能使用来源素材 logicalAssetId；"
                         "来源素材版本只能放在 arguments.referenceVersionIds。"
                     )
@@ -593,10 +598,10 @@ _SPECS = (
         name="design_motion_overlays",
         description=(
             "让视觉设计模型观察目标 Timeline 的真实画面帧做两件事："
-            "为每个文字 Overlay（pet_os/interview_summary）生成贴合画面的精美"
+            "为每个台词卡 Overlay（text 非空）生成贴合画面的精美"
             "动态字幕卡样式，写入该 Element 的 creation.motion（渲染失败自动回退"
             "固定气泡模板）；再从全片挑选少数最值得装饰的片段（默认最多 3 个），"
-            "生成 overlay_kind=motion 的装饰 Overlay Element。全部结果直接写入 "
+            "生成无文字的装饰 Overlay Element（text 为空）。全部结果直接写入 "
             "project.json 并返回逐项摘要；写入后可用 read_project 查看，"
             "之后由确定性后端渲染接口把样式与动效合成进成片。"
         ),
@@ -781,11 +786,19 @@ class FileSpecialistToolRegistry:
             return SpecialistToolResult(payload=dict(result))
 
         if name == "image_generation":
-            command = (
-                CreatorCommandType.GENERATE_ASSET
-                if role is SpecialistRole.VISUAL_DEVELOPMENT
-                else CreatorCommandType.GENERATE_STORYBOARD_IMAGE
-            )
+            if target_ref.startswith("lineup:"):
+                # The cast lineup is the group anchor; only the visual
+                # development role may draw it, storyboard directors
+                # consume it through the reference chain instead.
+                if role is not SpecialistRole.VISUAL_DEVELOPMENT:
+                    raise PermissionDeniedError(
+                        "只有视觉开发 Specialist 可以生成阵容图",
+                    )
+                command = CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE
+            elif role is SpecialistRole.VISUAL_DEVELOPMENT:
+                command = CreatorCommandType.GENERATE_ASSET
+            else:
+                command = CreatorCommandType.GENERATE_STORYBOARD_IMAGE
             execution = await execute_file_image_command(
                 self.services,
                 project_id=project_id,

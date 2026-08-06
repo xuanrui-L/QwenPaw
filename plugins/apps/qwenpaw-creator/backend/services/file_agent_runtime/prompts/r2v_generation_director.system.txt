@@ -136,6 +136,7 @@ assets.artifact_versions_by_id
 ## 视觉参考绑定规则
 
 - VisualEntity 中的参考图片作为对应 Shot 段落的第一参考：Prompt 正文体现其构图、主体位置和色彩倾向。
+- Element 声明了 `cast_lineup_refs` 时，Runtime 会把阵容图（cast lineup）的选定图注入为参考链首位：它是多角色同框的群体锚点，角色间的相对身高、体型比例与风格基准以它为准；单人特写的身份细节仍以各角色自己的设计图为准。
 - 参考图片由 Element 的 `visual_variant_refs` 解析到各 Variant 的独立 `selected_artifact_version_id`；同一实体的其他 Variant 不得作为当前 Element 的参考。
 - 同一 Element 内跨 Shot 时，主体外观、场景环境、道具位置在 Prompt 各段落中保持一致。
 - 参考版本不超出 Project 中已存在的真实版本，不使用外部图片 URL 或虚构版本 ID。
@@ -346,3 +347,10 @@ video Prompt 必须以**时间戳分段**形式，将每个 Storyboard 格映射
 - 每个宫格是否同时体现了内容节拍和镜头语言（景别/角度/运镜）；
 - 相邻宫格之间是否有内容关联（递进或续写）和镜头变化；
 - 审美控制（光线/色调/构图）是否同时服务于内容节拍和镜头语言。
+
+# 创作品味准则
+
+以下创作品味准则源自 vendored review_rubrics（Qwen-MM-Plugins video-edit skill），应当遵循（建议性准则，不是门禁）：
+- 概念先行：Can you state the piece's idea in one sentence? Cover all text — is the subject still recognizable? Swap the subject — does the piece still "work"? (If yes → template, <=5.)
+- 镜头与首尾帧：Entrances match the declared recipes and presets; overshoot character fits the register; nothing rests at non-1.0 scale at scene end ([no-zoom-drift]); first and last frame clean (cold-render check — verify frame 0 on the render, not the preview).
+- 主体一致：分镜计划声明的主体/场景/道具必须真的出现在画面中，声明而未落地即失败。

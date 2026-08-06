@@ -129,7 +129,7 @@ def test_project_new_has_complete_valid_defaults_and_utc_time():
         now=datetime(2026, 7, 15, 16, 0, tzinfo=timezone.utc),
     )
 
-    assert project.schema_version == 5
+    assert project.schema_version == 6
     assert project.generation == 0
     assert project.created_at.tzinfo == timezone.utc
     assert project.timelines.order == ["timeline:main"]
@@ -360,12 +360,15 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
 
     migrated = load_project_document(raw)
 
-    assert migrated.schema_version == 5
+    assert migrated.schema_version == 6
     assert migrated.visual.entities.items[
         "char:hero"
     ].required_variant_ids == ["variant:peak"]
     assert project_document_etag(raw, project=migrated) == (
-        "sha256:62786303a10ac590a0bcd6036d4cd5c683a23e7660533334bb2547342724468b"
+        # Pinned against the current schema dump: bump when Project gains
+        # fields, the mechanism under test is that migration-added fields
+        # stay out of the source-document hash.
+        "sha256:5bc04a0b47b9081e8ebfde982bdcbe5a112e8fbf52406666b6ab0a71afb07d9b"
     )
     assert project_document_etag(raw, project=migrated) != project_etag(
         migrated,
