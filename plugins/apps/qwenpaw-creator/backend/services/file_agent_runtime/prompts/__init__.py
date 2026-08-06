@@ -45,6 +45,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "source_intelligence_agent.system.txt",
             "project_id",
             "workspace_schema",
+            "memory_guidance",
         ),
         _spec(
             "visual_development_agent.system",

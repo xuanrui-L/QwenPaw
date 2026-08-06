@@ -21,6 +21,7 @@ import {
   VideoCameraOutlined,
   AudioOutlined,
   SoundOutlined,
+  NodeIndexOutlined,
   GlobalOutlined,
   ReloadOutlined,
   CloseOutlined,
@@ -88,6 +89,7 @@ const ASR_PROTOCOLS = [
 ];
 const TTS_PROTOCOLS = ["DashScope（百炼）"];
 const S2V_PROTOCOLS = ["DashScope（百炼）"];
+const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
 const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
 const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
 
@@ -149,6 +151,13 @@ const S2V_PRESETS: Record<string, ProtocolPreset> = {
   },
 };
 
+const EMBEDDING_PRESETS: Record<string, ProtocolPreset> = {
+  "DashScope（百炼）": {
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    models: ["qwen3-vl-embedding"],
+  },
+};
+
 const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
@@ -192,7 +201,15 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   },
 };
 
-type ModelType = "llm" | "vlm" | "asr" | "tts" | "s2v" | "image" | "video";
+type ModelType =
+  | "llm"
+  | "vlm"
+  | "asr"
+  | "tts"
+  | "s2v"
+  | "embedding"
+  | "image"
+  | "video";
 type TabType = ModelType | "grounding";
 
 // Sections whose endpoint comes from a fixed protocol preset rather than
@@ -275,6 +292,15 @@ const DEFAULT_CONFIG: ModelConfigData = {
     custom_protocol: "",
     detect_model_name: "",
     reuse_llm_key: true,
+  },
+  embedding: {
+    enabled: false,
+    model_name: "qwen3-vl-embedding",
+    api_key: "",
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    protocol: "DashScope（百炼）",
+    custom_protocol: "",
+    reuse_vlm_key: true,
   },
   image: {
     enabled: false,
@@ -478,6 +504,16 @@ const CARD_META: {
     required: false,
   },
   {
+    type: "embedding",
+    labelKey: "modelConfig.embedding",
+    icon: (
+      <NodeIndexOutlined
+        style={{ color: "var(--color-text-tertiary)", fontSize: 16 }}
+      />
+    ),
+    required: false,
+  },
+  {
     type: "image",
     labelKey: "modelConfig.imageGen",
     icon: (
@@ -638,6 +674,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         merged.tts.protocol = TTS_PROTOCOLS[0];
       if (!S2V_PROTOCOLS.includes(merged.s2v.protocol))
         merged.s2v.protocol = S2V_PROTOCOLS[0];
+      if (!EMBEDDING_PROTOCOLS.includes(merged.embedding.protocol))
+        merged.embedding.protocol = EMBEDDING_PROTOCOLS[0];
       if (!IMAGE_PROTOCOLS.includes(merged.image.protocol))
         merged.image.protocol = IMAGE_PROTOCOLS[0];
       if (!VIDEO_PROTOCOLS.includes(merged.video.protocol))
@@ -927,6 +965,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         (type === "tts" && config.tts.reuse_llm_key) ||
         (type === "s2v" && config.s2v.reuse_llm_key)
           ? hasUsableApiKey(config.llm)
+          : type === "embedding" && config.embedding.reuse_vlm_key
+          ? hasUsableApiKey(config.vlm.use_llm ? config.llm : config.vlm) ||
+            hasUsableApiKey(config.llm)
           : hasUsableApiKey(item);
       if (!item.base_url || !hasKey || !item.model_name) {
         message.warning(t("modelConfig.fillComplete"));
@@ -944,6 +985,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         ) {
           // ASR/TTS/S2V can reuse the LLM API key (same DashScope credential).
           testApiKey = await resolveRealApiKey("llm", config.llm);
+        } else if (type === "embedding" && config.embedding.reuse_vlm_key) {
+          // Embedding reuses the VLM key (which may itself reuse the LLM).
+          const vlmSection = config.vlm.use_llm ? "llm" : "vlm";
+          const vlmItem = config.vlm.use_llm ? config.llm : config.vlm;
+          testApiKey =
+            (await resolveRealApiKey(vlmSection, vlmItem)) ||
+            (await resolveRealApiKey("llm", config.llm));
         } else if (type === "vlm" && config.vlm.use_llm) {
           // VLM reuses the LLM config.
           testApiKey = await resolveRealApiKey("llm", config.llm);
@@ -1076,6 +1124,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         "asr",
         "tts",
         "s2v",
+        "embedding",
         "image",
         "video",
       ] as TabType[]) {
@@ -1129,6 +1178,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       ? TTS_PROTOCOLS
       : type === "s2v"
       ? S2V_PROTOCOLS
+      : type === "embedding"
+      ? EMBEDDING_PROTOCOLS
       : type === "image"
       ? IMAGE_PROTOCOLS
       : VIDEO_PROTOCOLS;
@@ -1162,6 +1213,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         models: ttsModels.map((item) => item.model),
       };
     }
+    if (type === "embedding") return EMBEDDING_PRESETS[protocol] || null;
     if (type === "image") return IMAGE_PRESETS[protocol] || null;
     if (type === "video") return VIDEO_PRESETS[protocol] || null;
     return null;
@@ -1488,6 +1540,26 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               </p>
             </div>
           )}
+        {type === "embedding" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+            <Checkbox
+              checked={config.embedding.reuse_vlm_key}
+              onChange={(e) =>
+                updateItem("embedding", "reuse_vlm_key", e.target.checked)
+              }
+            >
+              复用 VLM API Key
+            </Checkbox>
+            <span
+              style={{
+                fontSize: 11,
+                color: "var(--color-text-tertiary)",
+              }}
+            >
+              用于长素材层次记忆的节点向量化与语义检索
+            </span>
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <Button
             className="test-btn"

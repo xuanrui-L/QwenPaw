@@ -56,6 +56,7 @@ export interface ModelConfigData {
     // provider only; empty means the backend default qwen-mt-image.
     translate_model: string;
   };
+  embedding: ModelConfigItem & { reuse_vlm_key: boolean };
   video: ModelConfigItem;
   oss: OssConfig;
   executionAuthorization: {
@@ -70,7 +71,7 @@ export interface ModelConfigData {
 }
 
 export interface ModelConnectionTestRequest {
-  type: "llm" | "vlm" | "asr" | "tts" | "s2v" | "image" | "video";
+  type: "llm" | "vlm" | "asr" | "tts" | "s2v" | "embedding" | "image" | "video";
   base_url: string;
   api_key: string;
   model_name: string;

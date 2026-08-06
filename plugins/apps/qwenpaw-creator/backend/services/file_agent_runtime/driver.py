@@ -149,7 +149,10 @@ from .models import (
     CreatorAgentRunRecord,
     TERMINAL_AGENT_RUN_STATUSES,
 )
-from .native_media import source_intelligence_content_parts
+from .native_media import (
+    document_page_content_parts,
+    source_intelligence_content_parts,
+)
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
 from .work_graph import derive_work_graph
@@ -2757,6 +2760,8 @@ class FileCreatorAgentRuntime:
             project_id=project_id,
             project=snapshot.project,
             workspace_schema=tools.schema_prompt.text,
+            project_root=self.services.projects.project_root(project_id),
+            target_refs=delegated.target_refs,
         )
         record_metadata: dict[str, Any] = {"parentActionId": parent_action_id}
         if request.source == "review_rejection_feedback":
@@ -3423,6 +3428,52 @@ class FileCreatorAgentRuntime:
                         "failed": failed,
                     },
                 )
+                if call.name == "read_document" and not failed:
+                    # Rendered pages enter the VLM context as native images
+                    # via the existing multimodal user-message mechanism.
+                    page_content: list[dict[str, Any]] = []
+                    try:
+                        page_parts = await document_page_content_parts(
+                            self.services,
+                            project_id=project_id,
+                            tool_result=result,
+                        )
+                    except (asyncio.CancelledError, StaleAgentRun):
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        page_parts = []
+                        page_content = [
+                            {
+                                "type": "text",
+                                "text": ("文档页图注入失败，请基于工具返回的" f"文本摘要继续：{exc}"),
+                            },
+                        ]
+                    if page_parts:
+                        page_note = (
+                            f"以下是 read_document 渲染的 {len(page_parts)} 张"
+                            "文档页图，按页序排列；请直接观察页图内容，"
+                            "结合工具返回的文本摘要形成文档理解。"
+                        )
+                        page_content = [
+                            {"type": "text", "text": page_note},
+                            *page_parts,
+                        ]
+                    if page_content:
+                        await asyncio.to_thread(
+                            self.executions.append_specialist_message,
+                            project_id,
+                            specialist_run_id,
+                            message_id=f"specialist-message-{uuid4().hex}",
+                            role="user",
+                            content_parts=page_content,
+                            metadata={
+                                "parentActionId": parent_action_id,
+                                "documentPagesForToolCallId": call.call_id,
+                            },
+                        )
+                        messages.append(
+                            {"role": "user", "content": page_content},
+                        )
                 if waiting_review is not None:
                     target_ref = str(
                         waiting_review.details.get("targetRef") or "当前目标",

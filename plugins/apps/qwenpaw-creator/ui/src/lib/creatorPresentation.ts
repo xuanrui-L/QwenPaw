@@ -10,6 +10,7 @@ const TASK_KIND_LABEL_KEYS: Record<TaskView["kind"], string> = {
   asset_ingest: "presentation.taskKinds.asset_ingest",
   asset_import: "presentation.taskKinds.asset_import",
   source_intelligence: "presentation.taskKinds.source_intelligence",
+  source_memory_build: "presentation.taskKinds.source_memory_build",
   image_generation: "presentation.taskKinds.image_generation",
   r2v_generation: "presentation.taskKinds.r2v_generation",
   ai_edit_plan: "presentation.taskKinds.ai_edit_plan",

@@ -961,9 +961,11 @@ describe("PlanPage Timeline/Element frontend", () => {
           ?.textContent ?? ""
       ).replace(/\s+/g, "");
     // The canvas summary always derives from the playhead (0s here).
+    // #90 fixed the badge to one interpolated timeline.itemsCount
+    // message, so the derived text is "0s·{count}项内容".
     const derivedAtZero = summary();
     expect(derivedAtZero).toContain("0s·");
-    expect(derivedAtZero).toContain("项内容");
+    expect(derivedAtZero).toContain("2项内容");
 
     // Whole-lane click: pinned selection semantics, not "active at 0s".
     fireEvent.click(

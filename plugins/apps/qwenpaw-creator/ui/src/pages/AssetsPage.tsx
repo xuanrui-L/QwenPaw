@@ -27,6 +27,7 @@ import type {
   CharacterVoiceDocument,
   ProjectDocument,
   SourceAssetVersionDocument,
+  TaskView,
   VisualEntityDocument,
   VisualCastLineupDocument,
   VisualVariantDocument,
@@ -40,6 +41,7 @@ import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
+import DocumentUnderstanding from "@/components/assets/DocumentUnderstanding";
 import PageLoadError from "@/components/PageLoadError";
 import PageSkeleton from "@/components/PageSkeleton";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
@@ -139,6 +141,43 @@ function downloadName(name: string, mediaType: string): string {
   const ext =
     MIME_EXTENSION_MAP[mediaType.split(";")[0].trim().toLowerCase()] ?? "";
   return ext ? `${base}${ext}` : base;
+}
+
+// Source version ids whose long-source graph memory is built FOR THE
+// CURRENTLY SELECTED VERSION. A SUCCEEDED source_memory_build task alone
+// is not enough: after a same-logical-asset version replacement the old
+// task must not decorate the new, unbuilt version. The badge therefore
+// requires the ProjectSource's current intelligence version to point at
+// this exact selected version with a matching source checksum (the
+// backend memoryRef itself is checksum-gated on load).
+function memoryBuiltVersionIds(
+  project: ProjectDocument,
+  tasks: TaskView[],
+): Set<string> {
+  const builtLogicalIds = new Set<string>();
+  for (const task of tasks) {
+    if (task.kind !== "source_memory_build") continue;
+    if (task.status !== "SUCCEEDED") continue;
+    if (!task.targetRef.startsWith("asset:")) continue;
+    builtLogicalIds.add(task.targetRef.slice("asset:".length));
+  }
+  const badged = new Set<string>();
+  if (!builtLogicalIds.size) return badged;
+  for (const source of Object.values(project.sources.sources.items)) {
+    if (!builtLogicalIds.has(source.logical_asset_id)) continue;
+    const intelligenceId = source.current_intelligence_version_id;
+    if (!intelligenceId) continue;
+    const intelligence =
+      project.assets.intelligence_versions_by_id[intelligenceId];
+    if (!intelligence) continue;
+    const versionId = intelligence.source_asset_version_id;
+    if (versionId !== source.selected_asset_version_id) continue;
+    const version = project.assets.source_versions_by_id[versionId];
+    if (!version) continue;
+    if (version.checksum !== intelligence.source_checksum) continue;
+    badged.add(versionId);
+  }
+  return badged;
 }
 
 function artifactMedia(
@@ -557,8 +596,36 @@ function visualItemGroups(
   ];
 }
 
+/**
+ * Intelligence version bound to one exact SourceAssetVersion. Repeated
+ * analyses keep every record, so the Source's current pointer wins and
+ * older versions fall back to their newest analysis by created_at.
+ */
+function intelligenceVersionForSource(
+  project: ProjectDocument,
+  version: SourceAssetVersionDocument,
+): string | null {
+  const records = Object.values(
+    project.assets.intelligence_versions_by_id,
+  ).filter((record) => record.source_asset_version_id === version.version_id);
+  if (!records.length) return null;
+  const current = Object.values(project.sources.sources.items).find(
+    (source) => source.logical_asset_id === version.logical_asset_id,
+  )?.current_intelligence_version_id;
+  const pinned = records.find(
+    (record) => record.intelligence_version_id === current,
+  );
+  if (pinned) return pinned.intelligence_version_id;
+  return [...records].sort((left, right) =>
+    right.created_at.localeCompare(left.created_at),
+  )[0].intelligence_version_id;
+}
+
 function kindLabel(item: AssetItem, t: (key: string) => string): string {
-  if (item.kind === "source") return t("assets.sourceLabel");
+  if (item.kind === "source")
+    return item.mediaKind === "document"
+      ? t("assets.sourceDocumentLabel")
+      : t("assets.sourceLabel");
   if (item.kind === "artifact") return t("assets.artifactLabel");
   if (item.ref.startsWith("lineup:")) return t("assets.lineupLabel");
   const entity = item.raw as VisualEntityDocument;
@@ -844,10 +911,12 @@ export default function AssetsPage() {
   const patchProject = useProjectSnapshotStore((state) => state.patch);
   const patching = useProjectSnapshotStore((state) => state.patching);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
+  const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [search, setSearch] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [inputKind, setInputKind] = useState<"url" | "text">("url");
   const [inputName, setInputName] = useState("");
@@ -911,6 +980,10 @@ export default function AssetsPage() {
         item.variantState === "active",
     ) ||
     null;
+  const memoryBuilt = useMemo(
+    () => (project ? memoryBuiltVersionIds(project, tasks) : new Set<string>()),
+    [project, tasks],
+  );
 
   useEffect(() => {
     useCreatorInteractionStore.getState().select(selected?.ref || null);
@@ -928,14 +1001,18 @@ export default function AssetsPage() {
   };
   const uploadFile = async (file: File) => {
     setUploading(true);
+    setUploadError(null);
     try {
       await ingestAssetFile(id, file, "ATTACH_SOURCE");
       message.success(t("assets.uploadSuccess"));
       await refreshAfterIngest();
     } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : t("assets.uploadFailed"),
-      );
+      // Keep a persistent inline banner besides the transient toast so the
+      // rejection reason stays readable (acceptance B6).
+      const text =
+        error instanceof Error ? error.message : t("assets.uploadFailed");
+      setUploadError(text);
+      message.error(text, 6);
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -947,6 +1024,7 @@ export default function AssetsPage() {
       return;
     }
     setUploading(true);
+    setUploadError(null);
     try {
       await ingestAssetValue(id, {
         kind: inputKind,
@@ -964,9 +1042,10 @@ export default function AssetsPage() {
       setInputValue("");
       await refreshAfterIngest();
     } catch (error) {
-      message.error(
-        error instanceof Error ? error.message : t("assets.addFailed"),
-      );
+      const text =
+        error instanceof Error ? error.message : t("assets.addFailed");
+      setUploadError(text);
+      message.error(text, 6);
     } finally {
       setUploading(false);
     }
@@ -1025,6 +1104,24 @@ export default function AssetsPage() {
           </Button>
         </div>
       </header>
+
+      {uploadError && (
+        <div
+          role="alert"
+          data-creator-module="asset-upload-error"
+          className="flex shrink-0 items-start justify-between gap-3 border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700"
+        >
+          <span className="leading-5">{uploadError}</span>
+          <button
+            type="button"
+            aria-label="关闭错误提示"
+            onClick={() => setUploadError(null)}
+            className="shrink-0 font-semibold text-red-500 hover:text-red-700"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <div
         data-onboarding-id="assets-filters"
@@ -1156,6 +1253,15 @@ export default function AssetsPage() {
                               音色
                             </span>
                           )}
+                          {item.kind === "source" &&
+                            memoryBuilt.has(item.id) && (
+                              <span
+                                data-creator-memory-badge={item.id}
+                                className="absolute bottom-2 right-2 rounded bg-emerald-600/90 px-1.5 py-0.5 text-[10px] font-bold text-white"
+                              >
+                                记忆已构建
+                              </span>
+                            )}
                         </div>
                         <div className="p-3">
                           <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
@@ -1286,6 +1392,25 @@ export default function AssetsPage() {
                     </div>
                   ))}
                 </dl>
+                {selected.kind === "source" &&
+                  selected.mediaKind === "document" && (
+                    <DocumentUnderstanding
+                      projectId={id}
+                      assetId={
+                        (selected.raw as SourceAssetVersionDocument)
+                          .logical_asset_id
+                      }
+                      intelligenceVersionId={
+                        // Bind the panel to this exact source version; the
+                        // versionless endpoint would show the current
+                        // version's understanding on older cards.
+                        intelligenceVersionForSource(
+                          project,
+                          selected.raw as SourceAssetVersionDocument,
+                        )
+                      }
+                    />
+                  )}
                 {(() => {
                   if (!project) return null;
                   const resolved = selected.provenanceRefs

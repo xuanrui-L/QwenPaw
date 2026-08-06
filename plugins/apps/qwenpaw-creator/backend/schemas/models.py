@@ -68,6 +68,10 @@ class S2vConfig(ModelConfigItem):
     protocol: str = "DashScope（百炼）"
     detect_model_name: str = ""
     reuse_llm_key: bool = True
+class EmbeddingConfig(ModelConfigItem):
+    """Long-source memory embedding backend (DashScope native)."""
+
+    reuse_vlm_key: bool = True
 
 
 def validation_source_from_reuse_llm(reuse_llm: bool) -> str:
@@ -182,6 +186,8 @@ class ModelConfigData(StrictModel):
     tts: TtsConfig = Field(default_factory=TtsConfig)
     s2v: S2vConfig = Field(default_factory=S2vConfig)
     image: ImageConfig
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    image: ModelConfigItem
     video: ModelConfigItem
     oss: OssConfig = Field(default_factory=OssConfig)
     execution_authorization: ExecutionAuthorizationConfig = Field(
@@ -200,6 +206,7 @@ class ModelConfigData(StrictModel):
 
 class ModelConnectionTestRequest(StrictModel):
     type: Literal["llm", "vlm", "asr", "tts", "s2v", "image", "video"]
+    type: Literal["llm", "vlm", "asr", "embedding", "image", "video"]
     base_url: str = ""
     api_key: str = ""
     model_name: str = ""

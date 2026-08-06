@@ -25,6 +25,7 @@ from domain.errors import ConflictError, StorageIntegrityError, ValidationError
 from models import config as model_config
 from schemas.models import (
     AsrConfig,
+    EmbeddingConfig,
     ExecutionAuthorizationConfig,
     GroundingConfig,
     ImageConfig,
@@ -98,6 +99,7 @@ _SECTIONS = (
     "asr",
     "tts",
     "s2v",
+    "embedding",
     "image",
     "video",
     "oss",
@@ -165,6 +167,11 @@ _ENV_MAPPING: dict[str, dict[str, tuple[str, ...]]] = {
         "api_key": ("S2V_API_KEY",),
         "model_name": ("S2V_MODEL_NAME",),
         "detect_model_name": ("S2V_DETECT_MODEL_NAME",),
+    },
+    "embedding": {
+        "base_url": ("EMBEDDING_BASE_URL",),
+        "api_key": ("EMBEDDING_API_KEY",),
+        "model_name": ("EMBEDDING_MODEL_NAME",),
     },
     "image": {
         "base_url": (
@@ -245,6 +252,13 @@ def _defaults() -> ModelConfigData:
         image=ImageConfig(
             enabled=False,
             protocol="OpenAI 协议",
+        ),
+        embedding=EmbeddingConfig(
+            enabled=False,
+            model_name="qwen3-vl-embedding",
+            base_url="https://dashscope.aliyuncs.com/api/v1",
+            protocol="DashScope（百炼）",
+            reuse_vlm_key=True,
         ),
         video=ModelConfigItem(
             enabled=False,
@@ -668,6 +682,7 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
         "llm": model_config.CREATOR_TEXT_CONFIG_TOOL,
         "vlm": model_config.CREATOR_VLM_CONFIG_TOOL,
         "asr": model_config.CREATOR_ASR_CONFIG_TOOL,
+        "embedding": model_config.CREATOR_EMBEDDING_CONFIG_TOOL,
         "image": model_config.CREATOR_IMAGE_CONFIG_TOOL,
         "video": model_config.CREATOR_VIDEO_CONFIG_TOOL,
     }
@@ -858,6 +873,11 @@ async def _validate_section_connectivity(
     api_key = item.get("api_key", "")
     if section in ("asr", "tts") and item.get("reuse_llm_key") and not api_key:
         api_key = config.get("llm", {}).get("api_key", "")
+    if section == "embedding" and item.get("reuse_vlm_key") and not api_key:
+        api_key = config.get("vlm", {}).get("api_key", "") or config.get(
+            "llm",
+            {},
+        ).get("api_key", "")
     if not item.get("base_url") or not api_key:
         raise ValidationError(
             f"{section}: 缺少 Base URL 或 API Key，请检查配置",
@@ -1183,6 +1203,7 @@ async def patch_model_config_section(
         "vlm",
         "grounding",
         "asr",
+        "embedding",
         "image",
         "video",
         "oss",
@@ -1336,6 +1357,22 @@ def _probe_payload(
                     "voice": body.voice or capability.system_voices[0],
                 },
                 "parameters": {},
+            },
+        )
+    if body.type == "embedding":
+        # Minimal real embedding request: the one-token spend is the only
+        # reliable probe on the native multimodal-embedding endpoint.
+        suffix = (
+            "/services/embeddings/multimodal-embedding/multimodal-embedding"
+        )
+        endpoint = base if base.endswith(suffix) else f"{base}{suffix}"
+        return (
+            endpoint,
+            headers,
+            {
+                "model": body.model_name,
+                "input": {"contents": [{"text": "ping"}]},
+                "parameters": {"dimension": 2560},
             },
         )
     if body.type in {"llm", "vlm"}:
@@ -1555,6 +1592,7 @@ async def get_real_api_key(section: str) -> dict[str, str]:
         "vlm",
         "asr",
         "tts",
+        "embedding",
         "image",
         "video",
         "grounding",

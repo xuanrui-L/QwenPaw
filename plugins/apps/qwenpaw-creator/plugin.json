@@ -15,7 +15,13 @@
   },
   "dependencies": [
     "oss2",
-    "imageio-ffmpeg"
+    "imageio-ffmpeg",
+    "pypdfium2",
+    "pandas",
+    "matplotlib",
+    "openpyxl",
+    "tabulate",
+    "numpy"
   ],
   "qwenpaw_version": {
     "min": "2.0.1"
@@ -48,6 +54,12 @@
         "required": false,
         "path_env": "CREATOR_FFPROBE_PATH",
         "fallback": "ffmpeg metadata probing"
+      },
+      "libreoffice": {
+        "required": false,
+        "required_for": "office document (doc/docx/ppt/pptx/vsdx) rendering in read_document",
+        "path_env": "CREATOR_LIBREOFFICE_PATH",
+        "fallback": "xlsx renders via the data renderer; other office formats return a readable install hint"
       }
     },
     "features": [
@@ -323,6 +335,38 @@
           {"name": "base_url", "label": "S2V Base URL", "type": "text", "required": false, "default": "https://dashscope.aliyuncs.com/api/v1"},
           {"name": "model", "label": "S2V Model", "type": "text", "required": false, "default": "wan2.2-s2v"},
           {"name": "detect_model", "label": "Face Detect Model", "type": "text", "required": false, "default": "wan2.2-s2v-detect", "help": "Free portrait suitability check that always runs before the billed submission."}
+        ]
+      },
+      {
+        "name": "creator_embedding_model",
+        "description": "QwenPaw Creator text embedding configuration for long-source graph memory",
+        "icon": "🧠",
+        "requires_config": false,
+        "config_fields": [
+          {
+            "name": "api_key",
+            "label": "Embedding API Key",
+            "type": "password",
+            "required": false,
+            "help": "Optional. May reuse creator_vlm_model when enabled in Creator settings. Environment fallback: EMBEDDING_API_KEY."
+          },
+          {
+            "name": "model",
+            "label": "Embedding Model",
+            "type": "text",
+            "required": false,
+            "default": "qwen3-vl-embedding",
+            "placeholder": "qwen3-vl-embedding"
+          },
+          {
+            "name": "base_url",
+            "label": "Embedding Base URL",
+            "type": "text",
+            "required": false,
+            "default": "https://dashscope.aliyuncs.com/api/v1",
+            "placeholder": "https://dashscope.aliyuncs.com/api/v1",
+            "help": "DashScope native multimodal-embedding endpoint root. Note the per-request batch cap."
+          }
         ]
       },
       {

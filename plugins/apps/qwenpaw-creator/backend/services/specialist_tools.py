@@ -23,6 +23,10 @@ from typing import Any
 from domain.enums import CreatorCommandType, SpecialistRole
 from domain.errors import PermissionDeniedError, ValidationError
 from models.config import is_s2v_configured, is_tts_configured
+from services.media.source_memory import (
+    QUERY_TYPES as _MEMORY_QUERY_TYPES,
+    source_memory_service,
+)
 from services.media_files.audio_execution import (
     execute_file_tts_command,
     execute_file_voice_enrollment_command,
@@ -347,7 +351,9 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
             "type": "array",
             "items": _SOURCE_SHOT_SCHEMA,
             "description": (
-                "视频必须覆盖至少 90% 完整时间线；图片和音频传空数组。" "每段使用整数毫秒半开区间 [startMs,endMs)。"
+                "视频必须覆盖至少 90% 完整时间线；图片和音频传空数组；"
+                "文档按页伪时间线提交（有页图时每渲染页恰好一条）。"
+                "每段使用整数毫秒半开区间 [startMs,endMs)。"
             ),
         },
         "entities": {
@@ -367,6 +373,11 @@ _SOURCE_COMMIT_ARGUMENTS = _arguments_schema(
                     "type": "string",
                     "minLength": 1,
                     "description": "transcribe_source_audio 返回的 opaque resultRef。",
+                },
+                "document": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "read_document 返回的 opaque resultRef；文档 Source 提交时必填。",
                 },
             },
             "additionalProperties": False,
@@ -490,6 +501,100 @@ _S2V_ARGUMENTS = _arguments_schema(
     (),
 )
 
+_READ_DOCUMENT_ARGUMENTS = _arguments_schema(
+    {
+        "fileRef": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "当前 Source 选中的 exact asset-version:<versionId>，逐字使用；"
+                "超出本 Run 准入边界的引用会被拒绝。"
+            ),
+        },
+        "pages": {
+            "type": "string",
+            "description": ('1-based 页范围，如 "1-5" 或 "1,3,5-8"；省略时渲染前 20 页。'),
+        },
+        "budget": {
+            "type": "string",
+            "enum": ["small", "normal", "large"],
+            "description": "页图分辨率预算，缺省 normal。",
+        },
+    },
+    ("fileRef",),
+)
+
+_MEMORY_QUERY_ARGUMENTS = _arguments_schema(
+    {
+        "queryType": {
+            "type": "string",
+            "enum": list(_MEMORY_QUERY_TYPES),
+            "description": (
+                "summary/super_events/macro_events 看层次概览；"
+                "subgraph 下钻单个 macro；search_nodes/search_ocr/"
+                "search_asr 语义与文本检索；by_time 按时间窗；"
+                "enumerate 计数/枚举候选。"
+            ),
+        },
+        "query": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "search_*/enumerate 必传的检索文本。用陈述句描述目标内容，"
+                "不要写问句；多目标问题只取各选项共享的信息，排除彼此"
+                "分歧的细节。"
+            ),
+        },
+        "nodeTypes": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "entity",
+                    "event",
+                    "on_screen_text",
+                    "asr_text",
+                ],
+            },
+            "uniqueItems": True,
+        },
+        "macroId": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "subgraph 必传目标 macro_id；macro_events 可传 "
+                "super_XX 只列该 SuperEvent 下的 macros。"
+            ),
+        },
+        "startMs": {"type": "integer", "minimum": 0},
+        "endMs": {"type": "integer", "minimum": 1},
+        "topK": {"type": "integer", "minimum": 1, "maximum": 50},
+        "minCosine": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": (
+                "仅 enumerate：密集命中的余弦阈值（默认 0.5）；枚举结果" "疑似漏计时调低后重试。"
+            ),
+        },
+        "maxResults": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "description": "仅 enumerate：枚举条目上限（默认 120）。",
+        },
+        "scope": {
+            "type": "string",
+            "enum": ["source", "project"],
+            "description": (
+                "默认 source 只查当前素材；project 合并项目内全部已构建"
+                "记忆跨素材检索（结果 ID 带来源前缀，hitWindowsMs 附 "
+                "assetId；by_time 不支持）。"
+            ),
+        },
+    },
+    ("queryType",),
+)
 
 _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
     {
@@ -595,6 +700,17 @@ _SPECS = (
         provider_kind="s2v",
     ),
     SpecialistToolSpec(
+        name="query_source_memory",
+        description=(
+            "查询当前 exact Source 已构建的长素材层次图记忆，按台词/"
+            "语义/屏幕文字/时间定位片段。返回 JSON 结果与命中 macro 的 "
+            "hitWindowsMs 时间窗；结论必须回到原片对应窄窗核验。未构建"
+            "记忆时返回 available=false。"
+        ),
+        roles=frozenset({SpecialistRole.SOURCE_INTELLIGENCE}),
+        parameters=_tool_schema(_MEMORY_QUERY_ARGUMENTS),
+    ),
+    SpecialistToolSpec(
         name="design_motion_overlays",
         description=(
             "让视觉设计模型观察目标 Timeline 的真实画面帧做两件事："
@@ -643,6 +759,18 @@ _SPECS = (
         requires_execution_authorization=True,
         long_running=True,
         provider_kind="tts",
+    ),
+    SpecialistToolSpec(
+        name="read_document",
+        description=(
+            "把当前 exact 文档 Source（PDF/Office/表格/字幕/纯文本等）渲染为"
+            "逐页页图与文本摘要。页图由 Runtime 落盘并在下一条消息中以原生图片"
+            "送入你的上下文；返回的 resultRef 是工具权威结果，提交素材理解时通过 "
+            "moduleResultRefs.document 引用，不要重写或伪造页图内容。"
+        ),
+        roles=frozenset({SpecialistRole.SOURCE_INTELLIGENCE}),
+        parameters=_tool_schema(_READ_DOCUMENT_ARGUMENTS),
+        provider_kind="document",
     ),
 )
 
@@ -757,7 +885,11 @@ class FileSpecialistToolRegistry:
         if not isinstance(payload, Mapping):
             raise ValidationError("Specialist tool arguments 必须是 object")
 
-        if name in {"transcribe_source_audio", "commit_source_intelligence"}:
+        if name in {
+            "transcribe_source_audio",
+            "commit_source_intelligence",
+            "read_document",
+        }:
             if context is None:
                 raise ValidationError(
                     f"{name} requires Runtime-owned outer VLM context",
@@ -782,6 +914,73 @@ class FileSpecialistToolRegistry:
                 command_id=idempotency_key,
                 arguments=payload,
                 context=context,
+            )
+            return SpecialistToolResult(payload=dict(result))
+
+        if name == "read_document":
+            result = await source_analysis_service(
+                self.services,
+            ).read_source_document(
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments=payload,
+                context=context,
+            )
+            return SpecialistToolResult(payload=dict(result))
+
+        if name == "query_source_memory":
+            if not target_ref.startswith("asset:") or not target_ref[6:]:
+                raise ValidationError(
+                    "query_source_memory 只接受 asset:<logicalAssetId>",
+                )
+            result = await source_memory_service(
+                self.services,
+            ).query_memory(
+                project_id=project_id,
+                logical_asset_id=target_ref[6:],
+                query_type=str(payload.get("queryType") or ""),
+                query=(
+                    str(payload["query"])
+                    if payload.get("query") is not None
+                    else None
+                ),
+                node_types=(
+                    [str(item) for item in payload["nodeTypes"]]
+                    if isinstance(payload.get("nodeTypes"), Sequence)
+                    and not isinstance(payload.get("nodeTypes"), str)
+                    else None
+                ),
+                macro_id=(
+                    str(payload["macroId"])
+                    if payload.get("macroId") is not None
+                    else None
+                ),
+                start_ms=(
+                    int(payload["startMs"])
+                    if payload.get("startMs") is not None
+                    else None
+                ),
+                end_ms=(
+                    int(payload["endMs"])
+                    if payload.get("endMs") is not None
+                    else None
+                ),
+                top_k=(
+                    int(payload["topK"])
+                    if payload.get("topK") is not None
+                    else None
+                ),
+                min_cosine=(
+                    float(payload["minCosine"])
+                    if payload.get("minCosine") is not None
+                    else None
+                ),
+                max_results=(
+                    int(payload["maxResults"])
+                    if payload.get("maxResults") is not None
+                    else None
+                ),
+                scope=str(payload.get("scope") or "source"),
             )
             return SpecialistToolResult(payload=dict(result))
 

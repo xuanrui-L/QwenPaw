@@ -9,6 +9,7 @@ import {
   saveModelConfig,
   testModelConnection,
 } from "@/api/creator";
+import type { DocumentMetadata } from "@/contracts/creator/assets";
 
 describe("new Creator API contract", () => {
   it("uses Project Patch and file Review routes with stable idempotency ids", async () => {
@@ -257,6 +258,15 @@ describe("new Creator API contract", () => {
         detect_model_name: "",
         reuse_llm_key: true,
       },
+      embedding: {
+        enabled: false,
+        model_name: "qwen3-vl-embedding",
+        api_key: "",
+        base_url: "https://dashscope.aliyuncs.com/api/v1",
+        protocol: "DashScope（百炼）",
+        custom_protocol: "",
+        reuse_vlm_key: true,
+      },
       image: {
         enabled: false,
         model_name: "",
@@ -304,5 +314,12 @@ describe("new Creator API contract", () => {
       access_key_secret: "oss-secret",
       endpoint: "https://oss-cn-hangzhou.aliyuncs.com",
     });
+  });
+
+  it("mirrors the backend document metadata contract", () => {
+    // schemas/assets.py DocumentMetadata serializes as camelCase pageCount.
+    const document: DocumentMetadata = { format: "pdf", pageCount: 4 };
+    expect(document).toEqual({ format: "pdf", pageCount: 4 });
+    expect(Object.keys(document).sort()).toEqual(["format", "pageCount"]);
   });
 });

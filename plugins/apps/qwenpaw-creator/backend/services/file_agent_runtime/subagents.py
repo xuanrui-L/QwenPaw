@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -211,6 +213,8 @@ def specialist_system_prompt(
     project_id: str,
     project: Project | None = None,
     workspace_schema: str | None = None,
+    project_root: Path | None = None,
+    target_refs: Sequence[str] | None = None,
 ) -> str:
     if role not in _DELEGATABLE_ROLES:
         raise ValueError(f"specialist role has no active prompt: {role.value}")
@@ -225,6 +229,16 @@ def specialist_system_prompt(
         values["tts_guidance"] = tts_guidance.specialist_guidance(
             role,
             project.scenario if project is not None else "general",
+        )
+    if role is SpecialistRole.SOURCE_INTELLIGENCE:
+        # Memory usage rules are injected only when the delegated asset
+        # actually has a built graph memory for its current intelligence.
+        from services.media.source_memory import memory_guidance_for_targets
+
+        values["memory_guidance"] = memory_guidance_for_targets(
+            project_root,
+            project,
+            list(target_refs or ()),
         )
     if role is SpecialistRole.R2V_GENERATION_DIRECTOR:
         # Model-specific prompt rules (e.g. HappyHorse [Image N] citations)

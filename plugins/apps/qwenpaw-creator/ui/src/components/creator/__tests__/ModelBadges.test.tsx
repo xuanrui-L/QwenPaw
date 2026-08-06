@@ -75,6 +75,15 @@ const config: ModelConfigData = {
     detect_model_name: "",
     reuse_llm_key: true,
   },
+  embedding: {
+    enabled: false,
+    model_name: "qwen3-vl-embedding",
+    api_key: "",
+    base_url: "https://dashscope.aliyuncs.com/api/v1",
+    protocol: "DashScope（百炼）",
+    custom_protocol: "",
+    reuse_vlm_key: true,
+  },
   image: {
     enabled: true,
     model_name: "qwen-image",

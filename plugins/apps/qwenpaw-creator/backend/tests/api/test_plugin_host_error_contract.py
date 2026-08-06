@@ -125,6 +125,7 @@ def test_plugin_manifest_declares_every_creator_config_tool(
         "creator_asr_model",
         "creator_tts_model",
         "creator_s2v_model",
+        "creator_embedding_model",
         "creator_image_model",
         "creator_video_model",
         "creator_media_oss",
