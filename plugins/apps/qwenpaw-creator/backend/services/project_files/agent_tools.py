@@ -17,6 +17,7 @@ import json
 from typing import Any, Mapping
 import threading
 
+from json_repair import repair_json
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -134,14 +135,54 @@ class PatchProjectToolInput(_ToolModel):
         # Field trip 2026-08-05: the model double-encoded ops as a JSON
         # string on its very first call. When the string parses to a list
         # the decode is lossless, so refusing it only costs a retry turn.
+        # Second field trip the same day: the stringified array itself
+        # carried a bracket slip (a missing comma at char 973), so strict
+        # parsing bounced it with a misleading "must not be a string"
+        # message and the model resent verbatim into the breaker. Streamed
+        # tool arguments already flow through json_repair; the same repair
+        # applies here, guarded to structure-only fixes by re-checking the
+        # result is a list of objects.
         if isinstance(value, str):
             try:
                 decoded = json.loads(value)
             except json.JSONDecodeError:
+                repaired = repair_json(value, return_objects=True)
+                if isinstance(repaired, list) and all(
+                    isinstance(item, Mapping) for item in repaired
+                ):
+                    return repaired
                 return value
             if isinstance(decoded, list):
                 return decoded
         return value
+
+
+def _patch_project_input_error(arguments: Mapping[str, Any]) -> str:
+    """Name the actual defect instead of a generic shape lecture.
+
+    A stringified ops payload whose inner JSON carries a bracket slip
+    must hear where the slip is — "must not be a string" made the model
+    resend verbatim into the non-progress breaker.
+    """
+
+    base = (
+        "patch_project 参数无效：ops 必须是操作对象数组（如 "
+        '[{"op": "replace", "path": "/name", "value": "..."}]）。'
+    )
+    ops = arguments.get("ops")
+    if isinstance(ops, str):
+        try:
+            json.loads(ops)
+        except json.JSONDecodeError as decode_error:
+            return (
+                base + f"收到的 ops 是字符串，且内部 JSON 存在语法错误（"
+                f"第 {decode_error.pos} 字符附近：{decode_error.msg}）。"
+                "请修复该处语法后以 JSON 数组（非字符串）重发。"
+            )
+        return base + "收到的 ops 是字符串，请直接发送 JSON 数组。"
+    if isinstance(ops, Mapping):
+        return base + "收到的 ops 是单个对象，请包裹为数组。"
+    return base
 
 
 class AgentProjectToolContext(_ToolModel):
@@ -950,9 +991,7 @@ class AgentProjectTools:
                 )
             except ValidationError as exc:
                 raise AgentProjectToolError(
-                    "patch_project 参数无效：ops 必须是操作对象数组（如 "
-                    '[{"op": "replace", "path": "/name", "value": "..."}]），'
-                    "不能是字符串或单个对象。",
+                    _patch_project_input_error(arguments),
                     code="PATCH_PROJECT_INPUT_INVALID",
                     details={
                         "validationErrors": exc.errors(

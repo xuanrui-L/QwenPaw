@@ -237,7 +237,7 @@ describe("origin/main visible shell fidelity", () => {
       "!border-x-0",
       "!bg-transparent",
     );
-    expect(screen.getByPlaceholderText(/^目标描述：/)).toHaveClass(
+    expect(screen.getByPlaceholderText(/^例：霸道总裁短剧/)).toHaveClass(
       "!border-none",
       "!p-4",
     );
@@ -274,10 +274,10 @@ describe("origin/main visible shell fidelity", () => {
     expect(
       screen.getByRole("button", { name: /保存配置/ }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /取\s*消/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /关闭/ })).toBeInTheDocument();
     // allow_all + skip + auto_approve maps to the top (YOLO) stop.
     const permissionSlider = screen.getByRole("slider", {
-      name: "执行确认模式",
+      name: "执行确认模式：",
     });
     expect(permissionSlider).toHaveValue("3");
     expect(screen.getByText(/完全无人值守/)).toBeInTheDocument();

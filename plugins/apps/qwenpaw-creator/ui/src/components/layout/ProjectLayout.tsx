@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Outlet } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
+import { useTranslation } from "react-i18next";
 import { useParams, usePathname } from "@/routing/navigation";
 import { navigateToLocator } from "@/routing/locators";
 import type { FileProjectReviewOperation } from "@/contracts/creator";
@@ -136,6 +137,7 @@ function LayoutSkeleton() {
 }
 
 export default function ProjectLayout() {
+  const { t } = useTranslation();
   const { id = "" } = useParams();
   const pathname = usePathname();
   const bootstrap = useCreatorSessionStore((state) => state.bootstrap);
@@ -340,7 +342,7 @@ export default function ProjectLayout() {
     navigateToLocator(id, locator, {
       review: true,
       field: locator.field ?? undefined,
-      description: "审阅 / 查看修改",
+      description: t("lib.reviewOrViewChanges"),
     });
   }, [fileReviews, fileReviewSyncStatus, id, pendingReviewNavigation]);
 
