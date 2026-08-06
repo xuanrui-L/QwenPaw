@@ -558,6 +558,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const [hostProviders, setHostProviders] = useState<HostProviderInfo[]>([]);
   const [ttsCapabilities, setTtsCapabilities] =
     useState<TtsCapabilities | null>(null);
+  // What the user actually typed in a model-name dropdown. Filtering by the
+  // field value would hide every other model once one is configured, so the
+  // full catalog shows on open and narrows only while typing.
+  const [modelSearch, setModelSearch] = useState<Record<string, string>>({});
   // A stale or partial response must not break the whole modal, so the list is
   // normalized once and every consumer reads this instead of the raw payload.
   const ttsModels = ttsCapabilities?.models ?? [];
@@ -1261,14 +1265,19 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               <AutoComplete
                 value={item.model_name}
                 onChange={(v) => updateItem(type, "model_name", v)}
-                options={modelOptions}
-                filterOption={(inputValue, option) =>
-                  (option?.label as string)
-                    ?.toLowerCase()
-                    .includes(inputValue.toLowerCase()) ||
-                  (option?.value as string)
-                    ?.toLowerCase()
-                    .includes(inputValue.toLowerCase())
+                options={modelOptions.filter((option) => {
+                  const typed = (modelSearch[type] ?? "").toLowerCase();
+                  if (!typed) return true;
+                  return (
+                    option.label.toLowerCase().includes(typed) ||
+                    option.value.toLowerCase().includes(typed)
+                  );
+                })}
+                onSearch={(typed) =>
+                  setModelSearch((prev) => ({ ...prev, [type]: typed }))
+                }
+                onFocus={() =>
+                  setModelSearch((prev) => ({ ...prev, [type]: "" }))
                 }
                 placeholder={t("modelConfig.selectOrInputModel")}
               />

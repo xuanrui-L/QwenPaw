@@ -232,3 +232,33 @@ describe("ModelConfigModal speech section", () => {
     expect(screen.queryByText("默认旁白音色")).not.toBeInTheDocument();
   });
 });
+
+describe("ModelConfigModal model dropdown catalog", () => {
+  it("shows the whole speech catalog even when a model is configured", async () => {
+    mount();
+    await openSpeechCard();
+    const modelInput = (await screen.findByDisplayValue(
+      "qwen3-tts-flash",
+    )) as HTMLInputElement;
+    // Opening the dropdown must not filter by the configured value:
+    // CosyVoice stays visible next to the current qwen3-tts pick.
+    fireEvent.focus(modelInput);
+    fireEvent.mouseDown(modelInput);
+    await waitFor(() => {
+      expect(
+        document.querySelector(
+          '.ant-select-item-option[title*="CosyVoice 3.5 Plus"]',
+        ),
+      ).toBeTruthy();
+    });
+  });
+
+  it("keeps the speech base url editable", async () => {
+    mount();
+    await openSpeechCard();
+    const baseUrl = (await screen.findByDisplayValue(
+      "https://dashscope.aliyuncs.com/api/v1",
+    )) as HTMLInputElement;
+    expect(baseUrl.disabled).toBe(false);
+  });
+});
