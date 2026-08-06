@@ -381,7 +381,7 @@
     "composeNow": "成片",
     "composeTooltip": "点击合成成片",
     "ttsRegenerateQueued": "文稿已保存，已委派创作助手重新合成这段语音",
-    "ttsRegenerateMessage": "我已把时间线元素 element:{{elementId}}（{{label}}）的旁白文稿改为：\n「{{text}}」\n请用 TTS 重新合成这段旁白并注册新的音频 version，把该元素的 source_asset_version_id 换成新版本；合成音频时长不得超过本段时长预算 {{budgetSeconds}} 秒（必要时先精简文稿并同步回 creation.script），如时长变化请同步调整该元素时长。"
+    "ttsRegenerateMessage": "我已把时间线元素 element:{{elementId}}（{{label}}）的旁白文稿改为：\n「{{text}}」\n请用语速 {{speechRate}} 重新合成这段旁白（tts_generation 传 speechRate；仅 CosyVoice 系列支持，当前模型不支持时忽略语速），注册新的音频 version 并把该元素的 source_asset_version_id 换成新版本；合成音频时长不得超过本段时长预算 {{budgetSeconds}} 秒（必要时先精简文稿并同步回 creation.script），如时长变化请同步调整该元素时长。"
   },
   "r2v": {
     "title": "视频方案 / {{element}} / 制作工作台",
@@ -546,7 +546,8 @@
     "enterWorkbench": "进入制作工作台（{{mode}}）",
     "audioBudget": "当前 {{actual}}s / 本段 {{budget}}s",
     "audioOverBudget": "音频超出本段时长，会与后续内容重叠；请精简文稿后点「应用修改」重新合成",
-    "ttsScriptHint": "修改文稿后点右上「应用修改」，创作助手将自动重新合成这段语音"
+    "ttsScriptHint": "修改文稿后点右上「应用修改」，创作助手将自动重新合成这段语音",
+    "speechRate": "语速"
   },
   "agent": {
     "assistant": "创作助手",

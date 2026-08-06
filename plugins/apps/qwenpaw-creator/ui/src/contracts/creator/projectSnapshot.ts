@@ -280,6 +280,8 @@ export interface AudioCreationDocument extends ProjectJsonRecord {
   source_asset_version_id: string;
   /** TTS narration keeps its script here; uploaded audio leaves it empty. */
   script?: string;
+  /** Synthesis speed multiplier (0.5–2.0); CosyVoice family only. */
+  speech_rate?: number;
   gain_db: number;
   pan: number;
 }

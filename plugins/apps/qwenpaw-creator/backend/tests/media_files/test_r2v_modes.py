@@ -359,6 +359,7 @@ def _register_tts_audio(services: CreatorFileServices, monkeypatch) -> str:
         voice=None,
         voice_id=None,
         voice_model=None,
+        speech_rate=None,
     ):
         return tts_model.TTSSynthesis(
             audio_bytes=b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 2048,

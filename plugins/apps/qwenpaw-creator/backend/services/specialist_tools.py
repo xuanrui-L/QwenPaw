@@ -389,6 +389,15 @@ _TTS_ARGUMENTS = _arguments_schema(
                 "该角色已绑定音色时自动改用其复刻音色合成。"
             ),
         },
+        "speechRate": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 2.0,
+            "description": (
+                "可选语速倍率（默认 1.0）；仅 CosyVoice 系列模型支持，"
+                "其它模型传非 1.0 值会报错，请改用增删文稿控制时长。"
+            ),
+        },
         "label": {
             "type": "string",
             "description": "可选的音频资产名称。",

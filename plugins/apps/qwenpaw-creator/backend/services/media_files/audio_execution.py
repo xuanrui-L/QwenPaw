@@ -328,6 +328,11 @@ async def execute_file_tts_command(
     voice = str(arguments.get("voice") or "").strip()
     character_ref = str(arguments.get("characterRef") or "").strip()
     label = str(arguments.get("label") or "").strip()
+    raw_rate = arguments.get("speechRate")
+    try:
+        speech_rate = None if raw_rate is None else float(raw_rate)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("speechRate 必须是 0.5–2.0 的数字") from exc
 
     voice_id: str | None = None
     voice_model = ""
@@ -346,6 +351,7 @@ async def execute_file_tts_command(
         voice=voice or None,
         voice_id=voice_id,
         voice_model=voice_model or None,
+        speech_rate=speech_rate,
     )
     duration = _audio_duration_seconds(
         synthesis.audio_bytes,
@@ -358,6 +364,8 @@ async def execute_file_tts_command(
         "textPreview": text[:120],
         "characters": synthesis.characters,
     }
+    if speech_rate is not None and speech_rate != 1.0:
+        metadata["speechRate"] = speech_rate
     if character_entity_id:
         metadata["characterEntityId"] = character_entity_id
     if voice_id:

@@ -194,3 +194,55 @@ def test_tts_api_key_falls_back_to_the_text_credential(
         },
     )
     assert model_config.get_tts_api_key() == "sk-own"
+
+
+def test_http_family_rejects_non_default_speech_rate(monkeypatch) -> None:
+    """qwen-tts has no rate parameter, so a non-default rate fails fast
+    instead of silently synthesizing at normal speed."""
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    with pytest.raises(ValueError, match="CosyVoice"):
+        asyncio.run(
+            tts_model.synthesize(
+                "你好世界",
+                voice="Serena",
+                speech_rate=1.3,
+            ),
+        )
+
+
+def test_websocket_family_forwards_speech_rate(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_ws(*, model, voice, text, api_key, speech_rate=1.0):
+        captured["model"] = model
+        captured["speech_rate"] = speech_rate
+        return b"MP3xxxx", "audio/mpeg"
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setenv("TTS_MODEL_NAME", "cosyvoice-v3.5-plus")
+    monkeypatch.setattr(tts_model, "_synthesize_over_websocket", fake_ws)
+
+    result = asyncio.run(
+        tts_model.synthesize(
+            "你好世界",
+            voice_id="cosyvoice-v3-designed",
+            voice_model="cosyvoice-v3.5-plus",
+            speech_rate=0.8,
+        ),
+    )
+    assert captured["model"] == "cosyvoice-v3.5-plus"
+    assert captured["speech_rate"] == 0.8
+    assert result.media_type == "audio/mpeg"
+
+
+def test_speech_rate_bounds_are_validated(monkeypatch) -> None:
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    with pytest.raises(ValueError, match="0.5"):
+        asyncio.run(
+            tts_model.synthesize(
+                "你好世界",
+                voice="Serena",
+                speech_rate=3.0,
+            ),
+        )

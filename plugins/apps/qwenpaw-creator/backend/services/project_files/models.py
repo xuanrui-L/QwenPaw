@@ -908,6 +908,9 @@ class AudioCreation(StrictModel):
     # applying the change re-synthesizes the audio. Uploaded/footage audio
     # leaves it empty.
     script: str = ""
+    # Synthesis speed multiplier; only the CosyVoice family honours it,
+    # other models keep the default 1.0.
+    speech_rate: float = Field(default=1.0, ge=0.5, le=2.0)
     gain_db: float = 0.0
     pan: float = Field(default=0.0, ge=-1, le=1)
 

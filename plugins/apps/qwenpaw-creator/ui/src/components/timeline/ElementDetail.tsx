@@ -768,6 +768,11 @@ export default function ElementDetail({
                 plausibleDuration != null &&
                 plausibleDuration > spanSec + 0.05;
               const scriptText = creation.script || textPreview;
+              // Only the CosyVoice family exposes a numeric speed knob;
+              // qwen-tts length is controlled through the script alone.
+              const supportsSpeechRate =
+                ttsModel.startsWith("cosyvoice") ||
+                ttsModel.includes("qwen-audio");
               return (
                 <div className="space-y-3">
                   <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-xs text-[var(--color-text-secondary)]">
@@ -816,6 +821,39 @@ export default function ElementDetail({
                         <InlineReviewDiff
                           pointer={pointer("creation", "script")}
                         />
+                        {supportsSpeechRate && (
+                          <label
+                            data-creator-field={`element:${element.element_id}/creation/speech_rate`}
+                            data-creator-path={pointer(
+                              "creation",
+                              "speech_rate",
+                            )}
+                            className="flex items-center gap-2"
+                          >
+                            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                              {t("elementDetail.speechRate")}
+                            </span>
+                            <InputNumber
+                              size="small"
+                              value={creation.speech_rate ?? 1.0}
+                              min={0.5}
+                              max={2}
+                              step={0.1}
+                              disabled={applying}
+                              className="!w-20"
+                              onChange={(value) =>
+                                onChange((draft) => {
+                                  if (draft.creation.type === "audio")
+                                    draft.creation.speech_rate =
+                                      typeof value === "number" ? value : 1.0;
+                                })
+                              }
+                            />
+                            <InlineReviewDiff
+                              pointer={pointer("creation", "speech_rate")}
+                            />
+                          </label>
+                        )}
                         <p className="text-[10px] text-[var(--color-text-tertiary)]">
                           {t("elementDetail.ttsScriptHint")}
                         </p>

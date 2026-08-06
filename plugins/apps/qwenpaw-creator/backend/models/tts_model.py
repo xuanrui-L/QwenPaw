@@ -169,6 +169,7 @@ def _synthesize_over_websocket(
     voice: str,
     text: str,
     api_key: str,
+    speech_rate: float = 1.0,
 ) -> tuple[bytes, str]:
     """Stream one utterance from the CosyVoice family over WebSocket.
 
@@ -212,6 +213,7 @@ def _synthesize_over_websocket(
         model=model,
         voice=voice,
         format=AudioFormat.MP3_24000HZ_MONO_256KBPS,
+        speech_rate=speech_rate,
         callback=_Collector(),
     )
     synthesizer.streaming_call(text)
@@ -230,11 +232,15 @@ async def synthesize(
     voice: str | None = None,
     voice_id: str | None = None,
     voice_model: str | None = None,
+    speech_rate: float | None = None,
 ) -> TTSSynthesis:
     """Render ``text`` to speech; ``voice_id`` selects a created voice.
 
     ``voice_model`` is the model a created voice is bound to (a character
     binding records it), because a voice only speaks through its own model.
+    ``speech_rate`` (0.5–2.0) is a CosyVoice-family capability: the WebSocket
+    synthesizer applies it natively, while the qwen-tts HTTP endpoint has no
+    such parameter and rejects a non-default rate up front.
     """
 
     value = _require_text(text)
@@ -260,6 +266,14 @@ async def synthesize(
                 f"system voices: {', '.join(capability.system_voices)}",
             )
     transport = require_capability(model).transport
+    rate = 1.0 if speech_rate is None else float(speech_rate)
+    if not 0.5 <= rate <= 2.0:
+        raise ValueError("speechRate must be between 0.5 and 2.0")
+    if rate != 1.0 and transport != "websocket":
+        raise ValueError(
+            f"{model} 不支持数值语速参数；只有 CosyVoice 系列（WebSocket 合成）"
+            "支持 speechRate 0.5–2.0，其它模型请通过增删文稿控制时长",
+        )
     logger.info(
         "TTS synthesize: model=%s voice=%s chars=%d created=%s transport=%s",
         model,
@@ -275,6 +289,7 @@ async def synthesize(
             voice=active_voice,
             text=value,
             api_key=key,
+            speech_rate=rate,
         )
         return TTSSynthesis(
             audio_bytes=content,

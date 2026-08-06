@@ -381,7 +381,7 @@
     "composeNow": "Final Cut",
     "composeTooltip": "Click to compose final cut",
     "ttsRegenerateQueued": "Script saved; the assistant is re-synthesizing this narration",
-    "ttsRegenerateMessage": "I changed the narration script of timeline element element:{{elementId}} ({{label}}) to:\n\"{{text}}\"\nPlease re-synthesize it with TTS, register the new audio version and point the element's source_asset_version_id at it; the synthesized audio must fit the segment budget of {{budgetSeconds}} seconds (trim the script and sync it back to creation.script if needed), and adjust the element duration if it changes."
+    "ttsRegenerateMessage": "I changed the narration script of timeline element element:{{elementId}} ({{label}}) to:\n\"{{text}}\"\nPlease re-synthesize it at speech rate {{speechRate}} (pass speechRate to tts_generation; CosyVoice family only, ignore the rate when the current model does not support it), register the new audio version and point the element's source_asset_version_id at it; the synthesized audio must fit the segment budget of {{budgetSeconds}} seconds (trim the script and sync it back to creation.script if needed), and adjust the element duration if it changes."
   },
   "r2v": {
     "title": "Video Plan / {{element}} / Production Workbench",
@@ -546,7 +546,8 @@
     "enterWorkbench": "Open Production Workbench ({{mode}})",
     "audioBudget": "{{actual}}s of {{budget}}s budget",
     "audioOverBudget": "Audio exceeds this segment and will overlap what follows; trim the script and apply to re-synthesize",
-    "ttsScriptHint": "Edit the script and hit Apply Changes; the assistant re-synthesizes this narration"
+    "ttsScriptHint": "Edit the script and hit Apply Changes; the assistant re-synthesizes this narration",
+    "speechRate": "Speed"
   },
   "agent": {
     "assistant": "Creative Assistant",

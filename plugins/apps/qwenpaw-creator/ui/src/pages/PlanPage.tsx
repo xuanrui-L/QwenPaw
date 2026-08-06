@@ -544,18 +544,22 @@ export default function PlanPage() {
       message.error(t("plan.overlayTextEmpty"));
       return;
     }
-    // A narration script edit needs the assistant to re-synthesize the
-    // audio after the patch lands; captured before markApplied clears it.
+    // A narration script or speech-rate edit needs the assistant to
+    // re-synthesize the audio after the patch lands; captured before
+    // markApplied clears it.
     const scriptEdit =
       draft.creation.type === "audio" &&
       draft.creation.script?.trim() &&
-      elementDraft.operations.some((operation) =>
-        operation.path.endsWith("/creation/script"),
+      elementDraft.operations.some(
+        (operation) =>
+          operation.path.endsWith("/creation/script") ||
+          operation.path.endsWith("/creation/speech_rate"),
       )
         ? {
             elementId: draft.element_id,
             label: draft.label || draft.element_id,
             text: draft.creation.script.trim(),
+            speechRate: draft.creation.speech_rate ?? 1.0,
             budgetSeconds: Number(
               (
                 draft.span.duration_tick /
