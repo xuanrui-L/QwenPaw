@@ -246,3 +246,32 @@ def test_speech_rate_bounds_are_validated(monkeypatch) -> None:
                 speech_rate=3.0,
             ),
         )
+
+
+def test_created_voice_uses_its_own_models_transport(monkeypatch) -> None:
+    """A CosyVoice-bound voice must ride WebSocket even when the configured
+    default model is qwen-tts (HTTP): transport follows the speaking model."""
+
+    captured: dict = {}
+
+    def fake_ws(*, model, voice, text, api_key, speech_rate=1.0):
+        captured["model"] = model
+        return b"MP3xxxx", "audio/mpeg"
+
+    async def fail_post_json(url, **kwargs):
+        raise AssertionError("HTTP path must not be used for a ws voice")
+
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+    monkeypatch.setenv("TTS_MODEL_NAME", "qwen3-tts-flash")
+    monkeypatch.setattr(tts_model, "_synthesize_over_websocket", fake_ws)
+    monkeypatch.setattr(tts_model, "_post_json", fail_post_json)
+
+    result = asyncio.run(
+        tts_model.synthesize(
+            "你好世界",
+            voice_id="cosyvoice-v3.5-plus-vd-x",
+            voice_model="cosyvoice-v3.5-plus",
+        ),
+    )
+    assert captured["model"] == "cosyvoice-v3.5-plus"
+    assert result.media_type == "audio/mpeg"

@@ -282,7 +282,10 @@ async def synthesize(
         bool(voice_id),
         transport,
     )
-    if capability.transport == "websocket":
+    # Transport follows the model that actually speaks: a created voice is
+    # bound to its own model, which may sit in the other family than the
+    # configured default (CosyVoice voice under a qwen-tts default).
+    if transport == "websocket":
         content, media_type = await asyncio.to_thread(
             _synthesize_over_websocket,
             model=model,
