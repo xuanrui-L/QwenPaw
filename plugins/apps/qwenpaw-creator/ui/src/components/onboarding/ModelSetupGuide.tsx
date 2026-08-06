@@ -3,7 +3,11 @@ import { useTranslation } from "react-i18next";
 import {
   AudioOutlined,
   EyeOutlined,
+  GlobalOutlined,
+  NodeIndexOutlined,
   PictureOutlined,
+  SoundOutlined,
+  UserOutlined,
   VideoCameraOutlined,
 } from "@ant-design/icons";
 
@@ -42,6 +46,11 @@ function getScenarioGuides(t: (key: string) => string): ScenarioGuide[] {
       models: t("onboarding.modelGuideAsrModels"),
       reason: t("onboarding.modelGuideAsrDesc"),
     },
+    {
+      scenario: t("onboarding.modelGuideVoice"),
+      models: t("onboarding.modelGuideVoiceModels"),
+      reason: t("onboarding.modelGuideVoiceDesc"),
+    },
   ];
 }
 
@@ -59,6 +68,11 @@ function getProviderGuides(t: (key: string) => string): ProviderGuide[] {
       protocols: t("onboarding.modelGuideLlmProtocols"),
     },
     {
+      type: "Grounding",
+      icon: <GlobalOutlined style={{ fontSize: 12 }} />,
+      protocols: t("onboarding.modelGuideGroundingProtocols"),
+    },
+    {
       type: t("onboarding.modelGuideImageGen"),
       icon: <PictureOutlined style={{ fontSize: 12 }} />,
       protocols: t("onboarding.modelGuideImageGenProtocols"),
@@ -72,6 +86,21 @@ function getProviderGuides(t: (key: string) => string): ProviderGuide[] {
       type: t("onboarding.modelGuideAsrTitle"),
       icon: <AudioOutlined style={{ fontSize: 12 }} />,
       protocols: t("onboarding.modelGuideAsrProtocols"),
+    },
+    {
+      type: t("onboarding.modelGuideTtsTitle"),
+      icon: <SoundOutlined style={{ fontSize: 12 }} />,
+      protocols: t("onboarding.modelGuideTtsProtocols"),
+    },
+    {
+      type: t("onboarding.modelGuideS2vTitle"),
+      icon: <UserOutlined style={{ fontSize: 12 }} />,
+      protocols: t("onboarding.modelGuideS2vProtocols"),
+    },
+    {
+      type: t("onboarding.modelGuideEmbeddingTitle"),
+      icon: <NodeIndexOutlined style={{ fontSize: 12 }} />,
+      protocols: t("onboarding.modelGuideEmbeddingProtocols"),
     },
   ];
 }

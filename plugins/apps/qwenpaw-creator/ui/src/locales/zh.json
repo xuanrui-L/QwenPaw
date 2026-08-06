@@ -339,7 +339,9 @@
     "translateCardTitle": "图内文字翻译",
     "translateCardBrief": "识别并替换图中文字为目标语言 · 保留排版",
     "translateModelLabel": "翻译模型（可选）",
-    "translateCardNote": "image_generation 的 translate 模式用此模型翻译图内文字并保留排版；留空时使用默认的 qwen-mt-image，与图片生成模型共用同一个 DashScope API Key（仅 DashScope 协议可用）。"
+    "translateCardNote": "image_generation 的 translate 模式用此模型翻译图内文字并保留排版；留空时使用默认的 qwen-mt-image，与图片生成模型共用同一个 DashScope API Key（仅 DashScope 协议可用）。",
+    "imageEndpointNote": "Base URL 填 API 根（https://dashscope.aliyuncs.com/api/v1）即可：百炼 qwen-image / wan-image 全系共用 multimodal-generation 服务路径，由后端自动拼接；图内文字翻译走 image2image 路径，同样自动拼接。",
+    "videoEndpointNote": "Base URL 填 API 根即可：DashScope 由后端自动拼接 video-generation/video-synthesis 提交路径，火山引擎自动拼接 ark v3 任务路径。"
   },
   "modelBadges": {
     "textModel": "文本模型",
@@ -1077,6 +1079,16 @@
     "modelGuideVideoGenProtocols": "DashScope（百炼：wan2.7、happyhorse-1.1 家族，t2v/i2v/r2v 按元素类型自动派生）、Volcano Engine（火山引擎：doubao-seedance-2.0，仅 r2v）",
     "modelGuideAsrTitle": "ASR 语音识别",
     "modelGuideAsrProtocols": "DashScope Fun-ASR、DashScope Qwen3-ASR、OpenAI Whisper",
+    "modelGuideVoice": "旁白配音 / 数字人口播",
+    "modelGuideVoiceModels": "TTS + 数字人",
+    "modelGuideVoiceDesc": "合成旁白与台词；音频驱动数字人口播视频段",
+    "modelGuideGroundingProtocols": "Serper（Google）/ Tavily 搜索，验证模型可复用 LLM/VLM 或自定义",
+    "modelGuideTtsTitle": "TTS 语音合成",
+    "modelGuideTtsProtocols": "DashScope（百炼）：Qwen-TTS 家族（qwen3-tts-flash / qwen3-tts-instruct-flash，含系统音色与复刻/设计）、CosyVoice 家族（cosyvoice-v3.5-plus / qwen-audio-3.0-tts-flash，需先建音色）",
+    "modelGuideS2vTitle": "数字人",
+    "modelGuideS2vProtocols": "DashScope（百炼）：wan2.2-s2v，提交前免费人像检测（wan2.2-s2v-detect）",
+    "modelGuideEmbeddingTitle": "Embedding",
+    "modelGuideEmbeddingProtocols": "DashScope（百炼）：qwen3-vl-embedding，用于素材检索与长源记忆",
     "modelGuideWhatModels": "什么场景需要配什么模型？",
     "modelGuideProviders": "当前支持的提供商 / 协议",
     "modelGuideSetupDesc": "在「模型配置」中填写 Base URL、API Key 与模型名称，并通过「测试连通性」后启用；VLM 可直接复用支持多模态的 LLM 配置。"

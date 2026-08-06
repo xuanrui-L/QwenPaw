@@ -28,6 +28,7 @@ import {
   ThunderboltOutlined,
   SafetyOutlined,
   ReadOutlined,
+  TranslationOutlined,
 } from "@ant-design/icons";
 import {
   getModelConfig,
@@ -186,8 +187,11 @@ const EMBEDDING_PRESETS: Record<string, ProtocolPreset> = {
 const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    // qwen-image-3.0 is the current Bailian flagship, so it leads the
-    // catalogue and becomes the default pick on protocol selection.
+    // Only models served by the multimodal-generation endpoint the backend
+    // actually calls (per the Bailian qwen-image / wan2.7 / wan2.6 API
+    // references); the legacy t2i family uses a different async endpoint
+    // this provider does not speak, so it is not offered. qwen-image-3.0
+    // is the current flagship and leads as the default pick.
     models: [
       "qwen-image-3.0-pro",
       "qwen-image-2.0-pro",
@@ -196,13 +200,7 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
       "qwen-image-plus",
       "wan2.7-image-pro",
       "wan2.7-image",
-      "wan2.6-t2i",
       "wan2.6-image",
-      "wan2.5-t2i-preview",
-      "wan2.2-t2i-plus",
-      "wan2.2-t2i-flash",
-      "wan2.1-t2i-plus",
-      "wan2.1-t2i-turbo",
       "z-image-turbo",
     ],
   },
@@ -2524,7 +2522,33 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           >
             {t("modelConfig.videoFamilyNote")}
           </span>
+          <span
+            style={{
+              fontSize: 11,
+              color: "var(--color-text-tertiary)",
+              lineHeight: 1.6,
+            }}
+          >
+            {t("modelConfig.videoEndpointNote")}
+          </span>
         </div>
+      ) : null;
+
+    // Bailian image models all share the multimodal-generation service path
+    // appended by the backend, so one API root serves the whole catalogue.
+    const imageEndpointBlock =
+      type === "image" &&
+      (item.protocol.toLowerCase().includes("dashscope") ||
+        item.protocol.includes("百炼")) ? (
+        <span
+          style={{
+            fontSize: 11,
+            color: "var(--color-text-tertiary)",
+            lineHeight: 1.6,
+          }}
+        >
+          {t("modelConfig.imageEndpointNote")}
+        </span>
       ) : null;
 
     const ttsFamilyBlock =
@@ -2747,6 +2771,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             )}
             {type !== "vlm" && renderFields(type)}
             {type === "vlm" && !config.vlm.use_llm && renderFields("vlm")}
+            {imageEndpointBlock}
             {videoFamilyBlock}
             {ttsFamilyBlock}
           </div>
@@ -2821,7 +2846,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         border: "none",
         textAlign: "left",
         cursor: "pointer",
-        fontSize: 13,
+        fontSize: 12.5,
         fontWeight: activePane === pane ? 600 : 500,
         color:
           activePane === pane
@@ -2833,9 +2858,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       }}
     >
       {icon}
-      <span className="text-ellipsis" style={{ flex: 1, minWidth: 0 }}>
-        {label}
-      </span>
+      <span style={{ flex: 1, minWidth: 0, lineHeight: 1.3 }}>{label}</span>
       {meta}
     </button>
   );
@@ -2935,7 +2958,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         <nav
           aria-label={t("modelConfig.settingsNav")}
           style={{
-            width: 200,
+            width: 232,
             flexShrink: 0,
             borderRight: "1px solid var(--color-border)",
             background: "var(--color-bg-secondary)",
@@ -3087,56 +3110,146 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                     const meta = CARD_META.find((item) => item.type === type);
                     return meta ? renderCard(meta) : null;
                   })}
-                  {activePane === "perception" && (
-                    <div
-                      className="glass-card"
-                      style={{ padding: "14px 18px" }}
-                    >
+                  {activePane === "media" && (
+                    <div className="glass-card">
                       <div
+                        onClick={() => toggleExpand("translate")}
                         style={{
-                          fontSize: 14,
-                          fontWeight: 600,
-                          color: "var(--color-text-primary)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "14px 18px",
+                          cursor: "pointer",
+                          userSelect: "none",
+                          borderBottom: expanded.translate
+                            ? "1px solid var(--color-border)"
+                            : "none",
                         }}
                       >
-                        {t("modelConfig.translateCardTitle")}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: "var(--color-text-tertiary)",
-                          marginTop: 2,
-                          lineHeight: 1.5,
-                        }}
-                      >
-                        {t("modelConfig.translateCardBrief")}
-                      </div>
-                      <div style={{ marginTop: 10, maxWidth: 380 }}>
-                        <label className="field-label">
-                          {t("modelConfig.translateModelLabel")}
-                        </label>
-                        <Input
-                          placeholder="qwen-mt-image"
-                          value={config.image.translate_model}
-                          onChange={(event) =>
-                            updateItem(
-                              "image",
-                              "translate_model",
-                              event.target.value,
-                            )
-                          }
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "flex-start",
+                            gap: 10,
+                            minWidth: 0,
+                          }}
+                        >
+                          <TranslationOutlined
+                            style={{
+                              color: "var(--color-text-tertiary)",
+                              fontSize: 16,
+                            }}
+                          />
+                          <div
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 2,
+                              minWidth: 0,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 10,
+                              }}
+                            >
+                              <span
+                                style={{
+                                  fontSize: 14,
+                                  fontWeight: 600,
+                                  color: "var(--color-text-primary)",
+                                }}
+                              >
+                                {t("modelConfig.translateCardTitle")}
+                              </span>
+                              <span
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  fontSize: 10,
+                                  fontWeight: 500,
+                                  color: "var(--color-text-tertiary)",
+                                  background: "var(--color-bg-secondary)",
+                                  padding: "1px 7px",
+                                  borderRadius: 4,
+                                }}
+                              >
+                                {t("modelConfig.optional")}
+                              </span>
+                              <span
+                                className="text-ellipsis"
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 500,
+                                  color: "var(--color-text-tertiary)",
+                                  maxWidth: 140,
+                                }}
+                              >
+                                {config.image.translate_model ||
+                                  "qwen-mt-image"}
+                              </span>
+                            </div>
+                            <span
+                              style={{
+                                fontSize: 11,
+                                color: "var(--color-text-tertiary)",
+                                lineHeight: 1.4,
+                              }}
+                            >
+                              {t("modelConfig.translateCardBrief")}
+                            </span>
+                          </div>
+                        </div>
+                        <DownOutlined
+                          style={{
+                            fontSize: 10,
+                            color: "var(--color-text-tertiary)",
+                            transition: "transform 0.2s",
+                            transform: expanded.translate
+                              ? "rotate(180deg)"
+                              : "rotate(0deg)",
+                          }}
                         />
                       </div>
-                      <p
-                        style={{
-                          margin: "8px 0 0",
-                          fontSize: 11,
-                          lineHeight: 1.6,
-                          color: "var(--color-text-tertiary)",
-                        }}
-                      >
-                        {t("modelConfig.translateCardNote")}
-                      </p>
+                      {expanded.translate && (
+                        <div
+                          style={{
+                            padding: "16px 18px 24px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 12,
+                          }}
+                        >
+                          <div style={{ maxWidth: 380 }}>
+                            <label className="field-label">
+                              {t("modelConfig.translateModelLabel")}
+                            </label>
+                            <Input
+                              placeholder="qwen-mt-image"
+                              value={config.image.translate_model}
+                              onChange={(event) =>
+                                updateItem(
+                                  "image",
+                                  "translate_model",
+                                  event.target.value,
+                                )
+                              }
+                            />
+                          </div>
+                          <p
+                            style={{
+                              margin: 0,
+                              fontSize: 11,
+                              lineHeight: 1.6,
+                              color: "var(--color-text-tertiary)",
+                            }}
+                          >
+                            {t("modelConfig.translateCardNote")}
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
                 </>

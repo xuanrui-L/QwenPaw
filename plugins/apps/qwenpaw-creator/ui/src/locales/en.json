@@ -339,7 +339,9 @@
     "translateCardTitle": "In-image Text Translation",
     "translateCardBrief": "Recognizes and replaces in-image text with the target language · keeps the layout",
     "translateModelLabel": "Translation model (optional)",
-    "translateCardNote": "image_generation mode=translate uses this model to translate in-image text while keeping the layout; empty means the default qwen-mt-image, sharing the image model's DashScope API Key (DashScope protocol only)."
+    "translateCardNote": "image_generation mode=translate uses this model to translate in-image text while keeping the layout; empty means the default qwen-mt-image, sharing the image model's DashScope API Key (DashScope protocol only).",
+    "imageEndpointNote": "Set Base URL to the API root (https://dashscope.aliyuncs.com/api/v1): every Bailian qwen-image / wan-image model shares the multimodal-generation service path, appended automatically by the backend; in-image translation uses the image2image path, appended the same way.",
+    "videoEndpointNote": "Set Base URL to the API root: the backend appends the DashScope video-generation/video-synthesis submit path automatically, and the ark v3 task path for Volcano Engine."
   },
   "modelBadges": {
     "textModel": "Text Model",
@@ -1077,6 +1079,16 @@
     "modelGuideVideoGenProtocols": "DashScope (Bailian: wan2.7 / happyhorse-1.1 families, t2v/i2v/r2v derived per element), Volcano Engine (doubao-seedance-2.0, r2v only)",
     "modelGuideAsrTitle": "ASR Speech Recognition",
     "modelGuideAsrProtocols": "DashScope Fun-ASR, DashScope Qwen3-ASR, OpenAI Whisper",
+    "modelGuideVoice": "Narration / talking-head",
+    "modelGuideVoiceModels": "TTS + Digital Human",
+    "modelGuideVoiceDesc": "Synthesizes narration and lines; audio drives talking-head segments",
+    "modelGuideGroundingProtocols": "Serper (Google) / Tavily search; the verifier can reuse LLM/VLM or a custom model",
+    "modelGuideTtsTitle": "TTS Speech Synthesis",
+    "modelGuideTtsProtocols": "DashScope: Qwen-TTS family (qwen3-tts-flash / qwen3-tts-instruct-flash, system voices plus cloning/design), CosyVoice family (cosyvoice-v3.5-plus / qwen-audio-3.0-tts-flash, voice required first)",
+    "modelGuideS2vTitle": "Digital Human",
+    "modelGuideS2vProtocols": "DashScope: wan2.2-s2v with the free face-detect gate (wan2.2-s2v-detect)",
+    "modelGuideEmbeddingTitle": "Embedding",
+    "modelGuideEmbeddingProtocols": "DashScope: qwen3-vl-embedding for source retrieval and long-source memory",
     "modelGuideWhatModels": "What models for what scenarios?",
     "modelGuideProviders": "Currently supported providers / protocols",
     "modelGuideSetupDesc": "Fill in Base URL, API Key and Model Name in 'Model Configuration', enable after passing 'Test Connection'; VLM can directly reuse multimodal-capable LLM configuration."
