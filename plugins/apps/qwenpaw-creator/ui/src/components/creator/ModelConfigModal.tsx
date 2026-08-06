@@ -1897,7 +1897,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       <div
         key={type}
         className="glass-card"
-        style={{ boxShadow: "var(--shadow-xs)" }}
+        style={{ borderRadius: 8, boxShadow: "var(--shadow-xs)" }}
       >
         <div
           onClick={() => toggleExpand("grounding")}
@@ -1914,10 +1914,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span
               style={{
-                width: 34,
-                height: 34,
-                borderRadius: 10,
-                background: "var(--color-bg-secondary)",
+                width: 30,
+                height: 30,
+                borderRadius: 8,
+                background: "var(--color-bg-layout)",
+                border: "1px solid var(--color-border)",
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -2006,9 +2007,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           >
             <div
               style={{
-                borderRadius: 8,
-                background: "var(--color-bg-secondary)",
-                padding: "8px 11px",
+                borderLeft: "3px solid var(--color-accent)",
+                background: "var(--color-bg-layout)",
+                borderRadius: "0 8px 8px 0",
+                padding: "7px 12px",
                 fontSize: 11.5,
                 lineHeight: 1.6,
                 color: "var(--color-text-secondary)",
@@ -2604,7 +2606,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       <div
         key={type}
         className="glass-card"
-        style={{ boxShadow: "var(--shadow-xs)" }}
+        style={{ borderRadius: 8, boxShadow: "var(--shadow-xs)" }}
       >
         <div
           onClick={() => toggleExpand(type)}
@@ -2628,10 +2630,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           >
             <span
               style={{
-                width: 34,
-                height: 34,
-                borderRadius: 10,
-                background: "var(--color-bg-secondary)",
+                width: 30,
+                height: 30,
+                borderRadius: 8,
+                background: "var(--color-bg-layout)",
+                border: "1px solid var(--color-border)",
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -2741,9 +2744,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           >
             <div
               style={{
-                borderRadius: 8,
-                background: "var(--color-bg-secondary)",
-                padding: "8px 11px",
+                borderLeft: "3px solid var(--color-accent)",
+                background: "var(--color-bg-layout)",
+                borderRadius: "0 8px 8px 0",
+                padding: "7px 12px",
                 fontSize: 11.5,
                 lineHeight: 1.6,
                 color: "var(--color-text-secondary)",
@@ -2875,19 +2879,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         alignItems: "center",
         gap: 8,
         width: "100%",
-        padding: "8px 12px",
-        borderRadius: 8,
-        border: "none",
+        padding: "7px 12px",
+        borderRadius: 9999,
+        border: `1px solid ${activePane === pane ? "#FFD7AC" : "transparent"}`,
         textAlign: "left",
         cursor: "pointer",
         fontSize: 12.5,
         fontWeight: activePane === pane ? 600 : 500,
-        color:
-          activePane === pane
-            ? "var(--color-accent)"
-            : "var(--color-text-secondary)",
-        background:
-          activePane === pane ? "var(--color-accent-soft)" : "transparent",
+        color: activePane === pane ? "#332F2E" : "var(--color-text-secondary)",
+        background: activePane === pane ? "#FFF3E6" : "transparent",
         transition: "all 0.15s",
       }}
     >
@@ -2995,7 +2995,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             width: 232,
             flexShrink: 0,
             borderRight: "1px solid var(--color-border)",
-            background: "var(--color-bg-secondary)",
+            background: "var(--color-bg-primary)",
             padding: "12px 10px",
             overflowY: "auto",
             display: "flex",
@@ -3082,8 +3082,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             padding: "20px 24px 28px",
             display: "flex",
             flexDirection: "column",
-            gap: 14,
-            background: "var(--color-bg-layout)",
+            gap: 12,
           }}
         >
           {(activePane === "lang" ||
@@ -3121,8 +3120,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       alignItems: "baseline",
                       gap: 6,
                       borderRadius: 8,
-                      background: "var(--color-bg-primary)",
-                      border: "1px solid var(--color-border)",
+                      background: "var(--color-bg-layout)",
                       padding: "5px 10px",
                       fontSize: 11,
                       color: "var(--color-text-tertiary)",
@@ -3149,7 +3147,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   {activePane === "media" && (
                     <div
                       className="glass-card"
-                      style={{ boxShadow: "var(--shadow-xs)" }}
+                      style={{ borderRadius: 8, boxShadow: "var(--shadow-xs)" }}
                     >
                       <div
                         onClick={() => toggleExpand("translate")}
@@ -3175,10 +3173,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         >
                           <span
                             style={{
-                              width: 34,
-                              height: 34,
-                              borderRadius: 10,
-                              background: "var(--color-bg-secondary)",
+                              width: 30,
+                              height: 30,
+                              borderRadius: 8,
+                              background: "var(--color-bg-layout)",
+                              border: "1px solid var(--color-border)",
                               display: "inline-flex",
                               alignItems: "center",
                               justifyContent: "center",
@@ -3370,7 +3369,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                             ? "var(--color-accent)"
                             : "var(--color-border)"
                         }`,
-                        borderRadius: 14,
+                        borderRadius: 8,
                         background: "var(--color-bg-primary)",
                         boxShadow: selected
                           ? "0 2px 10px rgba(255, 127, 22, 0.12)"
@@ -3588,7 +3587,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       background:
                         yolo && !anyReviewTier
                           ? "var(--color-warning-soft)"
-                          : "var(--color-bg-primary)",
+                          : "var(--color-bg-layout)",
                       border: `1px solid ${
                         yolo && !anyReviewTier
                           ? "rgba(247, 144, 9, 0.3)"
@@ -3629,6 +3628,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                       className="glass-card"
                       style={{
                         padding: "14px 16px",
+                        borderRadius: 8,
                         boxShadow: "var(--shadow-xs)",
                       }}
                       data-review-tier={tier.key}
@@ -3791,6 +3791,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 className="glass-card"
                 style={{
                   padding: "16px 18px",
+                  borderRadius: 8,
                   boxShadow: "var(--shadow-xs)",
                 }}
               >
@@ -3809,7 +3810,6 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Button onClick={handleCancel}>{t("modelConfig.close")}</Button>
           <Button
-            type="primary"
             icon={<ReloadOutlined />}
             loading={reloading}
             onClick={handleReload}
