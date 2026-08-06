@@ -216,6 +216,7 @@ describe("new Creator API contract", () => {
         reuse_llm: true,
         validation_source: "llm",
         tavily_api_key: "",
+        serper_api_key: "",
         native_search_enabled: true,
         search_provider: "dashscope_qwen",
         search_reuse_llm: true,
@@ -261,6 +262,8 @@ describe("new Creator API contract", () => {
         policy_api_key: "",
       },
       executionAuthorization: { mode: "required" },
+      creationCheckpoints: { mode: "required" },
+      mediaReview: { mode: "required" },
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({

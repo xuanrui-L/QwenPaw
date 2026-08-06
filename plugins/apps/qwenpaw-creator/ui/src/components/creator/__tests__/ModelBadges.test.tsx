@@ -34,6 +34,7 @@ const config: ModelConfigData = {
     reuse_llm: true,
     validation_source: "llm",
     tavily_api_key: "",
+    serper_api_key: "",
     native_search_enabled: true,
     search_provider: "dashscope_qwen",
     search_reuse_llm: true,
@@ -79,6 +80,8 @@ const config: ModelConfigData = {
     policy_api_key: "",
   },
   executionAuthorization: { mode: "allow_all" },
+  creationCheckpoints: { mode: "skip" },
+  mediaReview: { mode: "required" },
 };
 
 describe("ModelBadges", () => {

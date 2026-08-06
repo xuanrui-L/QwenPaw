@@ -51,7 +51,12 @@ from services.media_files.overlay import (
     render_interview_summary_overlay,
     render_pet_os_overlay,
 )
-from services.media_files.motion_overlay import render_motion_overlay
+from services.media_files.motion_overlay import (
+    caption_layout_error,
+    probe_motion_document,
+    render_motion_overlay,
+)
+from services.media_files.motion_templates import render_caption_template
 from services.media_files.transitions import (
     SUPPORTED_XFADE_KINDS,
     TransitionClip,
@@ -83,7 +88,10 @@ from services.media_files.element_adapter import (
     find_timeline_element,
     selected_element_output,
 )
-from services.media_files.review_admission import assert_media_review_admission
+from services.media_files.review_admission import (
+    assert_media_review_admission,
+    media_review_policy,
+)
 from services.project_files.remote_cache import (
     public_source_url,
     resolve_remote_cache,
@@ -658,6 +666,8 @@ class FfmpegLocalMediaRunner:
             rendered = segment.with_name(f"{segment.stem}-overlay.mp4")
             styled_error: str | None = None
             motion = overlay.get("motion")
+            render_location = overlay.get("location")
+            using_safe_motion = False
             if (
                 isinstance(motion, Mapping)
                 and str(motion.get("html") or "").strip()
@@ -674,6 +684,67 @@ class FfmpegLocalMediaRunner:
                 isinstance(motion, Mapping)
                 and str(motion.get("html") or "").strip()
             ):
+                safety_error = caption_layout_error(
+                    render_location,
+                    str(overlay.get("text") or ""),
+                    video_size,
+                )
+                if safety_error is None:
+                    location = render_location
+                    width_ratio = (
+                        float(location.get("width", 1.0))
+                        if isinstance(location, Mapping)
+                        else 1.0
+                    )
+                    height_ratio = (
+                        float(location.get("height", 1.0))
+                        if isinstance(location, Mapping)
+                        else 1.0
+                    )
+                    probe = probe_motion_document(
+                        str(motion["html"]),
+                        box_width=max(160, round(video_size[0] * width_ratio)),
+                        box_height=max(
+                            90,
+                            round(video_size[1] * height_ratio),
+                        ),
+                        ffmpeg_path=self.executable,
+                    )
+                    if not probe.ok:
+                        safety_error = probe.error
+                    elif probe.edge_contact > 0.02:
+                        safety_error = "字幕卡内容触碰视口边缘，存在裁切风险"
+                    elif probe.text_occlusion > 0.10:
+                        safety_error = "字幕文字被卡片内的图标或装饰遮挡"
+                if safety_error is not None:
+                    render_location = {
+                        "x": 0.5,
+                        "y": 0.88,
+                        "width": 0.8,
+                        "height": 0.18,
+                        "anchor_x": 0.5,
+                        "anchor_y": 0.5,
+                        "opacity": 1.0,
+                    }
+                    motion = {
+                        "html": render_caption_template(
+                            str(overlay.get("text") or ""),
+                            emotion=str(overlay.get("vibe") or "chill"),
+                            box_width=0.8,
+                            box_height=0.18,
+                        ),
+                        "fps": 24,
+                        "loop": False,
+                    }
+                    using_safe_motion = True
+                    styled_error = (
+                        f"{overlay['kind']} 字幕动效未通过合成安全检查，"
+                        f"已用统一安全动效模板渲染: {safety_error}"
+                    )
+            if (
+                isinstance(motion, Mapping)
+                and str(motion.get("html") or "").strip()
+            ):
                 result = render_motion_overlay(
                     ffmpeg_path=self.executable,
                     input_path=segment,
@@ -684,7 +755,7 @@ class FfmpegLocalMediaRunner:
                     video_size=video_size,
                     appear_at=overlay["appear_at"],
                     duration=overlay["duration"],
-                    location=overlay.get("location"),
+                    location=render_location,
                     viewport_inset=0.05,
                 )
                 if result.success:
@@ -693,10 +764,53 @@ class FfmpegLocalMediaRunner:
                         warnings.append(styled_error)
                     continue
                 rendered.unlink(missing_ok=True)
-                styled_error = (
-                    f"{overlay['kind']} 生成样式渲染失败，已回退固定样式: "
-                    f"{result.error or '未知错误'}"
-                )
+                if not using_safe_motion:
+                    generated_error = result.error or "未知错误"
+                    render_location = {
+                        "x": 0.5,
+                        "y": 0.88,
+                        "width": 0.8,
+                        "height": 0.18,
+                        "anchor_x": 0.5,
+                        "anchor_y": 0.5,
+                        "opacity": 1.0,
+                    }
+                    safe_result = render_motion_overlay(
+                        ffmpeg_path=self.executable,
+                        input_path=segment,
+                        output_path=rendered,
+                        html=render_caption_template(
+                            str(overlay.get("text") or ""),
+                            emotion=str(overlay.get("vibe") or "chill"),
+                            box_width=0.8,
+                            box_height=0.18,
+                        ),
+                        fps=24,
+                        loop=False,
+                        video_size=video_size,
+                        appear_at=overlay["appear_at"],
+                        duration=overlay["duration"],
+                        location=render_location,
+                        viewport_inset=0.05,
+                    )
+                    if safe_result.success:
+                        os.replace(rendered, segment)
+                        warnings.append(
+                            f"{overlay['kind']} 生成样式渲染失败，"
+                            f"已用统一安全动效模板渲染: {generated_error}",
+                        )
+                        continue
+                    rendered.unlink(missing_ok=True)
+                    styled_error = (
+                        f"{overlay['kind']} 生成样式与安全动效模板均渲染失败，"
+                        "已回退固定样式: "
+                        f"{generated_error}; {safe_result.error or '未知错误'}"
+                    )
+                else:
+                    styled_error = (
+                        f"{overlay['kind']} 安全动效模板渲染失败，"
+                        f"已回退固定样式: {result.error or '未知错误'}"
+                    )
             if overlay["kind"] == "pet_os":
                 result = render_pet_os_overlay(
                     ffmpeg_path=self.executable,
@@ -707,7 +821,7 @@ class FfmpegLocalMediaRunner:
                     video_size=video_size,
                     appear_at=overlay["appear_at"],
                     duration=overlay["duration"],
-                    location=overlay.get("location"),
+                    location=render_location,
                 )
             else:
                 result = render_interview_summary_overlay(
@@ -2624,14 +2738,20 @@ class FileLocalMediaExecutionService:
                     self._apply_result(candidate, result)
                     # Final composition is deterministic assembly (every input
                     # was reviewed individually), so it skips the review flow;
-                    # all other local media artifacts stay reviewed.
+                    # other local media artifacts follow the operator's media
+                    # review mode. An AUTO_FIX round cannot carry a boundary.
                     is_final_compose = (
                         result.get("commandType")
                         == CreatorCommandType.COMPOSE_FINAL_VIDEO.value
                     )
+                    review_policy = (
+                        ReviewPolicy.AUTO_FIX
+                        if is_final_compose
+                        else media_review_policy()
+                    )
                     review_boundary = (
                         None
-                        if is_final_compose
+                        if review_policy is not ReviewPolicy.REQUIRE_REVIEW
                         else self.services.commits.runtime_review_boundary(
                             task.project_id,
                             run_id=str(task.run_id),
@@ -2642,11 +2762,7 @@ class FileLocalMediaExecutionService:
                         base=current,
                         candidate=candidate,
                         origin=ChangeOrigin.RUNTIME_TASK,
-                        review_policy=(
-                            ReviewPolicy.AUTO_FIX
-                            if is_final_compose
-                            else ReviewPolicy.REQUIRE_REVIEW
-                        ),
+                        review_policy=review_policy,
                         review_boundary=review_boundary,
                         caused_by_request_id=latest.caused_by_request_id,
                         round_id=ids["round_id"],

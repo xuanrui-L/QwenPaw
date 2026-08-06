@@ -13,14 +13,17 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from copy import deepcopy
+import json
 from typing import Any, Mapping
 import threading
 
+from json_repair import repair_json
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -35,6 +38,7 @@ from .candidate_normalization import normalize_project_candidate
 from .commit import PROTECTED_EXACT_POINTERS, ProjectCommitBoundary
 from .jq_transform import JqProjectTransformer
 from .models import Project, TimelineElement
+from .patch_ops import PatchOpError, apply_patch_ops
 from .schema_prompt import ProjectSchemaPrompt, build_project_schema_prompt
 from .store import ProjectSnapshot, ProjectStore
 
@@ -42,6 +46,7 @@ from .store import ProjectSnapshot, ProjectStore
 READ_PROJECT_TOOL_NAME = "read_project"
 READ_PROJECT_FILE_TOOL_NAME = "read_project_file"
 JQ_PROJECT_TOOL_NAME = "jq_project"
+PATCH_PROJECT_TOOL_NAME = "patch_project"
 ELEMENTS_AT_TOOL_NAME = "elements_at"
 _DEFAULT_TEXT_PAGE_BYTES = 64 * 1024
 _MAX_TEXT_PAGE_BYTES = 256 * 1024
@@ -116,6 +121,68 @@ class ElementsAtToolInput(_ToolModel):
     timeline_id: str = Field(alias="timelineId", min_length=1)
     tick: int = Field(ge=0)
     include_disabled: bool = Field(default=False, alias="includeDisabled")
+
+
+class PatchProjectToolInput(_ToolModel):
+    project_id: str = Field(alias="projectId", min_length=1)
+    # Each op is validated by ``apply_patch_ops`` so failures carry the
+    # exact op index instead of an opaque pydantic location.
+    ops: list[dict[str, Any]] = Field(min_length=1)
+
+    @field_validator("ops", mode="before")
+    @classmethod
+    def _decode_stringified_ops(cls, value: Any) -> Any:
+        # Field trip 2026-08-05: the model double-encoded ops as a JSON
+        # string on its very first call. When the string parses to a list
+        # the decode is lossless, so refusing it only costs a retry turn.
+        # Second field trip the same day: the stringified array itself
+        # carried a bracket slip (a missing comma at char 973), so strict
+        # parsing bounced it with a misleading "must not be a string"
+        # message and the model resent verbatim into the breaker. Streamed
+        # tool arguments already flow through json_repair; the same repair
+        # applies here, guarded to structure-only fixes by re-checking the
+        # result is a list of objects.
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                repaired = repair_json(value, return_objects=True)
+                if isinstance(repaired, list) and all(
+                    isinstance(item, Mapping) for item in repaired
+                ):
+                    return repaired
+                return value
+            if isinstance(decoded, list):
+                return decoded
+        return value
+
+
+def _patch_project_input_error(arguments: Mapping[str, Any]) -> str:
+    """Name the actual defect instead of a generic shape lecture.
+
+    A stringified ops payload whose inner JSON carries a bracket slip
+    must hear where the slip is — "must not be a string" made the model
+    resend verbatim into the non-progress breaker.
+    """
+
+    base = (
+        "patch_project 参数无效：ops 必须是操作对象数组（如 "
+        '[{"op": "replace", "path": "/name", "value": "..."}]）。'
+    )
+    ops = arguments.get("ops")
+    if isinstance(ops, str):
+        try:
+            json.loads(ops)
+        except json.JSONDecodeError as decode_error:
+            return (
+                base + f"收到的 ops 是字符串，且内部 JSON 存在语法错误（"
+                f"第 {decode_error.pos} 字符附近：{decode_error.msg}）。"
+                "请修复该处语法后以 JSON 数组（非字符串）重发。"
+            )
+        return base + "收到的 ops 是字符串，请直接发送 JSON 数组。"
+    if isinstance(ops, Mapping):
+        return base + "收到的 ops 是单个对象，请包裹为数组。"
+    return base
 
 
 class AgentProjectToolContext(_ToolModel):
@@ -313,6 +380,72 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    PATCH_PROJECT_TOOL_NAME: {
+        "description": (
+            "用一组小而扁平的操作列表修改 Project，适用于 90% 的日常写入"
+            "（新建/更新实体、Element、改字段）；需要计算的复杂变换才用 "
+            "jq_project。每个 op 独立且浅（value 嵌套勿超 2 层）："
+            'add/replace/remove 用 RFC 6901 path（如 "/timelines/items/'
+            'timeline:main/elements_by_id/elem:x"，数组末尾用 "-"）；'
+            "upsert_entity 用于 EntityCollection（如 visual.entities 或某实体的 "
+            "variants），Runtime 自动同步 items 与 order。创建带 shots 的 "
+            "Element 时先用一个 op 建骨架（shots 空集合），再逐个 op 补 shot。"
+            "整个 ops 列表原子提交：全部成功或全部不生效，失败时报告出错的 "
+            "op 序号与 path。禁止触碰 Runtime 保护字段与媒体写回区。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "projectId": {"type": "string", "minLength": 1},
+                "ops": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {
+                                "type": "string",
+                                "enum": [
+                                    "add",
+                                    "replace",
+                                    "remove",
+                                    "upsert_entity",
+                                ],
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": (
+                                    "add/replace/remove 的 RFC 6901 目标路径"
+                                ),
+                            },
+                            "value": {
+                                "description": (
+                                    "add/replace/upsert_entity 的写入值；" "保持浅嵌套"
+                                ),
+                            },
+                            "collection": {
+                                "type": "string",
+                                "description": (
+                                    "upsert_entity 目标 EntityCollection 的路径"
+                                ),
+                            },
+                            "id": {
+                                "type": "string",
+                                "description": (
+                                    "upsert_entity 写入的实体 key，须与 value "
+                                    "内的身份字段一致"
+                                ),
+                            },
+                        },
+                        "required": ["op"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["projectId", "ops"],
+            "additionalProperties": False,
+        },
+    },
     ELEMENTS_AT_TOOL_NAME: {
         "description": (
             "查询 Timeline 某一整数 tick 上按半开区间仍然活跃的完整 Element。"
@@ -445,6 +578,44 @@ _PROJECT_SCHEMA_MESSAGE_HINTS: tuple[tuple[str, str], ...] = (
 )
 _MAX_SCHEMA_ERROR_LINES = 8
 
+# Fields that live on TimelineElement itself. A bracket slip in a large
+# nested payload routinely drops them inside ``creation`` instead, which
+# surfaces as several "Field required" errors that never name the real
+# mistake.
+_ELEMENT_LEVEL_FIELDS = frozenset(
+    {
+        "element_id",
+        "span",
+        "label",
+        "location",
+        "outputs",
+        "render_source",
+        "z_index",
+        "enabled",
+    },
+)
+
+
+def _misnested_element_field_hint(item: Mapping[str, Any]) -> str:
+    """Name the bracket-misplacement when element fields sit in creation."""
+
+    if item.get("type") != "missing":
+        return ""
+    loc = item.get("loc") or ()
+    if not loc or str(loc[-1]) not in _ELEMENT_LEVEL_FIELDS:
+        return ""
+    parent = item.get("input")
+    if not isinstance(parent, Mapping):
+        return ""
+    creation = parent.get("creation")
+    if isinstance(creation, Mapping) and str(loc[-1]) in creation:
+        return (
+            "花括号层级错位：该 element 级字段被误嵌进了 creation 内部。"
+            "请把 element_id/span/label 等字段提到与 creation 同级，"
+            "creation 内只保留 type 及创作字段"
+        )
+    return ""
+
 
 def _translate_project_schema_error(error: ValidationError) -> str:
     """Render post-jq Project validation errors as located, fixable items."""
@@ -469,7 +640,10 @@ def _translate_project_schema_error(error: ValidationError) -> str:
                     hint = f"（{text}）"
                     break
             else:
-                if item.get("type") == "extra_forbidden":
+                misnested = _misnested_element_field_hint(item)
+                if misnested:
+                    hint = f"（{misnested}）"
+                elif item.get("type") == "extra_forbidden":
                     hint = (
                         "（该字段不在 Project Schema 中，"
                         "请对照 system prompt 里的 PROJECT_JSON_SCHEMA）"
@@ -686,6 +860,47 @@ class AgentProjectTools:
             else None,
         )
 
+    def patch_project(
+        self,
+        *,
+        project_id: str,
+        ops: list[Mapping[str, Any]],
+    ) -> AgentProjectCommitResult:
+        """Apply a flat operation list and commit through the same boundary.
+
+        The candidate is derived deterministically from the last observed
+        base plus *ops*, so bracket depth never travels through the model.
+        Everything downstream — protected pointers, schema validation,
+        normalization, three-way merge and review — is the identical
+        pipeline jq_project uses.
+        """
+
+        request = PatchProjectToolInput(projectId=project_id, ops=list(ops))
+        base = self._base(request.project_id)
+        candidate = base.project.model_dump(mode="json")
+        apply_patch_ops(candidate, request.ops)
+        normalized_pointers = normalize_project_candidate(candidate)
+        result = self.commits.commit(
+            base=base,
+            candidate=candidate,
+            **self.context.commit_metadata(),
+        )
+        self._remember(result.snapshot)
+        snapshot = self._snapshot_result(result.snapshot)
+        return AgentProjectCommitResult(
+            **snapshot.model_dump(mode="python"),
+            transactionId=result.transaction_id,
+            changedPointers=[
+                change.json_pointer
+                for change in result.changeset.changes
+                if change.json_pointer is not None
+            ],
+            normalizedPointers=normalized_pointers,
+            reviewId=result.review.review_id
+            if result.review is not None
+            else None,
+        )
+
     def elements_at(
         self,
         *,
@@ -761,6 +976,46 @@ class AgentProjectTools:
                 raise AgentProjectToolError(
                     _translate_project_schema_error(exc),
                     code="JQ_PROJECT_SCHEMA_INVALID",
+                    details={
+                        "validationErrors": exc.errors(
+                            include_context=False,
+                            include_input=False,
+                            include_url=False,
+                        ),
+                    },
+                ) from exc
+        elif tool_name == PATCH_PROJECT_TOOL_NAME:
+            try:
+                request = PatchProjectToolInput.model_validate(
+                    dict(arguments),
+                )
+            except ValidationError as exc:
+                raise AgentProjectToolError(
+                    _patch_project_input_error(arguments),
+                    code="PATCH_PROJECT_INPUT_INVALID",
+                    details={
+                        "validationErrors": exc.errors(
+                            include_context=False,
+                            include_input=False,
+                            include_url=False,
+                        ),
+                    },
+                ) from exc
+            try:
+                result = self.patch_project(
+                    project_id=request.project_id,
+                    ops=request.ops,
+                )
+            except PatchOpError as exc:
+                raise AgentProjectToolError(
+                    f"patch_project 操作无效，项目未被修改：{exc}。"
+                    "请修正该 op 后重发整个 ops 列表。",
+                    code="PATCH_OPS_INVALID",
+                ) from exc
+            except ValidationError as exc:
+                raise AgentProjectToolError(
+                    _translate_project_schema_error(exc),
+                    code="PATCH_PROJECT_SCHEMA_INVALID",
                     details={
                         "validationErrors": exc.errors(
                             include_context=False,

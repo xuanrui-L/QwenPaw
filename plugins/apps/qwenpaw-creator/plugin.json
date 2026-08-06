@@ -3,10 +3,10 @@
   "name": "QwenPaw Creator",
   "version": "1.0.1",
   "type": "app",
-  "description": "QwenPaw plugin that brings the QwenPaw-Creator script-to-assets-to-video workflow into QwenPaw.",
+  "description": "An agentic video creation platform: generate from an idea or edit existing footage, with AI Agents collaborating on planning, generation, editing, and composition.",
   "description_i18n": {
-    "zh-CN": "将 QwenPaw-Creator 的剧本、资产、分镜与视频工作流作为插件接入 QwenPaw。",
-    "en-US": "QwenPaw plugin that brings the QwenPaw-Creator script, asset, storyboard, and video workflow into QwenPaw."
+    "zh-CN": "Agentic 视频创作平台：从创意生成或编辑已有素材，AI Agent 协同完成规划、生成、剪辑与合成。",
+    "en-US": "An agentic video creation platform: generate from an idea or edit existing footage, with AI Agents collaborating on planning, generation, editing, and composition."
   },
   "author": "QwenPaw Creator Team",
   "entry": {
@@ -18,15 +18,15 @@
     "imageio-ffmpeg"
   ],
   "qwenpaw_version": {
-    "min": "2.0.1",
-    "max": "3.1.0"
+    "min": "2.0.1"
   },
   "meta": {
     "pawapp": {
       "icon": "🎬",
       "icon_url": "/api/frontend_plugin/qwenpaw-creator/files/ui/dist/app/logo-mark.png",
       "entry_page": "/apps/qwenpaw-creator",
-      "launch_scope": "page"
+      "launch_scope": "page",
+      "category": "video-creation"
     },
     "permissions": {
       "chat": false,
@@ -50,7 +50,6 @@
         "fallback": "ffmpeg metadata probing"
       }
     },
-    "category": "video-creation",
     "features": [
       "project-management",
       "script-generation",
@@ -143,6 +142,14 @@
             "required": false,
             "placeholder": "tvly-...",
             "help": "Optional primary text and image retrieval provider."
+          },
+          {
+            "name": "serper_api_key",
+            "label": "Serper API Key",
+            "type": "password",
+            "required": false,
+            "placeholder": "serper key",
+            "help": "Optional Google search provider tried after Tavily."
           },
           {
             "name": "native_search_enabled",

@@ -205,6 +205,7 @@ def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
         "read_project",
         "read_project_file",
         "jq_project",
+        "patch_project",
         "elements_at",
     )
     file_parameters = schemas["read_project_file"]["parameters"]
@@ -242,6 +243,7 @@ def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
         "read_project",
         "read_project_file",
         "jq_project",
+        "patch_project",
         "elements_at",
     ]
     assert (
@@ -398,6 +400,29 @@ def test_translate_schema_error_hints_missing_variant_binding():
     assert "missing variant variant:missing" in message
     assert "先创建 Variant" in message
     assert "character_refs/prop_refs/scene_ref" not in message
+
+
+def test_translate_schema_error_hints_misnested_element_fields():
+    # A bracket slip put element-level fields inside creation: the three
+    # resulting "Field required" errors must name the real mistake.
+    raw = Project.new(project_id="project-1", name="Initial").model_dump(
+        mode="json",
+    )
+    raw["timelines"]["items"]["timeline:main"]["elements_by_id"]["elem:x"] = {
+        "creation": {
+            "type": "r2v",
+            "element_id": "elem:x",
+            "span": {"start_tick": 0, "duration_tick": 1000},
+            "label": "错位",
+        },
+    }
+
+    with pytest.raises(ValidationError) as caught:
+        Project.model_validate(raw)
+    message = _translate_project_schema_error(caught.value)
+
+    assert "花括号层级错位" in message
+    assert "提到与 creation 同级" in message
 
 
 def test_read_project_file_pages_only_verified_indexed_utf8_text(tmp_path):

@@ -37,6 +37,11 @@ logger = setup_logger("store")
 DEFAULT_MAX_PROJECT_JSON_BYTES = 8 * 1024 * 1024
 _SAFE_PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# Projects materialized from plugin-bundled inspiration examples carry this
+# marker file so listing keeps them out of the user's own project shelf while
+# every id-addressed route still serves them normally.
+BUILTIN_EXAMPLE_MARKER: Final = ".builtin-example"
+
 
 class ProjectStoreError(RuntimeError):
     """Base error for Project filesystem operations."""
@@ -411,6 +416,9 @@ class ProjectStore:
             except UnsafeProjectPath:
                 continue
             if not (entry / "project.json").exists():
+                continue
+            # Bundled example Projects never surface in "my projects".
+            if (entry / BUILTIN_EXAMPLE_MARKER).exists():
                 continue
             try:
                 snapshot = self.read(safe_id)

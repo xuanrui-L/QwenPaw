@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { GlobalOutlined } from "@ant-design/icons";
 import { getModelConfig } from "@/api/creator";
 import type { ModelConfigData, ModelConfigItem } from "@/contracts/creator";
@@ -20,20 +21,20 @@ const IDLE_HALO = "#EFF0F3";
 const BADGE_META: {
   type: ModelType;
   icon: string | null;
-  label: string;
+  labelKey: string;
 }[] = [
-  { type: "llm", icon: modelLlmIcon, label: "文本模型" },
-  { type: "vlm", icon: modelVlmIcon, label: "视觉理解模型" },
-  { type: "grounding", icon: null, label: "Grounding" },
-  { type: "asr", icon: modelAsrIcon, label: "语音识别模型" },
-  { type: "image", icon: modelImageIcon, label: "图像模型" },
-  { type: "video", icon: modelVideoIcon, label: "视频模型" },
+  { type: "llm", icon: modelLlmIcon, labelKey: "modelBadges.textModel" },
+  { type: "vlm", icon: modelVlmIcon, labelKey: "modelBadges.visionModel" },
+  { type: "grounding", icon: null, labelKey: "Grounding" },
+  { type: "asr", icon: modelAsrIcon, labelKey: "modelBadges.asrModel" },
+  { type: "image", icon: modelImageIcon, labelKey: "modelBadges.imageModel" },
+  { type: "video", icon: modelVideoIcon, labelKey: "modelBadges.videoModel" },
 ];
 
-const STATUS_TEXT: Record<ModelStatus, string> = {
-  on: "已配置",
-  off: "已配置但未启用",
-  none: "未配置",
+const STATUS_TEXT_KEYS: Record<ModelStatus, string> = {
+  on: "modelBadges.configured",
+  off: "modelBadges.configuredNotEnabled",
+  none: "modelBadges.notConfigured",
 };
 
 /**
@@ -42,6 +43,7 @@ const STATUS_TEXT: Record<ModelStatus, string> = {
  * a CSS mask. Clicking the pill opens the model configuration.
  */
 export default function ModelBadges() {
+  const { t } = useTranslation();
   const [config, setConfig] = useState<ModelConfigData | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
 
@@ -88,7 +90,9 @@ export default function ModelBadges() {
         !!searchModel.base_url &&
         supportsQwenNativeSearch(searchModel);
       const searchReady =
-        !!config.grounding.tavily_api_key || nativeSearchReady;
+        !!config.grounding.tavily_api_key ||
+        !!config.grounding.serper_api_key ||
+        nativeSearchReady;
       const verifierReady =
         !!verifier.model_name && !!verifier.api_key && !!verifier.base_url;
       if (!searchReady && !verifierReady) return "none";
@@ -110,8 +114,8 @@ export default function ModelBadges() {
         type="button"
         data-onboarding-id="model-badges"
         onClick={() => setModalOpen(true)}
-        title="模型配置"
-        aria-label="模型配置"
+        title={t("modelBadges.modelConfig")}
+        aria-label={t("modelBadges.modelConfig")}
         className="mr-[92px] flex cursor-pointer items-center gap-3 rounded-full bg-[rgba(43,27,0,0.04)] px-3 py-1 transition-colors hover:bg-[rgba(43,27,0,0.07)]"
       >
         {BADGE_META.map((meta) => {
@@ -122,8 +126,14 @@ export default function ModelBadges() {
             <span
               key={meta.type}
               className="flex h-5 items-center gap-2"
-              title={`${meta.label}：${STATUS_TEXT[state]}`}
-              aria-label={`${meta.label}：${STATUS_TEXT[state]}`}
+              title={t("modelBadges.badgeTitle", {
+                name: t(meta.labelKey),
+                status: t(STATUS_TEXT_KEYS[state]),
+              })}
+              aria-label={t("modelBadges.badgeTitle", {
+                name: t(meta.labelKey),
+                status: t(STATUS_TEXT_KEYS[state]),
+              })}
               data-model-badge={meta.type}
               data-status={state}
             >
