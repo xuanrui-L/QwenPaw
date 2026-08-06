@@ -105,6 +105,7 @@ class TaskKind(StrEnum):
     ASSET_INGEST = "asset_ingest"
     ASSET_IMPORT = "asset_import"
     SOURCE_INTELLIGENCE = "source_intelligence"
+    SOURCE_MEMORY_BUILD = "source_memory_build"
     IMAGE_GENERATION = "image_generation"
     R2V_GENERATION = "r2v_generation"
     AI_EDIT_EXECUTE = "ai_edit_execute"

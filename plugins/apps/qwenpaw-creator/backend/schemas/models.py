@@ -33,6 +33,12 @@ class AsrConfig(ModelConfigItem):
     reuse_llm_key: bool = True
 
 
+class EmbeddingConfig(ModelConfigItem):
+    """Long-source memory embedding backend (DashScope native)."""
+
+    reuse_vlm_key: bool = True
+
+
 def validation_source_from_reuse_llm(reuse_llm: bool) -> str:
     """Map the legacy ``reuse_llm`` flag onto ``validation_source``."""
 
@@ -142,6 +148,7 @@ class ModelConfigData(StrictModel):
     vlm: VlmConfig
     grounding: GroundingConfig = Field(default_factory=GroundingConfig)
     asr: AsrConfig = Field(default_factory=AsrConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     image: ModelConfigItem
     video: ModelConfigItem
     oss: OssConfig = Field(default_factory=OssConfig)
@@ -160,7 +167,7 @@ class ModelConfigData(StrictModel):
 
 
 class ModelConnectionTestRequest(StrictModel):
-    type: Literal["llm", "vlm", "asr", "image", "video"]
+    type: Literal["llm", "vlm", "asr", "embedding", "image", "video"]
     base_url: str = ""
     api_key: str = ""
     model_name: str = ""

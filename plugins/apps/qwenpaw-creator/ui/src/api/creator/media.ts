@@ -47,6 +47,19 @@ export function getGeneratedMediaUrl(url: string): string {
   return url;
 }
 
+/** Rendered document page image (doc-page:// evidence ref). */
+export function getDocumentPageUrl(
+  projectId: string,
+  checksum: string,
+  page: number,
+): string {
+  return creatorAuthenticatedUrl(
+    `/projects/${encodeURIComponent(projectId)}/doc-pages/${encodeURIComponent(
+      checksum,
+    )}/${page}`,
+  );
+}
+
 const motionDocumentCache = new Map<string, Promise<string>>();
 
 /**

@@ -40,6 +40,7 @@ export interface ModelConfigData {
     language: string;
     reuse_llm_key: boolean;
   };
+  embedding: ModelConfigItem & { reuse_vlm_key: boolean };
   image: ModelConfigItem;
   video: ModelConfigItem;
   oss: OssConfig;
@@ -55,7 +56,7 @@ export interface ModelConfigData {
 }
 
 export interface ModelConnectionTestRequest {
-  type: "llm" | "vlm" | "asr" | "image" | "video";
+  type: "llm" | "vlm" | "asr" | "embedding" | "image" | "video";
   base_url: string;
   api_key: string;
   model_name: string;
