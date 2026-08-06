@@ -86,6 +86,74 @@ const configuredGroundingConfig = {
 };
 
 describe("ModelConfigModal configuration lifecycle", () => {
+  it("keeps a VLM that reuses the LLM enabled after an LLM connectivity test", async () => {
+    // A successful test flips llm.enabled via updateItem; that derived-flag
+    // update must not cascade into vlm.use_llm/enabled=false — saving right
+    // after would silently persist the VLM as disabled.
+    const onClose = vi.fn();
+    const { calls } = installMockFetch([
+      {
+        match: "/models/config",
+        method: "POST",
+        response: { json: { ok: true } },
+      },
+      {
+        match: "/models/config",
+        method: "GET",
+        response: {
+          json: {
+            ...emptyConfig,
+            llm: {
+              ...emptyConfig.llm,
+              model_name: "qwen3.7-plus",
+              api_key: "saved-secret",
+              base_url: "https://provider.test/v1",
+            },
+            vlm: {
+              ...emptyConfig.vlm,
+              enabled: true,
+              use_llm: true,
+              model_name: "qwen-vl-max",
+            },
+          },
+        },
+      },
+      {
+        match: "/models/real-api-key/llm",
+        method: "GET",
+        response: { json: { apiKey: "saved-secret" } },
+      },
+      {
+        match: "/models/test",
+        method: "POST",
+        response: { json: { ok: true, ms: 8 } },
+      },
+    ]);
+    render(<ModelConfigModal open onClose={onClose} />);
+
+    await waitFor(() =>
+      expect(screen.getAllByText("qwen3.7-plus").length).toBeGreaterThan(0),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /测试连通性/ }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.url.endsWith("/models/test"))).toBe(
+        true,
+      ),
+    );
+
+    // The VLM badge keeps reflecting the reused LLM model instead of
+    // falling into the "disabled" branch …
+    expect(screen.queryByText("qwen-vl-max（已停用）")).not.toBeInTheDocument();
+
+    // … and the VLM section still reuses the LLM config and stays enabled.
+    fireEvent.click(screen.getByRole("button", { name: /VLM/ }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("checkbox", { name: /复用 LLM 配置/ }),
+      ).toBeChecked(),
+    );
+  });
+
   it("stays unconfigured until the user tests and saves entered model data", async () => {
     const onClose = vi.fn();
     const { calls } = installMockFetch([

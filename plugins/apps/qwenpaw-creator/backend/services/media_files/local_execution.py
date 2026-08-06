@@ -3957,14 +3957,27 @@ def validate_local_media_execution(
     failures would be silently swallowed and the frontend would wait for a
     Task that never exists. The route layer calls this precheck first so the
     same ValidationError is raised to the caller explicitly.
+
+    Review admission is checked here for the same reason: execute() rejects
+    unreviewed inputs with ReviewPendingError before it persists the Task, so
+    without this precheck the route would return 202 with a taskId that never
+    materializes and the frontend would silently mark the compose as failed.
     """
 
     snapshot = services.projects.read(project_id)
-    _resolve_execution(
+    resolved = _resolve_execution(
         snapshot=snapshot,
         command=CreatorCommandType(command),
         target_ref=target_ref,
         arguments=dict(arguments or {}),
+    )
+    assert_media_review_admission(
+        reviews=services.reviews.all_pending(project_id),
+        command_type=resolved.command.value,
+        target_ref=resolved.target_ref,
+        reference_version_ids=tuple(
+            item.version_id for item in resolved.inputs
+        ),
     )
 
 

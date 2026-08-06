@@ -4203,73 +4203,139 @@ class FileCreatorAgentRuntime:
             spec.name,
             arguments,
         )
-        authorization_id = (
-            "authorization-"
-            + uuid5(
-                NAMESPACE_URL,
-                f"qwenpaw-creator:file-tool-authorization:{project_id}:{execution_request_id}",
-            ).hex
-        )
+        # The approval identity is target-scoped (tool name + arguments),
+        # not run-scoped: a re-delegated Specialist retrying the same
+        # generation (e.g. its predecessor was interrupted by a review
+        # decision while parked on this very approval) must reuse the
+        # pending/approved record instead of asking the user to confirm the
+        # same call again. Rejected/expired attempts stay behind as terminal
+        # audit records and the next call opens a fresh attempt, mirroring
+        # creation checkpoints.
+        request_digest = hashlib.sha256(
+            "\0".join(
+                (
+                    spec.name,
+                    json.dumps(
+                        dict(arguments),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            ).encode("utf-8"),
+        ).hexdigest()
+        attempt = 0
+        existing: ExecutionAuthorizationRecord | None = None
+        while True:
+            authorization_id = (
+                "authorization-"
+                + uuid5(
+                    NAMESPACE_URL,
+                    "qwenpaw-creator:file-tool-authorization:"
+                    f"{project_id}:{request_digest}:{attempt}",
+                ).hex
+            )
+            try:
+                record = await asyncio.to_thread(
+                    self.executions.get_execution_authorization,
+                    project_id,
+                    authorization_id,
+                )
+            except RecordNotFoundError:
+                break
+            if record.status in (
+                ExecutionAuthorizationStatus.REJECTED,
+                ExecutionAuthorizationStatus.EXPIRED,
+            ):
+                attempt += 1
+                continue
+            existing = record
+            break
+        if (
+            existing is not None
+            and existing.status is ExecutionAuthorizationStatus.APPROVED
+        ):
+            logger.info(
+                "approval reused: project=%s run=%s role=%s tool=%s "
+                "call_id=%s authorization=%s",
+                project_id,
+                specialist_run_id,
+                common.get("role"),
+                spec.name,
+                call_id,
+                existing.authorization_id,
+            )
+            return existing.authorization_id
         target_ref = str(arguments.get("targetRef") or "project:unknown")
         tool_arguments = dict(arguments.get("arguments") or {})
         provider, model = _execution_provider_model(spec, tool_arguments)
-        # What the provider will actually bill: video_edit follows its input
-        # video, not the requested durationSeconds. The user must approve
-        # those effective terms, so summary and scope both read them
-        # (upstream dropped the local price estimate entirely).
-        billing_arguments = await self._billing_arguments(
-            spec,
-            project_id=project_id,
-            tool_arguments=tool_arguments,
-        )
-        adjusted_parameters = {
-            key: value
-            for key, value in billing_arguments.items()
-            if tool_arguments.get(key) != value
-        }
-        record = ExecutionAuthorizationRecord(
-            authorization_id=authorization_id,
-            project_id=project_id,
-            round_id=round_id,
-            run_id=specialist_run_id,
-            execution_request_id=execution_request_id,
-            operation=spec.name,
-            target_scope=[target_ref],
-            authorization_token=secrets.token_urlsafe(32),
-            summary=_authorization_summary(
+        if existing is not None:
+            # A pending approval for the same call already exists (created by
+            # an interrupted predecessor run): park on it instead of opening
+            # a duplicate decision card.
+            authorization = existing
+        else:
+            # What the provider will actually bill: video_edit follows its
+            # input video, not the requested durationSeconds. The user must
+            # approve those effective terms, so summary and scope both read
+            # them (upstream dropped the local price estimate entirely).
+            billing_arguments = await self._billing_arguments(
                 spec,
-                target_ref=target_ref,
-                provider=provider,
-                model=model,
-                tool_arguments=billing_arguments,
-            ),
-            scope={
-                "operation": spec.name,
-                "targetRefs": [target_ref],
-                "parameters": billing_arguments,
-                # Keep the literal tool request when it differs, so the
-                # approval record shows both what was asked and what is
-                # billed.
-                **(
-                    {"requestedParameters": tool_arguments}
-                    if adjusted_parameters
-                    else {}
+                project_id=project_id,
+                tool_arguments=tool_arguments,
+            )
+            adjusted_parameters = {
+                key: value
+                for key, value in billing_arguments.items()
+                if tool_arguments.get(key) != value
+            }
+            record = ExecutionAuthorizationRecord(
+                authorization_id=authorization_id,
+                project_id=project_id,
+                round_id=round_id,
+                run_id=specialist_run_id,
+                execution_request_id=execution_request_id,
+                operation=spec.name,
+                target_scope=[target_ref],
+                authorization_token=secrets.token_urlsafe(32),
+                summary=_authorization_summary(
+                    spec,
+                    target_ref=target_ref,
+                    provider=provider,
+                    model=model,
+                    tool_arguments=billing_arguments,
                 ),
-                "promptPreview": _prompt_preview(tool_arguments, limit=200),
-            },
-            requested_provider=provider,
-            requested_model=model,
-            requested_candidates=1,
-            caused_by_request_id=tools.context.caused_by_request_id,
-            caused_by_message_id=request.message_id,
-            caused_by_message_seq=request.message_seq,
-            review_policy=tools.context.review_policy,
-            metadata={"toolCallId": call_id, "parentRunId": parent_run_id},
-        )
-        authorization = await asyncio.to_thread(
-            self.executions.create_execution_authorization,
-            record,
-        )
+                scope={
+                    "operation": spec.name,
+                    "targetRefs": [target_ref],
+                    "parameters": billing_arguments,
+                    # Keep the literal tool request when it differs, so the
+                    # approval record shows both what was asked and what is
+                    # billed.
+                    **(
+                        {"requestedParameters": tool_arguments}
+                        if adjusted_parameters
+                        else {}
+                    ),
+                    "promptPreview": _prompt_preview(
+                        tool_arguments,
+                        limit=200,
+                    ),
+                },
+                requested_provider=provider,
+                requested_model=model,
+                requested_candidates=1,
+                caused_by_request_id=tools.context.caused_by_request_id,
+                caused_by_message_id=request.message_id,
+                caused_by_message_seq=request.message_seq,
+                review_policy=tools.context.review_policy,
+                metadata={"toolCallId": call_id, "parentRunId": parent_run_id},
+            )
+            authorization = await asyncio.to_thread(
+                self.executions.create_execution_authorization,
+                record,
+            )
         await self._event(
             project_id,
             session_id,

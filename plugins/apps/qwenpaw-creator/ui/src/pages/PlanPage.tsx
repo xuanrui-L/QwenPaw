@@ -12,6 +12,7 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
+import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { getArtifactVersionMediaUrl, renderTimeline } from "@/api/creator";
 import {
   elementsAtTick,
@@ -90,8 +91,14 @@ export default function PlanPage() {
   >(null);
   const [composeFailed, setComposeFailed] = useState(false);
   const composeAttemptedGeneration = useRef<number | null>(null);
+  const hadPendingReviews = useRef(false);
   const handledComposeTask = useRef<string | null>(null);
   const generation = useProjectSnapshotStore((state) => state.generation);
+  // Media outputs awaiting user review are rejected by the compose admission
+  // gate (409 WAITING_REVIEW), so auto-compose must wait them out.
+  const pendingReviewCount = useFileProjectReviewStore((state) =>
+    state.projectId === id ? state.reviews.length : 0,
+  );
   // Explicit selection (range drag, block/lane clicks) pins a list; when
   // null, "content at the playhead" derives from timeline + playheadTick so
   // keyboard seeks, playback and span edits can never show stale elements.
@@ -441,8 +448,25 @@ export default function PlanPage() {
   // up-to-date final cut; only one attempt per generation (no auto-retry on
   // failure — a manual retry entry remains); a short debounce absorbs
   // successive edits.
+  //
+  // Review decisions do not bump the project generation, so once the pending
+  // reviews drain, re-arm the one-attempt guard: the attempt blocked by the
+  // review gate must not permanently disable auto-compose for this
+  // generation.
   useEffect(() => {
-    if (!allReady || renderIsCurrent || isComposing) return;
+    if (pendingReviewCount > 0) {
+      hadPendingReviews.current = true;
+      return;
+    }
+    if (hadPendingReviews.current) {
+      hadPendingReviews.current = false;
+      composeAttemptedGeneration.current = null;
+    }
+  }, [pendingReviewCount]);
+
+  useEffect(() => {
+    if (!allReady || renderIsCurrent || isComposing || pendingReviewCount > 0)
+      return;
     if (
       generation !== null &&
       composeAttemptedGeneration.current === generation
@@ -453,7 +477,14 @@ export default function PlanPage() {
       void composeNow();
     }, 1500);
     return () => window.clearTimeout(timer);
-  }, [allReady, renderIsCurrent, isComposing, generation, composeNow]);
+  }, [
+    allReady,
+    renderIsCurrent,
+    isComposing,
+    generation,
+    composeNow,
+    pendingReviewCount,
+  ]);
 
   const downloadRender = useCallback(async () => {
     if (!freshRender) return;

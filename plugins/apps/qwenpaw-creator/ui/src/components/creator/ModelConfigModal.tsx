@@ -768,7 +768,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             }
           }
         }
-        if (type === "llm" && prev.vlm.use_llm) {
+        if (
+          type === "llm" &&
+          // Only real connection-credential edits invalidate a VLM that
+          // reuses the LLM config; derived flags like enabled/multimodal
+          // (flipped by a successful connectivity test) must not silently
+          // disable the VLM — saving right after would persist that state.
+          ["base_url", "api_key", "model_name", "protocol"].includes(field) &&
+          prev.vlm.use_llm
+        ) {
           updated.vlm = { ...updated.vlm, use_llm: false, enabled: false };
         }
         if (
