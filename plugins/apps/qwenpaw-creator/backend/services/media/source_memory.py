@@ -4,8 +4,9 @@
 """Long-source hierarchical graph memory inside Source Intelligence.
 
 Write path: after ``commit_source_intelligence`` publishes a regular index,
-sources longer than the threshold get a background Task (behind execution
-authorization) that builds the vendored video-memory hierarchical graph:
+sources longer than the threshold get a background Task (ungated: no
+execution authorization) that builds the vendored video-memory
+hierarchical graph:
 P1 ffmpeg frame-diff scene segmentation → P2 one VLM subgraph extraction
 per macro (bounded concurrency) in parallel with ASR transcription →
 P3 text-only aggregation plus full-node embedding (BM25-only text index
@@ -28,7 +29,6 @@ import os
 import shutil
 import subprocess  # nosec B404 - fixed ffmpeg argv, no shell
 import tempfile
-import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,13 +50,8 @@ from schemas.assets import (
     SourceModelRunRef,
 )
 from schemas.common import StrictModel
-from services.execution_pricing import (
-    CostEstimate,
-    estimate_source_memory_cost,
-)
 from services.runtime_files.errors import RecordNotFoundError
 from services.runtime_files.execution_models import (
-    ExecutionAuthorizationRecord,
     ExecutionAuthorizationStatus,
     TaskAttemptStatus,
     TaskRecord,
@@ -944,11 +939,13 @@ class SourceMemoryService:
         project_id: str,
         index: SourceIntelligenceIndex,
         local_path: Path | None,
-        run_id: str,
-        round_id: str,
         caused_by_request_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Schedule the background build after an index publication."""
+        """Schedule the background build after an index publication.
+
+        Builds are ungated: no execution authorization is created and
+        the task starts immediately.
+        """
         project_root = self.services.projects.project_root(project_id)
         if not self.should_build(index, project_root):
             return None
@@ -959,20 +956,12 @@ class SourceMemoryService:
             )
             return None
         duration_ms = int(index.media.duration_ms or 0)
-        estimate = estimate_source_memory_cost(
-            duration_ms=duration_ms,
-            vlm_model=model_config.get_vlm_model_name(),
-            embedding_model=model_config.get_embedding_model_name(),
-        )
         task = await asyncio.to_thread(
             self._admit_sync,
             project_id,
             index,
             local_path,
             duration_ms,
-            estimate,
-            run_id,
-            round_id,
             caused_by_request_id,
         )
         if task is None:
@@ -989,11 +978,7 @@ class SourceMemoryService:
             local_path=str(local_path),
         )
         self._spawn(job)
-        return {
-            "taskId": task.task_id,
-            "authorizationId": job.authorization_id,
-            "estimatedCost": estimate.estimated_cost,
-        }
+        return {"taskId": task.task_id}
 
     def _admit_sync(
         self,
@@ -1001,9 +986,6 @@ class SourceMemoryService:
         index: SourceIntelligenceIndex,
         local_path: Path,
         duration_ms: int,
-        estimate: CostEstimate,
-        run_id: str,
-        round_id: str,
         caused_by_request_id: str | None,
     ) -> TaskRecord | None:
         task_id = _stable_id("memtask", project_id, index.id)
@@ -1019,49 +1001,9 @@ class SourceMemoryService:
             # FAILED/CANCELLED builds are not auto-retried; a fresh index
             # version (new task id) restarts the flow.
             return None
-        authorization_id: str | None = None
-        requires_authorization = (
-            model_config.get_execution_authorization_mode()
-            != model_config.EXECUTION_AUTHORIZATION_ALLOW_ALL
-        )
+        # Memory builds run without an execution-authorization gate: the
+        # build starts as soon as the intelligence is published.
         target_ref = f"asset:{index.asset_id}"
-        if requires_authorization:
-            authorization_id = _stable_id("memauth", project_id, index.id)
-            minutes = max(1, round(duration_ms / 60_000))
-            record = ExecutionAuthorizationRecord(
-                authorization_id=authorization_id,
-                project_id=project_id,
-                round_id=round_id,
-                run_id=run_id,
-                task_id=task_id,
-                execution_request_id=_stable_id(
-                    "memreq",
-                    project_id,
-                    index.id,
-                ),
-                operation=SOURCE_MEMORY_OPERATION,
-                target_scope=[target_ref],
-                authorization_token=secrets.token_urlsafe(32),
-                summary=(
-                    f"为长素材（约 {minutes} 分钟）构建层次图记忆，"
-                    f"用于台词/语义/时间检索 · 预计 {estimate.display_text}"
-                ),
-                scope={
-                    "operation": SOURCE_MEMORY_OPERATION,
-                    "targetRefs": [target_ref],
-                    "parameters": {
-                        "analysisVersionId": index.id,
-                        "durationMs": duration_ms,
-                    },
-                    "billing": estimate.as_payload(),
-                },
-                requested_provider="dashscope",
-                requested_model=model_config.get_vlm_model_name(),
-                requested_candidates=1,
-                estimated_cost=estimate.estimated_cost,
-                caused_by_request_id=caused_by_request_id,
-            )
-            self.executions.create_execution_authorization(record)
         candidate = TaskRecord(
             task_id=task_id,
             project_id=project_id,
@@ -1080,19 +1022,16 @@ class SourceMemoryService:
                 "sourceChecksum": index.source_checksum,
                 "durationMs": duration_ms,
                 "localPath": str(local_path),
-                "authorizationId": authorization_id,
-                "estimatedCost": estimate.estimated_cost,
             },
         )
         task = self.executions.create_task(candidate)
         logger.info(
             "source memory build admitted: project=%s task=%s index=%s "
-            "duration=%dms authorization=%s",
+            "duration=%dms",
             project_id,
             task_id,
             index.id,
             duration_ms,
-            authorization_id,
         )
         return task
 

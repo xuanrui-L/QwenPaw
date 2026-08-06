@@ -31,7 +31,8 @@
       "icon": "🎬",
       "icon_url": "/api/frontend_plugin/qwenpaw-creator/files/ui/dist/app/logo-mark.png",
       "entry_page": "/apps/qwenpaw-creator",
-      "launch_scope": "page"
+      "launch_scope": "page",
+      "category": "video-creation"
     },
     "permissions": {
       "chat": false,
@@ -61,7 +62,6 @@
         "fallback": "xlsx renders via the data renderer; other office formats return a readable install hint"
       }
     },
-    "category": "video-creation",
     "features": [
       "project-management",
       "script-generation",

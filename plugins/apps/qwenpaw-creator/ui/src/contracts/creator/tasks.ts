@@ -83,8 +83,6 @@ export interface ExecutionAuthorizationView {
   authorizationToken: string;
   provider: string;
   model: string;
-  estimatedCost?: number;
-  currency?: string;
   maxCandidates: number;
   createdAt: string;
 }

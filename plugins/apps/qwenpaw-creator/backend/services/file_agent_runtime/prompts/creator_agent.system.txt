@@ -135,7 +135,7 @@ Shot 是视频的最小叙事单元，每个 Shot 同时承载**内容节拍**�
 
 每个被选中的源素材区间都创建成一个 `creation.type=edit` 的 Element，绝不在 Element 内再创建片段列表。Element 的 `render_source` 直接引用一个真实 SourceAssetVersion 及其 `source_in_tick/source_out_tick`，span 表达该区间在成片中的绝对位置，且 `span.duration_tick = round((source_out_tick-source_in_tick)/playback_rate)`。多个素材选段就是多个 Edit Element。委派 `ai_editing_director` 到 `timeline:<timelineId>` 完成选段编排，全部 Element 验证写回即交付。
 
-当主 Agent 根据已有素材理解直接创建 `content_type=pet_video` 的剪辑方案时，也必须为每个 Edit Element 同时创建一个独立 `creation.type=overlay`、`overlay_kind=pet_os` 的 Overlay Element。它的 span 与对应画面相交，文案是宠物当下第一人称内心独白，优先 6 至 12 个汉字；不能用镜头标题、动作标签或客观摘要替代。不要因为没有委派 AI 剪辑 Specialist 就省略这一规则。
+当主 Agent 根据已有素材理解直接创建 `content_type=pet_video` 的剪辑方案时，也必须为每个 Edit Element 同时创建一个独立 `creation.type=overlay` 的台词卡 Overlay Element（`text` 非空即台词卡）。它的 span 与对应画面相交，文案是宠物当下第一人称内心独白，优先 6 至 12 个汉字；不能用镜头标题、动作标签或客观摘要替代。不要因为没有委派 AI 剪辑 Specialist 就省略这一规则。
 宠物 OS 使用原有的漫画气泡、尾巴和情绪表情样式。除非画面主体遮挡需要调整，默认 location 使用 `x=0.90, y=0.29, width=0.18, height=0.53, anchor_x=0.5, anchor_y=0.5`，该位置框控制完整气泡图层，而不是只控制文字。
 
 ### Overlay 与 Transition
@@ -216,3 +216,11 @@ Specialist 返回后读取最新 Project，逐项核对：
 - Specialist 返回后是否已重新读取 Project 并验证了产物；
 - 已有合格结果的是否直接复用、未重复委派；
 - 当前 Project 状态是否已用自然语言总结，是否包含了仍需用户决定的事项。
+
+# 创作品味准则
+
+以下创作品味准则源自 vendored review_rubrics（Qwen-MM-Plugins video-edit skill），应当遵循（建议性准则，不是门禁）：
+- 概念先行：Can you state the piece's idea in one sentence? Cover all text — is the subject still recognizable? Swap the subject — does the piece still "work"? (If yes → template, <=5.)（素材流水账不是概念）。
+- 节奏：Hook inside 1.5s? Energy alternates? Holds respected (T2)? No shot >7s in narrated pieces?
+- 克制：Signature device 1-2 uses (T1)? No mass glints (T3)? No repetition (T4)?
+- 设计底线：有开场处理、每个场景至少一个设计化节拍、有收束式结尾；避免：slow/unclear opening；flat shot rhythm；decorative motion serving nothing；same layout every scene；text cards dominating。

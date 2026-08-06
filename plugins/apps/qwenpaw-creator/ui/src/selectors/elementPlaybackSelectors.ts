@@ -222,17 +222,17 @@ export function resolveElementPlayback(
   // separate media artifact is needed. The final cut is still rendered
   // frame-by-frame and composited by the backend; this only covers the
   // in-browser live preview.
-  if (element.creation.type === "overlay" && element.creation.motion?.html) {
-    return { element, status: "ready", media: null };
-  }
-  // Copy overlays (pet_os/interview_summary) have no standalone artifact: the
-  // final cut draws the bubble with a deterministic renderer at composite time,
-  // and the live preview draws the same spec directly, so they count as ready.
   if (
     element.creation.type === "overlay" &&
-    overlayContentKind(element.creation) === "copy" &&
-    element.creation.text
+    (element.creation.motion?.html || element.creation.motion?.html_file_id)
   ) {
+    return { element, status: "ready", media: null };
+  }
+  // Caption overlays (non-empty text) have no standalone artifact: the
+  // final cut draws the bubble with a deterministic renderer at composite
+  // time, and the live preview draws the same spec directly, so they count
+  // as ready.
+  if (element.creation.type === "overlay" && element.creation.text.trim()) {
     return { element, status: "ready", media: null };
   }
   return {

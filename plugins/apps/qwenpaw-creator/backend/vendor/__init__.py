@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Vendored third-party code. See NOTICE.md for attribution."""
+"""Apache-2.0 compliant vendored third-party code. See NOTICE.md."""

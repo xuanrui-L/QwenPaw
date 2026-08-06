@@ -95,9 +95,9 @@ from services.runtime_files.execution_store import (
 )
 from services.runtime_files.errors import RecordNotFoundError
 from services.runtime_files.atomic_store import atomic_replace_bytes
-from services.execution_pricing import (
-    CostEstimate,
-    estimate_execution_cost,
+from services.media_files.call_budget import (
+    MediaCallBudgetExhausted,
+    ensure_media_call_budget,
 )
 from services.observability import trace_event, traced_async
 from services.source_analysis import SourceAgentToolContext
@@ -150,6 +150,8 @@ from .native_media import (
 )
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
+from .work_graph import derive_work_graph
+from .work_scheduler import WorkGraphScheduler
 from .subagents import (
     DELEGATE_TOOL_NAME,
     DelegateToAgentInput,
@@ -986,6 +988,9 @@ class FileCreatorAgentRuntime:
         self._blocked_heads: dict[str, int] = {}
         self._epochs: dict[str, int] = {}
         self._publication_lock = threading.RLock()
+        # Event-driven media fan-out: the model plans, the Runtime executes
+        # READY work-graph nodes in parallel (unattended ladder only).
+        self.work_scheduler = WorkGraphScheduler(services)
 
     async def _complete_model_turn(
         self,
@@ -4068,12 +4073,6 @@ class FileCreatorAgentRuntime:
         target_ref = str(arguments.get("targetRef") or "project:unknown")
         provider, model = _execution_provider_model(spec)
         tool_arguments = dict(arguments.get("arguments") or {})
-        estimate = estimate_execution_cost(
-            provider_kind=spec.provider_kind,
-            provider=provider,
-            model=model,
-            arguments=tool_arguments,
-        )
         record = ExecutionAuthorizationRecord(
             authorization_id=authorization_id,
             project_id=project_id,
@@ -4089,19 +4088,16 @@ class FileCreatorAgentRuntime:
                 provider=provider,
                 model=model,
                 tool_arguments=tool_arguments,
-                estimate=estimate,
             ),
             scope={
                 "operation": spec.name,
                 "targetRefs": [target_ref],
                 "parameters": tool_arguments,
                 "promptPreview": _prompt_preview(tool_arguments, limit=200),
-                "billing": estimate.as_payload() if estimate else None,
             },
             requested_provider=provider,
             requested_model=model,
             requested_candidates=1,
-            estimated_cost=estimate.estimated_cost if estimate else None,
             caused_by_request_id=tools.context.caused_by_request_id,
             caused_by_message_id=request.message_id,
             caused_by_message_seq=request.message_seq,
@@ -4128,8 +4124,6 @@ class FileCreatorAgentRuntime:
                 "provider": provider,
                 "model": model,
                 "summary": authorization.summary,
-                "estimatedCost": authorization.estimated_cost,
-                "billing": estimate.as_payload() if estimate else None,
                 "toolCallId": call_id,
             },
         )
@@ -4414,13 +4408,14 @@ class FileCreatorAgentRuntime:
     # human message — a stuck project must fall back to a human.
     YOLO_RESUME_MAX_CONSECUTIVE = 5
 
-    async def _queue_yolo_completion_resume(
+    async def _queue_yolo_completion_resume(  # pylint: disable=too-many-return-statements
         self,
         *,
         project_id: str,
         session_id: str,
         conversation_id: str,
         run_id: str,
+        after_failure: bool = False,
     ) -> None:
         """Keep an unattended (YOLO) project moving until it is finished.
 
@@ -4431,6 +4426,11 @@ class FileCreatorAgentRuntime:
         elements still lack their main video the Runtime injects the same
         “继续” a supervising user would type. Two fuses stop runaway loops:
         a consecutive-resume cap and a no-progress breaker.
+
+        ``after_failure`` covers retryable faults (empty model turns,
+        transport blips): the failure itself proves the work is unfinished,
+        so the completion criterion is skipped — an early failure with no
+        elements yet must still resume.
         """
 
         if get_media_review_mode() != MEDIA_REVIEW_AUTO_APPROVE:
@@ -4442,9 +4442,47 @@ class FileCreatorAgentRuntime:
             )
         except Exception:  # pylint: disable=broad-except
             return
-        unfinished = _unfinished_video_element_ids(snapshot.project)
-        if not unfinished:
+        try:
+            records = await asyncio.to_thread(
+                self.executions.list_tasks,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            records = []
+        graph = derive_work_graph(snapshot.project, tasks=records)
+        unfinished_nodes = graph.unfinished()
+        if not unfinished_nodes and not after_failure:
             return
+        # Let the machine take every dispatchable gap before deciding to
+        # spend a model turn: the scheduler fans out READY media nodes.
+        self.work_scheduler.wake(project_id)
+        try:
+            await asyncio.to_thread(
+                ensure_media_call_budget,
+                self.services,
+                project_id,
+            )
+        except MediaCallBudgetExhausted as exc:
+            # A spent wallet fuse paralyzes every media path — a resume
+            # would only make the model walk into the same wall.
+            logger.warning(
+                "YOLO auto-resume stopped for %s: %s",
+                project_id,
+                exc,
+            )
+            return
+        model_required = graph.model_required_nodes()
+        if (
+            not after_failure
+            and self.work_scheduler.enabled()
+            and not model_required
+        ):
+            # Every remaining gap is machine-dispatchable (READY/RUNNING):
+            # the scheduler owns it; a resume would only burn model turns.
+            return
+        unfinished = [
+            node.label for node in (model_required or unfinished_nodes)
+        ]
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -4485,13 +4523,29 @@ class FileCreatorAgentRuntime:
                 snapshot.generation,
             )
             return
-        text = (
-            "【系统自动消息 · YOLO 持续执行】主线回合已结束，但项目尚未到达终态。\n"
-            "以下 Element 仍缺少成片视频："
-            + "、".join(unfinished)
-            + "。\n请从未完成的 Element 继续推进，不要重复已完成的工作；"
-            "全部完成后再进行收尾。"
-        )
+        if after_failure:
+            text = (
+                "【系统自动消息 · YOLO 持续执行】上一回合因瞬态故障中止"
+                "（如模型空响应或传输抖动），项目尚未完成。\n"
+                "请回顾会话历史，从中断处继续执行，不要重复已完成的工作。"
+            )
+            if unfinished:
+                text += (
+                    "\n以下环节尚未完成："
+                    + "、".join(unfinished[:8])
+                    + "。可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派。"
+                )
+        else:
+            reasons = []
+            for node in model_required[:8]:
+                why = node.error or "、".join(node.missing[:3]) or "待处理"
+                reasons.append(f"{node.label}（{why}）")
+            text = (
+                "【系统自动消息 · YOLO 持续执行】主线回合已结束，但以下环节需要"
+                "你处理（可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派）：\n"
+                + "\n".join(f"- {reason}" for reason in reasons)
+                + "\n请针对上述环节修复结构、补全 prompt 或调整参数；不要重复已完成的工作。"
+            )
         appended = await asyncio.to_thread(
             self.sessions.append_message,
             project_id,
@@ -4505,6 +4559,9 @@ class FileCreatorAgentRuntime:
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
                 "unfinishedElements": unfinished,
+                "modelRequiredNodes": [
+                    node.node_id for node in model_required[:12]
+                ],
             },
         )
         await self._event(
@@ -4869,6 +4926,20 @@ class FileCreatorAgentRuntime:
             retryable=retryable,
             details={"runId": run_id, "messageSeq": request.message_seq},
         )
+        # Unattended (YOLO) projects must not stay parked on a transient
+        # model fault at 3am: a retryable failure gets the same completion
+        # check as a succeeded run. The resume fuses (consecutive cap and
+        # the no-progress generation breaker) bound a run that keeps dying
+        # at the same spot, so this cannot loop forever. Non-retryable
+        # failures still wait for a human.
+        if retryable:
+            await self._queue_yolo_completion_resume(
+                project_id=project_id,
+                session_id=session_id,
+                conversation_id=request.conversation_id,
+                run_id=run_id,
+                after_failure=True,
+            )
         await self._event(
             project_id,
             session_id,
@@ -5706,9 +5777,13 @@ def _authorization_summary(
     provider: str,
     model: str,
     tool_arguments: Mapping[str, Any],
-    estimate: CostEstimate | None,
 ) -> str:
-    """One human-readable line telling the user exactly what will run."""
+    """One human-readable line telling the user exactly what will run.
+
+    Deliberately no price estimate: locally transcribed price tables go
+    stale silently and an authoritative-looking wrong number misleads
+    worse than no number. Call counts are the honest metric.
+    """
 
     label = _AUTHORIZATION_OPERATION_LABELS.get(spec.name, f"执行 {spec.name}")
     parts = [f"{label}：{target_ref}", f"模型 {provider}/{model}"]
@@ -5729,8 +5804,6 @@ def _authorization_summary(
             parts.append(
                 "有声" if tool_arguments.get("generateAudio") else "无声",
             )
-    if estimate is not None:
-        parts.append(f"预计费用 {estimate.display_text}（{estimate.formula}）")
     return " · ".join(parts)
 
 

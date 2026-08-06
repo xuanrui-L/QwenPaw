@@ -92,6 +92,31 @@ def _resolved_variant_id(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _lineup_anchor_version_ids(
+    project: Project,
+    creation: R2VCreation,
+) -> list[str]:
+    """Selected cast-lineup images referenced by this element.
+
+    The lineup is the group anchor for relative consistency (scale
+    ratios, shared style baseline, spatial order), so it must lead the
+    reference chain ahead of individual identity anchors. A referenced
+    lineup without a generated image contributes nothing yet — the
+    element keeps working while visual development catches up.
+    """
+
+    anchors: list[str] = []
+    for ref in creation.cast_lineup_refs:
+        lineup = project.visual.cast_lineups.items.get(ref)
+        if lineup is None:
+            # Mirrors the entity invariant below: a validated Project
+            # cannot reach here, so fail loudly for mutated models.
+            raise ValidationError(f"R2V 引用的阵容图不存在: {ref}")
+        if lineup.selected_artifact_version_id:
+            anchors.append(lineup.selected_artifact_version_id)
+    return anchors
+
+
 def resolve_r2v_visual_reference_version_ids(
     project: Project,
     creation: R2VCreation,
@@ -99,9 +124,11 @@ def resolve_r2v_visual_reference_version_ids(
 ) -> tuple[str, ...]:
     """Return exact references with bound Variant selections first.
 
-    A bound entity never consumes an ArtifactVersion owned by another Variant.
-    Ambiguous legacy Elements are left unchanged rather than guessed; the Plan
-    coverage checkpoint exposes those missing bindings to the user.
+    Cast-lineup group anchors lead the chain, then per-entity identity
+    anchors. A bound entity never consumes an ArtifactVersion owned by
+    another Variant. Ambiguous legacy Elements are left unchanged rather
+    than guessed; the Plan coverage checkpoint exposes those missing
+    bindings to the user.
     """
 
     explicit = list(dict.fromkeys(explicit_version_ids))
@@ -152,7 +179,10 @@ def resolve_r2v_visual_reference_version_ids(
                 break
         if keep:
             compatible_explicit.append(version_id)
-    return tuple(dict.fromkeys([*selected, *compatible_explicit]))
+    lineup_anchors = _lineup_anchor_version_ids(project, creation)
+    return tuple(
+        dict.fromkeys([*lineup_anchors, *selected, *compatible_explicit]),
+    )
 
 
 __all__ = ["resolve_r2v_visual_reference_version_ids"]

@@ -1306,7 +1306,6 @@ class SourceMediaAnalysisService:
             project_id=project_id,
             index=index,
             local_path=local_path,
-            context=context,
             command_id=command_id,
         )
         return {
@@ -1325,7 +1324,6 @@ class SourceMediaAnalysisService:
         project_id: str,
         index: SourceIntelligenceIndex,
         local_path: Path | None,
-        context: SourceAgentToolContext,
         command_id: str,
     ) -> dict[str, Any] | None:
         """Queue the long-source memory build; never blocks the index."""
@@ -1333,19 +1331,12 @@ class SourceMediaAnalysisService:
         from services.media.source_memory import source_memory_service
 
         try:
-            run = await asyncio.to_thread(
-                self.executions.get_run,
-                project_id,
-                context.specialist_run_id,
-            )
             return await source_memory_service(
                 self.services,
             ).maybe_schedule_build(
                 project_id=project_id,
                 index=index,
                 local_path=local_path,
-                run_id=run.run_id,
-                round_id=run.round_id,
                 caused_by_request_id=command_id,
             )
         except Exception as error:  # pylint: disable=broad-except

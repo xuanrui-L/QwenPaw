@@ -27,6 +27,7 @@ import type {
   SourceAssetVersionDocument,
   TaskView,
   VisualEntityDocument,
+  VisualCastLineupDocument,
   VisualVariantDocument,
 } from "@/contracts/creator";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
@@ -78,7 +79,8 @@ type AssetItem = {
   raw:
     | SourceAssetVersionDocument
     | ArtifactVersionDocument
-    | VisualEntityDocument;
+    | VisualEntityDocument
+    | VisualCastLineupDocument;
 };
 
 type AssetItemGroup = {
@@ -415,14 +417,68 @@ function assetItems(project: ProjectDocument): AssetItem[] {
       });
     },
   );
-  return dedupeByChecksum([...visuals, ...sources, ...artifacts]).sort(
-    (left, right) => {
-      return (
-        (right.createdAt || "").localeCompare(left.createdAt || "") ||
-        left.name.localeCompare(right.name)
+  // Cast lineups are visual assets too: the group anchor that locks
+  // relative scale and style across characters surfaces alongside the
+  // per-entity cards so its generation state is never invisible.
+  const lineups = (project.visual.cast_lineups?.order ?? []).flatMap(
+    (lineupId): AssetItem[] => {
+      const lineup = project.visual.cast_lineups?.items[lineupId];
+      if (!lineup) return [];
+      const selectedVersionId = lineup.selected_artifact_version_id;
+      const artifact = selectedVersionId
+        ? project.assets.artifact_versions_by_id[selectedVersionId]
+        : undefined;
+      const media = artifact
+        ? artifactMedia(project, artifact)
+        : { kind: "image", type: "" };
+      const characterNames = lineup.character_refs.map(
+        (ref) => project.visual.entities.items[ref]?.name || ref,
       );
+      return [
+        {
+          id: lineupId,
+          ref: `lineup:${lineupId}`,
+          kind: "visual",
+          name: lineup.name,
+          cardName: `${lineup.name}${i18n.t("assets.lineupCardSuffix")}`,
+          description:
+            lineup.relative_notes ||
+            lineup.description ||
+            `${i18n.t("assets.lineupDescPrefix")}${characterNames.join("、")}`,
+          mediaKind: media.kind,
+          mediaType: media.type,
+          previewUrl: artifact
+            ? getArtifactVersionMediaUrl(artifact.version_id)
+            : undefined,
+          stale: artifact?.stale,
+          checksum: artifact?.checksum,
+          ownerRef: artifact?.owner_ref,
+          variantState: artifact ? "active" : "unselected",
+          provenanceRefs: artifact?.provenance_refs ?? [],
+          metadata: {
+            kind: "cast_lineup",
+            character_refs: lineup.character_refs,
+            relative_notes: lineup.relative_notes,
+            generated_artifact_version_ids:
+              lineup.generated_artifact_version_ids,
+            selected_artifact_version_id: selectedVersionId,
+          },
+          raw: lineup,
+        },
+      ];
     },
   );
+  return dedupeByChecksum([
+    ...lineups,
+    ...visuals,
+    ...sources,
+    ...artifacts,
+  ]).sort((left, right) => {
+    return (
+      (right.createdAt || "").localeCompare(left.createdAt || "") ||
+      left.name.localeCompare(right.name)
+    );
+  });
 }
 
 function visualItemGroups(
@@ -430,8 +486,13 @@ function visualItemGroups(
   items: AssetItem[],
 ): AssetItemGroup[] {
   const itemsByEntity = new Map<string, AssetItem[]>();
+  const lineupItems: AssetItem[] = [];
   const unassigned: AssetItem[] = [];
   for (const item of items) {
+    if (item.ref.startsWith("lineup:")) {
+      lineupItems.push(item);
+      continue;
+    }
     if (!item.entityId) {
       unassigned.push(item);
       continue;
@@ -506,6 +567,18 @@ function visualItemGroups(
           },
         ]
       : []),
+    ...(lineupItems.length
+      ? [
+          {
+            key: "visual-lineups",
+            label: i18n.t("assets.lineupGroup"),
+            countLabel: i18n.t("assets.lineupGroupCount", {
+              count: lineupItems.length,
+            }),
+            items: lineupItems,
+          },
+        ]
+      : []),
     ...(unassigned.length
       ? [
           {
@@ -552,6 +625,7 @@ function kindLabel(item: AssetItem, t: (key: string) => string): string {
       ? t("assets.sourceDocumentLabel")
       : t("assets.sourceLabel");
   if (item.kind === "artifact") return t("assets.artifactLabel");
+  if (item.ref.startsWith("lineup:")) return t("assets.lineupLabel");
   const entity = item.raw as VisualEntityDocument;
   return entity.kind === "character"
     ? t("assets.character")
@@ -687,6 +761,17 @@ function generationPromptTarget(
   project: ProjectDocument,
   selected: AssetItem,
 ): PromptTarget | null {
+  if (selected.ref.startsWith("lineup:")) {
+    // Lineup cards reuse kind "visual" for filtering, but their raw is a
+    // VisualCastLineupDocument — no variants tree to walk. Their editable
+    // "prompt" is the relative_notes the lineup image is drawn from.
+    const lineup = selected.raw as VisualCastLineupDocument;
+    return {
+      pointer: `/visual/cast_lineups/items/${lineup.lineup_id}/relative_notes`,
+      value: lineup.relative_notes,
+      label: i18n.t("assets.lineupRelativeNotes"),
+    };
+  }
   if (selected.kind === "visual") {
     const entity = selected.raw as VisualEntityDocument;
     return visualEntityPromptTarget(

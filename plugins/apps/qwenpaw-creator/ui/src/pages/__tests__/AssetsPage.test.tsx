@@ -578,4 +578,35 @@ describe("AssetsPage Project projection", () => {
       second.container.querySelector("[data-creator-memory-badge]"),
     ).not.toBeInTheDocument();
   });
+
+  it("opens a cast lineup card without crashing and edits relative notes", async () => {
+    // Regression: lineup cards reuse kind "visual", but their raw document
+    // has no variants tree — the detail panel used to walk variants.order
+    // and crash with "Cannot read properties of undefined".
+    const project = cloneProject();
+    (project.visual as Record<string, unknown>).cast_lineups = {
+      items: {
+        "lineup:duo": {
+          lineup_id: "lineup:duo",
+          name: "双人组",
+          description: "两只猫并排",
+          character_refs: ["cat", "cat"],
+          relative_notes: "左矮右高",
+          generated_artifact_version_ids: [],
+          selected_artifact_version_id: null,
+        },
+      },
+      order: ["lineup:duo"],
+    };
+    seedProject(project);
+    installMockFetch(ingestRoutes());
+    renderPage();
+
+    fireEvent.click(screen.getByText("双人组"));
+
+    await waitFor(() =>
+      expect(screen.getByText("相对关系说明")).toBeInTheDocument(),
+    );
+    expect(screen.getAllByText(/左矮右高/).length).toBeGreaterThan(0);
+  });
 });

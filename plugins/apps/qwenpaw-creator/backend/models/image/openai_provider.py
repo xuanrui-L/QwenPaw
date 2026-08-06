@@ -148,9 +148,9 @@ class OpenAIImageModel(BaseImageModel):
                 int(
                     os.environ.get(
                         "OPENAI_IMAGE_TIMEOUT",
-                        os.environ.get("IMAGE_TIMEOUT", "120"),
+                        os.environ.get("IMAGE_TIMEOUT", "240"),
                     )
-                    or 120,
+                    or 240,
                 ),
             ),
             concurrency=_configured_int(

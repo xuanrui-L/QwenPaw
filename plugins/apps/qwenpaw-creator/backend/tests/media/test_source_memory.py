@@ -13,7 +13,6 @@ import pytest
 
 from domain.errors import ValidationError
 from schemas.assets import SourceIntelligenceIndex, SourceMemoryRef
-from services.execution_pricing import estimate_source_memory_cost
 from services.media import source_memory
 from services.media.source_memory import (
     SourceMemoryProjection,
@@ -251,30 +250,6 @@ def test_index_dump_includes_hydrated_memory_ref() -> None:
     assert dumped["memoryRef"]["builtAt"] == "2026-08-01T01:00:00Z"
 
 
-# ── cost estimate ────────────────────────────────────────────────────────────
-
-
-def test_memory_cost_estimate_is_duration_linear() -> None:
-    short = estimate_source_memory_cost(
-        duration_ms=25 * 60 * 1000,
-        vlm_model="qwen3.7-plus",
-        embedding_model="qwen3-vl-embedding",
-    )
-    long = estimate_source_memory_cost(
-        duration_ms=50 * 60 * 1000,
-        vlm_model="qwen3.7-plus",
-        embedding_model="qwen3-vl-embedding",
-    )
-    assert short.currency == "CNY"
-    assert short.approximate is True
-    assert short.estimated_cost is not None
-    assert long.estimated_cost == pytest.approx(
-        short.estimated_cost * 2,
-        rel=0.01,
-    )
-    assert "¥" in short.formula
-
-
 # ── projection ───────────────────────────────────────────────────────────────
 
 
@@ -506,20 +481,6 @@ def test_query_memory_validates_arguments(tmp_path, monkeypatch) -> None:
         _run_query(service, query_type="subgraph")
     with pytest.raises(ValidationError):
         _run_query(service, query_type="by_time", start_ms=10, end_ms=10)
-
-
-def test_authorization_summary_uses_estimate(tmp_path, monkeypatch) -> None:
-    # Admission is billing-gated: the record carries the duration-linear
-    # estimate for the UI approval card.
-    del tmp_path, monkeypatch
-    estimate = estimate_source_memory_cost(
-        duration_ms=25 * 60 * 1000,
-        vlm_model="qwen3.7-plus",
-        embedding_model="qwen3-vl-embedding",
-    )
-    payload = estimate.as_payload()
-    assert payload["displayText"].startswith("约 ¥")
-    assert payload["approximate"] is True
 
 
 def test_build_datetime_marker_is_timezone_aware() -> None:

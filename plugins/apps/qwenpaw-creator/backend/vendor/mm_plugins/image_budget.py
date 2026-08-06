@@ -22,6 +22,12 @@ DEFAULT_BUDGET = "normal"
 IMAGE_BUDGET_TOKENS = {"small": 256, "normal": 1024, "large": 2048}
 IMAGE_MIN_PIXELS = min(IMAGE_BUDGET_TOKENS.values()) * TOKEN_SIZE * TOKEN_SIZE
 
+# Render-review (WT4) addition: per-frame video budgets inlined verbatim from
+# upstream src/shared/env.py. A pure additive block on top of the canonical
+# copy so cross-worktree re-vendoring stays a mechanical union.
+VIDEO_BUDGET_TOKENS = {"small": 80, "normal": 256, "large": 1024}
+VIDEO_MIN_PIXELS = min(VIDEO_BUDGET_TOKENS.values()) * TOKEN_SIZE * TOKEN_SIZE
+
 
 def budget_to_pixels(budget: str, tokens_map: dict[str, int]) -> int:
     """Map a resolution preset ('small'/'normal'/'large') to a pixel budget via its token count."""

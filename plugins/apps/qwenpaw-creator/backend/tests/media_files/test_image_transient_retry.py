@@ -13,10 +13,8 @@ import asyncio
 import pytest
 
 from domain.errors import ConflictError
-from services.media_files.image_execution import (
-    FileImageExecutionService,
-    _is_transient_task_error,
-)
+from services.media_files.image_execution import FileImageExecutionService
+from services.media_files.transient_errors import is_transient_task_error
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     ElementLocation,
@@ -147,12 +145,15 @@ def test_exhausted_transient_slots_stop_retrying(tmp_path, monkeypatch):
 
 
 def test_transient_error_classifier():
-    assert _is_transient_task_error(
+    assert is_transient_task_error(
         {"message": "All connection attempts failed"},
     )
-    assert _is_transient_task_error({"message": "Read Timed Out"})
-    assert _is_transient_task_error({"message": "status 503 from provider"})
-    assert not _is_transient_task_error(
+    assert is_transient_task_error({"message": "Read Timed Out"})
+    assert is_transient_task_error({"message": "status 503 from provider"})
+    assert is_transient_task_error(
+        {"message": "opaque failure", "retryable": True},
+    )
+    assert not is_transient_task_error(
         {"message": "rejected by the safety system"},
     )
-    assert not _is_transient_task_error(None)
+    assert not is_transient_task_error(None)

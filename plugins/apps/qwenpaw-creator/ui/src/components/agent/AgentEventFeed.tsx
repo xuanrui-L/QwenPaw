@@ -12,6 +12,7 @@ import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
+import { useWorkGraphStore } from "@/store/workGraphStore";
 import { isTechnicalControlText } from "@/lib/creatorMessagePresentation";
 import {
   creatorRoleLabel,
@@ -288,6 +289,30 @@ function EventCard({
   );
 }
 
+function WorkGraphSummaryChip() {
+  // One-line production summary sourced from the derived work graph; the
+  // full lane view lives in the workspace dropdown (WorkGraphPanel).
+  const graph = useWorkGraphStore((state) => state.graph);
+  if (!graph || !graph.counts.total) return null;
+  const done = graph.counts.done ?? 0;
+  const running = graph.counts.running ?? 0;
+  const failed = graph.counts.failed ?? 0;
+  return (
+    <span
+      data-testid="work-graph-summary"
+      className="text-[10px] font-normal text-[var(--color-text-tertiary)]"
+    >
+      进度 {done}/{graph.counts.total}
+      {running > 0 && ` · 并行 ${running}`}
+      {failed > 0 && (
+        <span className="text-[var(--color-danger,#ef4444)]">
+          {` · 失败 ${failed}`}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export default function AgentEventFeed() {
   const { t } = useTranslation();
   const taskProjectId = useCreatorTaskViewStore((state) => state.projectId);
@@ -397,6 +422,7 @@ export default function AgentEventFeed() {
             <PlayCircle className="h-3.5 w-3.5 text-[var(--color-accent)]" />
             {t("agentEventFeed.productionFlow")}
           </span>
+          <WorkGraphSummaryChip />
           <span className="flex items-center gap-1.5">
             <span
               className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${meta.tone}`}

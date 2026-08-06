@@ -120,6 +120,8 @@ export interface VisualVariantDocument extends ProjectJsonRecord {
   reference_artifact_version_ids: string[];
   generated_artifact_version_ids: string[];
   selected_artifact_version_id: string | null;
+  derived_from_variant_id?: string | null;
+  consistency_tags?: string[];
 }
 
 export interface VisualEntityDocument extends ProjectJsonRecord {
@@ -131,12 +133,28 @@ export interface VisualEntityDocument extends ProjectJsonRecord {
   required_variant_ids: string[];
   variants: ProjectEntityCollection<VisualVariantDocument>;
   selected_artifact_version_id: string | null;
+  canonical_variant_id?: string | null;
+}
+
+export interface VisualCastLineupDocument extends ProjectJsonRecord {
+  lineup_id: string;
+  name: string;
+  description: string;
+  character_refs: string[];
+  scene_ref: string | null;
+  prop_refs: string[];
+  reference_asset_version_ids: string[];
+  reference_artifact_version_ids: string[];
+  generated_artifact_version_ids: string[];
+  selected_artifact_version_id: string | null;
+  relative_notes: string;
 }
 
 export interface VisualDevelopmentDocument extends ProjectJsonRecord {
   visual_bible: string;
   style: string;
   entities: ProjectEntityCollection<VisualEntityDocument>;
+  cast_lineups?: ProjectEntityCollection<VisualCastLineupDocument>;
 }
 
 export interface TimelineSpanDocument extends ProjectJsonRecord {
@@ -181,6 +199,7 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   scene_ref: string | null;
   prop_refs: string[];
   visual_variant_refs: Record<string, string>;
+  cast_lineup_refs?: string[];
   shots: ProjectEntityCollection<ShotDocument>;
   recipe: GenerationRecipeDocument | null;
   storyboard_prompt: string;
@@ -198,8 +217,9 @@ export interface EditCreationDocument extends ProjectJsonRecord {
 }
 
 export interface MotionGraphicDocument extends ProjectJsonRecord {
-  format: "html_css";
-  html: string;
+  format: "html_css" | "html_js";
+  html?: string | null;
+  html_file_id?: string | null;
   fps: number;
   loop: boolean;
   design_notes: string;
@@ -215,7 +235,9 @@ export interface MotionGraphicDocument extends ProjectJsonRecord {
 
 export interface OverlayCreationDocument extends ProjectJsonRecord {
   type: "overlay";
-  overlay_kind: "pet_os" | "interview_summary" | "motion" | "media";
+  // The overlay role derives from data: non-empty text = caption card;
+  // empty text with motion/prompt = text-free decoration; media stickers
+  // reference their payload through the element's render_source.
   text: string;
   vibe: string;
   prompt: string;
@@ -231,6 +253,15 @@ export interface TransitionCreationDocument extends ProjectJsonRecord {
   easing: string;
 }
 
+// A full-canvas motion document that carries the segment's whole picture
+// (pure motion-graphics cut, no footage behind it).
+export interface MotionClipCreationDocument extends ProjectJsonRecord {
+  type: "motion_clip";
+  intent: string;
+  prompt: string;
+  motion?: MotionGraphicDocument | null;
+}
+
 export interface AudioCreationDocument extends ProjectJsonRecord {
   type: "audio";
   source_asset_version_id: string;
@@ -242,6 +273,7 @@ export type ElementCreationDocument =
   | R2VCreationDocument
   | EditCreationDocument
   | OverlayCreationDocument
+  | MotionClipCreationDocument
   | TransitionCreationDocument
   | AudioCreationDocument;
 
