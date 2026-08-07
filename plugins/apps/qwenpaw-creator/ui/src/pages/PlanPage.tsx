@@ -243,6 +243,7 @@ export default function PlanPage() {
           element.creation.type === "i2v" ||
           element.creation.type === "s2v" ||
           element.creation.type === "edit" ||
+          element.creation.type === "motion_clip" ||
           (element.creation.type === "overlay" &&
             overlayContentKind(element.creation) !== "copy")),
     );
