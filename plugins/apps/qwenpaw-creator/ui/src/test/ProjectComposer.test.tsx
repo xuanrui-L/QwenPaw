@@ -1,9 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectComposer } from "@/components/creator/ProjectComposer";
 import type { ModelConfigData } from "@/contracts/creator/models";
 import { installMockFetch } from "@/test/mockFetch";
+import { useModelConfigStore } from "@/store/modelConfigStore";
 
 const configuredModelConfig: ModelConfigData = {
   llm: {
@@ -136,6 +137,12 @@ function installComposerMockFetch(
 }
 
 describe("ProjectComposer ingest boundary", () => {
+  // The model-config snapshot is a module-level singleton; a previous test's
+  // fetch must not leak into the next render's synchronous assertions.
+  beforeEach(() => {
+    useModelConfigStore.setState({ config: null });
+  });
+
   it("keeps only Agent and disabled Loop modes, and hides video format controls for editing", () => {
     render(
       <MemoryRouter>

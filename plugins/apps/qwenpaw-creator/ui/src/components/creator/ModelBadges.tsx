@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { GlobalOutlined, SoundOutlined, UserOutlined } from "@ant-design/icons";
-import { getModelConfig } from "@/api/creator";
-import type { ModelConfigData, ModelConfigItem } from "@/contracts/creator";
+import type { ModelConfigItem } from "@/contracts/creator";
+import { useModelConfigStore } from "@/store/modelConfigStore";
 import modelLlmIcon from "@/assets/design/model-llm.svg";
 import modelVlmIcon from "@/assets/design/model-vlm.svg";
 import modelAsrIcon from "@/assets/design/model-asr.svg";
@@ -71,22 +71,19 @@ const STATUS_TEXT_KEYS: Record<ModelStatus, string> = {
  */
 export default function ModelBadges() {
   const { t } = useTranslation();
-  const [config, setConfig] = useState<ModelConfigData | null>(null);
+  // Shared snapshot: badges follow config saves made from any home-page
+  // modal, not just the one opened from here.
+  const config = useModelConfigStore((state) => state.config);
+  const refresh = useModelConfigStore((state) => state.refresh);
   const [modalOpen, setModalOpen] = useState(false);
 
-  const refresh = useCallback(() => {
-    getModelConfig()
-      .then(setConfig)
-      .catch(() => setConfig(null));
-  }, []);
-
   useEffect(() => {
-    refresh();
+    void refresh();
   }, [refresh]);
 
   const modalClose = useCallback(() => {
     setModalOpen(false);
-    refresh();
+    void refresh();
   }, [refresh]);
 
   const status = (type: ModelType): ModelStatus => {

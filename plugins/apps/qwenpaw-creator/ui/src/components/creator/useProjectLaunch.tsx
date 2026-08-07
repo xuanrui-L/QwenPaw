@@ -11,13 +11,13 @@ import {
   createAssetImport,
   createProject,
   getAssetImport,
-  getModelConfig,
   getTask,
   ingestAssetFile,
   ingestAssetValue,
   newClientId,
   sendCreatorMessage,
 } from "@/api/creator";
+import { useModelConfigStore } from "@/store/modelConfigStore";
 import { taskErrorMessage } from "@/lib/taskPresentation";
 import { creatorStatusLabel } from "@/lib/creatorPresentation";
 import { useRouter } from "@/routing/navigation";
@@ -156,7 +156,10 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
   const projectRequest = useRef({ signature: "", id: "" });
   const initialMessageRequests = useRef(new Map<string, string>());
   const sourceRequestIds = useRef(new Map<string, string>());
-  const [modelConfig, setModelConfig] = useState<ModelConfigData | null>(null);
+  // Shared snapshot: saving the config in the home banner or header badges
+  // modal must clear this composer's required-model hint without a reload.
+  const modelConfig = useModelConfigStore((state) => state.config);
+  const refreshModelConfig = useModelConfigStore((state) => state.refresh);
   const [modelConfigModalOpen, setModelConfigModalOpen] = useState(false);
   const hasUrl =
     urlDraft.trim().length > 0 || attachments.some((att) => att.kind === "url");
@@ -181,14 +184,9 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
     }
     return missing;
   }, [modelConfig, scenario, hasAttachments]);
-  const refreshModelConfig = useCallback(() => {
-    getModelConfig()
-      .then(setModelConfig)
-      .catch(() => setModelConfig(null));
-  }, []);
   useEffect(() => {
-    refreshModelConfig();
-  }, [refreshModelConfig, scenario, hasAttachments]);
+    void refreshModelConfig();
+  }, [refreshModelConfig]);
 
   const requestIdFor = (key: string) => {
     const existing = sourceRequestIds.current.get(key);

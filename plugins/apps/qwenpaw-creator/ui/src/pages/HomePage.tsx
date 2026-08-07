@@ -6,13 +6,13 @@ import tabCreateIcon from "@/assets/design/icon-tab-create.svg";
 import tabProjectsIcon from "@/assets/design/icon-tab-projects.svg";
 import previewEyeIcon from "@/assets/design/icon-eye-preview.svg";
 import importProjectIcon from "@/assets/design/icon-import-project.svg";
-import type { ModelConfigData, ProjectSummary } from "@/contracts/creator";
+import type { ProjectSummary } from "@/contracts/creator";
 import {
   deleteProject,
-  getModelConfig,
   listProjects,
   getArtifactVersionMediaUrl,
 } from "@/api/creator";
+import { useModelConfigStore } from "@/store/modelConfigStore";
 import { useRouter, useSearchParams } from "@/routing/navigation";
 import ModelBadges from "@/components/creator/ModelBadges";
 import ModelConfigModal from "@/components/creator/ModelConfigModal";
@@ -151,17 +151,14 @@ export default function HomePage() {
   const [sortBy, setSortBy] = useState<SortField>("updated_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const requestHomeTour = useOnboardingStore((state) => state.requestHomeTour);
-  const [modelConfig, setModelConfig] = useState<ModelConfigData | null>(null);
+  // Shared with the composer and header badges so saving the model config
+  // anywhere clears every home-page warning at once.
+  const modelConfig = useModelConfigStore((state) => state.config);
+  const refreshModelConfig = useModelConfigStore((state) => state.refresh);
   const [configModalOpen, setConfigModalOpen] = useState(false);
 
-  const refreshModelConfig = useCallback(() => {
-    getModelConfig()
-      .then(setModelConfig)
-      .catch(() => setModelConfig(null));
-  }, []);
-
   useEffect(() => {
-    refreshModelConfig();
+    void refreshModelConfig();
   }, [refreshModelConfig]);
 
   // An LLM is required for every creation scenario; keep reminding on the home page until configured.
@@ -501,7 +498,7 @@ export default function HomePage() {
         open={configModalOpen}
         onClose={() => {
           setConfigModalOpen(false);
-          refreshModelConfig();
+          void refreshModelConfig();
         }}
       />
       <ProjectImporter
