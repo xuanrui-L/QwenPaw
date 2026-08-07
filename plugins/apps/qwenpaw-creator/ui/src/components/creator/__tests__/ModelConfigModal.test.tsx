@@ -431,4 +431,41 @@ describe("ModelConfigModal configuration lifecycle", () => {
     await waitFor(() => expect(toggle.disabled).toBe(false));
     expect(toggle.checked).toBe(false);
   });
+
+  it("renders the TTS, S2V and Embedding card copy through i18n keys", async () => {
+    installMockFetch([
+      {
+        match: "/models/config",
+        method: "GET",
+        response: { json: emptyConfig },
+      },
+    ]);
+    render(<ModelConfigModal open onClose={vi.fn()} />);
+
+    // Embedding lives on the default language pane.
+    fireEvent.click(await screen.findByText("Embedding 模型"));
+    await waitFor(() =>
+      expect(screen.getByText("复用 VLM API Key")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText("用于长素材层次记忆的节点向量化与语义检索"),
+    ).toBeInTheDocument();
+
+    // TTS and S2V live on the media pane.
+    fireEvent.click(screen.getByRole("button", { name: /媒体生成/ }));
+    fireEvent.click(await screen.findByText("TTS 语音合成模型"));
+    await waitFor(() =>
+      expect(screen.getByText("复用 LLM API Key")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/开启后可为成片生成旁白/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/复刻\/设计所用的配套模型由后端自动选择/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("数字人模型"));
+    await waitFor(() =>
+      expect(screen.getByText("人像检测模型（可选）")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/提交前会先跑免费的人像检测/)).toBeInTheDocument();
+  });
 });
