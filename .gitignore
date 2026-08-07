@@ -153,3 +153,7 @@ docs-site/
 
 # Local review notes
 docs/reviews/
+
+# Local scratch output and planning docs (never product artifacts)
+output/
+docs/proposals/
