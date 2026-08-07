@@ -1077,10 +1077,9 @@ class TestMotionRenderFailurePropagation:
         # regenerate or remove the design.
         runner = self._runner(monkeypatch)
         monkeypatch.setattr(
-            "services.media_files.local_execution.render_motion_overlay",
-            lambda **kwargs: OverlayRenderResult(
-                False,
-                "html_js 文档未注册 window.__hf 协议或 duration 无效",
+            "services.media_files.local_execution.prepare_motion_layer",
+            lambda **kwargs: motion_overlay.MotionLayerPrep(
+                error="html_js 文档未注册 window.__hf 协议或 duration 无效",
             ),
         )
         item, segment = self._item(tmp_path)
@@ -1096,13 +1095,33 @@ class TestMotionRenderFailurePropagation:
     ) -> None:
         runner = self._runner(monkeypatch)
 
-        def fake_render(**kwargs):
+        def fake_prepare(**kwargs):
+            return motion_overlay.MotionLayerPrep(
+                layer=motion_overlay.PreparedMotionLayer(
+                    frames_dir=tmp_path,
+                    frame_count=1,
+                    effective_fps=24.0,
+                    appear_at=0.0,
+                    duration=2.0,
+                    left=0,
+                    top=0,
+                    opacity=1.0,
+                    period_mode=False,
+                    managed_exit=False,
+                ),
+            )
+
+        def fake_composite(**kwargs):
             Path(kwargs["output_path"]).write_bytes(b"with-motion")
             return OverlayRenderResult(True)
 
         monkeypatch.setattr(
-            "services.media_files.local_execution.render_motion_overlay",
-            fake_render,
+            "services.media_files.local_execution.prepare_motion_layer",
+            fake_prepare,
+        )
+        monkeypatch.setattr(
+            "services.media_files.local_execution.composite_motion_layers",
+            fake_composite,
         )
         item, segment = self._item(tmp_path)
         warnings = runner._apply_motion_overlays(item, segment)

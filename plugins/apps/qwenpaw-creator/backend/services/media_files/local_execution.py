@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+import concurrent.futures
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -30,6 +31,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import subprocess
+import tempfile
 from typing import Any, Protocol, TYPE_CHECKING
 from uuid import NAMESPACE_URL, uuid5
 
@@ -53,7 +55,10 @@ from services.media_files.overlay import (
 )
 from services.media_files.motion_engine import full_engine_digest
 from services.media_files.motion_overlay import (
+    PreparedMotionLayer,
     caption_layout_error,
+    composite_motion_layers,
+    prepare_motion_layer,
     probe_motion_document,
     render_motion_overlay,
 )
@@ -151,6 +156,28 @@ _LOCAL_MEDIA_COMMANDS = frozenset(
     },
 )
 _MAX_VIDEO_BYTES = 4 * 1024 * 1024 * 1024
+# Motion layers burned per ffmpeg pass: enough to cover a typical caption
+# stack in one encode while keeping the filter graph and PNG-sequence
+# input memory bounded.
+_MOTION_BURN_BATCH_SIZE = 8
+# Finished-segment cache: re-renders of an unchanged segment (same source
+# content, trims, canvas and overlay stack) are byte-for-byte identical, so
+# an edit to one Element re-renders only its own segment.
+_SEGMENT_CACHE_MAX_ITEMS = 96
+# Renderer behaviour version for cached segments; bump on any semantic
+# change to segment rendering or overlay burning.
+_SEGMENT_CACHE_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class _SegmentRender:
+    """Outcome of rendering one timeline segment."""
+
+    path: Path
+    duration: float
+    warnings: tuple[str, ...]
+
+
 _DEFAULT_FFMPEG_TIMEOUT_SECONDS = 15 * 60.0
 _DEFAULT_FFMPEG_TERMINATION_GRACE_SECONDS = 5.0
 # Original-footage volume while a Timeline audio Element (narration) plays;
@@ -311,173 +338,71 @@ class FfmpegLocalMediaRunner:
                 spec.work_dir,
                 "segments",
             )
-            for index, item in enumerate(spec.inputs):
-                start_seconds = item.start_seconds or 0.0
-                end_seconds = item.end_seconds
-                if end_seconds is None:
-                    if item.duration_seconds is None:
-                        raise ValidationError(
-                            "Edit Element 缺少可执行 source range",
-                        )
-                    end_seconds = start_seconds + item.duration_seconds
-                # For a transition pair, the tail of the `from` segment that
-                # the `to` segment covers is simply not rendered; the rest of
-                # the overlap is consumed by the xfade blend.
-                tail_trim = tail_trims.get(item.source_ref, 0.0)
-                segment_duration = max(
-                    1 / 30,
-                    end_seconds - start_seconds - tail_trim,
+            concurrency = self._segment_concurrency(len(spec.inputs))
+            outcomes: dict[int, _SegmentRender] = {}
+            done_signals = 0
+
+            def _report_done(index: int) -> None:
+                # Progress ticks fire in completion order; the completed
+                # count is monotonic because every tick only decrements
+                # the shared occurrence counter.
+                if spec.on_element_done is None:
+                    return
+                for element_id in input_element_ids[index]:
+                    remaining_element_occurrences[element_id] -= 1
+                completed_elements = sum(
+                    remaining == 0
+                    for remaining in remaining_element_occurrences.values()
                 )
+                spec.on_element_done(completed_elements, total_elements)
 
-                # Calculate freeze duration if target exceeds source
-                freeze_duration = 0.0
-                if (
-                    item.duration_seconds is not None
-                    and item.start_seconds is not None
-                    and item.end_seconds is not None
-                ):
-                    source_duration = item.duration_seconds
-                    target_duration = item.end_seconds - item.start_seconds
-                    if target_duration > source_duration:
-                        freeze_duration = target_duration - source_duration
-
-                segment = segment_dir / f"{index:06d}.mp4"
-                if item.motion_clip is not None:
-                    # A pure motion-graphics segment: the document paints
-                    # the whole picture, so the base is a silent opaque
-                    # canvas and the clip renders full-frame on top.
-                    self._render_motion_clip_segment(
+            if concurrency <= 1 or len(spec.inputs) <= 1:
+                for index, item in enumerate(spec.inputs):
+                    outcomes[index] = self._render_one_segment(
+                        spec,
+                        index,
                         item,
-                        segment,
-                        canvas_size=spec.canvas_size,
-                        segment_duration=segment_duration,
-                        work_dir=spec.work_dir,
+                        segment_dir=segment_dir,
+                        tail_trims=tail_trims,
                     )
-                    for warning in self._apply_overlay(item, segment):
-                        overlay_warnings.append(
-                            f"{item.source_ref or item.version_id}: "
-                            f"{warning}",
-                        )
-                    for warning in self._apply_motion_overlays(item, segment):
-                        overlay_warnings.append(
-                            f"{item.source_ref or item.version_id}: "
-                            f"{warning}",
-                        )
-                    concat_inputs.append(segment)
-                    segment_durations.append(segment_duration)
-                    if spec.on_element_done is not None:
-                        for element_id in input_element_ids[index]:
-                            remaining_element_occurrences[element_id] -= 1
-                        completed_elements = sum(
-                            remaining == 0
-                            for remaining in (
-                                remaining_element_occurrences.values()
-                            )
-                        )
-                        spec.on_element_done(
-                            completed_elements,
-                            total_elements,
-                        )
-                    continue
-                # A still image can carry a segment (pure motion-graphics
-                # cuts render generated backdrops with overlays on top).
-                # ffmpeg needs -loop 1 to keep emitting frames and -t to
-                # bound the loop; seeking into a still is meaningless.
-                is_still_image = item.duration_seconds is None and str(
-                    item.media_type or "",
-                ).startswith("image/")
-                # apad references [0:a]; sources without an audio stream
-                # (common for generated R2V footage) must keep the optional
-                # 0:a? mapping or ffmpeg rejects the whole filtergraph.
-                freeze_audio = (
-                    freeze_duration > 0
-                    and not is_still_image
-                    and self._probe_has_audio(item.path)
-                )
-                placement_filter = self._placement_filter(
-                    item.location,
-                    canvas_size=spec.canvas_size,
-                    duration_seconds=segment_duration,
-                    freeze_duration=freeze_duration,
-                    freeze_audio=freeze_audio,
-                )
-
-                # Build FFmpeg arguments
-                if is_still_image:
-                    ffmpeg_args = [
-                        "-y",
-                        "-loop",
-                        "1",
-                        "-framerate",
-                        "30",
-                        "-t",
-                        f"{segment_duration:.6f}",
-                        "-i",
-                        os.fspath(item.path),
-                    ]
-                else:
-                    ffmpeg_args = [
-                        "-y",
-                        "-ss",
-                        f"{start_seconds:.6f}",
-                        "-t",
-                        f"{segment_duration:.6f}",
-                        "-i",
-                        os.fspath(item.path),
-                    ]
-                ffmpeg_args.extend(
-                    [
-                        "-filter_complex",
-                        placement_filter,
-                        "-map",
-                        "[outv]",
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "veryfast",
-                        "-pix_fmt",
-                        "yuv420p",
-                    ],
-                )
-
-                # Map audio if present
-                if freeze_audio:
-                    ffmpeg_args.extend(["-map", "[a]"])
-                else:
-                    ffmpeg_args.extend(["-map", "0:a?"])
-
-                ffmpeg_args.extend(
-                    [
-                        "-c:a",
-                        "aac",
-                        "-movflags",
-                        "+faststart",
-                        os.fspath(segment),
-                    ],
-                )
-
-                self._run(ffmpeg_args, cwd=spec.work_dir)
-                for warning in self._apply_overlay(item, segment):
-                    overlay_warnings.append(
-                        f"{item.source_ref or item.version_id}: {warning}",
-                    )
-                for warning in self._apply_motion_overlays(item, segment):
-                    overlay_warnings.append(
-                        f"{item.source_ref or item.version_id}: {warning}",
-                    )
-                concat_inputs.append(segment)
-                segment_durations.append(segment_duration)
-                if spec.on_element_done is not None:
-                    for element_id in input_element_ids[index]:
-                        remaining_element_occurrences[element_id] -= 1
-                    completed_elements = sum(
-                        remaining == 0
-                        for remaining in remaining_element_occurrences.values()
-                    )
-                    spec.on_element_done(
-                        completed_elements,
-                        total_elements,
-                    )
+                    done_signals += 1
+                    _report_done(index)
+            else:
+                # Segments share no state (each burns its own overlay
+                # stack onto its own file); the only serialized resource
+                # is the capture worker, which queues internally.
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=concurrency,
+                ) as pool:
+                    futures = {
+                        pool.submit(
+                            self._render_one_segment,
+                            spec,
+                            index,
+                            item,
+                            segment_dir=segment_dir,
+                            tail_trims=tail_trims,
+                        ): index
+                        for index, item in enumerate(spec.inputs)
+                    }
+                    try:
+                        for future in concurrent.futures.as_completed(
+                            futures,
+                        ):
+                            index = futures[future]
+                            outcomes[index] = future.result()
+                            done_signals += 1
+                            _report_done(index)
+                    except BaseException:
+                        for pending_future in futures:
+                            pending_future.cancel()
+                        raise
+            del done_signals
+            for index in range(len(spec.inputs)):
+                outcome = outcomes[index]
+                concat_inputs.append(outcome.path)
+                segment_durations.append(outcome.duration)
+                overlay_warnings.extend(outcome.warnings)
         else:
             concat_inputs.extend(item.path for item in spec.inputs)
         joins = self._resolve_segment_joins(spec, joins_by_pair)
@@ -820,6 +745,291 @@ class FfmpegLocalMediaRunner:
 
         return filter_chain
 
+    def _segment_concurrency(self, segment_count: int) -> int:
+        """Parallel segment renders for one composition.
+
+        Segments are independent (each owns its file and overlay stack);
+        the ceiling keeps Chromium + ffmpeg peak memory bounded on a
+        developer machine.  ``QWENPAW_SEGMENT_CONCURRENCY=1`` restores
+        strictly serial rendering.
+        """
+
+        raw = os.environ.get("QWENPAW_SEGMENT_CONCURRENCY", "")
+        try:
+            configured = int(raw) if raw else 3
+        except ValueError:
+            configured = 3
+        return max(1, min(configured, segment_count, os.cpu_count() or 1))
+
+    def _segment_cache_key(
+        self,
+        spec: LocalMediaExecutionSpec,
+        item: LocalMediaInput,
+        *,
+        segment_duration: float,
+        freeze_duration: float,
+    ) -> str | None:
+        """Content identity of one finished (base + burned layers) segment.
+
+        Every input that can change the segment's pixels or sound must
+        appear here; the checksum identifies source bytes, motion/overlay
+        projections identify burned layers by document checksum, and the
+        engine digest salts the html_js frame renderer.  Returns ``None``
+        when the item carries no stable content checksum.
+        """
+
+        if not item.checksum:
+            return None
+        try:
+            payload = {
+                "v": _SEGMENT_CACHE_VERSION,
+                "checksum": item.checksum,
+                "mediaType": item.media_type,
+                "start": item.start_seconds,
+                "end": item.end_seconds,
+                "sourceDuration": item.duration_seconds,
+                "segmentDuration": round(segment_duration, 6),
+                "freeze": round(freeze_duration, 6),
+                "canvas": list(spec.canvas_size),
+                "location": item.location,
+                "originalSound": item.original_sound,
+                "overlays": [
+                    _fingerprint_overlay(overlay) for overlay in item.overlays
+                ],
+                "motions": [
+                    _fingerprint_motion(motion) for motion in item.motions
+                ],
+                "motionClip": (
+                    _fingerprint_motion(item.motion_clip)
+                    if item.motion_clip is not None
+                    else None
+                ),
+                "engine": full_engine_digest(),
+            }
+            return hashlib.sha256(
+                canonical_json_bytes(payload),
+            ).hexdigest()
+        except Exception:  # noqa: BLE001 - cache is best-effort only
+            return None
+
+    @staticmethod
+    def _segment_cache_root() -> Path:
+        root = Path(tempfile.gettempdir()) / "qwenpaw-segment-cache-v1"
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return root
+
+    def _restore_cached_segment(
+        self,
+        cache_key: str,
+        segment: Path,
+    ) -> tuple[str, ...] | None:
+        """Copy one cached segment into place; returns its warnings."""
+
+        entry = self._segment_cache_root() / f"{cache_key}.mp4"
+        sidecar = entry.with_suffix(".json")
+        if not entry.is_file():
+            return None
+        try:
+            shutil.copy2(entry, segment)
+            warnings: tuple[str, ...] = ()
+            if sidecar.is_file():
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+                warnings = tuple(str(w) for w in (data.get("warnings") or []))
+            entry.touch()  # LRU recency
+            return warnings
+        except Exception:  # noqa: BLE001 - fall back to a fresh render
+            return None
+
+    def _store_cached_segment(
+        self,
+        cache_key: str,
+        segment: Path,
+        warnings: Sequence[str],
+    ) -> None:
+        root = self._segment_cache_root()
+        entry = root / f"{cache_key}.mp4"
+        try:
+            staged = entry.with_name(f"{entry.stem}.{os.getpid()}.tmp")
+            shutil.copy2(segment, staged)
+            staged.replace(entry)
+            entry.with_suffix(".json").write_text(
+                json.dumps({"warnings": list(warnings)}),
+                encoding="utf-8",
+            )
+            self._prune_segment_cache(root)
+        except Exception:  # noqa: BLE001 - cache is best-effort only
+            return
+
+    @staticmethod
+    def _prune_segment_cache(root: Path) -> None:
+        entries = sorted(
+            root.glob("*.mp4"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in entries[_SEGMENT_CACHE_MAX_ITEMS:]:
+            stale.unlink(missing_ok=True)
+            stale.with_suffix(".json").unlink(missing_ok=True)
+
+    def _render_one_segment(
+        self,
+        spec: LocalMediaExecutionSpec,
+        index: int,
+        item: LocalMediaInput,
+        *,
+        segment_dir: Path,
+        tail_trims: Mapping[str, float],
+    ) -> _SegmentRender:
+        """Render one timeline segment: base picture plus burned layers."""
+
+        start_seconds = item.start_seconds or 0.0
+        end_seconds = item.end_seconds
+        if end_seconds is None:
+            if item.duration_seconds is None:
+                raise ValidationError(
+                    "Edit Element 缺少可执行 source range",
+                )
+            end_seconds = start_seconds + item.duration_seconds
+        # For a transition pair, the tail of the `from` segment that
+        # the `to` segment covers is simply not rendered; the rest of
+        # the overlap is consumed by the xfade blend.
+        tail_trim = tail_trims.get(item.source_ref, 0.0)
+        segment_duration = max(
+            1 / 30,
+            end_seconds - start_seconds - tail_trim,
+        )
+
+        # Calculate freeze duration if target exceeds source
+        freeze_duration = 0.0
+        if (
+            item.duration_seconds is not None
+            and item.start_seconds is not None
+            and item.end_seconds is not None
+        ):
+            source_duration = item.duration_seconds
+            target_duration = item.end_seconds - item.start_seconds
+            if target_duration > source_duration:
+                freeze_duration = target_duration - source_duration
+
+        segment = segment_dir / f"{index:06d}.mp4"
+        cache_key = self._segment_cache_key(
+            spec,
+            item,
+            segment_duration=segment_duration,
+            freeze_duration=freeze_duration,
+        )
+        if cache_key is not None:
+            cached_warnings = self._restore_cached_segment(cache_key, segment)
+            if cached_warnings is not None:
+                return _SegmentRender(
+                    segment,
+                    segment_duration,
+                    cached_warnings,
+                )
+
+        warnings: list[str] = []
+        if item.motion_clip is not None:
+            # A pure motion-graphics segment: the document paints
+            # the whole picture, so the base is a silent opaque
+            # canvas and the clip renders full-frame on top.
+            self._render_motion_clip_segment(
+                item,
+                segment,
+                canvas_size=spec.canvas_size,
+                segment_duration=segment_duration,
+                work_dir=spec.work_dir,
+            )
+        else:
+            # A still image can carry a segment (pure motion-graphics
+            # cuts render generated backdrops with overlays on top).
+            # ffmpeg needs -loop 1 to keep emitting frames and -t to
+            # bound the loop; seeking into a still is meaningless.
+            is_still_image = item.duration_seconds is None and str(
+                item.media_type or "",
+            ).startswith("image/")
+            # apad references [0:a]; sources without an audio stream
+            # (common for generated R2V footage) must keep the optional
+            # 0:a? mapping or ffmpeg rejects the whole filtergraph.
+            freeze_audio = (
+                freeze_duration > 0
+                and not is_still_image
+                and self._probe_has_audio(item.path)
+            )
+            placement_filter = self._placement_filter(
+                item.location,
+                canvas_size=spec.canvas_size,
+                duration_seconds=segment_duration,
+                freeze_duration=freeze_duration,
+                freeze_audio=freeze_audio,
+            )
+
+            # Build FFmpeg arguments
+            if is_still_image:
+                ffmpeg_args = [
+                    "-y",
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    "30",
+                    "-t",
+                    f"{segment_duration:.6f}",
+                    "-i",
+                    os.fspath(item.path),
+                ]
+            else:
+                ffmpeg_args = [
+                    "-y",
+                    "-ss",
+                    f"{start_seconds:.6f}",
+                    "-t",
+                    f"{segment_duration:.6f}",
+                    "-i",
+                    os.fspath(item.path),
+                ]
+            ffmpeg_args.extend(
+                [
+                    "-filter_complex",
+                    placement_filter,
+                    "-map",
+                    "[outv]",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-pix_fmt",
+                    "yuv420p",
+                ],
+            )
+
+            # Map audio if present
+            if freeze_audio:
+                ffmpeg_args.extend(["-map", "[a]"])
+            else:
+                ffmpeg_args.extend(["-map", "0:a?"])
+
+            ffmpeg_args.extend(
+                [
+                    "-c:a",
+                    "aac",
+                    "-movflags",
+                    "+faststart",
+                    os.fspath(segment),
+                ],
+            )
+
+            self._run(ffmpeg_args, cwd=spec.work_dir)
+        for warning in self._apply_overlay(item, segment):
+            warnings.append(
+                f"{item.source_ref or item.version_id}: {warning}",
+            )
+        for warning in self._apply_motion_overlays(item, segment):
+            warnings.append(
+                f"{item.source_ref or item.version_id}: {warning}",
+            )
+        if cache_key is not None:
+            self._store_cached_segment(cache_key, segment, warnings)
+        return _SegmentRender(segment, segment_duration, tuple(warnings))
+
     def _apply_overlay(
         self,
         item: LocalMediaInput,
@@ -837,13 +1047,68 @@ class FfmpegLocalMediaRunner:
             else item.duration_seconds
         )
         video_size: tuple[int, int] | None = None
+        # Motion layers queue up and burn in one ffmpeg pass per batch, so
+        # N captions cost one encode generation instead of N sequential
+        # re-encodes.  A fixed-style fallback flushes the queue first so
+        # stacking keeps strict z_index order.
+        pending: list[
+            tuple[
+                PreparedMotionLayer,
+                str | None,
+                Mapping[str, Any],
+                Mapping[str, Any] | None,
+            ]
+        ] = []
+
+        def flush_pending() -> None:
+            queue = list(pending)
+            pending.clear()
+            for start in range(0, len(queue), _MOTION_BURN_BATCH_SIZE):
+                batch = queue[start : start + _MOTION_BURN_BATCH_SIZE]
+                burned = segment.with_name(f"{segment.stem}-overlay.mp4")
+                result = composite_motion_layers(
+                    ffmpeg_path=self.executable,
+                    input_path=segment,
+                    output_path=burned,
+                    layers=[layer for layer, _, _, _ in batch],
+                )
+                if result.success:
+                    os.replace(burned, segment)
+                    warnings.extend(err for _, err, _, _ in batch if err)
+                    continue
+                burned.unlink(missing_ok=True)
+                # Degraded path: burn one by one so a single bad layer
+                # cannot sink its whole batch; a still-failing layer drops
+                # to the fixed style so caption copy never leaves the cut.
+                for layer, err, fb_overlay, fb_location in batch:
+                    single = composite_motion_layers(
+                        ffmpeg_path=self.executable,
+                        input_path=segment,
+                        output_path=burned,
+                        layers=[layer],
+                    )
+                    if single.success:
+                        os.replace(burned, segment)
+                        if err is not None:
+                            warnings.append(err)
+                        continue
+                    burned.unlink(missing_ok=True)
+                    self._burn_fixed_overlay(
+                        fb_overlay,
+                        segment,
+                        video_size or self._probe_video_size(segment),
+                        warnings,
+                        f"{fb_overlay['kind']} 动效层合成失败，已回退固定样式: "
+                        f"{single.error or '未知错误'}",
+                        fb_location,
+                    )
+
         for raw in item.overlays:
             overlay = self._normalized_overlay(raw, segment_duration)
             if overlay is None:
                 continue
             if video_size is None:
                 video_size = self._probe_video_size(segment)
-            rendered = segment.with_name(f"{segment.stem}-overlay.mp4")
             styled_error: str | None = None
             motion = overlay.get("motion")
             render_location = overlay.get("location")
@@ -926,10 +1191,8 @@ class FfmpegLocalMediaRunner:
                 isinstance(motion, Mapping)
                 and str(motion.get("html") or "").strip()
             ):
-                result = render_motion_overlay(
+                prep = prepare_motion_layer(
                     ffmpeg_path=self.executable,
-                    input_path=segment,
-                    output_path=rendered,
                     html=str(motion["html"]),
                     fps=min(60, max(8, int(motion.get("fps") or 24))),
                     loop=bool(motion.get("loop", True)),
@@ -940,14 +1203,13 @@ class FfmpegLocalMediaRunner:
                     viewport_inset=0.05,
                     doc_format=str(motion.get("format") or "html_css"),
                 )
-                if result.success:
-                    os.replace(rendered, segment)
-                    if styled_error is not None:
-                        warnings.append(styled_error)
+                if prep.layer is not None:
+                    pending.append(
+                        (prep.layer, styled_error, overlay, render_location),
+                    )
                     continue
-                rendered.unlink(missing_ok=True)
                 if not using_safe_motion:
-                    generated_error = result.error or "未知错误"
+                    generated_error = prep.error or "未知错误"
                     render_location = {
                         "x": 0.5,
                         "y": 0.88,
@@ -957,10 +1219,8 @@ class FfmpegLocalMediaRunner:
                         "anchor_y": 0.5,
                         "opacity": 1.0,
                     }
-                    safe_result = render_motion_overlay(
+                    safe_prep = prepare_motion_layer(
                         ffmpeg_path=self.executable,
-                        input_path=segment,
-                        output_path=rendered,
                         html=render_caption_template(
                             str(overlay.get("text") or ""),
                             emotion=str(overlay.get("vibe") or "chill"),
@@ -975,64 +1235,92 @@ class FfmpegLocalMediaRunner:
                         location=render_location,
                         viewport_inset=0.05,
                     )
-                    if safe_result.success:
-                        os.replace(rendered, segment)
-                        warnings.append(
-                            f"{overlay['kind']} 生成样式渲染失败，"
-                            f"已用统一安全动效模板渲染: {generated_error}",
+                    if safe_prep.layer is not None:
+                        pending.append(
+                            (
+                                safe_prep.layer,
+                                f"{overlay['kind']} 生成样式渲染失败，"
+                                f"已用统一安全动效模板渲染: {generated_error}",
+                                overlay,
+                                render_location,
+                            ),
                         )
                         continue
-                    rendered.unlink(missing_ok=True)
                     styled_error = (
                         f"{overlay['kind']} 生成样式与安全动效模板均渲染失败，"
                         "已回退固定样式: "
-                        f"{generated_error}; {safe_result.error or '未知错误'}"
+                        f"{generated_error}; {safe_prep.error or '未知错误'}"
                     )
                 else:
                     styled_error = (
                         f"{overlay['kind']} 安全动效模板渲染失败，"
-                        f"已回退固定样式: {result.error or '未知错误'}"
+                        f"已回退固定样式: {prep.error or '未知错误'}"
                     )
-            if overlay["kind"] == "pet_os":
-                result = render_pet_os_overlay(
-                    ffmpeg_path=self.executable,
-                    input_path=segment,
-                    output_path=rendered,
-                    text=overlay["text"],
-                    vibe=overlay["vibe"],
-                    video_size=video_size,
-                    appear_at=overlay["appear_at"],
-                    duration=overlay["duration"],
-                    location=render_location,
-                )
-            else:
-                # Interview-summary card styling: reached by legacy inputs
-                # frozen before overlay kinds were removed and by overlays
-                # whose migrated presentation is vibe="summary".
-                result = render_interview_summary_overlay(
-                    ffmpeg_path=self.executable,
-                    input_path=segment,
-                    output_path=rendered,
-                    text=overlay["text"],
-                    video_size=video_size,
-                    appear_at=overlay["appear_at"],
-                    duration=overlay["duration"],
-                    location=overlay.get("location"),
-                )
-            if not result.success:
-                rendered.unlink(missing_ok=True)
-                # The fixed template is the last carrier of the caption
-                # copy: when it fails too, the final cut would silently
-                # lose mandatory content, so the execution aborts and the
-                # task fails into the rejection feedback loop.
-                raise ValidationError(
-                    f"{overlay['kind']} 字幕渲染失败，已中止合成（台词内容不得从成片中"
-                    f"丢失）: {result.error or '未知错误'}",
-                )
-            os.replace(rendered, segment)
-            if styled_error is not None:
-                warnings.append(styled_error)
+            # The fixed style stacks below any queued motion layers unless
+            # the queue burns first, so flush before painting it.
+            flush_pending()
+            self._burn_fixed_overlay(
+                overlay,
+                segment,
+                video_size,
+                warnings,
+                styled_error,
+                render_location,
+            )
+        flush_pending()
         return warnings
+
+    def _burn_fixed_overlay(
+        self,
+        overlay: Mapping[str, Any],
+        segment: Path,
+        video_size: tuple[int, int],
+        warnings: list[str],
+        styled_error: str | None,
+        render_location: Mapping[str, Any] | None,
+    ) -> None:
+        """Burn one fixed-style caption; failure aborts the composition."""
+
+        rendered = segment.with_name(f"{segment.stem}-overlay.mp4")
+        if overlay["kind"] == "pet_os":
+            result = render_pet_os_overlay(
+                ffmpeg_path=self.executable,
+                input_path=segment,
+                output_path=rendered,
+                text=overlay["text"],
+                vibe=overlay["vibe"],
+                video_size=video_size,
+                appear_at=overlay["appear_at"],
+                duration=overlay["duration"],
+                location=render_location,
+            )
+        else:
+            # Interview-summary card styling: reached by legacy inputs
+            # frozen before overlay kinds were removed and by overlays
+            # whose migrated presentation is vibe="summary".
+            result = render_interview_summary_overlay(
+                ffmpeg_path=self.executable,
+                input_path=segment,
+                output_path=rendered,
+                text=overlay["text"],
+                video_size=video_size,
+                appear_at=overlay["appear_at"],
+                duration=overlay["duration"],
+                location=overlay.get("location"),
+            )
+        if not result.success:
+            rendered.unlink(missing_ok=True)
+            # The fixed template is the last carrier of the caption
+            # copy: when it fails too, the final cut would silently
+            # lose mandatory content, so the execution aborts and the
+            # task fails into the rejection feedback loop.
+            raise ValidationError(
+                f"{overlay['kind']} 字幕渲染失败，已中止合成（台词内容不得从成片中"
+                f"丢失）: {result.error or '未知错误'}",
+            )
+        os.replace(rendered, segment)
+        if styled_error is not None:
+            warnings.append(styled_error)
 
     def _apply_motion_overlays(
         self,
@@ -1050,19 +1338,15 @@ class FfmpegLocalMediaRunner:
 
         warnings: list[str] = []
         video_size: tuple[int, int] | None = None
-        for index, motion in enumerate(item.motions):
+        layers: list[PreparedMotionLayer] = []
+        for motion in item.motions:
             normalized = self._normalized_motion(item, motion)
             if normalized is None:
                 continue
             if video_size is None:
                 video_size = self._probe_video_size(segment)
-            rendered = segment.with_name(
-                f"{segment.stem}-motion-{index:02d}.mp4",
-            )
-            result = render_motion_overlay(
+            prep = prepare_motion_layer(
                 ffmpeg_path=self.executable,
-                input_path=segment,
-                output_path=rendered,
                 html=normalized["html"],
                 fps=normalized["fps"],
                 loop=normalized["loop"],
@@ -1073,12 +1357,27 @@ class FfmpegLocalMediaRunner:
                 viewport_inset=0.05,
                 doc_format=normalized["format"],
             )
-            if not result.success:
-                rendered.unlink(missing_ok=True)
+            if prep.layer is None:
                 raise ValidationError(
                     f"motion overlay {normalized['element_id']} 渲染失败，"
                     "已中止合成（不发布缺少既定动效的成片）；请修复或移除该动效 "
-                    f"Element 后重新合成: {result.error or '未知错误'}",
+                    f"Element 后重新合成: {prep.error or '未知错误'}",
+                )
+            layers.append(prep.layer)
+        for start in range(0, len(layers), _MOTION_BURN_BATCH_SIZE):
+            batch = layers[start : start + _MOTION_BURN_BATCH_SIZE]
+            rendered = segment.with_name(f"{segment.stem}-motion.mp4")
+            result = composite_motion_layers(
+                ffmpeg_path=self.executable,
+                input_path=segment,
+                output_path=rendered,
+                layers=batch,
+            )
+            if not result.success:
+                rendered.unlink(missing_ok=True)
+                raise ValidationError(
+                    "motion overlay 合成失败，已中止合成（不发布缺少既定动效的"
+                    f"成片）: {result.error or '未知错误'}",
                 )
             os.replace(rendered, segment)
         return warnings
