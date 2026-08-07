@@ -26,6 +26,23 @@
   "qwenpaw_version": {
     "min": "2.0.1"
   },
+  "pack_exclude": [
+    "backend/tests",
+    "backend/scripts",
+    "backend/pytest.ini",
+    "e2e",
+    "scripts",
+    "ui/src",
+    "ui/public",
+    "ui/scripts",
+    "ui/index.html",
+    "ui/package.json",
+    "ui/package-lock.json",
+    "ui/plugin-entry.js",
+    "ui/tsconfig.json",
+    "ui/vite.config.ts",
+    "ui/vitest.config.ts"
+  ],
   "meta": {
     "pawapp": {
       "icon": "🎬",
