@@ -164,6 +164,32 @@ tl.to('.card',{{y:'0%',duration:1.0,ease:'sine.inOut'}},1.9);
     return _document(css, body, script, 2.9), 2.9
 
 
+def _caption_static_capsule(
+    text: str,
+    palette: BlueprintPalette,
+    intensity: float,
+) -> tuple[str, float]:
+    """静态胶囊：全片像素级一致的解说/教学字幕。
+
+    对齐 hyperframes 的 caption-bar 做法：字号固定（不随文本长度
+    缩放，长句靠 max-width 换行），胶囊宽度随内容伸缩，零入场装饰
+    ——仅整卡一次短淡入后保持静止，任意时刻采样都是同一幅末态。
+    """
+
+    del intensity  # 静态模板没有可调幅度，保持签名一致即可
+    css = f"""
+.wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
+.card{{width:max-content;max-width:94%;box-sizing:border-box;font-size:24vh;padding:.28em .9em;border-radius:.42em;background:{palette.paper}f2;border:.04em solid {palette.ink}26;box-shadow:0 .08em .3em {palette.ink}33}}
+.text{{font-family:"PingFang SC","Noto Sans SC",sans-serif;font-weight:600;font-size:1em;line-height:1.35;letter-spacing:.02em;text-align:center;color:{palette.ink}}}
+"""
+    body = f"<div class='wrap'><div class='card'><div class='text'>{escape(text.strip())}</div></div></div>"
+    script = """
+tl.fromTo('.card',{autoAlpha:0},{autoAlpha:1,duration:.3,ease:'power1.out'},0);
+tl.to('.card',{autoAlpha:1,duration:.1},.3);
+"""
+    return _document(css, body, script, 0.4), 0.4
+
+
 def _caption_ink_reveal(
     text: str,
     palette: BlueprintPalette,
@@ -310,6 +336,7 @@ CAPTION_BLUEPRINTS = {
     "stagger_pop": _caption_stagger_pop,
     "ink_reveal": _caption_ink_reveal,
     "glow_breath": _caption_glow_breath,
+    "static_capsule": _caption_static_capsule,
 }
 DECORATION_BLUEPRINTS = {
     "wave_flow": _decor_wave_flow,
@@ -323,6 +350,7 @@ _BLUEPRINT_HINTS = {
     "stagger_pop": "综艺花字：逐字弹入+强调下划线，适合活泼/惊喜/动作场面",
     "ink_reveal": "电影字幕：横向揭示+侧色条，适合叙事/沉稳/收尾语气",
     "glow_breath": "情绪光晕：发光呼吸+星芒点缀，适合治愈/夜景/抒情",
+    "static_capsule": "静态胶囊：固定字号白底深字零动画，适合解说/教学/纪录片逐句字幕",
     "wave_flow": "波浪流动：多层弧带起伏，适合水面/舒缓/自然场景",
     "particle_drift": "微光粒子：光点漂浮呼吸，适合梦幻/温柔/光斑画面",
     "orbit_rings": "几何圆环：双环旋转+光核脉动，适合科技/聚焦/节奏点",

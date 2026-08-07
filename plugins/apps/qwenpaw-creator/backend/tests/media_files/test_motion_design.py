@@ -873,3 +873,38 @@ class TestUniformCaptionStyle:
             "第二句旁白。",
             "",
         )
+
+    def test_uniform_blueprint_font_size_ignores_text_length(self) -> None:
+        """The static capsule keeps one fixed font size: a long sentence
+        wraps instead of shrinking, so short and long captions share the
+        exact same style skeleton (the hyperframes caption-bar contract)."""
+
+        from services.media_files.motion_blueprints import (
+            render_caption_blueprint,
+        )
+
+        blueprint = motion_design._UNIFORM_CAPTION_BLUEPRINT
+        intensity = motion_design._UNIFORM_CAPTION_INTENSITY
+        short_text = "所以x等于3。"
+        long_text = "这道题要求我们解一元一次方程，6乘以括号x加2，等于30。"
+        short_doc, _ = render_caption_blueprint(
+            blueprint,
+            short_text,
+            intensity=intensity,
+        )
+        long_doc, _ = render_caption_blueprint(
+            blueprint,
+            long_text,
+            intensity=intensity,
+        )
+        # Style skeleton (all CSS, including font-size) is byte-identical
+        # across very different text lengths -- only the words differ.
+        assert short_doc.replace(short_text, "") == long_doc.replace(
+            long_text,
+            "",
+        )
+        # No adaptive vw/text-length term ever reaches the font size.
+        assert "font-size:24vh" in short_doc
+        # No per-card entrance choreography beyond the single card fade.
+        for performance in ("letterSpacing", "scaleY", "stagger"):
+            assert performance not in short_doc

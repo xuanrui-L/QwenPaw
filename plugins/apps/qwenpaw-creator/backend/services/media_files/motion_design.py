@@ -103,7 +103,7 @@ _MAX_SEGMENTS = 24
 _MAX_CONCURRENT_DESIGNS = 3
 # Uniform narration captions: one fixed blueprint and intensity shared by
 # every card in the film, so subtitles stay visually identical throughout.
-_UNIFORM_CAPTION_BLUEPRINT = "ink_reveal"
+_UNIFORM_CAPTION_BLUEPRINT = "static_capsule"
 _UNIFORM_CAPTION_INTENSITY = 0.5
 _MAX_DESIGN_ATTEMPTS = 2
 _TEXT_CARD_DESIGN_ATTEMPTS = 3
