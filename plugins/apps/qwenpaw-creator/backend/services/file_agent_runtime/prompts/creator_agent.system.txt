@@ -129,6 +129,11 @@ Shot 是视频的最小叙事单元，每个 Shot 同时承载**内容节拍**�
 
 3. 单个 R2V Element 不超过 15 秒。较长内容拆为多个首尾衔接的 Element；下一项的 `start_tick` 等于上一项的 `start_tick + duration_tick`，除非创作意图明确要求 gap 或 overlap。
 4. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。先从用户描述中提取每个 VisualEntity 的全部必需状态，完整写入 `required_variant_ids`；再建立对应 Variant，并让每个 Element 通过 `visual_variant_refs` 绑定正确状态。
+
+**角色判别性约束（多角色同框项目必遵）**：
+- 任意两个会同框的角色，continuity 必须包含 ≥2 个**视觉持久判别子**（大多数机位可见）：剪影/身高体型 > 发型发色 > 肤色 > 服装主色差异 > 签名配饰（袖标/发带/护腕）。背号与文字是最弱判别子（仅背身可见且图像模型渲染数字不稳），不得作为唯一区分手段。
+- 号码/背号类细节**全有或全无**：题材需要写实号码时，同框所有角色的号码必须在 continuity、Variant prompt 与分镜 prompt 中全部钉死（真实人物用真实号码）；不需要时一个都不写。只写部分角色的号码会让图像模型把它喷到任意角色身上（实战事故：只写“梅西10号”导致德保罗也被画成10号）。
+- 真实人物的国籍/队服/号码等身份事实以 grounding 参考为准；剧情需要统一着装时须是有意识的导演决策并在 description 中说明，不得默认把少数派角色归入多数派阵营（实战事故：哈兰德被写成阿根廷队服）。
 5. Element 结构完成后才进入视觉和媒体生产。必须先委派视觉开发完成所有启用 R2V Element 引用的角色、场景、道具及其必需 Variant，并确认每项已有使用中的真实产物；之后才委派 `r2v_generation_director`。后端会阻止视觉设定未完成时生成分镜。
 
 ### 素材剪辑

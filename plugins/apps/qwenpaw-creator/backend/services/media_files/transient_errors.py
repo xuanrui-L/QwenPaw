@@ -23,6 +23,15 @@ TRANSIENT_ERROR_MARKERS = (
     # EBADF from a torn-down socket during download: the transport failed,
     # not the request — field runs showed httpx surfacing it mid-transfer.
     "bad file descriptor",
+    # DNS resolution failures happen before any billable request leaves
+    # the machine, so a bounded retry is free. A permanently wrong
+    # base_url still surfaces: retry slots exhaust and the terminal
+    # message tells the user to check the configuration. Field runs
+    # (2026-08-07) showed one [Errno 8] blip locking three nodes.
+    "nodename nor servname",  # macOS getaddrinfo EAI_NONAME
+    "name or service not known",  # glibc getaddrinfo EAI_NONAME
+    "temporary failure in name resolution",  # glibc EAI_AGAIN
+    "getaddrinfo",
     "status 429",
     "status 502",
     "status 503",

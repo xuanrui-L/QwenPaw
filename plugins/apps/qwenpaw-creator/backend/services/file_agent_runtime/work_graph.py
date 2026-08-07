@@ -572,6 +572,13 @@ def _storyboard_gate_dependencies(
     with no variants at all — schema invariant: declared variants always
     live in required_variant_ids) come back as plain-text reasons that
     route to the completion resume.
+
+    A multi-character storyboard additionally waits for any *planned*
+    lineup covering ≥2 of its characters: the lineup image is the
+    pairwise-contrast anchor (relative height/build, kit discriminators),
+    and field runs showed identity drift — duplicated jersey numbers —
+    exactly when storyboards rendered while the lineup was still absent.
+    Projects that plan no lineup are unaffected.
     """
 
     gate_missing: list[str] = []
@@ -602,7 +609,36 @@ def _storyboard_gate_dependencies(
             creation.visual_variant_refs.get(ref)
         ):
             gate_missing.append(f"{ref} 缺少 variant 绑定")
+    for lineup_node in _covering_lineup_nodes(project, creation):
+        if lineup_node not in deps:
+            deps.append(lineup_node)
     return tuple(gate_missing)
+
+
+def _covering_lineup_nodes(
+    project: Project,
+    creation: R2VCreation,
+) -> list[str]:
+    """Planned-but-unselected lineups this storyboard should wait for.
+
+    Explicit ``cast_lineup_refs`` always count; otherwise any planned
+    lineup sharing ≥2 characters with the element covers it. Selected
+    lineups resolve to DONE nodes and never block.
+    """
+
+    if len(creation.character_refs) < 2:
+        return []
+    element_cast = set(creation.character_refs)
+    explicit = set(creation.cast_lineup_refs)
+    nodes: list[str] = []
+    for lineup_id in project.visual.cast_lineups.order:
+        lineup = project.visual.cast_lineups.items[lineup_id]
+        covering = lineup_id in explicit or (
+            len(element_cast & set(lineup.character_refs)) >= 2
+        )
+        if covering:
+            nodes.append(f"lineup:{lineup_id}")
+    return nodes
 
 
 def _entity_has_artwork(entity: Any) -> bool:

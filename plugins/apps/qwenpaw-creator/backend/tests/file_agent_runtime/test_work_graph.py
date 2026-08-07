@@ -292,6 +292,77 @@ def test_missing_storyboard_prompt_is_a_model_required_gap() -> None:
     assert storyboard in graph.model_required_nodes()
 
 
+def test_multi_character_storyboard_waits_for_the_planned_lineup() -> None:
+    """The lineup image is the pairwise-contrast anchor.
+
+    Field run (project-bb49): storyboards rendered while the planned
+    lineup was still absent and identities drifted (duplicated jersey
+    numbers). A planned lineup covering ≥2 of the element's characters
+    must gate the storyboard until its image is selected.
+    """
+
+    project = _project()
+    for ref in ("char:a", "char:b"):
+        project.visual.entities.items[ref] = _entity(
+            ref,
+            {f"var:{ref[-1]}": f"art:{ref[-1]}"},
+        )
+        project.visual.entities.order.append(ref)
+    project.visual.cast_lineups.items["lineup:duo"] = VisualCastLineup(
+        lineup_id="lineup:duo",
+        name="双人阵容",
+        character_refs=["char:a", "char:b"],
+    )
+    project.visual.cast_lineups.order.append("lineup:duo")
+    _add_element(
+        project,
+        _element(
+            "elem:pair",
+            character_refs=["char:a", "char:b"],
+            visual_variant_refs={"char:a": "var:a", "char:b": "var:b"},
+        ),
+    )
+
+    graph = derive_work_graph(project)
+    storyboard = graph.by_id["storyboard:elem:pair"]
+    assert storyboard.status is WorkNodeStatus.GATED
+    assert "lineup:lineup:duo" in storyboard.missing
+
+    # The lineup image lands: the storyboard unblocks.
+    project.visual.cast_lineups.items[
+        "lineup:duo"
+    ].selected_artifact_version_id = "art:lineup"
+    graph = derive_work_graph(project)
+    assert graph.by_id["storyboard:elem:pair"].status is (WorkNodeStatus.READY)
+
+
+def test_single_character_storyboard_ignores_planned_lineups() -> None:
+    project = _project()
+    for ref in ("char:a", "char:b"):
+        project.visual.entities.items[ref] = _entity(
+            ref,
+            {f"var:{ref[-1]}": f"art:{ref[-1]}"},
+        )
+        project.visual.entities.order.append(ref)
+    project.visual.cast_lineups.items["lineup:duo"] = VisualCastLineup(
+        lineup_id="lineup:duo",
+        name="双人阵容",
+        character_refs=["char:a", "char:b"],
+    )
+    project.visual.cast_lineups.order.append("lineup:duo")
+    _add_element(
+        project,
+        _element(
+            "elem:solo",
+            character_refs=["char:a"],
+            visual_variant_refs={"char:a": "var:a"},
+        ),
+    )
+
+    graph = derive_work_graph(project)
+    assert graph.by_id["storyboard:elem:solo"].status is (WorkNodeStatus.READY)
+
+
 def test_stale_marks_but_does_not_regenerate() -> None:
     project = _project()
     project.visual.entities.items["char:a"] = _entity(
