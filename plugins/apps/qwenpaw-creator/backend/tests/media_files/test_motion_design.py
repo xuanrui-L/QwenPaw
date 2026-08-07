@@ -828,3 +828,48 @@ class TestApplyOverlayStyledRouting:
             },
         ]
         assert 'data-motion-motif="caption_card"' in safe_motion_html[0]
+
+
+class TestUniformCaptionStyle:
+    def test_bad_caption_style_is_rejected_before_any_read(self) -> None:
+        with pytest.raises(ValidationError, match="captionStyle"):
+            asyncio.run(
+                motion_design.design_motion_overlays(
+                    object(),
+                    project_id="p1",
+                    target_ref="timeline:main",
+                    arguments={"captionStyle": "rainbow"},
+                    idempotency_key="k1",
+                ),
+            )
+
+    def test_uniform_blueprint_renders_identically_across_cards(self) -> None:
+        """Uniform narration captions share one deterministic skeleton:
+        two cards differ only by their words, never by style."""
+
+        from services.media_files.motion_blueprints import (
+            render_caption_blueprint,
+        )
+
+        blueprint = motion_design._UNIFORM_CAPTION_BLUEPRINT
+        intensity = motion_design._UNIFORM_CAPTION_INTENSITY
+        first, _ = render_caption_blueprint(
+            blueprint,
+            "第一句旁白。",
+            intensity=intensity,
+        )
+        again, _ = render_caption_blueprint(
+            blueprint,
+            "第一句旁白。",
+            intensity=intensity,
+        )
+        assert first == again  # deterministic, no per-card variation
+        second, _ = render_caption_blueprint(
+            blueprint,
+            "第二句旁白。",
+            intensity=intensity,
+        )
+        assert first.replace("第一句旁白。", "") == second.replace(
+            "第二句旁白。",
+            "",
+        )

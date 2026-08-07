@@ -101,6 +101,10 @@ def _log_safe(value: object) -> str:
 
 _MAX_SEGMENTS = 24
 _MAX_CONCURRENT_DESIGNS = 3
+# Uniform narration captions: one fixed blueprint and intensity shared by
+# every card in the film, so subtitles stay visually identical throughout.
+_UNIFORM_CAPTION_BLUEPRINT = "ink_reveal"
+_UNIFORM_CAPTION_INTENSITY = 0.5
 _MAX_DESIGN_ATTEMPTS = 2
 _TEXT_CARD_DESIGN_ATTEMPTS = 3
 _TEXT_CARD_MIN_COVERAGE = 0.3
@@ -1215,6 +1219,9 @@ async def design_motion_overlays(
         except (TypeError, ValueError) as exc:
             raise ValidationError("maxDecorations 必须是整数") from exc
         budget = min(max(budget, 0), _MAX_DECORATION_BUDGET)
+    caption_style = str(arguments.get("captionStyle") or "varied").strip()
+    if caption_style not in {"varied", "uniform"}:
+        raise ValidationError("captionStyle 必须是 varied 或 uniform")
 
     snapshot: ProjectSnapshot = await asyncio.to_thread(
         services.projects.read,
@@ -1426,6 +1433,95 @@ async def design_motion_overlays(
             "concept": concept,
             "fallbackReason": reason,
         }
+
+    def uniform_text_style(overlay: TimelineElement) -> dict[str, Any]:
+        """Style one caption with the film-wide uniform template.
+
+        Narration captions (tutorials, explainers, documentary voice-over)
+        must look identical from the first card to the last — only the
+        words change — so the uniform mode renders every card from one
+        fixed blueprint deterministically and never asks the design model
+        for a per-card look.
+        """
+
+        creation = overlay.creation
+        assert isinstance(creation, OverlayCreation)
+        entry: dict[str, Any] = {
+            "elementId": overlay.element_id,
+            "overlayKind": "caption",
+        }
+        if requested is not None and overlay.element_id not in requested:
+            return {**entry, "status": "not_requested"}
+        if creation.motion is not None:
+            return {**entry, "status": "already_styled"}
+        emotion = (
+            creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
+        )
+        location = overlay.location or ElementLocation(
+            x=0.50,
+            y=0.88,
+            width=0.80,
+            height=0.14,
+            anchor_x=0.5,
+            anchor_y=0.5,
+        )
+        try:
+            _validate_caption_location(location, creation.text, canvas_size)
+        except ValidationError:
+            location = ElementLocation(
+                x=0.50,
+                y=0.88,
+                width=0.80,
+                height=0.18,
+                anchor_x=0.5,
+                anchor_y=0.5,
+            )
+        concept = f"全片统一解说字幕卡 {_UNIFORM_CAPTION_BLUEPRINT}"
+        try:
+            blueprint_html, _hf = render_caption_blueprint(
+                _UNIFORM_CAPTION_BLUEPRINT,
+                creation.text,
+                palette=_THEME_BLUEPRINT_PALETTES.get(theme),
+                intensity=_UNIFORM_CAPTION_INTENSITY,
+            )
+            motion = MotionGraphic(
+                format="html_js",
+                html=blueprint_html,
+                fps=24,
+                loop=False,
+                design_notes=concept,
+                motif="caption_card",
+                theme=theme,
+                variant="sticker",
+                emotion=emotion,
+                entrance="pop",
+                exit="soft_fade",
+                intensity=_UNIFORM_CAPTION_INTENSITY,
+            )
+        except ValueError:
+            concept = "全片统一解说字幕卡（固定模板）"
+            motion = MotionGraphic(
+                html=render_caption_template(
+                    creation.text,
+                    theme=theme,
+                    emotion=emotion,
+                    box_width=location.width,
+                    box_height=location.height,
+                ),
+                fps=24,
+                loop=False,
+                design_notes=concept,
+                motif="caption_card",
+                template_version=MOTION_TEMPLATE_VERSION,
+                theme=theme,
+                variant="sticker",
+                emotion=emotion,
+                entrance="pop",
+                exit="soft_fade",
+                intensity=_UNIFORM_CAPTION_INTENSITY,
+            )
+        styled[overlay.element_id] = (motion, location)
+        return {**entry, "status": "designed", "concept": concept}
 
     async def window_frames(
         render_source: SourceVersionRenderSource,
@@ -1736,7 +1832,9 @@ async def design_motion_overlays(
                 style_text_overlay(overlay, card_index)
                 for card_index, overlay in enumerate(text_overlays)
             ),
-        ),
+        )
+        if caption_style == "varied"
+        else [uniform_text_style(overlay) for overlay in text_overlays],
     )
     clip_results = list(
         await asyncio.gather(
