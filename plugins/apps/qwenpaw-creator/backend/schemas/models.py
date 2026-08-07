@@ -187,11 +187,20 @@ class SelfReviewConfig(StrictModel):
     six-dimension review (render_review). An explicitly set
     ``CREATOR_*_REVIEW_ENABLED`` environment switch still overrides the
     persisted value so existing deployments keep their behaviour.
+
+    ``env_overrides`` is read-only response state populated by the
+    settings API (tier key -> raw env value) so the UI can badge tiers
+    whose toggles are currently shadowed by the environment; it is never
+    persisted (field incident: review ran with the UI toggled off).
     """
 
     sync_enabled: bool = False
     media_enabled: bool = False
     render_enabled: bool = False
+    env_overrides: dict[str, str] = Field(
+        default_factory=dict,
+        alias="envOverrides",
+    )
 
 
 class OssConfig(StrictModel):

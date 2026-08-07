@@ -71,11 +71,14 @@ export interface ModelConfigData {
     mode: "required" | "auto_approve";
   };
   // Advisory self-review tiers (run_review sync/media + render_review).
-  // Explicit CREATOR_*_REVIEW_ENABLED env switches still override at runtime.
+  // Explicit CREATOR_*_REVIEW_ENABLED env switches still override at runtime;
+  // envOverrides reports the shadowed tiers (tier key -> raw env value) so
+  // the UI can badge them. Read-only, never persisted.
   selfReview: {
     sync_enabled: boolean;
     media_enabled: boolean;
     render_enabled: boolean;
+    envOverrides?: Record<string, string>;
   };
 }
 

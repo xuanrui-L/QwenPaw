@@ -297,6 +297,8 @@
     "reviewDependsOk": "依赖 {{model}} · 已就绪",
     "reviewDependsMissing": "依赖 {{model}} · 未就绪，去配置 →",
     "reviewEnvNote": "若部署显式设置了 CREATOR_SYNC/MEDIA/SELF_REVIEW_ENABLED 环境变量，则以环境变量为准，此处开关不生效。",
+    "reviewEnvForcedOn": "环境变量强制开启",
+    "reviewEnvForcedOff": "环境变量强制关闭",
     "selfReviewSaveFailed": "自我审阅设置保存失败",
     "usageLabel": "用于",
     "needLabel": "何时需要",

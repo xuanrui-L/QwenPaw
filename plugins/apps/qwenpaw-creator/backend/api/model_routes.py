@@ -594,7 +594,11 @@ def mutate_model_config(
         updated = mutator(persisted)
 
         # Encrypt secret fields when the QwenPaw secret store is available.
-        updated_dict = updated.model_dump()
+        # The self-review env-override report is response-only state and
+        # must never land in the persisted file.
+        updated_dict = updated.model_dump(
+            exclude={"self_review": {"env_overrides"}},
+        )
         _encrypt_secret_fields(updated_dict)
 
         atomic_replace_bytes(
@@ -945,6 +949,22 @@ async def get_model_config() -> ModelConfigData:
         load_model_config,
         include_environment=False,
     )
+    # Read-only override report: tiers whose settings-center toggles are
+    # currently shadowed by explicit CREATOR_*_REVIEW_ENABLED env vars.
+    # The UI badges them so the precedence is visible instead of a ghost
+    # (field incident: review ran with the UI toggled off).
+    from models.config import forced_review_env_overrides
+
+    env_to_tier = {
+        "CREATOR_SYNC_REVIEW_ENABLED": "sync_enabled",
+        "CREATOR_MEDIA_REVIEW_ENABLED": "media_enabled",
+        "CREATOR_SELF_REVIEW_ENABLED": "render_enabled",
+    }
+    loaded.self_review.env_overrides = {
+        env_to_tier[name]: value
+        for name, value in forced_review_env_overrides().items()
+        if name in env_to_tier
+    }
     return _mask_secrets(loaded)
 
 
@@ -1234,6 +1254,9 @@ async def patch_self_review(
         merged = current.model_dump()
         section = dict(merged.get("self_review") or {})
         section.update(updates)
+        # Response-only state: the env-override report must never land in
+        # the persisted config file.
+        section.pop("env_overrides", None)
         merged["self_review"] = section
         try:
             return ModelConfigData.model_validate(merged)

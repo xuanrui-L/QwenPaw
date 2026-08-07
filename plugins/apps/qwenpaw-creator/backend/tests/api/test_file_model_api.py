@@ -374,6 +374,46 @@ def test_self_review_patch_merges_tiers(tmp_path, monkeypatch) -> None:
     assert unchanged.self_review.sync_enabled is True
 
 
+def test_self_review_env_overrides_reported_never_persisted(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """GET badges env-shadowed tiers; PATCH never writes the report to disk.
+
+    Field incident: review ran with the settings-center toggles off
+    because stale env vars stayed injected — the UI needs the override
+    to be visible, and the persisted file must stay clean.
+    """
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    config_path = (tmp_path / "config" / "model_config.json").resolve()
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    for env in (
+        "CREATOR_SELF_REVIEW_ENABLED",
+        "CREATOR_SYNC_REVIEW_ENABLED",
+        "CREATOR_MEDIA_REVIEW_ENABLED",
+    ):
+        monkeypatch.delenv(env, raising=False)
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps(_config()), encoding="utf-8")
+
+    silent = asyncio.run(model_routes.get_model_config())
+    assert silent.self_review.env_overrides == {}
+
+    monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "1")
+    monkeypatch.setenv("CREATOR_SELF_REVIEW_ENABLED", "0")
+    loaded = asyncio.run(model_routes.get_model_config())
+    assert loaded.self_review.env_overrides == {
+        "media_enabled": "1",
+        "render_enabled": "0",
+    }
+
+    # A tier PATCH while overrides are active must not persist the report.
+    asyncio.run(model_routes.patch_self_review({"sync_enabled": True}))
+    on_disk = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "env_overrides" not in (on_disk.get("self_review") or {})
+
+
 def test_video_api_key_reuses_llm_for_dashscope(tmp_path, monkeypatch) -> None:
     """Without a video key the DashScope (wan/happyhorse) backend reuses the
     text credential by default; opting out or running on Volcano never

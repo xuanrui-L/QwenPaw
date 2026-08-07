@@ -297,6 +297,8 @@
     "reviewDependsOk": "Requires {{model}} · ready",
     "reviewDependsMissing": "Requires {{model}} · not ready, configure →",
     "reviewEnvNote": "When CREATOR_SYNC/MEDIA/SELF_REVIEW_ENABLED environment variables are explicitly set, they take precedence and these switches have no effect.",
+    "reviewEnvForcedOn": "Forced on by environment",
+    "reviewEnvForcedOff": "Forced off by environment",
     "selfReviewSaveFailed": "Failed to save self-review settings",
     "usageLabel": "Used for",
     "needLabel": "When needed",

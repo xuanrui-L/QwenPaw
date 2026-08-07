@@ -3723,6 +3723,30 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                                     model: tier.depLabel,
                                   })}
                             </button>
+                            {config.selfReview.envOverrides?.[tier.key] !==
+                              undefined && (
+                              <span
+                                style={{
+                                  fontSize: 10.5,
+                                  padding: "1px 8px",
+                                  borderRadius: 8,
+                                  fontWeight: 500,
+                                  background:
+                                    "var(--color-warning-soft, #fef3c7)",
+                                  color: "var(--color-warning, #92400e)",
+                                }}
+                                title={t("modelConfig.reviewEnvNote")}
+                              >
+                                {["1", "true", "yes", "on"].includes(
+                                  (
+                                    config.selfReview.envOverrides[tier.key] ??
+                                    ""
+                                  ).toLowerCase(),
+                                )
+                                  ? t("modelConfig.reviewEnvForcedOn")
+                                  : t("modelConfig.reviewEnvForcedOff")}
+                              </span>
+                            )}
                           </div>
                           <div
                             style={{
