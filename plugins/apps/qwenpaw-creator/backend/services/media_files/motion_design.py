@@ -1450,8 +1450,10 @@ async def design_motion_overlays(
             "elementId": overlay.element_id,
             "overlayKind": "caption",
         }
-        if requested is not None and overlay.element_id not in requested:
-            return {**entry, "status": "not_requested"}
+        # Uniform mode expresses a film-wide caption policy, so every
+        # caption is covered even when the caller scoped elementIds to
+        # its motion clips; re-styling is prevented by the already_styled
+        # guard, never by the request filter.
         if creation.motion is not None:
             return {**entry, "status": "already_styled"}
         emotion = (

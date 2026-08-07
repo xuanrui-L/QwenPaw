@@ -631,7 +631,8 @@ _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
                 "字幕卡样式策略：varied（默认）逐卡生成式设计、蓝图轮换，"
                 "适合宠物 OS/综艺台词卡；uniform 全片用同一固定模板确定性"
                 "渲染（只换文字，样式逐卡一致），适合教学/解说/纪录片式"
-                "旁白字幕。"
+                "旁白字幕；uniform 是全片字幕策略，覆盖所有文字 Overlay，不受 "
+                "elementIds 限定。"
             ),
         },
     },
