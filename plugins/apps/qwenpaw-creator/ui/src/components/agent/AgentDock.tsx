@@ -1703,6 +1703,9 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
   const stopping = useCreatorSessionStore((state) => state.stopping);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const stopAllAgents = useCreatorSessionStore((state) => state.stopAllAgents);
+  const rateLimitRetry = useCreatorSessionStore(
+    (state) => state.rateLimitRetry,
+  );
   const subagentActivities = useCreatorSessionStore(
     (state) => state.subagentActivities,
   );
@@ -1741,6 +1744,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
 
   const [removedContextRefs, setRemovedContextRefs] = useState<string[]>([]);
   const [canSend, setCanSend] = useState(false);
+  const [rateLimitResuming, setRateLimitResuming] = useState(false);
   const [inlineRefs, setInlineRefs] = useState<string[]>([]);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionOptions, setMentionOptions] = useState<RefSearchItem[]>([]);
@@ -1852,6 +1856,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
         toolCalls,
         tasks,
         project,
+        rateLimitRetry,
       }),
     [
       session,
@@ -1863,8 +1868,24 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
       toolCalls,
       tasks,
       project,
+      rateLimitRetry,
     ],
   );
+
+  // A throttled run stops with the full conversation still intact; the
+  // continue control re-submits a resume request so the Agent picks the
+  // same task back up on the previous messages.
+  const resumeAfterRateLimit = async () => {
+    if (rateLimitResuming) return;
+    setRateLimitResuming(true);
+    try {
+      await sendMessage({ message: t("agent.rateLimitResumeMessage") });
+    } catch (error) {
+      message.error((error as Error).message);
+    } finally {
+      setRateLimitResuming(false);
+    }
+  };
 
   const contextChips = useMemo(() => {
     const chips: RefSearchItem[] = [];
@@ -2478,7 +2499,30 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                 ))}
                 {session?.status === "ERROR" && session?.error?.message && (
                   <div className="mx-3 my-2 rounded-md bg-[var(--color-danger-soft)] px-3 py-2 text-[11px] leading-[1.5] text-[var(--color-danger)]">
-                    {session.error.message}
+                    {session.error.code === "MODEL_RATE_LIMITED" ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <span>
+                          {t("agent.rateLimitExhausted", {
+                            retries: Number.isFinite(
+                              Number(session.error.details?.retryCount),
+                            )
+                              ? Number(session.error.details?.retryCount)
+                              : rateLimitRetry?.maxAttempts ?? 5,
+                          })}
+                        </span>
+                        <Button
+                          size="small"
+                          type="primary"
+                          danger
+                          loading={rateLimitResuming}
+                          onClick={() => void resumeAfterRateLimit()}
+                        >
+                          {t("agent.rateLimitContinue")}
+                        </Button>
+                      </div>
+                    ) : (
+                      session.error.message
+                    )}
                   </div>
                 )}
               </div>

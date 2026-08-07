@@ -140,6 +140,8 @@ from .model_client import (
     AgentStreamCallbackError,
     AgentStreamCallbackPassthrough,
     AgentModelTurn,
+    RateLimitExhaustedError,
+    RateLimitRetryNotice,
     AgentScopeAgentChatClient,
     AgentScopeVlmChatClient,
     AgentToolCall,
@@ -1011,6 +1013,7 @@ class FileCreatorAgentRuntime:
         on_text_delta: Any,
         on_thinking_delta: Any,
         on_tool_call_delta: Any,
+        on_rate_limit_retry: Any = None,
     ) -> AgentModelTurn:
         """Bound one provider turn; max_model_turns cannot stop a hung turn."""
 
@@ -1022,6 +1025,7 @@ class FileCreatorAgentRuntime:
                     on_text_delta=on_text_delta,
                     on_thinking_delta=on_thinking_delta,
                     on_tool_call_delta=on_tool_call_delta,
+                    on_rate_limit_retry=on_rate_limit_retry,
                 ),
                 timeout=self.model_turn_timeout_seconds,
             )
@@ -1709,6 +1713,28 @@ class FileCreatorAgentRuntime:
                 retryable=False,
             )
             self._blocked_heads[project_id] = message.message_seq
+        except RateLimitExhaustedError as exc:
+            logger.error(
+                "Agent run %s failed — model rate limit exhausted after "
+                "%d retries: %s",
+                run_id,
+                exc.retries,
+                exc,
+            )
+            await self._fail_run(
+                project_id,
+                session.session_id,
+                goal.goal_id,
+                run_id,
+                message,
+                code="MODEL_RATE_LIMITED",
+                # Neutral technical text: AgentDock renders the localized
+                # notice from locales via the MODEL_RATE_LIMITED code.
+                message_text=str(exc),
+                retryable=True,
+                extra_details={"retryCount": exc.retries},
+            )
+            self._blocked_heads[project_id] = message.message_seq
         except AgentModelError as exc:
             logger.error(
                 "Agent run %s failed — model request error: %s",
@@ -1905,6 +1931,25 @@ class FileCreatorAgentRuntime:
             tool_progress = _ToolArgumentProgressReporter(
                 persist_tool_progress,
             )
+
+            async def report_rate_limit_retry(
+                notice: RateLimitRetryNotice,
+            ) -> None:
+                self._assert_epoch(project_id, run_id, epoch)
+                await self._event(
+                    project_id,
+                    session_id,
+                    "agent.model.rate_limit_retry",
+                    run_id,
+                    request,
+                    {
+                        "runId": run_id,
+                        "attempt": notice.attempt,
+                        "maxAttempts": notice.max_attempts,
+                        "delaySeconds": notice.delay_seconds,
+                    },
+                )
+
             turn = await self._complete_model_turn(
                 self.model_client,
                 label="Creator Agent",
@@ -1913,6 +1958,7 @@ class FileCreatorAgentRuntime:
                 on_text_delta=persist_text_delta,
                 on_thinking_delta=persist_thinking_delta,
                 on_tool_call_delta=tool_progress.feed,
+                on_rate_limit_retry=report_rate_limit_retry,
             )
             await tool_progress.finish(turn.tool_calls)
             self._assert_epoch(project_id, run_id, epoch)
@@ -5111,7 +5157,14 @@ class FileCreatorAgentRuntime:
         code: str,
         message_text: str,
         retryable: bool,
+        extra_details: Mapping[str, Any] | None = None,
     ) -> None:
+        details: dict[str, Any] = {
+            "runId": run_id,
+            "messageSeq": request.message_seq,
+        }
+        if extra_details:
+            details.update(extra_details)
         try:
             await asyncio.to_thread(
                 self.runs.transition,
@@ -5170,7 +5223,7 @@ class FileCreatorAgentRuntime:
             code=code,
             message=message_text,
             retryable=retryable,
-            details={"runId": run_id, "messageSeq": request.message_seq},
+            details=details,
         )
         # Unattended (YOLO) projects must not stay parked on a transient
         # model fault at 3am: a retryable failure gets the same completion
@@ -5198,6 +5251,7 @@ class FileCreatorAgentRuntime:
                     "code": code,
                     "message": message_text,
                     "retryable": retryable,
+                    "details": dict(extra_details or {}),
                 },
             },
         )
