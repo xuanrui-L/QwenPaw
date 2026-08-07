@@ -162,10 +162,15 @@ class DashScopeImageModel(BaseImageModel):
                 int(
                     os.environ.get(
                         "DASHSCOPE_IMAGE_CONCURRENCY",
-                        os.environ.get("IMAGE_CONCURRENCY", "1"),
+                        os.environ.get("IMAGE_CONCURRENCY", "0"),
                     )
-                    or 1,
-                ),
+                    or 0,
+                )
+                # The provider semaphore must not default below the
+                # scheduler's dispatch cap: a mismatch silently
+                # serializes renders behind model_slot("image") while
+                # the graph shows parallel RUNNING nodes.
+                or model_config.get_media_parallelism(),
             ),
         )
 
@@ -363,9 +368,7 @@ class DashScopeImageModel(BaseImageModel):
                     message = ""
                     if isinstance(output, dict):
                         message = str(
-                            output.get("message")
-                            or output.get("code")
-                            or "",
+                            output.get("message") or output.get("code") or "",
                         )
                     raise ModelError(
                         f"Image task {task_id} ended {status}"

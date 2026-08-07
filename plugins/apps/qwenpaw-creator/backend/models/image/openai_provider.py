@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from models import config as model_config
 from models.media_transport import read_reference_media
 from models.provider_tasks import note_provider_task
 from utils.exceptions import ModelError
@@ -218,7 +219,16 @@ class OpenAIImageModel(BaseImageModel):
             concurrency=_configured_int(
                 "concurrency",
                 "OPENAI_IMAGE_CONCURRENCY",
-                int(os.environ.get("OPENAI_IMAGE_CONCURRENCY", "1") or 1),
+                int(
+                    os.environ.get(
+                        "OPENAI_IMAGE_CONCURRENCY",
+                        os.environ.get("IMAGE_CONCURRENCY", "0"),
+                    )
+                    or 0,
+                )
+                # Default follows the scheduler's dispatch cap so the
+                # provider semaphore never silently serializes renders.
+                or model_config.get_media_parallelism(),
             ),
             background_model=_configured_value(
                 "background_model",
