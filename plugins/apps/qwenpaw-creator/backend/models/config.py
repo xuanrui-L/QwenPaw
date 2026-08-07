@@ -587,7 +587,6 @@ VIDEO_BASE_URL = os.environ.get(
 )
 VIDEO_API_KEY = os.environ.get("VIDEO_API_KEY", "")
 VIDEO_MODEL_NAME = os.environ.get("VIDEO_MODEL_NAME", "wan2.7-r2v")
-VIDEO_CONCURRENCY = _positive_int_env("VIDEO_CONCURRENCY", 1)
 
 
 # ── Dynamic request-scoped getters ───────────────────────────────────────────
@@ -1410,6 +1409,23 @@ def get_video_model_name() -> str:
         "model",
         "VIDEO_MODEL_NAME",
         VIDEO_MODEL_NAME,
+    )
+
+
+def get_video_concurrency() -> int:
+    """Semaphore cap for model_slot("video").
+
+    Defaults to the scheduler's dispatch cap so the provider semaphore
+    never silently serializes renders behind a parallel-looking work
+    graph (same coupling as the image providers); explicit env/config
+    still wins.
+    """
+
+    return _configured_int(
+        CREATOR_VIDEO_CONFIG_TOOL,
+        "concurrency",
+        "VIDEO_CONCURRENCY",
+        get_media_parallelism(),
     )
 
 
