@@ -173,7 +173,8 @@ def _caption_static_capsule(
 
     对齐 hyperframes 的 caption-bar 做法：字号固定（不随文本长度
     缩放，长句靠 max-width 换行），胶囊宽度随内容伸缩，零入场装饰
-    ——仅整卡一次短淡入后保持静止，任意时刻采样都是同一幅末态。
+    ——仅整卡一次短淡入后保持静止，任意时刻采样都是同一幅末态；
+    退场硬切（exit none），避免逐句字幕交接处前后两卡淡变叠影。
     """
 
     del intensity  # 静态模板没有可调幅度，保持签名一致即可
@@ -184,10 +185,10 @@ def _caption_static_capsule(
 """
     body = f"<div class='wrap'><div class='card'><div class='text'>{escape(text.strip())}</div></div></div>"
     script = """
-tl.fromTo('.card',{autoAlpha:0},{autoAlpha:1,duration:.3,ease:'power1.out'},0);
+tl.fromTo('.card',{autoAlpha:.35},{autoAlpha:1,duration:.3,ease:'power1.out'},0);
 tl.to('.card',{autoAlpha:1,duration:.1},.3);
 """
-    return _document(css, body, script, 0.4), 0.4
+    return _document(css, body, script, 0.4, exit_style="none"), 0.4
 
 
 def _caption_ink_reveal(

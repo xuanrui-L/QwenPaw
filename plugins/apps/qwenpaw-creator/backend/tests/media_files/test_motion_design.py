@@ -908,3 +908,10 @@ class TestUniformCaptionStyle:
         # No per-card entrance choreography beyond the single card fade.
         for performance in ("letterSpacing", "scaleY", "stagger"):
             assert performance not in short_doc
+        # Compose probes reject documents whose t=0 frame is fully
+        # transparent, so the fade must start from partial visibility.
+        assert "autoAlpha:0}" not in short_doc
+        assert "autoAlpha:.35" in short_doc
+        # Captions hand over back-to-back: a managed exit fade would
+        # double-expose neighbouring cards, so the exit is a hard cut.
+        assert 'data-motion-exit="none"' in short_doc
