@@ -1915,10 +1915,9 @@ class FileCreatorAgentRuntime:
             self.max_model_turns,
             element_count,
         )
-        # External skill pipelines (read docs, author files, run scripts,
-        # import artifacts) legitimately need many more single-tool turns
-        # than regular Project work; the budget only grows after a skill
-        # tool has actually been called in this run.
+        # The element-scaled budget is used as-is: skills provide domain
+        # knowledge through the viewer and deliverables flow through the
+        # native pipeline, so no per-tool budget extension exists anymore.
         effective_max_turns = turn_budget
         turn_number = 0
         while turn_number < effective_max_turns:
