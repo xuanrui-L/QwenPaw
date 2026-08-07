@@ -4437,6 +4437,15 @@ class FileCreatorAgentRuntime:
         changed = result.get("changedPointers")
         if not isinstance(changed, list) or not changed:
             return
+        # Every committed structure write may have turned media nodes READY
+        # (prompt-first planning writes complete variant prompts long before
+        # the run ends). Waking the scheduler here lets anchors render in
+        # parallel with the remaining planning turns instead of idling until
+        # run completion — measured at ~9 wasted minutes on a five-act
+        # project. Cheap when nothing is ready: one derived-graph tick, and
+        # the fingerprint ledger already dedupes; a later prompt edit marks
+        # the early render stale through the normal staleness path.
+        self.work_scheduler.wake(project_id)
         await self._event(
             project_id,
             session_id,

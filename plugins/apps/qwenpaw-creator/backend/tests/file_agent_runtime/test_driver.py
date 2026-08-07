@@ -4797,3 +4797,49 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     )
     assert "告诉我" not in streamed_text
     assert expected_final_summary in streamed_text
+
+
+def test_workspace_commits_wake_the_media_scheduler(tmp_path) -> None:
+    """Every committed structure write wakes the per-project scheduler.
+
+    Prompt-first planning writes complete variant prompts many turns
+    before the run ends; without a commit-time wake the READY anchors
+    idle until run completion (measured at ~9 minutes on a five-act
+    project). Empty commits must stay silent.
+    """
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal=None)
+        driver = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(
+                lambda *args, **kwargs: AgentModelTurn(content="idle"),
+            ),
+            poll_interval_seconds=0.01,
+        )
+        woken: list[str] = []
+        driver.work_scheduler.wake = woken.append  # type: ignore[method-assign]
+
+        async def _noop_event(*args, **kwargs) -> None:
+            return None
+
+        driver._event = _noop_event  # type: ignore[method-assign]
+        await driver._workspace_changed(
+            PROJECT_ID,
+            SESSION_ID,
+            "run-1",
+            None,
+            {"changedPointers": ["/strategy/creative_brief"]},
+            action_id="call-1",
+        )
+        await driver._workspace_changed(
+            PROJECT_ID,
+            SESSION_ID,
+            "run-1",
+            None,
+            {"changedPointers": []},
+            action_id="call-2",
+        )
+        return woken
+
+    assert asyncio.run(scenario()) == [PROJECT_ID]
