@@ -618,7 +618,20 @@ def get_text_model_name() -> str:
     )
 
 
+def _vlm_use_llm() -> bool:
+    """Return True when the persisted VLM section reuses the text model.
+
+    ``use_llm`` means full reuse (key, endpoint, model). Any explicit values
+    left over in the VLM section are stale configuration and must not win,
+    otherwise requests go to a mismatched endpoint/key pair.
+    """
+    section = _get_user_config().get("vlm")
+    return bool(isinstance(section, dict) and section.get("use_llm"))
+
+
 def get_vlm_api_key() -> str:
+    if _vlm_use_llm():
+        return get_text_api_key()
     return (
         _explicit_configured_value(
             CREATOR_VLM_CONFIG_TOOL,
@@ -630,6 +643,8 @@ def get_vlm_api_key() -> str:
 
 
 def get_vlm_base_url() -> str:
+    if _vlm_use_llm():
+        return get_text_base_url()
     return (
         _explicit_configured_value(
             CREATOR_VLM_CONFIG_TOOL,
@@ -641,6 +656,8 @@ def get_vlm_base_url() -> str:
 
 
 def get_vlm_model_name() -> str:
+    if _vlm_use_llm():
+        return get_text_model_name()
     return (
         _explicit_configured_value(
             CREATOR_VLM_CONFIG_TOOL,

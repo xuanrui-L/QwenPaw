@@ -410,9 +410,15 @@ def _assemble_model_config(
     if isinstance(self_review, dict):
         base["self_review"].update(self_review)
     if base["vlm"].get("use_llm"):
+        # Full reuse: stale explicit VLM values (left over from a previous
+        # standalone configuration) must be overridden, not just filled when
+        # empty, or requests hit a mismatched endpoint/key pair. Keep the
+        # stored value only when the text section has none (env-backed LLM).
         for field in ("base_url", "api_key", "model_name"):
-            if not base["vlm"].get(field):
-                base["vlm"][field] = base["llm"].get(field, "")
+            base["vlm"][field] = base["llm"].get(field, "") or base["vlm"].get(
+                field,
+                "",
+            )
 
     # Decrypt secret fields when the QwenPaw secret store is available.
     _decrypt_secret_fields(base)
