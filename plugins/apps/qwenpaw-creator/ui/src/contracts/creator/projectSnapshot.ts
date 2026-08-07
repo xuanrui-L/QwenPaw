@@ -415,6 +415,8 @@ export interface ProjectSnapshotEnvelope {
   generation: number;
   etag: string;
   syncStatus: ProjectServerSyncStatus;
+  /** Bundled inspiration example; gates flows needing the remote original. */
+  builtinExample?: boolean;
   project: ProjectDocument;
 }
 

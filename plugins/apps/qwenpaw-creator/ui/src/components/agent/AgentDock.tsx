@@ -47,6 +47,8 @@ import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationSt
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
+import SourceCacheGate from "@/components/creator/SourceCacheGate";
+import { useSourceCache } from "@/lib/sourceCache";
 import {
   creatorEventLabel,
   creatorRoleLabel,
@@ -1730,6 +1732,13 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
   const project = useProjectSnapshotStore((state) =>
     state.projectId === projectId ? state.project : null,
   );
+  const builtinExample = useProjectSnapshotStore((state) =>
+    state.projectId === projectId ? state.builtinExample : false,
+  );
+  // Bundled examples ship trimmed clips only; follow-up agent questions need
+  // the full originals cached locally, so gate sending until they land.
+  const sourceCache = useSourceCache(projectId, builtinExample);
+  const originalsGate = builtinExample && sourceCache.originalsMissing;
   const timeline = selectPrimaryTimeline(project);
 
   const streaming = Boolean(
@@ -2190,6 +2199,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
   };
 
   const submit = async () => {
+    if (originalsGate) return;
     const content = inputRef.current?.getContent() ?? {
       text: "",
       refs: [],
@@ -2699,6 +2709,11 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
               <OnboardingHint hintKey="mention" className="mb-2">
                 {t("agent.mentionHint")}
               </OnboardingHint>
+              {originalsGate && (
+                <div className="mb-2">
+                  <SourceCacheGate status={sourceCache} compact />
+                </div>
+              )}
               <div className="flex items-end gap-2">
                 <MentionInput
                   ref={inputRef}
@@ -2737,7 +2752,7 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
                     type="primary"
                     aria-label={t("common.send")}
                     icon={<ArrowUpOutlined />}
-                    disabled={!canSend}
+                    disabled={!canSend || originalsGate}
                     onClick={() => void submit()}
                     className="!flex !h-8 !w-8 !items-center !justify-center !p-0"
                   />

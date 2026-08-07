@@ -1205,7 +1205,17 @@
     "shortDramaDesc": "Create a post-apocalyptic survival short drama, focusing on the main group...",
     "shortDramaFull": "Create a post-apocalyptic survival short drama, focusing on the main group's survival and bonds in the wasteland.",
     "title": "Inspiration Examples",
-    "openFailed": "Failed to open inspiration example, please try again later"
+    "openFailed": "Failed to open inspiration example, please try again later",
+    "downloadingHint": "First open downloads the example from the cloud, please wait",
+    "preparingHint": "Preparing the example project…"
+  },
+  "sourceCache": {
+    "title": "Original footage not downloaded",
+    "description": "To keep the example small, the original footage was not bundled. Download it before viewing the original or continuing to create from it.",
+    "download": "Download original",
+    "downloading": "Downloading…",
+    "retry": "Retry download",
+    "failed": "Download failed: {{message}}"
   },
   "scenario": {
     "shortDrama": "Short Drama",

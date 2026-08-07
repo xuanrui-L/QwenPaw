@@ -42,6 +42,8 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
 import DocumentUnderstanding from "@/components/assets/DocumentUnderstanding";
+import SourceCacheGate from "@/components/creator/SourceCacheGate";
+import { useSourceCache } from "@/lib/sourceCache";
 import PageLoadError from "@/components/PageLoadError";
 import PageSkeleton from "@/components/PageSkeleton";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
@@ -907,6 +909,12 @@ export default function AssetsPage() {
   );
   const syncStatus = useProjectSnapshotStore((state) => state.syncStatus);
   const syncError = useProjectSnapshotStore((state) => state.syncError);
+  const builtinExample = useProjectSnapshotStore((state) =>
+    state.projectId === id ? state.builtinExample : false,
+  );
+  // Bundled examples ship trimmed clips only; the gigabyte-scale originals
+  // are fetched on demand when the user wants to watch them here.
+  const sourceCache = useSourceCache(id, builtinExample);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const patchProject = useProjectSnapshotStore((state) => state.patch);
   const patching = useProjectSnapshotStore((state) => state.patching);
@@ -980,6 +988,11 @@ export default function AssetsPage() {
         item.variantState === "active",
     ) ||
     null;
+  const selectedOriginalGate =
+    selected?.kind === "source" &&
+    sourceCache.versions.some(
+      (version) => version.assetVersionId === selected.id && !version.cached,
+    );
   const memoryBuilt = useMemo(
     () => (project ? memoryBuiltVersionIds(project, tasks) : new Set<string>()),
     [project, tasks],
@@ -1306,9 +1319,17 @@ export default function AssetsPage() {
             <div>
               <div
                 data-review-media-anchor={versionFromUrl ?? undefined}
-                className="flex aspect-video items-center justify-center overflow-hidden bg-black"
+                className={
+                  selectedOriginalGate
+                    ? ""
+                    : "flex aspect-video items-center justify-center overflow-hidden bg-black"
+                }
               >
-                {selected.mediaKind === "audio" && selected.previewUrl ? (
+                {selectedOriginalGate ? (
+                  <div className="p-4">
+                    <SourceCacheGate status={sourceCache} />
+                  </div>
+                ) : selected.mediaKind === "audio" && selected.previewUrl ? (
                   <audio
                     src={selected.previewUrl}
                     controls

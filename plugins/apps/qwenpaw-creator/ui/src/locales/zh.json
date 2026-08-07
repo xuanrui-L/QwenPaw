@@ -1205,7 +1205,17 @@
     "shortDramaDesc": "制作一部末世生存题材的短剧，重点介绍一下主角团…",
     "shortDramaFull": "制作一部末世生存题材的短剧，重点刻画主角团在废土中的求生与羁绊。",
     "title": "灵感示例",
-    "openFailed": "打开灵感示例失败，请稍后重试"
+    "openFailed": "打开灵感示例失败，请稍后重试",
+    "downloadingHint": "首次打开需从云端下载示例素材，请稍候",
+    "preparingHint": "正在准备示例项目…"
+  },
+  "sourceCache": {
+    "title": "原片尚未下载",
+    "description": "为控制示例体积，原始素材未随示例打包。查看原片或继续基于原片创作前，请先下载原片。",
+    "download": "下载原片",
+    "downloading": "下载中…",
+    "retry": "重试下载",
+    "failed": "下载失败：{{message}}"
   },
   "scenario": {
     "shortDrama": "短剧",

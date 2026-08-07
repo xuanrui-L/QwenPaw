@@ -171,12 +171,14 @@ async def _indexed_version(
             return match
         _VERSION_PROJECT_CACHE.pop((kind, version_id), None)
     matches: list[tuple[Path, IndexedFile | None, Any, str]] = []
-    summaries = await asyncio.to_thread(services.projects.list)
+    # discover_project_ids (not list) so bundled example Projects, which are
+    # hidden from the user's project shelf, still serve their media.
+    summaries = await asyncio.to_thread(services.projects.discover_project_ids)
     for summary in summaries:
         match = await asyncio.to_thread(
             _version_in_project,
             services,
-            project_id=summary.project_id,
+            project_id=summary,
             version_id=version_id,
             kind=kind,
         )
@@ -302,6 +304,10 @@ def _motion_document_in_project(
         snapshot = services.projects.read(project_id)
     except ProjectNotFound:
         return None
+    except ProjectStoreError:
+        # Discovery includes unvalidated directories; one corrupt Project must
+        # not block the scan of the remaining healthy ones.
+        return None
     indexed = snapshot.project.assets.files_by_id.get(file_id)
     if indexed is None or indexed.schema_name != "motion_document":
         return None
@@ -324,12 +330,14 @@ async def motion_document(
     matches: list[tuple[Path, IndexedFile]] = []
     # O(项目数) 扫描：本地单用户部署的项目数量有限，且命中后前端会长期
     # immutable 缓存；若项目规模增长，应改为全局 file_id → 项目的索引。
-    summaries = await asyncio.to_thread(services.projects.list)
-    for summary in summaries:
+    # discover_project_ids (not list) so bundled example Projects, which are
+    # hidden from the user's project shelf, still serve their media.
+    project_ids = await asyncio.to_thread(services.projects.discover_project_ids)
+    for project_id in project_ids:
         match = await asyncio.to_thread(
             _motion_document_in_project,
             services,
-            project_id=summary.project_id,
+            project_id=project_id,
             file_id=file_id,
         )
         if match is not None:
@@ -376,12 +384,14 @@ async def motion_document_poster(
     """
 
     matches: list[tuple[Path, IndexedFile]] = []
-    summaries = await asyncio.to_thread(services.projects.list)
-    for summary in summaries:
+    # discover_project_ids (not list) so bundled example Projects, which are
+    # hidden from the user's project shelf, still serve their media.
+    project_ids = await asyncio.to_thread(services.projects.discover_project_ids)
+    for project_id in project_ids:
         match = await asyncio.to_thread(
             _motion_document_in_project,
             services,
-            project_id=summary.project_id,
+            project_id=project_id,
             file_id=file_id,
         )
         if match is not None:
