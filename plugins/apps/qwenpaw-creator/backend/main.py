@@ -206,6 +206,19 @@ async def _startup() -> None:
         raise
     _file_services = services
     logger.info("QwenPaw Creator file runtime ready at %s", data_root)
+    # Loud, not silent: explicitly set review env vars take full control
+    # and the settings-center toggles are ignored — a field incident had
+    # review running with the UI switched off because a stale env stayed
+    # injected in the launch command.
+    from models.config import forced_review_env_overrides
+
+    overrides = forced_review_env_overrides()
+    if overrides:
+        logger.warning(
+            "Review tiers forced by environment (settings-center toggles "
+            "are ignored for these): %s",
+            ", ".join(f"{k}={v}" for k, v in overrides.items()),
+        )
     trace_event(
         "creator.runtime.started",
         component="pawapp",
