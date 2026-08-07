@@ -454,31 +454,40 @@ describe("ModelConfigModal configuration lifecycle", () => {
     ]);
     render(<ModelConfigModal open onClose={vi.fn()} />);
 
+    // Assert against the locale JSON values (test locale is forced to zh)
+    // so a drifting translation fails here instead of passing silently.
+    const mc = zh.modelConfig;
+    const escaped = (value: string) =>
+      new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+
     // Embedding lives on the default language pane.
-    fireEvent.click(await screen.findByText("Embedding 模型"));
+    fireEvent.click(await screen.findByText(mc.embedding));
     await waitFor(() =>
-      expect(screen.getByText("复用 VLM API Key")).toBeInTheDocument(),
+      expect(screen.getByText(mc.reuseVlmApiKey)).toBeInTheDocument(),
     );
-    expect(
-      screen.getByText("用于长素材层次记忆的节点向量化与语义检索"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(mc.embeddingReuseNote)).toBeInTheDocument();
 
     // TTS and S2V live on the media pane.
-    fireEvent.click(screen.getByRole("button", { name: /媒体生成/ }));
-    fireEvent.click(await screen.findByText("TTS 语音合成模型"));
-    await waitFor(() =>
-      expect(screen.getByText("复用 LLM API Key")).toBeInTheDocument(),
+    fireEvent.click(
+      screen.getByRole("button", { name: new RegExp(mc.paneMedia) }),
     );
-    expect(screen.getByText(/开启后可为成片生成旁白/)).toBeInTheDocument();
+    fireEvent.click(await screen.findByText(mc.tts));
+    await waitFor(() =>
+      expect(screen.getByText(mc.reuseLlmApiKey)).toBeInTheDocument(),
+    );
+    // Both TTS notes share one paragraph, so match each note fragment.
     expect(
-      screen.getByText(/复刻\/设计所用的配套模型由后端自动选择/),
+      screen.getByText(escaped(mc.ttsSystemVoicesNote)),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(escaped(mc.ttsCloneModelAutoNote)),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("数字人模型"));
+    fireEvent.click(screen.getByText(mc.s2v));
     await waitFor(() =>
-      expect(screen.getByText("人像检测模型（可选）")).toBeInTheDocument(),
+      expect(screen.getByText(mc.s2vDetectModelLabel)).toBeInTheDocument(),
     );
-    expect(screen.getByText(/提交前会先跑免费的人像检测/)).toBeInTheDocument();
+    expect(screen.getByText(mc.s2vDetectNote)).toBeInTheDocument();
   });
 
   it("maps every protocol option to a label key present in both locales", () => {

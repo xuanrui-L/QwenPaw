@@ -1338,6 +1338,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         setTested((prev) => ({ ...prev, [type]: false }));
         return;
       }
+      // handleTest itself validates the fields (warning toast when
+      // incomplete) and only enables the card after a passing probe, so no
+      // pre-check is needed here.
       await handleTest(type);
     },
     [handleTest, handleVlmToggle, updateItem],
