@@ -147,7 +147,8 @@ describe("ModelConfigModal configuration lifecycle", () => {
     expect(screen.queryByText("qwen-vl-max（已停用）")).not.toBeInTheDocument();
 
     // … and the VLM section still reuses the LLM config and stays enabled.
-    fireEvent.click(screen.getByRole("button", { name: /VLM/ }));
+    // Expand the VLM card via its header title.
+    fireEvent.click(screen.getByText("VLM 模型"));
     await waitFor(() =>
       expect(
         screen.getByRole("checkbox", { name: /复用 LLM 配置/ }),
@@ -353,5 +354,81 @@ describe("ModelConfigModal configuration lifecycle", () => {
       ) as HTMLInputElement | undefined;
     expect(baseUrl).toBeTruthy();
     expect(baseUrl!.disabled).toBe(false);
+  });
+
+  const llmConfiguredVideoOff = {
+    ...emptyConfig,
+    llm: {
+      ...emptyConfig.llm,
+      model_name: "qwen3.7-plus",
+      api_key: "saved-secret",
+      base_url: "https://provider.test/v1",
+    },
+    video: { ...emptyConfig.video, reuse_llm_key: true },
+  };
+
+  it("runs the connectivity test when a model is switched on and enables it on success", async () => {
+    const { calls } = installMockFetch([
+      {
+        match: "/models/config",
+        method: "GET",
+        response: { json: llmConfiguredVideoOff },
+      },
+      {
+        match: "/models/test",
+        method: "POST",
+        response: { json: { ok: true, ms: 8 } },
+      },
+    ]);
+    render(<ModelConfigModal open onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /媒体生成/ }));
+    fireEvent.click(await screen.findByText("视频生成模型"));
+    const toggle = (await screen.findByRole("checkbox", {
+      name: "视频生成模型",
+    })) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(calls.some((call) => call.url.endsWith("/models/test"))).toBe(
+        true,
+      ),
+    );
+    // A passing probe switches the card on, so the enabled-but-untested
+    // (red) state is never shown.
+    await waitFor(() => expect(toggle.checked).toBe(true));
+    expect(screen.queryByText(/（未测试）/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the model switched off when the automatic connectivity test fails", async () => {
+    const { calls } = installMockFetch([
+      {
+        match: "/models/config",
+        method: "GET",
+        response: { json: llmConfiguredVideoOff },
+      },
+      {
+        match: "/models/test",
+        method: "POST",
+        response: { json: { ok: false, error: "bad gateway" } },
+      },
+    ]);
+    render(<ModelConfigModal open onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /媒体生成/ }));
+    fireEvent.click(await screen.findByText("视频生成模型"));
+    const toggle = (await screen.findByRole("checkbox", {
+      name: "视频生成模型",
+    })) as HTMLInputElement;
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(calls.some((call) => call.url.endsWith("/models/test"))).toBe(
+        true,
+      ),
+    );
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    expect(toggle.checked).toBe(false);
   });
 });
