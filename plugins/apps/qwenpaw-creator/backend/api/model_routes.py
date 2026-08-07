@@ -875,7 +875,11 @@ async def _validate_section_connectivity(
         return
 
     api_key = item.get("api_key", "")
-    if section in ("asr", "tts") and item.get("reuse_llm_key") and not api_key:
+    if (
+        section in ("asr", "tts", "s2v", "image", "video")
+        and item.get("reuse_llm_key")
+        and not api_key
+    ):
         api_key = config.get("llm", {}).get("api_key", "")
     if section == "embedding" and item.get("reuse_vlm_key") and not api_key:
         api_key = config.get("vlm", {}).get("api_key", "") or config.get(
@@ -1476,7 +1480,7 @@ async def test_model_connection(
     item = getattr(loaded, body.type)
     fallback_api_key = item.api_key
     if (
-        body.type in ("asr", "tts", "s2v")
+        body.type in ("asr", "tts", "s2v", "image", "video")
         and getattr(item, "reuse_llm_key", False)
         and not fallback_api_key
     ):

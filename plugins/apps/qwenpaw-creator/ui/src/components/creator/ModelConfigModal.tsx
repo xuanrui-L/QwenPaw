@@ -1216,7 +1216,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       const hasKey =
         (type === "asr" && config.asr.reuse_llm_key) ||
         (type === "tts" && config.tts.reuse_llm_key) ||
-        (type === "s2v" && config.s2v.reuse_llm_key)
+        (type === "s2v" && config.s2v.reuse_llm_key) ||
+        (type === "image" && config.image.reuse_llm_key) ||
+        (type === "video" && config.video.reuse_llm_key)
           ? hasUsableApiKey(config.llm)
           : type === "embedding" && config.embedding.reuse_vlm_key
           ? hasUsableApiKey(config.vlm.use_llm ? config.llm : config.vlm) ||
@@ -1234,9 +1236,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
         if (
           (type === "asr" && config.asr.reuse_llm_key) ||
           (type === "tts" && config.tts.reuse_llm_key) ||
-          (type === "s2v" && config.s2v.reuse_llm_key)
+          (type === "s2v" && config.s2v.reuse_llm_key) ||
+          (type === "image" && config.image.reuse_llm_key) ||
+          (type === "video" && config.video.reuse_llm_key)
         ) {
-          // ASR/TTS/S2V can reuse the LLM API key (same DashScope credential).
+          // ASR/TTS/S2V/Image/Video can reuse the LLM API key (same
+          // DashScope credential).
           testApiKey = await resolveRealApiKey("llm", config.llm);
         } else if (type === "embedding" && config.embedding.reuse_vlm_key) {
           // Embedding reuses the VLM key (which may itself reuse the LLM).
