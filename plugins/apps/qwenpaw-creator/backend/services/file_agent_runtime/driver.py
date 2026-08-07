@@ -1258,6 +1258,15 @@ class FileCreatorAgentRuntime:
                 return None
         elif run.status not in TERMINAL_AGENT_RUN_STATUSES:
             return None
+        elif (
+            datetime.now(UTC) - run.updated_at
+        ).total_seconds() < self._ORPHAN_RUN_GRACE_SECONDS:
+            # A run that just reached its terminal status is almost always
+            # a live owner between its final transition and its own
+            # clear_active_run — stealing the lease in that window fails
+            # the owner's cleanup for nothing. True crash leftovers stay
+            # stuck far longer than the grace period.
+            return None
         try:
             return await asyncio.to_thread(
                 self.sessions.clear_active_run,
@@ -1669,17 +1678,32 @@ class FileCreatorAgentRuntime:
                     else CreatorGoalStatus.COMPLETED
                 ),
             )
-            await asyncio.to_thread(
-                self.sessions.clear_active_run,
-                project_id,
-                session.session_id,
-                expected_run_id=run_id,
-                status=(
-                    CreatorSessionStatus.PENDING_REVIEW
-                    if needs_review
-                    else CreatorSessionStatus.IDLE
-                ),
-            )
+            try:
+                await asyncio.to_thread(
+                    self.sessions.clear_active_run,
+                    project_id,
+                    session.session_id,
+                    expected_run_id=run_id,
+                    status=(
+                        CreatorSessionStatus.PENDING_REVIEW
+                        if needs_review
+                        else CreatorSessionStatus.IDLE
+                    ),
+                )
+            except SessionStateConflict as exc:
+                # A sibling reconciler (another process on this runtime
+                # root) already observed the terminal run record and
+                # released the session first. The outcome is equivalent —
+                # the run succeeded and the lease is free — so failing the
+                # whole run here would flip a finished Goal to FAILED over
+                # a no-op.
+                logger.warning(
+                    "session lease already released after success: "
+                    "project=%s run=%s: %s",
+                    project_id,
+                    run_id,
+                    exc,
+                )
             await self._event(
                 project_id,
                 session.session_id,
