@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from pathlib import Path
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -22,6 +23,10 @@ from services.media_files.ffmpeg import ffmpeg_readiness
 from services.media_files.keyframe_cache import (
     materialize_keyframe,
     verified_indexed_path,
+)
+from services.media_files.motion_engine import (
+    referenced_vendor_filenames,
+    resolve_vendor_files,
 )
 from services.media_files.motion_overlay import render_motion_poster
 from services.project_files.assets import AssetFileError, AssetFileStore
@@ -419,6 +424,100 @@ async def motion_document_poster(
         headers={
             "Cache-Control": "public, max-age=31536000, immutable",
             "ETag": f'"poster:{indexed.sha256}:{actual_width}x{actual_height}"',
+        },
+    )
+
+
+# Host->document bridge for the sandboxed live-preview iframe: the paused
+# GSAP timeline never advances on its own, so the preview host drives it by
+# posting seek messages the same way the render worker drives __hf.seek.
+_PREVIEW_SEEK_BRIDGE = """
+<script>
+window.addEventListener('message', function (event) {
+  var data = event.data || {};
+  if (data.type !== 'qwenpaw-motion-seek') return;
+  var seconds = Number(data.seconds) || 0;
+  var proto = window.__hf;
+  if (proto && typeof proto.seek === 'function') {
+    try { proto.seek(seconds, { suppressEvents: true }); } catch (error) {}
+  }
+  var animations = document.getAnimations
+    ? document.getAnimations({ subtree: true })
+    : [];
+  for (var i = 0; i < animations.length; i++) {
+    try { animations[i].currentTime = seconds * 1000; } catch (error) {}
+  }
+});
+try { parent.postMessage({ type: 'qwenpaw-motion-ready' }, '*'); } catch (error) {}
+</script>
+"""
+
+
+@router.get("/media/motion-documents/{file_id}/preview")
+async def motion_document_preview(
+    file_id: str,
+    services: CreatorFileServices = Depends(project_file_services),
+) -> Response:
+    """Self-contained playable copy of one html_js motion document.
+
+    The hyperframes-style same-source preview: the very document the
+    render worker captures also runs in the frontend, inside an iframe
+    sandboxed to ``allow-scripts`` only (opaque origin, no host access).
+    Vendored runtime references are inlined because the sandbox cannot
+    resolve relative ``vendor/`` paths, and a postMessage seek bridge
+    lets the host drive the paused timeline exactly like the renderer.
+    """
+
+    matches: list[tuple[Path, IndexedFile]] = []
+    summaries = await asyncio.to_thread(services.projects.list)
+    for summary in summaries:
+        match = await asyncio.to_thread(
+            _motion_document_in_project,
+            services,
+            project_id=summary.project_id,
+            file_id=file_id,
+        )
+        if match is not None:
+            matches.append(match)
+    if not matches:
+        raise NotFoundError("motion 文档不存在")
+    project_root, indexed = matches[0]
+
+    def build_preview() -> str:
+        try:
+            with AssetFileStore(project_root).open_verified(
+                indexed,
+            ) as stream:
+                html = stream.read().decode("utf-8")
+        except AssetFileError as error:
+            raise StorageIntegrityError(str(error)) from error
+        for filename, path in resolve_vendor_files(
+            referenced_vendor_filenames(html),
+        ).items():
+            body = Path(path).read_text(encoding="utf-8")
+            html = re.sub(
+                rf"<script\s+src=[\"']vendor/{re.escape(filename)}[\"']\s*>\s*</script>",
+                lambda _m, body=body: f"<script>{body}</script>",
+                html,
+                count=1,
+            )
+        if "</body>" in html:
+            return html.replace("</body>", _PREVIEW_SEEK_BRIDGE + "</body>", 1)
+        return html + _PREVIEW_SEEK_BRIDGE
+
+    payload = await asyncio.to_thread(build_preview)
+    return Response(
+        payload,
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": f'"preview:{indexed.sha256}"',
+            # The document runs in an opaque-origin sandbox; this CSP is a
+            # second fence: inline script/style only, no network at all.
+            "Content-Security-Policy": (
+                "default-src 'none'; script-src 'unsafe-inline'; "
+                "style-src 'unsafe-inline'; img-src data:; font-src data:"
+            ),
         },
     )
 

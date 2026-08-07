@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from html import escape
+from collections.abc import Mapping
 import math
 import re
 
@@ -117,15 +118,20 @@ def _document(
     duration: float,
     *,
     exit_style: str = "soft_fade",
+    full_bleed: bool = False,
 ) -> str:
     register = _HF_REGISTER.replace("%DUR%", f"{duration:.3f}")
     # data-motion-exit hands the ending to the renderer-managed exit (an
     # alpha fade over the last 15% of the output window): cards and
     # decorations leave gracefully instead of hard-cutting, while the
     # timeline itself keeps a fully visible final state for the probes.
+    # Caption/decoration cards keep the 8% root inset (entrance travel
+    # space inside their overlay box); full-canvas scene documents ARE
+    # the picture and must flood the whole viewport instead.
+    root_css = "#root{position:absolute;inset:0;}" if full_bleed else ""
     return (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>\n'
-        f"{_BASE_CSS}\n{css}\n</style></head>"
+        f"{_BASE_CSS}\n{root_css}\n{css}\n</style></head>"
         f'<body><div id="root" data-motion-exit="{exit_style}">{body}</div>\n'
         '<script src="vendor/gsap.min.js"></script>\n'
         f"<script>\nvar tl = gsap.timeline({{ paused: true }});\n{script}\n{register}\n</script></body></html>"
@@ -389,6 +395,168 @@ def render_caption_blueprint(
     )
 
 
+# Latin runs allowed inside otherwise-Chinese teaching copy: standard
+# math function names that legitimately appear in derivations.
+_MATH_LATIN_TOKENS = frozenset(
+    {
+        "sin",
+        "cos",
+        "tan",
+        "cot",
+        "sec",
+        "csc",
+        "log",
+        "ln",
+        "lim",
+        "exp",
+        "sqrt",
+        "abs",
+        "max",
+        "min",
+        "mod",
+    },
+)
+_LATIN_RUN = re.compile(r"[A-Za-z]{3,}")
+
+
+def require_chinese_copy(value: str, slot: str) -> str:
+    """Reject teaching copy that drifted into English.
+
+    Single-letter variables (x, y) and math function names pass; any
+    other run of 3+ latin letters ("PREVIOUS", "Step") is a language
+    drift and fails closed so it can never reach the final cut.
+    """
+
+    for run in _LATIN_RUN.findall(value):
+        if run.lower() not in _MATH_LATIN_TOKENS:
+            raise ValueError(
+                f"教学卡文案必须使用中文：{slot} 中出现了英文词「{run}」",
+            )
+    return value.strip()
+
+
+def _scene_edu_step_card(
+    content: Mapping[str, object],
+    palette: BlueprintPalette,
+) -> tuple[str, float]:
+    """教学推导卡：确定性全屏场景骨架，内容只填槽位。
+
+    蒸馏自 edu-agent 的 Aurora Scholar 设计系统：满屏淡雅渐变背景（无
+    外边距，天然满足 coverage 守卫）+ 实心白板 + 步骤徽章 + 上一步
+    回顾条 + 推导行 + 结果高亮框；所有固定标签（“上一步”“得到”）写死
+    在模板里，VLM 只产内容文案，英文漂移在槽位校验处 fail-closed。
+    底部 18% 为字幕保留区。
+    """
+
+    del palette  # Aurora Scholar 自带固定配色，不随主题漂移
+    badge = require_chinese_copy(str(content.get("badge") or ""), "badge")
+    title = require_chinese_copy(str(content.get("title") or ""), "title")
+    previous = require_chinese_copy(
+        str(content.get("previous") or ""),
+        "previous",
+    )
+    operation = require_chinese_copy(
+        str(content.get("operation") or ""),
+        "operation",
+    )
+    raw_lines = content.get("lines") or []
+    if not isinstance(raw_lines, (list, tuple)):
+        raise ValueError("lines 必须是字符串列表")
+    lines = [
+        require_chinese_copy(str(line), f"lines[{index}]")
+        for index, line in enumerate(raw_lines)
+        if str(line).strip()
+    ]
+    result = require_chinese_copy(str(content.get("result") or ""), "result")
+    if not (title or lines or result):
+        raise ValueError("教学卡至少需要 title、lines 或 result 之一")
+
+    parts: list[str] = []
+    if badge:
+        parts.append(f"<div class='badge'>{escape(badge)}</div>")
+    if title:
+        parts.append(f"<div class='title'>{escape(title)}</div>")
+    if previous:
+        parts.append(
+            "<div class='prev'><span class='prev-tag'>上一步</span>"
+            f"<span class='prev-math math'>{escape(previous)}</span></div>",
+        )
+    if operation:
+        parts.append(f"<div class='op'>{escape(operation)}</div>")
+    if lines:
+        rows = "".join(
+            f"<div class='row'><i class='dot'>{index + 1}</i>"
+            f"<span class='math'>{escape(line)}</span></div>"
+            for index, line in enumerate(lines)
+        )
+        parts.append(f"<div class='rows'>{rows}</div>")
+    if result:
+        parts.append(
+            "<div class='result'><span class='result-tag'>得到</span>"
+            f"<span class='result-math math'>{escape(result)}</span></div>",
+        )
+    css = """
+html,body{width:100%;height:100%;margin:0;overflow:hidden}
+.stage{position:absolute;inset:0;background:linear-gradient(160deg,#f8fafc 0%,#eef2ff 55%,#e0e7ff 100%);font-family:"PingFang SC","Noto Sans SC",sans-serif}
+.aurora{position:absolute;border-radius:50%;filter:blur(2vh)}
+.a1{left:-6%;top:-10%;width:44%;height:44%;background:radial-gradient(closest-side,rgba(99,102,241,.18),transparent 72%)}
+.a2{right:-8%;bottom:6%;width:52%;height:52%;background:radial-gradient(closest-side,rgba(6,182,212,.14),transparent 74%)}
+.panel{position:absolute;left:8%;right:8%;top:7%;bottom:20%;background:#ffffff;border:.35vh solid rgba(99,102,241,.28);border-top:.55vh solid rgba(99,102,241,.24);border-radius:2.6vh;box-shadow:0 .6vh 2.4vh rgba(99,102,241,.08),0 2.4vh 7vh rgba(99,102,241,.12);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2.6vh;padding:3.5vh 5vw}
+.badge{padding:1.1vh 3.2vh;border-radius:99px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-weight:700;font-size:3.4vh;letter-spacing:.08em}
+.title{font-weight:700;font-size:6.4vh;color:#0f172a}
+.prev{display:flex;align-items:center;gap:1.6vh;padding:1.2vh 2.6vh;border-radius:1.6vh;background:#f1f5f9;color:#64748b;font-size:3.4vh}
+.prev-tag{font-size:2.6vh;color:#94a3b8}
+.op{padding:1.2vh 2.8vh;border-radius:1.6vh;border:.25vh solid rgba(99,102,241,.35);color:#6366f1;font-weight:600;font-size:3.2vh}
+.rows{display:flex;flex-direction:column;gap:1.8vh;align-items:flex-start}
+.row{display:flex;align-items:center;gap:1.8vh}
+.dot{width:4.6vh;height:4.6vh;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-style:normal;font-weight:700;font-size:2.6vh;display:flex;align-items:center;justify-content:center;flex:none}
+.math{font-family:Georgia,"Times New Roman","Songti SC",serif;font-size:5vh;color:#0f172a;letter-spacing:.04em}
+.result{display:flex;align-items:center;gap:1.8vh;padding:1.6vh 3.2vh;border-radius:1.8vh;background:#ecfdf5;border:.3vh solid rgba(16,185,129,.5)}
+.result-tag{font-size:2.8vh;color:#059669;font-weight:600}
+.result-math{font-size:6vh;color:#047857;font-weight:700}
+"""
+    body = (
+        "<div class='stage'><i class='aurora a1'></i><i class='aurora a2'></i>"
+        f"<div class='panel'>{''.join(parts)}</div></div>"
+    )
+    script = """
+tl.fromTo('.stage',{autoAlpha:.6},{autoAlpha:1,duration:.4,ease:'power1.out'},0);
+tl.fromTo('.panel',{autoAlpha:.4,y:'2.4%'},{autoAlpha:1,y:'0%',duration:.6,ease:'power3.out'},0);
+tl.fromTo('.badge',{autoAlpha:.4,scale:.85},{autoAlpha:1,scale:1,duration:.5,ease:'back.out(1.4)'},.15);
+tl.fromTo('.prev,.op,.title',{autoAlpha:.35,y:'12%'},{autoAlpha:1,y:'0%',duration:.5,stagger:.12,ease:'power3.out'},.25);
+tl.fromTo('.row',{autoAlpha:.3,x:'-2%'},{autoAlpha:1,x:'0%',duration:.5,stagger:.18,ease:'power3.out'},.45);
+tl.fromTo('.result',{autoAlpha:.35,scale:.94},{autoAlpha:1,scale:1,duration:.6,ease:'back.out(1.4)'},1.0);
+"""
+    return (
+        _document(css, body, script, 2.2, exit_style="none", full_bleed=True),
+        2.2,
+    )
+
+
+SCENE_BLUEPRINTS = {
+    "edu_step_card": _scene_edu_step_card,
+}
+
+
+def render_scene_blueprint(
+    blueprint: str,
+    content: Mapping[str, object],
+    *,
+    palette: object = None,
+) -> tuple[str, float]:
+    """Render one full-canvas scene blueprint; ``(html, hf duration)``.
+
+    Scene blueprints are the caption-blueprint philosophy applied to the
+    segment picture itself: the skeleton (layout, colors, fixed Chinese
+    labels, choreography) is deterministic code and the model only
+    supplies content slots, so styling can never drift per segment.
+    """
+
+    if blueprint not in SCENE_BLUEPRINTS:
+        raise ValueError(f"unknown scene blueprint: {blueprint!r}")
+    return SCENE_BLUEPRINTS[blueprint](content, validated_palette(palette))
+
+
 def render_decoration_blueprint(
     blueprint: str,
     *,
@@ -410,9 +578,12 @@ __all__ = [
     "CAPTION_BLUEPRINTS",
     "CAPTION_BLUEPRINT_ORDER",
     "DECORATION_BLUEPRINTS",
+    "SCENE_BLUEPRINTS",
     "BlueprintPalette",
     "blueprint_catalog_text",
     "render_caption_blueprint",
     "render_decoration_blueprint",
+    "render_scene_blueprint",
+    "require_chinese_copy",
     "validated_palette",
 ]

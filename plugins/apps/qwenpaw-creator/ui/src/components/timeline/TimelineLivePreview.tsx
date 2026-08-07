@@ -17,6 +17,7 @@ import type {
 import {
   fetchMotionDocument,
   getMotionDocumentPosterUrl,
+  getMotionDocumentPreviewUrl,
 } from "@/api/creator/media";
 import type { ElementPlayback } from "@/selectors/elementPlaybackSelectors";
 import {
@@ -371,6 +372,7 @@ function MotionOverlayLayer({
   const isJsTimeline = motion?.format === "html_js";
   const posterFileId = isJsTimeline ? motion?.html_file_id ?? null : null;
   const [posterFailed, setPosterFailed] = useState(false);
+  const [playerBooted, setPlayerBooted] = useState(false);
   const { html, failed: htmlFailed } = useMotionDocumentHtml(
     isJsTimeline ? null : motion ?? null,
   );
@@ -402,6 +404,16 @@ function MotionOverlayLayer({
   };
 
   useEffect(syncAnimations, [playing, pausedSeekTimeMs]);
+  // Same-source playable copy: drive the sandboxed document's paused
+  // timeline over the postMessage bridge, one seek per playhead change
+  // (the render worker drives the very same __hf.seek protocol).
+  useEffect(() => {
+    if (!isJsTimeline || !playerBooted) return;
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: "qwenpaw-motion-seek", seconds: localTimeMs / 1000 },
+      "*",
+    );
+  }, [isJsTimeline, playerBooted, localTimeMs]);
   useEffect(() => {
     return () => onVisualReadyChange(visualKey, false);
   }, [onVisualReadyChange, visualKey]);
@@ -433,28 +445,47 @@ function MotionOverlayLayer({
     if (!posterFileId || posterFailed) return null;
     const motif = motionMotif(motion, null);
     if (motif && RETIRED_MOTION_MOTIFS.has(motif)) return null;
+    const layerStyle = {
+      ...boxStyle,
+      opacity:
+        exitStyle === "none" ? baseOpacity : baseOpacity * (1 - exitProgress),
+      transform: `${boxStyle.transform ?? ""} scale(${exitScale})`.trim(),
+    };
     return (
-      <img
-        data-live-motion-overlay={element.element_id}
-        data-live-motion-poster="true"
-        src={getMotionDocumentPosterUrl(
-          posterFileId,
-          Math.round(1280 * (element.location?.width ?? 1)),
-          Math.round(720 * (element.location?.height ?? 1)),
-        )}
-        alt={element.label || "动态动效"}
-        onLoad={() => onVisualReadyChange(visualKey, true)}
-        onError={() => setPosterFailed(true)}
-        className="pointer-events-none absolute border-0 bg-transparent"
-        style={{
-          ...boxStyle,
-          opacity:
-            exitStyle === "none"
-              ? baseOpacity
-              : baseOpacity * (1 - exitProgress),
-          transform: `${boxStyle.transform ?? ""} scale(${exitScale})`.trim(),
-        }}
-      />
+      <>
+        {/* Poster underlay: paints immediately and survives an iframe
+            that fails to boot, so readiness never hangs on scriptableness. */}
+        <img
+          data-live-motion-overlay={element.element_id}
+          data-live-motion-poster="true"
+          src={getMotionDocumentPosterUrl(
+            posterFileId,
+            Math.round(1280 * (element.location?.width ?? 1)),
+            Math.round(720 * (element.location?.height ?? 1)),
+          )}
+          alt={element.label || "动态动效"}
+          onLoad={() => onVisualReadyChange(visualKey, true)}
+          onError={() => setPosterFailed(true)}
+          className="pointer-events-none absolute border-0 bg-transparent"
+          style={layerStyle}
+        />
+        {/* Same-source playable copy (hyperframes-style): the document
+            the renderer captures also runs here, in an opaque-origin
+            sandbox, driven frame-by-frame over the postMessage bridge. */}
+        <iframe
+          ref={iframeRef}
+          data-live-motion-player={element.element_id}
+          src={getMotionDocumentPreviewUrl(posterFileId)}
+          title={element.label || t("livePreview.motionEffect")}
+          sandbox="allow-scripts"
+          onLoad={() => setPlayerBooted(true)}
+          className="pointer-events-none absolute border-0 bg-transparent"
+          style={{
+            ...layerStyle,
+            visibility: playerBooted ? undefined : "hidden",
+          }}
+        />
+      </>
     );
   }
   if (!html) return null;

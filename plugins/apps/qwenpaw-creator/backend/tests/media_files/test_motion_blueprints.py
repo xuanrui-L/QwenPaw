@@ -193,3 +193,59 @@ class TestBlueprintDesignValidation:
             canvas_size=(1280, 720),
         )
         assert not isinstance(design, str)
+
+
+class TestSceneBlueprints:
+    """edu_step_card: deterministic skeleton, Chinese-only copy slots."""
+
+    _CONTENT = {
+        "badge": "步骤一",
+        "title": "去括号",
+        "previous": "6(x-1)=24",
+        "operation": "两边展开括号",
+        "lines": ["6×x=6x", "6×(-1)=-6"],
+        "result": "6x-6=24",
+    }
+
+    def test_renders_deterministically_with_fixed_chinese_labels(self):
+        from services.media_files.motion_blueprints import (
+            render_scene_blueprint,
+        )
+
+        first, duration = render_scene_blueprint(
+            "edu_step_card",
+            self._CONTENT,
+        )
+        again, _ = render_scene_blueprint("edu_step_card", self._CONTENT)
+        assert first == again
+        assert duration > 0
+        # Fixed labels live in the template, never in model output.
+        assert "上一步" in first
+        assert "得到" in first
+        # Full-bleed stage: the coverage gate needs an edge-to-edge root.
+        assert "inset:0" in first
+        assert 'data-motion-exit="none"' in first
+
+    def test_rejects_english_copy_in_any_slot(self):
+        from services.media_files.motion_blueprints import (
+            render_scene_blueprint,
+        )
+
+        for slot, poisoned in (
+            ("title", "PREVIOUS STEP"),
+            ("lines", ["Move -6 to right"]),
+            ("result", "Verification Process"),
+        ):
+            content = {**self._CONTENT, slot: poisoned}
+            with pytest.raises(ValueError, match="中文"):
+                render_scene_blueprint("edu_step_card", content)
+
+    def test_math_tokens_and_variables_pass(self):
+        from services.media_files.motion_blueprints import (
+            require_chinese_copy,
+        )
+
+        assert require_chinese_copy("sin(x)+cos(y)=1", "line")
+        assert require_chinese_copy("6(x-1)=24", "line")
+        with pytest.raises(ValueError, match="Step"):
+            require_chinese_copy("Step 2 移项", "line")

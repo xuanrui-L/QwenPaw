@@ -635,6 +635,17 @@ _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
                 "elementIds 限定。"
             ),
         },
+        "sceneStyle": {
+            "type": "string",
+            "enum": ["generative", "edu_steps"],
+            "description": (
+                "全画幅 motion_clip 场景的设计策略：generative（默认）由模型"
+                "自由生成 HTML；edu_steps 用确定性教学推导卡模板（满屏版式、"
+                "步骤徽章/上一步/推导行/结果高亮固定骨架），模型只填内容文案，"
+                "全片风格绝对一致且文案强制中文；数学/物理等分步讲解视频必须用 "
+                "edu_steps。"
+            ),
+        },
     },
     (),
 )

@@ -442,6 +442,32 @@ describe("TimelineLivePreview", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("mounts a sandboxed same-source player alongside the html_js poster", () => {
+    const project = cloneProject();
+    const overlay =
+      project.timelines.items["timeline:main"].elements_by_id["overlay-title"];
+    if (overlay.creation.type !== "overlay" || !overlay.creation.motion) {
+      throw new Error("expected generated motion overlay");
+    }
+    overlay.creation.motion.format = "html_js";
+    overlay.creation.motion.html = null;
+    overlay.creation.motion.html_file_id = "file-motion-player-test";
+
+    const { container } = renderPreview(project, 2000);
+    const player = container.querySelector(
+      'iframe[data-live-motion-player="overlay-title"]',
+    ) as HTMLIFrameElement;
+    expect(player).toBeInTheDocument();
+    // Opaque-origin sandbox: scripts may run, nothing else.
+    expect(player.getAttribute("sandbox")).toBe("allow-scripts");
+    expect(player.getAttribute("src")).toContain(
+      "/media/motion-documents/file-motion-player-test/preview",
+    );
+    // Hidden until the document boots; the poster underlay carries the
+    // first paint.
+    expect(player.style.visibility).toBe("hidden");
+  });
+
   it("fails closed for html_js without a poster", () => {
     const project = cloneProject();
     const overlay =
