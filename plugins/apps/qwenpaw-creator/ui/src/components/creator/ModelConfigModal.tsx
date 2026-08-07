@@ -1933,7 +1933,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     const item = config[type] as ModelConfigItem;
     const meta = CARD_META.find((card) => card.type === type);
     const busy =
-      (type === "vlm" && testingVlmMultimodal) || testing[type] === true;
+      (type === "vlm" && testingVlmMultimodal === true) ||
+      testing[type] === true;
     return (
       <>
         <label className="desktop-toggle" onClick={(e) => e.stopPropagation()}>
