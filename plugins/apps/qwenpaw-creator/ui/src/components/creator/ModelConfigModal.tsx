@@ -49,7 +49,7 @@ import type {
 } from "@/contracts/creator";
 import ModelSetupGuide from "@/components/onboarding/ModelSetupGuide";
 
-const LLM_PROTOCOLS = [
+export const LLM_PROTOCOLS = [
   "Anthropic Claude",
   "DashScope（百炼）",
   "Aliyun Token Plan",
@@ -68,7 +68,7 @@ const LLM_PROTOCOLS = [
   "小米 MiMo",
   "自定义",
 ];
-const VLM_PROTOCOLS = [
+export const VLM_PROTOCOLS = [
   "Anthropic Claude",
   "DashScope（百炼）",
   "Aliyun Token Plan",
@@ -87,22 +87,25 @@ const VLM_PROTOCOLS = [
   "小米 MiMo",
   "自定义",
 ];
-const ASR_PROTOCOLS = [
+export const ASR_PROTOCOLS = [
   "DashScope Fun-ASR",
   "DashScope Qwen3-ASR",
   "OpenAI Whisper",
 ];
-const TTS_PROTOCOLS = ["DashScope（百炼）"];
-const S2V_PROTOCOLS = ["DashScope（百炼）"];
-const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
-const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
-const VIDEO_PROTOCOLS = ["DashScope（百炼）", "Volcano Engine（火山引擎）"];
+export const TTS_PROTOCOLS = ["DashScope（百炼）"];
+export const S2V_PROTOCOLS = ["DashScope（百炼）"];
+export const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
+export const IMAGE_PROTOCOLS = ["OpenAI 协议", "DashScope（百炼）"];
+export const VIDEO_PROTOCOLS = [
+  "DashScope（百炼）",
+  "Volcano Engine（火山引擎）",
+];
 
 // Display-only labels for the protocol dropdowns: the stored protocol
 // strings double as backend match keys (substring checks in the host),
 // so only the rendered label translates while the value stays verbatim.
 // Unknown/custom protocols fall back to their raw value.
-const PROTOCOL_LABEL_KEYS: Record<string, string> = {
+export const PROTOCOL_LABEL_KEYS: Record<string, string> = {
   "Anthropic Claude": "modelConfig.protocols.anthropicClaude",
   "DashScope（百炼）": "modelConfig.protocols.dashscope",
   "Aliyun Token Plan": "modelConfig.protocols.aliyunTokenPlan",

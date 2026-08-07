@@ -1,7 +1,19 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import ModelConfigModal from "../ModelConfigModal";
+import ModelConfigModal, {
+  ASR_PROTOCOLS,
+  EMBEDDING_PROTOCOLS,
+  IMAGE_PROTOCOLS,
+  LLM_PROTOCOLS,
+  PROTOCOL_LABEL_KEYS,
+  S2V_PROTOCOLS,
+  TTS_PROTOCOLS,
+  VIDEO_PROTOCOLS,
+  VLM_PROTOCOLS,
+} from "../ModelConfigModal";
 import { installMockFetch } from "@/test/mockFetch";
+import en from "@/locales/en.json";
+import zh from "@/locales/zh.json";
 
 const emptyConfig = {
   llm: {
@@ -467,5 +479,36 @@ describe("ModelConfigModal configuration lifecycle", () => {
       expect(screen.getByText("人像检测模型（可选）")).toBeInTheDocument(),
     );
     expect(screen.getByText(/提交前会先跑免费的人像检测/)).toBeInTheDocument();
+  });
+
+  it("maps every protocol option to a label key present in both locales", () => {
+    // Guards the display-label map against drift: a protocol added to any
+    // dropdown array without a PROTOCOL_LABEL_KEYS entry would silently fall
+    // back to the raw (Chinese) value in English mode.
+    const protocols = new Set([
+      ...LLM_PROTOCOLS,
+      ...VLM_PROTOCOLS,
+      ...ASR_PROTOCOLS,
+      ...TTS_PROTOCOLS,
+      ...S2V_PROTOCOLS,
+      ...EMBEDDING_PROTOCOLS,
+      ...IMAGE_PROTOCOLS,
+      ...VIDEO_PROTOCOLS,
+    ]);
+    const zhProtocols = zh.modelConfig.protocols as Record<string, string>;
+    const enProtocols = en.modelConfig.protocols as Record<string, string>;
+    for (const protocol of protocols) {
+      const key = PROTOCOL_LABEL_KEYS[protocol];
+      expect(key, `missing label key for protocol "${protocol}"`).toBeTruthy();
+      const leaf = key.split(".").pop()!;
+      expect(
+        zhProtocols[leaf],
+        `missing zh translation for "${protocol}"`,
+      ).toBeTruthy();
+      expect(
+        enProtocols[leaf],
+        `missing en translation for "${protocol}"`,
+      ).toBeTruthy();
+    }
   });
 });
