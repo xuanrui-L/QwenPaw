@@ -785,7 +785,24 @@
     "cancel": "Cancel",
     "jumpToPrompt": "Jump to the Prompt / edit location to be generated, check input before confirming",
     "productionConfirmOrView": "Production confirmation / View generation input",
-    "view": "View"
+    "view": "View",
+    "listSeparator": ", ",
+    "summarySeparator": ": "
+  },
+  "workGraph": {
+    "laneVisual": "Visual Assets",
+    "laneLineup": "Lineup",
+    "laneCompose": "Final Composition",
+    "waitingDeps": "Waiting on {{count}} dependencies",
+    "retry": "Retry",
+    "generate": "Generate",
+    "productionProgress": "Production progress {{done}}/{{total}}",
+    "parallel": "Parallel {{count}}",
+    "mediaCallBudgetTitle": "Paid media generation calls issued / project budget (adjust via agent_runtime.media_call_budget)",
+    "mediaCalls": "Media calls {{used}}/{{budget}}",
+    "progress": "Progress {{done}}/{{total}}",
+    "failed": "Failed {{count}}",
+    "listSeparator": ", "
   },
   "decisionTray": {
     "productionConfirm": "Production Confirm · ",
@@ -890,7 +907,17 @@
     "keepItem": "Keep",
     "undoItem": "Undo",
     "previewUnavailable": "Preview unavailable",
-    "viewGenDetail": "View generation details"
+    "viewGenDetail": "View generation details",
+    "creationTypeR2v": "R2V Footage",
+    "creationTypeT2v": "Text-to-Video",
+    "creationTypeI2v": "First-Frame-to-Video",
+    "creationTypeS2v": "Digital Human Speech",
+    "creationTypeEdit": "Edited Clip",
+    "creationTypeOverlay": "Text/Decoration",
+    "creationTypeTransition": "Transition",
+    "creationTypeAudio": "Audio",
+    "audioGain": "Gain {{gain}}dB",
+    "audioPan": "Pan {{pan}}"
   },
   "rejectionFeedback": {
     "undoContent": "Undo content",

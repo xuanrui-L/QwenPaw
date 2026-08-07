@@ -781,11 +781,28 @@
     "terminate": "终止",
     "currentProject": "当前项目",
     "specialistsFailed": "项专业制作失败",
+    "listSeparator": "、",
+    "summarySeparator": "：",
     "continue": "继续",
     "cancel": "取消",
     "jumpToPrompt": "跳转到将要生成的 Prompt / 编辑位置，确认前先检查输入",
     "productionConfirmOrView": "生产确认 / 查看生成输入",
     "view": "查看"
+  },
+  "workGraph": {
+    "laneVisual": "视觉资产",
+    "laneLineup": "阵容图",
+    "laneCompose": "最终合成",
+    "waitingDeps": "等待 {{count}} 项依赖",
+    "retry": "重试",
+    "generate": "生成",
+    "productionProgress": "制作进度 {{done}}/{{total}}",
+    "parallel": "并行 {{count}}",
+    "mediaCallBudgetTitle": "已发起的付费媒体生成调用次数 / 项目上限（可在配置 agent_runtime.media_call_budget 调整）",
+    "mediaCalls": "媒体调用 {{used}}/{{budget}}",
+    "progress": "进度 {{done}}/{{total}}",
+    "failed": "失败 {{count}}",
+    "listSeparator": "、"
   },
   "decisionTray": {
     "productionConfirm": "生产确认 · ",
@@ -890,7 +907,17 @@
     "keepItem": "保留",
     "undoItem": "撤销",
     "previewUnavailable": "预览不可用",
-    "viewGenDetail": "查看生成详情"
+    "viewGenDetail": "查看生成详情",
+    "creationTypeR2v": "R2V 画面",
+    "creationTypeT2v": "文本生视频",
+    "creationTypeI2v": "首帧生视频",
+    "creationTypeS2v": "数字人口播",
+    "creationTypeEdit": "剪辑片段",
+    "creationTypeOverlay": "文字/装饰",
+    "creationTypeTransition": "转场",
+    "creationTypeAudio": "音频",
+    "audioGain": "音量 {{gain}}dB",
+    "audioPan": "声像 {{pan}}"
   },
   "rejectionFeedback": {
     "undoContent": "撤销内容",
