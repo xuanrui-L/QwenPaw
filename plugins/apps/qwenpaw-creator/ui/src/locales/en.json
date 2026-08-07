@@ -1292,7 +1292,13 @@
       "complete_current_change": "Complete check",
       "ground_prompt_context": "Verify frame context",
       "transcribe_source_audio": "Audio transcription",
-      "commit_source_intelligence": "Write analysis results"
+      "commit_source_intelligence": "Write analysis results",
+      "s2v_generation": "Generate lip-sync video",
+      "tts_generation": "Synthesize speech",
+      "create_character_voice": "Create character voice",
+      "read_document": "Read document",
+      "query_source_memory": "Query source memory",
+      "design_motion_overlays": "Design motion overlays"
     },
     "roles": {
       "source_intelligence_agent": "Source Analysis",
@@ -1305,6 +1311,7 @@
       "review_consistency_agent": "Consistency Check"
     },
     "specialistProduction": "Specialist Production",
+    "unknownTool": "Task",
     "toolRunning": {
       "read_project": "Viewing project...",
       "read_project_file": "Reading source analysis...",
@@ -1315,6 +1322,12 @@
       "source_intelligence": "Analyzing source...",
       "transcribe_source_audio": "Transcribing audio...",
       "commit_source_intelligence": "Writing analysis results...",
+      "read_document": "Reading document...",
+      "query_source_memory": "Querying source memory...",
+      "tts_generation": "Synthesizing speech...",
+      "create_character_voice": "Creating character voice...",
+      "s2v_generation": "Generating lip-sync video...",
+      "design_motion_overlays": "Designing motion overlays...",
       "ai_edit": "Executing edit...",
       "read_file": "Reading file...",
       "write_file": "Writing file...",

@@ -1292,7 +1292,13 @@
       "complete_current_change": "完成检查",
       "ground_prompt_context": "核对画面上下文",
       "transcribe_source_audio": "音频转写",
-      "commit_source_intelligence": "写入理解结果"
+      "commit_source_intelligence": "写入理解结果",
+      "s2v_generation": "生成口型视频",
+      "tts_generation": "合成语音",
+      "create_character_voice": "创建角色音色",
+      "read_document": "读取文档",
+      "query_source_memory": "查询素材记忆",
+      "design_motion_overlays": "设计动态字幕"
     },
     "roles": {
       "source_intelligence_agent": "素材理解",
@@ -1305,6 +1311,7 @@
       "review_consistency_agent": "一致性检查"
     },
     "specialistProduction": "专业制作",
+    "unknownTool": "任务",
     "toolRunning": {
       "read_project": "正在查看项目…",
       "read_project_file": "正在阅读素材分析…",
@@ -1315,6 +1322,12 @@
       "source_intelligence": "素材理解中…",
       "transcribe_source_audio": "素材音频转写中…",
       "commit_source_intelligence": "素材理解写入中…",
+      "read_document": "正在读取文档…",
+      "query_source_memory": "正在查询素材记忆…",
+      "tts_generation": "语音合成中…",
+      "create_character_voice": "角色音色创建中…",
+      "s2v_generation": "口型视频生成中…",
+      "design_motion_overlays": "动态字幕设计中…",
       "ai_edit": "剪辑执行中…",
       "read_file": "正在读取文件…",
       "write_file": "正在写入文件…",
