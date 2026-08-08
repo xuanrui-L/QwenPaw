@@ -431,6 +431,9 @@ async def motion_document_poster(
 # Host->document bridge for the sandboxed live-preview iframe: the paused
 # GSAP timeline never advances on its own, so the preview host drives it by
 # posting seek messages the same way the render worker drives __hf.seek.
+# targetOrigin is deliberately '*': the document runs in an opaque origin
+# (sandbox without allow-same-origin), which no concrete origin string can
+# match; the payload carries nothing but a type tag and a timestamp.
 _PREVIEW_SEEK_BRIDGE = """
 <script>
 window.addEventListener('message', function (event) {
@@ -501,6 +504,11 @@ async def motion_document_preview(
                 html,
                 count=1,
             )
+        # Fail closed on a leftover vendor reference: the sandboxed iframe
+        # cannot resolve relative paths, so an uninlined runtime would boot
+        # a silently dead document instead of a playable one.
+        if re.search(r"<script\s+src=[\"']vendor/", html):
+            raise StorageIntegrityError("动效文档的运行时引用未能内联，无法预览")
         if "</body>" in html:
             return html.replace("</body>", _PREVIEW_SEEK_BRIDGE + "</body>", 1)
         return html + _PREVIEW_SEEK_BRIDGE

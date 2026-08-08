@@ -345,7 +345,11 @@ class FfmpegLocalMediaRunner:
             def _report_done(index: int) -> None:
                 # Progress ticks fire in completion order; the completed
                 # count is monotonic because every tick only decrements
-                # the shared occurrence counter.
+                # the shared occurrence counter. Thread-safety note: this
+                # closure runs exclusively on the coordinating thread (the
+                # serial loop, or the as_completed() consumer) — worker
+                # threads only execute _render_one_segment and never touch
+                # the counter, so no lock is needed here.
                 if spec.on_element_done is None:
                     return
                 for element_id in input_element_ids[index]:
