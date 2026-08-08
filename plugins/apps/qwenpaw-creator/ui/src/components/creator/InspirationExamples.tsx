@@ -149,9 +149,9 @@ export default function InspirationExamples() {
                   {progress && (
                     <p className="mt-1 text-[11px] leading-4 text-[#a3a3a3]">
                       {progress.totalBytes && progress.totalBytes > 0
-                        ? `${formatBytes(progress.receivedBytes)} / ${formatBytes(
-                            progress.totalBytes,
-                          )}`
+                        ? `${formatBytes(
+                            progress.receivedBytes,
+                          )} / ${formatBytes(progress.totalBytes)}`
                         : formatBytes(progress.receivedBytes)}
                     </p>
                   )}

@@ -78,7 +78,8 @@ export function useSourceCache(
     loading,
     versions,
     originalsMissing: enabled && versions.some((version) => !version.cached),
-    allCached: enabled && versions.length > 0 && versions.every((v) => v.cached),
+    allCached:
+      enabled && versions.length > 0 && versions.every((v) => v.cached),
     anyDownloading,
     triggering,
     download,

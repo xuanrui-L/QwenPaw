@@ -165,7 +165,9 @@ async def list_examples() -> dict[str, Any]:
 
 
 def _progress_path(data_root: Path, example_id: str) -> Path:
-    return data_root / _PROGRESS_DIR_NAME / f"{_safe_example_id(example_id)}.json"
+    return (
+        data_root / _PROGRESS_DIR_NAME / f"{_safe_example_id(example_id)}.json"
+    )
 
 
 def _safe_example_id(example_id: str) -> str:
@@ -191,7 +193,10 @@ class _ExampleProgressWriter:
     def report(self, received_bytes: int, total_bytes: int | None) -> None:
         now = time.monotonic()
         complete = total_bytes is not None and received_bytes >= total_bytes
-        if not complete and now - self._last_write < _PROGRESS_MIN_INTERVAL_SECONDS:
+        if (
+            not complete
+            and now - self._last_write < _PROGRESS_MIN_INTERVAL_SECONDS
+        ):
             return
         self._last_write = now
         try:

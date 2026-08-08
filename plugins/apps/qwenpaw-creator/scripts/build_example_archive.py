@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
+# pylint: disable=too-many-branches,too-many-statements
 """Build an OSS-hosted inspiration example archive from a real Project.
 
 Only ``backend/examples/manifest.json`` ships inside the plugin; the archive
@@ -242,7 +243,9 @@ def _materialize_remote_source_clips(
     intelligences = assets.get("intelligence_versions_by_id", {})
     ticks_per_second = 1000
     timelines = document.get("timelines", {})
-    timeline_items = timelines.get("items", {}) if isinstance(timelines, dict) else {}
+    timeline_items = (
+        timelines.get("items", {}) if isinstance(timelines, dict) else {}
+    )
     for timeline in timeline_items.values():
         if isinstance(timeline, dict) and timeline.get("ticks_per_second"):
             ticks_per_second = int(timeline["ticks_per_second"])
@@ -356,7 +359,9 @@ def _materialize_remote_source_clips(
         clip_duration = _probe_duration_seconds(clip_path)
         with clip_path.open("rb") as handle:
             digest = hashlib.sha256()
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            # Bind the handle as a default argument so the callable does not
+            # close over the loop variable (pylint cell-var-from-loop).
+            for chunk in iter(lambda h=handle: h.read(1024 * 1024), b""):
                 digest.update(chunk)
         files[file_id] = {
             "file_id": file_id,
@@ -417,9 +422,7 @@ def _materialize_remote_source_clips(
             if not isinstance(intelligence, dict):
                 continue
             clone_identity = f"{file_identity}:intelligence:{intelligence_id}"
-            clone_id = (
-                f"source-intelligence-{uuid5(NAMESPACE_URL, clone_identity).hex}"
-            )
+            clone_id = f"source-intelligence-{uuid5(NAMESPACE_URL, clone_identity).hex}"
             if clone_id not in intelligences:
                 clone = dict(intelligence)
                 clone["intelligence_version_id"] = clone_id

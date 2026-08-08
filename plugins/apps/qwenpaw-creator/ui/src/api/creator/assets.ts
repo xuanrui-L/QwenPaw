@@ -154,7 +154,9 @@ export function downloadSourceCache(
   assetVersionId: string,
 ): Promise<SourceCacheDownloadAccepted> {
   return creatorRequest(
-    `${sourceCachePath(projectId)}/${encodeURIComponent(assetVersionId)}/download`,
+    `${sourceCachePath(projectId)}/${encodeURIComponent(
+      assetVersionId,
+    )}/download`,
     { method: "POST" },
     // Original footage can be gigabytes; give the trigger call a long budget.
     { timeoutMs: 300_000 },
