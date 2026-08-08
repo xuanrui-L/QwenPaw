@@ -457,7 +457,8 @@ def _assemble_model_config(
         # model-config route; surface the offending field as a structured
         # 422 the UI can actually display.
         first_error = exc.errors()[0] if exc.errors() else {}
-        field = ".".join(str(loc) for loc in first_error.get("loc", []))
+        loc = first_error.get("loc")
+        field = ".".join(str(part) for part in loc) if loc else "unknown field"
         message = first_error.get("msg", str(exc))
         raise ValidationError(
             f"模型配置文件不可用: {field} {message}；" "请修正 model_config.json 或重新保存模型配置",
