@@ -33,7 +33,7 @@ from services.project_files.assets import AssetFileError, AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import IndexedFile
 from services.project_files.remote_cache import resolve_remote_cache
-from services.project_files.store import ProjectNotFound
+from services.project_files.store import ProjectNotFound, ProjectStoreError
 from services.runtime_files.execution_store import ProjectExecutionStore
 from utils.paths import media_path_from_url
 
@@ -337,7 +337,9 @@ async def motion_document(
     # immutable 缓存；若项目规模增长，应改为全局 file_id → 项目的索引。
     # discover_project_ids (not list) so bundled example Projects, which are
     # hidden from the user's project shelf, still serve their media.
-    project_ids = await asyncio.to_thread(services.projects.discover_project_ids)
+    project_ids = await asyncio.to_thread(
+        services.projects.discover_project_ids,
+    )
     for project_id in project_ids:
         match = await asyncio.to_thread(
             _motion_document_in_project,
@@ -391,7 +393,9 @@ async def motion_document_poster(
     matches: list[tuple[Path, IndexedFile]] = []
     # discover_project_ids (not list) so bundled example Projects, which are
     # hidden from the user's project shelf, still serve their media.
-    project_ids = await asyncio.to_thread(services.projects.discover_project_ids)
+    project_ids = await asyncio.to_thread(
+        services.projects.discover_project_ids,
+    )
     for project_id in project_ids:
         match = await asyncio.to_thread(
             _motion_document_in_project,
