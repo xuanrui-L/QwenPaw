@@ -359,7 +359,9 @@ def _materialize_remote_source_clips(
         clip_duration = _probe_duration_seconds(clip_path)
         with clip_path.open("rb") as handle:
             digest = hashlib.sha256()
-            while chunk := handle.read(1024 * 1024):
+            # Bind the handle as a default argument so the callable does not
+            # close over the loop variable (pylint cell-var-from-loop).
+            for chunk in iter(lambda h=handle: h.read(1024 * 1024), b""):
                 digest.update(chunk)
         files[file_id] = {
             "file_id": file_id,
