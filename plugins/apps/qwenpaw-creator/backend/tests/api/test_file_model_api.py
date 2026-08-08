@@ -238,6 +238,58 @@ def test_tts_section_survives_unrelated_config_mutations(
     assert reloaded.tts.api_key == "sk-tts"
 
 
+def test_load_drops_unknown_persisted_fields_instead_of_500(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """model_config.json written by another plugin version must still load.
+
+    The schema forbids extra fields, so an unknown key persisted by a newer
+    (or older) build used to escape as a raw pydantic error — an opaque 500
+    on every model-config route, locking users out of the config modal.
+    """
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    config_path = (tmp_path / "config" / "model_config.json").resolve()
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    payload = _config()
+    payload["llm"]["field_from_the_future"] = "surprise"
+    payload["tts"] = {"model_name": "qwen3-tts-flash", "speed": 1.2}
+    payload["self_review"] = {"sync_enabled": True, "retired_tier": False}
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = model_routes.load_model_config(include_environment=False)
+    assert loaded.llm.model_name == "qwen-plus"
+    assert loaded.tts.model_name == "qwen3-tts-flash"
+    assert loaded.self_review.sync_enabled is True
+
+    # A read-modify-write transaction must also survive (saves go through
+    # the same assembly) and rewrite the file without the unknown fields.
+    model_routes.mutate_model_config(lambda config: config)
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "field_from_the_future" not in persisted["llm"]
+    assert "speed" not in persisted["tts"]
+
+
+def test_load_surfaces_invalid_persisted_value_as_validation_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A wrong-typed persisted value must raise the structured 422 error."""
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    config_path = (tmp_path / "config" / "model_config.json").resolve()
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+    payload = _config()
+    payload["llm"]["enabled"] = "definitely-not-a-bool"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="llm.enabled"):
+        model_routes.load_model_config(include_environment=False)
+
+
 def test_real_api_key_supports_every_speech_section(
     tmp_path,
     monkeypatch,

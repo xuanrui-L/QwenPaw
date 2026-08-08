@@ -326,6 +326,32 @@ def _read_raw_config(config_path: Path) -> dict[str, Any]:
     return configs
 
 
+def _merge_known_fields(
+    base_section: dict[str, Any],
+    incoming: dict[str, Any],
+    section: str,
+) -> dict[str, Any]:
+    """Merge only fields the current schema knows into ``base_section``.
+
+    ``model_config.json`` outlives plugin upgrades and downgrades, so it can
+    carry fields this build has never heard of. The schema forbids extras,
+    and letting them through turns every model-config route into an
+    unhandled 500. Drop them (with a log) instead of failing the request.
+    """
+
+    recognized = {
+        key: value for key, value in incoming.items() if key in base_section
+    }
+    dropped = set(incoming) - set(recognized)
+    if dropped:
+        logger.warning(
+            f"Ignoring unknown fields in model config section "
+            f"'{_log_safe(section)}': {_log_safe(sorted(dropped))}",
+        )
+    base_section.update(recognized)
+    return recognized
+
+
 def _assemble_model_config(
     configs: dict[str, Any],
     *,
@@ -336,10 +362,14 @@ def _assemble_model_config(
         config_section = configs.get(section)
         explicit: set[str] = set()
         if isinstance(config_section, dict):
-            base[section].update(config_section)
+            recognized = _merge_known_fields(
+                base[section],
+                config_section,
+                section,
+            )
             explicit.update(
                 key
-                for key, value in config_section.items()
+                for key, value in recognized.items()
                 if value not in {None, ""}
             )
         if include_environment and section in _ENV_MAPPING:
@@ -397,18 +427,15 @@ def _assemble_model_config(
                     legacy_field,
                     "",
                 )
-    authorization = configs.get("execution_authorization")
-    if isinstance(authorization, dict):
-        base["execution_authorization"].update(authorization)
-    checkpoints = configs.get("creation_checkpoints")
-    if isinstance(checkpoints, dict):
-        base["creation_checkpoints"].update(checkpoints)
-    media_review = configs.get("media_review")
-    if isinstance(media_review, dict):
-        base["media_review"].update(media_review)
-    self_review = configs.get("self_review")
-    if isinstance(self_review, dict):
-        base["self_review"].update(self_review)
+    for extra_section in (
+        "execution_authorization",
+        "creation_checkpoints",
+        "media_review",
+        "self_review",
+    ):
+        incoming = configs.get(extra_section)
+        if isinstance(incoming, dict):
+            _merge_known_fields(base[extra_section], incoming, extra_section)
     if base["vlm"].get("use_llm"):
         # Full reuse: stale explicit VLM values (left over from a previous
         # standalone configuration) must be overridden, not just filled when
@@ -423,7 +450,18 @@ def _assemble_model_config(
     # Decrypt secret fields when the QwenPaw secret store is available.
     _decrypt_secret_fields(base)
 
-    return ModelConfigData.model_validate(base)
+    try:
+        return ModelConfigData.model_validate(base)
+    except PydanticValidationError as exc:
+        # A raw pydantic error would escape as an opaque 500 on every
+        # model-config route; surface the offending field as a structured
+        # 422 the UI can actually display.
+        first_error = exc.errors()[0] if exc.errors() else {}
+        field = ".".join(str(loc) for loc in first_error.get("loc", []))
+        message = first_error.get("msg", str(exc))
+        raise ValidationError(
+            f"模型配置文件不可用: {field} {message}；" "请修正 model_config.json 或重新保存模型配置",
+        ) from exc
 
 
 def load_model_config(*, include_environment: bool = True) -> ModelConfigData:
