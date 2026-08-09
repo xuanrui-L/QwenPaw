@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any
 
 from domain.errors import ValidationError
@@ -63,6 +64,14 @@ _PROBE_KEYFRAME_FRACTIONS = (0.05, 0.15, 0.3, 0.5, 0.7, 0.9, 1.0)
 # Loop seam gate: a seamless loop must paint (nearly) identical pixels at
 # t=0 and t=duration.  Rejection thresholds over premultiplied RGBA.
 _LOOP_SEAM_MAX_MEAN_DIFF = 4.0
+# Ring-frame documents declare themselves on their root element; the
+# capture truth gate then requires a transparent center window instead
+# of the edge-contact rule (an opaque border touches every edge by
+# design).
+_FRAME_RING_MARK = re.compile(
+    r"""data-motion-frame\s*=\s*["']ring["']""",
+    re.IGNORECASE,
+)
 _LOOP_SEAM_MAX_CHANGED_FRACTION = 0.05
 # Static detection compares every probe frame against t=0 and must stay far
 # below any real motion: a genuinely frozen document measures ~0.0002 mean
@@ -76,7 +85,10 @@ _PROBE_TIMEOUT_SECONDS = 90
 _CAPTURE_BASE_TIMEOUT_SECONDS = 120
 _CAPTURE_PER_FRAME_SECONDS = 3.0
 _PROBE_CACHE_MAX_ITEMS = 128
-_FRAME_CACHE_MAX_ITEMS = 32
+_FRAME_CACHE_MAX_ITEMS = 128
+# Entries younger than this are never pruned even beyond the budget:
+# they belong to a composite that is still burning its layers.
+_FRAME_CACHE_PRUNE_MIN_AGE_SECONDS = 3600.0
 _probe_cache: OrderedDict[
     tuple[str, int, int, str],
     MotionDocumentProbe,
@@ -239,6 +251,10 @@ def handle(job):
                 },
                 device_scale_factor=1,
             )
+            # A crashed renderer leaves evaluate() waiting forever by
+            # default; bound every page call so the host timeout can
+            # surface a proper error instead of a stuck worker.
+            context.set_default_timeout(15000)
             try:
                 page = context.new_page()
                 if job.get("prelude"):
@@ -379,10 +395,19 @@ class _keep_browser:
 
 def serve():
     global BROWSER
+    import os
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
-        BROWSER = playwright.chromium.launch(headless=True)
+        # The bundled Playwright Chromium can be broken on the host (e.g.
+        # macOS builds whose renderer crashes on color-emoji glyphs);
+        # QWENPAW_CREATOR_MOTION_BROWSER points at a known-good browser.
+        BROWSER = playwright.chromium.launch(
+            headless=True,
+            executable_path=(
+                os.environ.get("QWENPAW_CREATOR_MOTION_BROWSER") or None
+            ),
+        )
         for line in sys.stdin:
             line = line.strip()
             if not line:
@@ -681,18 +706,22 @@ def _alpha_plane_stats(
     plane: bytes,
     width: int,
     height: int,
-) -> tuple[float, float]:
-    """Return (visible fraction, strongest edge-contact fraction) of one plane.
+) -> tuple[float, float, float, float]:
+    """Return (visible, max/min edge-contact, center-visible) fractions.
 
     Edge contact measures how much visible content sits on the outermost
-    pixel rows/columns; a high value means the content overflows the
-    viewport and is being clipped. ``(-1.0, -1.0)`` when the buffer does
-    not match the expected geometry.
+    pixel rows/columns; a high max means content overflows the viewport
+    and is being clipped, while a high MIN means every edge carries
+    content — the signature of an intentional border. Center visibility
+    samples the middle 44% window — ring-frame documents must keep it
+    transparent so the wrapped footage shows through.
+    ``(-1.0, -1.0, -1.0, -1.0)`` when the buffer does not match the
+    expected geometry.
     """
 
     total = width * height
     if width <= 0 or height <= 0 or len(plane) < total:
-        return -1.0, -1.0
+        return -1.0, -1.0, -1.0, -1.0
     visible = sum(1 for byte in plane[:total] if byte > 16)
     edges = (
         plane[0:width],
@@ -700,10 +729,33 @@ def _alpha_plane_stats(
         plane[0:total:width],
         plane[width - 1 : total : width],
     )
-    edge_contact = max(
+    contacts = [
         sum(1 for byte in edge if byte > 16) / len(edge) for edge in edges
+    ]
+    edge_contact = max(contacts)
+    edge_floor = min(contacts)
+    center_left = round(width * 0.28)
+    center_right = round(width * 0.72)
+    center_top = round(height * 0.28)
+    center_bottom = round(height * 0.72)
+    center_total = max(
+        1,
+        (center_right - center_left) * (center_bottom - center_top),
     )
-    return visible / total, edge_contact
+    center_visible = sum(
+        1
+        for row in range(center_top, center_bottom)
+        for byte in plane[
+            row * width + center_left : row * width + center_right
+        ]
+        if byte > 16
+    )
+    return (
+        visible / total,
+        edge_contact,
+        center_visible / center_total,
+        edge_floor,
+    )
 
 
 def _frame_alpha_stats(
@@ -711,9 +763,9 @@ def _frame_alpha_stats(
     ffmpeg_path: str,
     width: int,
     height: int,
-) -> tuple[float, float]:
-    """Return (coverage, edge contact) for one frame, ``(-1.0, -1.0)`` when
-    the alpha plane cannot be inspected."""
+) -> tuple[float, float, float, float]:
+    """Return (coverage, max/min edge contact, center coverage) for one
+    frame, all ``-1.0`` when the alpha plane cannot be inspected."""
 
     try:
         result = subprocess.run(
@@ -735,7 +787,7 @@ def _frame_alpha_stats(
             check=False,
         )
     except Exception:  # noqa: BLE001 - inspection is best-effort
-        return -1.0, -1.0
+        return -1.0, -1.0, -1.0, -1.0
     if result.returncode != 0 or not result.stdout:
         # Fully opaque frames are written as RGB PNGs without an alpha
         # plane, which makes ``alphaextract`` fail exactly for the
@@ -744,14 +796,20 @@ def _frame_alpha_stats(
         # such frames the benefit of the doubt.
         rgba = _frame_rgba_bytes(frame, ffmpeg_path)
         if rgba is None:
-            return -1.0, -1.0
+            return -1.0, -1.0, -1.0, -1.0
         return _alpha_plane_stats(bytes(rgba[3::4]), width, height)
-    coverage, edge = _alpha_plane_stats(result.stdout, width, height)
+    coverage, edge, center, edge_floor = _alpha_plane_stats(
+        result.stdout,
+        width,
+        height,
+    )
     if coverage < 0.0:
         visible = sum(1 for byte in result.stdout if byte > 16)
         coverage = visible / len(result.stdout)
         edge = -1.0
-    return coverage, edge
+        center = -1.0
+        edge_floor = -1.0
+    return coverage, edge, center, edge_floor
 
 
 def _frames_visible_stats(
@@ -775,7 +833,7 @@ def _frames_visible_stats(
     edge_contact = 0.0
     coverages: list[float] = []
     for frame in frames:
-        frame_coverage, frame_edge = _frame_alpha_stats(
+        frame_coverage, frame_edge, _center, _floor = _frame_alpha_stats(
             frame,
             ffmpeg_path,
             width,
@@ -928,6 +986,7 @@ def _verify_captured_frames(
     box_height: int,
     ffmpeg_path: str,
     full_canvas: bool = False,
+    frame_ring: bool = False,
 ) -> str | None:
     """Post-render truth gate over the captured output frames.
 
@@ -938,20 +997,33 @@ def _verify_captured_frames(
     ``_CAPTURE_MAX_EDGE_CONTACT``, is rejected so bad frames never enter
     the frame cache or the composited segment.  Inspection failures pass:
     the gate must never turn tooling problems into lost overlays.
+
+    ``frame_ring`` documents (declared ``data-motion-frame="ring"``) are
+    opaque borders around a transparent window: touching the box edge is
+    their normal state, so the edge rule is replaced by an honest center
+    gate — the middle 44% window must stay (almost) fully transparent or
+    the "frame" would cover the wrapped footage.
     """
 
     if frame_count <= 0:
         return None
-    indices = sorted(
-        {
-            0,
-            (frame_count - 1) // 2,
-            max(0, math.floor(0.8 * (frame_count - 1))),
-        },
-    )
+    if frame_count <= 3:
+        # Tiny captures (cross-boundary slivers, ultra-short overlays):
+        # the canonical first/middle/80% indices all collapse onto the
+        # entrance frames, which an entrance animation legitimately keeps
+        # transparent. Inspect every frame instead.
+        indices = list(range(frame_count))
+    else:
+        indices = sorted(
+            {
+                0,
+                (frame_count - 1) // 2,
+                max(0, math.floor(0.8 * (frame_count - 1))),
+            },
+        )
     coverages: list[float] = []
     for index in indices:
-        coverage, edge = _frame_alpha_stats(
+        coverage, edge, center, edge_floor = _frame_alpha_stats(
             frames_dir / f"{index:05d}.png",
             ffmpeg_path,
             box_width,
@@ -960,11 +1032,29 @@ def _verify_captured_frames(
         if coverage < 0.0:
             return None
         # A full-canvas motion clip IS the picture: touching the box edge
-        # is its normal state, so only the empty-frame rule applies.
-        if not full_canvas and edge > _CAPTURE_MAX_EDGE_CONTACT:
+        # is its normal state, so only the empty-frame rule applies. Ring
+        # forms — opaque border with content on EVERY edge around a
+        # transparent center — are recognised geometrically as well as by
+        # declaration: the edge rule exists to catch clipped content, and
+        # a border wrapping the footage on all four sides is not clipping.
+        # A one-sided overflow keeps at least one empty edge and stays
+        # rejected.
+        is_ring_form = frame_ring or (
+            0.0 <= center <= 0.05 and edge_floor > 0.5
+        )
+        if (
+            not full_canvas
+            and not is_ring_form
+            and edge > _CAPTURE_MAX_EDGE_CONTACT
+        ):
             return (
                 f"动效渲染真值自查失败: 第 {index} 帧可见内容越出透明盒边缘"
                 f"（边缘接触率 {edge:.0%}），拒绝入库"
+            )
+        if frame_ring and center > 0.05:
+            return (
+                f"动效渲染真值自查失败: ring 框文档的中心窗口必须保持透明"
+                f"（第 {index} 帧中心可见率 {center:.0%}），拒绝入库"
             )
         coverages.append(coverage)
     if all(coverage <= 0.0 for coverage in coverages):
@@ -1253,12 +1343,30 @@ def _complete_frame_cache(frames_dir: Path, frame_count: int) -> bool:
 
 
 def _prune_frame_cache(cache_root: Path) -> None:
+    """Evict old frame sequences beyond the cache budget.
+
+    Only entries older than the protection window are removed: one
+    composite run prepares dozens of sequences (every segment carries a
+    frame + captions + decorations) and burns them afterwards, so an
+    age-blind LRU deleted sequences that were still queued for ffmpeg
+    (field run 2026-08-09: compose aborted on a vanished %05d.png dir).
+    Fresh entries are always part of a live composite; stale ones are
+    yesterday's cache and safe to drop.
+    """
+
+    now = time.time()
     entries = sorted(
         (entry for entry in cache_root.iterdir() if entry.is_dir()),
         key=lambda entry: entry.stat().st_mtime,
         reverse=True,
     )
     for stale in entries[_FRAME_CACHE_MAX_ITEMS:]:
+        try:
+            age = now - stale.stat().st_mtime
+        except OSError:
+            continue
+        if age < _FRAME_CACHE_PRUNE_MIN_AGE_SECONDS:
+            continue
         shutil.rmtree(stale, ignore_errors=True)
 
 
@@ -1475,6 +1583,10 @@ def prepare_motion_layer(
 
     if duration <= 0 or not math.isfinite(duration):
         return MotionLayerPrep(error="动效持续时间必须为正数")
+    # Ring-frame declaration is data-driven: blueprint documents mark
+    # their root with data-motion-frame="ring" and the capture truth gate
+    # swaps the edge rule for the transparent-center rule.
+    frame_ring = bool(_FRAME_RING_MARK.search(html))
     try:
         engine_fields = _engine_job_fields(html, doc_format)
         engine_salt = _engine_salt(html, doc_format)
@@ -1601,7 +1713,11 @@ def prepare_motion_layer(
         period_mode=period_mode,
     )
     cache_key = hashlib.sha256(
-        (frame_identity + ("|full_canvas" if full_canvas else "")).encode(
+        (
+            frame_identity
+            + ("|full_canvas" if full_canvas else "")
+            + ("|ring" if frame_ring else "")
+        ).encode(
             "utf-8",
         ),
     ).hexdigest()
@@ -1652,9 +1768,22 @@ def prepare_motion_layer(
                 box_height=box_height,
                 ffmpeg_path=ffmpeg_path,
                 full_canvas=full_canvas,
+                frame_ring=frame_ring,
             )
         if error is not None:
-            shutil.rmtree(staged_dir, ignore_errors=True)
+            # Keep the rejected frames for offline diagnosis instead of
+            # destroying the only evidence of why the truth gate failed.
+            rejected_dir = cache_root / f"rejected-{cache_key[:16]}"
+            shutil.rmtree(rejected_dir, ignore_errors=True)
+            try:
+                staged_dir.replace(rejected_dir)
+                logger.warning(
+                    "motion truth gate rejected frames kept at %s: %s",
+                    rejected_dir,
+                    error,
+                )
+            except OSError:
+                shutil.rmtree(staged_dir, ignore_errors=True)
             return MotionLayerPrep(error=error)
         if not _complete_frame_cache(frames_dir, frame_count):
             shutil.rmtree(frames_dir, ignore_errors=True)

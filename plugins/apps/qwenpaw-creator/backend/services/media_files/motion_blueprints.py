@@ -119,6 +119,7 @@ def _document(
     *,
     exit_style: str = "soft_fade",
     full_bleed: bool = False,
+    frame_ring: bool = False,
 ) -> str:
     register = _HF_REGISTER.replace("%DUR%", f"{duration:.3f}")
     # data-motion-exit hands the ending to the renderer-managed exit (an
@@ -128,11 +129,15 @@ def _document(
     # Caption/decoration cards keep the 8% root inset (entrance travel
     # space inside their overlay box); full-canvas scene documents ARE
     # the picture and must flood the whole viewport instead.
+    # data-motion-frame="ring" declares an opaque-border/transparent-
+    # window document so the capture gate swaps its edge rule for the
+    # transparent-center rule.
     root_css = "#root{position:absolute;inset:0;}" if full_bleed else ""
+    ring_attr = ' data-motion-frame="ring"' if frame_ring else ""
     return (
         '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>\n'
         f"{_BASE_CSS}\n{root_css}\n{css}\n</style></head>"
-        f'<body><div id="root" data-motion-exit="{exit_style}">{body}</div>\n'
+        f'<body><div id="root" data-motion-exit="{exit_style}"{ring_attr}>{body}</div>\n'
         '<script src="vendor/gsap.min.js"></script>\n'
         f"<script>\nvar tl = gsap.timeline({{ paused: true }});\n{script}\n{register}\n</script></body></html>"
     )
@@ -339,6 +344,187 @@ tl.to('.core',{{scale:1,duration:1.6,ease:'sine.inOut'}},1.6);
     return _document(css, body, script, 3.2), 3.2
 
 
+# ---------------------------------------------------------------------------
+# Variety frame blueprints (loop=True, opaque border + transparent window)
+# ---------------------------------------------------------------------------
+
+
+def validated_frame_window(raw: object) -> dict[str, float]:
+    """Clamp one normalized window rect for a frame blueprint.
+
+    The window is the transparent hole the wrapped footage shows
+    through, expressed as left/top/width/height fractions of the
+    canvas. Borders thinner than ~2% would render sub-pixel at 720p,
+    so the window is clamped to leave a real border on every side.
+    """
+
+    data = raw if isinstance(raw, Mapping) else {}
+    width = _clamped(data.get("width"), 0.86, 0.40, 0.94)
+    height = _clamped(data.get("height"), 0.80, 0.40, 0.94)
+    left = _clamped(data.get("left"), (1.0 - width) / 2, 0.02, 0.56)
+    top = _clamped(data.get("top"), (1.0 - height) / 2, 0.02, 0.56)
+    width = min(width, 0.98 - left - 0.02)
+    height = min(height, 0.98 - top - 0.02)
+    return {"left": left, "top": top, "width": width, "height": height}
+
+
+def _frame_geometry(window: Mapping[str, float]) -> str:
+    """Shared strip/ring/corner CSS for one frame window rect.
+
+    Four opaque strips tile everything outside the window; a rounded
+    ring sits on the window edge and four small corner patches (in the
+    strip base color, painted before the ring) fill the notches between
+    the square strips and the ring's rounded corners.
+    """
+
+    left = window["left"] * 100
+    top = window["top"] * 100
+    width = window["width"] * 100
+    height = window["height"] * 100
+    right = 100 - left - width
+    bottom = 100 - top - height
+    return f"""
+.strip{{position:absolute;overflow:hidden}}
+.st{{left:0;right:0;top:0;height:{top:.2f}%}}
+.sb{{left:0;right:0;bottom:0;height:{bottom:.2f}%}}
+.sl{{left:0;top:{top:.2f}%;bottom:{bottom:.2f}%;width:{left:.2f}%}}
+.sr{{right:0;top:{top:.2f}%;bottom:{bottom:.2f}%;width:{right:.2f}%}}
+.patch{{position:absolute;width:3.2vh;height:3.2vh}}
+.p1{{left:{left:.2f}%;top:{top:.2f}%}}
+.p2{{right:{right:.2f}%;top:{top:.2f}%}}
+.p3{{left:{left:.2f}%;bottom:{bottom:.2f}%}}
+.p4{{right:{right:.2f}%;bottom:{bottom:.2f}%}}
+.ring{{position:absolute;left:{left:.2f}%;top:{top:.2f}%;width:{width:.2f}%;height:{height:.2f}%;border-radius:2.6vh;box-sizing:border-box}}
+.c{{position:absolute;width:4.6vh;height:4.6vh}}
+.c1{{left:{left:.2f}%;top:{top:.2f}%;transform:translate(-46%,-46%)}}
+.c2{{left:{left + width:.2f}%;top:{top:.2f}%;transform:translate(-54%,-46%)}}
+.c3{{left:{left:.2f}%;top:{top + height:.2f}%;transform:translate(-46%,-54%)}}
+.c4{{left:{left + width:.2f}%;top:{top + height:.2f}%;transform:translate(-54%,-54%)}}
+"""
+
+
+_FRAME_BODY = (
+    "<i class='strip st'><i class='tex'></i></i>"
+    "<i class='strip sb'><i class='tex'></i></i>"
+    "<i class='strip sl'><i class='tex'></i></i>"
+    "<i class='strip sr'><i class='tex'></i></i>"
+    "<i class='patch p1'></i><i class='patch p2'></i>"
+    "<i class='patch p3'></i><i class='patch p4'></i>"
+    "<i class='ring'></i>"
+    "<i class='c c1'></i><i class='c c2'></i>"
+    "<i class='c c3'></i><i class='c c4'></i>"
+)
+
+
+def _frame_pop_variety(
+    palette: BlueprintPalette,
+    intensity: float,
+    window: Mapping[str, float],
+) -> tuple[str, float]:
+    """综艺贴纸框：撞色渐变边框 + 波点纹理流动 + 四角星星贴纸律动，闭环。"""
+
+    wiggle = 8 + intensity * 8
+    css = (
+        _frame_geometry(window)
+        + f"""
+.strip,.patch{{background:linear-gradient(135deg,{palette.primary},{palette.secondary})}}
+.tex{{position:absolute;inset:-8vh;background-image:radial-gradient(circle,{palette.paper}59 1vh,transparent 1.15vh);background-size:4vh 4vh}}
+.ring{{border:1.3vh solid {palette.paper};box-shadow:0 0 0 .5vh {palette.ink}33 inset}}
+.c{{background:{palette.paper};clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%);filter:drop-shadow(.3vh .4vh 0 {palette.ink}4d)}}
+"""
+    )
+    script = f"""
+tl.fromTo('.tex',{{x:'0vh',y:'0vh'}},{{x:'4vh',y:'4vh',duration:3.2,ease:'none'}},0);
+tl.to('.c1,.c4',{{rotate:{wiggle:.0f},scale:1.12,duration:1.6,ease:'sine.inOut'}},0);
+tl.to('.c1,.c4',{{rotate:0,scale:1,duration:1.6,ease:'sine.inOut'}},1.6);
+tl.to('.c2,.c3',{{rotate:-{wiggle:.0f},scale:.92,duration:1.6,ease:'sine.inOut'}},0);
+tl.to('.c2,.c3',{{rotate:0,scale:1,duration:1.6,ease:'sine.inOut'}},1.6);
+"""
+    return (
+        _document(
+            css,
+            _FRAME_BODY,
+            script,
+            3.2,
+            exit_style="none",
+            full_bleed=True,
+            frame_ring=True,
+        ),
+        3.2,
+    )
+
+
+def _frame_warm_journal(
+    palette: BlueprintPalette,
+    intensity: float,
+    window: Mapping[str, float],
+) -> tuple[str, float]:
+    """手账拍立得框：奶油纸边框 + 细纹纸理 + 角上胶带与光点呼吸，闭环。"""
+
+    breath = 0.06 + intensity * 0.08
+    css = (
+        _frame_geometry(window)
+        + f"""
+.strip,.patch{{background:{palette.paper}}}
+.tex{{position:absolute;inset:-8vh;background-image:repeating-linear-gradient(45deg,{palette.secondary}1f 0,{palette.secondary}1f .5vh,transparent .5vh,transparent 3vh)}}
+.ring{{border:1.1vh solid #ffffff;box-shadow:0 .5vh 2.2vh {palette.ink}40,0 0 0 .35vh {palette.primary}59 inset}}
+.c{{border-radius:50%;background:radial-gradient(circle at 35% 35%,#ffffff,{palette.primary})}}
+.c2,.c3{{border-radius:.7vh;background:{palette.primary}b3;width:7vh;height:2.6vh}}
+.c2{{transform:translate(-54%,-46%) rotate(-38deg)}}
+.c3{{transform:translate(-46%,-54%) rotate(-38deg)}}
+"""
+    )
+    script = f"""
+tl.fromTo('.tex',{{x:'0vh',y:'0vh'}},{{x:'4.24vh',y:'4.24vh',duration:3.2,ease:'none'}},0);
+tl.to('.c1,.c4',{{scale:{1 + breath:.2f},duration:1.6,ease:'sine.inOut'}},0);
+tl.to('.c1,.c4',{{scale:1,duration:1.6,ease:'sine.inOut'}},1.6);
+tl.to('.ring',{{boxShadow:'0 .7vh 2.6vh {palette.ink}4d,0 0 0 .35vh {palette.primary}73 inset',duration:1.6,ease:'sine.inOut'}},0);
+tl.to('.ring',{{boxShadow:'0 .5vh 2.2vh {palette.ink}40,0 0 0 .35vh {palette.primary}59 inset',duration:1.6,ease:'sine.inOut'}},1.6);
+"""
+    return (
+        _document(
+            css,
+            _FRAME_BODY,
+            script,
+            3.2,
+            exit_style="none",
+            full_bleed=True,
+            frame_ring=True,
+        ),
+        3.2,
+    )
+
+
+FRAME_BLUEPRINTS = {
+    "pop_variety": _frame_pop_variety,
+    "warm_journal": _frame_warm_journal,
+}
+
+
+def render_frame_blueprint(
+    blueprint: str,
+    *,
+    palette: object = None,
+    intensity: object = None,
+    window: object = None,
+) -> tuple[str, float]:
+    """Render one variety frame blueprint; ``(html, period seconds)``.
+
+    The frame is an opaque decorated border with a transparent window:
+    burned over a footage segment (usually shrunk to the window rect via
+    its Element location) it produces the variety-show "wrapped picture"
+    composition without any pipeline change.
+    """
+
+    if blueprint not in FRAME_BLUEPRINTS:
+        raise ValueError(f"unknown frame blueprint: {blueprint!r}")
+    return FRAME_BLUEPRINTS[blueprint](
+        validated_palette(palette),
+        _clamped(intensity, 0.55, 0.0, 1.0),
+        validated_frame_window(window),
+    )
+
+
 CAPTION_BLUEPRINTS = {
     "stagger_pop": _caption_stagger_pop,
     "ink_reveal": _caption_ink_reveal,
@@ -361,6 +547,8 @@ _BLUEPRINT_HINTS = {
     "wave_flow": "波浪流动：多层弧带起伏，适合水面/舒缓/自然场景",
     "particle_drift": "微光粒子：光点漂浮呼吸，适合梦幻/温柔/光斑画面",
     "orbit_rings": "几何圆环：双环旋转+光核脉动，适合科技/聚焦/节奏点",
+    "pop_variety": "综艺贴纸框：撞色波点边框+四角星星贴纸，适合活泼/高光/搞笑时刻",
+    "warm_journal": "手账拍立得框：奶油纸边框+胶带贴角，适合温馨/家庭/治愈时刻",
 }
 
 
@@ -578,12 +766,15 @@ __all__ = [
     "CAPTION_BLUEPRINTS",
     "CAPTION_BLUEPRINT_ORDER",
     "DECORATION_BLUEPRINTS",
+    "FRAME_BLUEPRINTS",
     "SCENE_BLUEPRINTS",
     "BlueprintPalette",
     "blueprint_catalog_text",
     "render_caption_blueprint",
     "render_decoration_blueprint",
+    "render_frame_blueprint",
     "render_scene_blueprint",
     "require_chinese_copy",
+    "validated_frame_window",
     "validated_palette",
 ]

@@ -133,12 +133,13 @@ export function patchExecutionAuthorization(
 
 export function patchCreationCheckpoints(
   mode: "required" | "skip",
+  executionMode: "delegated" | "co_creation" | "fine_tuning" = "co_creation",
 ): Promise<{ ok: boolean }> {
   const id = newClientId("creation-checkpoints");
   return creatorRequest("/models/config/creation-checkpoints", {
     method: "PATCH",
     headers: { "Idempotency-Key": id },
-    body: jsonBody({ mode }),
+    body: jsonBody({ mode, execution_mode: executionMode }),
   });
 }
 

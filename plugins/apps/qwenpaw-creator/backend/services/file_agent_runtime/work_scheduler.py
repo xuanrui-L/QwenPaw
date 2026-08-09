@@ -74,6 +74,7 @@ def _is_transient_dispatch_error(exc: Exception) -> bool:
 
 
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
+_COMPOSE_COMMANDS = {CreatorCommandType.COMPOSE_FINAL_VIDEO.value}
 
 DispatchHook = Callable[[str, WorkGraph], Awaitable[None]]
 
@@ -163,7 +164,9 @@ class WorkGraphScheduler:
     async def tick(self, project_id: str) -> WorkGraph | None:
         """Derive the graph once and dispatch what capacity allows."""
 
-        if not self.enabled():
+        # enabled() stats the user-config file; commit-triggered wakes run
+        # on the event loop, so the check must not block it.
+        if not await asyncio.to_thread(self.enabled):
             return None
         try:
             snapshot = await asyncio.to_thread(
@@ -240,7 +243,13 @@ class WorkGraphScheduler:
                 or not node.error
             ):
                 continue
-            if not _is_transient_dispatch_error(RuntimeError(node.error)):
+            # Compose is a free local ffmpeg pass: any failure (cache
+            # race, transient fs state) is worth a bounded, unpaid
+            # re-render. Paid media nodes only re-enter on recognised
+            # transient provider faults.
+            if node.kind != "compose" and not _is_transient_dispatch_error(
+                RuntimeError(node.error),
+            ):
                 continue
             fingerprint = node.dispatch_fingerprint or node.node_id
             ledger_key = (project_id, node.node_id, fingerprint)
@@ -322,8 +331,23 @@ class WorkGraphScheduler:
         idempotency_key = (
             f"dag-{node.node_id}-{fingerprint or node.dispatch_fingerprint}"
         )
+        if node.command in _COMPOSE_COMMANDS:
+            # A failed master render is retried without content changes
+            # (free local pass), so the retry generation must mint a new
+            # idempotency slot — reusing the old one would just replay
+            # the recorded failure.
+            ledger_key = (
+                project_id,
+                node.node_id,
+                fingerprint or node.dispatch_fingerprint or node.node_id,
+            )
+            generation = self._transient_retries.get(ledger_key, 0)
+            if generation:
+                idempotency_key = f"{idempotency_key}-r{generation}"
         if node.command in _R2V_COMMANDS:
             dispatch = self._r2v_dispatch or _default_r2v_dispatch
+        elif node.command in _COMPOSE_COMMANDS:
+            dispatch = _default_compose_dispatch
         else:
             dispatch = self._image_dispatch or _default_image_dispatch
         return await dispatch(
@@ -380,6 +404,119 @@ async def _default_r2v_dispatch(
     return await execute_file_r2v_command(
         services,
         project_id=project_id,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def _default_compose_dispatch(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    command: str,
+    target_ref: str,
+    arguments: dict[str, Any],
+    idempotency_key: str,
+) -> Any:
+    """Master render for an unattended project (same path as the UI button).
+
+    Text overlays that never received a motion design get the automatic
+    design pass first — losing the styling must never lose the cut — then
+    the deterministic local composition runs.
+    """
+
+    # pylint: disable=import-outside-toplevel
+    from services.media_files.local_execution import (
+        _stable_id,
+        execute_file_local_media_command,
+    )
+    from services.runtime_files.errors import RecordNotFoundError
+    from services.runtime_files.execution_models import TaskStatus
+
+    # A master render is a free local pass, so a failed attempt must not
+    # freeze the slot: probe the durable ledger and mint the next retry
+    # generation past any terminal-failed task. Succeeded slots keep
+    # replaying (true idempotency); the bound stops runaway loops.
+    executions = ProjectExecutionStore(services.root)
+    for generation in range(0, 9):
+        candidate_key = (
+            idempotency_key
+            if generation == 0
+            else f"{idempotency_key}-r{generation}"
+        )
+        task_id = _stable_id("task", project_id, candidate_key)
+        try:
+            existing = await asyncio.to_thread(
+                executions.get_task,
+                project_id,
+                task_id,
+            )
+        except RecordNotFoundError:
+            idempotency_key = candidate_key
+            break
+        if existing.status not in {
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.QUARANTINED,
+        }:
+            # RUNNING/QUEUED/SUCCEEDED reuse the slot: an in-progress or
+            # finished compose is idempotent and the caller converges on
+            # the same durable task instead of paying for a second render.
+            idempotency_key = candidate_key
+            break
+    else:
+        idempotency_key = f"{idempotency_key}-r8"
+
+    try:
+        snapshot = await asyncio.to_thread(services.projects.read, project_id)
+        timeline_id = target_ref.removeprefix("timeline:")
+        timeline = snapshot.project.timelines.items.get(timeline_id)
+        from services.media_files.motion_design import (
+            _is_frame_overlay,
+        )
+
+        needs_design = timeline is not None and any(
+            element.enabled
+            and (
+                (
+                    getattr(element.creation, "type", "") == "overlay"
+                    and (getattr(element.creation, "text", "") or "").strip()
+                    and getattr(element.creation, "motion", None) is None
+                )
+                # Variety frames own their visual through the blueprint:
+                # a hand-written thin border would ship black letterbox
+                # bars, so the design pass upgrades it before rendering.
+                or _is_frame_overlay(element)
+            )
+            for element in timeline.elements_by_id.values()
+        )
+        if needs_design:
+            from services.media_files.motion_design import (
+                design_motion_overlays,
+            )
+
+            await design_motion_overlays(
+                services,
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments={},
+                # Suffix with the (possibly generation-suffixed) compose
+                # key so a retried compose never replays a failed design
+                # attempt against the same idempotency slot.
+                idempotency_key=f"auto-motion-design:{idempotency_key}",
+            )
+    except Exception:  # pylint: disable=broad-except
+        logger.warning(
+            "auto design_motion_overlays failed for %s; compose falls back "
+            "to static templates",
+            target_ref,
+            exc_info=True,
+        )
+    return await execute_file_local_media_command(
+        services,
+        project_id=project_id,
+        command=CreatorCommandType(command),
         target_ref=target_ref,
         arguments=arguments,
         idempotency_key=idempotency_key,

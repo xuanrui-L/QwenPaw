@@ -1122,10 +1122,18 @@ async def patch_creation_checkpoints(
     mode = data.get("mode")
     if mode not in ("required", "skip"):
         raise ValidationError("mode 必须是 'required' 或 'skip'")
+    execution_mode = data.get("execution_mode", "co_creation")
+    if execution_mode not in ("delegated", "co_creation", "fine_tuning"):
+        raise ValidationError(
+            "execution_mode 必须是 'delegated'、'co_creation' 或 'fine_tuning'",
+        )
 
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
-        merged["creation_checkpoints"] = {"mode": mode}
+        merged["creation_checkpoints"] = {
+            "mode": mode,
+            "execution_mode": execution_mode,
+        }
         try:
             return ModelConfigData.model_validate(merged)
         except PydanticValidationError as exc:
@@ -1173,7 +1181,16 @@ async def patch_permission_mode(
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
         merged["execution_authorization"] = {"mode": execution}
-        merged["creation_checkpoints"] = {"mode": checkpoints}
+        # The permission ladder owns only the gate on/off; the governance
+        # execution_mode survives the write (skip already forces
+        # delegated at read time).
+        merged["creation_checkpoints"] = {
+            "mode": checkpoints,
+            "execution_mode": merged.get("creation_checkpoints", {}).get(
+                "execution_mode",
+                "co_creation",
+            ),
+        }
         merged["media_review"] = {"mode": media_review}
         try:
             return ModelConfigData.model_validate(merged)

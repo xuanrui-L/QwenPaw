@@ -13,6 +13,7 @@ but no main video") generalizes here to the whole pipeline.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
@@ -33,7 +34,9 @@ class WorkNodeStatus(StrEnum):
 
 # Node kinds the scheduler may dispatch without a model turn: their
 # generation parameters are deterministically assembled from project.json.
-DISPATCHABLE_KINDS = frozenset({"visual", "lineup", "storyboard", "video"})
+DISPATCHABLE_KINDS = frozenset(
+    {"visual", "lineup", "storyboard", "video", "compose"},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,8 +515,54 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             video_node_ids.append(video_id)
 
     # ---- Final compose ------------------------------------------------
-    if video_node_ids:
+    # Any timeline whose main track carries enabled content (R2V, Edit or
+    # motion-clip Elements) ends in one deterministic master render. The
+    # node is machine-dispatchable so an unattended (delegated) project
+    # reaches its final cut without a user pressing "render"; the scene
+    # ledger gate mirrors validate_scene_ledger_locked so dispatch never
+    # burns a compose the backend door would reject.
+    from services.project_files.models import (
+        EditCreation,
+        MotionClipCreation,
+    )
+
+    compose_timeline_id: str | None = None
+    for timeline_id in project.timelines.order:
+        timeline = project.timelines.items[timeline_id]
+        has_content = any(
+            element.enabled
+            and isinstance(
+                element.creation,
+                (R2VCreation, EditCreation, MotionClipCreation),
+            )
+            for element in timeline.elements_by_id.values()
+        )
+        if has_content:
+            compose_timeline_id = timeline_id
+            break
+    if compose_timeline_id is not None:
+        timeline = project.timelines.items[compose_timeline_id]
         missing = _upstream_missing(video_node_ids, statuses)
+        scene_gaps: list[str] = []
+        plan = getattr(timeline, "edit_plan", None)
+        if (
+            plan is not None
+            and not plan.mechanical_exemption
+            and plan.scene_ledger
+        ):
+            from services.render_review.scene_review import (
+                scene_content_fingerprint,
+            )
+
+            for row in plan.scene_ledger:
+                if row.status != "locked":
+                    scene_gaps.append(f"场景未锁定: {row.scene_id}")
+                elif row.locked_fingerprint != scene_content_fingerprint(
+                    timeline,
+                    row,
+                ):
+                    scene_gaps.append(f"场景锁已过期: {row.scene_id}")
+        missing = (*missing, *scene_gaps)
         task = next(
             (
                 item
@@ -530,6 +579,13 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             ),
             None,
         )
+        if final_slot is not None:
+            # A stale master render (edit impact marked it after content
+            # changes) must not read as DONE, or the unattended pipeline
+            # would stop one compose short of the corrected final cut.
+            version = project.assets.artifact_versions_by_id.get(final_slot)
+            if version is not None and getattr(version, "stale", False):
+                final_slot = None
         if task is not None:
             status = WorkNodeStatus.RUNNING
         elif final_slot:
@@ -550,9 +606,39 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 progress=getattr(task, "progress", None),
                 missing=missing,
                 locator={"page": "plan"},
-                # Compose stays model/user-driven for now: not dispatchable.
-                command=None,
-                target_ref=None,
+                command="COMPOSE_FINAL_VIDEO",
+                target_ref=f"timeline:{compose_timeline_id}",
+                # The fingerprint must change whenever the rendered output
+                # would: spans alone miss re-picked source ranges
+                # (render_source), edited overlays/motion documents and
+                # regenerated media versions, which previously replayed a
+                # stale compose as an idempotent no-op.
+                dispatch_fingerprint=_fingerprint(
+                    "compose:final",
+                    timeline.color_grade,
+                    sorted(
+                        (
+                            element_id,
+                            json.dumps(
+                                element.model_dump(mode="json"),
+                                sort_keys=True,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                        )
+                        for element_id, element in (
+                            timeline.elements_by_id.items()
+                        )
+                        if element.enabled
+                    ),
+                    sorted(
+                        (slot_id, slot.selected_version_id or "")
+                        for slot_id, slot in (
+                            project.assets.artifact_slots_by_id.items()
+                        )
+                        if slot.kind != "final_video"
+                    ),
+                ),
             ),
         )
 

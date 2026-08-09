@@ -34,6 +34,7 @@ import {
   getModelConfig,
   saveModelConfig,
   patchPermissionMode,
+  patchCreationCheckpoints,
   patchSelfReview,
   testModelConnection,
   getHostProviders,
@@ -3599,6 +3600,108 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   </Button>
                 </div>
               )}
+              <div>
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: "var(--color-text-primary)",
+                  }}
+                >
+                  {t("modelConfig.executionModeTitle")}
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: "var(--color-text-tertiary)",
+                    marginTop: 3,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  {activeModeIndex > 0
+                    ? t("modelConfig.executionModeForcedDesc")
+                    : t("modelConfig.executionModeDesc")}
+                </div>
+                <div
+                  role="radiogroup"
+                  aria-label={t("modelConfig.executionModeTitle")}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    marginTop: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  {(["co_creation", "delegated", "fine_tuning"] as const).map(
+                    (mode) => {
+                      const forcedDelegated = activeModeIndex > 0;
+                      const current = forcedDelegated
+                        ? "delegated"
+                        : config.creationCheckpoints.executionMode ??
+                          "co_creation";
+                      const selected = current === mode;
+                      const disabled = forcedDelegated;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          disabled={disabled}
+                          data-execution-mode={mode}
+                          onClick={() => {
+                            if (disabled) return;
+                            setConfig((previous) => ({
+                              ...previous,
+                              creationCheckpoints: {
+                                ...previous.creationCheckpoints,
+                                executionMode: mode,
+                              },
+                            }));
+                            void patchCreationCheckpoints(
+                              config.creationCheckpoints.mode,
+                              mode,
+                            ).catch(() => {
+                              message.error(
+                                t("modelConfig.executionModeSaveFailed"),
+                              );
+                            });
+                          }}
+                          style={{
+                            padding: "9px 14px",
+                            borderRadius: 8,
+                            fontSize: 12,
+                            lineHeight: 1.4,
+                            textAlign: "left",
+                            cursor: disabled ? "not-allowed" : "pointer",
+                            opacity: disabled && mode !== "delegated" ? 0.5 : 1,
+                            border: `1.5px solid ${
+                              selected
+                                ? "var(--color-accent)"
+                                : "var(--color-border)"
+                            }`,
+                            background: "var(--color-bg-primary)",
+                            color: "var(--color-text-primary)",
+                          }}
+                        >
+                          <div style={{ fontWeight: 600 }}>
+                            {t(`modelConfig.executionMode_${mode}`)}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: "var(--color-text-tertiary)",
+                              marginTop: 2,
+                            }}
+                          >
+                            {t(`modelConfig.executionMode_${mode}_desc`)}
+                          </div>
+                        </button>
+                      );
+                    },
+                  )}
+                </div>
+              </div>
             </>
           )}
 

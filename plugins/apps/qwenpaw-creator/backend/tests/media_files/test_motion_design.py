@@ -46,6 +46,7 @@ from services.project_files.models import (
     Timeline,
     TimelineElement,
     TimelineSpan,
+    overlay_role,
 )
 
 _HTML = "<html><body><div class='card'>本喵要发光</div></body></html>"
@@ -489,26 +490,38 @@ class TestAlphaPlaneStats:
 
     def test_centered_content_has_no_edge_contact(self) -> None:
         visible = {(x, y) for x in range(2, 8) for y in range(2, 8)}
-        coverage, edge = _alpha_plane_stats(
+        coverage, edge, center, edge_floor = _alpha_plane_stats(
             self._plane(10, 10, visible),
             10,
             10,
         )
         assert coverage == pytest.approx(0.36)
         assert edge == 0.0
+        assert edge_floor == 0.0
+        # The whole 3..7 center window is painted.
+        assert center == pytest.approx(1.0)
 
     def test_clipped_content_touches_edge(self) -> None:
         visible = {(9, y) for y in range(3, 8)}
-        coverage, edge = _alpha_plane_stats(
+        coverage, edge, center, edge_floor = _alpha_plane_stats(
             self._plane(10, 10, visible),
             10,
             10,
         )
         assert coverage == pytest.approx(0.05)
         assert edge == pytest.approx(0.5)
+        # One-sided overflow: the other edges stay empty.
+        assert edge_floor == 0.0
+        # Edge column stays outside the center window.
+        assert center == 0.0
 
     def test_geometry_mismatch_returns_unknown(self) -> None:
-        assert _alpha_plane_stats(b"\xff" * 10, 10, 10) == (-1.0, -1.0)
+        assert _alpha_plane_stats(b"\xff" * 10, 10, 10) == (
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+        )
 
 
 def _edit_element(
@@ -869,6 +882,40 @@ class TestApplyOverlayStyledRouting:
         assert 'data-motion-motif="caption_card"' in safe_motion_html[0]
 
 
+class TestVarietyFrameDesign:
+    """Deterministic variety frame: window derivation and conventions."""
+
+    def test_window_mirrors_shrunk_edit_placement(self) -> None:
+        location = ElementLocation(
+            x=0.5,
+            y=0.48,
+            width=0.84,
+            height=0.80,
+            anchor_x=0.5,
+            anchor_y=0.5,
+        )
+        window = motion_design._frame_window_from_edit(location)
+        assert window == {
+            "left": pytest.approx(0.08),
+            "top": pytest.approx(0.08),
+            "width": pytest.approx(0.84),
+            "height": pytest.approx(0.80),
+        }
+
+    def test_full_frame_or_rotated_edit_keeps_default_window(self) -> None:
+        assert motion_design._frame_window_from_edit(None) is None
+        assert motion_design._frame_window_from_edit(ElementLocation()) is None
+        rotated = ElementLocation(width=0.8, height=0.8, rotation_degrees=8.0)
+        assert motion_design._frame_window_from_edit(rotated) is None
+
+    def test_frame_overlay_convention_is_text_free_with_prompt(self) -> None:
+        # The director creates the declaration (text-free, vibe="frame",
+        # prompt states the intent); the design tool fills creation.motion.
+        creation = OverlayCreation(vibe="frame", prompt="家庭高光时刻包裹框")
+        assert overlay_role(creation) == "decoration"
+        assert creation.motion is None
+
+
 class TestUniformCaptionStyle:
     def test_bad_caption_style_is_rejected_before_any_read(self) -> None:
         with pytest.raises(ValidationError, match="captionStyle"):
@@ -1080,3 +1127,50 @@ class TestSegmentCache:
         assert warnings == ("warn-1",)
         assert restored.read_bytes() == b"finished segment"
         assert runner._restore_cached_segment("m" * 64, restored) is None
+
+
+def test_frame_overlay_recognition_covers_field_variants() -> None:
+    # Taught convention: vibe="frame". Field variant: emotional vibe,
+    # frame wording in the label, hand-written thin-border css motion —
+    # recognised so the blueprint pass can upgrade it.
+    def overlay(vibe: str, label: str, motion=None) -> TimelineElement:
+        return TimelineElement(
+            element_id="elem:ov-frame-x",
+            label=label,
+            span=TimelineSpan(start_tick=0, duration_tick=3000),
+            location=ElementLocation(),
+            creation=OverlayCreation(
+                vibe=vibe,
+                prompt="综艺感手绘边框，包裹画面",
+                motion=motion,
+            ),
+        )
+
+    assert motion_design._is_frame_overlay(overlay("frame", "框"))
+    hand_written = MotionGraphic(
+        format="html_css",
+        html="<html><body><div style='border:2px solid pink'>"
+        + "x" * 32
+        + "</div></body></html>",
+        motif="custom",
+    )
+    assert motion_design._is_frame_overlay(
+        overlay("playful", "综艺框·鬼脸", motion=hand_written),
+    )
+    blueprint_done = MotionGraphic(
+        format="html_js",
+        html="<html><body>" + "y" * 40 + "</body></html>",
+        motif="variety_frame",
+    )
+    assert not motion_design._is_frame_overlay(
+        overlay("frame", "综艺框", motion=blueprint_done),
+    )
+    # Plain decorations without frame wording stay untouched.
+    plain = TimelineElement(
+        element_id="elem:ov-decor",
+        label="装饰",
+        span=TimelineSpan(start_tick=0, duration_tick=3000),
+        location=ElementLocation(),
+        creation=OverlayCreation(vibe="chill", prompt="微光粒子点缀"),
+    )
+    assert not motion_design._is_frame_overlay(plain)

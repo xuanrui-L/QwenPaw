@@ -46,6 +46,7 @@ from services.media_files.motion_blueprints import (
     blueprint_catalog_text,
     render_caption_blueprint,
     render_decoration_blueprint,
+    render_frame_blueprint,
     render_scene_blueprint,
 )
 from services.media_files.motion_engine import (
@@ -67,11 +68,17 @@ from services.media_files.motion_templates import (
     render_caption_template,
     render_decoration_template,
 )
+from services.media_files.beat_grid import (
+    BeatGrid,
+    BeatGridUnavailable,
+    extract_beat_grid,
+)
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileStore,
 )
 from services.project_files.models import (
+    AudioCreation,
     EditCreation,
     ElementLocation,
     IndexedFile,
@@ -109,6 +116,16 @@ _UNIFORM_CAPTION_INTENSITY = 0.5
 _MAX_DESIGN_ATTEMPTS = 2
 _TEXT_CARD_DESIGN_ATTEMPTS = 3
 _TEXT_CARD_MIN_COVERAGE = 0.3
+# Placement/scale tendencies rotated across a film's caption cards so
+# concurrent designs still differ in composition; the model may overrule
+# any of them when the footage demands, they are never style templates.
+_CARD_COMPOSITION_SEEDS = (
+    "大字抢镜：卡占画面上半部偏一侧（width≈0.5），整体微倾斜，靠近主体方向",
+    "小而点睛：紧贴主体动作旁的小卡（width≈0.28），像一句随手贴上的吐槽",
+    "斜角构图：画面斜上角或斜下角，明显旋转角度，逐字大小错落",
+    "横贯强调：中下部横向大字（width≈0.6），关键词放大变色，背景色块不规则",
+    "边角呼应：靠画面一侧竖向留白处，窄而高的排版感，搭配细长装饰线",
+)
 _TEXT_CARD_MAX_EDGE_CONTACT = 0.02
 _DECORATION_MIN_COVERAGE = 0.08
 _DECORATION_MAX_EDGE_CONTACT = 0.02
@@ -213,7 +230,8 @@ _DECOR_SYSTEM_PROMPT = (
 - 先识别同时段台词的语用意图，动效必须直接呼应台词含义或当下动作；没有贴切的创意就输出 needed=false，不要用无关图形凑数。
 
 第二步：自由创作（只在确实需要时）
-- 风格必须现代、精致、有设计感：参考高级综艺包装与电影预告 motion graphics —— 描边 draw-on、几何线条编排、动态 mask reveal、粒子轨迹、弹性形状组合。禁止土味设计：不要楞的纯色方块、不要廉价剪贴画感、不要滥用外发光。
+- 风格必须现代、精致、有设计感：参考高级综艺包装与电影预告 motion graphics —— 描边 draw-on、几何线条编排、动态 mask reveal、粒子轨迹、弹性形状组合。整体要求综艺/vlog 包装时，可用更活泼的综艺语汇：手绘风贴纸、惊叹号/爱心等符号形状、放射线集中线、弹跳角标，但仍须克制精致。禁止土味设计：不要楞的纯色方块、不要廉价剪贴画感、不要滥用外发光。
+- 尺寸与节奏随画面呼吸：装饰不是一成不变的图标——循环周期内让元素有机地放大缩小（scale 0.85~1.2）、轨迹漂移、成员错峰，幅度呼应画面动作的能量（动作激烈则大，安静则细腻）。
 - 必须与画面和谐：从真实画面帧取色，并根据动效所在区域的明暗选择深/浅方案拉开对比（亮色背景绝不用白色细线，暗色背景绝不用深色细线）；从第一帧起就要有可见内容。
 - 绝不遮挡主体：从帧序列判断主体位置与镜头运动趋势，把 location 放在全程都是留白的区域；面积克制（一般不超过画面四分之一），动效是点缀不是主角。
 - 装饰动效不是字幕卡：禁止出现任何可见文字、字母、数字、对话气泡。台词由独立的 OS Overlay 承担。
@@ -254,48 +272,40 @@ location 使用归一化画布坐标：x/y 是锚点在画布上的位置，anch
 )
 
 _TEXT_STYLE_SYSTEM_PROMPT = (
-    """你是一位顶级视频包装动效设计师。你会看到一个视频片段的真实画面帧和一段必须展示的台词文字，需要为这段文字设计一张电影级的 GSAP 动态字幕卡，取代呆板的固定气泡样式。
+    """你是一位顶级视频包装动效设计师。你会看到一个视频片段的真实画面帧和一段必须展示的台词文字，需要为这段文字自由设计一张贴合本片风格的 GSAP 动态花字/字幕卡。没有任何预设模板：每张卡都是你看着画面为这支片量身创作的原生包装。
 
-设计原则：
-- 台词文字必须一字不差完整出现，且必须直接写在静态 HTML 里（绝不允许用 JS 运行时拼接或注入台词）。字号大、清晰易读，用描边、投影或色块底衬保证在任何画面上都读得清。整句台词必须完整落在视口内，一行放不下就主动换行并适当调小字号。卡片上只能出现台词本身。
-- 动画要炫酷有设计感：逐字/逐词 stagger 弹入（back.out 或 elastic.out 缓动），配合轻微的发光、渐变分隔线、几何点缀的入场编排；入场后保持稳定可读，可叠加轻微漂浮/循环微动；时间轴 85% 之后设计退场趋势（淡出或缩小）。整体气质是精致综艺花字/电影标题，不是简陋气泡。
-- 字效克制清楚：文字描边最多 1px，只用一层轻微阴影或单层发光；较长台词必须允许换行，不得用 white-space:nowrap。
-- 视口就是卡片本身：location 已经框定了卡片在画面中的位置和大小，卡片主体必须撑满视口（宽高各占 90% 以上），台词字号用 vh 单位（主文字建议 14vh 以上，长台词可换行）。
-- 位置与大小必须避开画面主体（人物、动物、关键物体与运动路径）：从真实画面帧判断主体位置和镜头运动趋势，把卡片放在留白区（通常是上方天空、角落或侧边）；卡片面积一般不超过画面的四分之一（通过 location.width/height 控制），宁可小而精致，绝不遮挡主体。
-- 配色从画面帧中取色并拉开对比度，让卡片既融入画面又一眼抢眼。
+风格推导（第一优先级）：
+- 先读画面：色彩、光线、情绪、题材（综艺/电影感/治愈/纪录），再读任务里的全片概念与整体要求；字体气质、配色、装饰语汇全部从这里推导，让字卡像这支片自己长出来的。
+- 同一支片的多张卡要有家族感（同一字体气质、同一色系逻辑），但每张卡的构图、大小、角度、动态必须不同，任务会告知本卡序号与前序卡的构图概要，不要重复。
+
+构图跳脱（综艺/vlog 类内容）：
+- 拒绝千篇一律的居中胶囊和规整排版：字卡可以整体倾斜（CSS rotate -8°~8°）、可以靠近主体呼应动作与表情（不遮挡脸部与关键动作）、逐字大小错落、关键词变色/放大强调、用色块/描边/手绘笔触/小贴纸穿插。
+- location 从画面构图自由决定：可以大（width 可达 0.6、height 可达 0.4）也可以小而精致，可以在主体旁、斜上角、贴近动作轨迹处；避开任务列出的已占用区域；安静/抒情内容则克制留白。
+
+动态设计（入场后不许定格）：
+- 入场要有设计：逐字/逐词 stagger 弹入、描边 draw-on、色块擦除揭示、旋转落入等，缓动用 back.out / elastic.out 拉开强弱。
+- 入场完成后持续活着：整卡缓慢 scale 呼吸（0.98~1.03）、轻微漂移或摇摆、关键词二次弹跳、装饰元素独立循环；高潮词可以在中段再放大强调一次。时间轴 85% 之后设计退场趋势（淡出或缩小）。
+- 至少三层深度：文字主体 + 强调装饰（下划线/色块/星芒）+ 背景层（半透 scrim/不规则色块），各层动态错峰。
+
+可读性硬约束（不可违反）：
+- 台词文字必须一字不差完整出现，且必须直接写在静态 HTML 里（绝不允许用 JS 运行时拼接或注入台词）。整句台词必须完整落在视口内，一行放不下就主动换行并适当调小字号；卡上只能出现台词本身。
+- 在任何画面上都读得清：描边最多 1px，只用一层轻微阴影或单层发光；长台词必须允许换行，不得用 white-space:nowrap。
+- 视口就是卡片本身：卡片主体必须撑满视口（宽高各占 90% 以上），台词字号用 vh 单位（主文字建议 14vh 以上，长台词可换行）。
 
 """
     + _JS_TIMELINE_CODE_RULES
     + """
 
-两条设计路线，优先路线 A：
-A（蓝图参数化，推荐）：从下列经过验证的动效蓝图中挑一个最贴合画面情绪的，并从真实画面帧里取色填 palette（primary=强调色、secondary=辅助色、ink=深色、paper=浅色，都用 #rrggbb）；同一支视频的多张字幕卡应风格各异，任务里会给出本卡序号与轮换建议，除非画面明显更适合其它蓝图。蓝图目录：
-%CAPTION_CATALOG%
-路线 A 输出字段：blueprint、palette、intensity（0-1，动态幅度）、concept、location；不要输出 html。
-B（自由 GSAP，仅当蓝图都不契合且你有强创意时）：按上述代码要求输出 format="html_js" 与完整 html。
-
-输出要求：只输出一个 JSON 对象，不要输出任何其他文字或代码围栏。字段：
-路线 A：
+输出要求：只输出一个 JSON 对象，不要输出任何其他文字或代码围栏：
 {
-  "concept": "一句话描述这张字幕卡的设计创意",
-  "blueprint": "stagger_pop | ink_reveal | glow_breath",
-  "palette": {"primary": "#rrggbb", "secondary": "#rrggbb", "ink": "#rrggbb", "paper": "#rrggbb"},
-  "intensity": 0-1,
-  "location": {"x": 0-1, "y": 0-1, "width": 0-1, "height": 0-1, "anchor_x": 0-1, "anchor_y": 0-1, "opacity": 0-1}
-}
-路线 B：
-{
-  "concept": "一句话描述这张字幕卡的设计创意",
+  "concept": "一句话描述这张卡的设计创意与它如何呼应画面风格",
   "format": "html_js",
   "html": "完整 HTML 文档字符串",
   "fps": 24,
   "loop": false,
   "location": {"x": 0-1, "y": 0-1, "width": 0-1, "height": 0-1, "anchor_x": 0-1, "anchor_y": 0-1, "opacity": 0-1}
 }
-location 使用归一化画布坐标：x/y 是锚点在画布上的位置，anchor_x/anchor_y 选择内容盒的哪个点对齐到 x/y，width/height 是盒子相对画布的比例。""".replace(
-        "%CAPTION_CATALOG%",
-        blueprint_catalog_text("caption"),
-    )
+location 使用归一化画布坐标：x/y 是锚点在画布上的位置，anchor_x/anchor_y 选择内容盒的哪个点对齐到 x/y，width/height 是盒子相对画布的比例。"""
 )
 
 _SELECT_SYSTEM_PROMPT = """你是一位视频包装总监。给你一支视频全部片段的剪辑意图清单，你要挑选最值得叠加装饰动效的少数片段。装饰动效是锦上添花：只在情绪高点、转折、开场或收尾这样的关键时刻出现才显得精心；每个片段都有反而廉价。数量不超过给定名额，可以少于名额，也可以是空数组。
@@ -797,16 +807,18 @@ def _text_style_task_text(
 ) -> str:
     creation = overlay.creation
     assert isinstance(creation, OverlayCreation)
-    rotation = CAPTION_BLUEPRINT_ORDER[
-        card_index % len(CAPTION_BLUEPRINT_ORDER)
-    ]
+    del theme  # 家族感由画面与全片概念推导，不再绑定固定主题色板
+    # Composition seeds rotate per card so concurrently designed cards
+    # still land in different places at different scales — they are
+    # placement tendencies the model may overrule for the footage, never
+    # style templates.
+    seed = _CARD_COMPOSITION_SEEDS[card_index % len(_CARD_COMPOSITION_SEEDS)]
     lines = [
-        "请为下面这段台词设计动态字幕卡。",
+        "请为下面这段台词自由设计一张贴合本片风格的动态花字/字幕卡。",
         f"台词文字: {creation.text}",
         f"情绪基调: {creation.vibe}",
         f"展示时长: {duration_seconds:.1f} 秒",
-        f"全片统一视觉主题: {theme}。字幕卡需与该主题保持一致。",
-        f"本卡序号: 第 {card_index + 1} 张；蓝图轮换建议: {rotation}（若画面明显更适合其它蓝图可换，但同片多张卡不要重复同一蓝图）。",
+        f"本卡序号: 第 {card_index + 1} 张。本卡构图建议（可根据画面推翻，但同片各卡构图必须互不重复）：{seed}。",
     ]
     if edit_element is not None and isinstance(
         edit_element.creation,
@@ -1019,20 +1031,99 @@ async def _select_decoration_ids(
     }
 
 
+def _timeline_beat_grid(
+    *,
+    project: Project,
+    timeline: Timeline,
+    project_root: Path,
+    executions: ProjectExecutionStore,
+) -> tuple[BeatGrid, int] | None:
+    """Beat grid of the timeline's dominant music Element (WT-B5).
+
+    Returns the grid plus the music Element's timeline start tick so
+    callers can snap in timeline coordinates. Every degradation path
+    (no music, no local bytes, no librosa) is declared in the log —
+    decorations then simply keep their unsnapped spans.
+    """
+    tracks = [
+        element
+        for element in timeline.elements_by_id.values()
+        if element.enabled and isinstance(element.creation, AudioCreation)
+    ]
+    if not tracks:
+        return None
+    element = max(tracks, key=lambda item: item.span.duration_tick)
+    creation = element.creation
+    assert isinstance(creation, AudioCreation)
+    path = _source_local_path(
+        project=project,
+        project_root=project_root,
+        version_id=creation.source_asset_version_id,
+        executions=executions,
+    )
+    if path is None:
+        logger.info("BGM 没有可用本地字节，装饰不做节拍吸附（已声明降级）")
+        return None
+    try:
+        grid = extract_beat_grid(path)
+    except BeatGridUnavailable as error:
+        logger.info("节拍吸附跳过（已声明降级）: %s", error)
+        return None
+    except Exception as error:  # noqa: BLE001 - snapping is best-effort
+        logger.warning("节拍网格提取失败，装饰不吸附: %s", error)
+        return None
+    return (grid, element.span.start_tick) if grid.beats_ms else None
+
+
+def _beat_snapped_span(
+    span: TimelineSpan,
+    beat_sync: tuple[BeatGrid, int] | None,
+    ticks_per_second: int,
+) -> TimelineSpan:
+    """Push a decoration's entrance onto the next BGM beat (WT-B5).
+
+    Only forward shifts inside the host segment are taken, so the burned
+    overlay always stays within its edit span; anything else passes the
+    span through untouched.
+    """
+    if beat_sync is None or span.duration_tick <= 0:
+        return span
+    grid, music_start_tick = beat_sync
+    start_ms = round(
+        (span.start_tick - music_start_tick) * 1000 / ticks_per_second,
+    )
+    delta_tick = round(
+        (grid.snap_ms(start_ms) - start_ms) * ticks_per_second / 1000,
+    )
+    if delta_tick <= 0 or delta_tick >= span.duration_tick:
+        return span
+    return TimelineSpan(
+        start_tick=span.start_tick + delta_tick,
+        duration_tick=span.duration_tick - delta_tick,
+    )
+
+
 def _motion_element(
     *,
     edit_element: TimelineElement,
     motion: MotionGraphic,
     location: ElementLocation,
     concept: str,
+    beat_sync: tuple[BeatGrid, int] | None = None,
+    ticks_per_second: int = 1000,
 ) -> TimelineElement:
-    return TimelineElement(
-        element_id=f"{edit_element.element_id}{_MOTION_ELEMENT_SUFFIX}",
-        label=f"动效: {concept[:40]}",
-        span=TimelineSpan(
+    span = _beat_snapped_span(
+        TimelineSpan(
             start_tick=edit_element.span.start_tick,
             duration_tick=edit_element.span.duration_tick,
         ),
+        beat_sync,
+        ticks_per_second,
+    )
+    return TimelineElement(
+        element_id=f"{edit_element.element_id}{_MOTION_ELEMENT_SUFFIX}",
+        label=f"动效: {concept[:40]}",
+        span=span,
         location=location,
         z_index=edit_element.z_index + 10,
         creation=OverlayCreation(
@@ -1184,6 +1275,58 @@ async def _plan_story_beats(
     return "根据时间线建立开场、变化与收束", None
 
 
+def _is_frame_overlay(element: TimelineElement) -> bool:
+    """Recognise one variety-frame Overlay declaration.
+
+    The taught convention is ``vibe="frame"``, but field runs show the
+    model sometimes keeps an emotional vibe and signals the frame intent
+    through its label/prompt instead — and may even hand-write a thin
+    css border that leaves the letterbox black. Frame semantics live in
+    the wording; the visual is owned by the deterministic blueprint, so
+    a hand-written non-blueprint motion is upgraded rather than kept.
+    """
+
+    creation = element.creation
+    if not isinstance(creation, OverlayCreation):
+        return False
+    if creation.text.strip():
+        return False
+    wording = f"{element.label or ''} {creation.prompt or ''}"
+    declared = creation.vibe == "frame" or any(
+        marker in wording for marker in ("综艺框", "包裹框", "边框", "画框")
+    )
+    if not declared:
+        return False
+    motion = creation.motion
+    if motion is None:
+        return True
+    return motion.motif != "variety_frame"
+
+
+def _frame_window_from_edit(
+    edit_location: ElementLocation | None,
+) -> dict[str, float] | None:
+    """Derive the frame's transparent window from one Edit placement box.
+
+    Returns ``None`` (default centered window) unless the Edit is an
+    axis-aligned shrunk placement — the only composition the director
+    prompt teaches; rotated or full-frame footage keeps the default.
+    """
+
+    if (
+        edit_location is None
+        or edit_location.rotation_degrees != 0.0
+        or (edit_location.width >= 1.0 and edit_location.height >= 1.0)
+    ):
+        return None
+    return {
+        "left": edit_location.x - edit_location.anchor_x * edit_location.width,
+        "top": edit_location.y - edit_location.anchor_y * edit_location.height,
+        "width": edit_location.width,
+        "height": edit_location.height,
+    }
+
+
 async def design_motion_overlays(
     services: Any,
     *,
@@ -1237,6 +1380,15 @@ async def design_motion_overlays(
     executions = ProjectExecutionStore(services.root)
     ffmpeg_path = resolve_ffmpeg() or "ffmpeg"
     canvas_size = _design_canvas_size(project)
+    # Beat-sync (WT-B5): decoration entrances snap to the BGM grid when a
+    # music Element with local bytes exists; degradation is declared inside.
+    beat_sync = await asyncio.to_thread(
+        _timeline_beat_grid,
+        project=project,
+        timeline=timeline,
+        project_root=project_root,
+        executions=executions,
+    )
 
     edit_elements = sorted(
         (
@@ -1269,7 +1421,24 @@ async def design_motion_overlays(
         ),
         key=lambda element: (element.span.start_tick, element.element_id),
     )[:_MAX_SEGMENTS]
-    if not edit_elements and not text_overlays and not motion_clips:
+    # Variety frame Overlays (text-free, vibe="frame"): the editing
+    # director declares the wrapped-picture composition; the actual frame
+    # document is deterministic blueprint output so every framed segment
+    # shares one packaging style across the film.
+    frame_overlays = sorted(
+        (
+            element
+            for element in timeline.elements_by_id.values()
+            if element.enabled and _is_frame_overlay(element)
+        ),
+        key=lambda element: (element.span.start_tick, element.element_id),
+    )[:_MAX_SEGMENTS]
+    if (
+        not edit_elements
+        and not text_overlays
+        and not motion_clips
+        and not frame_overlays
+    ):
         raise ValidationError(
             "Timeline 没有可设计的 Edit Element、文字 Overlay 或动效片段 Element",
         )
@@ -1642,7 +1811,11 @@ async def design_motion_overlays(
                         ffmpeg_path=ffmpeg_path,
                     )
                 ).path
-                for fraction in (0.25, 0.75)
+                # Four spread samples instead of two: the designer sees
+                # how the subject moves through the window, so placement
+                # and dynamics can answer the footage instead of one
+                # frozen moment.
+                for fraction in (0.12, 0.38, 0.62, 0.88)
             ]
         except Exception as exc:
             return {"status": "failed", "error": f"抽帧失败: {exc}"}
@@ -1665,6 +1838,59 @@ async def design_motion_overlays(
                 best_overlap = overlap
                 best = edit
         return best
+
+    def style_frame_overlay(overlay: TimelineElement) -> dict[str, Any]:
+        """Render one variety frame from the film-wide blueprint.
+
+        The window rect mirrors the wrapped Edit Element's placement box
+        so the opaque border lands exactly around the shrunk footage; a
+        full-frame (or rotated) Edit gets the default centered window
+        whose border simply covers the footage edges. Deterministic by
+        design — one packaging style per film, zero model calls.
+        """
+
+        creation = overlay.creation
+        assert isinstance(creation, OverlayCreation)
+        entry: dict[str, Any] = {
+            "elementId": overlay.element_id,
+            "overlayKind": "frame",
+        }
+        edit = best_covering_edit(overlay)
+        window = _frame_window_from_edit(
+            edit.location if edit is not None else None,
+        )
+        blueprint = (
+            "warm_journal" if theme == "soft_journal" else "pop_variety"
+        )
+        concept = f"综艺包裹框 {blueprint}：{creation.prompt[:40]}"
+        try:
+            blueprint_html, _period = render_frame_blueprint(
+                blueprint,
+                palette=_THEME_BLUEPRINT_PALETTES.get(theme),
+                intensity=0.55,
+                window=window,
+            )
+        except ValueError as exc:
+            return {**entry, "status": "failed", "error": str(exc)}
+        motion = MotionGraphic(
+            format="html_js",
+            html=blueprint_html,
+            fps=24,
+            loop=True,
+            design_notes=concept,
+            motif="variety_frame",
+            theme=theme,
+            variant="sticker",
+            emotion="chill",
+            entrance="pop",
+            exit="none",
+            intensity=0.55,
+        )
+        styled[overlay.element_id] = (
+            motion,
+            ElementLocation(x=0.5, y=0.5, width=1.0, height=1.0),
+        )
+        return {**entry, "status": "designed", "concept": concept}
 
     async def style_text_overlay(
         overlay: TimelineElement,
@@ -1863,6 +2089,8 @@ async def design_motion_overlays(
                 motion=motion,
                 location=location,
                 concept=concept,
+                beat_sync=beat_sync,
+                ticks_per_second=timeline.ticks_per_second,
             ),
         )
         return {**entry, "status": "designed", "concept": concept}
@@ -1921,6 +2149,9 @@ async def design_motion_overlays(
             ),
         ),
     )
+    frame_results = [
+        style_frame_overlay(overlay) for overlay in frame_overlays
+    ]
     # Design decorations in timeline order so each decision can see motifs
     # already used earlier in the story and avoid accidental repetition.
     segment_results: list[dict[str, Any]] = []
@@ -1942,6 +2173,7 @@ async def design_motion_overlays(
             "storySummary": story_summary,
             "textOverlays": text_results,
             "motionClips": clip_results,
+            "frameOverlays": frame_results,
             "segments": segment_results,
             "generation": snapshot.generation,
             "etag": snapshot.etag,
@@ -2034,6 +2266,7 @@ async def design_motion_overlays(
         "storySummary": story_summary,
         "textOverlays": text_results,
         "motionClips": clip_results,
+        "frameOverlays": frame_results,
         "segments": segment_results,
         "generation": committed.generation,
         "etag": committed.etag,

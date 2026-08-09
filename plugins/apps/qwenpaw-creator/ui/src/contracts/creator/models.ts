@@ -66,6 +66,8 @@ export interface ModelConfigData {
   };
   creationCheckpoints: {
     mode: "required" | "skip";
+    /** Mid-flight governance (upstream three modes); skip forces delegated. */
+    executionMode?: "delegated" | "co_creation" | "fine_tuning";
   };
   mediaReview: {
     mode: "required" | "auto_approve";

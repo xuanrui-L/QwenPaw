@@ -2,6 +2,7 @@
 # flake8: noqa: E501
 # pylint: disable=too-many-return-statements
 # pylint: disable=too-many-branches
+# pylint: disable=too-many-statements
 """File-native toolkits owned by Creator specialists.
 
 The Agent runtime consumes this registry as a generic AgentScope tool surface.
@@ -14,6 +15,7 @@ transaction or an overlay ChangeSet.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -23,6 +25,8 @@ from typing import Any
 from domain.enums import CreatorCommandType, SpecialistRole
 from domain.errors import PermissionDeniedError, ValidationError
 from models.config import is_s2v_configured, is_tts_configured
+from services.media.source_observation import source_observation_service
+from services.media.source_video_reader import source_video_reader_service
 from services.media.source_memory import (
     QUERY_TYPES as _MEMORY_QUERY_TYPES,
     source_memory_service,
@@ -46,6 +50,46 @@ from services.source_analysis import (
     SourceAgentToolContext,
     source_analysis_service,
 )
+
+logger = logging.getLogger("creator.specialist_tools")
+
+
+def _unique_prefix_correction(
+    target_ref: str,
+    admitted_target_refs: Sequence[str],
+) -> str | None:
+    """Resolve one mistyped ref against the admitted set, or ``None``.
+
+    Content-addressed refs share a long structural prefix (for example
+    ``asset:asset-`` plus hex); a model transcription slip usually keeps
+    a long head intact and corrupts a later run. The correction demands
+    at least 8 characters beyond the longest structural prefix shared
+    across the admitted set, and exactly one candidate — anything less
+    stays a hard rejection.
+    """
+
+    ref = target_ref.strip()
+    if not ref or not admitted_target_refs:
+        return None
+    structural = admitted_target_refs[0]
+    for candidate in admitted_target_refs[1:]:
+        limit = min(len(structural), len(candidate))
+        keep = 0
+        while keep < limit and structural[keep] == candidate[keep]:
+            keep += 1
+        structural = structural[:keep]
+    required = len(structural) + 8
+    matches = []
+    for candidate in admitted_target_refs:
+        limit = min(len(ref), len(candidate))
+        shared = 0
+        while shared < limit and ref[shared] == candidate[shared]:
+            shared += 1
+        if shared >= required:
+            matches.append(candidate)
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 class SpecialistToolWait(StrEnum):
@@ -596,6 +640,72 @@ _MEMORY_QUERY_ARGUMENTS = _arguments_schema(
     ("queryType",),
 )
 
+_OBSERVE_CLIP_ARGUMENTS = _arguments_schema(
+    {
+        "startMs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "观察窗口在源素材时间轴上的起点（毫秒）。",
+        },
+        "endMs": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "观察窗口终点（毫秒）。窗口上限 120 秒：更宽的问题先用 "
+                "query_source_memory 定位到窄窗后逐窗核验。"
+            ),
+        },
+        "question": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "对这段原片要核验/回答的具体问题，带上待验证的结论本身，"
+                "例如：‘记忆检索称此处出现主角摔倒，画面中是否属实，"
+                "具体发生在哪个时刻？’"
+            ),
+        },
+    },
+    ("startMs", "endMs", "question"),
+)
+
+_READ_SOURCE_VIDEO_ARGUMENTS = _arguments_schema(
+    {
+        "fps": {
+            "type": "number",
+            "minimum": 0,
+            "description": ("采样帧率；0（默认）按窗口时长自动选择。窄窗口细看时" "可传 1-2。"),
+        },
+        "budget": {
+            "type": "string",
+            "enum": ["small", "normal", "large"],
+            "description": (
+                "单帧分辨率预算：small(~288px) 粗扫全片定位，"
+                "normal(~512px) 默认，large(~1024px) 看清局部细节。"
+            ),
+        },
+        "startMs": {"type": "integer", "minimum": 0},
+        "endMs": {"type": "integer", "minimum": 1},
+        "maxFrames": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 64,
+            "description": "抽帧上限（默认 32）。",
+        },
+    },
+    (),
+)
+
+_REVIEW_SCENE_ARGUMENTS = _arguments_schema(
+    {
+        "sceneId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "edit_plan.scene_ledger 中的 scene_id。",
+        },
+    },
+    ("sceneId",),
+)
+
 _MOTION_DESIGN_ARGUMENTS = _arguments_schema(
     {
         "brief": {
@@ -711,8 +821,8 @@ _SPECS = (
         description=(
             "数字人口型视频（wan2.2-s2v）：用一张角色人像图 + 一段音频生成"
             "对口型说话视频，写回目标 R2V Element 的主视频槽。提交前自动先跑"
-            "免费人像检测（未通过不产生任何费用）；audioAssetRef 直接消费 "
-            "tts_generation 产出的 audio version。"
+            "人像检测（按成功请求计费，远低于生成费用；检测未通过不会提交"
+            "生成）；audioAssetRef 直接消费 tts_generation 产出的 audio version。"
         ),
         roles=frozenset({SpecialistRole.R2V_GENERATION_DIRECTOR}),
         parameters=_tool_schema(_S2V_ARGUMENTS),
@@ -731,6 +841,58 @@ _SPECS = (
         ),
         roles=frozenset({SpecialistRole.SOURCE_INTELLIGENCE}),
         parameters=_tool_schema(_MEMORY_QUERY_ARGUMENTS),
+    ),
+    SpecialistToolSpec(
+        name="observe_source_clip",
+        description=(
+            "回原片核验：按时间窗从当前 exact Source 的原始媒体抽出连续"
+            "片段，由 VLM 真实观看后回答问题并附时间戳证据。"
+            "query_source_memory 的 hitWindowsMs 结论在用于剪辑选段前必须"
+            "经本工具逐窗核验；窗口 0.5–120 秒。"
+        ),
+        roles=frozenset(
+            {
+                SpecialistRole.SOURCE_INTELLIGENCE,
+                SpecialistRole.AI_EDITING_DIRECTOR,
+            },
+        ),
+        parameters=_tool_schema(_OBSERVE_CLIP_ARGUMENTS),
+        long_running=True,
+        wait=SpecialistToolWait.TASK,
+        provider_kind="vlm",
+    ),
+    SpecialistToolSpec(
+        name="read_source_video",
+        description=(
+            "按需观看源素材（先粗看再细看）：从当前 exact Source 的原始"
+            "视频按动态分辨率/帧率抽帧，帧序列带时间戳以原生图片进入你的"
+            "下一条消息。典型用法：budget=small 不传时间窗扫全片建立定位，"
+            "再对命中段用 budget=large + 时间窗细看；需要连续动态细节时"
+            "改用 observe_source_clip。"
+        ),
+        roles=frozenset(
+            {
+                SpecialistRole.SOURCE_INTELLIGENCE,
+                SpecialistRole.AI_EDITING_DIRECTOR,
+            },
+        ),
+        parameters=_tool_schema(_READ_SOURCE_VIDEO_ARGUMENTS),
+        long_running=True,
+        wait=SpecialistToolWait.TASK,
+    ),
+    SpecialistToolSpec(
+        name="review_scene",
+        description=(
+            "场景级预审锁定（scene-loop）：对 edit_plan.scene_ledger 中的一个"
+            "场景做六项检查（零渲染：证据来自源素材关键帧与动效文档事实）。"
+            "通过则把该行置为 locked 并记录内容指纹；不通过返回逐项 findings。"
+            "master 合成前全部声明场景必须 locked；段内 Element 变更会使锁失效。"
+        ),
+        roles=frozenset({SpecialistRole.AI_EDITING_DIRECTOR}),
+        parameters=_tool_schema(_REVIEW_SCENE_ARGUMENTS),
+        long_running=True,
+        provider_kind="vlm",
+        wait=SpecialistToolWait.TASK,
     ),
     SpecialistToolSpec(
         name="design_motion_overlays",
@@ -792,6 +954,7 @@ _SPECS = (
         ),
         roles=frozenset({SpecialistRole.SOURCE_INTELLIGENCE}),
         parameters=_tool_schema(_READ_DOCUMENT_ARGUMENTS),
+        long_running=True,
         provider_kind="document",
     ),
 )
@@ -900,9 +1063,33 @@ class FileSpecialistToolRegistry:
             target_ref=target_ref,
             admitted_target_refs=admitted_target_refs,
         ):
-            raise PermissionDeniedError(
-                "Specialist tool targetRef 不在本 Run 准入范围",
+            corrected = _unique_prefix_correction(
+                target_ref,
+                admitted_target_refs,
             )
+            if corrected is not None and spec.admits_target_ref(
+                role=role,
+                target_ref=corrected,
+                admitted_target_refs=admitted_target_refs,
+            ):
+                # Long content-addressed ids invite transcription slips
+                # (field run 2026-08-09: one flipped hex run burned a
+                # whole 18-asset delegation). A unique long-prefix match
+                # against the admitted set is deterministic evidence of
+                # the intended target, so recover instead of failing the
+                # run; ambiguity still fails closed below.
+                logger.warning(
+                    "specialist targetRef typo corrected: %s -> %s",
+                    target_ref,
+                    corrected,
+                )
+                target_ref = corrected
+            else:
+                raise PermissionDeniedError(
+                    "Specialist tool targetRef 不在本 Run 准入范围；"
+                    f"收到 {target_ref or '(空)'}。准入目标请逐字符复制，"
+                    "不要手抄 ID；本 Run 准入：" + ", ".join(admitted_target_refs[:24]),
+                )
         payload = arguments.get("arguments")
         if not isinstance(payload, Mapping):
             raise ValidationError("Specialist tool arguments 必须是 object")
@@ -1005,6 +1192,98 @@ class FileSpecialistToolRegistry:
                 scope=str(payload.get("scope") or "source"),
             )
             return SpecialistToolResult(payload=dict(result))
+
+        if name == "observe_source_clip":
+            if not target_ref.startswith("asset:") or not target_ref[6:]:
+                raise ValidationError(
+                    "observe_source_clip 只接受 asset:<logicalAssetId>",
+                )
+            task = await source_observation_service(
+                self.services,
+            ).schedule_observe_clip(
+                project_id=project_id,
+                logical_asset_id=target_ref[6:],
+                start_ms=int(payload["startMs"]),
+                end_ms=int(payload["endMs"]),
+                question=str(payload["question"]),
+                idempotency_key=idempotency_key,
+                caused_by_request_id=(
+                    context.specialist_run_id if context is not None else None
+                ),
+            )
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": task.status.value,
+                    "taskId": task.task_id,
+                },
+                task_id=task.task_id,
+            )
+
+        if name == "read_source_video":
+            if not target_ref.startswith("asset:") or not target_ref[6:]:
+                raise ValidationError(
+                    "read_source_video 只接受 asset:<logicalAssetId>",
+                )
+            task = await source_video_reader_service(
+                self.services,
+            ).schedule_read_source_video(
+                project_id=project_id,
+                logical_asset_id=target_ref[6:],
+                fps=float(payload.get("fps") or 0),
+                budget=str(payload.get("budget") or "normal"),
+                start_ms=(
+                    int(payload["startMs"])
+                    if payload.get("startMs") is not None
+                    else None
+                ),
+                end_ms=(
+                    int(payload["endMs"])
+                    if payload.get("endMs") is not None
+                    else None
+                ),
+                max_frames=int(payload.get("maxFrames") or 32),
+                idempotency_key=idempotency_key,
+                caused_by_request_id=(
+                    context.specialist_run_id if context is not None else None
+                ),
+            )
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": task.status.value,
+                    "taskId": task.task_id,
+                },
+                task_id=task.task_id,
+            )
+
+        if name == "review_scene":
+            if not target_ref.startswith("timeline:"):
+                raise ValidationError(
+                    "review_scene 只接受 timeline:<timelineId>",
+                )
+            from services.render_review.scene_review import (
+                schedule_review_scene,
+            )
+
+            task = await schedule_review_scene(
+                self.services,
+                project_id=project_id,
+                timeline_ref=target_ref,
+                scene_id=str(payload["sceneId"]),
+                idempotency_key=idempotency_key,
+                caused_by_request_id=(
+                    context.specialist_run_id if context is not None else None
+                ),
+            )
+            return SpecialistToolResult(
+                payload={
+                    "ok": True,
+                    "status": task.status.value,
+                    "taskId": task.task_id,
+                },
+                task_id=task.task_id,
+            )
 
         if name == "image_generation":
             if target_ref.startswith("lineup:"):

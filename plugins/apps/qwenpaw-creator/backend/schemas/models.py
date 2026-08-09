@@ -160,9 +160,22 @@ class CreationCheckpointConfig(StrictModel):
 
     ``required`` blocks visual generation until the plan (and later the
     character/scene designs) are confirmed; ``skip`` runs unattended.
+
+    ``execution_mode`` scales the mid-flight governance (upstream
+    video-edit three modes): ``co_creation`` (default) keeps every gate
+    and asks for a creative direction before editing starts;
+    ``delegated`` drops the plan/design/direction gates (billing
+    authorizations stay); ``fine_tuning`` keeps one scope confirmation
+    for iterations on a delivered cut. ``mode=skip`` (the YOLO ladder)
+    forces ``delegated`` so the ladder never contradicts itself.
     """
 
     mode: Literal["required", "skip"] = "required"
+    execution_mode: Literal[
+        "delegated",
+        "co_creation",
+        "fine_tuning",
+    ] = Field(default="co_creation", alias="executionMode")
 
 
 class MediaReviewConfig(StrictModel):

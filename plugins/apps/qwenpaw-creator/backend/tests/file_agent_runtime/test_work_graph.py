@@ -411,6 +411,50 @@ def test_ready_media_nodes_exclude_compose() -> None:
     )
 
     graph = derive_work_graph(project)
-    assert graph.by_id["compose:final"].status is WorkNodeStatus.READY
-    assert not graph.ready_media_nodes()
-    assert graph.unfinished() == (graph.by_id["compose:final"],)
+    compose = graph.by_id["compose:final"]
+    assert compose.status is WorkNodeStatus.READY
+    # The master render is machine-dispatchable: an unattended project
+    # reaches its final cut without a user pressing "render".
+    assert graph.ready_media_nodes() == (compose,)
+    assert compose.command == "COMPOSE_FINAL_VIDEO"
+    assert compose.target_ref == "timeline:timeline:main"
+    assert graph.unfinished() == (compose,)
+
+
+def test_stale_final_render_reopens_compose() -> None:
+    # Render review revises an overlay after the master render: edit
+    # impact marks the final_video version stale. The compose node must
+    # drop back to READY so the unattended loop re-renders the corrected
+    # cut instead of reporting DONE one compose short.
+    project = _project()
+    _add_element(project, _element("elem:one"))
+    _select_slot(
+        project,
+        slot_id="element:elem:one:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:one",
+        version_id="art:sb",
+    )
+    _select_slot(
+        project,
+        slot_id="element:elem:one:main",
+        kind="element_video",
+        owner_ref="element:elem:one",
+        version_id="art:vid",
+    )
+    _select_slot(
+        project,
+        slot_id="timeline:timeline:main:render",
+        kind="final_video",
+        owner_ref="timeline:timeline:main",
+        version_id="art:final",
+    )
+
+    graph = derive_work_graph(project)
+    assert graph.by_id["compose:final"].status is WorkNodeStatus.DONE
+
+    project.assets.artifact_versions_by_id["art:final"].stale = True
+    graph = derive_work_graph(project)
+    compose = graph.by_id["compose:final"]
+    assert compose.status is WorkNodeStatus.READY
+    assert compose in graph.ready_media_nodes()

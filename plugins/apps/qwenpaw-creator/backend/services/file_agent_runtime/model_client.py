@@ -555,7 +555,9 @@ class AgentScopeAgentChatClient:
         self,
         model: DashScopeChatModel | None = None,
         *,
-        timeout_seconds: float = 180.0,
+        # Keep in sync with driver.DEFAULT_MODEL_TURN_TIMEOUT_SECONDS so
+        # the transport timeout never undercuts the turn budget.
+        timeout_seconds: float = 300.0,
         # ``None`` omits the parameter entirely so the provider/model keeps
         # control over its own output budget.
         max_tokens: int | None = None,
@@ -623,7 +625,7 @@ class AgentScopeAgentChatClient:
         _empty_retries_remaining: int = 2,
         _rate_limit_retries_remaining: int = MAX_RATE_LIMIT_RETRIES,
         _transient_retries_remaining: int = 2,
-        _markup_retries_remaining: int = 2,
+        _markup_retries_remaining: int = 4,
     ) -> AgentModelTurn:
         native_messages = records_to_agentscope_messages(messages)
         allowed_names = {

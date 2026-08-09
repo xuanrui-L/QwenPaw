@@ -605,8 +605,8 @@ def test_agentscope_client_rejects_textual_tool_markup_before_text_callback(
 
     provider = asyncio.run(scenario())
     # Markup degradation is stochastic, so the turn is retried before the
-    # run is failed: original attempt plus two retries.
-    assert provider.calls == 3
+    # run is failed: original attempt plus four retries.
+    assert provider.calls == 5
     assert text_deltas == []
 
 

@@ -13,9 +13,12 @@ from services.media_files import motion_engine
 from services.media_files.motion_blueprints import (
     CAPTION_BLUEPRINT_ORDER,
     DECORATION_BLUEPRINTS,
+    FRAME_BLUEPRINTS,
     blueprint_catalog_text,
     render_caption_blueprint,
     render_decoration_blueprint,
+    render_frame_blueprint,
+    validated_frame_window,
     validated_palette,
 )
 from services.media_files.motion_design import _validated_design
@@ -106,6 +109,44 @@ class TestBlueprintRendering:
             assert name in caption
         for name in DECORATION_BLUEPRINTS:
             assert name in decoration
+
+    def test_every_frame_blueprint_registers_hf_and_vendor(self) -> None:
+        for name in FRAME_BLUEPRINTS:
+            html, period = render_frame_blueprint(name)
+            assert "window.__hf" in html
+            assert 'src="vendor/gsap.min.js"' in html
+            assert period > 0
+            # Full-bleed border document: the root floods the viewport
+            # and the four strips tile everything outside the window.
+            assert "#root{position:absolute;inset:0;}" in html
+
+    def test_frame_window_mirrors_edit_placement_box(self) -> None:
+        # A centered 0.84 x 0.80 edit placement produces matching strip
+        # geometry: top strip 10%, left strip 8%.
+        html, _ = render_frame_blueprint(
+            "pop_variety",
+            window={"left": 0.08, "top": 0.10, "width": 0.84, "height": 0.80},
+        )
+        assert ".st{left:0;right:0;top:0;height:10.00%}" in html
+        assert ".sl{left:0;top:10.00%;bottom:10.00%;width:8.00%}" in html
+
+    def test_frame_window_clamps_to_keep_real_borders(self) -> None:
+        window = validated_frame_window(
+            {"left": -0.5, "top": 0.0, "width": 2.0, "height": 0.01},
+        )
+        assert 0.02 <= window["left"]
+        assert window["left"] + window["width"] <= 0.98
+        assert 0.02 <= window["top"]
+        assert window["top"] + window["height"] <= 0.98
+        assert window["width"] >= 0.40 - 1e-9
+        # Garbage input falls back to the default centered window.
+        default = validated_frame_window(None)
+        assert default["width"] == pytest.approx(0.86)
+        assert default["left"] == pytest.approx(0.07)
+
+    def test_unknown_frame_blueprint_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unknown frame blueprint"):
+            render_frame_blueprint("nope")
 
 
 class TestBlueprintDesignValidation:

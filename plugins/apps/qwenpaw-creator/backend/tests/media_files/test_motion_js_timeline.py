@@ -485,6 +485,61 @@ class TestCaptureTruthGate:
         error = self._verify(self._frames(tmp_path, frames))
         assert error is not None and "越出透明盒边缘" in error
 
+    def test_ring_frame_accepts_full_edge_border(self, tmp_path) -> None:
+        # A variety frame is an opaque border with a transparent window:
+        # 100% edge contact is its normal state under the ring gate.
+        def border(x: int, y: int) -> tuple[int, int, int, int]:
+            on_border = x < 3 or x >= 13 or y < 3 or y >= 13
+            return (255, 255, 255, 255) if on_border else (0, 0, 0, 0)
+
+        frames_dir = self._frames(
+            tmp_path,
+            {index: border for index in _SAMPLED_INDICES},
+        )
+        assert (
+            _verify_captured_frames(
+                frames_dir,
+                frame_count=5,
+                box_width=_BOX,
+                box_height=_BOX,
+                ffmpeg_path=_FFMPEG,
+                frame_ring=True,
+            )
+            is None
+        )
+        # Geometric recognition: the same ring form passes WITHOUT the
+        # declaration (model-authored html_css frames carry no marker).
+        assert (
+            _verify_captured_frames(
+                frames_dir,
+                frame_count=5,
+                box_width=_BOX,
+                box_height=_BOX,
+                ffmpeg_path=_FFMPEG,
+            )
+            is None
+        )
+
+    def test_ring_frame_rejects_opaque_center(self, tmp_path) -> None:
+        # An "opaque frame" that paints the middle would cover the
+        # wrapped footage: the honest center gate fails it closed.
+        def opaque(_x: int, _y: int) -> tuple[int, int, int, int]:
+            return (255, 255, 255, 255)
+
+        frames_dir = self._frames(
+            tmp_path,
+            {index: opaque for index in _SAMPLED_INDICES},
+        )
+        error = _verify_captured_frames(
+            frames_dir,
+            frame_count=5,
+            box_width=_BOX,
+            box_height=_BOX,
+            ffmpeg_path=_FFMPEG,
+            frame_ring=True,
+        )
+        assert error is not None and "中心窗口必须保持透明" in error
+
     def test_inspection_failure_passes(self, tmp_path) -> None:
         # Missing frames or a broken ffmpeg must never reject a render:
         # the gate only acts on positive evidence.
@@ -826,7 +881,7 @@ class TestOpaqueFrameAlphaFallback:
         # (-1, -1) let exactly the full-bleed documents skip the gates.
         frame = tmp_path / "opaque.png"
         _write_rgb_png(frame, _BOX, _BOX, lambda _x, _y: (240, 240, 240))
-        coverage, edge = motion_overlay._frame_alpha_stats(
+        coverage, edge, _center, _floor = motion_overlay._frame_alpha_stats(
             frame,
             _FFMPEG,
             _BOX,

@@ -42,6 +42,16 @@ EXECUTION_AUTHORIZATION_REQUIRED = "required"
 EXECUTION_AUTHORIZATION_ALLOW_ALL = "allow_all"
 CREATION_CHECKPOINT_REQUIRED = "required"
 CREATION_CHECKPOINT_SKIP = "skip"
+
+# Upstream video-edit governance modes ("how much to ask mid-flight").
+EXECUTION_MODE_DELEGATED = "delegated"
+EXECUTION_MODE_CO_CREATION = "co_creation"
+EXECUTION_MODE_FINE_TUNING = "fine_tuning"
+_EXECUTION_MODES = (
+    EXECUTION_MODE_DELEGATED,
+    EXECUTION_MODE_CO_CREATION,
+    EXECUTION_MODE_FINE_TUNING,
+)
 MEDIA_REVIEW_REQUIRED = "required"
 MEDIA_REVIEW_AUTO_APPROVE = "auto_approve"
 CREATOR_CONFIG_TOOLS = (
@@ -315,6 +325,26 @@ def get_creation_checkpoint_mode() -> str:
     if value == CREATION_CHECKPOINT_SKIP:
         return CREATION_CHECKPOINT_SKIP
     return CREATION_CHECKPOINT_REQUIRED
+
+
+def get_execution_mode() -> str:
+    """Return the mid-flight governance mode (upstream three modes).
+
+    Ladder consistency: ``creation_checkpoints.mode=skip`` (the YOLO
+    ladder stop) already means "no mid-flight gates", so it forces
+    ``delegated`` regardless of the stored ``execution_mode`` — the two
+    knobs can never contradict each other.
+    """
+
+    if get_creation_checkpoint_mode() == CREATION_CHECKPOINT_SKIP:
+        return EXECUTION_MODE_DELEGATED
+    section = _get_user_config().get("creation_checkpoints")
+    value = (
+        section.get("execution_mode") if isinstance(section, dict) else None
+    )
+    if value in _EXECUTION_MODES:
+        return value
+    return EXECUTION_MODE_CO_CREATION
 
 
 def get_media_review_mode() -> str:

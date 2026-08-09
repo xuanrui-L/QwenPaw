@@ -14,6 +14,7 @@ import {
 } from "@/selectors/timelineElementSelectors";
 import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
 import { formatSeconds } from "@/lib/timecode";
+import EditPlanCard from "./EditPlanCard";
 
 interface ElementListProps {
   timeline: TimelineDocument;
@@ -143,6 +144,7 @@ export default function ElementList({
         data-element-list
         className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3 [scrollbar-gutter:stable]"
       >
+        <EditPlanCard editPlan={timeline.edit_plan} />
         {elements.length === 0 ? (
           agentWorking.working ? (
             <div

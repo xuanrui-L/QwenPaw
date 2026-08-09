@@ -50,7 +50,7 @@ def test_registered_migration_runs_before_strict_project_validation() -> None:
         PROJECT_MIGRATIONS.pop(0, None)
         PROJECT_MIGRATIONS.pop(1, None)
 
-    assert project.schema_version == 6
+    assert project.schema_version == 8
     assert project.name == "Project"
     assert project.timelines.order == ["timeline:main"]
 
@@ -91,7 +91,7 @@ def test_overlay_kind_is_dropped_when_migrating_from_v2() -> None:
 
     project = load_project_json(json.dumps(raw))
 
-    assert project.schema_version == 6
+    assert project.schema_version == 8
     element = project.timelines.items["timeline:main"].elements_by_id[
         "overlay-1"
     ]
@@ -366,7 +366,7 @@ def test_unregistered_or_future_schema_fails_closed() -> None:
     with pytest.raises(CanonicalJsonError):
         load_project_json(json.dumps(raw))
 
-    raw["schema_version"] = 7
+    raw["schema_version"] = 9
     with pytest.raises(CanonicalJsonError):
         load_project_json(json.dumps(raw))
 
@@ -422,7 +422,7 @@ def test_v3_migration_declares_existing_variants_as_required() -> None:
     migrated = migrate_project_document(raw)
 
     # The chain continues through v4 -> v5 (overlay_kind removal).
-    assert migrated["schema_version"] == 6
+    assert migrated["schema_version"] == 8
     assert migrated["visual"]["entities"]["items"]["char:hero"][
         "required_variant_ids"
     ] == ["variant:peak", "variant:fallen"]
@@ -685,3 +685,58 @@ def test_v5_mode_tagged_r2v_creations_split_into_their_own_types() -> None:
     assert shot1["type"] == "r2v"
     assert "generation_mode" not in shot1
     assert migrated["schema_version"] == 6
+
+
+def test_v6_migration_introduces_null_edit_plan() -> None:
+    from datetime import datetime, timezone
+
+    from services.project_files.serialization import project_file_bytes
+
+    project = Project.new(
+        project_id="project-v6",
+        name="Plan",
+        now=datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc),
+    )
+    raw = json.loads(project_file_bytes(project))
+    raw["schema_version"] = 6
+    for timeline in raw["timelines"]["items"].values():
+        timeline.pop("edit_plan", None)
+
+    migrated = PROJECT_MIGRATIONS[6](raw)
+
+    assert migrated["schema_version"] == 7
+    for timeline in migrated["timelines"]["items"].values():
+        assert timeline["edit_plan"] is None
+
+
+def test_v6_migration_keeps_existing_edit_plan() -> None:
+    # setdefault semantics: a document that already carries a plan (e.g.
+    # written between upgrade steps) is not clobbered back to null.
+    raw = {
+        "schema_version": 6,
+        "timelines": {
+            "items": {
+                "timeline:main": {"edit_plan": {"concept": "kept"}},
+            },
+        },
+    }
+    migrated = PROJECT_MIGRATIONS[6](raw)
+    assert migrated["timelines"]["items"]["timeline:main"]["edit_plan"] == {
+        "concept": "kept",
+    }
+
+
+def test_v7_migration_clears_free_form_color_grade() -> None:
+    from services.project_files.serialization import project_file_bytes
+
+    project = Project.new(project_id="project-v7", name="Grade")
+    raw = json.loads(project_file_bytes(project))
+    raw["schema_version"] = 7
+    for timeline in raw["timelines"]["items"].values():
+        timeline["color_grade"] = "明亮温暖清新：自由文本描述"
+
+    migrated = PROJECT_MIGRATIONS[7](raw)
+
+    assert migrated["schema_version"] == 8
+    for timeline in migrated["timelines"]["items"].values():
+        assert timeline["color_grade"] == ""

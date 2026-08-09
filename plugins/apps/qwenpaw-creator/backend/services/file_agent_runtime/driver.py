@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -163,6 +163,7 @@ from .models import (
 )
 from .native_media import (
     document_page_content_parts,
+    video_frame_content_parts,
     source_intelligence_content_parts,
 )
 from .prompts import render_creator_system_prompt
@@ -187,7 +188,7 @@ OBJECT_GROUNDING_TOOL_NAME = "ground_image_objects"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
-DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 180.0
+DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 300.0
 # The workspace schema prompt instructs the model to keep each jq_project
 # argument JSON under 4KB; the advisory fires at 2x that guidance so the
 # diagnosis surfaces payloads that ignored the instruction.
@@ -315,6 +316,26 @@ def _specialist_waiting_review_summary(
             "这不算重新生成已通过产物。"
         )
     return f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；" "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
+
+
+def _timelines_have_plan(project: Any, target_refs: list[str]) -> bool:
+    """True when every delegated Timeline already carries an edit_plan.
+
+    Used by the co-creation direction gate: a Timeline with a written
+    contract has already passed (or explicitly skipped) direction picking.
+    """
+    timelines = project.timelines.items
+    for target_ref in target_refs:
+        if not str(target_ref).startswith("timeline:"):
+            continue
+        stripped = str(target_ref).partition(":")[2]
+        timeline = timelines.get(stripped) or timelines.get(str(target_ref))
+        if timeline is None:
+            continue
+        plan = getattr(timeline, "edit_plan", None)
+        if plan is None or not plan.concept.strip():
+            return False
+    return True
 
 
 def _agent_waiting_review_summary(
@@ -1016,6 +1037,24 @@ class FileCreatorAgentRuntime:
         # Event-driven media fan-out: the model plans, the Runtime executes
         # READY work-graph nodes in parallel (unattended ladder only).
         self.work_scheduler = WorkGraphScheduler(services)
+        # Media workers commit from thread-pool threads; route their
+        # post-commit signal onto the loop so a finished r2v/compose task
+        # re-evaluates the work graph without waiting for a model turn.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        self._commit_wake_listener: Callable[[str], None] | None = None
+        if loop is not None:
+
+            def _wake_from_commit(project_id: str, _loop=loop) -> None:
+                _loop.call_soon_threadsafe(
+                    self.work_scheduler.wake,
+                    project_id,
+                )
+
+            services.poller.add_commit_listener(_wake_from_commit)
+            self._commit_wake_listener = _wake_from_commit
 
     async def _complete_model_turn(
         self,
@@ -1063,8 +1102,80 @@ class FileCreatorAgentRuntime:
             name="creator-file-agent-dispatcher",
         )
         self._wake.set()
+        # Startup sweep: the media scheduler is commit-driven, so READY
+        # work-graph nodes that became dispatchable right before a
+        # restart (field run 2026-08-09: all scenes locked, compose
+        # READY, process bounced) would otherwise wait for the next
+        # commit that may never come. One wake per Project re-evaluates
+        # every graph; projects with nothing READY are a cheap no-op.
+        # An unattended run the shutdown cancelled mid-turn additionally
+        # gets one YOLO continuation — nobody is attending to retype
+        # “继续”, and the existing fuses still bound runaway loops.
+        try:
+            summaries = await asyncio.to_thread(self.services.projects.list)
+        except Exception:  # noqa: BLE001 - sweep must never block startup
+            summaries = []
+        for summary in summaries:
+            self.work_scheduler.wake(summary.project_id)
+            try:
+                await self._resume_interrupted_run(summary.project_id)
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "startup interrupted-run resume failed for %s",
+                    summary.project_id,
+                )
+
+    async def _resume_interrupted_run(self, project_id: str) -> None:
+        """Queue one YOLO continuation for a stalled unattended project.
+
+        Two startup dead-ends are recovered here. A shutdown-cancelled
+        run: the dispatcher only launches runs for pending user messages
+        and graceful shutdown consumes the head message first, so the
+        project would sit idle forever. A succeeded run whose work graph
+        still carries model-required gaps: the end-of-run YOLO check can
+        race automation that invalidates state right after it passed
+        (field run 2026-08-09: the pre-compose design pass expired scene
+        locks minutes after the run's clean exit). Both continuations go
+        through the standard YOLO gate (auto-approve mode only, resume
+        caps, no-progress fuse), so an actually-finished project is a
+        no-op.
+        """
+
+        records = await asyncio.to_thread(self.runs.list, project_id)
+        if not records:
+            return
+        last = records[-1]
+        if last.status is AgentRunStatus.CANCELLED:
+            code = str((last.error or {}).get("code") or "")
+            if code != "SHUTDOWN":
+                # SUPERSEDED/INTERRUPTED carry human intent (a replacement
+                # request or an explicit stop); restarting must not
+                # overrule them.
+                return
+            await self._queue_yolo_completion_resume(
+                project_id=project_id,
+                session_id=last.session_id,
+                conversation_id=last.conversation_id,
+                run_id=last.run_id,
+                after_failure=True,
+            )
+            self._wake.set()
+            return
+        if last.status is AgentRunStatus.SUCCEEDED:
+            await self._queue_yolo_completion_resume(
+                project_id=project_id,
+                session_id=last.session_id,
+                conversation_id=last.conversation_id,
+                run_id=last.run_id,
+            )
+            self._wake.set()
 
     async def stop(self) -> None:
+        if self._commit_wake_listener is not None:
+            self.services.poller.remove_commit_listener(
+                self._commit_wake_listener,
+            )
+            self._commit_wake_listener = None
         self._stopping = True
         dispatcher = self._dispatcher
         self._dispatcher = None
@@ -3008,9 +3119,10 @@ class FileCreatorAgentRuntime:
                 self.services,
                 project_id=project_id,
                 request=request,
+                target_refs=delegated.target_refs,
             )
             user_text += (
-                "\n\n本消息附有本轮用户输入的全部原生图片/视频，"
+                "\n\n本消息附有本次委派需要观察的全部原生图片/视频，"
                 f"共 {len(native_media_parts)} 份。必须基于这些原生媒体进行观察，"
                 "不能把消息中的 URL 文本当作已经完成素材理解。"
             )
@@ -3036,6 +3148,32 @@ class FileCreatorAgentRuntime:
                         ensure_ascii=False,
                         separators=(",", ":"),
                     )
+                )
+        if role is SpecialistRole.AI_EDITING_DIRECTOR:
+            from models.config import get_execution_mode
+
+            execution_mode = get_execution_mode()
+            user_text += f"\n\n当前执行模式：{execution_mode}。"
+            if execution_mode == "co_creation" and not _timelines_have_plan(
+                snapshot.project,
+                delegated.target_refs,
+            ):
+                user_text += (
+                    "共创模式且目标 Timeline 尚无 edit_plan：进入方向门——"
+                    "先产出 3 个候选创作方向（每个含一句话 concept、三旋钮 "
+                    "dials、signature_device 与一句 pitch），首行用 "
+                    "[BLOCKED] 列出三卡等待用户选择；用户选定后再把该方向"
+                    "作为 edit_plan 底稿继续。用户已在本次消息中明确选择方向"
+                    "或要求直接开剪时不重复询问。"
+                )
+            elif execution_mode == "delegated":
+                user_text += (
+                    "委派模式：不要中途询问方向或确认，自主完成 edit_plan " "与剪辑，决策写进 edit_plan 即可。"
+                )
+            elif execution_mode == "fine_tuning":
+                user_text += (
+                    "微调模式：用户在迭代已交付成片。只确认本次改动范围，"
+                    "不重新提方向；修改波及的场景需重新 review_scene。"
                 )
         user_content: list[dict[str, Any]] = [
             {"type": "text", "text": user_text},
@@ -3599,6 +3737,56 @@ class FileCreatorAgentRuntime:
                         "failed": failed,
                     },
                 )
+                if call.name == "read_source_video" and not failed:
+                    # Extracted source frames enter the specialist context
+                    # as native images interleaved with timestamps, via the
+                    # same mechanism as read_document page images.
+                    frame_content: list[dict[str, Any]] = []
+                    try:
+                        frame_parts = await video_frame_content_parts(
+                            self.services,
+                            project_id=project_id,
+                            task_result=result,
+                        )
+                    except (asyncio.CancelledError, StaleAgentRun):
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        frame_parts = []
+                        frame_content = [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "视频帧图注入失败，请基于工具返回的" f"摘要继续或缩小窗口重试：{exc}"
+                                ),
+                            },
+                        ]
+                    if frame_parts:
+                        frame_note = (
+                            "以下是 read_source_video 抽取的帧序列，每帧前"
+                            "一行是它在源素材中的时间戳；请直接观察帧内容，"
+                            "需看连续动态细节时对命中时段改用 "
+                            "observe_source_clip。"
+                        )
+                        frame_content = [
+                            {"type": "text", "text": frame_note},
+                            *frame_parts,
+                        ]
+                    if frame_content:
+                        await asyncio.to_thread(
+                            self.executions.append_specialist_message,
+                            project_id,
+                            specialist_run_id,
+                            message_id=f"specialist-message-{uuid4().hex}",
+                            role="user",
+                            content_parts=frame_content,
+                            metadata={
+                                "parentActionId": parent_action_id,
+                                "videoFramesForToolCallId": call.call_id,
+                            },
+                        )
+                        messages.append(
+                            {"role": "user", "content": frame_content},
+                        )
                 if call.name == "read_document" and not failed:
                     # Rendered pages enter the VLM context as native images
                     # via the existing multimodal user-message mechanism.
@@ -5181,11 +5369,25 @@ class FileCreatorAgentRuntime:
                 status=AgentRunStatus.CANCELLED,
                 updates={
                     "error": {
-                        "code": "SUPERSEDED" if superseded else "INTERRUPTED",
+                        # SHUTDOWN marks a process-lifecycle cancellation
+                        # (restart/deploy): the startup sweep may resume
+                        # it. INTERRUPTED stays a human stop and is never
+                        # auto-resumed.
+                        "code": (
+                            "SUPERSEDED"
+                            if superseded
+                            else (
+                                "SHUTDOWN" if self._stopping else "INTERRUPTED"
+                            )
+                        ),
                         "message": (
                             "Run superseded by an AgentDock request"
                             if superseded
-                            else "Run interrupted by the user"
+                            else (
+                                "Run cancelled by process shutdown"
+                                if self._stopping
+                                else "Run interrupted by the user"
+                            )
                         ),
                     },
                 },

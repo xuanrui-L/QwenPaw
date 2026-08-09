@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
 # pylint: disable=consider-using-with,raise-missing-from,too-many-branches
-# pylint: disable=too-many-statements,unused-argument
+# pylint: disable=too-many-statements,unused-argument,too-many-return-statements
 """File-native local video execution for edit and composition commands.
 
 The service freezes one ``project.json`` snapshot, resolves every input through
@@ -61,6 +61,10 @@ from services.media_files.motion_overlay import (
     prepare_motion_layer,
     probe_motion_document,
     render_motion_overlay,
+)
+from services.media_files.beat_grid import (
+    BeatGridUnavailable,
+    extract_beat_grid,
 )
 from services.media_files.motion_templates import render_caption_template
 from services.media_files.transitions import (
@@ -166,7 +170,7 @@ _MOTION_BURN_BATCH_SIZE = 8
 _SEGMENT_CACHE_MAX_ITEMS = 96
 # Renderer behaviour version for cached segments; bump on any semantic
 # change to segment rendering or overlay burning.
-_SEGMENT_CACHE_VERSION = 1
+_SEGMENT_CACHE_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +187,9 @@ _DEFAULT_FFMPEG_TERMINATION_GRACE_SECONDS = 5.0
 # Original-footage volume while a Timeline audio Element (narration) plays;
 # ~-9dB keeps ambience audible without competing with the voice.
 _DUCK_VOLUME = 0.35
+# Beat-snapped xfades must keep a perceptible blend; below this the join
+# effectively degrades to a cut and the snap is skipped instead.
+_MIN_SNAPPED_BLEND_SECONDS = 0.05
 
 
 def _merge_windows(
@@ -234,6 +241,7 @@ class LocalMediaExecutionSpec:
     canvas_size: tuple[int, int]
     on_element_done: Callable[[int, int], None] | None = None
     audio_tracks: tuple[Mapping[str, Any], ...] = ()
+    color_grade: str = ""
 
 
 def _input_render_element_ids(item: LocalMediaInput) -> frozenset[str]:
@@ -269,6 +277,28 @@ class LocalMediaRunner(Protocol):
 
     async def render(self, spec: LocalMediaExecutionSpec) -> Mapping[str, Any]:
         ...
+
+
+# Unified colour-grade presets applied to the whole composited cut.
+# Every preset must keep skin tones natural: gentle eq lifts plus a small
+# colour-balance shift, never LUT-strength stylisation.
+_COLOR_GRADE_FILTERS: dict[str, str] = {
+    # 明亮、温暖、清新：家庭 Vlog 默认暖色基调。
+    "warm_bright": (
+        "eq=brightness=0.02:saturation=1.12:gamma=1.03,"
+        "colorbalance=rm=0.03:gm=0.01:bm=-0.04:rh=0.02:bh=-0.02"
+    ),
+    # 冷静通透：科技/城市内容的冷色基调。
+    "clean_cool": (
+        "eq=brightness=0.01:saturation=1.05:gamma=1.02,"
+        "colorbalance=rm=-0.02:bm=0.04:bh=0.02"
+    ),
+    # 电影感：压暗部、轻微去饱和。
+    "cinematic": (
+        "eq=brightness=-0.01:saturation=0.96:contrast=1.08:gamma=0.98,"
+        "colorbalance=sm=-0.03:bh=-0.02"
+    ),
+}
 
 
 class FfmpegLocalMediaRunner:
@@ -324,6 +354,7 @@ class FfmpegLocalMediaRunner:
         )
         total_elements = len(remaining_element_occurrences)
         tail_trims, joins_by_pair = self._transition_directives(spec)
+        self._snap_transitions_to_beats(spec, tail_trims, joins_by_pair)
         if spec.command in (
             CreatorCommandType.EXECUTE_EDIT,
             CreatorCommandType.COMPOSE_FINAL_VIDEO,
@@ -429,7 +460,93 @@ class FfmpegLocalMediaRunner:
             )
         if spec.audio_tracks:
             self._mix_audio_tracks(spec)
+        grade_warning = self._apply_color_grade(spec)
+        if grade_warning:
+            overlay_warnings.append(grade_warning)
         return overlay_warnings
+
+    @staticmethod
+    def _snap_transitions_to_beats(
+        spec: LocalMediaExecutionSpec,
+        tail_trims: dict[str, float],
+        joins: dict[tuple[str, str], TransitionJoin],
+    ) -> None:
+        """Beat-sync (WT-B5): land each xfade's resolution moment on a beat.
+
+        The overlap a transition consumes is fixed by the Timeline
+        (blend + tail trim = overlap), but the split between the two is a
+        render-side degree of freedom: shifting δ from trim to blend moves
+        the moment the incoming shot fully takes over (xfade end) by δ
+        while the chain offsets after the join and the total duration stay
+        exactly on the Timeline end. Snapping therefore never retimes the
+        committed cut layout. Requires a BGM track; degradation (no
+        librosa, unreadable audio) is declared in the log, never silent.
+        """
+        if not any(join.effective_blend() > 0 for join in joins.values()):
+            return
+        track = max(
+            (
+                item
+                for item in spec.audio_tracks
+                if item.get("path")
+                and float(item.get("max_duration_seconds") or 0.0) > 0
+            ),
+            key=lambda item: float(item["max_duration_seconds"]),
+            default=None,
+        )
+        if track is None:
+            return
+        try:
+            grid = extract_beat_grid(Path(track["path"]))
+        except BeatGridUnavailable as error:
+            logger.info("转场 beat-sync 跳过（已声明降级）: %s", error)
+            return
+        except Exception as error:  # noqa: BLE001 - snapping is best-effort
+            logger.warning("节拍网格提取失败，转场不吸附: %s", error)
+            return
+        if not grid.beats_ms:
+            return
+        music_offset = float(track.get("offset_seconds") or 0.0)
+        durations: list[float] = []
+        for item in spec.inputs:
+            if item.start_seconds is not None and item.end_seconds is not None:
+                raw = item.end_seconds - item.start_seconds
+            elif item.duration_seconds is not None:
+                raw = item.duration_seconds
+            else:
+                return  # boundaries cannot be predicted — leave unsnapped
+            durations.append(raw - tail_trims.get(item.source_ref, 0.0))
+        accumulated = durations[0]
+        for index in range(1, len(spec.inputs)):
+            pair = (
+                spec.inputs[index - 1].source_ref,
+                spec.inputs[index].source_ref,
+            )
+            join = joins.get(pair)
+            blend = join.effective_blend() if join is not None else 0.0
+            if join is not None and blend > 0:
+                from_ref = pair[0]
+                trim = tail_trims.get(from_ref, 0.0)
+                local_ms = round((accumulated - music_offset) * 1000)
+                delta = (grid.snap_ms(local_ms) - local_ms) / 1000
+                new_blend = blend + delta
+                new_trim = trim - delta
+                if (
+                    delta
+                    and new_trim >= 0
+                    and _MIN_SNAPPED_BLEND_SECONDS
+                    <= new_blend
+                    < min(durations[index - 1], durations[index])
+                ):
+                    tail_trims[from_ref] = new_trim
+                    durations[index - 1] += delta
+                    joins[pair] = TransitionJoin(
+                        kind=join.kind,
+                        blend_seconds=new_blend,
+                    )
+                    accumulated += delta
+                    blend = new_blend
+            accumulated = accumulated - blend + durations[index]
 
     @staticmethod
     def _transition_directives(
@@ -482,6 +599,53 @@ class FfmpegLocalMediaRunner:
             )
             for index in range(1, len(spec.inputs))
         ]
+
+    def _apply_color_grade(
+        self,
+        spec: LocalMediaExecutionSpec,
+    ) -> str | None:
+        """Re-encode the composited cut through one unified grade preset.
+
+        Grading runs last (after concat and audio mixing) so a single
+        deterministic pass colours every segment, transition and burned
+        overlay identically. Unknown preset names degrade to a warning:
+        losing the grade must never lose the cut.
+        """
+
+        grade = (spec.color_grade or "").strip()
+        if not grade:
+            return None
+        video_filter = _COLOR_GRADE_FILTERS.get(grade)
+        if video_filter is None:
+            return f"未知的统一调色预设 {grade!r}，已跳过调色；可用预设: " + ", ".join(
+                sorted(_COLOR_GRADE_FILTERS),
+            )
+        graded = spec.work_dir / "graded.mp4"
+        self._run(
+            [
+                "-y",
+                "-i",
+                os.fspath(spec.output_path),
+                "-vf",
+                video_filter,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                os.fspath(graded),
+            ],
+            cwd=spec.work_dir,
+        )
+        graded.replace(spec.output_path)
+        return None
 
     def _mix_audio_tracks(self, spec: LocalMediaExecutionSpec) -> None:
         """Mix Timeline audio Elements into the composed video.
@@ -1022,11 +1186,15 @@ class FfmpegLocalMediaRunner:
             )
 
             self._run(ffmpeg_args, cwd=spec.work_dir)
-        for warning in self._apply_overlay(item, segment):
+        # Text-free motion layers (variety frames, decorations) burn
+        # first; caption cards burn on top so copy stays readable even
+        # when a frame border crosses the caption box (variety-show
+        # packaging puts 花字 on the frame, never under it).
+        for warning in self._apply_motion_overlays(item, segment):
             warnings.append(
                 f"{item.source_ref or item.version_id}: {warning}",
             )
-        for warning in self._apply_motion_overlays(item, segment):
+        for warning in self._apply_overlay(item, segment):
             warnings.append(
                 f"{item.source_ref or item.version_id}: {warning}",
             )
@@ -1492,6 +1660,13 @@ class FfmpegLocalMediaRunner:
         if not math.isfinite(duration) or duration <= 0:
             duration = segment_duration - appear_at
         duration = min(duration, segment_duration - appear_at)
+        # A cross-boundary overlay leaves only a sliver of itself on this
+        # segment (transitions shift the cut points); an entrance animation
+        # is still transparent there, so the truth gate would reject the
+        # whole composite over frames nobody can see. Skip the sliver — the
+        # neighbouring segment renders the overlay in full.
+        if duration < 0.3:
+            return None
         try:
             fps = int(raw.get("fps", 24))
         except (TypeError, ValueError):
@@ -1838,6 +2013,7 @@ class _ResolvedExecution:
     read_set: tuple[dict[str, Any], ...]
     source_selections: tuple[dict[str, Any], ...]
     audio_tracks: tuple[_FrozenAudioTrack, ...] = ()
+    color_grade: str = ""
 
 
 def _stable_id(prefix: str, project_id: str, key: str) -> str:
@@ -2659,6 +2835,7 @@ def _timeline_execution(
         read_set=tuple(read_set),
         source_selections=tuple(selections),
         audio_tracks=tuple(audio_tracks),
+        color_grade=timeline.color_grade,
     )
 
 
@@ -2680,6 +2857,14 @@ def _resolve_execution(
         )
     if command is CreatorCommandType.COMPOSE_FINAL_VIDEO:
         timeline = _target_timeline(project, target_ref)
+        # Scene-loop gate (upstream scene_gate): a declared ledger must be
+        # fully locked with fresh fingerprints before the expensive master
+        # render; the check itself is pure computation.
+        from services.render_review.scene_review import (
+            validate_scene_ledger_locked,
+        )
+
+        validate_scene_ledger_locked(timeline)
         return _timeline_execution(
             project=project,
             timeline=timeline,
@@ -2774,6 +2959,13 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             "transitions": list(resolved.transitions),
             "audioPlan": resolved.audio_plan,
             "canvasSize": list(resolved.canvas_size),
+            # Only present when a grade is configured so every historical
+            # fingerprint (and its reusable render) stays byte-identical.
+            **(
+                {"colorGrade": resolved.color_grade}
+                if resolved.color_grade
+                else {}
+            ),
             # Only present when the Timeline has audio Elements so historical
             # audio-free fingerprints (and their reusable renders) survive.
             **(
@@ -3593,6 +3785,7 @@ class FileLocalMediaExecutionService:
             canvas_size=resolved.canvas_size,
             on_element_done=on_element_done,
             audio_tracks=tuple(local_audio_tracks),
+            color_grade=resolved.color_grade,
         )
         AtomicJsonRecordStore(work_dir / "spec.json").write(
             {
