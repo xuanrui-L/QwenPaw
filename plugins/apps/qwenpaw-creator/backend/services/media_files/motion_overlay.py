@@ -1092,11 +1092,7 @@ def _verify_captured_frames(
             if max_edge_contact is None
             else max_edge_contact
         )
-        if (
-            not full_canvas
-            and not is_ring_form
-            and edge > edge_budget
-        ):
+        if not full_canvas and not is_ring_form and edge > edge_budget:
             return (
                 f"动效渲染真值自查失败: 第 {index} 帧可见内容越出透明盒边缘"
                 f"（边缘接触率 {edge:.0%}），拒绝入库"
@@ -1211,8 +1207,7 @@ def probe_motion_document(
         total_ms = float(result.get("totalMs") or 0.0)
         text_occlusion = float(result.get("textOcclusion", -1.0))
         occlusion_culprits = tuple(
-            str(item)
-            for item in (result.get("textOcclusionCulprits") or ())
+            str(item) for item in (result.get("textOcclusionCulprits") or ())
         )
         if count <= 0:
             return MotionDocumentProbe(
