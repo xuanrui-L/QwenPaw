@@ -1211,6 +1211,13 @@ class FileImageExecutionService:
                 is_transient_task_error(existing_task.error)
             ):
                 continue
+            if existing_task.status is TaskStatus.QUARANTINED:
+                rescued = await self._rescue_stale_quarantine(
+                    task=existing_task,
+                    slot_key=slot_key,
+                )
+                if rescued is not None:
+                    return rescued
             raise _terminated_task_conflict(existing_task)
         else:
             raise _terminated_task_conflict(
@@ -2179,6 +2186,9 @@ class FileImageExecutionService:
                 elif (
                     current.etag != latest.input_etag
                     or current.generation != latest.input_generation
+                ) and not self._read_set_still_current(
+                    current.project,
+                    latest,
                 ):
                     return "STALE", latest, current
                 else:
@@ -2330,6 +2340,77 @@ class FileImageExecutionService:
         return selected_version_id == artifact.version_id
 
     @staticmethod
+    def _read_set_still_current(
+        project: Project,
+        task: TaskRecord,
+    ) -> bool:
+        """True when the task's render inputs are unchanged in ``project``.
+
+        Whole-project etag drift treats every commit as fatal, but under
+        parallel fan-out the most common mid-render commit is a sibling
+        media import touching disjoint pointers — quarantining then
+        discards a finished, paid render (field run 2026-08-07: the
+        first commit of a four-wide storyboard wave staled the other
+        three). Publishing stays allowed when every frozen read-set
+        version still resolves to the same checksum and the target
+        still exists; anything else keeps the fail-closed quarantine.
+        """
+
+        metadata = task.metadata or {}
+        command = str(metadata.get("commandType") or "")
+        target_ref = str(metadata.get("targetRef") or "")
+        if not command or not target_ref:
+            return False
+        for item in task.read_set or []:
+            if not isinstance(item, Mapping):
+                return False
+            version_id = str(item.get("versionId") or "")
+            checksum = str(item.get("checksum") or "")
+            version = project.assets.source_versions_by_id.get(
+                version_id,
+            ) or project.assets.artifact_versions_by_id.get(version_id)
+            if version is None or version.checksum != checksum:
+                return False
+        return FileImageExecutionService._target_still_present(
+            project,
+            command=command,
+            target_ref=target_ref,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _target_still_present(
+        project: Project,
+        *,
+        command: str,
+        target_ref: str,
+        metadata: Mapping[str, Any],
+    ) -> bool:
+        if command == CreatorCommandType.GENERATE_STORYBOARD_IMAGE.value:
+            element_id = target_element_id(target_ref, command=command)
+            try:
+                find_timeline_element(project, element_id)
+            except NotFoundError:
+                return False
+            return True
+        if command == CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE.value:
+            lineup_id = _target_id(target_ref, "lineup")
+            return lineup_id in project.visual.cast_lineups.items
+        entity_id = _target_id(target_ref, "asset")
+        entity = project.visual.entities.items.get(entity_id)
+        if entity is None:
+            return False
+        raw_snapshot = metadata.get("requestSnapshot")
+        variant_id = (
+            raw_snapshot.get("variantId")
+            if isinstance(raw_snapshot, Mapping)
+            else None
+        )
+        if variant_id:
+            return str(variant_id) in entity.variants.items
+        return True
+
+    @staticmethod
     def _apply_result(
         candidate: dict[str, Any],
         result: Mapping[str, Any],
@@ -2469,6 +2550,101 @@ class FileImageExecutionService:
             transition_task=False,
         )
         await self._finish_run(task.project_id, ids["run_id"], run_status)
+
+    async def _rescue_stale_quarantine(
+        self,
+        *,
+        task: TaskRecord,
+        slot_key: str,
+    ) -> FileImageExecutionResult | None:
+        """Import a quarantined-but-paid render whose inputs still hold.
+
+        Under parallel fan-out the whole-project staleness gate used to
+        quarantine every sibling of the first committed render; their
+        provider outputs were already published and billed. Re-dispatch
+        lands on the terminal durable slot, so instead of a
+        ConflictError wall the stored result is re-validated against
+        the current snapshot and committed — no second render, no
+        second bill. Any other quarantine reason keeps the wall.
+        """
+
+        error = task.error if isinstance(task.error, Mapping) else {}
+        if str(error.get("code") or "") != "PROJECT_INPUT_SNAPSHOT_STALE":
+            return None
+        result = task.result if isinstance(task.result, dict) else None
+        if result is None:
+            return None
+        try:
+            artifact = ArtifactVersion.model_validate(
+                result["artifactVersion"],
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        ids = self._ids(task.project_id, f"{slot_key}:rescue")
+
+        def commit_rescue() -> ProjectSnapshot | None:
+            with self.services.projects.lifecycle_lock(task.project_id):
+                current = self.services.projects.read(task.project_id)
+                if self._result_is_converged(current.project, result):
+                    return current
+                if not self._read_set_still_current(current.project, task):
+                    return None
+                candidate = current.project.model_dump(mode="json")
+                self._apply_result(candidate, result)
+                review_policy = media_review_policy()
+                review_boundary = (
+                    self.services.commits.runtime_review_boundary(
+                        task.project_id,
+                        run_id=str(task.run_id),
+                        request_id=task.caused_by_request_id,
+                    )
+                    if review_policy is ReviewPolicy.REQUIRE_REVIEW
+                    else None
+                )
+                commit = self.services.commits.commit(
+                    base=current,
+                    candidate=candidate,
+                    origin=ChangeOrigin.RUNTIME_TASK,
+                    review_policy=review_policy,
+                    review_boundary=review_boundary,
+                    caused_by_request_id=task.caused_by_request_id,
+                    round_id=ids["round_id"],
+                    transaction_id=ids["transaction_id"],
+                    advance_accepted_baseline=True,
+                    _lifecycle_lock_held=True,
+                )
+                return commit.snapshot
+
+        snapshot = await asyncio.to_thread(commit_rescue)
+        if snapshot is None:
+            return None
+        await asyncio.to_thread(self.services.poller.note_commit, snapshot)
+        logger.info(
+            "rescued quarantined image result | task=%s target=%s",
+            task.task_id,
+            result.get("targetRef"),
+        )
+        published = {
+            **result,
+            "projectEtag": snapshot.etag,
+            "projectGeneration": snapshot.generation,
+        }
+        schedule_media_review(
+            self.services,
+            project_id=task.project_id,
+            published_result=published,
+        )
+        return FileImageExecutionResult(
+            task_id=task.task_id,
+            run_id=str(task.run_id or ""),
+            transaction_id=str(
+                result.get("transactionId") or ids["transaction_id"],
+            ),
+            artifact_version_id=artifact.version_id,
+            project_etag=snapshot.etag,
+            project_generation=snapshot.generation,
+            replayed=True,
+        )
 
     async def _fail_if_running(
         self,

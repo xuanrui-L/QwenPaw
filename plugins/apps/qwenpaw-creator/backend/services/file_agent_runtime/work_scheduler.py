@@ -22,7 +22,7 @@ Safety posture:
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType
 from models.config import (
@@ -71,6 +71,39 @@ def _is_transient_dispatch_error(exc: Exception) -> bool:
     return is_transient_error_message(text) or any(
         marker in text for marker in _TRANSIENT_ERROR_MARKERS
     )
+
+
+def _quarantined_stale_targets(tasks: Sequence[Any]) -> set[str]:
+    """Target refs holding a rescuable quarantined-stale result.
+
+    Sibling commits in a parallel fan-out used to quarantine finished
+    (billed) renders as PROJECT_INPUT_SNAPSHOT_STALE; the stored result
+    on the terminal task is everything the executor needs to import
+    without re-rendering. Only these targets may reopen the dispatch
+    ledger — anything else keeps the no-paid-retry guarantee.
+    """
+
+    targets: set[str] = set()
+    for task in tasks:
+        status = getattr(task, "status", None)
+        if getattr(status, "value", None) != "QUARANTINED":
+            continue
+        error = getattr(task, "error", None)
+        if (
+            not isinstance(error, Mapping)
+            or str(error.get("code") or "") != "PROJECT_INPUT_SNAPSHOT_STALE"
+        ):
+            continue
+        if not isinstance(getattr(task, "result", None), dict):
+            continue
+        metadata = getattr(task, "metadata", None) or {}
+        input_refs = getattr(task, "input_refs", None) or []
+        target = str(
+            metadata.get("targetRef") or (input_refs[0] if input_refs else ""),
+        )
+        if target:
+            targets.add(target)
+    return targets
 
 
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
@@ -204,7 +237,7 @@ class WorkGraphScheduler:
             1 for node in graph.nodes if node.status.value == "running"
         )
         capacity = get_media_parallelism() - running - len(inflight)
-        for node in self._dispatch_candidates(project_id, graph):
+        for node in self._dispatch_candidates(project_id, graph, tasks):
             if capacity <= 0:
                 break
             fingerprint = node.dispatch_fingerprint or node.node_id
@@ -225,6 +258,7 @@ class WorkGraphScheduler:
         self,
         project_id: str,
         graph: WorkGraph,
+        tasks: Sequence[Any] = (),
     ) -> list[WorkNode]:
         """READY media nodes plus transiently-failed ones within budget.
 
@@ -236,6 +270,33 @@ class WorkGraphScheduler:
         """
 
         candidates = list(graph.ready_media_nodes())
+        rescuable = _quarantined_stale_targets(tasks)
+        if rescuable:
+            inflight = self._inflight.get(project_id, set())
+            for node in candidates:
+                # A dispatched node that re-derives READY while a
+                # quarantined-stale sibling result exists means its task
+                # left the graph without a durable outcome (the graph
+                # never indexes QUARANTINED tasks). Reopen the ledger
+                # within the transient budget; the durable slot rescues
+                # the stored result instead of paying a second render.
+                if node.target_ref not in rescuable:
+                    continue
+                fingerprint = node.dispatch_fingerprint or node.node_id
+                ledger_key = (project_id, node.node_id, fingerprint)
+                if (
+                    ledger_key not in self._dispatched
+                    or node.node_id in inflight
+                ):
+                    continue
+                if self._transient_retries.get(ledger_key, 0) >= (
+                    _TRANSIENT_RETRY_LIMIT
+                ):
+                    continue
+                self._transient_retries[ledger_key] = (
+                    self._transient_retries.get(ledger_key, 0) + 1
+                )
+                self._dispatched.discard(ledger_key)
         for node in graph.nodes:
             if (
                 node.status.value != "failed"
