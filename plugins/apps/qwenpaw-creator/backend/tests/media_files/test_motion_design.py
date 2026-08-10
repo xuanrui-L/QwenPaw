@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
-# pylint: disable=unused-argument,protected-access
+# pylint: disable=unused-argument,protected-access,redefined-outer-name
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 
 import pytest
@@ -12,6 +13,8 @@ import pytest
 from domain.errors import ValidationError
 from services.media_files import local_execution as local_execution_module
 from services.media_files import motion_design
+from services.media_files import motion_engine
+from services.media_files.motion_engine import VendorLib
 from services.media_files.local_execution import (
     FfmpegLocalMediaRunner,
     LocalMediaInput,
@@ -50,6 +53,40 @@ from services.project_files.models import (
 )
 
 _HTML = "<html><body><div class='card'>本喵要发光</div></body></html>"
+
+_FAKE_GSAP = b"window.gsap={timeline:function(){return{}}};"
+
+
+@pytest.fixture()
+def stub_gsap_vendor(monkeypatch, tmp_path):
+    """Install a verified stand-in for the pinned GSAP runtime.
+
+    CI never runs the vendor fetch CLI, so html_js documents (which
+    reference vendor/gsap.min.js) must resolve against a stub file.
+    """
+
+    stub = VendorLib(
+        name="gsap",
+        filename="gsap.min.js",
+        sha256=hashlib.sha256(_FAKE_GSAP).hexdigest(),
+        size_bytes=len(_FAKE_GSAP),
+        source_url="https://example.invalid/gsap.min.js",
+        license_note="test stub",
+    )
+    vendor_dir = tmp_path / "vendor"
+    vendor_dir.mkdir()
+    (vendor_dir / stub.filename).write_bytes(_FAKE_GSAP)
+    monkeypatch.setattr(motion_engine, "VENDOR_LIBS", {"gsap": stub})
+    monkeypatch.setattr(
+        motion_engine,
+        "_LIBS_BY_FILENAME",
+        {stub.filename: stub},
+    )
+    monkeypatch.setenv(
+        "QWENPAW_CREATOR_MOTION_VENDOR_DIR",
+        str(vendor_dir),
+    )
+    return stub
 
 
 def _motion() -> MotionGraphic:
@@ -1191,7 +1228,9 @@ def test_frame_overlay_recognition_covers_field_variants() -> None:
     assert not motion_design._is_frame_overlay(plain)
 
 
-def test_required_text_tolerates_punctuation_reexpression() -> None:
+def test_required_text_tolerates_punctuation_reexpression(
+    stub_gsap_vendor,
+) -> None:
     # Expressive lettering replaces the comma with a line break and the
     # exclamation mark with an accent shape; characters stay verbatim.
     hf = (
@@ -1257,22 +1296,19 @@ def test_repair_recovers_missing_script_close_tag() -> None:
     # died on "__hf 未注册" — a pure syntax slip, fixed deterministically.
     from services.media_files.motion_design import _repair_common_html_slips
 
-    nested = (
-        "<script src=\"vendor/gsap.min.js\">\n"
-        "<script>var tl = 1;</script>"
-    )
+    nested = '<script src="vendor/gsap.min.js">\n<script>var tl = 1;</script>'
     fixed = _repair_common_html_slips(nested)
-    assert "vendor/gsap.min.js\">\n</script><script>var tl = 1;</script>" in (
-        fixed.replace("vendor/gsap.min.js\">", "vendor/gsap.min.js\">", 1)
-    ) or fixed.count("</script>") == 2
-    inline_in_src = (
-        "<script src=\"vendor/gsap.min.js\">var tl = 2;</script>"
+    assert (
+        'vendor/gsap.min.js">\n</script><script>var tl = 1;</script>'
+        in (fixed.replace('vendor/gsap.min.js">', 'vendor/gsap.min.js">', 1))
+        or fixed.count("</script>") == 2
     )
+    inline_in_src = '<script src="vendor/gsap.min.js">var tl = 2;</script>'
     fixed2 = _repair_common_html_slips(inline_in_src)
     assert fixed2.count("<script") == 2 and "var tl = 2;" in fixed2
     # Well-formed documents pass through unchanged.
     good = (
-        "<script src=\"vendor/gsap.min.js\"></script>"
+        '<script src="vendor/gsap.min.js"></script>'
         "<script>var tl = 3;</script>"
     )
     assert _repair_common_html_slips(good) == good
@@ -1283,7 +1319,7 @@ def test_repair_lifts_zero_starting_opacity() -> None:
 
     html = (
         "<style>.a{opacity:0;} .b{opacity:0.8}</style>"
-        "<script src=\"vendor/gsap.min.js\"></script>"
+        '<script src="vendor/gsap.min.js"></script>'
         "<script>tl.from('.a',{autoAlpha:0,y:20});"
         "tl.fromTo('.b',{opacity: 0.0},{opacity:1});"
         "tl.to('.c',{opacity:0.6});</script>"

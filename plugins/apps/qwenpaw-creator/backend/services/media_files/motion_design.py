@@ -449,8 +449,7 @@ def _validated_location(raw: Any) -> ElementLocation:
             or bottom + shift_y > 1.0 + 1e-9
         ):
             raise ValidationError(
-                "动效 location 盒子超出画布边界且无法平移收回；"
-                "调整 width/height 确保不超过画布",
+                "动效 location 盒子超出画布边界且无法平移收回；调整 width/height 确保不超过画布",
             )
         location = location.model_copy(
             update={"x": location.x + shift_x, "y": location.y + shift_y},
@@ -499,6 +498,12 @@ def _repair_common_html_slips(html: str) -> str:
 
     # A src-script carrying inline code in its body: split into the
     # include plus a real inline script so the code actually runs.
+    # Deliberate semantic change: browsers ignore the body of a src
+    # script, so this repair *enables* code the model always meant to
+    # run but mis-nested. Safe here because the document only ever
+    # renders in the sandboxed capture browser (pinned local vendors,
+    # no network, no navigation) and still passes every validation gate
+    # below after the repair.
     def _split(match: re.Match[str]) -> str:
         opening, body = match.group(1), match.group(2)
         if not body.strip():
@@ -732,8 +737,10 @@ def _validated_design(
         strip_punct = _PUNCTUATION_RUN.sub
         wanted_core = strip_punct("", wanted)
         visible_core = strip_punct("", visible)
-        if wanted and wanted not in visible and (
-            not wanted_core or wanted_core not in visible_core
+        if (
+            wanted
+            and wanted not in visible
+            and (not wanted_core or wanted_core not in visible_core)
         ):
             raise ValidationError(
                 "design html 没有完整包含给定的台词文字，字词必须一字不差出现"

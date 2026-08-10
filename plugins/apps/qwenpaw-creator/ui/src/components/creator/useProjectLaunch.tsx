@@ -150,9 +150,10 @@ async function continueLaunchInBackground({
   looseFiles,
   urlAttachments,
 }: LaunchContinuation): Promise<void> {
+  const projectId = project.projectId;
   const progress = useLaunchUploadStore.getState();
   progress.begin(
-    project.projectId,
+    projectId,
     folderFiles.length + looseFiles.length + urlAttachments.length,
   );
   const refs: string[] = [];
@@ -196,7 +197,9 @@ async function continueLaunchInBackground({
           await wait(800);
         }
         for (const att of folderFiles) {
-          useLaunchUploadStore.getState().fileFinished(att.file.name, true);
+          useLaunchUploadStore
+            .getState()
+            .fileFinished(projectId, att.file.name, true);
         }
       } catch (error) {
         message.warning(
@@ -205,14 +208,16 @@ async function continueLaunchInBackground({
           }),
         );
         for (const att of folderFiles) {
-          useLaunchUploadStore.getState().fileFinished(att.file.name, false);
+          useLaunchUploadStore
+            .getState()
+            .fileFinished(projectId, att.file.name, false);
         }
       }
     }
 
     await mapWithConcurrency(looseFiles, INGEST_CONCURRENCY, async (att) => {
       const store = useLaunchUploadStore.getState();
-      store.fileStarted(att.file.name);
+      store.fileStarted(projectId, att.file.name);
       try {
         const accepted = await ingestAssetFile(
           project.projectId,
@@ -224,9 +229,13 @@ async function continueLaunchInBackground({
           ? [`asset-version:${accepted.assetVersionId}`]
           : await waitForTask(project.projectId, accepted.taskId);
         refs.push(...taskRefs);
-        useLaunchUploadStore.getState().fileFinished(att.file.name, true);
+        useLaunchUploadStore
+          .getState()
+          .fileFinished(projectId, att.file.name, true);
       } catch (error) {
-        useLaunchUploadStore.getState().fileFinished(att.file.name, false);
+        useLaunchUploadStore
+          .getState()
+          .fileFinished(projectId, att.file.name, false);
         message.warning(
           i18n.t("lib.attachmentIngestFailed", {
             name: att.file.name,
@@ -254,9 +263,9 @@ async function continueLaunchInBackground({
         if (accepted.assetVersionId) {
           refs.push(`asset-version:${accepted.assetVersionId}`);
         }
-        useLaunchUploadStore.getState().fileFinished(att.url, true);
+        useLaunchUploadStore.getState().fileFinished(projectId, att.url, true);
       } catch (error) {
-        useLaunchUploadStore.getState().fileFinished(att.url, false);
+        useLaunchUploadStore.getState().fileFinished(projectId, att.url, false);
         message.warning(
           i18n.t("lib.attachmentIngestFailed", {
             name: att.url,
@@ -266,10 +275,13 @@ async function continueLaunchInBackground({
       }
     }
 
-    useLaunchUploadStore.getState().messaging();
+    useLaunchUploadStore.getState().messaging(projectId);
     const uniqueRefs = [...new Set(refs)].filter((ref) =>
       ref.startsWith("asset-version:"),
     );
+    // Deliberate: the first message is sent even when every ingest failed —
+    // the text goal alone is a valid brief, and each failure was already
+    // surfaced to the user as a warning above.
     await sendCreatorMessage(project.projectId, {
       clientMessageId: newClientId("initial-message"),
       creatorSessionId: project.creatorSessionId,
@@ -278,12 +290,10 @@ async function continueLaunchInBackground({
       assetVersionRefs: uniqueRefs,
       context: { panel: "composer" },
     });
-    useLaunchUploadStore.getState().finish(true);
+    useLaunchUploadStore.getState().finish(projectId, true);
   } catch (error) {
-    useLaunchUploadStore.getState().finish(false);
-    message.error(
-      (error as Error).message || i18n.t("home.launchFailed"),
-    );
+    useLaunchUploadStore.getState().finish(projectId, false);
+    message.error((error as Error).message || i18n.t("home.launchFailed"));
   }
 }
 
