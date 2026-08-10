@@ -150,6 +150,33 @@ async def test_local_streaming_detects_video_magic_and_returns_integrity(
     assert result.path.read_bytes() == content
 
 
+@_run_async
+async def test_local_streaming_path_fallback_without_descriptor_rooted_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        secure_video_stream,
+        "_supports_descriptor_rooted_io",
+        lambda: False,
+    )
+    project_root, scratch = _scope(tmp_path)
+    source = scratch / "provider-output.bin"
+    source.write_bytes(_MP4)
+
+    result = await SecureR2VVideoMaterializer().materialize(
+        {"path": str(source), "media_type": "video/mp4"},
+        project_root=project_root,
+        project_id="project-1",
+        task_id="task-1",
+    )
+
+    assert result.path.parent == scratch
+    assert result.path.suffix == ".mp4"
+    assert result.sha256 == hashlib.sha256(_MP4).hexdigest()
+    assert result.path.read_bytes() == _MP4
+
+
 @pytest.mark.parametrize(
     "source_factory",
     [

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -736,6 +738,53 @@ def test_model_config_is_single_file_native_and_idempotent(
         path.suffix.casefold() in {".db", ".sqlite", ".sqlite3"}
         for path in tmp_path.rglob("*")
     )
+
+
+def test_model_config_save_tolerates_windows_like_private_file_surface(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    monkeypatch.setenv(
+        "CREATOR_MODEL_CONFIG_PATH",
+        str((tmp_path / "config" / "model_config.json").resolve()),
+    )
+    real_open = os.open
+
+    def windows_like_open(target, flags, mode=0o777, *args, **kwargs):
+        if Path(target).is_dir():
+            raise PermissionError(errno.EACCES, "Permission denied", target)
+        return real_open(target, flags, mode, *args, **kwargs)
+
+    monkeypatch.delattr(model_routes.os, "fchmod", raising=False)
+    monkeypatch.setattr(model_routes.os, "open", windows_like_open)
+
+    app = FastAPI()
+    app.add_exception_handler(CreatorError, creator_error_handler)
+    app.include_router(router)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/models/config",
+                headers={"Idempotency-Key": "config-windows-like"},
+                json=_config(),
+            )
+
+    response = asyncio.run(scenario())
+
+    assert response.status_code == 200
+    persisted = json.loads(
+        (tmp_path / "config" / "model_config.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    model_routes._decrypt_secret_fields(persisted)
+    assert persisted["llm"]["api_key"] == "secret"
 
 
 def test_concurrent_single_file_save_is_atomic_and_last_writer_wins(

@@ -1029,9 +1029,12 @@ def _stage_materialized_video(
     """Stream a verified private scratch file into immutable Asset staging."""
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise RuntimeError("R2V Asset staging requires O_NOFOLLOW")
-    flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    else:
+        value = materialized.path.lstat()
+        if stat.S_ISLNK(value.st_mode):
+            raise ValidationError("R2V Asset staging refuses symlink output")
     descriptor = os.open(materialized.path, flags)
     try:
         details = os.fstat(descriptor)

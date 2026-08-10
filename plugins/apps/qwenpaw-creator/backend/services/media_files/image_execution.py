@@ -858,6 +858,50 @@ async def _read_controlled_local(
         raise ValidationError("provider 本地输出路径不安全")
 
     def read() -> bytes:
+        if (
+            os.name == "nt"
+            or not hasattr(os, "O_NOFOLLOW")
+            or os.open not in os.supports_dir_fd
+        ):
+            parent = allowed_root
+            for segment in relative.parts[:-1]:
+                parent = parent / segment
+                try:
+                    details = parent.lstat()
+                except OSError as exc:
+                    raise ValidationError(
+                        "provider 本地输出不存在、越界或包含 symlink",
+                    ) from exc
+                if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(
+                    details.st_mode,
+                ):
+                    raise ValidationError(
+                        "provider 本地输出不存在、越界或包含 symlink",
+                    )
+            target = parent / relative.parts[-1]
+            try:
+                details = target.lstat()
+            except OSError as exc:
+                raise ValidationError(
+                    "provider 本地输出不存在、越界或包含 symlink",
+                ) from exc
+            if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(
+                details.st_mode,
+            ):
+                raise ValidationError("provider 本地输出必须是普通文件")
+            if details.st_size <= 0 or details.st_size > max_bytes:
+                raise ValidationError("provider 图片为空或超过大小限制")
+            try:
+                with target.open("rb") as handle:
+                    content = handle.read(max_bytes + 1)
+            except OSError as exc:
+                raise ValidationError(
+                    "provider 本地输出不存在、越界或包含 symlink",
+                ) from exc
+            if not content or len(content) > max_bytes:
+                raise ValidationError("provider 图片为空或超过大小限制")
+            return content
+
         directory_flags = os.O_RDONLY
         if hasattr(os, "O_DIRECTORY"):
             directory_flags |= os.O_DIRECTORY
