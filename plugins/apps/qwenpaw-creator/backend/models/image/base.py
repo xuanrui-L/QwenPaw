@@ -136,6 +136,18 @@ async def download_remote_image(remote_url: str, model_name: str) -> str:
     return persist_image_bytes(img_bytes, model_name, "url→file")
 
 
+def _logged_model_error(message: str, model_name: str) -> ModelError:
+    """Log and build the terminal error in one step.
+
+    The message doubles as the persisted task error that the transient
+    classifier matches, so it must always carry a detail — an empty one
+    once turned a plain network blip into a deterministic wall.
+    """
+
+    logger.error(message)
+    return ModelError(message, model_name=model_name)
+
+
 def _configured_value(
     fields: str | tuple[str, ...],
     env_name: str,
@@ -383,6 +395,16 @@ class BaseImageModel(ABC):
                 f"Image generation timed out after {self.timeout}s",
                 model_name=self.model_name,
             )
+        except httpx.TransportError as e:
+            # ReadError/WriteError/ConnectError stringify empty; losing the
+            # type name made the persisted error unclassifiable and a plain
+            # network blip became a deterministic wall (field run
+            # 2026-08-10: an upload burst locked two storyboard nodes).
+            raise _logged_model_error(
+                "Image generation connection failure: "
+                f"{str(e) or type(e).__name__}",
+                self.model_name,
+            )
         except httpx.HTTPStatusError as e:
             detail = format_http_error_detail(e.response)
             logger.error(
@@ -394,10 +416,10 @@ class BaseImageModel(ABC):
                 model_name=self.model_name,
             )
         except Exception as e:
-            logger.error(f"Image generation failed: {e}")
-            raise ModelError(
-                f"Image generation failed: {str(e)}. Check creator_image_model configuration.",
-                model_name=self.model_name,
+            raise _logged_model_error(
+                f"Image generation failed: {str(e) or type(e).__name__}. "
+                "Check creator_image_model configuration.",
+                self.model_name,
             )
 
     async def _translate(

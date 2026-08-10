@@ -166,6 +166,13 @@ def test_transient_error_classifier():
     assert is_transient_task_error(
         {"message": "getaddrinfo failed"},
     )
+    # httpx transport errors (WriteError/ReadError/ConnectError) stringify
+    # empty; the provider now labels them "connection failure: <type>" so
+    # they classify as transient instead of locking the node (field run
+    # 2026-08-10: an upload burst walled two storyboards).
+    assert is_transient_task_error(
+        {"message": "Image generation connection failure: WriteError"},
+    )
     assert is_transient_task_error(
         {"message": "opaque failure", "retryable": True},
     )

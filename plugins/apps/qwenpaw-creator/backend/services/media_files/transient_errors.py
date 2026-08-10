@@ -36,6 +36,14 @@ TRANSIENT_ERROR_MARKERS = (
     "status 502",
     "status 503",
     "status 504",
+    # Legacy empty-detail records: before the provider labelled
+    # httpx transport errors, WriteError/ReadError/ConnectError
+    # stringified to nothing and persisted this exact degenerate
+    # message. Only an empty ``str(exc)`` can produce it, so matching
+    # it retroactively reopens nodes walled by a plain network blip
+    # (field run 2026-08-10). Real config errors carry a detail and
+    # never match.
+    "image generation failed: . check",
 )
 
 MAX_TRANSIENT_RETRY_SLOTS = 3
