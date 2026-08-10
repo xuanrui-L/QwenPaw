@@ -246,7 +246,11 @@ class ProjectStore:
         project_root = self.project_root(candidate.project_id)
         payload = self._checked_payload(candidate)
         staging_root = self.root / ".staging"
-        staged_project = staging_root / f"{candidate.project_id}.{uuid4().hex}"
+        # Keep the private staged directory name short: Runtime bootstrap
+        # writes deeply nested temp files inside it, and a long name here
+        # pushes those paths past the Windows MAX_PATH (260) limit.  The
+        # name is never parsed; publication renames it to the project id.
+        staged_project = staging_root / f"p{uuid4().hex}"
 
         # Keep one global lock order across lifecycle operations and commit
         # publication: lifecycle lock first, then the in-process store lock.
