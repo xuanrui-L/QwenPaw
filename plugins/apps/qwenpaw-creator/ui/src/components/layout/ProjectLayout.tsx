@@ -3,6 +3,7 @@ import { Outlet } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "react-i18next";
 import { useParams, usePathname } from "@/routing/navigation";
+import LaunchUploadProgressCard from "@/components/creator/LaunchUploadProgressCard";
 import { navigateToLocator } from "@/routing/locators";
 import type { FileProjectReviewOperation } from "@/contracts/creator";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
@@ -371,6 +372,7 @@ export default function ProjectLayout() {
             className="panel-enter relative min-h-0 flex-1 overflow-hidden"
           >
             <Outlet />
+            <LaunchUploadProgressCard />
           </main>
         </div>
         {/* Right rail: the dock keeps the top; on narrow workspaces the pages

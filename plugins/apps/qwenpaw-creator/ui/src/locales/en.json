@@ -1598,5 +1598,12 @@
   "language": {
     "zh": "Chinese",
     "en": "English"
+  },
+  "launchUpload": {
+    "uploading": "Uploading assets {{done}}/{{total}}",
+    "messaging": "Submitting the creative brief…",
+    "failed": "Asset upload failed",
+    "partialFailed": "{{failed}} asset(s) failed to upload and were skipped",
+    "dismiss": "Dismiss upload progress"
   }
 }

@@ -185,15 +185,30 @@ class TestMotionDesignSafety:
     }
 
     def test_location_box_must_stay_inside_canvas(self) -> None:
-        with pytest.raises(ValidationError, match="超出画布边界"):
+        # An overshooting box is translated back inside (the size and
+        # edge-hugging intent are unambiguous), never rejected outright.
+        clamped = _validated_location(
+            {
+                "x": 0.95,
+                "y": 0.1,
+                "width": 0.2,
+                "height": 0.2,
+                "anchor_x": 0,
+                "anchor_y": 0,
+            },
+        )
+        assert clamped.x == pytest.approx(0.8)
+        assert clamped.y == pytest.approx(0.1)
+        left = clamped.x - clamped.anchor_x * clamped.width
+        assert 0.0 <= left and left + clamped.width <= 1.0 + 1e-9
+        # A box larger than the canvas is stopped by the size gate.
+        with pytest.raises(ValidationError, match="1% 到 100%"):
             _validated_location(
                 {
-                    "x": 0.95,
-                    "y": 0.1,
-                    "width": 0.2,
-                    "height": 0.2,
-                    "anchor_x": 0,
-                    "anchor_y": 0,
+                    "x": 0.5,
+                    "y": 0.5,
+                    "width": 1.0,
+                    "height": 1.2,
                 },
             )
 
@@ -1174,3 +1189,107 @@ def test_frame_overlay_recognition_covers_field_variants() -> None:
         creation=OverlayCreation(vibe="chill", prompt="微光粒子点缀"),
     )
     assert not motion_design._is_frame_overlay(plain)
+
+
+def test_required_text_tolerates_punctuation_reexpression() -> None:
+    # Expressive lettering replaces the comma with a line break and the
+    # exclamation mark with an accent shape; characters stay verbatim.
+    hf = (
+        "<script src='vendor/gsap.min.js'></script>"
+        "<script>var tl = gsap.timeline({paused:true});"
+        "window.__hf={duration:2.0,seek:function(t){tl.totalTime(t)}};"
+        "</script>"
+    )
+    html = (
+        "<!DOCTYPE html><html><body><div class='l1'>整蛊老爸</div>"
+        "<div class='l2'>行动</div><i class='accent'></i>"
+        + hf
+        + "</body></html>"
+    )
+    motion, _loc, _concept = _validated_design(
+        {
+            "concept": "斜角花字",
+            "format": "html_js",
+            "html": html,
+            "fps": 24,
+            "loop": False,
+            "location": {
+                "x": 0.5,
+                "y": 0.3,
+                "width": 0.5,
+                "height": 0.24,
+            },
+        },
+        required_text="整蛊老爸，行动！",
+        default_loop=False,
+        canvas_size=(1280, 720),
+    )
+    assert motion.format == "html_js"
+    # Rewriting the words themselves is still rejected.
+    with pytest.raises(ValidationError, match="一字不差"):
+        _validated_design(
+            {
+                "concept": "改词",
+                "format": "html_js",
+                "html": (
+                    "<!DOCTYPE html><html><body><div>整老爸行动</div>"
+                    + hf
+                    + "</body></html>"
+                ),
+                "fps": 24,
+                "loop": False,
+                "location": {
+                    "x": 0.5,
+                    "y": 0.3,
+                    "width": 0.5,
+                    "height": 0.24,
+                },
+            },
+            required_text="整蛊老爸，行动！",
+            default_loop=False,
+            canvas_size=(1280, 720),
+        )
+
+
+def test_repair_recovers_missing_script_close_tag() -> None:
+    # Field run 2026-08-09: the model dropped </script> after the vendor
+    # include, browsers swallowed the inline timeline, and every retry
+    # died on "__hf 未注册" — a pure syntax slip, fixed deterministically.
+    from services.media_files.motion_design import _repair_common_html_slips
+
+    nested = (
+        "<script src=\"vendor/gsap.min.js\">\n"
+        "<script>var tl = 1;</script>"
+    )
+    fixed = _repair_common_html_slips(nested)
+    assert "vendor/gsap.min.js\">\n</script><script>var tl = 1;</script>" in (
+        fixed.replace("vendor/gsap.min.js\">", "vendor/gsap.min.js\">", 1)
+    ) or fixed.count("</script>") == 2
+    inline_in_src = (
+        "<script src=\"vendor/gsap.min.js\">var tl = 2;</script>"
+    )
+    fixed2 = _repair_common_html_slips(inline_in_src)
+    assert fixed2.count("<script") == 2 and "var tl = 2;" in fixed2
+    # Well-formed documents pass through unchanged.
+    good = (
+        "<script src=\"vendor/gsap.min.js\"></script>"
+        "<script>var tl = 3;</script>"
+    )
+    assert _repair_common_html_slips(good) == good
+
+
+def test_repair_lifts_zero_starting_opacity() -> None:
+    from services.media_files.motion_design import _repair_common_html_slips
+
+    html = (
+        "<style>.a{opacity:0;} .b{opacity:0.8}</style>"
+        "<script src=\"vendor/gsap.min.js\"></script>"
+        "<script>tl.from('.a',{autoAlpha:0,y:20});"
+        "tl.fromTo('.b',{opacity: 0.0},{opacity:1});"
+        "tl.to('.c',{opacity:0.6});</script>"
+    )
+    fixed = _repair_common_html_slips(html)
+    assert "autoAlpha:0.25" in fixed
+    assert "opacity: 0.25" in fixed or "opacity:0.25" in fixed
+    # Non-zero values stay untouched.
+    assert "opacity:0.8" in fixed and "opacity:0.6" in fixed

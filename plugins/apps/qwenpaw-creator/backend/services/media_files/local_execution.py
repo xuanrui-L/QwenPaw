@@ -1374,6 +1374,10 @@ class FfmpegLocalMediaRunner:
                     location=render_location,
                     viewport_inset=0.05,
                     doc_format=str(motion.get("format") or "html_css"),
+                    # Caption cards may bleed background blocks off their
+                    # box on purpose; readability is guarded by the
+                    # design-time layout/occlusion/copy gates instead.
+                    max_edge_contact=1.0,
                 )
                 if prep.layer is not None:
                     pending.append(

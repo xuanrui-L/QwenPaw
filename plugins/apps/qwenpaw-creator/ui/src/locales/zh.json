@@ -1598,5 +1598,12 @@
   "language": {
     "zh": "中文",
     "en": "English"
+  },
+  "launchUpload": {
+    "uploading": "素材上传中 {{done}}/{{total}}",
+    "messaging": "正在提交创作指令…",
+    "failed": "素材上传失败",
+    "partialFailed": "{{failed}} 个素材上传失败，已跳过",
+    "dismiss": "关闭上传进度"
   }
 }

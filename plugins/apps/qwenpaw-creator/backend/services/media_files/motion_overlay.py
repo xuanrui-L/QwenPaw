@@ -183,6 +183,7 @@ TEXT_OCCLUSION = '''
   );
   let covered = 0;
   let sampled = 0;
+  const culprits = new Set();
   while (walker.nextNode()) {
     const node = walker.currentNode;
     if (!node.textContent || !node.textContent.trim()) continue;
@@ -213,16 +214,34 @@ TEXT_OCCLUSION = '''
           continue;
         }
         const top = document.elementFromPoint(x, y);
-        // elementFromPoint returns the text node's parent when the glyph is
-        // actually painted.  Returning an ancestor means this sample was
-        // clipped by an overflow container or covered by another layer.
-        const textIsTopmost = top === parent;
-        if (!textIsTopmost) covered += 1;
+        // A glyph sample is only "covered" when an unrelated sibling
+        // layer paints on top of it. Hitting the text's own parent, a
+        // descendant decoration nested inside it, or an ancestor (the
+        // card background showing through inter-glyph gaps — routine
+        // for CJK runs with letter-spacing) is normal rendering, not
+        // occlusion.
+        const related =
+          top === parent ||
+          (top && parent.contains(top)) ||
+          (top && top.contains(parent));
+        if (!related) {
+          covered += 1;
+          if (top) {
+            const tag = top.tagName ? top.tagName.toLowerCase() : '?';
+            const cls = top.className && top.className.toString
+              ? top.className.toString().split(/\s+/).slice(0, 2).join('.')
+              : '';
+            culprits.add(cls ? tag + '.' + cls : tag);
+          }
+        }
         sampled += 1;
       }
     }
   }
-  return sampled > 0 ? covered / sampled : 0;
+  return {
+    ratio: sampled > 0 ? covered / sampled : 0,
+    culprits: Array.from(culprits).slice(0, 4),
+  };
 }
 '''
 
@@ -257,6 +276,15 @@ def handle(job):
             context.set_default_timeout(15000)
             try:
                 page = context.new_page()
+                # Uncaught JS errors are the top reason a document never
+                # registers window.__hf; capture them so the design
+                # feedback loop can name the actual bug instead of a
+                # generic "protocol missing".
+                page_errors = []
+                page.on(
+                    "pageerror",
+                    lambda exc: page_errors.append(str(exc)[:300]),
+                )
                 if job.get("prelude"):
                     page.add_init_script(job["prelude"])
 
@@ -289,10 +317,19 @@ def handle(job):
                 hf_ms = float(info.get("hfMs") or 0.0)
                 managed_exit = bool(info.get("managedExit"))
                 text_occlusion = 0.0
+                occlusion_culprits = []
                 if job.get("format") == "html_js":
                     if hf_ms <= 0:
+                        detail = (
+                            "；页面 JS 错误: " + " | ".join(page_errors[:3])
+                            if page_errors
+                            else ""
+                        )
                         return {
-                            "error": "html_js 文档未注册 window.__hf 协议或 duration 无效",
+                            "error": (
+                                "html_js 文档未注册 window.__hf 协议或 "
+                                "duration 无效" + detail
+                            ),
                         }
                     # The registered timeline owns the document clock; CSS
                     # animations, if any, follow the same seek below.
@@ -321,10 +358,15 @@ def handle(job):
                         )
                         if seek_error:
                             return {"error": seek_error}
-                        text_occlusion = max(
-                            text_occlusion,
-                            float(page.evaluate(TEXT_OCCLUSION) or 0.0),
-                        )
+                        occ = page.evaluate(TEXT_OCCLUSION) or {}
+                        if isinstance(occ, dict):
+                            ratio = float(occ.get("ratio") or 0.0)
+                            for name in occ.get("culprits") or []:
+                                if name not in occlusion_culprits:
+                                    occlusion_culprits.append(str(name))
+                        else:
+                            ratio = float(occ or 0.0)
+                        text_occlusion = max(text_occlusion, ratio)
                         page.screenshot(
                             path="%s/%05d.png" % (job["frames_dir"], index),
                             omit_background=True,
@@ -376,6 +418,7 @@ def handle(job):
         "totalMs": total_ms,
         "managedExit": managed_exit,
         "textOcclusion": text_occlusion,
+        "textOcclusionCulprits": occlusion_culprits,
     }
 
 
@@ -439,6 +482,7 @@ class MotionDocumentProbe:
     visible_coverage: float = -1.0
     edge_contact: float = -1.0
     text_occlusion: float = -1.0
+    text_occlusion_culprits: tuple[str, ...] = ()
 
 
 def _normalized_box(
@@ -987,6 +1031,7 @@ def _verify_captured_frames(
     ffmpeg_path: str,
     full_canvas: bool = False,
     frame_ring: bool = False,
+    max_edge_contact: float | None = None,
 ) -> str | None:
     """Post-render truth gate over the captured output frames.
 
@@ -1042,10 +1087,15 @@ def _verify_captured_frames(
         is_ring_form = frame_ring or (
             0.0 <= center <= 0.05 and edge_floor > 0.5
         )
+        edge_budget = (
+            _CAPTURE_MAX_EDGE_CONTACT
+            if max_edge_contact is None
+            else max_edge_contact
+        )
         if (
             not full_canvas
             and not is_ring_form
-            and edge > _CAPTURE_MAX_EDGE_CONTACT
+            and edge > edge_budget
         ):
             return (
                 f"动效渲染真值自查失败: 第 {index} 帧可见内容越出透明盒边缘"
@@ -1160,6 +1210,10 @@ def probe_motion_document(
         count = int(result.get("count") or 0)
         total_ms = float(result.get("totalMs") or 0.0)
         text_occlusion = float(result.get("textOcclusion", -1.0))
+        occlusion_culprits = tuple(
+            str(item)
+            for item in (result.get("textOcclusionCulprits") or ())
+        )
         if count <= 0:
             return MotionDocumentProbe(
                 False,
@@ -1243,6 +1297,7 @@ def probe_motion_document(
             visible_coverage=coverage,
             edge_contact=edge_contact,
             text_occlusion=text_occlusion,
+            text_occlusion_culprits=occlusion_culprits,
         )
         with _probe_cache_lock:
             _probe_cache[cache_key] = probe
@@ -1578,8 +1633,15 @@ def prepare_motion_layer(
     viewport_inset: float = 0.0,
     doc_format: str = "html_css",
     full_canvas: bool = False,
+    max_edge_contact: float | None = None,
 ) -> MotionLayerPrep:
-    """Probe, capture and verify one motion document's frame sequence."""
+    """Probe, capture and verify one motion document's frame sequence.
+
+    ``max_edge_contact`` overrides the capture edge budget: caption
+    cards may bleed background blocks off their box on purpose (their
+    readability is guarded by the layout/occlusion/copy gates), while
+    text-free decorations keep the strict default.
+    """
 
     if duration <= 0 or not math.isfinite(duration):
         return MotionLayerPrep(error="动效持续时间必须为正数")
@@ -1717,6 +1779,11 @@ def prepare_motion_layer(
             frame_identity
             + ("|full_canvas" if full_canvas else "")
             + ("|ring" if frame_ring else "")
+            + (
+                ""
+                if max_edge_contact is None
+                else f"|edge{max_edge_contact:.2f}"
+            )
         ).encode(
             "utf-8",
         ),
@@ -1769,6 +1836,7 @@ def prepare_motion_layer(
                 ffmpeg_path=ffmpeg_path,
                 full_canvas=full_canvas,
                 frame_ring=frame_ring,
+                max_edge_contact=max_edge_contact,
             )
         if error is not None:
             # Keep the rejected frames for offline diagnosis instead of

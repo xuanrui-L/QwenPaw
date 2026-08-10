@@ -114,8 +114,13 @@ _MAX_CONCURRENT_DESIGNS = 3
 _UNIFORM_CAPTION_BLUEPRINT = "static_capsule"
 _UNIFORM_CAPTION_INTENSITY = 0.5
 _MAX_DESIGN_ATTEMPTS = 2
-_TEXT_CARD_DESIGN_ATTEMPTS = 3
+_TEXT_CARD_DESIGN_ATTEMPTS = 4
 _TEXT_CARD_MIN_COVERAGE = 0.3
+# Punctuation (either width) that expressive lettering may re-express
+# through layout; letters and CJK characters stay authoritative.
+_PUNCTUATION_RUN = re.compile(
+    r"[，。！？、；：“”‘’…—～·（）《》〈〉,.!?;:'\"()\[\]~\-]+",
+)
 # Placement/scale tendencies rotated across a film's caption cards so
 # concurrent designs still differ in composition; the model may overrule
 # any of them when the footage demands, they are never style templates.
@@ -126,7 +131,11 @@ _CARD_COMPOSITION_SEEDS = (
     "横贯强调：中下部横向大字（width≈0.6），关键词放大变色，背景色块不规则",
     "边角呼应：靠画面一侧竖向留白处，窄而高的排版感，搭配细长装饰线",
 )
-_TEXT_CARD_MAX_EDGE_CONTACT = 0.02
+# Expressive caption cards may bleed background blocks off their box
+# edge on purpose; only a fully edge-locked frame (text at risk of
+# clipping on every side) stays rejected. Decorations keep the strict
+# budget — they sit over footage and clipped shapes read as bugs.
+_TEXT_CARD_MAX_EDGE_CONTACT = 1.0
 _DECORATION_MIN_COVERAGE = 0.08
 _DECORATION_MAX_EDGE_CONTACT = 0.02
 _KEYFRAME_WIDTH = 960
@@ -177,7 +186,7 @@ _SHARED_CODE_RULES = """代码要求：
 # through window.__hf.seek, so every rule here is seek-safety, not style.
 _JS_TIMELINE_CODE_RULES = """代码要求（html_js 动态时间线方案）：
 - html 是一个完整的独立 HTML 文档，背景完全透明（不要给 html/body 设置任何背景色）。
-- 布局铁律（违反会被自动拒绝）：所有内容必须放在一个根容器里，根容器固定为 position:absolute; inset:8%（这就是安全边距，不要更小）；动画全程任何可见像素（含描边、阴影、发光、装饰粒子）都不得碰到视口边缘。因此：禁止从视口外滑入/滑出（不要 x:'-100%' 这类动画）；位移动画幅度≤视口的5%；scale 过冲峰值≤1.06；入场用 透明度+轻缩放+clip-path reveal 代替大位移，但 t=0 的画面必须已有可见内容（起始不透明度 ≥0.2，渲染器会检查 t=0 空帧并拒绝）。
+- 布局铁律（违反会被自动拒绝）：所有内容必须放在一个根容器里，默认根容器为 position:absolute; inset:8%（装饰动效与常规卡片不要更小，任何可见像素都不得碰到视口边缘）；花字卡的大面积背景色块/scrim 如需贴边出血（bleed）可以用 inset:0 的背景层，但文字与关键图形（含描边、阴影、发光）必须保持至少 6% 内边距。禁止从视口外滑入/滑出（不要 x:'-100%' 这类动画）；位移动画幅度≤10%；scale 过冲峰值≤1.12；入场用透明度+缩放+clip-path reveal 代替大位移，但 t=0 的画面必须已有可见内容（起始不透明度 ≥0.2，渲染器会检查 t=0 空帧并拒绝）。
 - 退场不要自己做：不要在时间线里把内容淡出或移出；如需退场，在根容器上声明 data-motion-exit="soft_fade"（或 "shrink"），渲染器会在片段末尾自动处理。时间线末态必须保持完整可见。
 - 入场要快：全部入场动画在 0.8 秒内完成；__hf.duration 填入场+持续微动一个周期的总秒数（建议 2~4 秒），不要填整个片段时长。
 - 动画用 GSAP 时间线驱动：只能通过 <script src="vendor/gsap.min.js"></script> 引入 GSAP，再写一段内联 <script> 构建 paused 的 gsap.timeline 并注册 seek 协议，样板必须严格遵守：
@@ -290,6 +299,7 @@ _TEXT_STYLE_SYSTEM_PROMPT = (
 可读性硬约束（不可违反）：
 - 台词文字必须一字不差完整出现，且必须直接写在静态 HTML 里（绝不允许用 JS 运行时拼接或注入台词）。整句台词必须完整落在视口内，一行放不下就主动换行并适当调小字号；卡上只能出现台词本身。
 - 在任何画面上都读得清：描边最多 1px，只用一层轻微阴影或单层发光；长台词必须允许换行，不得用 white-space:nowrap。
+- 底板绝不遮人：禁止大面积高不透明底板（尤其是大椭圆/大圆形蒙层）——底板要么紧贴文字包围盒（padding ≤ 字号的 0.6 倍），要么用不透明度 ≤40% 的轻 scrim；宁可靠描边/阴影保读，也不要用大白块盖画面。
 - 视口就是卡片本身：卡片主体必须撑满视口（宽高各占 90% 以上），台词字号用 vh 单位（主文字建议 14vh 以上，长台词可换行）。
 
 """
@@ -426,8 +436,24 @@ def _validated_location(raw: Any) -> ElementLocation:
     right = left + location.width
     bottom = top + location.height
     if left < 0.0 or top < 0.0 or right > 1.0 or bottom > 1.0:
-        raise ValidationError(
-            "动效 location 盒子超出画布边界；调整 x/y、width/height 或 anchor，确保完整落在 0..1 画布内",
+        # Expressive compositions push boxes toward the canvas border and
+        # models routinely overshoot by a few percent. The intent (this
+        # size, hugging that edge) is unambiguous — translate the box
+        # back inside instead of burning a design attempt.
+        shift_x = max(0.0, -left) - max(0.0, right - 1.0)
+        shift_y = max(0.0, -top) - max(0.0, bottom - 1.0)
+        if (
+            left + shift_x < -1e-9
+            or top + shift_y < -1e-9
+            or right + shift_x > 1.0 + 1e-9
+            or bottom + shift_y > 1.0 + 1e-9
+        ):
+            raise ValidationError(
+                "动效 location 盒子超出画布边界且无法平移收回；"
+                "调整 width/height 确保不超过画布",
+            )
+        location = location.model_copy(
+            update={"x": location.x + shift_x, "y": location.y + shift_y},
         )
     return location
 
@@ -450,6 +476,70 @@ def _locations_overlap(
         or left_y + left.height + gap <= right_y
         or right_y + right.height + gap <= left_y
     )
+
+
+def _repair_common_html_slips(html: str) -> str:
+    """Deterministically fix high-frequency model HTML slips.
+
+    The most damaging one: a missing ``</script>`` after the vendor
+    include (``<script src=...><script>code``). Browsers then treat the
+    whole inline script as the (ignored) body of the src tag, the seek
+    protocol never registers, and the design dies on "__hf 未注册" —
+    burning a retry on a pure syntax slip.
+    """
+
+    # A src-script immediately followed by another opening script tag:
+    # close the first one.
+    html = re.sub(
+        r"(<script\b[^>]*\bsrc\s*=[^>]*>)\s*(?=<script\b)",
+        r"\1</script>",
+        html,
+        flags=re.IGNORECASE,
+    )
+
+    # A src-script carrying inline code in its body: split into the
+    # include plus a real inline script so the code actually runs.
+    def _split(match: re.Match[str]) -> str:
+        opening, body = match.group(1), match.group(2)
+        if not body.strip():
+            return match.group(0)
+        return f"{opening}</script><script>{body}</script>"
+
+    html = re.sub(
+        r"(<script\b[^>]*\bsrc\s*=[^>]*>)(.*?)</script>",
+        _split,
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # Zero starting opacity is the single most stubborn slip: models keep
+    # writing fade-ins from 0 despite the rules, and the t=0 empty-frame
+    # gate rejects the whole design. Lift any zero opacity/autoAlpha to
+    # 0.25 — inside scripts (GSAP tweens) and stylesheets alike. Exits
+    # are renderer-managed, so a lifted fade-out target only restores
+    # the required visible end state.
+    def _lift_zero_alpha(match: re.Match[str]) -> str:
+        opening, body, closing = match.groups()
+        body = re.sub(
+            r"((?:autoAlpha|opacity)\s*:\s*)0(?:\.0+)?(?=\s*[,}!;])",
+            r"\g<1>0.25",
+            body,
+        )
+        return f"{opening}{body}{closing}"
+
+    html = re.sub(
+        r"(<script(?![^>]*\bsrc)[^>]*>)(.*?)(</script>)",
+        _lift_zero_alpha,
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    html = re.sub(
+        r"(<style\b[^>]*>)(.*?)(</style>)",
+        _lift_zero_alpha,
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return html
 
 
 def _validate_caption_location(
@@ -553,6 +643,8 @@ def _validated_design(
         )
     if not isinstance(html, str) or len(html.strip()) < 32:
         raise ValidationError("design html 缺失或过短")
+    if not uses_template and not uses_blueprint:
+        html = _repair_common_html_slips(html)
     html = html.strip()
     if len(html) > 200_000:
         raise ValidationError("design html 超过 200000 字符上限")
@@ -633,12 +725,27 @@ def _validated_design(
         )
     if required_text is not None:
         wanted = re.sub(r"\s+", "", required_text)
-        if wanted and wanted not in visible:
+        # Expressive lettering commonly replaces punctuation with layout
+        # (a line break instead of a comma, an accent shape instead of
+        # the exclamation mark). Words and characters stay authoritative;
+        # punctuation may be re-expressed visually.
+        strip_punct = _PUNCTUATION_RUN.sub
+        wanted_core = strip_punct("", wanted)
+        visible_core = strip_punct("", visible)
+        if wanted and wanted not in visible and (
+            not wanted_core or wanted_core not in visible_core
+        ):
             raise ValidationError(
-                "design html 没有完整包含给定的台词文字，台词必须一字不差地出现（可以换行，但不能改写或省略）",
+                "design html 没有完整包含给定的台词文字，字词必须一字不差出现"
+                "（可以换行、可以用版式代替标点，但不能改写或省略文字；"
+                "若做逐字动画，每个字用独立元素包裹，字符本身原样保留）",
             )
-        extra = visible.replace(wanted, "", 1) if wanted else visible
-        if len(extra) > 6:
+        cleaned = (
+            visible_core.replace(wanted_core, "", 1)
+            if wanted_core
+            else visible_core
+        )
+        if len(cleaned) > 6:
             raise ValidationError(
                 "卡片上的可见文字只能是台词本身，不要把任务说明、Element ID 等其他文字画进卡片",
             )
@@ -925,8 +1032,23 @@ async def _design_document(
         )
         if not probe.ok:
             last_error = probe.error
+            hint = ""
+            if last_error and "t=0" in last_error:
+                hint = (
+                    "具体修法：把所有 tl.from/fromTo 的起始透明度改为 "
+                    "autoAlpha:0.25（不要 opacity:0），或在时间线最前面 "
+                    "tl.set(根容器,{autoAlpha:0.3},0)。"
+                )
+            elif last_error and "__hf" in last_error:
+                hint = (
+                    "具体修法：严格按样板写两个独立的 script 标签："
+                    '先 <script src="vendor/gsap.min.js"></script>（必须自闭合），'
+                    "再另开一个 <script>…</script> 写时间线与 window.__hf 注册，"
+                    "确保 JS 无语法错误。"
+                )
             feedback = (
-                f"\n上一次输出的 HTML 加载校验失败，原因：{last_error}。" "请修正后重新只输出一个 JSON 对象。"
+                f"\n上一次输出的 HTML 加载校验失败，原因：{last_error}。{hint}"
+                "请修正后重新只输出一个 JSON 对象。"
             )
             continue
         # Blueprint cards wrap their content instead of flooding the
@@ -956,9 +1078,14 @@ async def _design_document(
                 "请修正后重新只输出一个 JSON 对象。"
             )
             continue
-        if required_text is not None and probe.text_occlusion > 0.10:
+        if required_text is not None and probe.text_occlusion > 0.18:
+            culprits = "、".join(probe.text_occlusion_culprits[:4])
             last_error = (
-                "字幕文字被卡片内的图标或装饰遮挡" f"（遮挡采样率 {probe.text_occlusion:.0%}）"
+                "字幕文字被卡片内的图标或装饰遮挡"
+                f"（遮挡采样率 {probe.text_occlusion:.0%}"
+                + (f"，遮挡元素：{culprits}" if culprits else "")
+                + "）；把这些元素移到文字层之下（z-index 更低）、"
+                "缩小或移开文字包围盒"
             )
             feedback = (
                 f"\n上一次输出被拒绝，原因：{last_error}。"
@@ -1273,6 +1400,25 @@ async def _plan_story_beats(
     except Exception:  # pragma: no cover - neutral fallback below
         pass
     return "根据时间线建立开场、变化与收束", None
+
+
+def _is_trusted_caption_motion(motion: MotionGraphic | None) -> bool:
+    """Whether a caption's motion document can reach the final cut as-is.
+
+    Trusted documents come from this design pipeline: seek-driven
+    ``html_js`` (blueprints and free-form designs, both probe-gated) or
+    versioned fixed templates. A hand-written ``html_css`` snippet from
+    the editing model (field run 2026-08-09: revision turns wrote 700
+    byte cards) fails the compose-time safety check and silently ships
+    the fallback bubble — treat it as unstyled so the design pass
+    replaces it with a real footage-aware design.
+    """
+
+    if motion is None:
+        return False
+    if motion.format == "html_js":
+        return True
+    return motion.template_version is not None
 
 
 def _is_frame_overlay(element: TimelineElement) -> bool:
@@ -1698,7 +1844,7 @@ async def design_motion_overlays(
         # caption is covered even when the caller scoped elementIds to
         # its motion clips; re-styling is prevented by the already_styled
         # guard, never by the request filter.
-        if creation.motion is not None:
+        if _is_trusted_caption_motion(creation.motion):
             return {**entry, "status": "already_styled"}
         emotion = (
             creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
@@ -1904,7 +2050,9 @@ async def design_motion_overlays(
         }
         if requested is not None and overlay.element_id not in requested:
             return {**entry, "status": "not_requested"}
-        if creation.motion is not None:
+        # An explicit elementIds request forces a redesign even over a
+        # trusted document — that is how review feedback replaces a card.
+        if requested is None and _is_trusted_caption_motion(creation.motion):
             return {**entry, "status": "already_styled"}
         edit = best_covering_edit(overlay)
         if edit is None:

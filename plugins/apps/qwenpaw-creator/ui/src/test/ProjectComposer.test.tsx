@@ -267,7 +267,7 @@ describe("ProjectComposer ingest boundary", () => {
     ).toBe(false);
   });
 
-  it("waits to navigate until the first asset-backed message is durably accepted", async () => {
+  it("navigates immediately and keeps ingest + first message in the background", async () => {
     let acceptMessage: (() => void) | undefined;
     const messageAccepted = new Promise<void>((resolve) => {
       acceptMessage = resolve;
@@ -329,18 +329,29 @@ describe("ProjectComposer ingest boundary", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: /启动 Agent/ }));
 
+    // The composer closes right after the Project exists — the user lands
+    // on the project page while attachments upload in the background.
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(
+      calls.find((call) => call.url.endsWith("/projects"))?.body,
+    ).not.toHaveProperty("initialGoal");
+
+    // The background continuation still sends the durable first message
+    // (with the ingested asset refs) after navigation.
     await waitFor(() =>
       expect(
         calls.some((call) => call.url.endsWith("/projects/p-delayed/messages")),
       ).toBe(true),
     );
-    expect(onClose).not.toHaveBeenCalled();
-    expect(
-      calls.find((call) => call.url.endsWith("/projects"))?.body,
-    ).not.toHaveProperty("initialGoal");
-
     acceptMessage?.();
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      const messageCall = calls.find((call) =>
+        call.url.endsWith("/projects/p-delayed/messages"),
+      );
+      expect(messageCall?.body).toHaveProperty("assetVersionRefs", [
+        "asset-version:av1",
+      ]);
+    });
   });
 
   it("removes the obsolete end-to-end confirmation copy", () => {

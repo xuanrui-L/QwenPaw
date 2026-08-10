@@ -474,6 +474,7 @@ async def _default_compose_dispatch(
         timeline = snapshot.project.timelines.items.get(timeline_id)
         from services.media_files.motion_design import (
             _is_frame_overlay,
+            _is_trusted_caption_motion,
         )
 
         needs_design = timeline is not None and any(
@@ -482,7 +483,12 @@ async def _default_compose_dispatch(
                 (
                     getattr(element.creation, "type", "") == "overlay"
                     and (getattr(element.creation, "text", "") or "").strip()
-                    and getattr(element.creation, "motion", None) is None
+                    # Hand-written css snippets fail the compose-time
+                    # safety check and ship the fallback bubble; only a
+                    # pipeline-designed document counts as styled.
+                    and not _is_trusted_caption_motion(
+                        getattr(element.creation, "motion", None),
+                    )
                 )
                 # Variety frames own their visual through the blueprint:
                 # a hand-written thin border would ship black letterbox
