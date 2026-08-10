@@ -3,12 +3,22 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .common import StrictModel
 
 
-class ModelConfigItem(StrictModel):
+class _ConfigBase(BaseModel):
+    """Config models tolerate schema drift (extra fields from newer/older
+    front-ends or persisted files) by ignoring unknown keys instead of
+    rejecting them.  ``populate_by_name`` keeps alias + field-name parity
+    with ``StrictModel``.
+    """
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+
+class ModelConfigItem(_ConfigBase):
     enabled: bool = False
     model_name: str = ""
     api_key: str = ""
@@ -151,11 +161,11 @@ class GroundingConfig(ModelConfigItem):
         return migrated
 
 
-class ExecutionAuthorizationConfig(StrictModel):
+class ExecutionAuthorizationConfig(_ConfigBase):
     mode: Literal["required", "allow_all"] = "required"
 
 
-class CreationCheckpointConfig(StrictModel):
+class CreationCheckpointConfig(_ConfigBase):
     """Pit-stop gates the user must clear before costly generation.
 
     ``required`` blocks visual generation until the plan (and later the
@@ -178,7 +188,7 @@ class CreationCheckpointConfig(StrictModel):
     ] = Field(default="co_creation", alias="executionMode")
 
 
-class MediaReviewConfig(StrictModel):
+class MediaReviewConfig(_ConfigBase):
     """Quality gate for generated media (images/videos).
 
     ``required`` parks every generated artifact behind a pending Review;
@@ -190,7 +200,7 @@ class MediaReviewConfig(StrictModel):
     mode: Literal["required", "auto_approve"] = "required"
 
 
-class SelfReviewConfig(StrictModel):
+class SelfReviewConfig(_ConfigBase):
     """Advisory model-driven review tiers along the creation pipeline.
 
     Mirrors the three independent review modules: ``sync_enabled`` reviews
@@ -216,7 +226,7 @@ class SelfReviewConfig(StrictModel):
     )
 
 
-class OssConfig(StrictModel):
+class OssConfig(_ConfigBase):
     """QwenPaw Creator media OSS configuration stored in model_config.json."""
 
     enabled: bool = False
@@ -228,7 +238,7 @@ class OssConfig(StrictModel):
     policy_api_key: str = ""
 
 
-class ModelConfigData(StrictModel):
+class ModelConfigData(_ConfigBase):
     llm: LlmConfig
     vlm: VlmConfig
     grounding: GroundingConfig = Field(default_factory=GroundingConfig)
