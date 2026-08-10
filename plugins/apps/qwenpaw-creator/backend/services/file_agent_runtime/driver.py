@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -189,6 +189,21 @@ GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
 DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 300.0
+
+# Tool results that may carry video-frame refs to inject as native
+# images: the synchronous reader and the background-task harvester.
+_VIDEO_FRAME_TOOL_NAMES = frozenset(
+    {"read_source_video", "check_observation_tasks"},
+)
+
+
+def _nested_tool_payload(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Model-owned specialist tool flags (background/wait) live in the
+    nested ``arguments.arguments`` payload, not on the envelope."""
+    payload = arguments.get("arguments")
+    return payload if isinstance(payload, Mapping) else {}
+
+
 # The workspace schema prompt instructs the model to keep each jq_project
 # argument JSON under 4KB; the advisory fires at 2x that guidance so the
 # diagnosis surfaces payloads that ignored the instruction.
@@ -3737,17 +3752,33 @@ class FileCreatorAgentRuntime:
                         "failed": failed,
                     },
                 )
-                if call.name == "read_source_video" and not failed:
+                if (
+                    call.name in _VIDEO_FRAME_TOOL_NAMES
+                    and not failed
+                    and not result.get("background")
+                ):
                     # Extracted source frames enter the specialist context
                     # as native images interleaved with timestamps, via the
-                    # same mechanism as read_document page images.
+                    # same mechanism as read_document page images. Frames
+                    # arrive either directly (synchronous read) or nested
+                    # in the per-task entries of a harvest result.
                     frame_content: list[dict[str, Any]] = []
+                    frame_sources: list[dict[str, Any]] = [result]
+                    frame_sources.extend(
+                        entry
+                        for entry in result.get("tasks") or []
+                        if isinstance(entry, dict)
+                    )
                     try:
-                        frame_parts = await video_frame_content_parts(
-                            self.services,
-                            project_id=project_id,
-                            task_result=result,
-                        )
+                        frame_parts = []
+                        for frame_source in frame_sources:
+                            frame_parts.extend(
+                                await video_frame_content_parts(
+                                    self.services,
+                                    project_id=project_id,
+                                    task_result=frame_source,
+                                ),
+                            )
                     except (asyncio.CancelledError, StaleAgentRun):
                         raise
                     except Exception as exc:  # noqa: BLE001
@@ -4172,7 +4203,21 @@ class FileCreatorAgentRuntime:
                 ),
             )
             result = dict(invoked.payload)
-            if spec is not None and spec.wait is SpecialistToolWait.TASK:
+            tool_payload = _nested_tool_payload(arguments)
+            background_requested = bool(
+                spec is not None
+                and spec.background_capable
+                and tool_payload.get("background"),
+            )
+            if (
+                spec is not None
+                and spec.wait is SpecialistToolWait.TASK
+                and background_requested
+            ):
+                # Host-style async submit: hand the task id back now and
+                # let the model harvest via check_observation_tasks.
+                result["background"] = True
+            elif spec is not None and spec.wait is SpecialistToolWait.TASK:
                 if not invoked.task_id:
                     raise FileAgentRuntimeError(
                         f"{name} declared Task wait without a task id",
@@ -4190,6 +4235,18 @@ class FileCreatorAgentRuntime:
                         "outputRefs": list(task.output_refs),
                         "result": task.result,
                     },
+                )
+            elif (
+                spec is not None
+                and spec.wait is SpecialistToolWait.TASK_LIST
+                and invoked.task_ids
+                and tool_payload.get("wait", True)
+            ):
+                result["tasks"] = await self._await_specialist_tasks(
+                    project_id=project_id,
+                    parent_run_id=parent_run_id,
+                    epoch=epoch,
+                    task_ids=invoked.task_ids,
                 )
             if authorization_id is not None:
                 result["executionAuthorizationId"] = authorization_id
@@ -4781,6 +4838,48 @@ class FileCreatorAgentRuntime:
                     f"Task {task_id} ended as {task.status.value}: {detail}",
                 )
             await asyncio.sleep(min(self.poll_interval_seconds, 0.5))
+
+    async def _await_specialist_tasks(
+        self,
+        *,
+        project_id: str,
+        parent_run_id: str,
+        epoch: int,
+        task_ids: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """Await a batch of tasks in parallel, tolerating per-task failure.
+
+        Unlike the single-task awaiter this never raises for a FAILED
+        task: the harvest must report every task's own outcome so one
+        bad observation cannot mask the results of its batch peers.
+        """
+
+        async def _one(task_id: str) -> dict[str, Any]:
+            try:
+                task = await self._await_specialist_task(
+                    project_id=project_id,
+                    parent_run_id=parent_run_id,
+                    epoch=epoch,
+                    task_id=task_id,
+                )
+            except (asyncio.CancelledError, StaleAgentRun):
+                raise
+            except FileAgentRuntimeError as exc:
+                return {
+                    "taskId": task_id,
+                    "status": "FAILED",
+                    "error": str(exc),
+                }
+            return {
+                "taskId": task.task_id,
+                "status": task.status.value,
+                "outputRefs": list(task.output_refs),
+                "result": task.result,
+            }
+
+        return list(
+            await asyncio.gather(*(_one(task_id) for task_id in task_ids)),
+        )
 
     async def _workspace_changed(
         self,

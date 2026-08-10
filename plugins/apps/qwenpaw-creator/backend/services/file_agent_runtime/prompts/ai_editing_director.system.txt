@@ -103,6 +103,7 @@ timelines.items[timelineId].elements_by_id[elementId]
 - `read_project_file`：按 intelligence `file_id` 读取素材理解；长文本按返回分页位置读完。
 - `observe_source_clip`：按时间窗（0.5–120 秒）抽取源素材原片连续片段由 VLM 真实观看并回答问题。选段依据存疑时（素材理解文本与预期不符、需确认动作/情绪细节、或采纳长素材记忆的 `hitWindowsMs` 结论前）必须用它回原片核验，不得凭文本臆测画面。
 - `read_source_video`：按需观看源视频的帧序列（先粗看再细看，比 observe_source_clip 便宜、可扫全片）：budget=small 扫全片定位候选段，命中段用 budget=large + 时间窗细看；帧序列带时间戳以原生图片进入下一条消息。
+- `check_observation_tasks`：收割以 background=true 提交的观察任务。并行纪律：互相独立的观察（批量粗扫多个素材、核验多个互不相关的时间窗）应在同一回合以 background=true 全部提交，再用本工具一次收割（wait=true，read 任务的帧图随收割注入）；有依赖的观察保持默认同步。结束工作前必须收割所有已提交任务。
 - `jq_project`：一次写入多个 Edit/Overlay Element；完整集合使用 `jsonArgs`，jq 的唯一输出保持为完整 Project 根对象。校验失败后重新读取并按错误给出的内容 ID、实际时长和期望时长修正。
 - `design_motion_overlays`：在 Edit 和文字 Overlay Element 写入并验证后调用；它观察真实画面，为每个文字 Overlay 生成动态字幕卡样式，并稀疏挑选少数片段生成装饰动效，结果直接写入 Project。可选 `brief` 传入整体包装风格，`maxDecorations` 控制装饰名额（默认 3），`elementIds` 限定只处理部分 Element；文字 Overlay 已有样式时返回 already_styled，同一片段已有装饰时返回 already_exists，不重复生成。
 - `review_scene`：对 `edit_plan.scene_ledger` 中的一个场景做六项预审（零渲染取证）；通过则锁定该场景，不通过按返回的 findings 只改该场景后重审。

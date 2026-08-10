@@ -22,9 +22,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from domain.enums import CreatorCommandType, SpecialistRole
+from domain.enums import CreatorCommandType, SpecialistRole, TaskKind
 from domain.errors import PermissionDeniedError, ValidationError
 from models.config import is_s2v_configured, is_tts_configured
+from services.runtime_files.errors import RecordNotFoundError
 from services.media.source_observation import source_observation_service
 from services.media.source_video_reader import source_video_reader_service
 from services.media.source_memory import (
@@ -95,6 +96,10 @@ def _unique_prefix_correction(
 class SpecialistToolWait(StrEnum):
     NONE = "NONE"
     TASK = "TASK"
+    # The tool returns a batch of task ids; the driver awaits them all in
+    # parallel (or returns a status snapshot when the model asks not to
+    # wait), so total latency is the max of the batch, not the sum.
+    TASK_LIST = "TASK_LIST"
 
 
 _PROJECT_ASSETS_TARGET_REF = "project:assets"
@@ -112,6 +117,10 @@ class SpecialistToolSpec:
     long_running: bool = False
     wait: SpecialistToolWait = SpecialistToolWait.NONE
     provider_kind: str | None = None
+    # Tools that may skip the inline TASK wait when the model passes
+    # background=true (host-style async: submit now, harvest later via
+    # check_observation_tasks).
+    background_capable: bool = False
 
     def expands_project_assets_scope(
         self,
@@ -205,6 +214,7 @@ def provider_function(
 class SpecialistToolResult:
     payload: dict[str, Any]
     task_id: str | None = None
+    task_ids: tuple[str, ...] = ()
 
 
 def _arguments_schema(
@@ -664,6 +674,14 @@ _OBSERVE_CLIP_ARGUMENTS = _arguments_schema(
                 "具体发生在哪个时刻？’"
             ),
         },
+        "background": {
+            "type": "boolean",
+            "description": (
+                "true=立即返回 taskId 不等待，可在同一回合并行提交多个"
+                "互相独立的观察，之后用 check_observation_tasks 一次性"
+                "收割；false（默认）=等待完成后直接返回答案。"
+            ),
+        },
     },
     ("startMs", "endMs", "question"),
 )
@@ -691,8 +709,39 @@ _READ_SOURCE_VIDEO_ARGUMENTS = _arguments_schema(
             "maximum": 64,
             "description": "抽帧上限（默认 32）。",
         },
+        "background": {
+            "type": "boolean",
+            "description": (
+                "true=立即返回 taskId 不等待（帧图在 "
+                "check_observation_tasks 收割时注入）；适合对多个素材"
+                "并行粗扫。false（默认）=等待完成，帧图随本回合注入。"
+            ),
+        },
     },
     (),
+)
+
+_CHECK_OBSERVATION_ARGUMENTS = _arguments_schema(
+    {
+        "taskIds": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": True,
+            "description": (
+                "要收割的观察任务 id（observe_source_clip / "
+                "read_source_video 以 background=true 提交时返回）。"
+            ),
+        },
+        "wait": {
+            "type": "boolean",
+            "description": (
+                "true（默认）=并行等待全部任务到终态后返回结果；" "false=立即返回当前状态快照，不等待。"
+            ),
+        },
+    },
+    ("taskIds",),
 )
 
 _REVIEW_SCENE_ARGUMENTS = _arguments_schema(
@@ -860,6 +909,7 @@ _SPECS = (
         long_running=True,
         wait=SpecialistToolWait.TASK,
         provider_kind="vlm",
+        background_capable=True,
     ),
     SpecialistToolSpec(
         name="read_source_video",
@@ -879,6 +929,25 @@ _SPECS = (
         parameters=_tool_schema(_READ_SOURCE_VIDEO_ARGUMENTS),
         long_running=True,
         wait=SpecialistToolWait.TASK,
+        background_capable=True,
+    ),
+    SpecialistToolSpec(
+        name="check_observation_tasks",
+        description=(
+            "收割以 background=true 提交的观察任务（observe_source_clip /"
+            " read_source_video）：wait=true（默认）并行等待全部任务完成后"
+            "返回各自结果（read 任务的帧图随之注入）；wait=false 立即返回"
+            "状态快照。提交的后台任务必须在结束工作前收割。"
+        ),
+        roles=frozenset(
+            {
+                SpecialistRole.SOURCE_INTELLIGENCE,
+                SpecialistRole.AI_EDITING_DIRECTOR,
+            },
+        ),
+        parameters=_tool_schema(_CHECK_OBSERVATION_ARGUMENTS),
+        long_running=True,
+        wait=SpecialistToolWait.TASK_LIST,
     ),
     SpecialistToolSpec(
         name="review_scene",
@@ -1255,6 +1324,48 @@ class FileSpecialistToolRegistry:
                     "taskId": task.task_id,
                 },
                 task_id=task.task_id,
+            )
+
+        if name == "check_observation_tasks":
+            # Read-only harvest: validate ownership and kind so a model
+            # can never use the harvester to wait on (or leak) tasks that
+            # are not its own background observations.
+            from services.runtime_files.execution_store import (
+                ProjectExecutionStore,
+            )
+
+            task_ids = [str(item) for item in payload["taskIds"]]
+            executions = ProjectExecutionStore(self.services.root)
+            snapshot: list[dict[str, Any]] = []
+            for candidate_id in task_ids:
+                try:
+                    record = await asyncio.to_thread(
+                        executions.get_task,
+                        project_id,
+                        candidate_id,
+                    )
+                except RecordNotFoundError as exc:
+                    raise ValidationError(
+                        f"观察任务不存在: {candidate_id}",
+                    ) from exc
+                if record.kind not in {
+                    TaskKind.OBSERVE_SOURCE_CLIP,
+                    TaskKind.READ_SOURCE_VIDEO,
+                }:
+                    raise ValidationError(
+                        "check_observation_tasks 只接受 observe_source_clip"
+                        f"/read_source_video 任务: {candidate_id} 是 "
+                        f"{record.kind.value}",
+                    )
+                snapshot.append(
+                    {
+                        "taskId": record.task_id,
+                        "status": record.status.value,
+                    },
+                )
+            return SpecialistToolResult(
+                payload={"ok": True, "tasks": snapshot},
+                task_ids=tuple(task_ids),
             )
 
         if name == "review_scene":
