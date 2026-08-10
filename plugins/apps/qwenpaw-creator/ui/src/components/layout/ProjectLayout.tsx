@@ -154,6 +154,15 @@ export default function ProjectLayout() {
     ),
   );
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
+  // Scheduler-owned production keeps mutating tasks and the work graph
+  // after the agent run ends, so "session is idle" must not mean "stop
+  // watching": running nodes are in flight and ready nodes may be
+  // admitted on the next tick.
+  const workGraphActive = useWorkGraphStore((state) => {
+    const counts = state.graph?.counts;
+    if (!counts) return false;
+    return (counts.running ?? 0) > 0 || (counts.ready ?? 0) > 0;
+  });
   const startProjectSnapshotPolling = useProjectSnapshotStore(
     (state) => state.startPolling,
   );
@@ -230,7 +239,14 @@ export default function ProjectLayout() {
       useAgentDockUiStore.getState().reset();
       useNavigationStore.getState().clear();
     }
-    void Promise.all([bootstrap(id), refreshTasks(id)]).catch(() => undefined);
+    void Promise.all([
+      bootstrap(id),
+      refreshTasks(id),
+      // Load the graph eagerly: the DAG panel only renders once nodes
+      // exist, and its own mount-refresh cannot break that chicken-and-egg
+      // after a page reload on a scheduler-driven project.
+      useWorkGraphStore.getState().refresh(id),
+    ]).catch(() => undefined);
     return () => disconnect();
   }, [bootstrap, disconnect, id, refreshTasks]);
 
@@ -251,6 +267,20 @@ export default function ProjectLayout() {
     }, 750);
     return () => window.clearInterval(timer);
   }, [id, refreshTasks, sessionStatus]);
+
+  useEffect(() => {
+    if (!id || !workGraphActive) return;
+    // Scheduler-driven production runs with no live agent session and no
+    // SSE stream: without this poll the dock and timeline freeze on the
+    // last mid-flight snapshot (perpetual "waiting for result" rows and
+    // generating stripes on finished elements). Polling stops by itself
+    // once every node is terminal.
+    const timer = window.setInterval(() => {
+      void refreshTasks(id).catch(() => undefined);
+      void useWorkGraphStore.getState().refresh(id);
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [id, refreshTasks, workGraphActive]);
 
   useEffect(() => {
     let panel: CreatorPanel = "other";
