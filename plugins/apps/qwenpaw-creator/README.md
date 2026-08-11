@@ -34,13 +34,13 @@ Creator is installed and opened from **Apps** in QwenPaw. Start QwenPaw and open
 
 Before your first project, open **Model Configuration** at the lower right of the home composer (or follow the first-run guide). Connect only the capabilities your scenario needs:
 
-| Scenario                         | Required capabilities                    | Role in the workflow                                             |
-| -------------------------------- | ---------------------------------------- | ---------------------------------------------------------------- |
-| Every scenario                   | LLM (required)                           | The brain for creative planning, storyboards, and Agent dialogue |
-| Short drama / general generation | Image generation + video generation + VLM | Generate frames and video; use VLM for visual quality review     |
-| Editing / uploaded sources       | VLM                                      | Understand uploaded image and video content                      |
-| Sources with speech / transcription | ASR                                   | Turn speech into text for editing and subtitles                  |
-| Voice-over / digital-human delivery | TTS + digital human                   | Synthesize narration and dialogue; drive talking-video segments  |
+| Scenario                            | Required capabilities                     | Role in the workflow                                             |
+| ----------------------------------- | ----------------------------------------- | ---------------------------------------------------------------- |
+| Every scenario                      | LLM (required)                            | The brain for creative planning, storyboards, and Agent dialogue |
+| Short drama / general generation    | Image generation + video generation + VLM | Generate frames and video; use VLM for visual quality review     |
+| Editing / uploaded sources          | VLM                                       | Understand uploaded image and video content                      |
+| Sources with speech / transcription | ASR                                       | Turn speech into text for editing and subtitles                  |
+| Voice-over / digital-human delivery | TTS + digital human                       | Synthesize narration and dialogue; drive talking-video segments  |
 
 The current model matrix is grouped by capability:
 
@@ -75,8 +75,8 @@ Creator’s agentic capability is not a separate layer floating beside the edito
   <figcaption>The current project element is linked in AgentDock, while an exact time range enters the composer as a structured selection. Refine either through natural language or continue editing manually.</figcaption>
 </figure>
 
-| What you select                                          | How it becomes Agent context                                                        | What remains manually editable                                               |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| What you select                                          | How it becomes Agent context                                                   | What remains manually editable                                               |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | A timeline point or dragged time range                   | Insert it through the selection action with exact timing and object references | Continue adjusting clip bounds, order, track relationships, and rhythm       |
 | A clip, subtitle, motion, transition, asset, or artifact | The current selection is linked automatically; use `@` to reference another    | Open details to edit timing, stacking, position, opacity, or copy            |
 | A section of page text                                   | Highlight it and use the selection action to insert it in the composer         | Edit the source field directly, or ask the Agent to change only that passage |
