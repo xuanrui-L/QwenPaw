@@ -381,12 +381,11 @@ export default function AgentEventFeed() {
     [events],
   );
   const authorization = pendingAuthorizations[0];
-  const showProductionCard =
-    !workGraphActive ||
-    Boolean(authorization) ||
-    failedTargetRuns.length > 0 ||
-    status === "running" ||
-    status === "waiting_confirm";
+  // With an active work graph the DAG info tab owns production tracking
+  // end to end — failed nodes carry their own Retry there and the dock
+  // composer owns the stop control — so the flat card only survives for
+  // a pending execution authorization, which has no other home.
+  const showProductionCard = !workGraphActive || Boolean(authorization);
   if (
     !runs.length &&
     !tasks.length &&
