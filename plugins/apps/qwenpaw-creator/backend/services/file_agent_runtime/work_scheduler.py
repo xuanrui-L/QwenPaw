@@ -213,6 +213,40 @@ class WorkGraphScheduler:
         except Exception:  # pylint: disable=broad-except
             logger.exception("work-graph state read failed for %s", project_id)
             return None
+
+        # Auto-rereview stale scene locks before deriving the graph.
+        # Without this, compose stays GATED (scene locks expired) but
+        # auto_review_stale_scenes only runs inside compose execution —
+        # a chicken-and-egg deadlock that halts the unattended pipeline.
+        try:
+            from services.render_review.scene_review import (
+                auto_review_stale_scenes,
+                collect_scene_review_targets,
+            )
+
+            for timeline_id in snapshot.project.timelines.order:
+                timeline = snapshot.project.timelines.items[timeline_id]
+                stale, drafts = collect_scene_review_targets(timeline)
+                if stale or drafts:
+                    await auto_review_stale_scenes(
+                        self.services,
+                        project_id=project_id,
+                        timeline_ref=f"timeline:{timeline_id}",
+                        timeline=timeline,
+                    )
+                    snapshot = await asyncio.to_thread(
+                        self.services.projects.read,
+                        project_id,
+                    )
+                    break
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "pre-compose auto-rereview failed for %s; proceeding "
+                "with stale graph",
+                project_id,
+                exc_info=True,
+            )
+
         graph = derive_work_graph(snapshot.project, tasks=tasks)
         inflight = self._inflight.setdefault(project_id, set())
         try:

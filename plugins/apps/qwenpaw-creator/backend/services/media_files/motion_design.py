@@ -526,7 +526,7 @@ def _repair_common_html_slips(html: str) -> str:
     def _lift_zero_alpha(match: re.Match[str]) -> str:
         opening, body, closing = match.groups()
         body = re.sub(
-            r"((?:autoAlpha|opacity)\s*:\s*)0(?:\.0+)?(?=\s*[,}!;])",
+            r"((?:autoAlpha|opacity)\s*:\s*)(?:0(?:\.0+)?|\.0+)(?=\s*[,}!;])",
             r"\g<1>0.25",
             body,
         )

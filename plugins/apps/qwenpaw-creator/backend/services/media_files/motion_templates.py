@@ -97,7 +97,7 @@ html,body{{width:100%;height:100%;margin:0;background:transparent;overflow:hidde
 .card{{position:relative;width:100%;height:88%;display:flex;align-items:center;justify-content:center;padding:7% 9%;background:{background};color:{ink};border:clamp(3px,1.8vh,8px) solid {ink};border-radius:24% 22% 24% 18%;box-shadow:1.8vh 2vh 0 color-mix(in srgb,{ink} 28%,transparent);animation:{ambient} 2.8s ease-in-out .45s infinite alternate;overflow:hidden}}
 .card:before{{content:'';position:absolute;left:9%;top:11%;width:18%;height:6%;border-radius:999px;background:{accent};transform:rotate(-8deg)}}
 .text{{position:relative;z-index:1;width:100%;max-height:100%;font-family:Impact,"Arial Black","PingFang SC",sans-serif;font-size:{font_size}vh;font-weight:900;line-height:1.08;text-align:center;overflow-wrap:anywhere;text-wrap:balance;text-shadow:.25vh .25vh 0 color-mix(in srgb,{accent} 65%,transparent)}}
-@keyframes enter{{0%{{opacity:0;transform:scale(.7) rotate(-4deg)}}70%{{opacity:1;transform:scale(1.04) rotate(1deg)}}100%{{transform:scale(1)}}}}
+@keyframes enter{{0%{{opacity:.25;transform:scale(.7) rotate(-4deg)}}70%{{opacity:1;transform:scale(1.04) rotate(1deg)}}100%{{transform:scale(1)}}}}
 @keyframes float{{to{{transform:translateY(-2%)}}}}
 @keyframes tilt{{to{{transform:rotate(2deg) translateY(-1%)}}}}
 @keyframes pulse{{to{{transform:scale(1.025)}}}}
@@ -144,10 +144,10 @@ html,body{{width:100%;height:100%;margin:0;background:transparent;overflow:hidde
 {motif_css}
 {_THEME_CSS[theme]}
 {_VARIANT_CSS[variant]}
-@keyframes enter-pop{{from{{opacity:0;transform:scale(.68)}}to{{opacity:1;transform:scale(1)}}}}
-@keyframes enter-stamp{{0%{{opacity:0;transform:scale(1.35) rotate(-7deg)}}70%{{opacity:1;transform:scale(.94) rotate(2deg)}}100%{{transform:scale(1)}}}}
-@keyframes enter-draw_in{{from{{opacity:0;clip-path:inset(0 100% 0 0)}}to{{opacity:1;clip-path:inset(0)}}}}
-@keyframes enter-slide{{from{{opacity:0;transform:translateX(-18%)}}to{{opacity:1;transform:translateX(0)}}}}
+@keyframes enter-pop{{from{{opacity:.25;transform:scale(.68)}}to{{opacity:1;transform:scale(1)}}}}
+@keyframes enter-stamp{{0%{{opacity:.25;transform:scale(1.35) rotate(-7deg)}}70%{{opacity:1;transform:scale(.94) rotate(2deg)}}100%{{transform:scale(1)}}}}
+@keyframes enter-draw_in{{from{{opacity:.25;clip-path:inset(0 100% 0 0)}}to{{opacity:1;clip-path:inset(0)}}}}
+@keyframes enter-slide{{from{{opacity:.25;transform:translateX(-18%)}}to{{opacity:1;transform:translateX(0)}}}}
 @keyframes ambient-chill{{to{{transform:translateY(-3px);opacity:.9}}}}
 @keyframes ambient-curious{{to{{transform:translateY(-2px) rotate(3deg)}}}}
 @keyframes ambient-surprise{{to{{transform:scale(calc(.96 + var(--intensity) * .04))}}}}
