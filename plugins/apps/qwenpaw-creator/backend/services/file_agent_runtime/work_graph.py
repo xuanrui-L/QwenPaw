@@ -276,6 +276,47 @@ def _video_prompt_dialogue_gaps(creation: R2VCreation) -> tuple[str, ...]:
     return tuple(gaps)
 
 
+def _element_dialogue_absence_gap(
+    creation: R2VCreation,
+    scenario: str,
+) -> str | None:
+    """Element has characters but zero dialogue — gate the video node.
+
+    Field run 2026-08-12 (project 4cd, amodei love story): the story
+    theme was "unspoken love" and the model interpreted it as "no one
+    speaks anywhere" — 6 elements, 26 shots, only 1 dialogue line.
+    The dialogue-coverage gate (_video_prompt_dialogue_gaps) only fires
+    when dialogue *exists* and is not quoted; it silently passes when
+    shot.dialogue is empty. This gate catches the other failure mode:
+    characters appear but the model wrote a silent film.
+
+    Exemptions:
+    - Non-narrative scenarios (video_edit, general) — no story doctrine.
+    - Elements without character_refs — nothing to speak.
+    - Elements whose narrative contains the explicit directorial note
+      "有意静默" — a deliberate silence choice, not an oversight.
+    """
+    if scenario != "short_drama":
+        return None
+    if not creation.character_refs:
+        return None
+    narrative = creation.narrative or ""
+    if "有意静默" in narrative:
+        return None
+    any_dialogue = any(
+        (shot.dialogue or "").strip()
+        for shot_id in creation.shots.order
+        if (shot := creation.shots.items.get(shot_id)) is not None
+    )
+    if any_dialogue:
+        return None
+    return (
+        "element 有角色出场但全部 Shot 均无对白"
+        "（shot.dialogue 为空），叙事项目须每 2–3 Shot 至少 1 句对白；"
+        "如确需静默请在 narrative 写明「有意静默」"
+    )
+
+
 def _slot_selected(project: Project, slot_id: str) -> str | None:
     slot = project.assets.artifact_slots_by_id.get(slot_id)
     if slot is None:
@@ -600,6 +641,15 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # prompt before dispatch — see _video_prompt_dialogue_gaps.
                 status = WorkNodeStatus.GATED
                 video_missing = dialogue_gaps
+            elif absence_gap := _element_dialogue_absence_gap(
+                creation,
+                project.scenario,
+            ):
+                # Narrative element has characters but zero dialogue
+                # across all shots — the model wrote a silent film.
+                # See _element_dialogue_absence_gap.
+                status = WorkNodeStatus.GATED
+                video_missing = (absence_gap,)
             else:
                 status = WorkNodeStatus.READY
             add(

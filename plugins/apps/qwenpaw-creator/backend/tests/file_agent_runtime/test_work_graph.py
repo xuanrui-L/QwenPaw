@@ -465,6 +465,61 @@ def test_dialogue_gate_ignores_speaker_prefixes_and_stage_directions() -> None:
     assert video.missing == ("video_prompt 缺台词原文：shot:farewell",)
 
 
+def test_silent_film_gated_until_dialogue_or_intentional_silence() -> None:
+    """Field run 2026-08-12 (4cd, amodei love story): theme "unspoken
+    love" → model wrote 26 shots with 1 dialogue line total. The
+    dialogue-coverage gate only fires when dialogue *exists*; it passed
+    silently when every shot.dialogue was empty. This gate catches the
+    other failure mode: characters appear but the element is a silent
+    film.
+    """
+    project = _project()
+    project.scenario = "short_drama"
+    for ref in ("char:dario", "char:suwan"):
+        project.visual.entities.items[ref] = _entity(
+            ref,
+            {"var:default": None},
+        )
+        project.visual.entities.order.append(ref)
+    shot = Shot(
+        shot_id="shot:reunion",
+        description="重逢",
+        camera="⊙ 静止",
+        framing="近景",
+        duration_seconds=3,
+    )
+    _element_with_landed_storyboard(
+        project,
+        character_refs=["char:dario", "char:suwan"],
+        narrative="两人重逢，一切尽在不言中。",
+        shots={
+            "items": {shot.shot_id: shot},
+            "order": [shot.shot_id],
+        },
+        video_prompt="Emotional reunion, restrained eye contact.",
+    )
+
+    # All shots empty + no intentional-silence note → GATED.
+    graph = derive_work_graph(project)
+    video = graph.by_id["video:elem:one"]
+    assert video.status is WorkNodeStatus.GATED
+    assert "全部 Shot 均无对白" in video.missing[0]
+
+    # Adding "有意静默" to the narrative releases the gate.
+    element = project.timelines.items["timeline:main"].elements_by_id[
+        "elem:one"
+    ]
+    element.creation.narrative = "两人重逢，有意静默——未说出口的话才是故事核心。"
+    graph = derive_work_graph(project)
+    assert graph.by_id["video:elem:one"].status is WorkNodeStatus.READY
+
+    # Non-narrative scenario never gates on dialogue absence.
+    project.scenario = "general"
+    element.creation.narrative = "两人重逢，一切尽在不言中。"
+    graph = derive_work_graph(project)
+    assert graph.by_id["video:elem:one"].status is WorkNodeStatus.READY
+
+
 def test_multi_character_storyboard_waits_for_the_planned_lineup() -> None:
     """The lineup image is the pairwise-contrast anchor.
 
