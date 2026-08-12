@@ -4545,6 +4545,30 @@ async def recover_interrupted_image_tasks(
                     str(task.idempotency_key or task.task_id),
                 )
             )
+            if stable["task_id"] != task.task_id:
+                # Scheduler-dispatched tasks (idempotency keys like
+                # ``dag-storyboard:...``) carry execution-store ids, not
+                # the file-image command namespace recomputed above.
+                # Field run 2026-08-12 (project 27dc): the recomputed id
+                # missed the record, _fail_if_running returned on
+                # RecordNotFound and the interrupted RUNNING task
+                # survived restart as a zombie pinning its work-graph
+                # lane RUNNING forever. Recover the record we actually
+                # iterated — including its live attempt, which the
+                # fail-close must finish (a foreign-namespace attempt id
+                # would open a second attempt and leave the first, and
+                # therefore the Task, RUNNING).
+                stable = {
+                    **stable,
+                    "task_id": task.task_id,
+                    "run_id": str(task.run_id or stable["run_id"]),
+                }
+                attempts = executions.list_task_attempts(
+                    project_id,
+                    task.task_id,
+                )
+                if attempts:
+                    stable["attempt_id"] = attempts[-1].attempt_id
             if isinstance(task.result, dict):
                 try:
                     await worker._converge(  # noqa: SLF001

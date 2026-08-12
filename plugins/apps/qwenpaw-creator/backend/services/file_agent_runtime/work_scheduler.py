@@ -22,6 +22,7 @@ Safety posture:
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType
@@ -54,6 +55,16 @@ _IDLE_EXIT_SECONDS = 300.0
 # reopen the ledger this many times per (node, fingerprint); deterministic
 # failures (safety rejections, validation) stay locked until inputs change.
 _TRANSIENT_RETRY_LIMIT = 2
+# A provider having a bad hour outlives the immediate retry budget.
+# Field run 2026-08-12 (project 27dc): gpt-image-2 threw WriteTimeout /
+# ReadError for ~40 minutes; every storyboard burned its 2 retries and
+# FAILED terminally with nothing left to try once the provider recovered
+# — a human nudge was the only way back. After the immediate budget is
+# spent, one further retry is granted per cooldown window up to a hard
+# cap, so the pipeline self-heals from provider weather while paid
+# spend stays bounded.
+_TRANSIENT_RETRY_HARD_CAP = 6
+_TRANSIENT_RETRY_COOLDOWN_SECONDS = 300.0
 
 # Scheduler-only transient markers; the shared media-side classifier
 # (is_transient_error_message) supplies the common ones (connection,
@@ -133,7 +144,29 @@ class WorkGraphScheduler:
         # (project_id, node_id, fingerprint) -> already dispatched once.
         self._dispatched: set[tuple[str, str, str]] = set()
         self._transient_retries: dict[tuple[str, str, str], int] = {}
+        self._transient_last: dict[tuple[str, str, str], float] = {}
         self._inflight: dict[str, set[str]] = {}
+
+    def _transient_budget_available(
+        self,
+        ledger_key: tuple[str, str, str],
+    ) -> bool:
+        count = self._transient_retries.get(ledger_key, 0)
+        if count < _TRANSIENT_RETRY_LIMIT:
+            return True
+        if count >= _TRANSIENT_RETRY_HARD_CAP:
+            return False
+        last = self._transient_last.get(ledger_key, 0.0)
+        return (time.monotonic() - last) >= _TRANSIENT_RETRY_COOLDOWN_SECONDS
+
+    def _note_transient_retry(
+        self,
+        ledger_key: tuple[str, str, str],
+    ) -> None:
+        self._transient_retries[ledger_key] = (
+            self._transient_retries.get(ledger_key, 0) + 1
+        )
+        self._transient_last[ledger_key] = time.monotonic()
 
     # -- lifecycle -----------------------------------------------------
 
@@ -271,8 +304,8 @@ class WorkGraphScheduler:
 
         candidates = list(graph.ready_media_nodes())
         rescuable = _quarantined_stale_targets(tasks)
+        inflight = self._inflight.get(project_id, set())
         if rescuable:
-            inflight = self._inflight.get(project_id, set())
             for node in candidates:
                 # A dispatched node that re-derives READY while a
                 # quarantined-stale sibling result exists means its task
@@ -289,14 +322,19 @@ class WorkGraphScheduler:
                     or node.node_id in inflight
                 ):
                     continue
-                if self._transient_retries.get(ledger_key, 0) >= (
-                    _TRANSIENT_RETRY_LIMIT
-                ):
+                if not self._transient_budget_available(ledger_key):
                     continue
-                self._transient_retries[ledger_key] = (
-                    self._transient_retries.get(ledger_key, 0) + 1
-                )
+                self._note_transient_retry(ledger_key)
                 self._dispatched.discard(ledger_key)
+        recorded_keys = tuple(
+            str(getattr(task, "idempotency_key", "") or "") for task in tasks
+        )
+        self._reopen_recordless_ready_nodes(
+            project_id,
+            candidates,
+            inflight,
+            recorded_keys,
+        )
         for node in graph.nodes:
             if (
                 node.status.value != "failed"
@@ -314,16 +352,48 @@ class WorkGraphScheduler:
                 continue
             fingerprint = node.dispatch_fingerprint or node.node_id
             ledger_key = (project_id, node.node_id, fingerprint)
-            if self._transient_retries.get(ledger_key, 0) >= (
-                _TRANSIENT_RETRY_LIMIT
-            ):
+            if not self._transient_budget_available(ledger_key):
                 continue
-            self._transient_retries[ledger_key] = (
-                self._transient_retries.get(ledger_key, 0) + 1
-            )
+            self._note_transient_retry(ledger_key)
             self._dispatched.discard(ledger_key)
             candidates.append(node)
         return candidates
+
+    def _reopen_recordless_ready_nodes(
+        self,
+        project_id: str,
+        candidates: Sequence[WorkNode],
+        inflight: set[str],
+        recorded_keys: Sequence[str],
+    ) -> None:
+        """Reopen READY nodes whose last dispatch died before admission.
+
+        READY + ledger-marked + not inflight + no durable task record
+        means the last dispatch died before admitting a task — a
+        pre-spend rejection (execution gate, validation) or a transport
+        fault ahead of admission. Real executors admit the task before
+        any provider spend, so no record ⇒ nothing paid; a marked ledger
+        would otherwise strand the node READY-but-undispatchable forever
+        (field run 2026-08-12, project 27dc: a single-character scene
+        stalled 25 minutes behind a project-wide lineup gate until a
+        restart cleared the ledger). The bounded budget — not the ledger
+        — stops a graph/executor mismatch from hot-looping.
+        """
+
+        for node in candidates:
+            fingerprint = node.dispatch_fingerprint or node.node_id
+            ledger_key = (project_id, node.node_id, fingerprint)
+            if ledger_key not in self._dispatched or node.node_id in inflight:
+                continue
+            prefix = f"dag-{node.node_id}-{fingerprint}"
+            if any(key.startswith(prefix) for key in recorded_keys):
+                # A durable record exists (running / failed / quarantined):
+                # the record — not this reopen path — owns its lifecycle.
+                continue
+            if not self._transient_budget_available(ledger_key):
+                continue
+            self._note_transient_retry(ledger_key)
+            self._dispatched.discard(ledger_key)
 
     async def _dispatch(
         self,
@@ -341,20 +411,16 @@ class WorkGraphScheduler:
             await self.dispatch_node(project_id, node, fingerprint)
         except Exception as exc:  # pylint: disable=broad-except
             ledger_key = (project_id, node.node_id, fingerprint)
-            if (
-                _is_transient_dispatch_error(exc)
-                and self._transient_retries.get(ledger_key, 0)
-                < _TRANSIENT_RETRY_LIMIT
-            ):
+            if _is_transient_dispatch_error(
+                exc,
+            ) and self._transient_budget_available(ledger_key):
                 # Field run 2026-08-06: the first live fan-out lost five
                 # storyboards to provider timeouts and the ledger locked
                 # them as if the failure were deterministic. Transient
                 # faults reopen the ledger (bounded) so the next tick
                 # retries; the durable idempotency slot resumes the same
                 # task instead of paying twice.
-                self._transient_retries[ledger_key] = (
-                    self._transient_retries.get(ledger_key, 0) + 1
-                )
+                self._note_transient_retry(ledger_key)
                 self._dispatched.discard(ledger_key)
                 logger.warning(
                     "work-graph dispatch transient failure project=%s "
@@ -362,13 +428,16 @@ class WorkGraphScheduler:
                     project_id,
                     node.node_id,
                     self._transient_retries[ledger_key],
-                    _TRANSIENT_RETRY_LIMIT,
+                    _TRANSIENT_RETRY_HARD_CAP,
                     exc,
                 )
             else:
-                # The task record carries the durable failure; the graph
-                # will surface it as FAILED and the ledger prevents a paid
-                # retry until the node's inputs change.
+                # The durable task record (real executors admit the task
+                # before any provider spend) carries the failure: the
+                # graph surfaces it as FAILED and the marked ledger
+                # prevents a paid retry until the node's inputs change.
+                # Failures without a record re-enter through the bounded
+                # no-record reopen in _dispatch_candidates.
                 logger.warning(
                     "work-graph dispatch failed project=%s node=%s: %s",
                     project_id,
