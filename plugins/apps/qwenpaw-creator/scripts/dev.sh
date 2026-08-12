@@ -57,7 +57,8 @@ install_plugin() {
   "$QWENPAW_PYTHON" -m playwright install chromium
 
   echo "==> Installing GSAP animation runtime for motion overlays ..."
-  (cd "$PLUGIN_DIR/backend" && "$QWENPAW_PYTHON" -m services.media_files.motion_engine fetch)
+  INSTALLED_PLUGIN="$WORKING_DIR/plugins/qwenpaw-creator"
+  (cd "$INSTALLED_PLUGIN/backend" && "$QWENPAW_PYTHON" -m services.media_files.motion_engine fetch)
 
   echo "==> Clearing segment render cache to force fresh motion composition ..."
   rm -rf "${TMPDIR:-/tmp}/qwenpaw-segment-cache-v1"
