@@ -29,6 +29,7 @@ from models.config import (
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
     get_execution_authorization_mode,
     get_media_parallelism,
+    get_vlm_timeout_seconds,
 )
 from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
@@ -228,15 +229,38 @@ class WorkGraphScheduler:
                 timeline = snapshot.project.timelines.items[timeline_id]
                 stale, drafts = collect_scene_review_targets(timeline)
                 if stale or drafts:
-                    await auto_review_stale_scenes(
-                        self.services,
-                        project_id=project_id,
-                        timeline_ref=f"timeline:{timeline_id}",
-                        timeline=timeline,
+                    review_timeout = min(
+                        max(len(stale) + len(drafts), 1)
+                        * int(get_vlm_timeout_seconds()),
+                        600,
                     )
-                    snapshot = await asyncio.to_thread(
-                        self.services.projects.read,
-                        project_id,
+                    try:
+                        await asyncio.wait_for(
+                            auto_review_stale_scenes(
+                                self.services,
+                                project_id=project_id,
+                                timeline_ref=f"timeline:{timeline_id}",
+                                timeline=timeline,
+                            ),
+                            timeout=review_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "pre-compose auto-rereview timed out after "
+                            "%ds for %s; proceeding with stale graph",
+                            review_timeout,
+                            project_id,
+                        )
+                        break
+                    snapshot, tasks = await asyncio.gather(
+                        asyncio.to_thread(
+                            self.services.projects.read,
+                            project_id,
+                        ),
+                        asyncio.to_thread(
+                            self.executions.list_tasks,
+                            project_id,
+                        ),
                     )
                     break
         except Exception:  # pylint: disable=broad-except
