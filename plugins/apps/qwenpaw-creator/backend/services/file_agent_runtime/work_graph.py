@@ -276,11 +276,11 @@ def _video_prompt_dialogue_gaps(creation: R2VCreation) -> tuple[str, ...]:
     return tuple(gaps)
 
 
-def _element_dialogue_absence_gap(
+def _element_dialogue_density_gap(
     creation: R2VCreation,
     scenario: str,
 ) -> str | None:
-    """Element has characters but zero dialogue — gate the video node.
+    """Element dialogue density below min_dialogue_ratio — gate the video.
 
     Field run 2026-08-12 (project 4cd, amodei love story): the story
     theme was "unspoken love" and the model interpreted it as "no one
@@ -290,31 +290,40 @@ def _element_dialogue_absence_gap(
     shot.dialogue is empty. This gate catches the other failure mode:
     characters appear but the model wrote a silent film.
 
+    The threshold is per-element (``creation.min_dialogue_ratio``,
+    default 0.3 ≈ 1 line per 2–3 shots); the review UI may override it
+    per element for fine-grained control.
+
     Exemptions:
     - Non-narrative scenarios (video_edit, general) — no story doctrine.
     - Elements without character_refs — nothing to speak.
     - Elements whose narrative contains the explicit directorial note
       "有意静默" — a deliberate silence choice, not an oversight.
+    - min_dialogue_ratio == 0 — the model (or user) explicitly opted out.
     """
-    if scenario != "short_drama":
-        return None
-    if not creation.character_refs:
-        return None
-    narrative = creation.narrative or ""
-    if "有意静默" in narrative:
-        return None
-    any_dialogue = any(
-        (shot.dialogue or "").strip()
-        for shot_id in creation.shots.order
-        if (shot := creation.shots.items.get(shot_id)) is not None
-    )
-    if any_dialogue:
-        return None
-    return (
-        "element 有角色出场但全部 Shot 均无对白"
-        "（shot.dialogue 为空），叙事项目须每 2–3 Shot 至少 1 句对白；"
-        "如确需静默请在 narrative 写明「有意静默」"
-    )
+    gap: str | None = None
+    if (
+        scenario == "short_drama"
+        and creation.character_refs
+        and creation.min_dialogue_ratio > 0
+        and "有意静默" not in (creation.narrative or "")
+    ):
+        shots = [creation.shots.items.get(sid) for sid in creation.shots.order]
+        shots = [s for s in shots if s is not None]
+        if shots:
+            dialogue_count = sum(
+                1 for s in shots if (s.dialogue or "").strip()
+            )
+            ratio = dialogue_count / len(shots)
+            if ratio < creation.min_dialogue_ratio:
+                gap = (
+                    f"element 对白密度 {dialogue_count}/{len(shots)}"
+                    f" ({ratio:.0%}) 低于目标"
+                    f" {creation.min_dialogue_ratio:.0%}；"
+                    "如确需静默请在 narrative 写明「有意静默」"
+                    "或将 min_dialogue_ratio 调低"
+                )
+    return gap
 
 
 def _slot_selected(project: Project, slot_id: str) -> str | None:
@@ -641,13 +650,13 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # prompt before dispatch — see _video_prompt_dialogue_gaps.
                 status = WorkNodeStatus.GATED
                 video_missing = dialogue_gaps
-            elif absence_gap := _element_dialogue_absence_gap(
+            elif absence_gap := _element_dialogue_density_gap(
                 creation,
                 project.scenario,
             ):
-                # Narrative element has characters but zero dialogue
-                # across all shots — the model wrote a silent film.
-                # See _element_dialogue_absence_gap.
+                # Element dialogue density below min_dialogue_ratio —
+                # the model wrote a silent film or too-sparse dialogue.
+                # See _element_dialogue_density_gap.
                 status = WorkNodeStatus.GATED
                 video_missing = (absence_gap,)
             else:

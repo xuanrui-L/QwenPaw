@@ -472,6 +472,8 @@ def test_silent_film_gated_until_dialogue_or_intentional_silence() -> None:
     silently when every shot.dialogue was empty. This gate catches the
     other failure mode: characters appear but the element is a silent
     film.
+
+    The threshold is per-element ``min_dialogue_ratio`` (default 0.3).
     """
     project = _project()
     project.scenario = "short_drama"
@@ -481,41 +483,67 @@ def test_silent_film_gated_until_dialogue_or_intentional_silence() -> None:
             {"var:default": None},
         )
         project.visual.entities.order.append(ref)
-    shot = Shot(
-        shot_id="shot:reunion",
-        description="重逢",
-        camera="⊙ 静止",
-        framing="近景",
-        duration_seconds=3,
-    )
+
+    # 4 shots, 0 dialogue → 0% < 30% → GATED.
+    silent_shots = [
+        Shot(
+            shot_id=f"shot:{i}",
+            description=f"镜头 {i}",
+            camera="⊙ 静止",
+            framing="近景",
+            duration_seconds=2,
+        )
+        for i in range(4)
+    ]
     _element_with_landed_storyboard(
         project,
         character_refs=["char:dario", "char:suwan"],
         narrative="两人重逢，一切尽在不言中。",
         shots={
-            "items": {shot.shot_id: shot},
-            "order": [shot.shot_id],
+            "items": {s.shot_id: s for s in silent_shots},
+            "order": [s.shot_id for s in silent_shots],
         },
         video_prompt="Emotional reunion, restrained eye contact.",
     )
 
-    # All shots empty + no intentional-silence note → GATED.
     graph = derive_work_graph(project)
     video = graph.by_id["video:elem:one"]
     assert video.status is WorkNodeStatus.GATED
-    assert "全部 Shot 均无对白" in video.missing[0]
+    assert "0%" in video.missing[0] and "30%" in video.missing[0]
 
-    # Adding "有意静默" to the narrative releases the gate.
+    # 1/4 dialogue = 25% < 30% → still GATED.
     element = project.timelines.items["timeline:main"].elements_by_id[
         "elem:one"
     ]
+    element.creation.shots.items["shot:0"].dialogue = "好久不见。"
+    graph = derive_work_graph(project)
+    assert graph.by_id["video:elem:one"].status is WorkNodeStatus.GATED
+
+    # 2/4 dialogue = 50% >= 30% → READY (if prompt quotes the lines).
+    element.creation.shots.items["shot:1"].dialogue = "是啊，好久了。"
+    element.creation.video_prompt = (
+        "Emotional reunion. He says: “好久不见。” "
+        "She replies: “是啊，好久了。” Restrained eye contact."
+    )
+    graph = derive_work_graph(project)
+    assert graph.by_id["video:elem:one"].status is WorkNodeStatus.READY
+
+    # Adding "有意静默" to the narrative releases the gate.
     element.creation.narrative = "两人重逢，有意静默——未说出口的话才是故事核心。"
+    element.creation.shots.items["shot:0"].dialogue = ""
+    element.creation.shots.items["shot:1"].dialogue = ""
+    graph = derive_work_graph(project)
+    assert graph.by_id["video:elem:one"].status is WorkNodeStatus.READY
+
+    # min_dialogue_ratio=0 opts out of the gate entirely.
+    element.creation.narrative = "两人重逢，一切尽在不言中。"
+    element.creation.min_dialogue_ratio = 0.0
     graph = derive_work_graph(project)
     assert graph.by_id["video:elem:one"].status is WorkNodeStatus.READY
 
     # Non-narrative scenario never gates on dialogue absence.
     project.scenario = "general"
-    element.creation.narrative = "两人重逢，一切尽在不言中。"
+    element.creation.min_dialogue_ratio = 0.3
     graph = derive_work_graph(project)
     assert graph.by_id["video:elem:one"].status is WorkNodeStatus.READY
 
