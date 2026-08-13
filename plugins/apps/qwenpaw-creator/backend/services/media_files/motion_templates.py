@@ -171,12 +171,12 @@ _VARIANT_CSS = {
 _MOTIFS: dict[str, tuple[str, str]] = {
     "paw_trail": (
         """
-.paw{width:23%;aspect-ratio:1;opacity:0;filter:drop-shadow(3px 3px 0 color-mix(in srgb,var(--secondary) 35%,transparent));animation:paw-appear .36s cubic-bezier(.2,.85,.2,1) forwards}
+.paw{width:23%;aspect-ratio:1;opacity:.25;filter:drop-shadow(3px 3px 0 color-mix(in srgb,var(--secondary) 35%,transparent));animation:paw-appear .36s cubic-bezier(.2,.85,.2,1) forwards}
 .pad,.toe{position:absolute;background:var(--primary)}
 .pad{left:20%;bottom:4%;width:60%;height:51%;border-radius:52% 52% 44% 44%}
 .toe{width:20%;height:20%;border-radius:50%}.t1{left:2%;top:28%}.t2{left:27%;top:7%}.t3{right:27%;top:3%}.t4{right:2%;top:24%}
-.p1{left:2%;bottom:2%;transform:rotate(-16deg);animation-delay:.08s}.p2{left:39%;top:31%;transform:rotate(6deg);animation-delay:.38s}.p3{right:1%;top:4%;transform:rotate(20deg);animation-delay:.68s}
-@keyframes paw-appear{0%{opacity:0;scale:.55}72%{opacity:1;scale:1.08}100%{opacity:1;scale:1}}
+.p1{left:2%;bottom:2%;transform:rotate(-16deg)}.p2{left:39%;top:31%;transform:rotate(6deg);animation-delay:.38s}.p3{right:1%;top:4%;transform:rotate(20deg);animation-delay:.68s}
+@keyframes paw-appear{0%{opacity:.25;scale:.55}72%{opacity:1;scale:1.08}100%{opacity:1;scale:1}}
 """,
         """<i class="shape paw p1"><b class="pad"></b><b class="toe t1"></b><b class="toe t2"></b><b class="toe t3"></b><b class="toe t4"></b></i><i class="shape paw p2"><b class="pad"></b><b class="toe t1"></b><b class="toe t2"></b><b class="toe t3"></b><b class="toe t4"></b></i><i class="shape paw p3"><b class="pad"></b><b class="toe t1"></b><b class="toe t2"></b><b class="toe t3"></b><b class="toe t4"></b></i>""",
     ),
