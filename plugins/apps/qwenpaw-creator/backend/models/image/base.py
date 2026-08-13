@@ -46,6 +46,37 @@ MIN_IMAGE_BYTES = int(os.environ.get("IMAGE_MIN_BYTES", "10000"))
 IMAGE_GENERATION_MODES = ("generate", "edit", "translate")
 EDIT_MIN_REFERENCE_IMAGES = 1
 EDIT_MAX_REFERENCE_IMAGES = 3
+# qwen-image models accept at most 3 image content items per request in any
+# mode (0 = T2I, 1–3 = I2I); a fourth reference makes the upstream reject
+# the call with HTTP 400.  Other providers keep the historical tool-level
+# budget that the specialist prompts advertise.
+QWEN_IMAGE_MAX_REFERENCE_IMAGES = 3
+GENERIC_MAX_REFERENCE_IMAGES = 5
+
+
+def image_model_prompt_guidance(model_name: str) -> str:
+    """Model-specific reference-count rules injected into specialist prompts.
+
+    The static prompts stay model-agnostic; the reference budget depends on
+    the configured image model (observed live: qwen-image-3.0 rejected a
+    storyboard call carrying 4 reference images with HTTP 400), so the rule
+    is rendered from the runtime-resolved model name.
+    """
+
+    normalized = model_name.strip() or "未配置"
+    if normalized.casefold().startswith("qwen-image"):
+        return (
+            f"当前图片生成模型是 `{normalized}`，单次调用最多接受 "
+            f"{QWEN_IMAGE_MAX_REFERENCE_IMAGES} 张参考图（0 张=文生图，"
+            f"1–{QWEN_IMAGE_MAX_REFERENCE_IMAGES} 张=图生图），超出会被上游以 "
+            "400 拒绝；每次调用所传递的参考版本 ID 总数必须不超过 "
+            f"{QWEN_IMAGE_MAX_REFERENCE_IMAGES}，超出预算时只保留最关键的参考"
+            "（storyboard、角色/场景锚点优先）。"
+        )
+    return (
+        f"当前图片生成模型是 `{normalized}`，每次调用所传递的参考版本 ID "
+        f"总数不超过 {GENERIC_MAX_REFERENCE_IMAGES}。"
+    )
 
 
 def format_http_error_detail(response: httpx.Response) -> str:

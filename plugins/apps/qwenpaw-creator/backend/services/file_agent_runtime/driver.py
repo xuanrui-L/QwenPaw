@@ -99,7 +99,10 @@ from services.runtime_files.execution_store import (
     ExecutionStoreError,
     ProjectExecutionStore,
 )
-from services.runtime_files.errors import RecordNotFoundError
+from services.runtime_files.errors import (
+    LockTimeoutError,
+    RecordNotFoundError,
+)
 from services.runtime_files.atomic_store import atomic_replace_bytes
 from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
@@ -1047,6 +1050,12 @@ class FileCreatorAgentRuntime:
         self._stopping = False
         self._active: dict[str, _ProjectTask] = {}
         self._blocked_heads: dict[str, int] = {}
+        # Durable-interrupt stall tracking: project -> (run_id, first seen
+        # monotonic time).  A RUNNING run with no local handle normally
+        # belongs to another live process, but when that owner died before
+        # persisting a terminal status the Session would otherwise stay
+        # INTERRUPT_REQUESTED forever (see _record_idle_interrupt).
+        self._interrupt_stalls: dict[str, tuple[str, float]] = {}
         self._epochs: dict[str, int] = {}
         self._publication_lock = threading.RLock()
         # Event-driven media fan-out: the model plans, the Runtime executes
@@ -5605,8 +5614,15 @@ class FileCreatorAgentRuntime:
         }
         if extra_details:
             details.update(extra_details)
+        # Terminal persistence must survive the very condition that usually
+        # triggers it: Runtime lock starvation.  A failure cascade that
+        # itself dies on LockTimeoutError durably strands the run RUNNING
+        # and wedges the Session (observed live: the dock showed 「正在停止
+        # 所有 Agent」 forever).  Each step below therefore retries lock
+        # timeouts and never aborts the remaining cleanup.
         try:
-            await asyncio.to_thread(
+            await self._persist_terminal_state(
+                "run transition",
                 self.runs.transition,
                 project_id,
                 run_id,
@@ -5632,7 +5648,8 @@ class FileCreatorAgentRuntime:
         # same message.  Recovery requires a new explicit user request; the
         # persisted session error keeps the failure visible to AgentDock.
         try:
-            await asyncio.to_thread(
+            await self._persist_terminal_state(
+                "consume failed request",
                 self.sessions.mark_messages_consumed,
                 project_id,
                 session_id,
@@ -5642,13 +5659,15 @@ class FileCreatorAgentRuntime:
         except SessionStateConflict:
             pass
         try:
-            await asyncio.to_thread(
+            await self._persist_terminal_state(
+                "goal failure",
                 self.sessions.set_goal_status,
                 project_id,
                 goal_id,
                 CreatorGoalStatus.FAILED,
             )
-            await asyncio.to_thread(
+            await self._persist_terminal_state(
+                "session lease release",
                 self.sessions.clear_active_run,
                 project_id,
                 session_id,
@@ -5656,15 +5675,17 @@ class FileCreatorAgentRuntime:
             )
         except SessionStateConflict:
             pass
-        await asyncio.to_thread(
-            self.sessions.set_session_error,
-            project_id,
-            session_id,
-            code=code,
-            message=message_text,
-            retryable=retryable,
-            details=details,
-        )
+        with contextlib.suppress(SessionStateConflict):
+            await self._persist_terminal_state(
+                "session error",
+                self.sessions.set_session_error,
+                project_id,
+                session_id,
+                code=code,
+                message=message_text,
+                retryable=retryable,
+                details=details,
+            )
         # Unattended (YOLO) projects must not stay parked on a transient
         # model fault at 3am: a retryable failure gets the same completion
         # check as a succeeded run. The resume fuses (consecutive cap and
@@ -5695,6 +5716,63 @@ class FileCreatorAgentRuntime:
                 },
             },
         )
+
+    # How long a durable interrupt may point at a RUNNING run that no local
+    # handle owns before this process reclaims it.  A live owner (this or any
+    # sibling process) serves a durable interrupt within seconds via task
+    # cancellation, so a stall this long means the owner died between failing
+    # and persisting a terminal run status.
+    _INTERRUPT_STALL_RECLAIM_SECONDS = 120.0
+
+    def _interrupt_stall_expired(self, project_id: str, run_id: str) -> bool:
+        """Track how long a durable interrupt has pointed at the same run."""
+
+        now = time.monotonic()
+        stall = self._interrupt_stalls.get(project_id)
+        if stall is None or stall[0] != run_id:
+            self._interrupt_stalls[project_id] = (run_id, now)
+            return False
+        return now - stall[1] >= self._INTERRUPT_STALL_RECLAIM_SECONDS
+
+    async def _persist_terminal_state(
+        self,
+        description: str,
+        func: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Run a durable terminal write, retrying Runtime lock timeouts.
+
+        Terminal cleanup usually executes exactly when the Runtime lock is
+        most contended; giving up on the first timeout durably strands
+        non-terminal state that no later pass may safely repair.
+        """
+
+        delay = 1.0
+        attempts = 5
+        for attempt in range(1, attempts + 1):
+            try:
+                return await asyncio.to_thread(func, *args, **kwargs)
+            except LockTimeoutError as exc:
+                if attempt == attempts:
+                    logger.error(
+                        "terminal persistence gave up (%s) after %d "
+                        "attempts: %s",
+                        description,
+                        attempts,
+                        exc,
+                    )
+                    raise
+                logger.warning(
+                    "terminal persistence retry %d/%d (%s): %s",
+                    attempt,
+                    attempts,
+                    description,
+                    exc,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 8.0)
 
     async def _record_idle_interrupt(
         self,
@@ -5753,8 +5831,51 @@ class FileCreatorAgentRuntime:
                         # serves the interrupt.
                         return
                 elif run.status not in TERMINAL_AGENT_RUN_STATUSES:
-                    return
-                session = await asyncio.to_thread(
+                    # A RUNNING run whose worker died between failing and
+                    # persisting its terminal status (observed live: the
+                    # FAILED transition itself lost the Runtime lock race)
+                    # stays RUNNING durably with no owner — waiting on it
+                    # parks the Session in INTERRUPT_REQUESTED forever.  A
+                    # live owner resolves a durable interrupt within
+                    # seconds, so a persistent stall proves the owner is
+                    # gone and the stop must be served here.
+                    if not self._interrupt_stall_expired(
+                        project_id,
+                        run.run_id,
+                    ):
+                        return
+                    try:
+                        await asyncio.to_thread(
+                            self.runs.transition,
+                            project_id,
+                            run.run_id,
+                            expected_status=run.status,
+                            status=AgentRunStatus.FAILED,
+                            updates={
+                                "error": {
+                                    "code": "INTERRUPTED",
+                                    "message": (
+                                        "running run reclaimed by a stalled "
+                                        "durable interrupt; its worker died "
+                                        "without persisting a terminal "
+                                        "status"
+                                    ),
+                                    "retryable": True,
+                                },
+                            },
+                        )
+                    except AgentRunStateConflict:
+                        # A live owner moved the run after all; it now
+                        # serves the interrupt.
+                        return
+                    logger.warning(
+                        "reclaimed orphaned RUNNING run for durable "
+                        "interrupt: project=%s run=%s",
+                        project_id,
+                        run.run_id,
+                    )
+                session = await self._persist_terminal_state(
+                    "interrupt lease release",
                     self.sessions.clear_active_run,
                     project_id,
                     session.session_id,
@@ -5762,14 +5883,16 @@ class FileCreatorAgentRuntime:
                     status=CreatorSessionStatus.INTERRUPT_REQUESTED,
                 )
             if session.last_consumed_message_seq < session.last_message_seq:
-                await asyncio.to_thread(
+                await self._persist_terminal_state(
+                    "interrupt message consumption",
                     self.sessions.mark_messages_consumed,
                     project_id,
                     session.session_id,
                     through_seq=session.last_message_seq,
                     goal_id=session.active_goal_id,
                 )
-            await asyncio.to_thread(
+            await self._persist_terminal_state(
+                "interrupt session status",
                 self.sessions.set_session_status,
                 project_id,
                 session.session_id,
@@ -5783,7 +5906,16 @@ class FileCreatorAgentRuntime:
                 actor="user",
                 payload={"reason": reason},
             )
+            self._interrupt_stalls.pop(project_id, None)
         except Exception:
+            # The next reconcile pass retries; keep the failure visible —
+            # this path being silent hid a permanently wedged Session.
+            logger.warning(
+                "idle interrupt cleanup failed: project=%s reason=%s",
+                project_id,
+                reason,
+                exc_info=True,
+            )
             return
 
     async def _event(

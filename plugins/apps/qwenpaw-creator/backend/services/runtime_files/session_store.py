@@ -1892,7 +1892,17 @@ class ProjectRuntimeSessionStore:
     ) -> CreatorSessionRecord:
         session = self._read_session_unlocked(project_id, session_id)
         messages = self._message_records_unlocked(project_id, session_id)
-        events = self._event_records_unlocked(project_id, session_id)
+        # The event stream dominates the aggregate size (streaming deltas
+        # append thousands of records per run).  Re-parsing and re-validating
+        # every event here — under the exclusive project lock — made each
+        # writer hold the lock for seconds on long sessions and starved every
+        # other lock user (observed live: r2v supervisors and the durable
+        # interrupt cleanup timing out at 10s).  The durable tail seq is
+        # authoritative for the head pointer: seqs are contiguous from 1 by
+        # construction and ``last_seq`` repairs a torn crash tail exactly as
+        # a full scan would.  Full-stream validation still happens on the
+        # read paths that materialize events.
+        event_head = self._events_store(project_id, session_id).last_seq()
         queued = self._queued_records_unlocked(project_id, session_id)
         latest_queued = _latest_by(queued, "queued_message_id")
         queue_count = sum(
@@ -1900,7 +1910,6 @@ class ProjectRuntimeSessionStore:
             for item in latest_queued.values()
         )
         message_head = len(messages)
-        event_head = len(events)
         for message in messages:
             if message.review_boundary is not None:
                 self._ensure_review_boundary_unlocked(
