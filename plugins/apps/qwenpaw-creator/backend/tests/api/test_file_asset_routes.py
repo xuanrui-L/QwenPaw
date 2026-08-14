@@ -668,7 +668,7 @@ def test_local_video_route_enforces_its_own_limit(
 
     response = asyncio.run(scenario())
     assert response.status_code == 422
-    assert "本地视频超过 2 GiB" in response.text
+    assert "Local video upload exceeds 2 GiB" in response.text
     project = services.projects.read("project-1").project
     assert project.generation == 0
     assert project.assets.files_by_id == {}

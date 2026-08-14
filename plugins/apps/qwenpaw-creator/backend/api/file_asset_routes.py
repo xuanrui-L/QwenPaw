@@ -256,7 +256,7 @@ def _validate_local_video_upload(
         and size_bytes is not None
         and size_bytes > _MAX_LOCAL_VIDEO_UPLOAD_BYTES
     ):
-        raise ValidationError("本地视频超过 2 GiB 上传限制")
+        raise ValidationError("Local video upload exceeds 2 GiB limit")
 
 
 def _positive_int_env(variable: str, default: int) -> int:
