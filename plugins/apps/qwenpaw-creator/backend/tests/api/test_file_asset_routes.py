@@ -624,7 +624,10 @@ def test_local_video_limit_remains_2_gib_and_is_independent_of_remote_limit(
         "CREATOR_REMOTE_ASSET_MAX_BYTES",
         str(4 * 1024 * 1024 * 1024),
     )
-    assert file_asset_routes._MAX_LOCAL_VIDEO_UPLOAD_BYTES == 2 * 1024 * 1024 * 1024
+    assert (
+        file_asset_routes._MAX_LOCAL_VIDEO_UPLOAD_BYTES
+        == 2 * 1024 * 1024 * 1024
+    )
     _validate_local_video_upload(
         name="source.mp4",
         media_type="video/mp4",
