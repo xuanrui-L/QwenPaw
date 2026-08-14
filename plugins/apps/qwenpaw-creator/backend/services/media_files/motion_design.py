@@ -1520,7 +1520,12 @@ def _is_keyword_overlay(element: TimelineElement) -> bool:
         return False
     if not (creation.prompt or "").strip():
         return False
-    return not _is_frame_overlay(element)
+    if _is_frame_overlay(element):
+        return False
+    wording = (
+        f"{element.element_id} {element.label or ''} {creation.prompt or ''}"
+    )
+    return any(marker in wording for marker in ("关键词", "大字", "keyword"))
 
 
 def _frame_window_from_edit(
