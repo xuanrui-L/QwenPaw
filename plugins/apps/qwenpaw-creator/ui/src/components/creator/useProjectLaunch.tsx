@@ -367,8 +367,8 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
       scenario === "short_drama"
         ? ["vlm", "image", "video"]
         : scenario === "video_edit" || hasAttachments
-        ? ["vlm"]
-        : [];
+          ? ["vlm"]
+          : [];
     const missing: string[] = [];
     for (const type of required) {
       const item = config[type];
@@ -401,7 +401,9 @@ export function useProjectLaunch(options?: { onLaunched?: () => void }) {
 
   const stopOnOversizedFiles = (files: File[]) => {
     // 2 * 1024 * 1024 * 1024: 2GB
-    const oversized = files.filter((file) => file.size > 2 * 1024 * 1024 * 1024);
+    const oversized = files.filter(
+      (file) => file.size > 2 * 1024 * 1024 * 1024,
+    );
     if (oversized.length > 0) {
       const errorMessage = `${oversized.map((f) => f.name).join("\n")}`;
       Modal.error({
