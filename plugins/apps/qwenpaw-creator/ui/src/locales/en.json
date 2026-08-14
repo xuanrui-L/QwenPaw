@@ -128,7 +128,7 @@
     "configureRequiredModel": "Please configure the required model for the current scenario",
     "describeTargetFirst": "Please describe your goal first; attachments will be stored as project assets",
     "urlFormatError": "Invalid URL format. Please start with http:// or https://",
-    "fileSizeLimit": "File size exceeds 100MB limit",
+    "fileSizeLimit": "File size exceeds 2GB limit",
     "launchFailed": "Launch failed",
     "heroTitleDirector": "Director",
     "heroTitleWriter": "Writer",

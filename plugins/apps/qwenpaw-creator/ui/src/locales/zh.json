@@ -128,7 +128,7 @@
     "configureRequiredModel": "请先配置当前场景必选的模型",
     "describeTargetFirst": "请先用文字描述你的目标，附件会作为项目资产入库",
     "urlFormatError": "URL 格式不正确，请以 http:// 或 https:// 开头",
-    "fileSizeLimit": "文件尺寸超过 100MB 限制",
+    "fileSizeLimit": "文件尺寸超过 2GB 限制",
     "launchFailed": "启动失败",
     "heroTitleDirector": "导演",
     "heroTitleWriter": "编剧",
