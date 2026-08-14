@@ -298,6 +298,26 @@ _COLOR_GRADE_FILTERS: dict[str, str] = {
         "eq=brightness=-0.01:saturation=0.96:contrast=1.08:gamma=0.98,"
         "colorbalance=sm=-0.03:bh=-0.02"
     ),
+    # 日常清新：暖中间调、黄红饱和度提升。
+    "vlog_fresh": (
+        "eq=brightness=0.02:saturation=1.10:gamma=1.04,"
+        "colorbalance=rm=0.04:gm=0.02:bm=-0.03:rh=0.01:bh=-0.01"
+    ),
+    # 水墨淡雅：去饱和中间调、冷移、提黑、低对比。
+    "ink_wash": (
+        "eq=brightness=0.01:saturation=0.88:contrast=0.96:gamma=1.06,"
+        "colorbalance=rm=-0.02:gm=-0.01:bm=0.03:rh=-0.01:bh=0.02"
+    ),
+    # 舞台戏剧：高对比、压暗部、暖高光。
+    "stage_drama": (
+        "eq=brightness=-0.02:saturation=1.04:contrast=1.14:gamma=0.95,"
+        "colorbalance=rm=0.04:gm=0.01:bm=-0.03:rh=0.05:bh=0.02"
+    ),
+    # 霓虹鲜艳：高饱和、冷暗/暖亮分裂调色。
+    "neon_vivid": (
+        "eq=brightness=0.0:saturation=1.22:contrast=1.10:gamma=0.97,"
+        "colorbalance=rm=-0.03:gm=-0.02:bm=0.05:rh=0.04:gh=0.01:bh=-0.02"
+    ),
 }
 
 

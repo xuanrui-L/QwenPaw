@@ -662,6 +662,7 @@ async def _default_compose_dispatch(
         timeline = snapshot.project.timelines.items.get(timeline_id)
         from services.media_files.motion_design import (
             _is_frame_overlay,
+            _is_keyword_overlay,
             _is_trusted_caption_motion,
         )
 
@@ -682,6 +683,14 @@ async def _default_compose_dispatch(
                 # a hand-written thin border would ship black letterbox
                 # bars, so the design pass upgrades it before rendering.
                 or _is_frame_overlay(element)
+                # Keyword overlays (text="" but prompt describes a
+                # styled keyword display) also need VLM design.
+                or (
+                    _is_keyword_overlay(element)
+                    and not _is_trusted_caption_motion(
+                        getattr(element.creation, "motion", None),
+                    )
+                )
             )
             for element in timeline.elements_by_id.values()
         )

@@ -38,7 +38,15 @@ DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
 
 # Unified colour-grade preset names; the ffmpeg filters live in the local
 # media renderer (keys must stay aligned with _COLOR_GRADE_FILTERS there).
-COLOR_GRADE_PRESETS = ("warm_bright", "clean_cool", "cinematic")
+COLOR_GRADE_PRESETS = (
+    "warm_bright",
+    "clean_cool",
+    "cinematic",
+    "vlog_fresh",
+    "ink_wash",
+    "stage_drama",
+    "neon_vivid",
+)
 SHA256_PATTERN = r"^[a-f0-9]{64}$"
 
 

@@ -161,7 +161,7 @@ Overlay 是独立 Element，拥有自己的 span、location 与 z-index；不要
 
 1. 转场只能连接主轨上播放顺序相邻的两个 R2V/Edit Element，同一对端点只创建一个转场。
 2. 先把 `to` Element 的 `start_tick` 提前，使两端 span 重叠恰好等于转场时长；再把转场的 span 写成这段交集（`start_tick = to.start_tick`，`duration_tick = 重叠量`）。重叠会被合成链消耗，成片总时长仍等于 Timeline 末端。
-3. `transition_kind` 只使用：`crossfade`（交叉溶解，默认首选）、`fadeblack`（经黑场）、`fadewhite`（经白场）、`dissolve`（颗粒溶解）、`wipeleft`（左划）、`cut`（硬切，一般无需显式创建）；其他值会回退为 crossfade。
+3. `transition_kind` 可选值：`crossfade`（交叉溶解，默认首选）、`fadeblack`（经黑场）、`fadewhite`（经白场）、`dissolve`（颗粒溶解）、`wipeleft`/`wiperight`/`wipeup`/`wipedown`（方向划）、`slideleft`/`slideright`/`slideup`/`slidedown`（方向滑入）、`circleopen`/`circleclose`/`circlecrop`（圆形）、`rectcrop`（矩形裁切）、`vertopen`/`vertclose`（垂直开合）、`horzopen`/`horzclose`（水平开合）、`pixelize`（像素化）、`squeezev`/`squeezeh`（挤压）、`zoomin`（缩放推入）、`radial`（径向扫光）、`cut`（硬切，一般无需显式创建）；未列入的值会回退为 crossfade。
 4. 转场时长建议 300–500ms，不得长于任一端点 Element。快节奏内容（平均 Element 时长 < 5s）的转场应偏向 300ms，舒缓内容可到 500ms。相邻片段默认硬切；仅在场景/时空/情绪切换需要缓冲时使用转场，不要滥用。
 5. 转场是程序化 Element：没有 location、outputs 与 render_source，不需要委派任何 Specialist 生成。
 
