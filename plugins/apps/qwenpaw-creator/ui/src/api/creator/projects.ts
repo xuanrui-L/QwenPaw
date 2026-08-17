@@ -179,6 +179,29 @@ export function deleteProject(projectId: string): Promise<void> {
   });
 }
 
+export function copyProject(projectId: string): Promise<{ projectId: string }> {
+  return creatorRequest(`/projects/${encodeURIComponent(projectId)}/copy`, {
+    method: "POST",
+    headers: { "Idempotency-Key": newClientId("copy-project") },
+  });
+}
+
+export interface RecreateParams {
+  name: string;
+  description: string;
+  scenario: string;
+  contentType: string | null;
+  resolution: string;
+  aspectRatio: string;
+  sourceUrls: string[];
+}
+
+export function getRecreateParams(projectId: string): Promise<RecreateParams> {
+  return creatorRequest(
+    `/projects/${encodeURIComponent(projectId)}/recreate-params`,
+  );
+}
+
 /** OSS-hosted inspiration examples shown under the home composer. */
 export function listInspirationExamples(): Promise<InspirationExampleListResponse> {
   return creatorRequest("/examples");
