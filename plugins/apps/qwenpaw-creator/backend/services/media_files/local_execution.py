@@ -2969,6 +2969,9 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # v6: caption safety fallback now uses element's actual location
             # dimensions for font sizing; edge contact threshold aligned
             # with design-time text card budget (1.0).
+            # v7: static_capsule blueprint uses dynamic _caption_font_css()
+            # instead of fixed font-size:24vh; cinematic colorbalance
+            # preset fixed (invalid sm → valid rs/gs/bs channels).
             "rendererVersion": 7,
             "targetRef": resolved.target_ref,
             "inputs": [

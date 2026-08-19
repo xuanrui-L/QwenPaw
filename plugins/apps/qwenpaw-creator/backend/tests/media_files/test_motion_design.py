@@ -997,7 +997,7 @@ class TestApplyOverlayStyledRouting:
                 "x": 0.5,
                 "y": 0.88,
                 "width": 0.8,
-                "height": 0.18,
+                "height": 0.25,
                 "anchor_x": 0.5,
                 "anchor_y": 0.5,
                 "opacity": 1.0,
@@ -1084,10 +1084,11 @@ class TestUniformCaptionStyle:
             "",
         )
 
-    def test_uniform_blueprint_font_size_ignores_text_length(self) -> None:
-        """The static capsule keeps one fixed font size: a long sentence
-        wraps instead of shrinking, so short and long captions share the
-        exact same style skeleton (the hyperframes caption-bar contract)."""
+    def test_uniform_blueprint_font_size_adapts_to_text_length(self) -> None:
+        """The static capsule uses dynamic font sizing (min(vh, vw)) so
+        that text fills its overlay box proportionally. Short text gets
+        a larger font; long text shrinks to fit. Both share the same
+        style skeleton structure (exit style, entrance, card layout)."""
 
         from services.media_files.motion_blueprints import (
             render_caption_blueprint,
@@ -1107,14 +1108,13 @@ class TestUniformCaptionStyle:
             long_text,
             intensity=intensity,
         )
-        # Style skeleton (all CSS, including font-size) is byte-identical
-        # across very different text lengths -- only the words differ.
-        assert short_doc.replace(short_text, "") == long_doc.replace(
-            long_text,
-            "",
-        )
-        # No adaptive vw/text-length term ever reaches the font size.
-        assert "font-size:24vh" in short_doc
+        # Font size uses dynamic min(vh, vw) clamping from _caption_font_css.
+        short_font = re.search(r"font-size:(min\([^)]+\))", short_doc)
+        long_font = re.search(r"font-size:(min\([^)]+\))", long_doc)
+        assert short_font is not None
+        assert long_font is not None
+        # Short text gets a larger font than long text.
+        assert short_font.group(1) != long_font.group(1)
         # No per-card entrance choreography beyond the single card fade.
         for performance in ("letterSpacing", "scaleY", "stagger"):
             assert performance not in short_doc
