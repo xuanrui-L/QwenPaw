@@ -566,6 +566,7 @@
     "noRefs": "No reference assets.",
     "noPreviewYet": "No previewable image generated yet, thumbnail will appear here when ready",
     "storyboardPendingNote": "Storyboard not selected yet: once chosen it becomes [Image 1] and the indexes below shift accordingly",
+    "refOrderPendingApply": "Unapplied edits: the authoritative [Image N] order refreshes after you apply changes",
     "refKind": {
       "storyboard": "Storyboard",
       "source": "Upload",

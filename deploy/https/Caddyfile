@@ -7,7 +7,10 @@
 #
 # Usage (on the deployment host):
 #   1. Install caddy (https://caddyserver.com/docs/install).
-#   2. Point QWENPAW_UPSTREAM at the QwenPaw HTTP listener, then run:
+#   2. Point QWENPAW_HTTPS_HOST at the address clients will use (the
+#      server's LAN IP or hostname) and QWENPAW_UPSTREAM at the QwenPaw
+#      HTTP listener, then run:
+#        QWENPAW_HTTPS_HOST=192.168.1.20 \
 #        QWENPAW_UPSTREAM=127.0.0.1:8088 \
 #        caddy run --config deploy/https/Caddyfile
 #   3. Trust the generated internal CA on each client machine:
@@ -15,7 +18,8 @@
 #        - for other clients, distribute the root certificate from
 #          Caddy's data dir (…/caddy/pki/authorities/local/root.crt)
 #          and add it to the OS/browser trust store.
-#   4. Open https://<server-ip>:8443 — the page is now a secure context.
+#   4. Open https://$QWENPAW_HTTPS_HOST:8443 — the page is now a secure
+#      context.
 #
 # With a real domain + public DNS, replace the site address below with the
 # domain and delete `tls internal`; Caddy then provisions Let's Encrypt
@@ -27,7 +31,10 @@
 	skip_install_trust
 }
 
-https://:8443 {
+# The site address needs a concrete host: a bare `https://:8443` gives the
+# internal CA no certificate subject, so every TLS handshake fails with
+# "internal error" before the request reaches the proxy.
+{$QWENPAW_HTTPS_HOST:127.0.0.1}:8443 {
 	tls internal
 
 	# Preserve origin headers so backend-generated absolute URLs (OAuth

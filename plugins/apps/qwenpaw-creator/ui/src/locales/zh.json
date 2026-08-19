@@ -566,6 +566,7 @@
     "noRefs": "暂无引用资产。",
     "noPreviewYet": "尚未生成可预览的图像，生成后这里会显示缩略图",
     "storyboardPendingNote": "尚未选定分镜图：选定后分镜图将作为 [Image 1]，以下序号会相应后移",
+    "refOrderPendingApply": "存在未应用的修改：[Image N] 权威序号将在应用更改后更新",
     "refKind": {
       "storyboard": "分镜图",
       "source": "上传素材",

@@ -256,6 +256,9 @@ export default function R2VWorkbenchPage() {
       return;
     }
     let cancelled = false;
+    // Drop the previous snapshot's numbering while the refresh is in
+    // flight so a just-applied draft never renders stale indices.
+    setReferenceOrder(null);
     getR2VReferenceOrder(id, elementId)
       .then((order) => {
         // Older backends (or generic test mocks) may answer without the
@@ -934,7 +937,7 @@ export default function R2VWorkbenchPage() {
         ? { kind: "image", url: getArtifactVersionMediaUrl(versionId) }
         : null;
     }
-    const versionId = ref.replace(/^artifact-version:/, "");
+    const versionId = ref.replace(/^(?:artifact-version|asset-version):/, "");
     const media = versionMediaKind(versionId);
     if (!media) return null;
     const artifact = project.assets.artifact_versions_by_id[versionId];
@@ -983,6 +986,16 @@ export default function R2VWorkbenchPage() {
           name: referenceVersionName(project, versionId),
         })),
     ];
+
+  // The authoritative [Image N] order is computed from the last committed
+  // snapshot. While the local draft is dirty (materials / entity / Variant
+  // edits not yet applied) the server cannot see those fields, so showing
+  // the stale numbering would invite prompts that cite the wrong images —
+  // fall back to the client-side aggregate until the user applies changes.
+  const authoritativeReferences =
+    !elementDraft.dirty && referenceOrder?.references.length
+      ? referenceOrder.references
+      : null;
 
   // Both Select options and the current value use real names; if the current
   // value is missing from the options (historical data / different prefix
@@ -1474,27 +1487,31 @@ export default function R2VWorkbenchPage() {
 
           <Panel
             title={t("r2v.inputRefs", {
-              count: referenceOrder?.references.length || inputRefs.length,
+              count: authoritativeReferences?.length || inputRefs.length,
             })}
           >
-            {referenceOrder && referenceOrder.references.length > 0 ? (
+            {authoritativeReferences ? (
               <div className="space-y-1.5">
-                {!referenceOrder.storyboardSelected && (
+                {!referenceOrder!.storyboardSelected && (
                   <p className="text-[10px] text-[var(--color-text-tertiary)]">
                     {t("r2v.storyboardPendingNote")}
                   </p>
                 )}
-                {referenceOrder.references.map((item) => {
-                  const thumb = refThumbInfo(
-                    `artifact-version:${item.versionId}`,
-                  );
+                {authoritativeReferences.map((item) => {
+                  // Uploaded sources and generated artifacts live in
+                  // different asset namespaces; the ref kind must match or
+                  // downstream resolution (AgentDock, locators) falls back
+                  // to an unresolved raw id.
+                  const itemRef =
+                    item.kind === "source"
+                      ? `asset-version:${item.versionId}`
+                      : `artifact-version:${item.versionId}`;
+                  const thumb = refThumbInfo(itemRef);
                   const row = (
                     <button
                       type="button"
                       onClick={() =>
-                        useCreatorInteractionStore
-                          .getState()
-                          .select(`artifact-version:${item.versionId}`)
+                        useCreatorInteractionStore.getState().select(itemRef)
                       }
                       className="flex w-full items-center gap-2 rounded-lg bg-[var(--color-bg-secondary)]/60 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-secondary)]"
                     >
@@ -1547,6 +1564,11 @@ export default function R2VWorkbenchPage() {
               </p>
             ) : (
               <div className="space-y-1.5">
+                {elementDraft.dirty && (
+                  <p className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {t("r2v.refOrderPendingApply")}
+                  </p>
+                )}
                 {inputRefs.map((item) => {
                   const thumb = refThumbInfo(item.ref);
                   const row = (
