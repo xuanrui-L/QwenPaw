@@ -386,8 +386,16 @@ async def list_messages(
     conversation_id: str,
     after: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
+    before: int | None = Query(None, ge=1),
+    tail: bool = Query(False),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
+    # ``after`` pages forward (live catch-up); ``before``/``tail`` page
+    # backward through history.  Mixing the two directions in one request
+    # has no coherent cursor, so it is rejected outright.
+    backward = before is not None or tail
+    if backward and after:
+        raise ValidationError("after 与 before/tail 不能同时使用")
     store = _store(services)
     try:
         session = await asyncio.to_thread(
@@ -404,7 +412,7 @@ async def list_messages(
             store.list_messages,
             project_id,
             session.session_id,
-            after_seq=after,
+            after_seq=0 if backward else after,
             limit=None,
         )
     except BaseException as error:
@@ -412,7 +420,21 @@ async def list_messages(
     matching = [
         item for item in messages if item.conversation_id == conversation_id
     ]
-    page = matching[:limit]
+    next_after: int | None = None
+    next_before: int | None = None
+    if backward:
+        older = (
+            matching
+            if before is None
+            else [item for item in matching if item.message_seq < before]
+        )
+        page = older[-limit:]
+        if page and len(older) > limit:
+            next_before = page[0].message_seq
+    else:
+        page = matching[:limit]
+        if len(matching) > limit:
+            next_after = page[-1].message_seq
     return {
         "items": [
             {
@@ -429,7 +451,8 @@ async def list_messages(
             }
             for item in page
         ],
-        "nextAfter": page[-1].message_seq if len(matching) > limit else None,
+        "nextAfter": next_after,
+        "nextBefore": next_before,
     }
 
 

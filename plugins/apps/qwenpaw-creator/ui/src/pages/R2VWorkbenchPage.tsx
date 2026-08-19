@@ -16,6 +16,7 @@ import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
+  getR2VReferenceOrder,
   getResolvedModels,
 } from "@/api/creator";
 import type { ResolvedModels } from "@/api/creator/models";
@@ -31,6 +32,7 @@ import type {
   ArtifactSlotDocument,
   ArtifactVersionDocument,
   ProjectDocument,
+  R2VReferenceOrderResponse,
   TaskView,
   TimelineElementDocument,
   VideoCreationDocument,
@@ -240,6 +242,34 @@ export default function R2VWorkbenchPage() {
   const [resolvedModels, setResolvedModels] = useState<ResolvedModels | null>(
     null,
   );
+  // Authoritative [Image N] order from the backend: entity binding and
+  // dedup reorder references, so the submit-path preview is the only
+  // trustworthy numbering for the video prompt's [Image N] citations.
+  const generation = useProjectSnapshotStore((state) =>
+    state.projectId === id ? state.generation : null,
+  );
+  const [referenceOrder, setReferenceOrder] =
+    useState<R2VReferenceOrderResponse | null>(null);
+  useEffect(() => {
+    if (!id || !elementId || generationMode !== "r2v") {
+      setReferenceOrder(null);
+      return;
+    }
+    let cancelled = false;
+    getR2VReferenceOrder(id, elementId)
+      .then((order) => {
+        // Older backends (or generic test mocks) may answer without the
+        // references payload; treat that as "no authoritative order".
+        if (!cancelled)
+          setReferenceOrder(Array.isArray(order?.references) ? order : null);
+      })
+      .catch(() => {
+        if (!cancelled) setReferenceOrder(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, elementId, generationMode, generation]);
 
   useEffect(() => {
     if (!versionFromUrl || !project) return;
@@ -996,22 +1026,50 @@ export default function R2VWorkbenchPage() {
     creation.prop_refs,
     (ref) => visualEntityName(project, ref),
   );
-  const materialOptions = withValueFallback(
-    [
-      ...Object.values(project.assets.source_versions_by_id).map((version) => ({
-        value: version.version_id,
-        label: version.name || version.version_id,
-      })),
-      ...Object.values(project.assets.artifact_versions_by_id)
-        .filter((version) => version.owner_ref !== elementRef)
-        .map((version) => ({
-          value: version.version_id,
-          label: version.name || version.version_id,
-        })),
-    ],
-    materialVersionIds,
-    (versionId) => referenceVersionName(project, versionId),
+  // HappyHorse r2v only accepts image references; hide videos up front so a
+  // submit-time ModelError cannot surprise the user. Wan r2v keeps videos.
+  const r2vVideoModel = (
+    resolvedModels?.video?.byMode?.r2v ??
+    resolvedModels?.video?.model ??
+    ""
+  ).toLowerCase();
+  const materialAllowed = (versionId: string) =>
+    !r2vVideoModel.startsWith("happyhorse") ||
+    versionMediaKind(versionId) !== "video";
+  const uploadOptions = Object.values(project.assets.source_versions_by_id)
+    .filter((version) => materialAllowed(version.version_id))
+    .map((version) => ({
+      value: version.version_id,
+      label: version.name || version.version_id,
+    }));
+  const generatedOptions = Object.values(project.assets.artifact_versions_by_id)
+    .filter((version) => version.owner_ref !== elementRef)
+    .filter((version) => materialAllowed(version.version_id))
+    .map((version) => ({
+      value: version.version_id,
+      label: version.name || version.version_id,
+    }));
+  // Selected values missing from both groups (historical data / filtered
+  // media) still need readable labels instead of raw IDs.
+  const knownMaterialValues = new Set(
+    [...uploadOptions, ...generatedOptions].map((option) => option.value),
   );
+  const materialFallbackOptions = materialVersionIds
+    .filter((versionId) => !knownMaterialValues.has(versionId))
+    .map((versionId) => ({
+      value: versionId,
+      label: referenceVersionName(project, versionId),
+    }));
+  const materialOptions = [
+    {
+      label: t("r2v.materialGroupUploads"),
+      options: uploadOptions,
+    },
+    {
+      label: t("r2v.materialGroupGenerated"),
+      options: [...generatedOptions, ...materialFallbackOptions],
+    },
+  ];
   const changeMaterialReferences = (next: string[]) =>
     updateElement((draft) => {
       if (draft.creation.type !== "r2v") return;
@@ -1414,8 +1472,76 @@ export default function R2VWorkbenchPage() {
             ))}
           </div>
 
-          <Panel title={t("r2v.inputRefs", { count: inputRefs.length })}>
-            {inputRefs.length === 0 ? (
+          <Panel
+            title={t("r2v.inputRefs", {
+              count: referenceOrder?.references.length || inputRefs.length,
+            })}
+          >
+            {referenceOrder && referenceOrder.references.length > 0 ? (
+              <div className="space-y-1.5">
+                {!referenceOrder.storyboardSelected && (
+                  <p className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {t("r2v.storyboardPendingNote")}
+                  </p>
+                )}
+                {referenceOrder.references.map((item) => {
+                  const thumb = refThumbInfo(
+                    `artifact-version:${item.versionId}`,
+                  );
+                  const row = (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        useCreatorInteractionStore
+                          .getState()
+                          .select(`artifact-version:${item.versionId}`)
+                      }
+                      className="flex w-full items-center gap-2 rounded-lg bg-[var(--color-bg-secondary)]/60 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-bg-secondary)]"
+                    >
+                      <span className="shrink-0 rounded border border-[var(--color-accent)]/40 bg-[var(--color-bg-primary)] px-1.5 py-px font-mono text-[10px] text-[var(--color-accent)]">
+                        [Image {item.index}]
+                      </span>
+                      <span className="shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-1.5 py-px text-[10px] text-[var(--color-text-tertiary)]">
+                        {t(`r2v.refKind.${item.kind}`)}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-[var(--color-accent)]">
+                        @{item.name}
+                      </span>
+                    </button>
+                  );
+                  return (
+                    <Tooltip
+                      key={item.versionId}
+                      placement="left"
+                      title={
+                        thumb ? (
+                          thumb.kind === "video" ? (
+                            <video
+                              src={thumb.url}
+                              muted
+                              preload="metadata"
+                              className="max-h-40 max-w-[220px] rounded object-contain"
+                            />
+                          ) : (
+                            <img
+                              src={thumb.url}
+                              alt={item.name}
+                              className="max-h-40 max-w-[220px] rounded object-contain"
+                            />
+                          )
+                        ) : (
+                          <span className="text-xs">
+                            {t("r2v.noPreviewYet")}
+                          </span>
+                        )
+                      }
+                    >
+                      {row}
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            ) : inputRefs.length === 0 ? (
               <p className="text-xs text-[var(--color-text-tertiary)]">
                 {t("r2v.noRefs")}
               </p>

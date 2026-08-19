@@ -206,6 +206,70 @@ def test_interrupt_response_does_not_wait_for_terminal_task_cleanup(
     release_cleanup.set()
 
 
+def test_message_history_pages_backward_with_tail_and_before(
+    tmp_path,
+) -> None:
+    app, _services, _snapshot, _bootstrap = _app(tmp_path)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            for index in range(1, 8):
+                posted = await client.post(
+                    "/projects/project-1/messages",
+                    headers={"Idempotency-Key": f"message-{index}"},
+                    json={
+                        "clientMessageId": f"message-{index}",
+                        "conversationId": "conversation-1",
+                        "message": f"第 {index} 条消息",
+                    },
+                )
+                assert posted.status_code == 202
+            base = "/projects/project-1/conversations/conversation-1/messages"
+            tail = await client.get(base, params={"tail": "true", "limit": 3})
+            middle = await client.get(base, params={"before": 5, "limit": 3})
+            head = await client.get(base, params={"before": 2, "limit": 3})
+            forward = await client.get(base, params={"after": 0, "limit": 3})
+            mixed = await client.get(
+                base,
+                params={"after": 3, "tail": "true"},
+            )
+        return tail, middle, head, forward, mixed
+
+    tail, middle, head, forward, mixed = _run(scenario())
+
+    # tail=true returns the newest page plus a backward cursor.
+    assert tail.status_code == 200
+    assert [item["messageSeq"] for item in tail.json()["items"]] == [5, 6, 7]
+    assert tail.json()["nextBefore"] == 5
+    assert tail.json().get("nextAfter") is None
+
+    # before pages strictly older history, ascending inside the page.
+    assert middle.status_code == 200
+    assert [item["messageSeq"] for item in middle.json()["items"]] == [2, 3, 4]
+    assert middle.json()["nextBefore"] == 2
+
+    # The oldest page has no further backward cursor.
+    assert head.status_code == 200
+    assert [item["messageSeq"] for item in head.json()["items"]] == [1]
+    assert head.json().get("nextBefore") is None
+
+    # Forward pagination keeps its original contract.
+    assert forward.status_code == 200
+    assert [item["messageSeq"] for item in forward.json()["items"]] == [
+        1,
+        2,
+        3,
+    ]
+    assert forward.json()["nextAfter"] == 3
+
+    # Mixing directions has no coherent cursor and is rejected.
+    assert mixed.status_code >= 400
+
+
 def test_file_conversation_create_replays_by_idempotency_key(tmp_path) -> None:
     app, _services, _snapshot, _bootstrap = _app(tmp_path)
 

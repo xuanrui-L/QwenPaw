@@ -565,6 +565,14 @@
     "inputRefs": "Input References ({{count}})",
     "noRefs": "No reference assets.",
     "noPreviewYet": "No previewable image generated yet, thumbnail will appear here when ready",
+    "storyboardPendingNote": "Storyboard not selected yet: once chosen it becomes [Image 1] and the indexes below shift accordingly",
+    "refKind": {
+      "storyboard": "Storyboard",
+      "source": "Upload",
+      "artifact": "Generated"
+    },
+    "materialGroupUploads": "Uploaded materials",
+    "materialGroupGenerated": "Generated artifacts",
     "assetBinding": "Asset Binding",
     "sceneLabel": "Scene",
     "selectScene": "Select scene",
