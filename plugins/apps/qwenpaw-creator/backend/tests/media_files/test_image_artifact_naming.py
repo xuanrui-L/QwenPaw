@@ -231,3 +231,14 @@ def test_resolved_reference_budget_reports_automatic_and_explicit_refs(
             arguments={"variantId": "var:budget"},
             image_model_name="private-gateway-alias",
         )
+
+    with pytest.raises(ImageModelCapabilityError) as empty_model:
+        _resolve_request(
+            snapshot=budget_snapshot,
+            project_root=Path(tmp_path),
+            command=CreatorCommandType.GENERATE_ASSET,
+            target_ref="asset:char:haaland",
+            arguments={"variantId": "var:budget"},
+            image_model_name="",
+        )
+    assert empty_model.value.details["modelName"] == "未配置"

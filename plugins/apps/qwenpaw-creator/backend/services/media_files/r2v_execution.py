@@ -147,6 +147,18 @@ _TERMINAL_TASKS = frozenset(
 logger = setup_logger("services.media_files.r2v_execution")
 
 
+class VideoReferenceBudgetError(ValidationError):
+    """Resolved Project references exceed the active video model contract."""
+
+    code = "VIDEO_REFERENCE_BUDGET_EXCEEDED"
+
+
+class VideoModelCapabilityError(ValidationError):
+    """A configured video model alias has no verified reference limit."""
+
+    code = "VIDEO_MODEL_CAPABILITY_UNKNOWN"
+
+
 def _log_safe(value: object) -> str:
     """Neutralise CR/LF so identifier values cannot forge log lines."""
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
@@ -742,6 +754,99 @@ def _validated_request_mode(arguments: Mapping[str, Any]) -> str:
         raise ValidationError(str(error)) from error
 
 
+def _assert_r2v_reference_budget(
+    project: Project,
+    version_ids: Sequence[str],
+) -> None:
+    """Fail before admission when Project references exceed model limits."""
+
+    from models import config as model_config
+    from models.video_capabilities import (
+        effective_video_model_name,
+        video_backend_key,
+        video_reference_capability,
+        video_reference_violation,
+    )
+
+    configured_model = model_config.get_video_model_name().strip()
+    backend_key = video_backend_key(
+        configured_model,
+        model_config.get_video_backend(),
+    )
+    effective_model = effective_video_model_name(
+        configured_model,
+        "r2v",
+        backend_key,
+    )
+    capability = video_reference_capability(effective_model)
+
+    image_ids: list[str] = []
+    video_ids: list[str] = []
+    for version_id in dict.fromkeys(version_ids):
+        source = project.assets.source_versions_by_id.get(version_id)
+        artifact = project.assets.artifact_versions_by_id.get(version_id)
+        version = source or artifact
+        if version is None:
+            # The resolver below owns the stable NotFoundError contract.
+            continue
+        if source is not None:
+            media_type = source.media_type.casefold()
+        else:
+            indexed = project.assets.files_by_id.get(artifact.file_id)
+            if indexed is None:
+                # The resolver below owns the integrity error and its details.
+                continue
+            media_type = indexed.media_type.casefold()
+        if media_type.startswith("image/"):
+            image_ids.append(version_id)
+        elif media_type.startswith("video/"):
+            video_ids.append(version_id)
+
+    details = {
+        "modelName": configured_model or "未配置",
+        "effectiveModelName": effective_model or "未配置",
+        "resolvedCount": len(image_ids) + len(video_ids),
+        "imageCount": len(image_ids),
+        "videoCount": len(video_ids),
+        "referenceVersionIds": list(dict.fromkeys(version_ids)),
+        "imageReferenceVersionIds": image_ids,
+        "videoReferenceVersionIds": video_ids,
+    }
+    if capability is None:
+        raise VideoModelCapabilityError(
+            "VIDEO_MODEL_CAPABILITY_UNKNOWN: 执行层已解析 R2V 的 Project "
+            "参考素材，但无法从官方能力表确认视频模型 "
+            f"{effective_model or '未配置'} 的输入上限，因此没有创建任务、"
+            "上传素材或调用 provider。如果这是兼容网关别名，请先将别名"
+            "映射到官方模型能力，不可使用 Wan 或通用猜测上限。",
+            details={**details, "knownModelRequired": True},
+        )
+
+    violation = video_reference_violation(
+        capability,
+        image_count=len(image_ids),
+        video_count=len(video_ids),
+    )
+    if violation is None:
+        return
+    raise VideoReferenceBudgetError(
+        "VIDEO_REFERENCE_BUDGET_EXCEEDED: 执行层解析 storyboard 与 Project "
+        f"exact reference version 后，共得到 {details['resolvedCount']} 个"
+        f"参考素材，但视频模型 {effective_model} 的官方限制为：{violation}。"
+        "执行层没有静默截断，也没有创建任务、上传素材或调用 provider。"
+        "请先 read_project，缩减目标 Element 的角色、场景、道具、阵容锚点"
+        "或 video_reference_version_ids，再用已变更的 Project 重试。",
+        details={
+            **details,
+            "modelFamily": capability.family,
+            "maxReferenceImages": capability.max_reference_images,
+            "maxReferenceVideos": capability.max_reference_videos,
+            "maxReferenceMedia": capability.max_reference_media,
+            "documentationUrl": capability.documentation_url,
+        },
+    )
+
+
 def _resolve_request(
     *,
     snapshot: ProjectSnapshot,
@@ -850,6 +955,7 @@ def _resolve_request(
                 ],
             ),
         )
+        _assert_r2v_reference_budget(project, version_ids)
         urls, checksums, provenance, read_set = _resolve_reference_versions(
             project=project,
             project_root=project_root,

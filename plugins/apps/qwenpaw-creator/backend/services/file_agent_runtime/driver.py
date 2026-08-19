@@ -6680,6 +6680,40 @@ def _specialist_tool_recovery(
             "details.limit. Preserve the identity/storyboard anchors that are "
             "actually essential."
         )
+    if name == "r2v_generation" and (
+        code == "VIDEO_REFERENCE_BUDGET_EXCEEDED"
+        or "VIDEO_REFERENCE_BUDGET_EXCEEDED" in error
+    ):
+        return (
+            "The execution layer resolved the selected storyboard and every "
+            "Project-owned exact video reference before task admission, and "
+            "their deduplicated image/video counts exceed the active video "
+            "model's official limits. No task was created, no media was "
+            "uploaded, and no provider call was made. Read error.details for "
+            "maxReferenceImages, maxReferenceVideos, maxReferenceMedia, and "
+            "the resolved version IDs. Call read_project, then use jq_project "
+            "to remove lower-priority character, scene, prop, cast-lineup, or "
+            "video_reference_version_ids from the target Element. Preserve "
+            "the selected storyboard because it is the required first image, "
+            "re-read the Project, and retry only after the resolved counts fit "
+            "all three limits."
+        )
+    capability_unknown_code = {
+        "image_generation": "IMAGE_MODEL_CAPABILITY_UNKNOWN",
+        "r2v_generation": "VIDEO_MODEL_CAPABILITY_UNKNOWN",
+    }.get(name)
+    if capability_unknown_code and (
+        code == capability_unknown_code or capability_unknown_code in error
+    ):
+        return (
+            "The configured media model name is empty or is an unregistered "
+            "gateway alias, so Creator cannot verify its official reference "
+            "input limit and failed closed before provider dispatch. Do not "
+            "guess a generic limit or repeat the same call. Report the model "
+            "configuration problem to the user; references may be retried "
+            "only after the configured name is changed or explicitly mapped "
+            "to a documented official model capability."
+        )
     if name in media_tools and (
         "PROJECT_INPUT_SNAPSHOT_STALE" in error
         or "已终止: QUARANTINED" in error

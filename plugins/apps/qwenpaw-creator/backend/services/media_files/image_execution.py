@@ -815,8 +815,8 @@ def _resolve_request(
     )
     if reference_limit is not None and reference_limit < 0:
         raise ValueError("max_reference_images must be non-negative")
-    if urls and reference_limit is None and image_model_name.strip():
-        model_label = image_model_name.strip() or "未配置"
+    if urls and reference_limit is None:
+        model_label = capability_model_name.strip() or "未配置"
         raise ImageModelCapabilityError(
             "IMAGE_MODEL_CAPABILITY_UNKNOWN: Creator 无法从官方能力表确认"
             f"模型 {model_label} 的参考图数量限制，因此未调用 provider。"
