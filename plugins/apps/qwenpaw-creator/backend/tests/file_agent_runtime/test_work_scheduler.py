@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access
 """Work-graph scheduler: parallel fan-out with fuses, not a retry cannon.
 
 The scheduler dispatches READY media nodes up to media_parallelism,
@@ -6,6 +7,7 @@ never redispatches the same node for the same inputs (FAILED stays
 parked until something changes), and stays fully inert outside the
 unattended ladder.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,7 +23,6 @@ from services.project_files.models import (
     VisualEntity,
     VisualVariant,
 )
-
 
 pytestmark = pytest.mark.unit
 
@@ -490,3 +491,43 @@ def test_prespend_rejection_never_poisons_the_ledger(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
     assert len(calls) == 3
+
+
+def test_cancel_project_does_not_resurrect_dispatch_and_wake_rearms(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def blocking_dispatch(inner_services, **kwargs):  # noqa: ARG001
+        del inner_services, kwargs
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    scheduler = WorkGraphScheduler(
+        services,
+        image_dispatch=blocking_dispatch,
+    )
+
+    async def scenario():
+        await scheduler.tick(PROJECT_ID)
+        await asyncio.wait_for(started.wait(), timeout=1)
+        scheduler.cancel_project(PROJECT_ID)
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert PROJECT_ID not in scheduler._loops
+        assert PROJECT_ID not in scheduler._dispatch_tasks
+        assert PROJECT_ID in scheduler._cancelled_projects
+
+        scheduler.wake(PROJECT_ID)
+        assert PROJECT_ID not in scheduler._cancelled_projects
+        scheduler.cancel_project(PROJECT_ID)
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())

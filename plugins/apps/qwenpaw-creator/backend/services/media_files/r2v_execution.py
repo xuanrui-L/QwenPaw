@@ -89,6 +89,7 @@ from services.media_files.transient_errors import (
 from services.media_files.visual_reference_resolution import (
     resolve_r2v_visual_reference_version_ids,
 )
+from services.observability import report_error
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
 from services.run_review.media_review import schedule_media_review
@@ -117,7 +118,6 @@ from utils.paths import media_task_scope, task_work_root
 # pylint: enable=no-name-in-module
 
 from .secure_video_stream import MaterializedVideo, materialize_r2v_video
-
 
 _MAX_VIDEO_BYTES = 256 * 1024 * 1024
 _SUBMIT_TIMEOUT_SECONDS = 180.0
@@ -1105,9 +1105,11 @@ class FileR2VExecutionService:
         self.poll_interval_seconds = float(poll_interval_seconds)
         self.poll_lease_seconds = float(poll_lease_seconds)
         self.poll_timeout_seconds = float(
-            poll_timeout_seconds
-            if poll_timeout_seconds is not None
-            else min(60.0, poll_lease_seconds * 0.8),
+            (
+                poll_timeout_seconds
+                if poll_timeout_seconds is not None
+                else min(60.0, poll_lease_seconds * 0.8)
+            ),
         )
         self.submit_timeout_seconds = float(submit_timeout_seconds)
         self.submit_claim_seconds = float(submit_claim_seconds)
@@ -1120,6 +1122,7 @@ class FileR2VExecutionService:
         self.clock = clock or time.time
         self.owner_id = f"r2v-supervisor-{uuid4().hex}"
         self._jobs: dict[str, asyncio.Task[None]] = {}
+        self._job_projects: dict[str, str] = {}
         self._terminal_recovery_jobs: dict[
             tuple[str, str],
             asyncio.Task[None],
@@ -1151,7 +1154,7 @@ class FileR2VExecutionService:
         task_id: str,
         mutator: Callable[[R2VTaskState], R2VTaskState | Mapping[str, Any]],
     ) -> R2VTaskState:
-        with self.services.projects.lifecycle_lock(project_id):
+        with self.services.projects.lifecycle_lock(project_id, shared=True):
             self.services.projects.read(project_id)
 
             def update(current: R2VTaskState) -> Any:
@@ -1267,7 +1270,10 @@ class FileR2VExecutionService:
             request_fingerprint=task.request_fingerprint,
             request=dict(request),
         )
-        with self.services.projects.lifecycle_lock(task.project_id):
+        with self.services.projects.lifecycle_lock(
+            task.project_id,
+            shared=True,
+        ):
             self.services.projects.read(task.project_id)
             store = self._state_store(task.project_id, task.task_id)
             created = store.try_create(candidate)
@@ -1283,7 +1289,10 @@ class FileR2VExecutionService:
     def _ensure_task_scratch_sync(self, task: TaskRecord) -> Path:
         """Create and validate the durable scratch owned by one active R2V Task."""
 
-        with self.services.projects.lifecycle_lock(task.project_id):
+        with self.services.projects.lifecycle_lock(
+            task.project_id,
+            shared=True,
+        ):
             self.services.projects.read(task.project_id)
             with media_task_scope(task.task_id, project_id=task.project_id):
                 scratch = task_work_root()
@@ -1858,10 +1867,12 @@ class FileR2VExecutionService:
             name=f"file-r2v:{task_id}",
         )
         self._jobs[task_id] = worker
+        self._job_projects[task_id] = project_id
 
         def discard(done: asyncio.Task[None]) -> None:
             if self._jobs.get(task_id) is done:
                 self._jobs.pop(task_id, None)
+                self._job_projects.pop(task_id, None)
             if not done.cancelled():
                 try:
                     done.exception()
@@ -1870,6 +1881,25 @@ class FileR2VExecutionService:
 
         worker.add_done_callback(discard)
         return worker
+
+    def cancel_project(self, project_id: str) -> None:
+        """Signal all provider/recovery workers owned by one Project."""
+
+        task_ids = [
+            task_id
+            for task_id, owner in self._job_projects.items()
+            if owner == project_id
+        ]
+        for task_id in task_ids:
+            worker = self._jobs.pop(task_id, None)
+            self._job_projects.pop(task_id, None)
+            if worker is not None:
+                worker.cancel()
+        for key, worker in list(self._terminal_recovery_jobs.items()):
+            if key[0] != project_id:
+                continue
+            self._terminal_recovery_jobs.pop(key, None)
+            worker.cancel()
 
     def _schedule_terminal_recovery(
         self,
@@ -2467,6 +2497,7 @@ class FileR2VExecutionService:
                     code="R2V_SUPERVISOR_FAILED",
                     message=str(error),
                     retryable=_is_transient_materialize_error(error),
+                    error=error,
                 )
             except BaseException:
                 logger.exception(
@@ -4266,11 +4297,25 @@ class FileR2VExecutionService:
         code: str,
         message: str,
         retryable: bool = False,
+        error: BaseException | None = None,
     ) -> None:
-        error = {
-            "code": code,
-            "message": message[:2000],
-            "retryable": retryable,
+        report = report_error(
+            component="r2v-execution",
+            code=code,
+            message=message,
+            error=error,
+            retryable=retryable,
+            details={
+                "projectId": task.project_id,
+                "taskId": task.task_id,
+                "runId": str(task.run_id or ""),
+            },
+            projectId=task.project_id,
+            taskId=task.task_id,
+            runId=str(task.run_id or ""),
+        )
+        failure = {
+            key: value for key, value in report.items() if value is not None
         }
         stable = _ids(
             task.project_id,
@@ -4279,7 +4324,7 @@ class FileR2VExecutionService:
         latest = await asyncio.to_thread(
             self._fail_active_task_locked,
             task,
-            error=error,
+            error=failure,
             stable=stable,
         )
         if latest.status in _TERMINAL_TASKS:
@@ -4462,6 +4507,7 @@ class FileR2VExecutionService:
             *self._terminal_recovery_jobs.values(),
         ]
         self._jobs.clear()
+        self._job_projects.clear()
         self._terminal_recovery_jobs.clear()
         for worker in workers:
             worker.cancel()

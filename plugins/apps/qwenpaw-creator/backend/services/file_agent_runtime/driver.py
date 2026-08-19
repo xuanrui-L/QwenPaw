@@ -117,7 +117,7 @@ from services.external_skills import (
     render_external_skills_context,
     view_skill as view_external_skill,
 )
-from services.observability import trace_event, traced_async
+from services.observability import report_error, trace_event, traced_async
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
     FileSpecialistToolRegistry,
@@ -373,7 +373,13 @@ def _deterministic_tool_failure_fingerprint(
 
     supported = isinstance(
         error,
-        (CreatorError, AgentProjectToolError, JqTransformError),
+        (
+            CreatorError,
+            AgentProjectToolError,
+            JqTransformError,
+            ValueError,
+            KeyError,
+        ),
     )
     if not supported or bool(getattr(error, "retryable", False)):
         return None
@@ -1049,6 +1055,7 @@ class FileCreatorAgentRuntime:
         self._wake = asyncio.Event()
         self._stopping = False
         self._active: dict[str, _ProjectTask] = {}
+        self._interrupt_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._blocked_heads: dict[str, int] = {}
         # Durable-interrupt stall tracking: project -> (run_id, first seen
         # monotonic time).  A RUNNING run with no local handle normally
@@ -1214,6 +1221,9 @@ class FileCreatorAgentRuntime:
                 handle.epoch,
             )
             handle.task.cancel()
+        cleanup_tasks = list(self._interrupt_cleanup_tasks)
+        for task in cleanup_tasks:
+            task.cancel()
         if handles:
             await asyncio.gather(
                 *(handle.task for handle in handles),
@@ -1221,7 +1231,10 @@ class FileCreatorAgentRuntime:
             )
         if dispatcher is not None:
             await asyncio.gather(dispatcher, return_exceptions=True)
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         self._active.clear()
+        self._interrupt_cleanup_tasks.clear()
         self._loop = None
 
     def notify(self, project_id: str) -> None:
@@ -1232,6 +1245,7 @@ class FileCreatorAgentRuntime:
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(self._wake.set)
 
+    # pylint: disable=too-many-return-statements
     async def interrupt(
         self,
         project_id: str,
@@ -1268,6 +1282,13 @@ class FileCreatorAgentRuntime:
             if superseded:
                 self.notify(project_id)
                 return False
+            if reason == "project_deleted":
+                # There is no durable Session to settle after the atomic
+                # Project rename. Returning immediately also prevents an idle
+                # cleanup writer from racing deletion and recreating Runtime
+                # parents under the old Project id.
+                self.work_scheduler.cancel_project(project_id)
+                return False
             await self._record_idle_interrupt(project_id, reason=reason)
             self.notify(project_id)
             return False
@@ -1281,15 +1302,38 @@ class FileCreatorAgentRuntime:
             self.notify(project_id)
             return True
         handle.interrupting = True
-        # Revoke in a worker because an already-started local publication holds
-        # this lock until its atomic commit finishes.
-        await asyncio.to_thread(
-            self._revoke_epoch,
-            project_id,
-            handle.run_id,
-            handle.epoch,
-        )
+        immediate = reason in {"user_interrupt", "project_deleted"}
+        if not immediate:
+            # Internal callers use the awaited boundary when they need to
+            # admit replacement work immediately after this method returns.
+            # The HTTP hard-stop/delete paths use the signal-first branch
+            # below so the UI never waits behind an in-progress commit.
+            await asyncio.to_thread(
+                self._revoke_epoch,
+                project_id,
+                handle.run_id,
+                handle.epoch,
+            )
+            self.work_scheduler.cancel_project(project_id)
+            handle.task.cancel()
+            self.notify(project_id)
+            return True
+        # Signal cancellation first. Revoke may need to wait behind an atomic
+        # publication already holding the in-process commit boundary; stop and
+        # delete must not keep the caller waiting for that completed decision.
+        self.work_scheduler.cancel_project(project_id)
         handle.task.cancel()
+        cleanup = asyncio.create_task(
+            asyncio.to_thread(
+                self._revoke_epoch,
+                project_id,
+                handle.run_id,
+                handle.epoch,
+            ),
+            name=f"creator-interrupt-revoke:{project_id}:{handle.run_id}",
+        )
+        self._interrupt_cleanup_tasks.add(cleanup)
+        cleanup.add_done_callback(self._interrupt_cleanup_tasks.discard)
         self.notify(project_id)
         return True
 
@@ -1877,7 +1921,7 @@ class FileCreatorAgentRuntime:
                 )
             self._blocked_heads.pop(project_id, None)
         except asyncio.CancelledError:
-            await self._cancel_run(
+            await self._cancel_run_if_project_exists(
                 project_id,
                 session.session_id,
                 goal.goal_id,
@@ -1886,7 +1930,7 @@ class FileCreatorAgentRuntime:
             )
             raise
         except StaleAgentRun:
-            await self._cancel_run(
+            await self._cancel_run_if_project_exists(
                 project_id,
                 session.session_id,
                 goal.goal_id,
@@ -2081,6 +2125,7 @@ class FileCreatorAgentRuntime:
         # native pipeline, so no per-tool budget extension exists anymore.
         effective_max_turns = turn_budget
         turn_number = 0
+        finalization_turn_added = False
         while turn_number < effective_max_turns:
             turn_number += 1
             self._assert_epoch(project_id, run_id, epoch)
@@ -2323,6 +2368,7 @@ class FileCreatorAgentRuntime:
                     if (
                         call.name != DELEGATE_TOOL_NAME
                         and call.name not in EXTERNAL_SKILL_TOOL_NAMES
+                        and "projectId" in call.arguments
                         and call.arguments.get("projectId") != project_id
                     ):
                         raise FileAgentRuntimeError(
@@ -2409,7 +2455,10 @@ class FileCreatorAgentRuntime:
                         )
                     else:
                         failure_fingerprint = (
-                            _deterministic_tool_failure_fingerprint(call, exc)
+                            _deterministic_tool_failure_fingerprint(
+                                call,
+                                exc,
+                            )
                         )
                         if failure_fingerprint is not None:
                             failure_count = (
@@ -2464,6 +2513,28 @@ class FileCreatorAgentRuntime:
                         "arguments; the run stopped instead of starting "
                         "another model turn",
                     )
+            if (
+                turn_number == effective_max_turns
+                and not finalization_turn_added
+            ):
+                # A healthy last-budget tool result used to be followed by an
+                # immediate run failure, before the model could observe the
+                # result and conclude. Grant exactly one non-runaway recovery
+                # turn and explicitly require a final answer, not more work.
+                finalization_turn_added = True
+                effective_max_turns += 1
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "MODEL_TURN_BUDGET_FINALIZE: The normal tool-turn "
+                            "budget is exhausted. Inspect the latest tool "
+                            "result and now return the best truthful final "
+                            "summary. Do not call another tool. If work remains, "
+                            "state it explicitly as blocked/remaining work."
+                        ),
+                    },
+                )
         raise AgentModelError(
             f"Creator Agent exceeded {effective_max_turns} model turns",
         )
@@ -3231,8 +3302,21 @@ class FileCreatorAgentRuntime:
         try:
             for _turn_number in range(
                 1,
-                self.specialist_max_model_turns + 1,
+                self.specialist_max_model_turns + 2,
             ):
+                if _turn_number == self.specialist_max_model_turns + 1:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "MODEL_TURN_BUDGET_FINALIZE: The normal "
+                                "specialist tool-turn budget is exhausted. "
+                                "Use the latest tool result to return [SUCCESS], "
+                                "[BLOCKED], or [FAILED] with a truthful concise "
+                                "summary now. Do not call another tool."
+                            ),
+                        },
+                    )
                 self._assert_epoch(project_id, parent_run_id, epoch)
                 message_id = f"specialist-message-{uuid4().hex}"
                 delta_index = 0
@@ -3687,7 +3771,10 @@ class FileCreatorAgentRuntime:
                     else:
                         failed = True
                         failure_fingerprint = (
-                            _deterministic_tool_failure_fingerprint(call, exc)
+                            _deterministic_tool_failure_fingerprint(
+                                call,
+                                exc,
+                            )
                         )
                         if failure_fingerprint is not None:
                             failure_count = (
@@ -3972,6 +4059,11 @@ class FileCreatorAgentRuntime:
                 specialist_run_id,
                 role.value,
             )
+            if not self.services.projects.project_path(project_id).is_file():
+                # Project DELETE is already the terminal authority; do not let
+                # specialist cleanup recreate Runtime directories below the
+                # removed id.
+                raise
             await asyncio.to_thread(
                 self.executions.transition_specialist_run,
                 project_id,
@@ -5462,6 +5554,38 @@ class FileCreatorAgentRuntime:
             round_id=f"agent-round-{run_id}",
         )
 
+    async def _cancel_run_if_project_exists(
+        self,
+        project_id: str,
+        session_id: str,
+        goal_id: str,
+        run_id: str,
+        message: CreatorMessageRecord,
+    ) -> None:
+        """Settle cancellation, suppressing only an atomic Project deletion."""
+
+        try:
+            await self._cancel_run(
+                project_id,
+                session_id,
+                goal_id,
+                run_id,
+                message,
+            )
+        except Exception:  # pylint: disable=broad-except
+            project_path = self.services.projects.project_path(project_id)
+            if project_path.is_file():
+                raise
+            # DELETE atomically removed the complete authority. Persisting a
+            # terminal Run/Session below the old id would recreate a ghost
+            # Project; absence is already the stronger terminal state.
+            logger.info(
+                "cancel cleanup stopped because Project was deleted: "
+                "project=%s run=%s",
+                project_id,
+                run_id,
+            )
+
     async def _cancel_run(
         self,
         project_id: str,
@@ -5611,9 +5735,30 @@ class FileCreatorAgentRuntime:
         details: dict[str, Any] = {
             "runId": run_id,
             "messageSeq": request.message_seq,
+            "projectId": project_id,
+            "sessionId": session_id,
+            "goalId": goal_id,
         }
         if extra_details:
             details.update(extra_details)
+        report = report_error(
+            component="file-agent-runtime",
+            code=code,
+            message=message_text,
+            retryable=retryable,
+            details=details,
+            projectId=project_id,
+            sessionId=session_id,
+            goalId=goal_id,
+            runId=run_id,
+        )
+        details.update(
+            {
+                key: report[key]
+                for key in ("errorId", "traceId", "requestId")
+                if report.get(key)
+            },
+        )
         # Terminal persistence must survive the very condition that usually
         # triggers it: Runtime lock starvation.  A failure cascade that
         # itself dies on LockTimeoutError durably strands the run RUNNING
@@ -5636,6 +5781,7 @@ class FileCreatorAgentRuntime:
                         "code": code,
                         "message": message_text,
                         "retryable": retryable,
+                        "details": details,
                     },
                 },
             )
@@ -5712,7 +5858,7 @@ class FileCreatorAgentRuntime:
                     "code": code,
                     "message": message_text,
                     "retryable": retryable,
-                    "details": dict(extra_details or {}),
+                    "details": details,
                 },
             },
         )
@@ -6499,6 +6645,7 @@ def _jq_project_recovery(code: str | None) -> str:
     )
 
 
+# pylint: disable=too-many-return-statements
 def _specialist_tool_recovery(
     name: str,
     error: str = "",
@@ -6506,6 +6653,33 @@ def _specialist_tool_recovery(
     code: str | None = None,
 ) -> str:
     media_tools = {"image_generation", "r2v_generation", "ai_edit"}
+    if any(
+        marker in error.casefold()
+        for marker in ("unknown tool", "tool not found", "not offered")
+    ):
+        return (
+            "The provider emitted a native call for a tool that was not "
+            "offered in this turn. Inspect the current tool manifest and issue "
+            "one changed native tool call using an exact offered tool name; do "
+            "not reproduce the call as textual/XML markup."
+        )
+    if name == "image_generation" and (
+        code == "IMAGE_REFERENCE_BUDGET_EXCEEDED"
+        or "IMAGE_REFERENCE_BUDGET_EXCEEDED" in error
+    ):
+        return (
+            "The execution layer resolved both Project-owned automatic image "
+            "references and explicit call references before provider dispatch, "
+            "and their deduplicated total exceeds the active model limit. No "
+            "provider call was made and no references were silently dropped. "
+            "Read error.details, then call read_project and use jq_project to "
+            "remove lower-priority reference IDs from the target variant, "
+            "storyboard creation, or lineup fields as appropriate; also shrink "
+            "referenceVersionIds/referenceImageUrls in the next call. Re-read "
+            "the Project and retry only after the resolved total is within "
+            "details.limit. Preserve the identity/storyboard anchors that are "
+            "actually essential."
+        )
     if name in media_tools and (
         "PROJECT_INPUT_SNAPSHOT_STALE" in error
         or "已终止: QUARANTINED" in error
@@ -6710,9 +6884,11 @@ def _authorization_summary(
             # video_edit follows its input video, so name the source of the
             # number the price is computed from.
             parts.append(
-                f"{duration}秒（按输入视频计费）"
-                if mode == "video_edit"
-                else f"{duration}秒",
+                (
+                    f"{duration}秒（按输入视频计费）"
+                    if mode == "video_edit"
+                    else f"{duration}秒"
+                ),
             )
         resolution = tool_arguments.get("resolution")
         if resolution:

@@ -47,7 +47,7 @@ def test_qwen_image_model_injects_three_reference_budget(
 
 
 @pytest.mark.parametrize("role", _IMAGE_ROLES)
-def test_other_image_model_keeps_generic_budget(monkeypatch, role) -> None:
+def test_openai_image_model_uses_official_budget(monkeypatch, role) -> None:
     monkeypatch.setattr(
         model_config,
         "get_image_model_name",
@@ -60,5 +60,5 @@ def test_other_image_model_keeps_generic_budget(monkeypatch, role) -> None:
     )
     prompt = _render(role)
     assert "gpt-image-2" in prompt
-    assert "总数不超过 5" in prompt
+    assert "最多 16 张" in prompt
     assert "{{image_model_guidance}}" not in prompt

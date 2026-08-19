@@ -46,7 +46,6 @@ from services.project_files.facade import CreatorFileServices
 from services.runtime_files.execution_store import ProjectExecutionStore
 from utils.logger import setup_logger
 
-
 logger = setup_logger("creator.work_scheduler")
 
 # Loop exits after this long without a wake; any later wake restarts it.
@@ -147,6 +146,8 @@ class WorkGraphScheduler:
         self._transient_retries: dict[tuple[str, str, str], int] = {}
         self._transient_last: dict[tuple[str, str, str], float] = {}
         self._inflight: dict[str, set[str]] = {}
+        self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._cancelled_projects: set[str] = set()
 
     def _transient_budget_available(
         self,
@@ -174,6 +175,10 @@ class WorkGraphScheduler:
     def wake(self, project_id: str) -> None:
         """Signal that durable state changed; start the loop if needed."""
 
+        # A real post-stop Project change/new run explicitly re-arms the
+        # scheduler. Cancelled dispatch finalizers do not call this method (see
+        # _dispatch), so they cannot resurrect a stopped project by themselves.
+        self._cancelled_projects.discard(project_id)
         event = self._wakes.setdefault(project_id, asyncio.Event())
         event.set()
         task = self._loops.get(project_id)
@@ -183,9 +188,17 @@ class WorkGraphScheduler:
             )
 
     async def shutdown(self) -> None:
-        for task in self._loops.values():
+        tasks = [
+            *self._loops.values(),
+            *(
+                task
+                for project_tasks in self._dispatch_tasks.values()
+                for task in project_tasks
+            ),
+        ]
+        for task in tasks:
             task.cancel()
-        for task in list(self._loops.values()):
+        for task in tasks:
             try:
                 await task
             except (
@@ -194,6 +207,33 @@ class WorkGraphScheduler:
             ):  # pylint: disable=broad-except
                 pass
         self._loops.clear()
+        self._dispatch_tasks.clear()
+        self._cancelled_projects.clear()
+
+    def cancel_project(self, project_id: str) -> None:
+        """Synchronously signal every scheduler-owned task for one Project."""
+
+        self._cancelled_projects.add(project_id)
+        loop = self._loops.pop(project_id, None)
+        if loop is not None:
+            loop.cancel()
+        for task in self._dispatch_tasks.pop(project_id, set()):
+            task.cancel()
+        self._inflight.pop(project_id, None)
+        self._wakes.pop(project_id, None)
+        self._dispatched = {
+            key for key in self._dispatched if key[0] != project_id
+        }
+        self._transient_retries = {
+            key: value
+            for key, value in self._transient_retries.items()
+            if key[0] != project_id
+        }
+        self._transient_last = {
+            key: value
+            for key, value in self._transient_last.items()
+            if key[0] != project_id
+        }
 
     # -- loop ----------------------------------------------------------
 
@@ -228,6 +268,7 @@ class WorkGraphScheduler:
             == EXECUTION_AUTHORIZATION_ALLOW_ALL
         )
 
+    # pylint: disable=too-many-statements
     async def tick(self, project_id: str) -> WorkGraph | None:
         """Derive the graph once and dispatch what capacity allows."""
 
@@ -338,9 +379,26 @@ class WorkGraphScheduler:
             self._dispatched.add(ledger_key)
             inflight.add(node.node_id)
             capacity -= 1
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._dispatch(project_id, node, fingerprint),
             )
+            project_tasks = self._dispatch_tasks.setdefault(project_id, set())
+            project_tasks.add(task)
+
+            def discard(
+                done: asyncio.Task[None],
+                *,
+                owner: str = project_id,
+            ) -> None:
+                owned = self._dispatch_tasks.get(owner)
+                if owned is not None:
+                    owned.discard(done)
+                    if not owned:
+                        self._dispatch_tasks.pop(owner, None)
+                if not done.cancelled():
+                    done.exception()
+
+            task.add_done_callback(discard)
         if self._on_tick is not None:
             await self._on_tick(project_id, graph)
         return graph
@@ -504,7 +562,8 @@ class WorkGraphScheduler:
                 )
         finally:
             self._inflight.get(project_id, set()).discard(node.node_id)
-            self.wake(project_id)
+            if project_id not in self._cancelled_projects:
+                self.wake(project_id)
 
     async def dispatch_node(
         self,

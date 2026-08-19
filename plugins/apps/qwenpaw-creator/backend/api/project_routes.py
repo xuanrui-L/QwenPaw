@@ -74,7 +74,6 @@ from .dependencies import (
     resolve_idempotency_key,
 )
 
-
 logger = setup_logger("project_routes")
 
 _CREATE_SCOPE = "POST /projects"
@@ -306,7 +305,9 @@ async def create_project(
             existing = services.projects.list()
             target_name = request.name.strip()
             if any(item.name == target_name for item in existing):
-                raise ValidationError(f"项目名称「{target_name}」已存在，请使用其他名称")
+                raise ValidationError(
+                    f"项目名称「{target_name}」已存在，请使用其他名称",
+                )
 
             holder: list[ProjectRuntimeBootstrap] = []
 
@@ -398,6 +399,12 @@ async def delete_project(
         superseded=False,
         reason="project_deleted",
     )
+    # Signal every detached provider/review/scheduler worker before the
+    # Project id disappears. Cancellation is synchronous; cleanup is not
+    # awaited because deletion itself is the terminal boundary.
+    from api.file_session_routes import _cancel_detached_project_tasks
+
+    _cancel_detached_project_tasks(services, project_id)
     try:
         await asyncio.to_thread(services.projects.delete, project_id)
     except ProjectNotFound:
@@ -405,14 +412,9 @@ async def delete_project(
     except (ProjectIntegrityError, ProjectStoreError) as exc:
         raise StorageIntegrityError(str(exc)) from exc
     services.poller.close(project_id)
-    try:
-        await asyncio.to_thread(
-            services.poller.poll_once,
-            project_id,
-            force=True,
-        )
-    except ProjectNotFound:
-        pass
+    from utils.logger import close_creator_project_logging
+
+    close_creator_project_logging(project_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

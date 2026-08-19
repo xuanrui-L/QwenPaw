@@ -74,6 +74,7 @@ from services.media_files.transitions import (
     build_transition_filter_chain,
     normalize_transition_kind,
 )
+from services.observability import report_error
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileError,
@@ -3362,6 +3363,7 @@ class FileLocalMediaExecutionService:
                 ids,
                 "LOCAL_MEDIA_EXECUTION_FAILED",
                 message=str(exc),
+                error=exc,
             )
             raise
         except AssetFileError as exc:
@@ -3370,6 +3372,7 @@ class FileLocalMediaExecutionService:
                 ids,
                 "LOCAL_MEDIA_EXECUTION_FAILED",
                 message=str(exc),
+                error=exc,
             )
             raise StorageIntegrityError(str(exc)) from exc
         except Exception as exc:
@@ -3378,6 +3381,7 @@ class FileLocalMediaExecutionService:
                 ids,
                 "LOCAL_MEDIA_EXECUTION_FAILED",
                 message=str(exc),
+                error=exc,
             )
             raise StorageIntegrityError(f"本地媒体执行失败: {exc}") from exc
 
@@ -3532,7 +3536,10 @@ class FileLocalMediaExecutionService:
         }
 
         def claim_sync():
-            with self.services.projects.lifecycle_lock(task.project_id):
+            with self.services.projects.lifecycle_lock(
+                task.project_id,
+                shared=True,
+            ):
                 self.services.projects.read(task.project_id)
                 project_root = self.services.projects.project_root(
                     task.project_id,
@@ -4262,6 +4269,7 @@ class FileLocalMediaExecutionService:
         code: str,
         *,
         message: str | None = None,
+        error: BaseException | None = None,
     ) -> None:
         try:
             task = await asyncio.to_thread(
@@ -4271,6 +4279,23 @@ class FileLocalMediaExecutionService:
             )
         except RecordNotFoundError:
             return
+        report = report_error(
+            component="local-media-execution",
+            code=code,
+            message=message or code,
+            error=error,
+            details={
+                "projectId": project_id,
+                "taskId": task.task_id,
+                "runId": ids.get("run_id"),
+            },
+            projectId=project_id,
+            taskId=task.task_id,
+            runId=ids.get("run_id"),
+        )
+        failure = {
+            key: value for key, value in report.items() if value is not None
+        }
         if task.status is TaskStatus.RUNNING:
             try:
                 await asyncio.to_thread(
@@ -4280,7 +4305,7 @@ class FileLocalMediaExecutionService:
                     event_id=ids["attempt_failed_event_id"],
                     attempt_id=ids["attempt_id"],
                     status=TaskAttemptStatus.FAILED,
-                    error={"code": code, "message": message or code},
+                    error=failure,
                 )
             except ExecutionStateConflict:
                 pass
@@ -4365,9 +4390,24 @@ class FileLocalMediaExecutionService:
                     pass
                 recovered.append(task.task_id)
                 continue
+            report = report_error(
+                component="local-media-execution",
+                code="LOCAL_MEDIA_PROCESS_RESTARTED",
+                message="进程重启前本地媒体执行未形成可收敛结果",
+                retryable=True,
+                details={
+                    "projectId": project_id,
+                    "taskId": task.task_id,
+                    "runId": str(task.run_id or ""),
+                },
+                projectId=project_id,
+                taskId=task.task_id,
+                runId=str(task.run_id or ""),
+            )
             error = {
-                "code": "LOCAL_MEDIA_PROCESS_RESTARTED",
-                "message": "进程重启前本地媒体执行未形成可收敛结果",
+                key: value
+                for key, value in report.items()
+                if value is not None
             }
             if task.status is TaskStatus.RUNNING:
                 try:

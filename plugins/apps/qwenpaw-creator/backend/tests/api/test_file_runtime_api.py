@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 
 import httpx
 from fastapi import FastAPI
@@ -151,12 +153,57 @@ def test_interrupt_is_persisted_before_process_local_cancellation(
     assert response.status_code == 202
     assert observed_statuses == ["INTERRUPT_REQUESTED"]
     assert response.json()["status"] == "CANCELLED"
+    deadline = time.monotonic() + 2
     cancelled_task = executions.get_task("project-1", "task-stop-1")
+    while (
+        cancelled_task.status is not TaskStatus.CANCELLED
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+        cancelled_task = executions.get_task("project-1", "task-stop-1")
     assert cancelled_task.status is TaskStatus.CANCELLED
     assert cancelled_task.error == {
         "code": "USER_CANCELLED",
         "message": "用户停止了当前项目的所有 Agent 活动",
     }
+
+
+def test_interrupt_response_does_not_wait_for_terminal_task_cleanup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    app, services, _snapshot, _bootstrap = _app(tmp_path)
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+
+    def blocking_cleanup(_services, project_id):
+        assert project_id == "project-1"
+        cleanup_started.set()
+        release_cleanup.wait(timeout=5)
+
+    monkeypatch.setattr(
+        "api.file_session_routes._cancel_active_project_tasks_sync",
+        blocking_cleanup,
+    )
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/projects/project-1/interrupt",
+                headers={"Idempotency-Key": "interrupt-nowait"},
+                json={},
+            )
+
+    response = _run(scenario())
+    assert cleanup_started.wait(timeout=1)
+    assert response.status_code == 202
+    assert response.json()["status"] == "CANCELLED"
+    stopped = services.sessions.get_project_session("project-1")
+    assert stopped.status.value == "CANCELLED"
+    release_cleanup.set()
 
 
 def test_file_conversation_create_replays_by_idempotency_key(tmp_path) -> None:
