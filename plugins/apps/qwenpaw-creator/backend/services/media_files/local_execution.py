@@ -296,7 +296,7 @@ _COLOR_GRADE_FILTERS: dict[str, str] = {
     # 电影感：压暗部、轻微去饱和。
     "cinematic": (
         "eq=brightness=-0.01:saturation=0.96:contrast=1.08:gamma=0.98,"
-        "colorbalance=sm=-0.03:bh=-0.02"
+        "colorbalance=rs=-0.02:gs=-0.01:bs=-0.03:bh=-0.02"
     ),
     # 日常清新：暖中间调、黄红饱和度提升。
     "vlog_fresh": (
@@ -1350,16 +1350,26 @@ class FfmpegLocalMediaRunner:
                     )
                     if not probe.ok:
                         safety_error = probe.error
-                    elif probe.edge_contact > 0.02:
+                    elif probe.edge_contact > 1.0:
                         safety_error = "字幕卡内容触碰视口边缘，存在裁切风险"
                     elif probe.text_occlusion > 0.10:
                         safety_error = "字幕文字被卡片内的图标或装饰遮挡"
                 if safety_error is not None:
+                    fallback_w = (
+                        float(render_location.get("width", 0.8))
+                        if isinstance(render_location, Mapping)
+                        else 0.8
+                    )
+                    fallback_h = (
+                        float(render_location.get("height", 0.25))
+                        if isinstance(render_location, Mapping)
+                        else 0.25
+                    )
                     render_location = {
                         "x": 0.5,
                         "y": 0.88,
                         "width": 0.8,
-                        "height": 0.18,
+                        "height": 0.25,
                         "anchor_x": 0.5,
                         "anchor_y": 0.5,
                         "opacity": 1.0,
@@ -1368,8 +1378,8 @@ class FfmpegLocalMediaRunner:
                         "html": render_caption_template(
                             str(overlay.get("text") or ""),
                             emotion=str(overlay.get("vibe") or "chill"),
-                            box_width=0.8,
-                            box_height=0.18,
+                            box_width=fallback_w,
+                            box_height=fallback_h,
                         ),
                         "fps": 24,
                         "loop": False,
@@ -1406,11 +1416,21 @@ class FfmpegLocalMediaRunner:
                     continue
                 if not using_safe_motion:
                     generated_error = prep.error or "未知错误"
+                    fallback_w = (
+                        float(render_location.get("width", 0.8))
+                        if isinstance(render_location, Mapping)
+                        else 0.8
+                    )
+                    fallback_h = (
+                        float(render_location.get("height", 0.25))
+                        if isinstance(render_location, Mapping)
+                        else 0.25
+                    )
                     render_location = {
                         "x": 0.5,
                         "y": 0.88,
                         "width": 0.8,
-                        "height": 0.18,
+                        "height": 0.25,
                         "anchor_x": 0.5,
                         "anchor_y": 0.5,
                         "opacity": 1.0,
@@ -1420,8 +1440,8 @@ class FfmpegLocalMediaRunner:
                         html=render_caption_template(
                             str(overlay.get("text") or ""),
                             emotion=str(overlay.get("vibe") or "chill"),
-                            box_width=0.8,
-                            box_height=0.18,
+                            box_width=fallback_w,
+                            box_height=fallback_h,
                         ),
                         fps=24,
                         loop=False,
@@ -1552,6 +1572,7 @@ class FfmpegLocalMediaRunner:
                 location=normalized.get("location"),
                 viewport_inset=0.05,
                 doc_format=normalized["format"],
+                max_edge_contact=1.0,
             )
             if prep.layer is None:
                 raise ValidationError(
@@ -2942,7 +2963,13 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # v4: html_js overlays no longer receive the legacy
             # viewport-safety CSS injection whose wildcard font overrides
             # stomped the blueprint clamps in the composite only.
-            "rendererVersion": 4,
+            # v5: subtitle fallback box height increased (0.18→0.25),
+            # padding consistency fix in PIL/interview-summary renderers,
+            # keyword overlay max_edge_contact aligned with design-time.
+            # v6: caption safety fallback now uses element's actual location
+            # dimensions for font sizing; edge contact threshold aligned
+            # with design-time text card budget (1.0).
+            "rendererVersion": 7,
             "targetRef": resolved.target_ref,
             "inputs": [
                 {

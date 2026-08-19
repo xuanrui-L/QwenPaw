@@ -1834,7 +1834,7 @@ async def design_motion_overlays(
             x=0.50,
             y=0.88,
             width=0.80,
-            height=0.18,
+            height=0.25,
             anchor_x=0.5,
             anchor_y=0.5,
         )
@@ -1851,7 +1851,7 @@ async def design_motion_overlays(
                 x=0.50,
                 y=0.88,
                 width=0.80,
-                height=0.18,
+                height=0.25,
                 anchor_x=0.5,
                 anchor_y=0.5,
             )
@@ -1946,7 +1946,7 @@ async def design_motion_overlays(
             x=0.50,
             y=0.88,
             width=0.80,
-            height=0.14,
+            height=0.25,
             anchor_x=0.5,
             anchor_y=0.5,
         )
@@ -1957,7 +1957,7 @@ async def design_motion_overlays(
                 x=0.50,
                 y=0.88,
                 width=0.80,
-                height=0.18,
+                height=0.25,
                 anchor_x=0.5,
                 anchor_y=0.5,
             )

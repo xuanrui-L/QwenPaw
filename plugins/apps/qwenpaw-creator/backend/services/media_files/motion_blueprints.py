@@ -189,9 +189,10 @@ def _caption_static_capsule(
     """
 
     del intensity  # 静态模板没有可调幅度，保持签名一致即可
+    font = _caption_font_css(text)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
-.card{{width:max-content;max-width:94%;box-sizing:border-box;font-size:24vh;padding:.28em .9em;border-radius:.42em;background:{palette.paper}f2;border:.04em solid {palette.ink}26;box-shadow:0 .08em .3em {palette.ink}33}}
+.card{{width:max-content;max-width:94%;box-sizing:border-box;font-size:{font};padding:.28em .9em;border-radius:.42em;background:{palette.paper}f2;border:.04em solid {palette.ink}26;box-shadow:0 .08em .3em {palette.ink}33}}
 .text{{font-family:"PingFang SC","Noto Sans SC",sans-serif;font-weight:600;font-size:1em;line-height:1.35;letter-spacing:.02em;text-align:center;color:{palette.ink}}}
 """
     body = f"<div class='wrap'><div class='card'><div class='text'>{escape(text.strip())}</div></div></div>"
