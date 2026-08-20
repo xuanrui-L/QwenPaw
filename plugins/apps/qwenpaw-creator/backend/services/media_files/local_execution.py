@@ -2973,7 +2973,10 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # v7: static_capsule blueprint uses dynamic _caption_font_css()
             # instead of fixed font-size:24vh; cinematic colorbalance
             # preset fixed (invalid sm → valid rs/gs/bs channels).
-            "rendererVersion": 7,
+            # v8: caption blueprint font size scaled inversely by overlay
+            # box height so apparent canvas-relative size stays consistent
+            # across overlays with very different box dimensions.
+            "rendererVersion": 8,
             "targetRef": resolved.target_ref,
             "inputs": [
                 {

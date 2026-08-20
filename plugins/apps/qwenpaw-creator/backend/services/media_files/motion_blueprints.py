@@ -88,7 +88,7 @@ def _chars(text: str) -> str:
     return "".join(pieces)
 
 
-def _caption_font_css(text: str) -> str:
+def _caption_font_css(text: str, *, box_height: float | None = None) -> str:
     """Two-axis font clamp for one caption viewport.
 
     The document only knows its own viewport, so the size is expressed
@@ -96,6 +96,12 @@ def _caption_font_css(text: str) -> str:
     the vw term keeps the longest line inside narrow boxes. Every
     decorative measure in the blueprints is em-based so the whole card
     scales with this value no matter how extreme the box ratio is.
+
+    When *box_height* is provided (normalised canvas fraction, e.g. 0.25),
+    the vh term is scaled inversely so that the apparent font size on the
+    canvas stays consistent across overlays with very different box
+    heights — a small box (0.18) gets a larger vh value, a tall box
+    (0.85) gets a smaller one.
     """
 
     length = max(1, len(re.sub(r"\s+", "", text)))
@@ -108,6 +114,8 @@ def _caption_font_css(text: str) -> str:
     # leaving the root 8% inset and entrance travel untouched.
     vw = 80.0 / (per_line * 1.08 + 1.9)
     vh = 76.0 / (lines * 2.4)
+    if box_height is not None and box_height > 0:
+        vh *= 0.25 / box_height
     return f"min({vh:.1f}vh,{vw:.1f}vw)"
 
 
@@ -152,11 +160,13 @@ def _caption_stagger_pop(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """综艺花字：内容包裹式贴纸胶囊 + 逐字弹入 + 强调下划线。"""
 
     overshoot = 1.3 + intensity * 0.6
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{display:flex;flex-direction:column;align-items:center;gap:.18em;max-width:96%;padding:.34em .85em .3em;font-size:{font};background:{palette.paper}f2;border:.07em solid {palette.ink};border-radius:.55em;box-shadow:.14em .18em 0 {palette.secondary}59}}
@@ -179,6 +189,8 @@ def _caption_static_capsule(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """静态胶囊：全片像素级一致的解说/教学字幕。
 
@@ -189,7 +201,7 @@ def _caption_static_capsule(
     """
 
     del intensity  # 静态模板没有可调幅度，保持签名一致即可
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{width:max-content;max-width:94%;box-sizing:border-box;font-size:{font};padding:.28em .9em;border-radius:.42em;background:{palette.paper}f2;border:.04em solid {palette.ink}26;box-shadow:0 .08em .3em {palette.ink}33}}
@@ -207,12 +219,14 @@ def _caption_ink_reveal(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """电影字幕：大字直压画面 + 细描边投影保可读 + 侧色条 draw-on，
     无满框底板，仅文字底部一条包裹式半透明 scrim 融入画面。"""
 
     reveal = 0.55 + intensity * 0.25
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{display:flex;align-items:center;gap:.42em;max-width:96%;font-size:{font};padding:.22em .6em;border-radius:.3em;background:color-mix(in srgb,{palette.ink} 42%,transparent)}}
@@ -234,12 +248,14 @@ def _caption_glow_breath(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """情绪光晕：无底板，文字发光呼吸直压画面，背后一团包裹式柔光晕，
     两侧星芒点缀随字号缩放。"""
 
     glow = 0.12 + intensity * 0.14
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;align-items:center;gap:.34em;max-width:96%;font-size:{font};padding:.3em .55em}}
@@ -262,11 +278,13 @@ def _caption_handwritten_note(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """手写笔记：纸纹底板 + 手写体微倾斜 + 墨水划线动画，适合 Vlog。"""
 
     tilt = -1.5 - intensity * 1.5
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;max-width:96%;font-size:{font};padding:.4em 1.1em .35em;background:{palette.paper}f0;border-radius:.6em;transform:rotate({tilt:.1f}deg);box-shadow:.2em .25em 0 {palette.secondary}40}}
@@ -290,11 +308,13 @@ def _caption_keyword_spotlight(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """关键词聚焦：左对齐，关键词高亮色块滑入，适合教学。"""
 
     highlight = 0.6 + intensity * 0.4
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;flex-direction:column;gap:.15em;max-width:96%;font-size:{font};padding:.3em .7em}}
@@ -329,11 +349,13 @@ def _caption_drama_whisper(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """低语独白：宋体大字宽字距，逐字淡入+垂直模糊，纯文字+横线，适合短剧。"""
 
     blur = 0.08 + intensity * 0.1
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;flex-direction:column;align-items:center;gap:.3em;max-width:96%;font-size:{font}}}
@@ -355,11 +377,13 @@ def _caption_neon_pulse(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """霓虹脉冲：暗底+亮色文字多层 glow 呼吸+霓虹描边，适合音乐/MV。"""
 
     glow = 0.15 + intensity * 0.2
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;align-items:center;justify-content:center;max-width:96%;font-size:{font};padding:.35em .9em;border:.1em solid {palette.primary}8c;border-radius:.5em;background:{palette.ink}cc;box-shadow:0 0 {glow:.2f}em {palette.primary}66,inset 0 0 {glow * 0.5:.2f}em {palette.primary}33}}
@@ -380,11 +404,13 @@ def _caption_brush_strike(
     text: str,
     palette: BlueprintPalette,
     intensity: float,
+    *,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """墨笔横扫：粗体字 clip-path 横扫揭示+对角线扫过，通用动作型。"""
 
     sweep_dur = 0.4 + intensity * 0.2
-    font = _caption_font_css(text)
+    font = _caption_font_css(text, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;max-width:96%;font-size:{font};padding:.3em .8em;overflow:hidden}}
@@ -1033,6 +1059,7 @@ def render_caption_blueprint(
     *,
     palette: object = None,
     intensity: object = None,
+    box_height: float | None = None,
 ) -> tuple[str, float]:
     """Render one caption card blueprint; returns ``(html, hf duration)``."""
 
@@ -1044,6 +1071,7 @@ def render_caption_blueprint(
         text,
         validated_palette(palette),
         _clamped(intensity, 0.55, 0.0, 1.0),
+        box_height=box_height,
     )
 
 
