@@ -1469,11 +1469,15 @@ def _anthropic_llm_probe(
     base: str,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
     """Anthropic Messages API probe for llm/vlm connectivity tests."""
-    headers = {
-        "x-api-key": body.api_key,
+    headers: dict[str, str] = {
         "Content-Type": "application/json",
         "anthropic-version": "2023-06-01",
     }
+    # Free-tier providers probe with require_api_key=False and an empty
+    # key; sending an empty x-api-key would fail with 401 instead of
+    # letting the unauthenticated probe proceed.
+    if body.api_key:
+        headers["x-api-key"] = body.api_key
     if body.type == "vlm":
         content: list[dict[str, Any]] = [
             {"type": "text", "text": "Reply with red only."},
@@ -1503,8 +1507,16 @@ def _gemini_llm_probe(
     body: ModelConnectionTestRequest,
     base: str,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
-    """Google Gemini Generative AI probe for llm/vlm connectivity tests."""
+    """Google Gemini Generative AI probe for llm/vlm connectivity tests.
+
+    Gemini authenticates through the ``key=`` query parameter (the same
+    transport used by ``text_model._call_gemini``); without it the probe
+    always fails with 400/401/403.
+    """
     url = f"{base}/v1beta/models/{body.model_name}:generateContent"
+    if body.api_key:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}key={body.api_key}"
     headers = {
         "Content-Type": "application/json",
     }
@@ -1532,7 +1544,11 @@ def _probe_payload(
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
     base = body.base_url.rstrip("/")
     headers: dict[str, str] = {"Content-Type": "application/json"}
-    if body.require_api_key:
+    # Send the credential whenever one is present so paid models behind a
+    # free-tier-capable provider still authenticate; ``require_api_key``
+    # only controls whether an *absent* key is tolerated (validated by the
+    # route before probing).
+    if body.api_key:
         headers["Authorization"] = f"Bearer {body.api_key}"
     if body.type == "asr":
         provider = body.provider or (
@@ -1597,10 +1613,9 @@ def _probe_payload(
             },
         )
     if body.type in {"llm", "vlm"}:
-        protocol_lower = body.protocol.casefold()
-        if "anthropic" in protocol_lower or "minimax" in protocol_lower:
+        if model_config.is_anthropic_protocol(body.protocol):
             return _anthropic_llm_probe(body, base)
-        if "gemini" in protocol_lower or "google" in protocol_lower:
+        if model_config.is_gemini_protocol(body.protocol):
             return _gemini_llm_probe(body, base)
         content: Any = "Reply with pong only."
         if body.type == "vlm":

@@ -732,22 +732,11 @@ def get_vlm_protocol() -> str:
     return os.environ.get("VLM_PROTOCOL", "").strip() or get_text_protocol()
 
 
-def get_vlm_chat_url() -> str:
-    """Return the chat-completion endpoint URL for the configured VLM.
-
-    Protocol-aware: Anthropic/MiniMax use ``/v1/messages``, everything
-    else falls back to the OpenAI-compatible ``/chat/completions``.
-    """
-    base = get_vlm_base_url().rstrip("/")
-    protocol = get_vlm_protocol().casefold()
-    if "anthropic" in protocol or "minimax" in protocol:
-        return f"{base}/v1/messages"
-    return f"{base}/chat/completions"
-
-
 # ── Protocol classification helpers ──────────────────────────────────────────
-# Shared by text_model, vlm_model, and model_routes to decide URL path,
-# headers, body format, and response parsing per API protocol.
+# Shared by text_model, vlm_model, model_client, and model_routes to decide
+# URL path, headers, body format, and response parsing per API protocol.
+# Keep the classification logic here; every other module must import these
+# helpers instead of re-implementing them.
 
 
 def is_anthropic_protocol(protocol: str) -> bool:
@@ -760,6 +749,30 @@ def is_gemini_protocol(protocol: str) -> bool:
     """True when *protocol* uses the Google Gemini Generative AI format."""
     lower = protocol.casefold()
     return "gemini" in lower or "google" in lower
+
+
+def protocol_requires_api_key(protocol: str) -> bool:
+    """True when the protocol has no keyless tier and needs a credential.
+
+    Anthropic and Gemini gateways always authenticate; OpenAI-compatible
+    gateways may expose free keyless models (e.g. OpenCode Zen ``*-free``).
+    """
+    return is_anthropic_protocol(protocol) or is_gemini_protocol(protocol)
+
+
+def get_vlm_chat_url() -> str:
+    """Return the chat-completion endpoint URL for the configured VLM.
+
+    Protocol-aware via ``chat_url_for``: Anthropic/MiniMax use
+    ``/v1/messages``, Gemini uses ``/v1beta/models/{model}:generateContent``,
+    everything else falls back to the OpenAI-compatible
+    ``/chat/completions``.
+    """
+    return chat_url_for(
+        get_vlm_base_url(),
+        get_vlm_protocol(),
+        get_vlm_model_name(),
+    )
 
 
 def chat_url_for(base_url: str, protocol: str, model_name: str = "") -> str:

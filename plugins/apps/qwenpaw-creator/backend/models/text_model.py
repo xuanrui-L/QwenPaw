@@ -56,14 +56,17 @@ async def _call_openai(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    # Free-tier gateways (e.g. OpenCode Zen ``*-free``) accept requests
+    # without an Authorization header; an empty Bearer value would be
+    # rejected as an invalid key.
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     async with model_slot("text"):
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 _openai_chat_url(),
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 json=body,
             )
     if response.status_code >= 400:
@@ -110,15 +113,17 @@ async def _call_anthropic(
         body["system"] = system_text.strip()
     if temperature > 0:
         body["temperature"] = temperature
+    headers: dict = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    if api_key:
+        headers["x-api-key"] = api_key
     async with model_slot("text"):
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 _anthropic_chat_url(),
-                headers={
-                    "x-api-key": api_key,
-                    "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01",
-                },
+                headers=headers,
                 json=body,
             )
     if response.status_code >= 400:
@@ -170,8 +175,9 @@ async def _call_gemini(
     if temperature > 0:
         body["generationConfig"]["temperature"] = temperature
     url = _gemini_chat_url(model_name)
-    sep = "&" if "?" in url else "?"
-    url = f"{url}{sep}key={api_key}"
+    if api_key:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}key={api_key}"
     async with model_slot("text"):
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
@@ -215,7 +221,10 @@ async def chat_completion(
     api_key = model_config.get_text_api_key()
     model_name = model_config.get_text_model_name()
     protocol = model_config.get_text_protocol()
-    if not api_key:
+    # Anthropic and Gemini gateways always authenticate; OpenAI-compatible
+    # gateways may serve free keyless models (e.g. OpenCode Zen), so an
+    # empty key is only an error for protocols that require one.
+    if not api_key and model_config.protocol_requires_api_key(protocol):
         raise ModelError(
             "Creator text model API key 未配置",
             model_name=model_name,
@@ -225,8 +234,7 @@ async def chat_completion(
         messages.append({"role": "system", "content": system_prompt.strip()})
     messages.append({"role": "user", "content": prompt})
     try:
-        protocol_lower = protocol.casefold()
-        if "anthropic" in protocol_lower or "minimax" in protocol_lower:
+        if model_config.is_anthropic_protocol(protocol):
             return await _call_anthropic(
                 messages,
                 api_key=api_key,
@@ -235,7 +243,7 @@ async def chat_completion(
                 max_tokens=max_tokens,
                 timeout=timeout,
             )
-        if "gemini" in protocol_lower or "google" in protocol_lower:
+        if model_config.is_gemini_protocol(protocol):
             return await _call_gemini(
                 messages,
                 api_key=api_key,

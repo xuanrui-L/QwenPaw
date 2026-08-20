@@ -116,3 +116,30 @@ def test_vlm_chat_url_uses_anthropic_path_for_minimax_protocol(
         )
     finally:
         config.reset_request_tool_configs(token)
+
+
+def test_vlm_chat_url_uses_generate_content_for_gemini_protocol(
+    monkeypatch,
+) -> None:
+    _clear_vlm_env(monkeypatch)
+    monkeypatch.setattr(config, "get_text_api_key", lambda: "text-key")
+    monkeypatch.setattr(
+        config,
+        "get_text_base_url",
+        lambda: "https://generativelanguage.googleapis.com",
+    )
+    monkeypatch.setattr(
+        config,
+        "get_text_model_name",
+        lambda: "gemini-2.5-pro",
+    )
+    monkeypatch.setattr(config, "get_text_protocol", lambda: "Google Gemini")
+    token = config.set_request_tool_configs({})
+    try:
+        assert config.get_vlm_protocol() == "Google Gemini"
+        assert config.get_vlm_chat_url() == (
+            "https://generativelanguage.googleapis.com"
+            "/v1beta/models/gemini-2.5-pro:generateContent"
+        )
+    finally:
+        config.reset_request_tool_configs(token)

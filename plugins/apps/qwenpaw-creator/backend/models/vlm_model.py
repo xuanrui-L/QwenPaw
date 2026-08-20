@@ -17,7 +17,9 @@ Supports three API protocols:
   Images use ``image`` content blocks with a ``source`` object; videos are
   not supported by the Anthropic Messages API.
 * Google Gemini (``/v1beta/models/{model}:generateContent``) — Google
-  Gemini. Media uses ``inline_data`` parts.
+  Gemini. Media uses ``inline_data`` parts; remote media is downloaded
+  and inlined because Gemini's ``file_data.file_uri`` only accepts
+  Files API / GCS resources, not arbitrary public URLs.
 """
 
 from __future__ import annotations
@@ -223,25 +225,57 @@ async def _transport_local_media_part(
 
 
 # ── Protocol helpers ─────────────────────────────────────────────────────────
-
-
-def _is_anthropic_protocol(protocol: str) -> bool:
-    lower = protocol.casefold()
-    return "anthropic" in lower or "minimax" in lower
-
-
-def _is_gemini_protocol(protocol: str) -> bool:
-    lower = protocol.casefold()
-    return "gemini" in lower or "google" in lower
+# Protocol classification lives in ``models.config`` so every module agrees
+# on which gateway speaks which wire format.
 
 
 def _vlm_url(base_url: str, protocol: str, model_name: str) -> str:
-    base = base_url.rstrip("/")
-    if _is_anthropic_protocol(protocol):
-        return f"{base}/v1/messages"
-    if _is_gemini_protocol(protocol):
-        return f"{base}/v1beta/models/{model_name}:generateContent"
-    return f"{base}/chat/completions"
+    return model_config.chat_url_for(base_url, protocol, model_name)
+
+
+def _is_gemini_file_uri(url: str) -> bool:
+    """True for URIs the Gemini ``file_data.file_uri`` field accepts.
+
+    Only Files API resources and GCS URIs are valid; arbitrary public
+    URLs are rejected by the API with INVALID_ARGUMENT.
+    """
+    return (
+        url.startswith("gs://") or "generativelanguage.googleapis.com" in url
+    )
+
+
+async def _download_remote_media(
+    url: str,
+    fallback_mime: str,
+    timeout: float,
+) -> tuple[str, str]:
+    """Download a remote media URL and return ``(mime_type, base64_data)``.
+
+    Gemini only accepts inline media or Files API resources, so remote
+    references must be downloaded and inlined before the request.
+    """
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        data = response.content
+    max_bytes = model_config.get_vlm_max_inline_bytes()
+    if len(data) > max_bytes:
+        raise ModelError(
+            f"VLM remote media inline size limit exceeded: {url} is "
+            f"{len(data)} bytes, limit is {max_bytes}",
+        )
+    content_type = (
+        (response.headers.get("Content-Type") or "").split(";")[0].strip()
+    )
+    mime = (
+        content_type
+        if content_type.startswith(("image/", "video/"))
+        else mimetypes.guess_type(urlparse(url).path)[0] or fallback_mime
+    )
+    return mime, base64.b64encode(data).decode("utf-8")
 
 
 # ── Response parsers ─────────────────────────────────────────────────────────
@@ -404,14 +438,29 @@ def _convert_to_gemini_content(
                     },
                 )
             else:
-                result.append(
-                    {
-                        "file_data": {
-                            "mime_type": "image/png",
-                            "file_uri": url,
+                # ``file_uri`` only accepts Files API resources
+                # (``https://generativelanguage.googleapis.com/v1beta/files/…``)
+                # or ``gs://`` URIs. ``_call_gemini_vlm`` downloads and
+                # inlines every other remote URL before conversion, so any
+                # plain URL reaching here is a programming error.
+                if _is_gemini_file_uri(url):
+                    result.append(
+                        {
+                            "file_data": {
+                                "mime_type": (
+                                    "video/mp4"
+                                    if part_type == "video_url"
+                                    else "image/png"
+                                ),
+                                "file_uri": url,
+                            },
                         },
-                    },
-                )
+                    )
+                else:
+                    raise ModelError(
+                        f"Gemini cannot reference remote media directly: {url}. "
+                        "Media must be inlined before conversion.",
+                    )
         elif part_type == "video_url":
             video_obj = part.get("video_url") or {}
             url = str(video_obj.get("url") or "")
@@ -428,14 +477,20 @@ def _convert_to_gemini_content(
                     },
                 )
             else:
-                result.append(
-                    {
-                        "file_data": {
-                            "mime_type": "video/mp4",
-                            "file_uri": url,
+                if _is_gemini_file_uri(url):
+                    result.append(
+                        {
+                            "file_data": {
+                                "mime_type": "video/mp4",
+                                "file_uri": url,
+                            },
                         },
-                    },
-                )
+                    )
+                else:
+                    raise ModelError(
+                        f"Gemini cannot reference remote media directly: {url}. "
+                        "Media must be inlined before conversion.",
+                    )
         else:
             result.append({"text": str(part)})
     return result
@@ -460,7 +515,10 @@ async def chat_completion(
     base_url = base_url_override or model_config.get_vlm_base_url()
     model_name = model_name_override or model_config.get_vlm_model_name()
     protocol = model_config.get_vlm_protocol()
-    if not api_key:
+    # Anthropic and Gemini gateways always authenticate; OpenAI-compatible
+    # gateways may serve free keyless models (e.g. OpenCode Zen), so an
+    # empty key is only an error for protocols that require one.
+    if not api_key and model_config.protocol_requires_api_key(protocol):
         raise ModelError(
             "creator_vlm_model.api_key, VLM_API_KEY, DASHSCOPE_API_KEY, or TEXT_API_KEY is required",
             model_name=model_name,
@@ -502,7 +560,7 @@ async def chat_completion(
     )
 
     try:
-        if _is_anthropic_protocol(protocol):
+        if model_config.is_anthropic_protocol(protocol):
             payload = await _call_anthropic_vlm(
                 content,
                 system_prompt=system_prompt,
@@ -513,7 +571,7 @@ async def chat_completion(
                 base_url=base_url,
                 model_name=model_name,
             )
-        elif _is_gemini_protocol(protocol):
+        elif model_config.is_gemini_protocol(protocol):
             payload = await _call_gemini_vlm(
                 content,
                 system_prompt=system_prompt,
@@ -580,18 +638,18 @@ async def chat_completion(
 
     elapsed = time.perf_counter() - start_ts
     # Parse response based on protocol
-    if _is_anthropic_protocol(protocol):
+    if model_config.is_anthropic_protocol(protocol):
         content_text = _parse_anthropic_response(payload, model_name)
-    elif _is_gemini_protocol(protocol):
+    elif model_config.is_gemini_protocol(protocol):
         content_text = _parse_gemini_response(payload, model_name)
     else:
         content_text = _parse_openai_response(payload, model_name)
 
     finish_reason = ""
     if isinstance(payload, dict):
-        if _is_anthropic_protocol(protocol):
+        if model_config.is_anthropic_protocol(protocol):
             finish_reason = str(payload.get("stop_reason") or "")
-        elif _is_gemini_protocol(protocol):
+        elif model_config.is_gemini_protocol(protocol):
             candidates = payload.get("candidates") or []
             if candidates and isinstance(candidates[0], dict):
                 finish_reason = str(candidates[0].get("finishReason") or "")
@@ -651,19 +709,24 @@ async def _call_openai_vlm(
         "max_tokens": max_tokens,
         "enable_thinking": False,
     }
+    headers: dict = {
+        "Content-Type": "application/json",
+        **(
+            {"X-DashScope-OssResourceResolve": "enable"}
+            if uses_temp_oss
+            else {}
+        ),
+    }
+    # Free-tier gateways (e.g. OpenCode Zen ``*-free``) accept requests
+    # without an Authorization header; an empty Bearer value would be
+    # rejected as an invalid key.
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with model_slot("vlm"):
             response = await client.post(
                 f"{base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    **(
-                        {"X-DashScope-OssResourceResolve": "enable"}
-                        if uses_temp_oss
-                        else {}
-                    ),
-                },
+                headers=headers,
                 json=body,
             )
     response.raise_for_status()
@@ -727,15 +790,17 @@ async def _call_anthropic_vlm(
     if temperature > 0:
         body["temperature"] = temperature
 
+    headers: dict = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    if api_key:
+        headers["x-api-key"] = api_key
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with model_slot("vlm"):
             response = await client.post(
                 f"{base_url.rstrip('/')}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01",
-                },
+                headers=headers,
                 json=body,
             )
     response.raise_for_status()
@@ -754,7 +819,9 @@ async def _call_gemini_vlm(
     model_name: str,
 ) -> dict:
     """Google Gemini VLM request."""
-    # Transport local media to inline base64 for Gemini format
+    # Transport local and remote media to inline base64 for Gemini format.
+    # ``file_uri`` only accepts Files API / GCS resources, so remote URLs
+    # are downloaded and inlined here.
     provider_content: list[dict] = []
     for item in content:
         normalized = dict(item)
@@ -764,26 +831,38 @@ async def _call_gemini_vlm(
         if part_type in ("image_url", "video_url"):
             media_obj = normalized.get(part_type) or {}
             url = str(media_obj.get("url") or "")
+            fallback = "video/mp4" if part_type == "video_url" else "image/png"
             local_path = _local_path_from_url(url)
             if local_path is not None:
-                fallback = (
-                    "video/mp4" if part_type == "video_url" else "image/png"
-                )
                 mime, b64_data = await asyncio.to_thread(
                     _inline_base64,
                     local_path,
                     fallback,
                 )
-                if part_type == "image_url":
-                    normalized = {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{b64_data}"},
-                    }
-                else:
-                    normalized = {
-                        "type": "video_url",
-                        "video_url": {"url": f"data:{mime};base64,{b64_data}"},
-                    }
+                normalized = {
+                    "type": part_type,
+                    part_type: {"url": f"data:{mime};base64,{b64_data}"},
+                }
+            elif (
+                url
+                and not url.startswith("data:")
+                and not _is_gemini_file_uri(url)
+            ):
+                try:
+                    mime, b64_data = await _download_remote_media(
+                        url,
+                        fallback,
+                        timeout,
+                    )
+                except httpx.HTTPError as exc:
+                    raise ModelError(
+                        f"VLM remote media download failed for {url}: {exc}",
+                        model_name=model_name,
+                    ) from exc
+                normalized = {
+                    "type": part_type,
+                    part_type: {"url": f"data:{mime};base64,{b64_data}"},
+                }
         provider_content.append(normalized)
 
     gemini_parts = _convert_to_gemini_content(provider_content)
@@ -800,8 +879,9 @@ async def _call_gemini_vlm(
         body["generationConfig"]["temperature"] = temperature
 
     url = f"{base_url.rstrip('/')}/v1beta/models/{model_name}:generateContent"
-    sep = "&" if "?" in url else "?"
-    url = f"{url}{sep}key={api_key}"
+    if api_key:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}key={api_key}"
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with model_slot("vlm"):

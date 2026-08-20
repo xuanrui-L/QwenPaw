@@ -900,7 +900,14 @@ export default function ModelConfigModal({ open, onClose }: Props) {
 
   const loadConfig = useCallback(async () => {
     try {
-      const data = await getModelConfig();
+      // Await the shared host-provider fetch so dynamically merged
+      // protocols (e.g. OpenCode) are not mistaken for legacy unknown
+      // values and reset below.
+      const [data, providers] = await Promise.all([
+        getModelConfig(),
+        getHostProviders(),
+      ]);
+      const knownHostProtocols = new Set(providers.map((p) => p.name));
       const receivedGrounding = data.grounding as Partial<GroundingConfig>;
       const validationSource =
         receivedGrounding.validation_source ??
@@ -936,7 +943,10 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           ...data.selfReview,
         },
       };
-      if (!VLM_PROTOCOLS.includes(merged.vlm.protocol))
+      if (
+        !VLM_PROTOCOLS.includes(merged.vlm.protocol) &&
+        !knownHostProtocols.has(merged.vlm.protocol)
+      )
         merged.vlm.protocol = VLM_PROTOCOLS[0];
       if (!ASR_PROTOCOLS.includes(merged.asr.protocol))
         merged.asr.protocol = ASR_PROTOCOLS[0];
