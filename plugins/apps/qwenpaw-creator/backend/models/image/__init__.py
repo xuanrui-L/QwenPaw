@@ -20,6 +20,10 @@ from urllib.parse import urlsplit
 from models.image.base import BaseImageModel
 from models.image.openai_provider import OpenAIImageModel
 from models.image.dashscope_provider import DashScopeImageModel
+from models.image.gemini_provider import GeminiImageModel
+from models.image.ark_provider import ArkImageModel
+from models.image.bfl_provider import BFLImageModel
+from models.image.ideogram_provider import IdeogramImageModel
 from models import config as model_config
 from utils.logger import setup_logger
 
@@ -29,6 +33,10 @@ __all__ = [
     "BaseImageModel",
     "OpenAIImageModel",
     "DashScopeImageModel",
+    "GeminiImageModel",
+    "ArkImageModel",
+    "BFLImageModel",
+    "IdeogramImageModel",
     "get_image_backend",
     "get_image_model",
     "generate_image",
@@ -39,6 +47,10 @@ __all__ = [
 _PROVIDERS: dict[str, type[BaseImageModel]] = {
     "OPENAI": OpenAIImageModel,
     "DASHSCOPE": DashScopeImageModel,
+    "GEMINI": GeminiImageModel,
+    "ARK": ArkImageModel,
+    "BFL": BFLImageModel,
+    "IDEOGRAM": IdeogramImageModel,
 }
 
 
@@ -59,8 +71,31 @@ def _is_maas_endpoint(base_url: str) -> bool:
     )
 
 
+def _detect_backend_from_names(model_name: str, base_url: str) -> str | None:
+    """Model-name / host based backend detection shared by the persisted
+    config and env fallbacks. Returns ``None`` when nothing matches."""
+
+    if model_name.startswith("gemini") or "generativelanguage" in base_url:
+        return "GEMINI"
+    if "seedream" in model_name or "volces.com" in base_url:
+        return "ARK"
+    if model_name.startswith("flux") or "bfl.ai" in base_url:
+        return "BFL"
+    if model_name.startswith("ideogram") or "ideogram.ai" in base_url:
+        return "IDEOGRAM"
+    if (
+        model_name.startswith("qwen-image")
+        or "multimodal-generation" in base_url
+        or "dashscope" in base_url
+        or _is_maas_endpoint(base_url)
+    ):
+        return "DASHSCOPE"
+    return None
+
+
 def get_image_backend() -> str:
-    """Return the active image provider switch (DASHSCOPE / OPENAI).
+    """Return the active image provider switch (DASHSCOPE / OPENAI / GEMINI /
+    ARK / BFL / IDEOGRAM).
     Priority: request-scoped Tool Config > env var > persisted model_config.json > default.
 
     The persisted-config fallback matters for background workers (specialist
@@ -85,38 +120,54 @@ def get_image_backend() -> str:
     logger.info("Image backend user_cfg: %s", user_cfg)
     if isinstance(user_cfg, dict) and user_cfg.get("enabled"):
         protocol = str(user_cfg.get("protocol") or "").casefold()
-        if "dashscope" in protocol or "百炼" in protocol:
-            logger.info("Image backend from protocol dashscope: DASHSCOPE")
-            return "DASHSCOPE"
-        if "token plan" in protocol or "tokenplan" in protocol:
-            logger.info("Image backend from protocol token plan: DASHSCOPE")
-            return "DASHSCOPE"
-        if "openai" in protocol:
-            logger.info("Image backend from protocol openai: OPENAI")
-            return "OPENAI"
+        protocol_backend = _backend_for_protocol(protocol)
+        if protocol_backend is not None:
+            logger.info(
+                "Image backend from protocol %s: %s",
+                protocol,
+                protocol_backend,
+            )
+            return protocol_backend
         model_name = str(user_cfg.get("model_name") or "").casefold()
         base_url = str(user_cfg.get("base_url") or "").casefold()
-        if (
-            model_name.startswith("qwen-image")
-            or "multimodal-generation" in base_url
-            or "dashscope" in base_url
-            or _is_maas_endpoint(base_url)
-        ):
-            logger.info("Image backend from model_name/base_url: DASHSCOPE")
-            return "DASHSCOPE"
+        detected = _detect_backend_from_names(model_name, base_url)
+        if detected is not None:
+            logger.info(
+                "Image backend from model_name/base_url: %s",
+                detected,
+            )
+            return detected
     model_name = os.environ.get("IMAGE_MODEL_NAME", "").casefold()
     base_url = os.environ.get("IMAGE_BASE_URL", "").casefold()
-    if (
-        os.environ.get("DASHSCOPE_IMAGE_API_KEY")
-        or model_name.startswith("qwen-image")
-        or "multimodal-generation" in base_url
-        or "dashscope" in base_url
-        or _is_maas_endpoint(base_url)
-    ):
+    if os.environ.get("DASHSCOPE_IMAGE_API_KEY"):
         logger.info("Image backend from env fallback: DASHSCOPE")
         return "DASHSCOPE"
+    detected = _detect_backend_from_names(model_name, base_url)
+    if detected is not None:
+        logger.info("Image backend from env fallback: %s", detected)
+        return detected
     logger.info("Image backend default: OPENAI")
     return "OPENAI"
+
+
+def _backend_for_protocol(protocol: str) -> str | None:
+    """Map a persisted protocol label onto a provider switch."""
+
+    if "dashscope" in protocol or "百炼" in protocol:
+        return "DASHSCOPE"
+    if "token plan" in protocol or "tokenplan" in protocol:
+        return "DASHSCOPE"
+    if "gemini" in protocol:
+        return "GEMINI"
+    if "volcano" in protocol or "火山" in protocol or "ark" in protocol:
+        return "ARK"
+    if "flux" in protocol or "black forest" in protocol or "bfl" in protocol:
+        return "BFL"
+    if "ideogram" in protocol:
+        return "IDEOGRAM"
+    if "openai" in protocol:
+        return "OPENAI"
+    return None
 
 
 def get_image_model() -> BaseImageModel:

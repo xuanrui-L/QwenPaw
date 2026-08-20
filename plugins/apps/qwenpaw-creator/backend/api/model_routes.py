@@ -729,6 +729,42 @@ def _ensure_grounding_model_configured(data: ModelConfigData) -> None:
         )
 
 
+def _image_backend_for_protocol(protocol: str) -> str:
+    """Map the persisted image protocol label onto a provider switch."""
+
+    lowered = protocol.casefold()
+    if (
+        "dashscope" in lowered
+        or "百炼" in protocol
+        or "token plan" in lowered
+        or "tokenplan" in lowered
+    ):
+        return "DASHSCOPE"
+    if "gemini" in lowered:
+        return "GEMINI"
+    if "volcano" in lowered or "火山" in protocol or "ark" in lowered:
+        return "ARK"
+    if "flux" in lowered or "black forest" in lowered or "bfl" in lowered:
+        return "BFL"
+    if "ideogram" in lowered:
+        return "IDEOGRAM"
+    if "openai" in lowered:
+        return "OPENAI"
+    return ""
+
+
+def _video_backend_for_protocol(protocol: str) -> str:
+    """Map the persisted video protocol label onto a transport backend.
+
+    Delegates to the shared mapping in ``models.config`` so the
+    request-scoped value and every fallback resolve the channel from the
+    same user configuration rule (Bailian hosting vs official Kling/Vidu
+    channels, Volcano Engine, Google Gemini, MiniMax).
+    """
+
+    return model_config.video_backend_for_protocol(protocol) or "wan"
+
+
 def request_tool_configs() -> dict[str, dict[str, Any]]:
     data = load_model_config()
     configs: dict[str, dict[str, Any]] = {}
@@ -766,16 +802,15 @@ def request_tool_configs() -> dict[str, dict[str, Any]]:
                     "reuse_llm_key": item.reuse_llm_key,
                 },
             )
-        if section == "image" and "dashscope" in item.protocol.casefold():
-            tool_config["_image_backend"] = "DASHSCOPE"
+        if section == "image":
+            image_backend = _image_backend_for_protocol(item.protocol)
+            if image_backend:
+                tool_config["_image_backend"] = image_backend
         if section == "image" and item.translate_model:
             tool_config["translate_model"] = item.translate_model
         if section == "video":
-            tool_config["_video_backend"] = (
-                "seedance2"
-                if "volcano" in item.protocol.casefold()
-                or "火山" in item.protocol
-                else "wan"
+            tool_config["_video_backend"] = _video_backend_for_protocol(
+                item.protocol,
             )
         configs[tool_name] = tool_config
     grounding = data.grounding

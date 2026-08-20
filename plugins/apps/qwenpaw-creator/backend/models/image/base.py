@@ -68,6 +68,14 @@ _OPENAI_IMAGE_DOCUMENTATION = (
     "https://github.com/openai/openai-python/blob/main/"
     "src/openai/types/image_edit_params.py"
 )
+_GEMINI_IMAGE_DOCUMENTATION = (
+    "https://ai.google.dev/gemini-api/docs/image-generation"
+)
+_ARK_SEEDREAM_DOCUMENTATION = "https://www.volcengine.com/docs/82379/1541523"
+_BFL_FLUX_DOCUMENTATION = "https://docs.bfl.ai"
+_IDEOGRAM_DOCUMENTATION = (
+    "https://developer.ideogram.ai/api-reference/api-reference/generate-v3"
+)
 
 # These are input-reference limits, not the number of generated outputs.
 # Keep the table closed over model families documented by the two providers
@@ -143,6 +151,99 @@ _REFERENCE_CAPABILITIES = (
             "openai-dall-e-3",
             0,
             _OPENAI_IMAGE_DOCUMENTATION,
+        ),
+    ),
+    # Google Gemini image generation (Nano Banana family). The official
+    # guide caps the total reference input at 14 images for the Gemini 3
+    # generation (3 Pro: 6 objects + 5 characters + 3 style; 3.1 Flash:
+    # 10 objects + 4 characters), while gemini-2.5-flash-image "works
+    # best with up to 3 images as input".
+    (
+        re.compile(
+            r"^gemini-3-pro-image(?:-preview)?$",
+            re.IGNORECASE,
+        ),
+        ImageReferenceCapability(
+            "gemini-3-pro-image",
+            14,
+            _GEMINI_IMAGE_DOCUMENTATION,
+        ),
+    ),
+    (
+        re.compile(
+            r"^gemini-3\.1-flash(?:-lite)?-image(?:-preview)?$",
+            re.IGNORECASE,
+        ),
+        ImageReferenceCapability(
+            "gemini-3.1-flash-image",
+            14,
+            _GEMINI_IMAGE_DOCUMENTATION,
+        ),
+    ),
+    (
+        re.compile(r"^gemini-2\.5-flash-image(?:-preview)?$", re.IGNORECASE),
+        ImageReferenceCapability(
+            "gemini-2.5-flash-image",
+            3,
+            _GEMINI_IMAGE_DOCUMENTATION,
+        ),
+    ),
+    # Volcengine Ark Doubao-Seedream: 5.0 pro accepts 1-10 reference
+    # images, 5.0 lite / 4.5 / 4.0 accept 1-14 (official "model
+    # capability" table on the images/generations API reference).
+    (
+        re.compile(
+            r"^doubao-seedream-5[.-]0-pro(?:-\d{6})?$",
+            re.IGNORECASE,
+        ),
+        ImageReferenceCapability(
+            "doubao-seedream-5.0-pro",
+            10,
+            _ARK_SEEDREAM_DOCUMENTATION,
+        ),
+    ),
+    (
+        re.compile(
+            r"^doubao-seedream-(?:5[.-]0-lite|4[.-]5|4[.-]0)(?:-\d{6})?$",
+            re.IGNORECASE,
+        ),
+        ImageReferenceCapability(
+            "doubao-seedream-5.0-lite/4.5/4.0",
+            14,
+            _ARK_SEEDREAM_DOCUMENTATION,
+        ),
+    ),
+    # BFL FLUX.2 family: up to 8 reference images via the API
+    # (input_image .. input_image_8).
+    (
+        re.compile(
+            r"^flux-2-(?:pro|max|flex|pro-preview|klein-9b|klein-4b)$",
+            re.IGNORECASE,
+        ),
+        ImageReferenceCapability(
+            "bfl-flux-2",
+            8,
+            _BFL_FLUX_DOCUMENTATION,
+        ),
+    ),
+    # Ideogram: the v3 generate endpoint accepts exactly 1
+    # character_reference_images file; the v4 generate endpoint documents
+    # no reference-image field at all (text-to-image only).
+    (
+        re.compile(r"^ideogram-v3$", re.IGNORECASE),
+        ImageReferenceCapability(
+            "ideogram-v3",
+            1,
+            _IDEOGRAM_DOCUMENTATION,
+        ),
+    ),
+    (
+        re.compile(r"^ideogram-v4$", re.IGNORECASE),
+        ImageReferenceCapability(
+            "ideogram-v4",
+            0,
+            "https://developer.ideogram.ai/api-reference/"
+            "api-reference/generate-v4",
         ),
     ),
 )

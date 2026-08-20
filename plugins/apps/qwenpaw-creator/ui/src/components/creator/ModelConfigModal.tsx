@@ -244,6 +244,47 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
     base_url: "https://api.openai.com/v1",
     models: ["gpt-image-2"],
   },
+  "Google Gemini": {
+    base_url: "https://generativelanguage.googleapis.com/v1beta",
+    // Nano Banana family via generateContent. gemini-3-pro-image accepts
+    // up to 14 reference images (6 objects + 5 characters + 3 style);
+    // gemini-2.5-flash-image works best with at most 3 references.
+    models: [
+      "gemini-3-pro-image",
+      "gemini-3.1-flash-image",
+      "gemini-3.1-flash-lite-image",
+      "gemini-2.5-flash-image",
+    ],
+  },
+  "Volcano Engine（火山引擎）": {
+    base_url: "https://ark.cn-beijing.volces.com",
+    // Ark images/generations (synchronous). Seedream 5.0 pro accepts up
+    // to 10 reference images; 5.0 lite / 4.5 / 4.0 accept up to 14.
+    models: [
+      "doubao-seedream-5-0-pro-260628",
+      "doubao-seedream-5-0-lite-260128",
+      "doubao-seedream-4-5-251128",
+      "doubao-seedream-4-0-250828",
+    ],
+  },
+  "Black Forest Labs（FLUX）": {
+    base_url: "https://api.bfl.ai",
+    // FLUX.2 create-then-poll API; up to 8 reference images
+    // (input_image .. input_image_8).
+    models: [
+      "flux-2-pro",
+      "flux-2-max",
+      "flux-2-flex",
+      "flux-2-klein-9b",
+      "flux-2-klein-4b",
+    ],
+  },
+  Ideogram: {
+    base_url: "https://api.ideogram.ai",
+    // ideogram-v3 exposes aspect_ratio and one character reference; the
+    // v4 generate endpoint documents neither, so it is text-to-image only.
+    models: ["ideogram-v3", "ideogram-v4"],
+  },
   "Aliyun Token Plan": {
     base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
     models: ["wan2.7-image-pro", "wan2.7-image"],
@@ -255,12 +296,68 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
     // Family base names: the backend derives the per-mode sibling
     // (wan2.7 → wan2.7-t2v/-i2v/-r2v) at submission, so no mode suffix
-    // is configured here.
-    models: ["wan2.7", "happyhorse-1.1"],
+    // is configured here. The kling/ and vidu/ entries are the
+    // Bailian-hosted third-party models served by the same
+    // video-synthesis endpoint (kling v3: t2v/i2v/refer≤7; vidu:
+    // reference-to-video only, 1-7 images).
+    models: [
+      "wan2.7",
+      "happyhorse-1.1",
+      "kling/kling-v3-omni-video-generation",
+      "kling/kling-v3-video-generation",
+      "vidu/viduq3-mix_reference2video",
+      "vidu/viduq3_reference2video",
+      "vidu/viduq3-turbo_reference2video",
+      "vidu/viduq3-ad_reference2video",
+      "vidu/viduq3-drama_reference2video",
+      "vidu/viduq2-pro_reference2video",
+      "vidu/viduq2_reference2video",
+    ],
   },
   "Volcano Engine（火山引擎）": {
     base_url: "https://ark.cn-beijing.volces.com",
-    models: ["doubao-seedance-2.0-pro", "doubao-seedance-2.0-lite"],
+    // Seedance 2.5 (doubao-seedance-2-5-260628) adds omni reference
+    // (up to 30 images + 10 videos) and 4-30s output.
+    models: [
+      "doubao-seedance-2-5-260628",
+      "doubao-seedance-2.0-pro",
+      "doubao-seedance-2.0-lite",
+    ],
+  },
+  "Google Gemini（Veo）": {
+    base_url: "https://generativelanguage.googleapis.com/v1beta",
+    // Veo 3.1 predictLongRunning: durations 4/6/8s (8s with references
+    // or 1080p/4k), up to 3 reference images; Lite has no references/4k.
+    models: [
+      "veo-3.1-generate-preview",
+      "veo-3.1-fast-generate-preview",
+      "veo-3.1-lite-generate-preview",
+    ],
+  },
+  "MiniMax（海螺）": {
+    base_url: "https://api.minimax.io",
+    // Hailuo: 768P at 6/10s, 1080P at 6s; S2V-01 is the only subject
+    // reference model (1 character image). China endpoint:
+    // https://api.minimaxi.com
+    models: [
+      "MiniMax-Hailuo-2.3",
+      "MiniMax-Hailuo-2.3-Fast",
+      "MiniMax-Hailuo-02",
+      "S2V-01",
+    ],
+  },
+  "Kling（可灵官方）": {
+    base_url: "https://api-singapore.klingai.com",
+    // Official channel (Bearer API Key). kling-3.0-omni serves reference
+    // generation (refer<=7, 3-15s, 720p/1080p/4k); kling-2.6 is t2v/i2v
+    // only (5s or 10s, 720p/1080p).
+    models: ["kling-3.0-omni", "kling-2.6"],
+  },
+  "Vidu（官方）": {
+    base_url: "https://api.vidu.com",
+    // Official reference2video channel (Token auth), 1-7 reference
+    // images; viduq2-pro additionally accepts reference videos.
+    models: ["viduq3-mix", "viduq3-turbo", "viduq3", "viduq2-pro", "viduq2"],
   },
   "Aliyun Token Plan": {
     base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",

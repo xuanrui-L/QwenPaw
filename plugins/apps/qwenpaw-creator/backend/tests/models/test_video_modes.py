@@ -192,14 +192,34 @@ def test_matrix_matches_the_finalized_plan() -> None:
         "video_edit",
     }
     assert VIDEO_MODE_MATRIX["wan"] == {"r2v", "t2v", "i2v"}
-    assert VIDEO_MODE_MATRIX["seedance2"] == {"r2v"}
+    # Seedance documents 文生视频/首帧/全模态参考, so t2v/i2v are exposed.
+    assert VIDEO_MODE_MATRIX["seedance2"] == {"r2v", "t2v", "i2v"}
+    assert VIDEO_MODE_MATRIX["veo"] == {"r2v", "t2v", "i2v"}
+    assert VIDEO_MODE_MATRIX["kling"] == {"r2v", "t2v", "i2v"}
+    assert VIDEO_MODE_MATRIX["minimax"] == {"r2v", "t2v", "i2v"}
+    # Vidu serves reference-to-video only on both channels.
+    assert VIDEO_MODE_MATRIX["vidu"] == {"r2v"}
 
 
 def test_backend_key_detection() -> None:
     assert video_backend_key("happyhorse-1.1-r2v") == "happyhorse"
     assert video_backend_key("wan2.7-r2v") == "wan"
     assert video_backend_key("doubao-seedance-2.0-pro") == "seedance2"
+    assert video_backend_key("doubao-seedance-2-5-260628") == "seedance2"
     assert video_backend_key("wan2.7-r2v", "seedance2") == "seedance2"
+    assert video_backend_key("veo-3.1-generate-preview") == "veo"
+    assert video_backend_key("MiniMax-Hailuo-2.3") == "minimax"
+    assert video_backend_key("S2V-01") == "minimax"
+    # Kling/Vidu map onto one family key regardless of the channel.
+    assert (
+        video_backend_key("kling/kling-v3-omni-video-generation", "wan")
+        == "kling"
+    )
+    assert video_backend_key("kling-3.0-omni", "kling") == "kling"
+    assert (
+        video_backend_key("vidu/viduq3-mix_reference2video", "wan") == "vidu"
+    )
+    assert video_backend_key("viduq3-mix", "vidu") == "vidu"
 
 
 def test_validate_video_mode_rejects_unsupported_pairs() -> None:
@@ -207,10 +227,14 @@ def test_validate_video_mode_rejects_unsupported_pairs() -> None:
         validate_video_mode("happyhorse", "hh", "video_edit") == "video_edit"
     )
     assert validate_video_mode("wan", "wan2.7-r2v", "") == "r2v"
+    assert (
+        validate_video_mode("seedance2", "doubao-seedance-2-5-260628", "t2v")
+        == "t2v"
+    )
     with pytest.raises(ValueError, match="不支持 mode=video_edit"):
         validate_video_mode("wan", "wan2.7-r2v", "video_edit")
     with pytest.raises(ValueError, match="不支持 mode=t2v"):
-        validate_video_mode("seedance2", "doubao-seedance-2.0-pro", "t2v")
+        validate_video_mode("vidu", "vidu/viduq3-mix_reference2video", "t2v")
     with pytest.raises(ValueError, match="未知的视频生成 mode"):
         validate_video_mode("wan", "wan2.7-r2v", "remix")
 
@@ -348,7 +372,112 @@ def test_guidance_describes_the_mode_matrix_per_model() -> None:
     assert "图片最多 9 张" in seedance
     assert "视频最多 3 个" in seedance
     assert "合计最多 12 个" in seedance
-    assert "不支持的 mode（t2v, i2v, video_edit）" in seedance
+    assert "不支持的 mode（video_edit）" in seedance
+
+    seedance_25 = video_model_prompt_guidance("doubao-seedance-2-5-260628")
+    assert "图片最多 30 张" in seedance_25
+    assert "[4, 30] 秒" in seedance_25
+
+    veo = video_model_prompt_guidance("veo-3.1-generate-preview")
+    assert "4/6/8 秒" in veo
+    assert "仅支持 1–3 张图片" in veo
+    veo_lite = video_model_prompt_guidance("veo-3.1-lite-generate-preview")
+    assert "官方不支持任何 r2v 参考素材" in veo_lite
+
+    # Kling guidance follows the configured channel's contract.
+    kling_bailian = video_model_prompt_guidance(
+        "kling/kling-v3-omni-video-generation",
+    )
+    assert "<<<image_N>>>" in kling_bailian
+    assert "图片最多 7 张" in kling_bailian
+    kling_direct = video_model_prompt_guidance("kling-3.0-omni")
+    assert "@image_N" in kling_direct
+    assert "720p/1080p/4k" in kling_direct
+
+    minimax = video_model_prompt_guidance("S2V-01")
+    assert "S2V-01" in minimax
+
+    vidu_bailian = video_model_prompt_guidance(
+        "vidu/viduq3-mix_reference2video",
+    )
+    assert "[1, 16] 秒" in vidu_bailian
+    assert "不支持的 mode（t2v, i2v, video_edit）" in vidu_bailian
+    vidu_direct = video_model_prompt_guidance("viduq3-mix")
+    assert "720p/1080p" in vidu_direct
+
+
+# ---------------------------------------------------------------------------
+# Backend channel selection follows the user configuration
+# ---------------------------------------------------------------------------
+
+
+def _bind_selection(monkeypatch, *, model="", base_url="", section=None):
+    monkeypatch.setattr(
+        model_config,
+        "get_request_tool_config",
+        lambda tool: {},
+    )
+    monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
+    monkeypatch.setattr(model_config, "get_video_base_url", lambda: base_url)
+    monkeypatch.setattr(
+        model_config,
+        "_get_user_config",
+        lambda: {"video": section or {}},
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected"),
+    [
+        ("DashScope（百炼）", "wan"),
+        ("Aliyun Token Plan", "wan"),
+        ("Volcano Engine（火山引擎）", "seedance2"),
+        ("Google Gemini（Veo）", "veo"),
+        ("MiniMax（海螺）", "minimax"),
+        ("Kling（可灵官方）", "kling"),
+        ("Vidu（官方）", "vidu"),
+    ],
+)
+def test_backend_follows_the_saved_protocol(
+    monkeypatch,
+    protocol,
+    expected,
+) -> None:
+    """The channel is the user's protocol choice, never the model name."""
+
+    _bind_selection(
+        monkeypatch,
+        # A Kling model name must not override the configured protocol.
+        model="kling-3.0-omni",
+        section={"enabled": True, "protocol": protocol},
+    )
+    assert model_config.get_video_backend() == expected
+
+
+def test_kling_and_vidu_names_do_not_select_a_channel(monkeypatch) -> None:
+    # Without a protocol, the configured endpoint host decides — and
+    # without either hint the DashScope default wins even for kling/vidu
+    # model names.
+    _bind_selection(
+        monkeypatch,
+        model="kling-3.0-omni",
+        base_url="https://api-singapore.klingai.com",
+    )
+    assert model_config.get_video_backend() == "kling"
+    _bind_selection(
+        monkeypatch,
+        model="viduq3-mix",
+        base_url="https://api.vidu.com",
+    )
+    assert model_config.get_video_backend() == "vidu"
+    _bind_selection(
+        monkeypatch,
+        model="kling/kling-v3-omni-video-generation",
+        base_url="https://dashscope.aliyuncs.com/api/v1",
+    )
+    assert model_config.get_video_backend() == "wan"
+    _bind_selection(monkeypatch, model="viduq3-mix", base_url="")
+    assert model_config.get_video_backend() == "wan"
 
 
 # ---------------------------------------------------------------------------

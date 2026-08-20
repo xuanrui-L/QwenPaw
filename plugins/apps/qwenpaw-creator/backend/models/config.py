@@ -1669,29 +1669,95 @@ def get_oss_public_base_url() -> str:
     return _first_env("OSS_PUBLIC_BASE_URL", "ALIYUN_OSS_PUBLIC_BASE_URL")
 
 
-def get_video_backend() -> str:  # pylint: disable=too-many-return-statements
+def video_backend_for_protocol(protocol: str) -> str | None:
+    """Map a saved protocol label onto a video transport backend.
+
+    Single source of truth for the channel choice: the UI protocol
+    selection decides the transport (notably Kling/Vidu, which exist both
+    as Bailian-hosted models on the DashScope protocol and as official
+    channels), so it is shared by the request-scoped mapping in
+    ``api.model_routes`` and the persisted-config fallback below.
+    Returns ``None`` when the label names no known protocol.
+    """
+    # pylint: disable=too-many-return-statements
+    if not protocol:
+        return None
+    lowered = protocol.casefold()
+    if "token plan" in lowered or "tokenplan" in lowered:
+        return "wan"
+    if "dashscope" in lowered or "百炼" in protocol:
+        return "wan"
+    if "volcano" in lowered or "火山" in protocol:
+        return "seedance2"
+    if "gemini" in lowered or "veo" in lowered:
+        return "veo"
+    if "minimax" in lowered or "海螺" in protocol:
+        return "minimax"
+    if "kling" in lowered or "可灵" in protocol:
+        return "kling"
+    if "vidu" in lowered:
+        return "vidu"
+    return None
+
+
+def get_video_backend() -> (
+    str
+):  # pylint: disable=too-many-return-statements,too-many-branches
     """Return the configured video backend protocol name.
-    Priority: request-scoped _video_backend (set by protocol) > heuristic.
+
+    Priority: request-scoped ``_video_backend`` (set from the saved
+    protocol) > the saved protocol label itself (request-scoped, then the
+    persisted config so background workers resolve identically) >
+    base_url / model-name heuristics for standalone env-var deployments.
+
+    The Kling/Vidu channel (Bailian hosting vs official API) is a user
+    configuration decision, so it is resolved from the protocol or the
+    endpoint host — never inferred from the model name.
     """
     tool_cfg = get_request_tool_config(CREATOR_VIDEO_CONFIG_TOOL)
     backend = tool_cfg.get("_video_backend")
     if backend:
         return backend.strip().lower()
-    protocol = str(tool_cfg.get("protocol") or "").casefold()
-    if "token plan" in protocol or "tokenplan" in protocol:
-        return "wan"
+    protocol_backend = video_backend_for_protocol(
+        str(tool_cfg.get("protocol") or ""),
+    )
+    if protocol_backend is not None:
+        return protocol_backend
+    # Persisted UI config: background workers run outside any HTTP request
+    # and have no request-scoped Tool Config bound; the saved protocol
+    # must select the same transport an in-request call would.
+    section = _get_user_config().get("video", {})
+    if isinstance(section, dict) and section.get("enabled"):
+        protocol_backend = video_backend_for_protocol(
+            str(section.get("protocol") or ""),
+        )
+        if protocol_backend is not None:
+            return protocol_backend
+    # Standalone/env fallbacks: the configured endpoint host decides the
+    # channel (still a user configuration choice, unlike the model name).
+    base_url = get_video_base_url().lower()
+    if "volcengine" in base_url:
+        return "seedance2"
+    if "generativelanguage" in base_url:
+        return "veo"
+    if "klingai" in base_url:
+        return "kling"
+    if "vidu.com" in base_url or "vidu.cn" in base_url:
+        return "vidu"
+    if "minimax" in base_url:
+        return "minimax"
+    # Last resort: model-name hints, only for families without any channel
+    # ambiguity. Kling/Vidu names never select a channel here — without a
+    # protocol or endpoint hint they stay on the DashScope default.
     model_name = get_video_model_name().lower()
     if "seedance" in model_name:
         return "seedance2"
-    # Bailian HappyHorse (e.g. happyhorse-1.1-r2v) shares the Wan DashScope
-    # async protocol; keep this explicit instead of relying on the "r2v"
-    # substring below.
-    if model_name.startswith("happyhorse"):
-        return "wan"
-    if model_name.startswith("wan") or "r2v" in model_name:
-        return "wan"
-    if "volcengine" in get_video_base_url().lower():
-        return "seedance2"
+    if model_name.startswith("veo"):
+        return "veo"
+    if "hailuo" in model_name or model_name.startswith(
+        ("minimax", "t2v-01", "i2v-01", "s2v-01"),
+    ):
+        return "minimax"
     return "wan"
 
 
@@ -1704,6 +1770,26 @@ def _validate_video_backend_url(backend: str, base: str) -> None:
     if backend == "wan" and "volcengine" in base_lower:
         raise ValueError(
             "VIDEO_MODEL_NAME selects Wan, but VIDEO_BASE_URL points to a Volcengine endpoint",
+        )
+    if backend == "veo" and "generativelanguage" not in base_lower:
+        raise ValueError(
+            "VIDEO_MODEL_NAME selects Veo (Gemini API), but VIDEO_BASE_URL "
+            "is not a generativelanguage.googleapis.com endpoint",
+        )
+    if backend == "minimax" and "minimax" not in base_lower:
+        raise ValueError(
+            "VIDEO_MODEL_NAME selects MiniMax, but VIDEO_BASE_URL is not a "
+            "MiniMax endpoint (api.minimax.io / api.minimaxi.com)",
+        )
+    if backend == "kling" and "klingai" not in base_lower:
+        raise ValueError(
+            "VIDEO_MODEL_NAME selects the official Kling channel, but "
+            "VIDEO_BASE_URL is not a klingai.com endpoint",
+        )
+    if backend == "vidu" and "vidu" not in base_lower:
+        raise ValueError(
+            "VIDEO_MODEL_NAME selects the official Vidu channel, but "
+            "VIDEO_BASE_URL is not a vidu.com endpoint",
         )
 
 
