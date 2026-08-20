@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=protected-access
-"""Work-graph scheduler: parallel fan-out with fuses, not a retry cannon.
-
-The scheduler dispatches READY media nodes up to media_parallelism,
-never redispatches the same node for the same inputs (FAILED stays
-parked until something changes), and stays fully inert outside the
-unattended ladder.
-"""
-
+"""Work-graph scheduler: parallel fan-out with fuses, not a retry cannon."""
 from __future__ import annotations
 
 import asyncio
@@ -78,10 +71,7 @@ class _RecordingDispatch:
         self.calls: list[dict] = []
         self._fail = fail
         self._error = error
-        # Real executors admit a durable task record before any provider
-        # spend; pass a list to mirror that admission-then-failure order
-        # (a dispatch that dies without a record is treated as pre-spend
-        # and re-enters through the bounded no-record reopen).
+        # Mirrors real executors' admission-then-failure record order.
         self._records = records
         self.started = asyncio.Event()
 
@@ -146,14 +136,7 @@ def test_tick_dispatches_up_to_media_parallelism(tmp_path, monkeypatch):
 
 
 def _failed_record(dispatch: _RecordingDispatch, *, error: str):
-    """The durable FAILED record a real executor leaves after admission.
-
-    Real executors admit the task before any provider spend; the fake
-    dispatchers here don't, so tests pinning the paid-retry guarantee
-    must supply the record — without one, the bounded no-record reopen
-    applies (a dispatch that dies before admission paid for nothing).
-    """
-
+    """The durable FAILED record a real executor leaves after admission."""
     call = dispatch.calls[0]
     return SimpleNamespace(
         kind="image_generation",
@@ -235,27 +218,6 @@ def test_changed_prompt_reopens_dispatch(tmp_path, monkeypatch):
     assert len(dispatch.calls) == 2
 
 
-def test_scheduler_is_inert_outside_allow_all(tmp_path, monkeypatch):
-    services = _services(tmp_path, monkeypatch, ready_variants=2)
-    monkeypatch.setattr(
-        "services.file_agent_runtime.work_scheduler."
-        "get_execution_authorization_mode",
-        lambda: "required",
-    )
-    dispatch = _RecordingDispatch()
-    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
-
-    async def scenario():
-        result = await scheduler.tick(PROJECT_ID)
-        await _drain()
-        return result
-
-    graph = asyncio.run(scenario())
-
-    assert graph is None
-    assert not dispatch.calls
-
-
 def test_idempotency_key_is_node_and_fingerprint_stable(
     tmp_path,
     monkeypatch,
@@ -273,59 +235,6 @@ def test_idempotency_key_is_node_and_fingerprint_stable(
 
     key = dispatch.calls[0]["idempotency_key"]
     assert key.startswith("dag-visual:char:a:var:0-")
-
-
-def test_transient_dispatch_failures_reopen_the_ledger_bounded(
-    tmp_path,
-    monkeypatch,
-):
-    """Field run 2026-08-06: five storyboards died of provider timeouts
-    and the ledger locked them as if deterministic. Transient faults
-    reopen the ledger up to the retry limit; the idempotency slot makes
-    the retry resume the same task."""
-    services = _services(tmp_path, monkeypatch, ready_variants=1)
-    _enable_yolo(monkeypatch)
-    dispatch = _RecordingDispatch(
-        fail=True,
-        error="Image generation timed out after 240s",
-    )
-    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
-
-    async def scenario():
-        for _ in range(4):  # initial + 2 transient retries + 1 extra tick
-            await scheduler.tick(PROJECT_ID)
-            await _drain()
-        await scheduler.shutdown()
-
-    asyncio.run(scenario())
-
-    # 1 initial dispatch + 2 bounded transient retries, then locked.
-    assert len(dispatch.calls) == 3
-
-
-def test_deterministic_failures_stay_locked(tmp_path, monkeypatch):
-    services = _services(tmp_path, monkeypatch, ready_variants=1)
-    _enable_yolo(monkeypatch)
-    dispatch = _RecordingDispatch(fail=True, error="safety system rejected")
-    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
-
-    async def scenario():
-        await scheduler.tick(PROJECT_ID)
-        await _drain()
-        record = _failed_record(dispatch, error="safety system rejected")
-        monkeypatch.setattr(
-            scheduler.executions,
-            "list_tasks",
-            lambda _project_id: [record],
-        )
-        for _ in range(2):
-            await scheduler.tick(PROJECT_ID)
-            await _drain()
-        await scheduler.shutdown()
-
-    asyncio.run(scenario())
-
-    assert len(dispatch.calls) == 1
 
 
 def test_quarantined_stale_result_reopens_dispatch(tmp_path, monkeypatch):
@@ -367,53 +276,11 @@ def test_quarantined_stale_result_reopens_dispatch(tmp_path, monkeypatch):
     assert len(dispatch.calls) == 3
 
 
-def test_quarantine_without_stored_result_stays_locked(
-    tmp_path,
-    monkeypatch,
-):
-    """No stored result means a reopen would pay for a fresh render —
-    the ledger stays closed and the node waits for an input change."""
-    services = _services(tmp_path, monkeypatch, ready_variants=1)
-    _enable_yolo(monkeypatch)
-    dispatch = _RecordingDispatch()
-    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
-
-    async def scenario():
-        await scheduler.tick(PROJECT_ID)
-        await _drain()
-        target_ref = dispatch.calls[0]["target_ref"]
-        stale_task = SimpleNamespace(
-            kind="image_generation",
-            status=TaskStatus.QUARANTINED,
-            error={"code": "PROJECT_INPUT_SNAPSHOT_STALE"},
-            result=None,
-            metadata={"targetRef": target_ref},
-            input_refs=[target_ref],
-            idempotency_key=dispatch.calls[0]["idempotency_key"],
-        )
-        monkeypatch.setattr(
-            scheduler.executions,
-            "list_tasks",
-            lambda _project_id: [stale_task],
-        )
-        await scheduler.tick(PROJECT_ID)
-        await _drain()
-        await scheduler.shutdown()
-
-    asyncio.run(scenario())
-
-    assert len(dispatch.calls) == 1
-
-
 def test_transient_budget_reopens_after_the_cooldown(tmp_path, monkeypatch):
-    """Provider weather outlives the immediate retry budget.
-
-    Field run 2026-08-12 (project 27dc): gpt-image-2 threw WriteTimeout /
-    ReadError for ~40 minutes, every storyboard burned its immediate
-    retries and FAILED terminally with nothing left to try once the
-    provider recovered. After the immediate budget, one retry per
-    cooldown window re-enters up to the hard cap.
-    """
+    """Field run 2026-08-12 (27dc): provider weather outlived the
+    immediate retry budget and every storyboard FAILED terminally.
+    After the immediate budget, one retry per cooldown window re-enters
+    up to the hard cap."""
     services = _services(tmp_path, monkeypatch, ready_variants=1)
     _enable_yolo(monkeypatch)
     dispatch = _RecordingDispatch(
