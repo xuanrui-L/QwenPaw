@@ -643,7 +643,7 @@ def mutate_model_config(
         # The self-review env-override report is response-only state and
         # must never land in the persisted file.
         updated_dict = updated.model_dump(
-            exclude={"self_review": {"env_overrides"}},
+            exclude={"self_review": {"env_overrides", "operator_status"}},
         )
         _encrypt_secret_fields(updated_dict)
 
@@ -1046,6 +1046,11 @@ async def get_model_config() -> ModelConfigData:
         for name, value in forced_review_env_overrides().items()
         if name in env_to_tier
     }
+    # Advanced per-operator resolution (user/auto + dependency probe);
+    # response-only, mirrors the env-override report above.
+    from services.run_review.operator_registry import operator_status_report
+
+    loaded.self_review.operator_status = operator_status_report()
     return _mask_secrets(loaded)
 
 
@@ -1362,21 +1367,51 @@ async def patch_self_review(
         if not isinstance(value, bool):
             raise ValidationError(f"{tier} 必须是布尔值")
         updates[tier] = value
-    unknown = set(data) - set(tier_keys)
+    operator_updates: dict[str, bool | None] | None = None
+    if "operators" in data:
+        raw_operators = data["operators"]
+        if not isinstance(raw_operators, dict):
+            raise ValidationError("operators 必须是对象")
+        from services.run_review.operator_registry import operator_keys
+
+        known = set(operator_keys())
+        unknown_ops = set(raw_operators) - known
+        if unknown_ops:
+            raise ValidationError(
+                f"不支持的算子: {', '.join(sorted(unknown_ops))}",
+            )
+        operator_updates = {}
+        for key, value in raw_operators.items():
+            # ``null`` restores the auto (能开尽开) resolution for one
+            # operator; booleans persist an explicit user choice.
+            if value is not None and not isinstance(value, bool):
+                raise ValidationError(f"operators.{key} 必须是布尔值或 null")
+            operator_updates[key] = value
+    unknown = set(data) - set(tier_keys) - {"operators"}
     if unknown:
         raise ValidationError(f"不支持的字段: {', '.join(sorted(unknown))}")
-    if not updates:
+    if not updates and operator_updates is None:
         raise ValidationError(
-            "至少提供 sync_enabled / media_enabled / render_enabled 之一",
+            "至少提供 sync_enabled / media_enabled / render_enabled / "
+            "operators 之一",
         )
 
     def mutate(current: ModelConfigData) -> ModelConfigData:
         merged = current.model_dump()
         section = dict(merged.get("self_review") or {})
         section.update(updates)
-        # Response-only state: the env-override report must never land in
-        # the persisted config file.
+        if operator_updates is not None:
+            operators = dict(section.get("operators") or {})
+            for key, value in operator_updates.items():
+                if value is None:
+                    operators.pop(key, None)
+                else:
+                    operators[key] = value
+            section["operators"] = operators
+        # Response-only state: the env-override / operator-status reports
+        # must never land in the persisted config file.
         section.pop("env_overrides", None)
+        section.pop("operator_status", None)
         merged["self_review"] = section
         try:
             return ModelConfigData.model_validate(merged)

@@ -135,6 +135,7 @@ def build_review_user_text(
     audio_profile: AudioProfile,
     video_duration_seconds: float | None,
     plan_context: Mapping[str, Any],
+    objective_facts: Mapping[str, Any] | None = None,
 ) -> str:
     """Compose the user turn text preceding the evidence frame images."""
     frame_lines = [
@@ -166,6 +167,16 @@ def build_review_user_text(
         + json.dumps(edit_plan, ensure_ascii=False),
         "【音频概要（ffmpeg ebur128）】\n"
         + json.dumps(audio_payload, ensure_ascii=False),
+    ]
+    if objective_facts:
+        # Tier-0 objective operators (APE-benchmark port): facts only —
+        # the preamble inside the block repeats the "hints, not verdicts"
+        # framing so the VLM folds them into row reasoning instead of
+        # copying them as findings.
+        from services.run_review.objective import render_facts_block
+
+        sections.append(render_facts_block(objective_facts))
+    sections += [
         "【证据帧时间戳（与随后附上的图片顺序一一对应）】\n" + "\n".join(frame_lines),
         "【八行检查要点】\n"
         + "\n".join(
@@ -306,17 +317,35 @@ def parse_review_report(
 
 
 def findings_feedback_payload(report: RenderReviewReport) -> dict[str, Any]:
-    """Structured findings payload injected into the next editing run."""
-    return {
+    """Structured findings payload injected into the next editing run.
+
+    Severity-weighted ordering (APE: major=2.0 / minor=1.0) is an
+    internal mechanism: the agent receives the reasoning entries
+    (evidence + suggestion) sorted most-damaging-first, never a score.
+    Confirmed near-miss challenges ride along; the eight-row findings
+    are always fully preserved (cap, don't erase).
+    """
+    ordered = sorted(
+        report.failed_findings(),
+        key=lambda item: 0 if item.severity == "major" else 1,
+    )
+    payload = {
         "type": "render_review_feedback",
         "video_ref": report.video_ref,
         "round": report.round,
         "max_rounds": MAX_REVIEW_ROUNDS,
         "verdict": report.verdict,
-        "findings": [
-            item.model_dump(mode="json") for item in report.failed_findings()
-        ],
+        "findings": [item.model_dump(mode="json") for item in ordered],
     }
+    confirmed = sorted(
+        report.confirmed_challenges(),
+        key=lambda item: 0 if item.severity == "major" else 1,
+    )
+    if confirmed:
+        payload["challenge_findings"] = [
+            item.model_dump(mode="json") for item in confirmed
+        ]
+    return payload
 
 
 __all__ = [

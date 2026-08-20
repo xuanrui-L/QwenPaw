@@ -31,7 +31,10 @@ from utils.logger import setup_logger
 logger = setup_logger("creator.run_review.text")
 
 _TRACE_COMPONENT = "run_review"
-_TEXT_MODEL_TIMEOUT_SECONDS = 60.0
+# Real-model observation (2026-08-20): the DogFooding proxy can take
+# >60s per text completion when the agent's own turn runs concurrently;
+# 60s produced spurious ReadTimeouts on the very first live commit.
+_TEXT_MODEL_TIMEOUT_SECONDS = 120.0
 _VALUE_CHAR_LIMIT = 2000
 _PAYLOAD_CHAR_LIMIT = 12000
 
@@ -200,6 +203,51 @@ async def _review_async(stage: str, payload_text: str) -> str:
     )
 
 
+async def _review_and_script(
+    stage: str,
+    payload_text: str,
+    strategy_payload: str,
+) -> tuple[str, dict[str, Any] | None]:
+    """Appeal review plus (for shots commits) the script-to-shots check.
+
+    The two calls run concurrently on the worker's private loop; the
+    script check is fail-open internally and never raises.
+    """
+    if not strategy_payload:
+        return await _review_async(stage, payload_text), None
+    from services.run_review.script_review import run_script_check
+
+    response, script_check = await asyncio.gather(
+        _review_async(stage, payload_text),
+        run_script_check(
+            strategy_payload=strategy_payload,
+            shots_payload=payload_text,
+        ),
+    )
+    return response, script_check
+
+
+def _script_check_enabled() -> bool:
+    from services.run_review.operator_registry import is_operator_enabled
+
+    return is_operator_enabled("script_check")
+
+
+def _strategy_payload(project_json: Mapping[str, Any]) -> str:
+    """Serialized creative strategy; empty when nothing is filled in."""
+    strategy = project_json.get("strategy")
+    if not isinstance(strategy, Mapping):
+        return ""
+    filled = {
+        key: value
+        for key, value in strategy.items()
+        if isinstance(value, str) and value.strip()
+    }
+    if not filled:
+        return ""
+    return json.dumps(filled, ensure_ascii=False)
+
+
 def maybe_sync_review(  # pylint: disable=too-many-return-statements
     *,
     project_id: str,
@@ -246,16 +294,40 @@ def maybe_sync_review(  # pylint: disable=too-many-return-statements
             # worker cannot block on one, so the advisory is skipped.
             logger.warning("sync review skipped: called on a running loop")
             return None
-        response = asyncio.run(_review_async(stage, payload_text))
+        response = asyncio.run(
+            _review_and_script(
+                stage,
+                payload_text,
+                # Script-to-shots check only reviews shot-list commits,
+                # needs a filled-in strategy to compare against, and is
+                # individually switchable in the self-review 高级配置.
+                (
+                    _strategy_payload(project_json)
+                    if group == "shots" and _script_check_enabled()
+                    else ""
+                ),
+            ),
+        )
+        response_text, script_check = response
         advisory = parse_sync_advisory(
-            response,
+            response_text,
             stage=stage,
             transaction_id=transaction_id,
             pointer_group=group,
             reviewed_pointers=matched,
             round_number=round_number,
         )
-        clean = not advisory.weak_scores()
+        from services.run_review.script_review import (
+            script_check_has_findings,
+        )
+
+        if script_check is not None:
+            advisory = advisory.model_copy(
+                update={"script_check": script_check},
+            )
+        clean = not advisory.weak_scores() and not script_check_has_findings(
+            script_check,
+        )
         admission.settle_sync_review(
             reports_root,
             pointer_group=group,
@@ -276,6 +348,7 @@ def maybe_sync_review(  # pylint: disable=too-many-return-statements
                 "stage": stage,
                 "round": round_number,
                 "clean": clean,
+                "scriptFindings": script_check_has_findings(script_check),
                 "transactionId": transaction_id,
             },
             projectId=project_id,

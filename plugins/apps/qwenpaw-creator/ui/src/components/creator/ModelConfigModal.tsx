@@ -8,6 +8,7 @@ import {
   Button,
   message,
   AutoComplete,
+  Tooltip,
 } from "antd";
 import { Brain } from "lucide-react";
 import {
@@ -527,6 +528,7 @@ const DEFAULT_CONFIG: ModelConfigData = {
     sync_enabled: false,
     media_enabled: false,
     render_enabled: false,
+    operators: {},
   },
 };
 
@@ -1274,7 +1276,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   // permission ladder’s failure handling.
   const saveSelfReview = useCallback(
     async (
-      tier: keyof ModelConfigData["selfReview"],
+      tier: "sync_enabled" | "media_enabled" | "render_enabled",
       value: boolean,
     ): Promise<void> => {
       const previous = config.selfReview;
@@ -1284,6 +1286,93 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       }));
       try {
         await patchSelfReview({ [tier]: value });
+      } catch (err) {
+        setConfig((prev) => ({ ...prev, selfReview: previous }));
+        message.error(
+          (err as Error).message || t("modelConfig.selfReviewSaveFailed"),
+        );
+      }
+    },
+    [config.selfReview],
+  );
+
+  // Persist one advanced operator switch (高级配置). ``null`` restores
+  // the auto (能开尽开) resolution; booleans record an explicit choice.
+  // Optimistic with rollback, and the read-only operatorStatus rows are
+  // re-derived locally so the badges track the toggle immediately.
+  const saveReviewOperator = useCallback(
+    async (key: string, value: boolean | null): Promise<void> => {
+      const previous = config.selfReview;
+      setConfig((prev) => {
+        const operators = { ...(prev.selfReview.operators ?? {}) };
+        if (value === null) {
+          delete operators[key];
+        } else {
+          operators[key] = value;
+        }
+        const operatorStatus = (prev.selfReview.operatorStatus ?? []).map(
+          (op) =>
+            op.key === key
+              ? {
+                  ...op,
+                  source: (value === null ? "auto" : "user") as "auto" | "user",
+                  enabled:
+                    value === null
+                      ? op.capability_ok || Boolean(op.degrades)
+                      : value,
+                }
+              : op,
+        );
+        return {
+          ...prev,
+          selfReview: { ...prev.selfReview, operators, operatorStatus },
+        };
+      });
+      try {
+        await patchSelfReview({ operators: { [key]: value } });
+      } catch (err) {
+        setConfig((prev) => ({ ...prev, selfReview: previous }));
+        message.error(
+          (err as Error).message || t("modelConfig.selfReviewSaveFailed"),
+        );
+      }
+    },
+    [config.selfReview],
+  );
+
+  // Restore a whole group of operators to the auto resolution in one
+  // PATCH. Restoration lives on the group header (a per-pill ⟳ marker
+  // read as a confusing “refresh” icon).
+  const restoreReviewOperators = useCallback(
+    async (keys: string[]): Promise<void> => {
+      if (keys.length === 0) {
+        return;
+      }
+      const previous = config.selfReview;
+      setConfig((prev) => {
+        const operators = { ...(prev.selfReview.operators ?? {}) };
+        for (const key of keys) {
+          delete operators[key];
+        }
+        const operatorStatus = (prev.selfReview.operatorStatus ?? []).map(
+          (op) =>
+            keys.includes(op.key)
+              ? {
+                  ...op,
+                  source: "auto" as const,
+                  enabled: op.capability_ok || Boolean(op.degrades),
+                }
+              : op,
+        );
+        return {
+          ...prev,
+          selfReview: { ...prev.selfReview, operators, operatorStatus },
+        };
+      });
+      try {
+        await patchSelfReview({
+          operators: Object.fromEntries(keys.map((key) => [key, null])),
+        });
       } catch (err) {
         setConfig((prev) => ({ ...prev, selfReview: previous }));
         message.error(
@@ -4007,6 +4096,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   ready: llmOk,
                   depType: "llm" as TabType,
                   depLabel: "LLM",
+                  opTiers: [1],
                 },
                 {
                   key: "media_enabled" as const,
@@ -4019,6 +4109,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   ready: vlmOk,
                   depType: "vlm" as TabType,
                   depLabel: "VLM",
+                  // Tier-0 objective operators feed the media review's
+                  // evidence chain, so they are managed under this card.
+                  opTiers: [0, 2],
                 },
                 {
                   key: "render_enabled" as const,
@@ -4031,6 +4124,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                   ready: vlmOk,
                   depType: "vlm" as TabType,
                   depLabel: "VLM",
+                  opTiers: [3],
                 },
               ];
               return (
@@ -4254,6 +4348,251 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                           <span className="thumb" />
                         </label>
                       </div>
+                      {(() => {
+                        // Advanced per-operator switches (高级配置): every
+                        // check is one “lit” pill — click toggles it, the
+                        // trailing i / ! badge explains it in plain words
+                        // on hover. Pills only respond while their tier
+                        // switch is on; otherwise the whole wall greys out.
+                        const ops = (
+                          config.selfReview.operatorStatus ?? []
+                        ).filter((op) => tier.opTiers.includes(op.tier));
+                        if (ops.length === 0) {
+                          return null;
+                        }
+                        const envRaw =
+                          config.selfReview.envOverrides?.[tier.key];
+                        const tierEnabled =
+                          tier.ready &&
+                          (envRaw !== undefined
+                            ? ["1", "true", "yes", "on"].includes(
+                                envRaw.toLowerCase(),
+                              )
+                            : config.selfReview[tier.key]);
+                        const manualKeys = ops
+                          .filter((op) => op.source === "user")
+                          .map((op) => op.key);
+                        return (
+                          <div style={{ marginTop: 10 }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 6,
+                                fontSize: 11.5,
+                                color: "var(--color-text-secondary)",
+                                marginBottom: 6,
+                              }}
+                            >
+                              {t("modelConfig.reviewOpsTitle", {
+                                count: ops.filter((op) => op.enabled).length,
+                                total: ops.length,
+                              })}
+                              <Tooltip
+                                title={
+                                  <div
+                                    style={{
+                                      maxWidth: 280,
+                                      fontSize: 12,
+                                      lineHeight: 1.6,
+                                    }}
+                                  >
+                                    {t("modelConfig.reviewOpsDesc")}
+                                  </div>
+                                }
+                              >
+                                <span
+                                  aria-label={t("modelConfig.reviewOpsDesc")}
+                                  style={{
+                                    width: 13,
+                                    height: 13,
+                                    borderRadius: "50%",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    fontSize: 9,
+                                    fontStyle: "italic",
+                                    fontWeight: 700,
+                                    border:
+                                      "1px solid var(--color-text-tertiary)",
+                                    color: "var(--color-text-tertiary)",
+                                    cursor: "help",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  i
+                                </span>
+                              </Tooltip>
+                              {tierEnabled && manualKeys.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void restoreReviewOperators(manualKeys)
+                                  }
+                                  style={{
+                                    marginLeft: "auto",
+                                    fontSize: 10.5,
+                                    border: "none",
+                                    background: "none",
+                                    color: "var(--color-accent)",
+                                    cursor: "pointer",
+                                    padding: 0,
+                                  }}
+                                >
+                                  {t("modelConfig.reviewOpsRestoreAll")}
+                                </button>
+                              )}
+                            </div>
+                            {!tierEnabled && (
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: "var(--color-text-tertiary)",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {t("modelConfig.reviewOpsDisabledHint")}
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: 6,
+                              }}
+                            >
+                              {ops.map((op) => {
+                                const name = t(
+                                  `modelConfig.reviewOp_${op.key}`,
+                                );
+                                const depMissing =
+                                  op.dependency !== "none" && !op.capability_ok;
+                                const lit = tierEnabled && op.enabled;
+                                const stateText =
+                                  op.source === "auto"
+                                    ? op.enabled
+                                      ? t("modelConfig.reviewOpStateAutoOn")
+                                      : t("modelConfig.reviewOpStateAutoOff")
+                                    : op.enabled
+                                    ? t("modelConfig.reviewOpStateManualOn")
+                                    : t("modelConfig.reviewOpStateManualOff");
+                                const tooltip = (
+                                  <div
+                                    style={{
+                                      maxWidth: 260,
+                                      fontSize: 12,
+                                      lineHeight: 1.6,
+                                    }}
+                                  >
+                                    <div style={{ fontWeight: 600 }}>
+                                      {name}
+                                    </div>
+                                    <div>
+                                      {t(`modelConfig.reviewOpDesc_${op.key}`)}
+                                    </div>
+                                    {op.dependency !== "none" && (
+                                      <div style={{ opacity: 0.85 }}>
+                                        {t(
+                                          `modelConfig.reviewOpDep_${op.dependency}`,
+                                        )}
+                                        {" · "}
+                                        {op.capability_ok
+                                          ? t("modelConfig.reviewOpDepReady")
+                                          : t("modelConfig.reviewOpDepMissing")}
+                                      </div>
+                                    )}
+                                    <div style={{ opacity: 0.85 }}>
+                                      {tierEnabled
+                                        ? stateText
+                                        : t(
+                                            "modelConfig.reviewOpsDisabledHint",
+                                          )}
+                                    </div>
+                                  </div>
+                                );
+                                return (
+                                  <button
+                                    key={op.key}
+                                    type="button"
+                                    data-review-operator={op.key}
+                                    aria-pressed={lit}
+                                    aria-disabled={!tierEnabled}
+                                    aria-label={name}
+                                    onClick={() => {
+                                      if (!tierEnabled) {
+                                        return;
+                                      }
+                                      void saveReviewOperator(
+                                        op.key,
+                                        !op.enabled,
+                                      );
+                                    }}
+                                    style={{
+                                      display: "inline-flex",
+                                      alignItems: "center",
+                                      gap: 5,
+                                      padding: "3px 9px",
+                                      borderRadius: 999,
+                                      fontSize: 11.5,
+                                      lineHeight: 1.5,
+                                      cursor: tierEnabled
+                                        ? "pointer"
+                                        : "not-allowed",
+                                      opacity: tierEnabled ? 1 : 0.45,
+                                      transition:
+                                        "background .15s ease, color .15s ease, border-color .15s ease, opacity .15s ease",
+                                      background: lit
+                                        ? "var(--color-accent-soft)"
+                                        : "transparent",
+                                      color: lit
+                                        ? "var(--color-accent)"
+                                        : "var(--color-text-tertiary)",
+                                      border: lit
+                                        ? "1px solid var(--color-accent)"
+                                        : "1px solid var(--color-border, rgba(0,0,0,0.15))",
+                                    }}
+                                  >
+                                    {name}
+                                    <Tooltip title={tooltip}>
+                                      <span
+                                        onClick={(event) =>
+                                          event.stopPropagation()
+                                        }
+                                        style={{
+                                          width: 13,
+                                          height: 13,
+                                          borderRadius: "50%",
+                                          display: "inline-flex",
+                                          alignItems: "center",
+                                          justifyContent: "center",
+                                          fontSize: 9,
+                                          fontWeight: 700,
+                                          fontStyle: depMissing
+                                            ? "normal"
+                                            : "italic",
+                                          flexShrink: 0,
+                                          cursor: "help",
+                                          border: depMissing
+                                            ? "1px solid var(--color-warning, #92400e)"
+                                            : "1px solid currentColor",
+                                          color: depMissing
+                                            ? "var(--color-warning, #92400e)"
+                                            : "inherit",
+                                          background: depMissing
+                                            ? "var(--color-warning-soft, #fef3c7)"
+                                            : "transparent",
+                                        }}
+                                      >
+                                        {depMissing ? "!" : "i"}
+                                      </span>
+                                    </Tooltip>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   ))}
                   <div

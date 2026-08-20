@@ -56,6 +56,14 @@ def feedback_text(
     target_ref: str,
     command: str,
 ) -> str:
+    # Severity-weighted ordering (APE: major=2.0, minor=1.0) is an
+    # internal mechanism only — the agent receives the reasoning entries
+    # (evidence + suggestion), sorted so the most damaging fix comes
+    # first, never a numeric score.
+    ordered_findings = sorted(
+        report.failed_findings(),
+        key=lambda item: 0 if item.severity == "major" else 1,
+    )
     payload = {
         "type": "run_review_feedback",
         "artifact_ref": report.artifact_ref,
@@ -64,9 +72,18 @@ def feedback_text(
         "max_rounds": admission.MAX_MEDIA_REVIEW_ROUNDS,
         "verdict": report.verdict,
         "findings": [
-            item.model_dump(mode="json") for item in report.failed_findings()
+            item.model_dump(mode="json") for item in ordered_findings
         ],
     }
+    confirmed_probes = sorted(
+        report.confirmed_probes(),
+        key=lambda item: 0 if item.severity == "major" else 1,
+    )
+    if confirmed_probes:
+        payload["probe_findings"] = [
+            item.model_dump(mode="json", exclude={"needs_review"})
+            for item in confirmed_probes
+        ]
     label = "生成图像" if report.kind == "image" else "分镜视频"
     return (
         f"【运行审阅反馈 · {label} · 第 {report.round}/"

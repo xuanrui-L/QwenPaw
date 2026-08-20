@@ -1459,6 +1459,42 @@ def is_media_review_enabled() -> bool:
     )
 
 
+def get_self_review_operators() -> dict[str, bool]:
+    """Explicit per-operator switches from the self_review section.
+
+    Only well-formed boolean entries are returned; anything else is
+    treated as "auto" by the operator registry (能开尽开).
+    """
+    section = _get_user_config().get("self_review")
+    if not isinstance(section, dict):
+        return {}
+    operators = section.get("operators")
+    if not isinstance(operators, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in operators.items()
+        if isinstance(value, bool)
+    }
+
+
+def is_render_challenge_enabled() -> bool:
+    """Near-miss challenge pass inside the render review.
+
+    Resolution order mirrors the review tiers: an explicitly set
+    ``CREATOR_RENDER_CHALLENGE_ENABLED`` environment variable keeps full
+    control (CI / emergency override), otherwise the ``challenge`` entry
+    of the self-review operator switches decides — defaulting to auto-on
+    (能开尽开: its models are the tier's own text/VLM pair).
+    """
+    raw = os.environ.get("CREATOR_RENDER_CHALLENGE_ENABLED", "").strip()
+    if raw:
+        return raw.casefold() in {"1", "true", "yes", "on"}
+    from services.run_review.operator_registry import is_operator_enabled
+
+    return is_operator_enabled("challenge")
+
+
 def _image_provider():
     """Return the active image provider instance (lazy import avoids cycles).
 

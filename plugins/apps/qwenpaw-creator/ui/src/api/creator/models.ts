@@ -201,6 +201,9 @@ export function patchSelfReview(
     sync_enabled: boolean;
     media_enabled: boolean;
     render_enabled: boolean;
+    // Explicit boolean persists a user choice; null restores auto
+    // (能开尽开) for that operator.
+    operators: Record<string, boolean | null>;
   }>,
 ): Promise<{ ok: boolean }> {
   const id = newClientId("self-review");

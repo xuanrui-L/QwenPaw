@@ -519,7 +519,7 @@ def _plan_context(
     return derive_plan_context(snapshot.project, target_ref)
 
 
-async def review_render(
+async def review_render(  # pylint: disable=too-many-statements
     services: "CreatorFileServices",
     *,
     project_id: str,
@@ -539,11 +539,31 @@ async def review_render(
     audio_profile = await asyncio.to_thread(probe_audio_profile, video_path)
     probe = await asyncio.to_thread(probe_media, str(video_path))
     context = dict(plan_context or {})
+    objective_facts: dict[str, Any] | None = None
+    try:
+        # Tier-0 objective facts (APE-benchmark port): advisory hints for
+        # the eight-row reasoning. Any failure only loses the hints.
+        from services.run_review.objective import collect_video_facts
+        from services.run_review.objective.asr_bridge import (
+            transcript_sentences,
+        )
+
+        transcript = await transcript_sentences(video_path)
+        objective_facts = await asyncio.to_thread(
+            collect_video_facts,
+            video_path,
+            expected_duration_seconds=context.get("target_duration_seconds"),
+            transcript_sentences=transcript,
+        )
+    except Exception:  # noqa: BLE001 - facts are advisory-only
+        logger.exception("render objective facts collection failed")
+        objective_facts = None
     user_text = build_review_user_text(
         frames=frames,
         audio_profile=audio_profile,
         video_duration_seconds=probe.duration_seconds,
         plan_context=context,
+        objective_facts=objective_facts,
     )
     content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
     for frame in frames:
@@ -590,6 +610,46 @@ async def review_render(
         raise RenderReviewError(
             f"review response invalid after {_VLM_ATTEMPTS} attempts: {last_error}",
         )
+    if objective_facts is not None:
+        report = report.model_copy(
+            update={"objective_facts": objective_facts},
+        )
+    try:
+        # Near-miss challenge pass (tier-3, default off): per-case defect
+        # hypotheses generated from the plan, judged on the same evidence
+        # frames. A confirmed major CT forces revise; the eight-row
+        # findings are always preserved alongside (gate caps, it never
+        # erases the rest of the report).
+        from models.config import is_render_challenge_enabled
+
+        if is_render_challenge_enabled():
+            from services.render_review.challenge import (
+                generate_challenge_questions,
+                judge_challenges,
+            )
+
+            questions = await generate_challenge_questions(context)
+            challenge_findings = await judge_challenges(
+                questions,
+                frames=frames,
+            )
+            if challenge_findings:
+                has_ct_major = any(
+                    item.verdict == "CT" and item.severity == "major"
+                    for item in challenge_findings
+                )
+                report = report.model_copy(
+                    update={
+                        "challenge_findings": challenge_findings,
+                        "verdict": (
+                            "revise"
+                            if has_ct_major or report.verdict == "revise"
+                            else report.verdict
+                        ),
+                    },
+                )
+    except Exception:  # noqa: BLE001 - challenge pass is advisory-only
+        logger.exception("render challenge pass failed")
     await asyncio.to_thread(
         _write_json,
         video_dir / f"round-{round_number}.json",

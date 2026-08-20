@@ -22,10 +22,30 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from models.vlm_model import chat_completion, multimodal_media_part
-from schemas.run_review import MediaReviewFinding, MediaReviewReport
+from schemas.run_review import (
+    MediaReviewFinding,
+    MediaReviewReport,
+    ProbeFinding,
+)
 from services.observability.tracing import trace_event
 from services.render_review.frames import extract_review_frames
 from services.run_review import admission, feedback
+from services.run_review.defect_bank import (
+    UNIVERSAL_DEFECTS,
+    build_defect_question_block,
+    program_defect_hints,
+)
+from services.run_review.faithfulness import (
+    build_faithfulness_block,
+    build_faithfulness_elements,
+)
+from services.run_review.objective import (
+    collect_image_facts,
+    collect_video_facts,
+    render_facts_block,
+)
+from services.run_review.objective.asr_bridge import transcript_sentences
+from services.run_review.operator_registry import is_operator_enabled
 from services.run_review.rubric_prompts import (
     build_image_check_system_prompt,
     build_scene_check_system_prompt,
@@ -45,6 +65,14 @@ _VIDEO_REVIEW_FRAMES = 8
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 _IMAGE_CHECK_KEYS = ("devices", "type_fonts", "composition_safety", "craft")
+_DEFECT_SEVERITIES = {
+    defect.defect_id: defect.severity for defect in UNIVERSAL_DEFECTS
+}
+# Frame-reference tolerance for the anti-hallucination bounds check: a
+# verdict citing a timestamp further than this from every evidence frame
+# is describing footage the VLM never saw.
+_FRAME_REF_TOLERANCE_MS = 500
+_MAX_FOCUSED_FRAMES = 6
 
 # Strong references to in-flight review tasks: the event loop only keeps
 # weak references, so an unreferenced task could be garbage-collected in
@@ -141,6 +169,66 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
+def _parse_probes(
+    raw: Any,
+    *,
+    expected_ids: Mapping[str, str],
+    valid_timestamps: list[int] | None,
+) -> list[ProbeFinding]:
+    """Normalize one ET/CT/NA probe array with anti-hallucination checks.
+
+    ``expected_ids`` maps probe id -> default severity. An NA without a
+    reason and a CT whose evidence timestamp is missing or out of the
+    evidence-frame set are kept but flagged ``needs_review`` — reported
+    for transparency, never counted toward the verdict (APE rule: do
+    not hard-flip a suspect verdict, flag it).
+    """
+    probes: list[ProbeFinding] = []
+    if not isinstance(raw, list):
+        return probes
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        probe_id = str(item.get("probe_id") or "")
+        if probe_id not in expected_ids or probe_id in seen:
+            continue
+        seen.add(probe_id)
+        verdict = str(item.get("verdict") or "").strip().upper()
+        if verdict not in ("ET", "CT", "NA"):
+            continue
+        timestamp = item.get("evidence_timestamp_ms")
+        if not isinstance(timestamp, int) or timestamp < 0:
+            timestamp = None
+        reason = str(item.get("reason") or "").strip()
+        suggestion = str(item.get("suggestion") or "").strip()
+        needs_review = False
+        if verdict == "NA" and not reason:
+            # Anti-hallucination: an NA must explain itself.
+            needs_review = True
+        if verdict == "CT":
+            if timestamp is None:
+                needs_review = True
+            elif valid_timestamps is not None and not any(
+                abs(timestamp - valid) <= _FRAME_REF_TOLERANCE_MS
+                for valid in valid_timestamps
+            ):
+                # The verdict cites a frame the VLM was never shown.
+                needs_review = True
+        probes.append(
+            ProbeFinding(
+                probe_id=probe_id,
+                verdict=verdict,  # type: ignore[arg-type]
+                severity=expected_ids[probe_id],  # type: ignore[arg-type]
+                evidence_timestamp_ms=timestamp,
+                reason=reason,
+                suggestion=suggestion,
+                needs_review=needs_review,
+            ),
+        )
+    return probes
+
+
 def parse_media_report(
     text: str,
     *,
@@ -149,6 +237,9 @@ def parse_media_report(
     round_number: int,
     gate_block: Mapping[str, Any] | None,
     stats: Mapping[str, Any] | None,
+    expected_defects: Mapping[str, str] | None = None,
+    expected_faith: Mapping[str, str] | None = None,
+    valid_timestamps: list[int] | None = None,
 ) -> MediaReviewReport:
     """Parse the VLM response; verdict is derived deterministically."""
     expected = _IMAGE_CHECK_KEYS if kind == "image" else _VIDEO_CHECK_KEYS
@@ -193,8 +284,23 @@ def parse_media_report(
         raise ValueError(
             "media review response missing checks: " + ", ".join(missing),
         )
+    defect_findings = _parse_probes(
+        payload.get("defect_findings"),
+        expected_ids=dict(expected_defects or {}),
+        valid_timestamps=valid_timestamps,
+    )
+    faithfulness_findings = _parse_probes(
+        payload.get("faithfulness_findings"),
+        expected_ids=dict(expected_faith or {}),
+        valid_timestamps=valid_timestamps,
+    )
     has_major = any(
         not item.passed and item.severity == "major" for item in findings
+    ) or any(
+        probe.verdict == "CT"
+        and probe.severity == "major"
+        and not probe.needs_review
+        for probe in (*defect_findings, *faithfulness_findings)
     )
     return MediaReviewReport(
         artifact_ref=artifact_ref,
@@ -203,9 +309,161 @@ def parse_media_report(
         gate_block=dict(gate_block) if gate_block else None,
         stats=dict(stats) if stats else None,
         findings=findings,
+        defect_findings=defect_findings,
+        faithfulness_findings=faithfulness_findings,
         verdict="revise" if has_major else "pass",
         created_at=datetime.now(UTC),
     )
+
+
+async def _video_objective_facts(
+    media_path: Path,
+    plan_context: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Tier-0 objective facts for one element video (fail-open)."""
+    try:
+        shots = plan_context.get("planned_shots") or []
+        planned_duration = sum(
+            float(shot.get("duration_seconds") or 0.0)
+            for shot in shots
+            if isinstance(shot, Mapping)
+        )
+        # The transcript only feeds ASR-backed facts; skip the paid ASR
+        # call outright when the av_sync operator is off.
+        transcript = (
+            await transcript_sentences(media_path)
+            if is_operator_enabled("av_sync")
+            else None
+        )
+        return await asyncio.to_thread(
+            collect_video_facts,
+            media_path,
+            expected_duration_seconds=planned_duration or None,
+            planned_shot_count=len(shots) or None,
+            transcript_sentences=transcript,
+        )
+    except Exception:  # noqa: BLE001 - facts are advisory-only
+        logger.exception("objective facts collection failed")
+        return None
+
+
+def _focused_frame_targets(
+    objective_facts: Mapping[str, Any] | None,
+) -> list[tuple[int, str]]:
+    """Program-located timestamps worth a zoomed-in look (stage one of
+    the two-stage judge): freeze suspicion midpoint, the first suspect
+    consistency pair, and a dense trio inside the longest shot so motion
+    trends are visible (sparse uniform sampling cannot show a push/pan).
+    """
+    if not objective_facts:
+        return []
+    targets: list[tuple[int, str]] = []
+    index = objective_facts.get("video_index") or {}
+    if isinstance(index, Mapping):
+        freezes = index.get("freeze_segments") or []
+        if freezes and isinstance(freezes[0], Mapping):
+            segment = freezes[0]
+            midpoint = (
+                int(segment.get("start_ms") or 0)
+                + int(segment.get("end_ms") or 0)
+            ) // 2
+            targets.append((midpoint, "冻结嫌疑段中点"))
+    consistency = objective_facts.get("cross_shot_consistency") or {}
+    if isinstance(consistency, Mapping):
+        for pair in (consistency.get("suspect_pairs") or [])[:1]:
+            if isinstance(pair, Mapping):
+                targets.append(
+                    (int(pair.get("frame_a_ms") or 0), "主体一致嫌疑帧A"),
+                )
+                targets.append(
+                    (int(pair.get("frame_b_ms") or 0), "主体一致嫌疑帧B"),
+                )
+    if isinstance(index, Mapping):
+        scenes = index.get("scenes") or []
+        spans = [
+            scene
+            for scene in scenes
+            if isinstance(scene, Mapping)
+            and int(scene.get("end_ms") or 0) - int(scene.get("start_ms") or 0)
+            > 1000
+        ]
+        if spans:
+            longest = max(
+                spans,
+                key=lambda scene: int(scene["end_ms"])
+                - int(scene["start_ms"]),
+            )
+            start = int(longest["start_ms"])
+            span = int(longest["end_ms"]) - start
+            for fraction in (0.3, 0.5, 0.7):
+                targets.append(
+                    (start + int(span * fraction), "最长镜头运镜观察"),
+                )
+    return targets
+
+
+def _extract_focused_frames(
+    media_path: Path,
+    targets: list[tuple[int, str]],
+    frames_dir: Path,
+    existing_ts: list[int],
+) -> list[dict[str, Any]]:
+    """Materialize focused frames as JPEGs; dedupe against uniform ones."""
+    if not targets:
+        return []
+    try:
+        from services.runtime_files.runtime_dependencies import (
+            resolve_ffmpeg,
+        )
+        from vendor.media_toolkit.video_read import (
+            extract_frames_by_seeking,
+        )
+
+        ffmpeg = resolve_ffmpeg()
+        if not ffmpeg:
+            return []
+        picked: list[tuple[int, str]] = []
+        taken = list(existing_ts)
+        for timestamp, label in targets:
+            if any(abs(timestamp - other) <= 400 for other in taken):
+                continue
+            picked.append((timestamp, label))
+            taken.append(timestamp)
+            if len(picked) >= _MAX_FOCUSED_FRAMES:
+                break
+        if not picked:
+            return []
+        extracted = extract_frames_by_seeking(
+            ffmpeg,
+            str(media_path),
+            [timestamp / 1000.0 for timestamp, _ in picked],
+            target_h=0,
+            target_w=0,
+        )
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        results: list[dict[str, Any]] = []
+        by_second = {
+            round(timestamp / 1000.0, 1): (timestamp, label)
+            for timestamp, label in picked
+        }
+        for seconds, payload in extracted:
+            match = by_second.get(seconds)
+            if match is None:
+                continue
+            timestamp, label = match
+            path = frames_dir / f"focused-{timestamp}.jpg"
+            path.write_bytes(payload)
+            results.append(
+                {
+                    "timestamp_ms": timestamp,
+                    "image_path": str(path),
+                    "label": label,
+                },
+            )
+        return results
+    except Exception:  # noqa: BLE001 - focused frames are best-effort
+        logger.exception("focused frame extraction failed")
+        return []
 
 
 async def review_media_artifact(
@@ -218,8 +476,14 @@ async def review_media_artifact(
     frames_dir: Path,
 ) -> MediaReviewReport:
     """Run gates/stats plus the VLM scene checks for one artifact."""
+    # pylint: disable=too-many-branches,too-many-statements
     gate_block: dict[str, Any] | None = None
     stats: dict[str, Any] = {}
+    objective_facts: dict[str, Any] | None = None
+    probe_sections: list[str] = []
+    expected_defects: dict[str, str] = {}
+    expected_faith: dict[str, str] = {}
+    valid_timestamps: list[int] | None = None
     if kind == "element_video":
         block = await asyncio.to_thread(
             review_gates.run_review_gates,
@@ -231,21 +495,87 @@ async def review_media_artifact(
             media_path,
         )
         stats = {**sampled, "judgment": frame_stats.judge_stats(sampled)}
+        objective_facts = await _video_objective_facts(
+            media_path,
+            plan_context,
+        )
         frames = await asyncio.to_thread(
             extract_review_frames,
             media_path,
             max_frames=_VIDEO_REVIEW_FRAMES,
             output_dir=frames_dir,
         )
-        system_prompt = build_scene_check_system_prompt()
+        focused = (
+            await asyncio.to_thread(
+                _extract_focused_frames,
+                media_path,
+                _focused_frame_targets(objective_facts),
+                frames_dir,
+                [frame.timestamp_ms for frame in frames],
+            )
+            if is_operator_enabled("focused_frames")
+            else []
+        )
+        planned_shots = plan_context.get("planned_shots") or []
+        index_facts = (objective_facts or {}).get("video_index") or {}
+        multi_shot = len(planned_shots) >= 2 or bool(
+            isinstance(index_facts, Mapping)
+            and int(index_facts.get("cut_count") or 0) >= 1,
+        )
+        if is_operator_enabled("defect_bank"):
+            probe_sections.append(
+                build_defect_question_block(multi_shot_expected=multi_shot),
+            )
+            expected_defects = dict(_DEFECT_SEVERITIES)
+            hints = program_defect_hints(objective_facts)
+            if hints:
+                probe_sections.append(hints)
+        faith_elements = (
+            build_faithfulness_elements(
+                plan_context,
+                objective_facts=objective_facts,
+            )
+            if is_operator_enabled("faithfulness")
+            else []
+        )
+        if faith_elements:
+            probe_sections.append(build_faithfulness_block(faith_elements))
+            # Faithfulness CT severity: plan mismatch is a major finding
+            # (same read as the devices check).
+            expected_faith = {
+                element["key"]: "major" for element in faith_elements
+            }
+        system_prompt = build_scene_check_system_prompt(
+            include_probes=bool(expected_defects or expected_faith),
+        )
         frame_lines = "\n".join(
             f"- 第 {index + 1} 张图 = t={frame.timestamp_ms}ms"
             for index, frame in enumerate(frames)
         )
-        image_paths = [frame.image_path for frame in frames]
+        if focused:
+            frame_lines += "\n" + "\n".join(
+                f"- 第 {len(frames) + index + 1} 张图 ="
+                f" t={item['timestamp_ms']}ms"
+                f"（聚焦帧：{item['label']}）"
+                for index, item in enumerate(focused)
+            )
+        image_paths = [frame.image_path for frame in frames] + [
+            item["image_path"] for item in focused
+        ]
+        valid_timestamps = [frame.timestamp_ms for frame in frames] + [
+            item["timestamp_ms"] for item in focused
+        ]
     else:
         sampled = await asyncio.to_thread(frame_stats.image_stats, media_path)
         stats = {**sampled, "judgment": frame_stats.judge_stats(sampled)}
+        try:
+            objective_facts = await asyncio.to_thread(
+                collect_image_facts,
+                media_path,
+            )
+        except Exception:  # noqa: BLE001 - facts are advisory-only
+            logger.exception("image objective facts failed")
+            objective_facts = None
         system_prompt = build_image_check_system_prompt()
         frame_lines = "- 第 1 张图 = 待审阅图像"
         image_paths = [str(media_path)]
@@ -255,13 +585,29 @@ async def review_media_artifact(
             gate_block,
             ensure_ascii=False,
         )
+    facts_lines = ""
+    if objective_facts:
+        stats = {**stats, "objective_facts": objective_facts}
+        facts_lines = "\n\n" + render_facts_block(objective_facts)
+    probe_lines = ""
+    if probe_sections:
+        probe_lines = "\n\n" + "\n\n".join(probe_sections)
     user_text = (
         "请按检查协议审阅这个生成产物。\n\n"
         + "【计划上下文】\n"
         + json.dumps(dict(plan_context), ensure_ascii=False)
         + "\n\n【画面统计（vendored frame stats）】\n"
-        + json.dumps(stats, ensure_ascii=False)
+        + json.dumps(
+            {
+                key: value
+                for key, value in stats.items()
+                if key != "objective_facts"
+            },
+            ensure_ascii=False,
+        )
         + gate_lines
+        + facts_lines
+        + probe_lines
         + "\n\n【证据图列表】\n"
         + frame_lines
     )
@@ -274,7 +620,9 @@ async def review_media_artifact(
         response = await chat_completion(
             content,
             system_prompt=system_prompt,
-            max_tokens=1800,
+            # The probe checklists (16 bank questions + faithfulness
+            # elements) add ~20 verdict objects to the response.
+            max_tokens=3200 if probe_sections else 1800,
         )
         try:
             report = parse_media_report(
@@ -284,6 +632,9 @@ async def review_media_artifact(
                 round_number=round_number,
                 gate_block=gate_block,
                 stats=stats,
+                expected_defects=expected_defects or None,
+                expected_faith=expected_faith or None,
+                valid_timestamps=valid_timestamps,
             )
             break
         except ValueError as exc:
