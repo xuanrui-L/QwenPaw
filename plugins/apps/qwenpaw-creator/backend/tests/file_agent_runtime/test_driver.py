@@ -772,7 +772,6 @@ def test_terminated_media_tasks_get_targeted_recovery(
     assert targeted_marker not in generic
 
 
-
 def test_video_reference_failures_get_targeted_recovery() -> None:
     budget = _specialist_tool_recovery(
         "r2v_generation",

@@ -599,6 +599,8 @@ def test_wan_reference_media_uses_dashscope_temp_upload(
         "wan2.7-r2v",
         "image/png",
     )
+
+
 # ---------------------------------------------------------------------------
 # Official reference-media capability table (fail-closed)
 # ---------------------------------------------------------------------------
