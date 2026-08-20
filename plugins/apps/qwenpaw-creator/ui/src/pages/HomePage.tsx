@@ -28,6 +28,7 @@ import { useRouter, useSearchParams } from "@/routing/navigation";
 import ModelBadges from "@/components/creator/ModelBadges";
 import ModelConfigModal from "@/components/creator/ModelConfigModal";
 import { SCENARIO_OPTIONS } from "@/components/creator/useProjectLaunch";
+import { creatorStatusLabel } from "@/lib/creatorPresentation";
 import {
   SEGMENTED_TRACK_CLASS,
   segmentedItemClass,
@@ -52,6 +53,27 @@ interface ProjectCardProps {
   onRecreate: (project: ProjectSummary) => void;
   onPreview: (project: ProjectSummary) => void;
   formatDate: (dateStr: string) => string;
+}
+
+function statusDotColor(status: string | null | undefined): string {
+  switch (status) {
+    case "IDLE":
+      return "bg-green-500";
+    case "RUNNING":
+    case "RESUMING":
+    case "WAITING_RUNTIME":
+      return "bg-blue-500";
+    case "PENDING_REVIEW":
+    case "WAITING_USER_INPUT":
+    case "WAITING_EXECUTION_AUTH":
+    case "INTERRUPT_REQUESTED":
+      return "bg-amber-500";
+    case "ERROR":
+    case "CANCELLED":
+      return "bg-red-500";
+    default:
+      return "bg-gray-300";
+  }
 }
 
 /** Text-only project card from the design draft. */
@@ -107,58 +129,70 @@ const ProjectCard = memo(function ProjectCard({
           {project.description}
         </p>
       </div>
-      <div className="flex items-center justify-between gap-2 text-xs leading-[18px] text-[var(--color-text-tertiary)]">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <span>{projectScenarioLabel}</span>
-          <span>{project.aspectRatio}</span>
-          <span>{project.resolution}</span>
-        </div>
-        <span
-          className="shrink-0 text-[var(--color-text-tertiary)]"
-          title={t("home.createdAt") + " " + formatDate(project.createdAt)}
-        >
-          {formatDate(project.updatedAt)}
-        </span>
-        {/* Export moved to the plan page; the only card actions left are
-            muted always-visible icons. */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Tooltip title={t("home.recreateProject", { name: project.name })}>
-            <button
-              type="button"
-              aria-label={t("home.recreateProject", { name: project.name })}
-              onClick={(e) => {
-                e.stopPropagation();
-                onRecreate(project);
-              }}
-              className="flex h-[18px] w-[18px] cursor-pointer items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-accent)]"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-            </button>
-          </Tooltip>
-          <Tooltip title={t("home.copyProject", { name: project.name })}>
-            <button
-              type="button"
-              aria-label={t("home.copyProject", { name: project.name })}
-              onClick={(e) => {
-                e.stopPropagation();
-                onCopy(project);
-              }}
-              className="flex h-[18px] w-[18px] cursor-pointer items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-accent)]"
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </button>
-          </Tooltip>
-          <button
-            type="button"
-            aria-label={t("home.deleteProject", { name: project.name })}
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(project);
-            }}
-            className="flex h-[18px] w-[18px] cursor-pointer items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-danger)]"
+      <div className="flex flex-col gap-1.5 text-xs leading-[18px] text-[var(--color-text-tertiary)]">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span
+              className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${statusDotColor(
+                project.status,
+              )}`}
+            />
+            <span className="truncate">
+              {creatorStatusLabel(project.status)}
+            </span>
+          </div>
+          <span
+            className="shrink-0 text-[var(--color-text-tertiary)]"
+            title={t("home.createdAt") + " " + formatDate(project.createdAt)}
           >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
+            {formatDate(project.updatedAt)}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate">{projectScenarioLabel}</span>
+            <span>{project.aspectRatio}</span>
+            <span>{project.resolution}</span>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Tooltip title={t("home.recreateProject", { name: project.name })}>
+              <button
+                type="button"
+                aria-label={t("home.recreateProject", { name: project.name })}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRecreate(project);
+                }}
+                className="flex h-[18px] w-[18px] cursor-pointer items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-accent)]"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </button>
+            </Tooltip>
+            <Tooltip title={t("home.copyProject", { name: project.name })}>
+              <button
+                type="button"
+                aria-label={t("home.copyProject", { name: project.name })}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCopy(project);
+                }}
+                className="flex h-[18px] w-[18px] cursor-pointer items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-accent)]"
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </button>
+            </Tooltip>
+            <button
+              type="button"
+              aria-label={t("home.deleteProject", { name: project.name })}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(project);
+              }}
+              className="flex h-[18px] w-[18px] cursor-pointer items-center justify-center text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-danger)]"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
