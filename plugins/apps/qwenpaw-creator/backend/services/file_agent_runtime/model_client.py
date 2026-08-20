@@ -673,7 +673,15 @@ class AgentScopeAgentChatClient:
             raise AgentModelConfigurationError(
                 "Creator text model configuration is incomplete: "
                 + ", ".join(missing)
-                + ". Configure creator_text_model before retrying.",
+                + f" (protocol='{protocol}', "
+                + f"base_url='{base_url or '<empty>'}', "
+                + f"model='{model_name or '<empty>'}', "
+                + "api_key="
+                + ("'<set>'" if api_key else "'<empty>'")
+                + "). Open the Creator model config dialog (or set the "
+                + "creator text model fields) and retry. Protocols "
+                + "'Anthropic'/'Gemini' always require an api_key; "
+                + "OpenAI-compatible gateways may run keyless free models.",
             )
         configuration = (api_key, base_url, model_name, protocol)
         if self.model is None or self._configuration != configuration:
@@ -1176,7 +1184,15 @@ class AgentScopeVlmChatClient(AgentScopeAgentChatClient):
             raise AgentModelConfigurationError(
                 "Creator VLM configuration is incomplete: "
                 + ", ".join(missing)
-                + ". Configure creator_vlm before retrying.",
+                + f" (protocol='{protocol}', "
+                + f"base_url='{base_url or '<empty>'}', "
+                + f"model='{model_name or '<empty>'}', "
+                + "api_key="
+                + ("'<set>'" if api_key else "'<empty>'")
+                + "). Open the Creator model config dialog (or set the "
+                + "creator VLM fields) and retry. Protocols "
+                + "'Anthropic'/'Gemini' always require an api_key; "
+                + "OpenAI-compatible gateways may run keyless free models.",
             )
         configuration = (api_key, base_url, model_name, protocol)
         if self.model is None or self._configuration != configuration:

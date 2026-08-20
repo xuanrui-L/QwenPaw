@@ -76,6 +76,7 @@ from .dependencies import (
     resolve_idempotency_key,
 )
 
+from utils.exceptions import redact_url, upstream_status_hint
 from utils.logger import setup_logger
 
 logger = setup_logger("model_routes")
@@ -1682,15 +1683,22 @@ async def test_model_connection(
             "voice": body.voice or getattr(item, "voice", ""),
         },
     )
-    if (
-        not selected.base_url
-        or (body.require_api_key and not selected.api_key)
-        or not selected.model_name
-    ):
+    missing: list[str] = []
+    if not selected.base_url:
+        missing.append("Base URL")
+    if body.require_api_key and not selected.api_key:
+        missing.append("API Key")
+    if not selected.model_name:
+        missing.append("模型名称")
+    if missing:
         return ConnectionTestResponse(
             ok=False,
             ms=0,
-            error="配置不完整，请检查 Base URL、API Key 和模型名称",
+            error=(
+                f"配置不完整：缺少 {'、'.join(missing)}（配置项: "
+                f"{body.type}，协议: {selected.protocol or '未指定'}）。"
+                "请在模型配置弹窗中补齐后重试。"
+            ),
         )
     start = time.monotonic()
     try:
@@ -1736,28 +1744,42 @@ async def test_model_connection(
                 provider_error = str(provider_body)
         except ValueError:
             provider_error = response.text[:300]
+        hint = upstream_status_hint(response.status_code)
         return ConnectionTestResponse(
             ok=False,
             ms=elapsed,
-            error=f"HTTP {response.status_code}: {provider_error or '请求失败'}",
+            error=(
+                f"HTTP {response.status_code}: "
+                f"{provider_error or '请求失败'} "
+                f"[探测端点: {redact_url(url)}，协议: {selected.protocol}]"
+                + (f"。{hint}" if hint else "")
+            ),
         )
     except httpx.ConnectError:
         return ConnectionTestResponse(
             ok=False,
             ms=round((time.monotonic() - start) * 1000),
-            error="无法连接到服务，请检查 Base URL 是否正确",
+            error=(
+                f"无法连接到服务，请检查 Base URL 是否正确"
+                f"（当前 Base URL: {selected.base_url}）"
+            ),
         )
     except httpx.TimeoutException:
         return ConnectionTestResponse(
             ok=False,
             ms=round((time.monotonic() - start) * 1000),
-            error="连接超时，请检查网络或 Base URL",
+            error=(
+                f"连接超时，请检查网络或 Base URL" f"（当前 Base URL: {selected.base_url}）"
+            ),
         )
     except (httpx.HTTPError, ValueError) as exc:
         return ConnectionTestResponse(
             ok=False,
             ms=round((time.monotonic() - start) * 1000),
-            error=str(exc),
+            error=(
+                f"{type(exc).__name__}: {exc} "
+                f"[配置项: {body.type}，协议: {selected.protocol}]"
+            ),
         )
 
 

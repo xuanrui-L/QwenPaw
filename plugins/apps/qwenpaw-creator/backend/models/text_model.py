@@ -19,7 +19,7 @@ import httpx
 
 from models import config as model_config
 from models.concurrency import model_slot
-from utils.exceptions import ModelError
+from utils.exceptions import ModelError, redact_url, upstream_status_hint
 
 
 def _openai_chat_url() -> str:
@@ -41,6 +41,36 @@ def _gemini_chat_url(model_name: str) -> str:
     return f"{base}/v1beta/models/{model_name}:generateContent"
 
 
+def _http_error(
+    response: httpx.Response,
+    *,
+    protocol: str,
+    model_name: str,
+    url: str,
+) -> ModelError:
+    """Build a ModelError carrying enough context to diagnose a failure.
+
+    User reports that only say "model call failed" are not actionable, so
+    the message names the protocol, model, endpoint, upstream status, and
+    the upstream response excerpt plus a status-specific hint.
+    """
+    hint = upstream_status_hint(response.status_code)
+    detail = f"上游响应: {response.text[:500]}" if response.text else "上游未返回响应体"
+    message = (
+        f"Text model 请求失败 [protocol={protocol} model={model_name} "
+        f"endpoint={redact_url(url)}] "
+        f"HTTP {response.status_code}: {detail}"
+    )
+    if hint:
+        message = f"{message}。{hint}"
+    # Upstream 4xx client errors are permanent: retrying will not help.
+    return ModelError(
+        message,
+        model_name=model_name,
+        retryable=response.status_code >= 500,
+    )
+
+
 async def _call_openai(
     messages: list[dict],
     *,
@@ -59,20 +89,23 @@ async def _call_openai(
     # Free-tier gateways (e.g. OpenCode Zen ``*-free``) accept requests
     # without an Authorization header; an empty Bearer value would be
     # rejected as an invalid key.
+    url = _openai_chat_url()
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     async with model_slot("text"):
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
-                _openai_chat_url(),
+                url,
                 headers=headers,
                 json=body,
             )
     if response.status_code >= 400:
-        raise ModelError(
-            f"Text model HTTP {response.status_code}: {response.text[:500]}",
+        raise _http_error(
+            response,
+            protocol="OpenAI-compatible",
             model_name=model_name,
+            url=url,
         )
     payload = response.json()
     choices = payload.get("choices") or []
@@ -119,17 +152,20 @@ async def _call_anthropic(
     }
     if api_key:
         headers["x-api-key"] = api_key
+    url = _anthropic_chat_url()
     async with model_slot("text"):
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
-                _anthropic_chat_url(),
+                url,
                 headers=headers,
                 json=body,
             )
     if response.status_code >= 400:
-        raise ModelError(
-            f"Text model HTTP {response.status_code}: {response.text[:500]}",
+        raise _http_error(
+            response,
+            protocol="Anthropic Messages",
             model_name=model_name,
+            url=url,
         )
     payload = response.json()
     content_blocks = payload.get("content") or []
@@ -186,9 +222,11 @@ async def _call_gemini(
                 json=body,
             )
     if response.status_code >= 400:
-        raise ModelError(
-            f"Text model HTTP {response.status_code}: {response.text[:500]}",
+        raise _http_error(
+            response,
+            protocol="Google Gemini",
             model_name=model_name,
+            url=url,
         )
     payload = response.json()
     candidates = payload.get("candidates") or []
@@ -226,8 +264,14 @@ async def chat_completion(
     # empty key is only an error for protocols that require one.
     if not api_key and model_config.protocol_requires_api_key(protocol):
         raise ModelError(
-            "Creator text model API key 未配置",
+            "Creator text model API key 未配置：协议 "
+            f"'{protocol}' 必须提供 API Key（模型: '{model_name or '未配置'}'，"
+            f"Base URL: '{model_config.get_text_base_url() or '未配置'}'）。"
+            "请在 Creator 模型配置弹窗或环境变量中填写 API Key；"
+            "若使用免 Key 的免费模型（如 OpenCode Zen *-free），"
+            "请选择 OpenAI 兼容协议。",
             model_name=model_name,
+            retryable=False,
         )
     messages: list[dict[str, str]] = []
     if system_prompt.strip():
@@ -264,7 +308,10 @@ async def chat_completion(
         raise
     except Exception as exc:
         raise ModelError(
-            f"Text model request failed: {type(exc).__name__}: {exc}",
+            f"Text model request failed [protocol={protocol} "
+            f"model={model_name} base_url="
+            f"{model_config.get_text_base_url()}] "
+            f"{type(exc).__name__}: {exc}",
             model_name=model_name,
         ) from exc
 

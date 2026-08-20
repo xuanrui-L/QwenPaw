@@ -7,7 +7,7 @@ URIs — arbitrary public URLs are rejected with INVALID_ARGUMENT. Remote
 media must therefore be downloaded and inlined before the request.
 """
 
-# pylint: disable=protected-access
+# pylint: disable=protected-access,unused-argument
 
 from __future__ import annotations
 

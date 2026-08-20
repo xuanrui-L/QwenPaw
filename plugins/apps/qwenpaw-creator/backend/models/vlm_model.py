@@ -37,7 +37,7 @@ from models import config as model_config
 from models.concurrency import model_slot
 from models.media_transport import upload_local_file_to_dashscope_temp
 from models.model_capability_cache import get_capability_cache
-from utils.exceptions import ModelError
+from utils.exceptions import ModelError, redact_url, upstream_status_hint
 from utils.logger import setup_logger
 from utils.paths import local_path_from_file_url, media_path_from_url
 
@@ -520,8 +520,15 @@ async def chat_completion(
     # empty key is only an error for protocols that require one.
     if not api_key and model_config.protocol_requires_api_key(protocol):
         raise ModelError(
-            "creator_vlm_model.api_key, VLM_API_KEY, DASHSCOPE_API_KEY, or TEXT_API_KEY is required",
+            "VLM API key 未配置：协议 "
+            f"'{protocol}' 必须提供 API Key（模型: "
+            f"'{model_name or '未配置'}'，Base URL: "
+            f"'{base_url or '未配置'}'）。请在 Creator 模型配置弹窗中填写 "
+            "VLM API Key，或配置 creator_vlm_model.api_key / VLM_API_KEY / "
+            "DASHSCOPE_API_KEY / TEXT_API_KEY 环境变量；若使用免 Key 的"
+            "免费模型（如 OpenCode Zen *-free），请选择 OpenAI 兼容协议。",
             model_name=model_name,
+            retryable=False,
         )
 
     has_media = any(
@@ -608,8 +615,17 @@ async def chat_completion(
             elapsed,
         )
         raise ModelError(
-            f"VLM request failed with status {exc.response.status_code}: {exc.response.text[:500]}",
+            f"VLM 请求失败 [protocol={protocol} model={model_name} "
+            f"endpoint={redact_url(_vlm_url(base_url, protocol, model_name))}] "
+            f"HTTP {exc.response.status_code}: "
+            f"{exc.response.text[:500] or '上游未返回响应体'}"
+            + (
+                f"。{upstream_status_hint(exc.response.status_code)}"
+                if upstream_status_hint(exc.response.status_code)
+                else ""
+            ),
             model_name=model_name,
+            retryable=exc.response.status_code >= 500,
         ) from exc
     except ModelError:
         raise
@@ -632,7 +648,9 @@ async def chat_completion(
             exc_info=True,
         )
         raise ModelError(
-            f"VLM request failed ({type(exc).__name__}): {exc!r} url={request_url}",
+            f"VLM 请求失败 [protocol={protocol} model={model_name}] "
+            f"({type(exc).__name__}): {exc!r} "
+            f"endpoint={redact_url(request_url)} timeout={actual_timeout}s",
             model_name=model_name,
         ) from exc
 
