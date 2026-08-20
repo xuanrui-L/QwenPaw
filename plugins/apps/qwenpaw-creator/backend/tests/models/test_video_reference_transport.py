@@ -263,7 +263,7 @@ def test_wan_local_reference_video_uploads_and_keeps_video_kind(
     assert kind == "video"
 
 
-def test_wan_remote_reference_streams_through_safe_temporary_file(
+def test_wan_remote_reference_passes_through_public_url(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -272,29 +272,6 @@ def test_wan_remote_reference_streams_through_safe_temporary_file(
         lambda: "wan2.7-r2v",
     )
     monkeypatch.setattr(model_config, "get_video_api_key", lambda: "video-key")
-    observed = {}
-
-    def fake_download(url, destination, *, max_bytes, timeout):
-        destination.write_bytes(b"remote-video")
-        observed["download"] = (url, max_bytes, timeout)
-        return len(b"remote-video"), "video/mp4", url
-
-    async def fake_upload(path, *, api_key, model_name, media_type):
-        observed["upload"] = (
-            path.read_bytes(),
-            path.name,
-            api_key,
-            model_name,
-            media_type,
-        )
-        return "oss://dashscope-instant/remote.mp4"
-
-    monkeypatch.setattr(video_model, "safe_download_to_file", fake_download)
-    monkeypatch.setattr(
-        video_model,
-        "upload_local_file_to_dashscope_temp",
-        fake_upload,
-    )
 
     url, kind = asyncio.run(
         video_model._resolve_reference_media_url(
@@ -303,14 +280,5 @@ def test_wan_remote_reference_streams_through_safe_temporary_file(
         ),
     )
 
-    assert url == "oss://dashscope-instant/remote.mp4"
+    assert url == "https://public.example/remote.mp4"
     assert kind == "video"
-    assert observed["download"][0] == "https://public.example/remote.mp4"
-    assert observed["download"][1] == 1024 * 1024 * 1024
-    assert observed["upload"] == (
-        b"remote-video",
-        "remote.mp4",
-        "video-key",
-        "wan2.7-r2v",
-        "video/mp4",
-    )

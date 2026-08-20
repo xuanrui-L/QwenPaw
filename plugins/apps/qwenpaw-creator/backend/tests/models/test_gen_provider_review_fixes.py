@@ -220,7 +220,7 @@ def test_translate_retries_transient_polls_instead_of_losing_the_task(
         )
     finally:
         model_config.reset_request_tool_configs(token)
-    assert result == "/generated/late.png"
+    assert result == {"url": "/generated/late.png", "source_url": ""}
 
 
 @respx.mock

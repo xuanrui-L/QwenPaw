@@ -600,6 +600,13 @@ def _build_chat_model(
         from agentscope.credential import GeminiCredential
         from agentscope.model import GeminiChatModel
 
+        # Google GenAI Client does not accept ``timeout`` in client_kwargs;
+        # drop it to avoid TypeError at construction time.
+        gemini_kwargs = (
+            {k: v for k, v in client_kwargs.items() if k != "timeout"}
+            if client_kwargs
+            else None
+        )
         return GeminiChatModel(
             credential=GeminiCredential(
                 id="qwenpaw-creator",
@@ -609,7 +616,7 @@ def _build_chat_model(
             parameters=parameters,
             stream=stream,
             formatter=formatter,
-            client_kwargs=client_kwargs,
+            client_kwargs=gemini_kwargs,
         )
     return DashScopeChatModel(
         credential=DashScopeCredential(

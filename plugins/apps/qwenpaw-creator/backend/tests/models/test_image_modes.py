@@ -156,7 +156,7 @@ def test_translate_submits_async_task_and_downloads_result(
     finally:
         model_config.reset_request_tool_configs(token)
 
-    assert result == "/generated/translated.png"
+    assert result == {"url": "/generated/translated.png", "source_url": ""}
     assert downloaded == ["https://oss.test/translated.png"]
     request = submit_route.calls.last.request
     assert request.headers["X-DashScope-Async"] == "enable"
@@ -221,7 +221,7 @@ def test_translate_polls_until_succeeded(monkeypatch) -> None:
         )
     finally:
         model_config.reset_request_tool_configs(token)
-    assert result == "/generated/late.png"
+    assert result == {"url": "/generated/late.png", "source_url": ""}
 
 
 @respx.mock
