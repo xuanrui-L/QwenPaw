@@ -201,7 +201,15 @@ def test_still_image_input_renders_a_timed_segment(tmp_path) -> None:
     _FFMPEG is None or _FFPROBE is None,
     reason="ffmpeg is not installed",
 )
-def test_video_playback_rate_controls_real_output_duration(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("playback_rate", "expected_duration"),
+    ((0.5, 4.0), (2.0, 1.0)),
+)
+def test_video_playback_rate_controls_real_output_duration(
+    tmp_path,
+    playback_rate: float,
+    expected_duration: float,
+) -> None:
     source = tmp_path / "source.mp4"
     subprocess.run(
         [
@@ -228,32 +236,33 @@ def test_video_playback_rate_controls_real_output_duration(tmp_path) -> None:
         ],
         check=True,
     )
-    work_dir = tmp_path / "work-slow"
+    rate_label = str(playback_rate).replace(".", "-")
+    work_dir = tmp_path / f"work-{rate_label}"
     work_dir.mkdir()
-    output = tmp_path / "slow.mp4"
+    output = tmp_path / f"retimed-{rate_label}.mp4"
     spec = LocalMediaExecutionSpec(
         command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
         target_ref="timeline:main",
-        task_id="task-slow",
+        task_id=f"task-{rate_label}",
         work_dir=work_dir,
         output_path=output,
         inputs=(
             LocalMediaInput(
-                version_id="asset-version-slow",
-                file_id="file-slow",
-                checksum="sha256:slow-source-v1",
+                version_id=f"asset-version-{rate_label}",
+                file_id=f"file-{rate_label}",
+                checksum=f"sha256:rate-{rate_label}-source-v1",
                 media_type="video/mp4",
                 path=source,
-                source_ref="element:slow",
+                source_ref=f"element:{rate_label}",
                 start_seconds=0.0,
                 end_seconds=2.0,
                 duration_seconds=2.0,
-                playback_rate=0.5,
+                playback_rate=playback_rate,
             ),
         ),
         transitions=(),
         audio_plan="preserve",
-        expected_duration_seconds=4.0,
+        expected_duration_seconds=expected_duration,
         canvas_size=(640, 360),
     )
 
@@ -280,8 +289,8 @@ def test_video_playback_rate_controls_real_output_duration(tmp_path) -> None:
             line.split(",") for line in probe.stdout.splitlines()
         )
     }
-    assert durations["video"] == pytest.approx(4.0, abs=0.15)
-    assert durations["audio"] == pytest.approx(4.0, abs=0.15)
+    assert durations["video"] == pytest.approx(expected_duration, abs=0.15)
+    assert durations["audio"] == pytest.approx(expected_duration, abs=0.15)
 
 
 def _materialize_keyframe(project_root: Path, source: Path, timestamp: float):

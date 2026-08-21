@@ -1222,7 +1222,7 @@ class FfmpegLocalMediaRunner:
                     "-ss",
                     f"{start_seconds:.6f}",
                     "-t",
-                    f"{segment_duration:.6f}",
+                    f"{source_read_duration:.6f}",
                     "-i",
                     os.fspath(item.path),
                 ]
