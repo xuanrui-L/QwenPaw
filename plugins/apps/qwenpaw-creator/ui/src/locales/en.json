@@ -352,6 +352,7 @@
     "reviewOpsDesc": "Lit checks run automatically during review. By default every check your configured models can support is turned on, and checks missing a required model stay off; anything you toggle by hand keeps your choice — click \"Restore defaults\" to go back to automatic.",
     "reviewOpsRestoreAll": "Restore defaults",
     "reviewOpsDisabledHint": "Turn on the review switch above to adjust these checks.",
+    "reviewOpsSharedNote": "The picture and sound basics here are shared with the final-cut review — adjustable while either review is on.",
     "reviewOpStateAutoOn": "Current: on (automatic)",
     "reviewOpStateAutoOff": "Current: off — a required model or component is missing; it turns on automatically once configured",
     "reviewOpStateManualOn": "Current: on (you turned it on)",

@@ -118,7 +118,10 @@ def build_video_index(
     )
     return {
         "sampled_frames": samples.count,
-        "duration_ms": timestamps[-1],
+        # Last sampled timestamp, NOT the container duration: naming it
+        # "duration" made the VLM read a short sampling span as a short
+        # video (machine_params carries the real length).
+        "sampled_span_ms": timestamps[-1],
         "cut_points_ms": cut_points_ms,
         "cut_count": len(cut_points_ms),
         "scenes": scenes,

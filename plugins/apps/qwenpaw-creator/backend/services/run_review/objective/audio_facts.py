@@ -63,10 +63,16 @@ def _spectral_flatness(spectra: np.ndarray) -> float:
     return float(np.median(log_mean / arith_mean))
 
 
-def _estimate_tempo_bpm(pcm: np.ndarray, sample_rate: int) -> float:
-    """Coarse tempo from the onset-envelope autocorrelation."""
+def _estimate_tempo_bpm(
+    spectra: np.ndarray,
+    sample_rate: int,
+) -> float:
+    """Coarse tempo from the onset-envelope autocorrelation.
+
+    Takes the already-computed frame spectra: recomputing the STFT here
+    would FFT the same audio twice per artifact.
+    """
     hop_seconds = _FFT_HOP / sample_rate
-    _, spectra = _power_spectrum(pcm, sample_rate)
     envelope = np.sqrt(spectra.sum(axis=1))
     onset = np.diff(envelope)
     onset[onset < 0] = 0.0
@@ -108,7 +114,7 @@ def audio_content_facts(
     high_band = freqs >= _HIGH_FREQ_SPLIT_HZ
     high_ratio = float(power[high_band].sum()) / total
     flatness = _spectral_flatness(spectra)
-    tempo = _estimate_tempo_bpm(pcm, sample_rate)
+    tempo = _estimate_tempo_bpm(spectra, sample_rate)
     music_votes = {
         "tempo": tempo > _MUSIC_TEMPO_BPM,
         "high_freq": high_ratio > _MUSIC_HIGH_FREQ_RATIO,
@@ -145,10 +151,13 @@ def av_sync_facts(
     cuts = sorted(int(item) for item in cut_points_ms)
     rows: list[dict[str, Any]] = []
     scores: list[float] = []
+    if not cuts:
+        return {
+            "measured": False,
+            "note": "未检出切镜点，无参照物可测量音画同步",
+        }
     for sentence in sentences:
         start_ms = int(sentence.get("start_ms") or 0)
-        if not cuts:
-            break
         nearest = min(
             cuts,
             key=lambda cut, start=start_ms: abs(cut - start),

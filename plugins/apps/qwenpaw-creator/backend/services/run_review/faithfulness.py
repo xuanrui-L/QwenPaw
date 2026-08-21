@@ -36,9 +36,23 @@ _COMPOSITION_PATTERN = re.compile(
     r"(特写|近景|中景|远景|全景|俯拍|仰拍|居中|三分法|对称|前景|背景虚化|过肩|侧面|正面|大全景)",
 )
 _MOTION_PATTERN = re.compile(
-    r"(推|拉|摇|移|跟拍|环绕|升降|手持|固定机位|变焦|甩镜|zoom|pan|tilt|dolly|orbit|static)",
+    r"(镜头(?:推|拉|摇|移)|(?:推|拉)(?:近|远)|缓缓(?:推|拉|摇|移)"
+    r"|跟拍|环绕|升降|手持|固定机位|变焦|甩镜|推镜|拉镜|摇镜|移镜"
+    r"|zoom|pan|tilt|dolly|orbit|static)",
     re.IGNORECASE,
 )
+
+# Faithfulness severities mirror the defect bank's reading: a missing or
+# wrong subject breaks the shot, while tone/motion drift is a note. Only
+# ``major`` rows can force a regeneration, so single-word look-alikes
+# ("他推开门") can no longer cost a re-render on their own.
+FAITHFULNESS_SEVERITIES: dict[str, str] = {
+    "faith_entity": "major",
+    "faith_sequence": "major",
+    "faith_composition": "minor",
+    "faith_tone": "minor",
+    "faith_motion": "minor",
+}
 
 FAITHFULNESS_ELEMENT_KEYS = (
     "faith_entity",

@@ -12,6 +12,7 @@ choice; none of these produce findings on their own.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -26,8 +27,15 @@ _WARM_HUE_MIN_DEG = 320.0
 
 
 def laplacian_variance(gray: np.ndarray) -> float:
-    """Variance of the 4-neighbour Laplacian response of one frame."""
+    """Variance of the 4-neighbour Laplacian response of one frame.
+
+    Frames thinner than three pixels leave the stencil empty, whose
+    variance is NaN — and these facts are serialized into the report,
+    where NaN is not valid JSON.
+    """
     frame = gray.astype(np.float32)
+    if frame.shape[0] < 3 or frame.shape[1] < 3:
+        return 0.0
     lap = (
         frame[:-2, 1:-1]
         + frame[2:, 1:-1]
@@ -35,7 +43,8 @@ def laplacian_variance(gray: np.ndarray) -> float:
         + frame[1:-1, 2:]
         - 4.0 * frame[1:-1, 1:-1]
     )
-    return float(lap.var())
+    variance = float(lap.var())
+    return variance if math.isfinite(variance) else 0.0
 
 
 def sharpness_facts(frames: list[np.ndarray]) -> dict[str, Any]:

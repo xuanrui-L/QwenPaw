@@ -249,38 +249,45 @@ def test_auto_rereview_evaluates_scenes_concurrently(monkeypatch) -> None:
     assert locked == ["scene-1", "scene-2", "scene-3", "scene-4"]
 
 
-def test_scene_pass_adds_no_concurrency_cap_of_its_own(monkeypatch) -> None:
-    """All scenes are dispatched at once; the VLM slot does the limiting.
+def _peak_scene_fan_out(monkeypatch, *, scenes: int, limit: int) -> int:
+    """Run the pass and report how many scenes were ever in flight.
 
-    The review must not impose a second, private ceiling: whatever
-    concurrency the configured model allows is what the pass gets.
+    The probe sits in ``_collect_evidence`` — i.e. before the VLM call,
+    where frame upload happens — because that stage runs outside
+    ``model_slot("vlm")`` and is exactly what the review-side gate has
+    to bound.
     """
     rows = [
         SceneLedgerRow(scene_id=f"scene-{index}", element_ids=[f"el-{index}"])
-        for index in range(1, 7)
+        for index in range(1, scenes + 1)
     ]
     project, timeline = _timeline_with_scene(
         edit_plan=_plan(rows),
-        scene_count=6,
+        scene_count=scenes,
     )
     services, _committed = _services(project)
     _stub_review_env(monkeypatch, payload=_checks_payload())
+    monkeypatch.setattr(
+        scene_review_module,
+        "get_vlm_concurrency",
+        lambda: limit,
+    )
 
     in_flight = 0
-    peak_in_flight = 0
+    peak = 0
 
-    async def fake_chat(content, **kwargs):
-        nonlocal in_flight, peak_in_flight
+    async def fake_evidence(**kwargs):
+        nonlocal in_flight, peak
         in_flight += 1
-        peak_in_flight = max(peak_in_flight, in_flight)
+        peak = max(peak, in_flight)
         await asyncio.sleep(0.05)
         in_flight -= 1
-        return _checks_payload()
+        return [], [], ["该场景不含 Edit 片段：仅按动效/文本事实评审。"]
 
     monkeypatch.setattr(
-        scene_review_module.vlm_model,
-        "chat_completion",
-        fake_chat,
+        scene_review_module,
+        "_collect_evidence",
+        fake_evidence,
     )
     asyncio.run(
         scene_review_module.auto_review_stale_scenes(
@@ -290,49 +297,36 @@ def test_scene_pass_adds_no_concurrency_cap_of_its_own(monkeypatch) -> None:
             timeline=timeline,
         ),
     )
-    # The stub bypasses model_slot, so an unlimited model yields full
-    # fan-out — proof the review layer holds no cap of its own.
-    assert peak_in_flight == 6
+    return peak
 
 
-def test_scene_calls_pass_through_the_shared_vlm_slot(monkeypatch) -> None:
-    """The VLM limiter is what bounds scene fan-out in production.
+def test_scene_fan_out_follows_the_model_concurrency(monkeypatch) -> None:
+    """Evidence upload is bounded by the configured VLM concurrency.
 
-    Every protocol transport wraps its request in ``model_slot("vlm")``,
-    whose ceiling is the configured VLM concurrency — so tightening or
-    lifting the model's own limit is what changes the scene fan-out.
+    ``model_slot("vlm")`` only wraps the HTTP request, so without a
+    review-side gate the frame transfers of every scene would start at
+    once. The gate borrows the model's own limit — no second knob.
+    """
+    assert _peak_scene_fan_out(monkeypatch, scenes=6, limit=2) == 2
+    assert _peak_scene_fan_out(monkeypatch, scenes=6, limit=6) == 6
+    assert _peak_scene_fan_out(monkeypatch, scenes=6, limit=1) == 1
+
+
+def test_media_transport_runs_outside_the_vlm_slot() -> None:
+    """Guards the premise above: uploads precede the limiter.
+
+    If a future refactor moves ``model_slot`` to wrap payload transport,
+    the review-side gate becomes redundant and this test should be
+    revisited together with it.
     """
     import inspect
 
-    from models import config as model_config
     from models import vlm_model
-    from models.concurrency import model_slot
 
-    transports = (
-        vlm_model._call_openai_vlm,
-        vlm_model._call_anthropic_vlm,
-        vlm_model._call_gemini_vlm,
-    )
-    for transport in transports:
-        assert 'model_slot("vlm")' in inspect.getsource(transport)
-
-    monkeypatch.setattr(model_config, "get_vlm_concurrency", lambda: 2)
-    peak = 0
-    active = 0
-
-    async def guarded() -> None:
-        nonlocal peak, active
-        async with model_slot("vlm"):
-            active += 1
-            peak = max(peak, active)
-            await asyncio.sleep(0.02)
-            active -= 1
-
-    async def fan_out() -> None:
-        await asyncio.gather(*(guarded() for _ in range(6)))
-
-    asyncio.run(fan_out())
-    assert peak == 2, "the shared VLM slot must cap concurrent scene calls"
+    source = inspect.getsource(vlm_model._call_openai_vlm)
+    transport_at = source.index("_transport_local_media_part")
+    slot_at = source.index('model_slot("vlm")')
+    assert transport_at < slot_at
 
 
 def test_auto_rereview_isolates_one_failing_scene(monkeypatch) -> None:

@@ -315,6 +315,78 @@ def test_self_review_env_overrides_reported_never_persisted(
     assert "env_overrides" not in (on_disk.get("self_review") or {})
 
 
+def test_self_review_operator_switches_contract(
+    config_path,
+    monkeypatch,
+) -> None:
+    """Per-operator switches: merge, restore-to-auto, reject, never leak.
+
+    The resolved ``operator_status`` report is response-only state (like
+    ``env_overrides``): the UI needs it, the config file must never see
+    it.
+    """
+    for env in _REVIEW_ENVS:
+        monkeypatch.delenv(env, raising=False)
+    _write(config_path, _config())
+
+    asyncio.run(
+        model_routes.patch_self_review(
+            {"operators": {"defect_bank": False, "challenge": True}},
+        ),
+    )
+    asyncio.run(
+        model_routes.patch_self_review({"operators": {"ocr_text": True}}),
+    )
+    loaded = model_routes.load_model_config(include_environment=False)
+    assert loaded.self_review.operators == {
+        "defect_bank": False,
+        "challenge": True,
+        "ocr_text": True,
+    }
+
+    # Explicit user choices win over the capability-based auto default.
+    from services.run_review.operator_registry import is_operator_enabled
+
+    assert is_operator_enabled("defect_bank") is False
+    assert is_operator_enabled("challenge") is True
+
+    # null removes the entry, restoring the auto resolution.
+    asyncio.run(
+        model_routes.patch_self_review({"operators": {"defect_bank": None}}),
+    )
+    restored = model_routes.load_model_config(include_environment=False)
+    assert "defect_bank" not in restored.self_review.operators
+    assert is_operator_enabled("defect_bank") is True
+
+    # Unknown keys and non-boolean values are rejected before mutation.
+    with pytest.raises(ValidationError, match="不支持的算子"):
+        asyncio.run(
+            model_routes.patch_self_review({"operators": {"bogus": True}}),
+        )
+    with pytest.raises(ValidationError, match="布尔值或 null"):
+        asyncio.run(
+            model_routes.patch_self_review({"operators": {"ocr_text": "on"}}),
+        )
+    with pytest.raises(ValidationError, match="必须是对象"):
+        asyncio.run(model_routes.patch_self_review({"operators": []}))
+    survived = model_routes.load_model_config(include_environment=False)
+    assert survived.self_review.operators == {
+        "challenge": True,
+        "ocr_text": True,
+    }
+
+    # GET reports resolved state; the file never carries it.
+    reported = asyncio.run(model_routes.get_model_config())
+    rows = {row["key"]: row for row in reported.self_review.operator_status}
+    assert rows["challenge"]["source"] == "user"
+    assert rows["video_index"]["source"] == "auto"
+    assert {"tier", "dependency", "capability_ok", "enabled"} <= set(
+        rows["av_sync"],
+    )
+    on_disk = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "operator_status" not in (on_disk.get("self_review") or {})
+
+
 def test_load_migrates_legacy_grounding_model_to_search_and_validation(
     config_path,
 ) -> None:

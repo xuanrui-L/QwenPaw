@@ -20,11 +20,14 @@ alarm rate survivable):
   shot/element; anchor-less questions are dropped.
 - question cap (6) and near-duplicate pruning.
 - verdict anti-hallucination — an NA needs a reason, a CT needs a frame
-  timestamp inside the shown evidence set; violations are flagged
-  ``needs_review`` and never counted.
+  timestamp inside the shown evidence set; a violating verdict is
+  downgraded to ET so it can never force a revision on invented
+  evidence.
 
-Gated by ``CREATOR_RENDER_CHALLENGE_ENABLED`` (default off): the pass
-adds one text-model and one VLM call per render review round.
+Switchable as the ``challenge`` review operator (auto-on; an explicitly
+set ``CREATOR_RENDER_CHALLENGE_ENABLED`` still overrides it). The pass
+adds one text-model and one VLM call per render review round, and the
+drafting half overlaps the main review.
 """
 
 from __future__ import annotations

@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 
 import numpy as np
 
@@ -67,6 +68,25 @@ _DISABLED_BLOCK = {
     "status": "disabled",
     "reason": "已在自我审阅高级配置中关闭",
 }
+
+# Operators that read the shared gray frame ladder. The decode runs when
+# any of them is enabled, so switching off one never starves the others.
+_GRAY_CONSUMERS = (
+    "video_index",
+    "light_metrics",
+    "av_sync",
+    "cross_shot_consistency",
+    "camera_motion",
+    "ocr_text",
+)
+
+# One shared pool for the three independent decodes. ``collect_*_facts``
+# already runs inside a ``to_thread`` worker, so spawning a fresh pool
+# per artifact would stack new threads on top of every review in flight.
+_DECODE_POOL = ThreadPoolExecutor(
+    max_workers=3,
+    thread_name_prefix="creator-objective-decode",
+)
 
 
 def _safe(
@@ -131,11 +151,18 @@ def collect_video_facts(
     mono PCM) are independent ffmpeg passes, so they are started
     together in a small thread pool; every operator then runs on the
     already-decoded buffers. Each operator stays individually fail-open.
+
+    The gray ladder is shared by several operators, so it is decoded
+    whenever *any* of them is on — switching off the cut/freeze facts
+    never silently disables sharpness, consistency, motion or OCR.
     """
+    # pylint: disable=too-many-statements
     facts: dict[str, Any] = {}
-    decode_gray = is_operator_enabled("video_index")
+    decode_gray = any(is_operator_enabled(key) for key in _GRAY_CONSUMERS)
     decode_pcm = is_operator_enabled("audio_content")
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    # nullcontext: the pool is process-wide, so it must not be shut down
+    # when one artifact finishes.
+    with nullcontext(_DECODE_POOL) as pool:
         probe_future = (
             pool.submit(probe_info, media_path)
             if is_operator_enabled("machine_params")
@@ -161,17 +188,61 @@ def collect_video_facts(
 
         _safe(facts, "machine_params", machine_param_block)
 
-        samples: GraySamples | None = None
-        diffs: np.ndarray | None = None
-        index: dict[str, Any] | None = None
+        # Lazily shared decode results: computed once, reported honestly.
+        # A real decode failure carries its own message so the skip
+        # reason never claims something that did not happen.
+        shared: dict[str, Any] = {}
+
+        def gray_samples() -> GraySamples | None:
+            if "samples" not in shared:
+                try:
+                    shared["samples"] = (
+                        gray_future.result()
+                        if gray_future is not None
+                        else None
+                    )
+                except Exception as exc:  # noqa: BLE001 - fail-open
+                    logger.warning("gray frame decode failed: %s", exc)
+                    shared["samples"] = None
+                    shared["decode_error"] = str(exc)[:120]
+            return shared["samples"]
+
+        def gray_skip_reason() -> str:
+            error = shared.get("decode_error")
+            return f"灰度帧解码失败：{error}" if error else "灰度帧不可用"
+
+        def frame_diffs() -> np.ndarray | None:
+            if "diffs" not in shared:
+                samples = gray_samples()
+                shared["diffs"] = (
+                    index_ops.frame_diffs(samples)
+                    if samples is not None
+                    else None
+                )
+            return shared["diffs"]
+
+        def video_index() -> dict[str, Any] | None:
+            """Shot index for downstream operators.
+
+            Computed even when the cut/freeze facts themselves are
+            switched off, because consistency and camera motion need the
+            scene boundaries and the derivation is pure arithmetic on
+            frames that are already decoded.
+            """
+            if "index" not in shared:
+                samples = gray_samples()
+                diffs = frame_diffs()
+                shared["index"] = (
+                    index_ops.build_video_index(samples, diffs=diffs)
+                    if samples is not None and diffs is not None
+                    else None
+                )
+            return shared["index"]
 
         def index_block() -> dict[str, Any]:
-            nonlocal samples, diffs, index
-            if gray_future is None:  # pragma: no cover - gate guards it
-                return {"status": "skipped", "skip_reason": "未解码灰度帧"}
-            samples = gray_future.result()
-            diffs = index_ops.frame_diffs(samples)
-            index = index_ops.build_video_index(samples, diffs=diffs)
+            index = video_index()
+            if index is None:
+                return {"status": "skipped", "skip_reason": gray_skip_reason()}
             payload = dict(index)
             if planned_shot_count is not None:
                 payload["planned_shot_count"] = planned_shot_count
@@ -182,8 +253,10 @@ def collect_video_facts(
         _safe(facts, "video_index", index_block)
 
         def light_block() -> dict[str, Any]:
+            samples = gray_samples()
+            diffs = frame_diffs()
             if samples is None or diffs is None:
-                return {"status": "skipped", "skip_reason": "解码失败"}
+                return {"status": "skipped", "skip_reason": gray_skip_reason()}
             rgb_frames = _rgb_probe_frames(media_path, samples.timestamps_ms)
             return {
                 "sharpness": light_ops.sharpness_facts(
@@ -213,63 +286,83 @@ def collect_video_facts(
 
         _safe(facts, "audio_content", audio_block)
 
-    def av_sync_block() -> dict[str, Any]:
-        if not transcript_rows:
-            return {
-                "measured": False,
-                "note": "无 ASR 转写（未配置或无人声），音画同步跳过",
-            }
-        if index is None:
-            return {"status": "skipped", "skip_reason": "视频索引不可用"}
-        return audio_ops.av_sync_facts(
-            transcript_rows,
-            index.get("cut_points_ms") or [],
-        )
+        def av_sync_block() -> dict[str, Any]:
+            if not transcript_rows:
+                return {
+                    "measured": False,
+                    "note": "无 ASR 转写（未配置、无人声或单镜头），音画同步跳过",
+                }
+            index = video_index()
+            if index is None:
+                return {
+                    "status": "skipped",
+                    "skip_reason": gray_skip_reason(),
+                }
+            return audio_ops.av_sync_facts(
+                transcript_rows,
+                index.get("cut_points_ms") or [],
+            )
 
-    _safe(facts, "av_sync", av_sync_block)
+        _safe(facts, "av_sync", av_sync_block)
 
-    def consistency_block() -> dict[str, Any]:
-        if samples is None or index is None:
-            return {"status": "skipped", "skip_reason": "视频索引不可用"}
-        return consistency_ops.cross_shot_consistency_facts(
-            samples,
-            list(index.get("scenes") or []),
-        )
+        def consistency_block() -> dict[str, Any]:
+            samples = gray_samples()
+            index = video_index()
+            if samples is None or index is None:
+                return {
+                    "status": "skipped",
+                    "skip_reason": gray_skip_reason(),
+                }
+            return consistency_ops.cross_shot_consistency_facts(
+                samples,
+                list(index.get("scenes") or []),
+            )
 
-    _safe(facts, "cross_shot_consistency", consistency_block)
+        _safe(facts, "cross_shot_consistency", consistency_block)
 
-    def camera_block() -> dict[str, Any]:
-        if samples is None or index is None:
-            return {"status": "skipped", "skip_reason": "视频索引不可用"}
-        return camera_ops.camera_motion_facts(
-            samples,
-            dynamic_frame_ratio=float(
-                index.get("dynamic_frame_ratio") or 0.0,
-            ),
-        )
+        def camera_block() -> dict[str, Any]:
+            samples = gray_samples()
+            index = video_index()
+            if samples is None or index is None:
+                return {
+                    "status": "skipped",
+                    "skip_reason": gray_skip_reason(),
+                }
+            return camera_ops.camera_motion_facts(
+                samples,
+                dynamic_frame_ratio=float(
+                    index.get("dynamic_frame_ratio") or 0.0,
+                ),
+            )
 
-    _safe(facts, "camera_motion", camera_block)
+        _safe(facts, "camera_motion", camera_block)
 
-    def ocr_block() -> dict[str, Any]:
-        expected = [text for text in (expected_texts or []) if text.strip()]
-        if not expected:
-            return {"measured": False, "note": "计划未声明需渲染的文字"}
-        if not ocr_ops.ocr_available():
-            return {
-                "measured": False,
-                "status": "skipped",
-                "skip_reason": "easyocr 未安装：文字核验回退纯 VLM 路径",
-            }
-        if samples is None:
-            return {"status": "skipped", "skip_reason": "解码失败"}
-        stamped = _rgb_probe_frames(
-            media_path,
-            samples.timestamps_ms,
-            count=6,
-        )
-        return ocr_ops.text_render_facts(stamped, expected)
+        def ocr_block() -> dict[str, Any]:
+            expected = [
+                text for text in (expected_texts or []) if text.strip()
+            ]
+            if not expected:
+                return {"measured": False, "note": "计划未声明需渲染的文字"}
+            if not ocr_ops.ocr_available():
+                return {
+                    "measured": False,
+                    "status": "skipped",
+                    "skip_reason": "easyocr 未安装：文字核验回退纯 VLM 路径",
+                }
+            samples = gray_samples()
+            if samples is None:
+                return {
+                    "status": "skipped",
+                    "skip_reason": gray_skip_reason(),
+                }
+            stamped = _rgb_probe_frames(
+                media_path,
+                samples.timestamps_ms,
+                count=6,
+            )
+            return ocr_ops.text_render_facts(stamped, expected)
 
-    _safe(facts, "text_render", ocr_block, switch="ocr_text")
+        _safe(facts, "text_render", ocr_block, switch="ocr_text")
     return facts
 
 

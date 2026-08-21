@@ -42,9 +42,11 @@ def _flow_stats(samples: GraySamples) -> tuple[list[float], list[float]]:
     circular_variances: list[float] = []
     stride = max(1, samples.count // _MAX_FLOW_PAIRS)
     for index in range(0, samples.count - stride, stride):
+        # Decoded frames are views over a read-only ffmpeg buffer; the
+        # OpenCV bindings need writable, contiguous input.
         flow = cv2.calcOpticalFlowFarneback(
-            samples.frames[index],
-            samples.frames[index + stride],
+            np.ascontiguousarray(samples.frames[index]),
+            np.ascontiguousarray(samples.frames[index + stride]),
             None,
             pyr_scale=0.5,
             levels=2,

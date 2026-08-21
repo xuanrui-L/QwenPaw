@@ -29,6 +29,7 @@ from uuid import NAMESPACE_URL, uuid5
 from domain.enums import TaskKind, TaskStatus
 from domain.errors import ValidationError
 from models import vlm_model
+from models.config import get_vlm_concurrency
 from models.vlm_model import multimodal_media_part
 from services.media_files.keyframe_cache import materialize_keyframe
 
@@ -221,8 +222,7 @@ async def _collect_evidence(  # pylint: disable=too-many-branches
     for element, source_path in zip(edit_elements, resolved_sources):
         if source_path is None:
             notes.append(
-                f"片段 {element.element_id} 源视频没有本地字节，"
-                "该片段按素材理解事实评审。",
+                f"片段 {element.element_id} 源视频没有本地字节，" "该片段按素材理解事实评审。",
             )
             continue
         render_source = element.render_source
@@ -264,15 +264,13 @@ async def _collect_evidence(  # pylint: disable=too-many-branches
             continue
         if isinstance(cached, BaseException):
             notes.append(
-                f"片段 {element_id} 抽帧失败（{cached}），"
-                "该片段按事实评审。",
+                f"片段 {element_id} 抽帧失败（{cached}），" "该片段按事实评审。",
             )
             broken.add(element_id)
             continue
         frames.append(cached.path)
         labels.append(
-            f"第 {len(frames)} 张图 = 片段 {element_id} "
-            f"源时间 {timestamp:.1f}s",
+            f"第 {len(frames)} 张图 = 片段 {element_id} " f"源时间 {timestamp:.1f}s",
         )
     return frames, labels, notes
 
@@ -391,8 +389,7 @@ async def _evaluate_scene(
     contract = plan.model_dump(mode="json", exclude={"scene_ledger"})
     sections = [
         f"请按六项场景检查验收场景 {scene_id}（{row.label or '未命名'}）。",
-        "【剪辑契约（devices 行的对照物）】\n"
-        + json.dumps(contract, ensure_ascii=False),
+        "【剪辑契约（devices 行的对照物）】\n" + json.dumps(contract, ensure_ascii=False),
         "【取证说明】\n" + _RENDER_ONLY_NOTES,
         "【证据帧（与随后附上的图片顺序一一对应）】\n"
         + ("\n".join(labels) if labels else "（本场景无源素材帧）"),
@@ -851,11 +848,13 @@ async def auto_review_stale_scenes(
     leave a scene blocked.
 
     Evidence collection and the VLM call run concurrently across scenes
-    because they share no state. There is deliberately no review-side
-    concurrency cap: every scene call goes through the shared
-    ``model_slot("vlm")`` limiter, so the VLM's own configured
-    concurrency governs how many run at once — raising it speeds this
-    pass up, and an unconstrained model is left unconstrained here too.
+    because they share no state. The fan-out is capped by the *model's*
+    configured VLM concurrency rather than a review-owned setting: the
+    per-request ``model_slot("vlm")`` only wraps the HTTP call, while
+    frame upload / base64 packing happens before it, so an uncapped
+    gather would push N x MAX_SCENE_FRAMES transfers through the shared
+    thread pool at once. Raising the model's own limit still widens this
+    pass; nothing here adds a second knob.
     Every Project write is then applied serially in scene order, which
     keeps the commit lock uncontended and the ledger deterministic.
 
@@ -866,22 +865,27 @@ async def auto_review_stale_scenes(
     targets = [*drafts, *stale]
     if not targets:
         return []
+    limit = max(1, get_vlm_concurrency())
     logger.info(
-        "auto-rereview: project=%s timeline=%s scenes=%d",
+        "auto-rereview: project=%s timeline=%s scenes=%d vlm_concurrency=%d",
         project_id,
         timeline_ref,
         len(targets),
+        limit,
     )
-    evaluations = await asyncio.gather(
-        *(
-            _evaluate_scene(
+    slots = asyncio.Semaphore(limit)
+
+    async def evaluate(scene_id: str) -> SceneEvaluation:
+        async with slots:
+            return await _evaluate_scene(
                 services,
                 project_id=project_id,
                 timeline_ref=timeline_ref,
                 scene_id=scene_id,
             )
-            for scene_id in targets
-        ),
+
+    evaluations = await asyncio.gather(
+        *(evaluate(scene_id) for scene_id in targets),
         return_exceptions=True,
     )
     remaining: list[str] = []

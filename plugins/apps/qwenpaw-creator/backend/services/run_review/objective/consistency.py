@@ -18,6 +18,7 @@ anything becomes a finding; without a VLM the pairs are reported as
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -51,14 +52,31 @@ def _center_crop(frame: np.ndarray) -> np.ndarray:
     return frame[top : top + crop_h, left : left + crop_w]
 
 
+@lru_cache(maxsize=1)
+def _face_cascade() -> Any:
+    """Parse the Haar cascade once per process (XML parse is not cheap)."""
+    if cv2 is None:  # pragma: no cover - optional dependency
+        return None
+    cascade = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
+    )
+    return None if cascade.empty() else cascade
+
+
 def _subject_region(frame: np.ndarray) -> tuple[np.ndarray, str]:
     """Face crop when cv2 can find one; center crop otherwise."""
     if cv2 is not None:
         try:
-            cascade = cv2.CascadeClassifier(
-                cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
+            cascade = _face_cascade()
+            if cascade is None:
+                raise RuntimeError("face cascade unavailable")
+            # cv2 needs writable, contiguous input; decoded frames are
+            # read-only views over the ffmpeg buffer.
+            faces = cascade.detectMultiScale(
+                np.ascontiguousarray(frame),
+                1.1,
+                4,
             )
-            faces = cascade.detectMultiScale(frame, 1.1, 4)
             if len(faces):
                 x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
                 pad_w, pad_h = w // 4, h // 4

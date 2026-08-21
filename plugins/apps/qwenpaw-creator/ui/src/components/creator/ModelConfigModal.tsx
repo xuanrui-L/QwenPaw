@@ -1302,24 +1302,26 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   // re-derived locally so the badges track the toggle immediately.
   const saveReviewOperator = useCallback(
     async (key: string, value: boolean | null): Promise<void> => {
-      const previous = config.selfReview;
-      setConfig((prev) => {
+      const applyLocal = (
+        prev: ModelConfigData,
+        next: boolean | null,
+      ): ModelConfigData => {
         const operators = { ...(prev.selfReview.operators ?? {}) };
-        if (value === null) {
+        if (next === null) {
           delete operators[key];
         } else {
-          operators[key] = value;
+          operators[key] = next;
         }
         const operatorStatus = (prev.selfReview.operatorStatus ?? []).map(
           (op) =>
             op.key === key
               ? {
                   ...op,
-                  source: (value === null ? "auto" : "user") as "auto" | "user",
+                  source: (next === null ? "auto" : "user") as "auto" | "user",
                   enabled:
-                    value === null
+                    next === null
                       ? op.capability_ok || Boolean(op.degrades)
-                      : value,
+                      : next,
                 }
               : op,
         );
@@ -1327,11 +1329,15 @@ export default function ModelConfigModal({ open, onClose }: Props) {
           ...prev,
           selfReview: { ...prev.selfReview, operators, operatorStatus },
         };
-      });
+      };
+      // Roll back only THIS pill: a render-time snapshot of the whole
+      // section would undo a sibling toggle that succeeded meanwhile.
+      const previousValue = config.selfReview.operators?.[key] ?? null;
+      setConfig((prev) => applyLocal(prev, value));
       try {
         await patchSelfReview({ operators: { [key]: value } });
       } catch (err) {
-        setConfig((prev) => ({ ...prev, selfReview: previous }));
+        setConfig((prev) => applyLocal(prev, previousValue));
         message.error(
           (err as Error).message || t("modelConfig.selfReviewSaveFailed"),
         );
@@ -4360,15 +4366,32 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                         if (ops.length === 0) {
                           return null;
                         }
-                        const envRaw =
-                          config.selfReview.envOverrides?.[tier.key];
+                        const tierLive = (
+                          key:
+                            | "sync_enabled"
+                            | "media_enabled"
+                            | "render_enabled",
+                        ): boolean => {
+                          const raw = config.selfReview.envOverrides?.[key];
+                          if (raw !== undefined) {
+                            return ["1", "true", "yes", "on"].includes(
+                              raw.toLowerCase(),
+                            );
+                          }
+                          return config.selfReview[key];
+                        };
+                        // Tier-0 evidence operators feed BOTH the media
+                        // review and the final-cut review, so they stay
+                        // adjustable while either of those runs — greying
+                        // them out with only the media switch off would
+                        // hide checks that are still executing.
+                        const sharedWithRender =
+                          tier.key === "media_enabled" &&
+                          vlmOk &&
+                          tierLive("render_enabled");
                         const tierEnabled =
                           tier.ready &&
-                          (envRaw !== undefined
-                            ? ["1", "true", "yes", "on"].includes(
-                                envRaw.toLowerCase(),
-                              )
-                            : config.selfReview[tier.key]);
+                          (tierLive(tier.key) || sharedWithRender);
                         const manualKeys = ops
                           .filter((op) => op.source === "user")
                           .map((op) => op.key);
@@ -4452,6 +4475,17 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                                 }}
                               >
                                 {t("modelConfig.reviewOpsDisabledHint")}
+                              </div>
+                            )}
+                            {tierEnabled && sharedWithRender && (
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: "var(--color-text-tertiary)",
+                                  marginBottom: 6,
+                                }}
+                              >
+                                {t("modelConfig.reviewOpsSharedNote")}
                               </div>
                             )}
                             <div

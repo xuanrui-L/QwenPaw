@@ -36,6 +36,7 @@ from services.run_review.defect_bank import (
     program_defect_hints,
 )
 from services.run_review.faithfulness import (
+    FAITHFULNESS_SEVERITIES,
     build_faithfulness_block,
     build_faithfulness_elements,
 )
@@ -128,13 +129,25 @@ def _derive_plan_context(
         snapshot = services.projects.read(project_id)
         project = snapshot.project
         context["project_brief"] = project.description
+        settings = getattr(project, "settings", None)
+        aspect_ratio = getattr(settings, "aspect_ratio", None)
+        if aspect_ratio:
+            # Declared frame shape feeds the machine-parameter check.
+            context["aspect_ratio"] = aspect_ratio
         target_ref = context["target_ref"]
         shots: list[dict[str, Any]] = []
+        planned_texts: list[str] = []
         for timeline in project.timelines.items.values():
             for element in timeline.elements_by_id.values():
+                creation = element.creation
+                if getattr(creation, "type", None) == "overlay":
+                    text = str(getattr(creation, "text", "") or "").strip()
+                    if text:
+                        # Overlay strings are burned into the frame, so
+                        # they are what the OCR check compares against.
+                        planned_texts.append(text)
                 if element.element_id not in target_ref:
                     continue
-                creation = element.creation
                 items = getattr(creation, "shots", None)
                 if items is None:
                     continue
@@ -149,6 +162,8 @@ def _derive_plan_context(
                     )
         if shots:
             context["planned_shots"] = shots[:12]
+        if planned_texts:
+            context["planned_texts"] = planned_texts[:12]
     except Exception:
         logger.exception("plan context derivation failed for %s", project_id)
     return context
@@ -316,6 +331,24 @@ def parse_media_report(
     )
 
 
+async def _gather_or_cancel(*awaitables: Any) -> list[Any]:
+    """gather() that cancels the remaining legs when one raises.
+
+    Plain ``asyncio.gather`` leaves siblings running after the first
+    failure; here those siblings are ffmpeg passes and a paid ASR call,
+    so they are cancelled before the error propagates.
+    """
+    tasks = [asyncio.ensure_future(item) for item in awaitables]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def _video_objective_facts(
     media_path: Path,
     plan_context: Mapping[str, Any],
@@ -328,23 +361,43 @@ async def _video_objective_facts(
             for shot in shots
             if isinstance(shot, Mapping)
         )
-        # The transcript only feeds ASR-backed facts; skip the paid ASR
-        # call outright when the av_sync operator is off.
-        transcript = (
-            await transcript_sentences(media_path)
-            if is_operator_enabled("av_sync")
-            else None
-        )
+        # The transcript only feeds ASR-backed facts, which need at least
+        # one cut to measure against; a single-shot element (the common
+        # case) would burn the ASR call for a "nothing to compare" note.
+        transcript = None
+        if is_operator_enabled("av_sync"):
+            multi_shot = len(shots) >= 2 or await asyncio.to_thread(
+                _has_cuts,
+                media_path,
+            )
+            if multi_shot:
+                transcript = await transcript_sentences(media_path)
         return await asyncio.to_thread(
             collect_video_facts,
             media_path,
             expected_duration_seconds=planned_duration or None,
+            expected_aspect=plan_context.get("aspect_ratio"),
+            expected_texts=plan_context.get("planned_texts"),
             planned_shot_count=len(shots) or None,
             transcript_sentences=transcript,
         )
     except Exception:  # noqa: BLE001 - facts are advisory-only
         logger.exception("objective facts collection failed")
         return None
+
+
+def _has_cuts(media_path: Path) -> bool:
+    """Cheap pre-check: does this artifact contain any shot change?"""
+    try:
+        from services.run_review.objective import video_index as index_ops
+        from services.run_review.objective.media_io import sample_gray_frames
+
+        samples = sample_gray_frames(media_path)
+        index = index_ops.build_video_index(samples)
+        return int(index.get("cut_count") or 0) > 0
+    except Exception:  # noqa: BLE001 - unknown means "do not spend ASR"
+        logger.warning("cut pre-check failed for %s", media_path)
+        return False
 
 
 async def _image_objective_facts(
@@ -444,12 +497,30 @@ def _extract_focused_frames(
                 break
         if not picked:
             return []
+        # Focused frames ride the same token budget as the uniform ones;
+        # sending them at source resolution would blow the prompt up by
+        # up to six full-size JPEGs.
+        from services.runtime_files.media_probe import probe_media
+        from vendor.media_toolkit.image_budget import (
+            VIDEO_BUDGET_TOKENS,
+            VIDEO_MIN_PIXELS,
+            budget_to_pixels,
+            smart_resize,
+        )
+
+        probe = probe_media(str(media_path))
+        target_h, target_w = smart_resize(
+            probe.height or 720,
+            probe.width or 1280,
+            VIDEO_MIN_PIXELS,
+            budget_to_pixels("normal", VIDEO_BUDGET_TOKENS),
+        )
         extracted = extract_frames_by_seeking(
             ffmpeg,
             str(media_path),
             [timestamp / 1000.0 for timestamp, _ in picked],
-            target_h=0,
-            target_w=0,
+            target_h=target_h,
+            target_w=target_w,
         )
         frames_dir.mkdir(parents=True, exist_ok=True)
         results: list[dict[str, Any]] = []
@@ -498,8 +569,10 @@ async def review_media_artifact(
     if kind == "element_video":
         # Gates, frame stats, evidence frames and the objective facts are
         # four independent passes over the same file; the focused frames
-        # below are the only step that needs their results.
-        block, sampled, frames, objective_facts = await asyncio.gather(
+        # below are the only step that needs their results. A failing
+        # leg cancels the rest so a paid ASR call cannot outlive the
+        # round it was started for.
+        block, sampled, frames, objective_facts = await _gather_or_cancel(
             asyncio.to_thread(review_gates.run_review_gates, media_path),
             asyncio.to_thread(frame_stats.sample_stats, media_path),
             asyncio.to_thread(
@@ -547,10 +620,16 @@ async def review_media_artifact(
         )
         if faith_elements:
             probe_sections.append(build_faithfulness_block(faith_elements))
-            # Faithfulness CT severity: plan mismatch is a major finding
-            # (same read as the devices check).
+            # Graded like the defect bank: a wrong/missing subject or a
+            # scrambled shot order breaks the shot (major), while tone,
+            # framing and camera-move drift are notes (minor) that never
+            # force a regeneration on their own.
             expected_faith = {
-                element["key"]: "major" for element in faith_elements
+                element["key"]: FAITHFULNESS_SEVERITIES.get(
+                    element["key"],
+                    "minor",
+                )
+                for element in faith_elements
             }
         system_prompt = build_scene_check_system_prompt(
             include_probes=bool(expected_defects or expected_faith),
@@ -573,7 +652,7 @@ async def review_media_artifact(
             item["timestamp_ms"] for item in focused
         ]
     else:
-        sampled, objective_facts = await asyncio.gather(
+        sampled, objective_facts = await _gather_or_cancel(
             asyncio.to_thread(frame_stats.image_stats, media_path),
             _image_objective_facts(media_path),
         )
@@ -583,12 +662,9 @@ async def review_media_artifact(
         image_paths = [str(media_path)]
     gate_lines = ""
     if gate_block is not None:
-        gate_lines = (
-            "\n\n【门禁证据块（vendored review gates）】\n"
-            + json.dumps(
-                gate_block,
-                ensure_ascii=False,
-            )
+        gate_lines = "\n\n【门禁证据块（vendored review gates）】\n" + json.dumps(
+            gate_block,
+            ensure_ascii=False,
         )
     facts_lines = ""
     if objective_facts:
@@ -627,7 +703,11 @@ async def review_media_artifact(
             system_prompt=system_prompt,
             # The probe checklists (16 bank questions + faithfulness
             # elements) add ~20 verdict objects to the response.
-            max_tokens=3200 if probe_sections else 1800,
+            # The probe run answers up to 16 defect + 5 faithfulness
+            # questions on top of the six protocol rows; a truncated
+            # reply is unparsable and both retries would resend the same
+            # prompt, so the ceiling has to fit the whole array.
+            max_tokens=4600 if probe_sections else 1800,
         )
         try:
             report = parse_media_report(

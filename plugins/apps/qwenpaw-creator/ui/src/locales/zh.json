@@ -352,6 +352,7 @@
     "reviewOpsDesc": "点亮的检查项会在审阅时自动执行。默认会根据你已配置的模型自动开启能用的检查，缺少所需模型的会自动关闭；你手动点过的项目以你的选择为准，可点右侧「恢复默认」回到自动。",
     "reviewOpsRestoreAll": "恢复默认",
     "reviewOpsDisabledHint": "先打开上方的审阅开关，才能调整这些检查项。",
+    "reviewOpsSharedNote": "其中的画面与声音基础检查与「成片审阅」共用，任一审阅开启时即可调整。",
     "reviewOpStateAutoOn": "当前：已开启（自动）",
     "reviewOpStateAutoOff": "当前：已关闭——缺少所需的模型或组件，配置好后会自动开启",
     "reviewOpStateManualOn": "当前：已开启（你手动打开的）",

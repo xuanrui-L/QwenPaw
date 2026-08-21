@@ -419,7 +419,7 @@ def _timeline_review_expectations(
     project: Any,
     timeline: Any,
     context: dict[str, Any],
-) -> tuple[bool, bool, set[str]]:
+) -> tuple[bool, bool, set[str], list[str]]:
     """Derive review expectations and live take ids from one timeline."""
     edit_plan = getattr(timeline, "edit_plan", None)
     if edit_plan is not None:
@@ -432,6 +432,7 @@ def _timeline_review_expectations(
     expects_voiceover = False
     expects_subtitles = False
     live_operation_versions: set[str] = set()
+    planned_texts: list[str] = []
     sources = getattr(
         getattr(project, "assets", None),
         "source_versions_by_id",
@@ -447,6 +448,10 @@ def _timeline_review_expectations(
         if kind == "overlay":
             text = str(getattr(creation, "text", "") or "").strip()
             expects_subtitles = expects_subtitles or bool(text)
+            if text:
+                # Every overlay string is burned into the frame, so it is
+                # what the OCR check compares against.
+                planned_texts.append(text)
         render_source = getattr(element, "render_source", None)
         version_id = str(getattr(render_source, "version_id", "") or "")
         if not version_id:
@@ -455,7 +460,12 @@ def _timeline_review_expectations(
         metadata = getattr(version, "metadata", None) or {}
         if str(metadata.get("sourceKind") or "") == "live_operation_take":
             live_operation_versions.add(version_id)
-    return expects_voiceover, expects_subtitles, live_operation_versions
+    return (
+        expects_voiceover,
+        expects_subtitles,
+        live_operation_versions,
+        planned_texts,
+    )
 
 
 def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
@@ -477,6 +487,10 @@ def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
             "target_duration_seconds",
             None,
         )
+        # Declared frame shape: the only authority the aspect check has.
+        aspect_ratio = getattr(settings, "aspect_ratio", None)
+        if aspect_ratio:
+            context["aspect_ratio"] = aspect_ratio
     brief = str(getattr(project, "description", "") or "").strip()
     if brief:
         context["project_brief"] = brief[:300]
@@ -487,7 +501,12 @@ def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
     # (mirrors local_execution._target_timeline).
     stripped = target_ref.partition(":")[2] or target_ref
     timeline = timelines.get(stripped) or timelines.get(target_ref)
-    expectations: tuple[bool, bool, set[str]] = (False, False, set())
+    expectations: tuple[bool, bool, set[str], list[str]] = (
+        False,
+        False,
+        set(),
+        [],
+    )
     if timeline is not None:
         expectations = _timeline_review_expectations(
             project,
@@ -498,12 +517,15 @@ def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
         expects_voiceover,
         expects_subtitles,
         live_operation_versions,
+        planned_texts,
     ) = expectations
     context["expects_voiceover"] = expects_voiceover
     context["expects_subtitles"] = expects_subtitles
     if live_operation_versions:
         context["live_operation_tutorial"] = True
         context["live_operation_take_count"] = len(live_operation_versions)
+    if planned_texts:
+        context["planned_texts"] = planned_texts[:12]
     return context
 
 
@@ -519,7 +541,7 @@ def _plan_context(
     return derive_plan_context(snapshot.project, target_ref)
 
 
-async def review_render(  # pylint: disable=too-many-statements
+async def review_render(  # pylint: disable=too-many-statements,too-many-branches
     services: "CreatorFileServices",
     *,
     project_id: str,
@@ -541,14 +563,26 @@ async def review_render(  # pylint: disable=too-many-statements
             from services.run_review.objective.asr_bridge import (
                 transcript_sentences,
             )
+            from services.run_review.operator_registry import (
+                is_operator_enabled,
+            )
 
-            transcript = await transcript_sentences(video_path)
+            # The transcript only feeds the ASR-backed sync facts, so a
+            # disabled av_sync operator must also skip the paid call
+            # (same rule as the media tier).
+            transcript = (
+                await transcript_sentences(video_path)
+                if is_operator_enabled("av_sync")
+                else None
+            )
             return await asyncio.to_thread(
                 collect_video_facts,
                 video_path,
                 expected_duration_seconds=context.get(
                     "target_duration_seconds",
                 ),
+                expected_aspect=context.get("aspect_ratio"),
+                expected_texts=context.get("planned_texts"),
                 transcript_sentences=transcript,
             )
         except Exception:  # noqa: BLE001 - facts are advisory-only
@@ -557,17 +591,31 @@ async def review_render(  # pylint: disable=too-many-statements
 
     # Evidence gathering is four independent passes over the same file
     # (frame seeks, loudness scan, container probe, objective facts):
-    # running them together turns their sum into their max.
-    frames, audio_profile, probe, objective_facts = await asyncio.gather(
-        asyncio.to_thread(
-            extract_review_frames,
-            video_path,
-            output_dir=video_dir / f"frames-round-{round_number}",
-        ),
-        asyncio.to_thread(probe_audio_profile, video_path),
-        asyncio.to_thread(probe_media, str(video_path)),
-        _objective_facts(),
-    )
+    # running them together turns their sum into their max. A failing
+    # leg cancels the others so no paid ASR call outlives the round.
+    tasks = [
+        asyncio.ensure_future(item)
+        for item in (
+            asyncio.to_thread(
+                extract_review_frames,
+                video_path,
+                output_dir=video_dir / f"frames-round-{round_number}",
+            ),
+            asyncio.to_thread(probe_audio_profile, video_path),
+            asyncio.to_thread(probe_media, str(video_path)),
+            _objective_facts(),
+        )
+    ]
+    try:
+        frames, audio_profile, probe, objective_facts = await asyncio.gather(
+            *tasks,
+        )
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     # The challenge questions are written from the plan alone, so the
     # text model can draft them while the VLM reads the frames; only the
     # judging pass needs both.
@@ -600,42 +648,47 @@ async def review_render(  # pylint: disable=too-many-statements
     video_ref = f"artifact-version:{video_id}"
     report: RenderReviewReport | None = None
     last_error: Exception | None = None
-    for attempt in range(_VLM_ATTEMPTS):
-        try:
-            response_text = await chat_completion(
-                content,
-                system_prompt=review_system_prompt(),
-                temperature=0.2,
-                max_tokens=2400,
-            )
-        except ModelError as exc:
-            # Transient provider/network failures get one more attempt;
-            # the loop stays advisory either way.
-            last_error = exc
-            logger.warning(
-                "render review VLM call failed (attempt %d): %s",
-                attempt + 1,
-                exc,
-            )
-            await asyncio.sleep(2 * (attempt + 1))
-            continue
-        try:
-            report = parse_review_report(
-                response_text,
-                video_ref=video_ref,
-                round_number=round_number,
-            )
-            break
-        except ValueError as exc:
-            last_error = exc
-            logger.warning(
-                "render review response unparsable (attempt %d): %s",
-                attempt + 1,
-                exc,
-            )
-    if report is None:
-        if challenge_questions is not None:
+    try:
+        for attempt in range(_VLM_ATTEMPTS):
+            try:
+                response_text = await chat_completion(
+                    content,
+                    system_prompt=review_system_prompt(),
+                    temperature=0.2,
+                    max_tokens=2400,
+                )
+            except ModelError as exc:
+                # Transient provider/network failures get one more
+                # attempt; the loop stays advisory either way.
+                last_error = exc
+                logger.warning(
+                    "render review VLM call failed (attempt %d): %s",
+                    attempt + 1,
+                    exc,
+                )
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            try:
+                report = parse_review_report(
+                    response_text,
+                    video_ref=video_ref,
+                    round_number=round_number,
+                )
+                break
+            except ValueError as exc:
+                last_error = exc
+                logger.warning(
+                    "render review response unparsable (attempt %d): %s",
+                    attempt + 1,
+                    exc,
+                )
+    finally:
+        # Any exit without a report (parse failure, provider error,
+        # cancellation) must not strand the drafting task — an orphan
+        # keeps a paid text call in flight and warns at shutdown.
+        if report is None and challenge_questions is not None:
             challenge_questions.cancel()
+    if report is None:
         raise RenderReviewError(
             f"review response invalid after {_VLM_ATTEMPTS} attempts: {last_error}",
         )
