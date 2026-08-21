@@ -260,9 +260,9 @@ async def run_computer_use_code(
     controller = DesktopController(client, recorder)
     from qwenpaw.app.computer_use import set_current_computer_use_turn_id
 
-    turn_token = set_current_computer_use_turn_id(
-        f"creator-{uuid.uuid4().hex}",
-    )
+    # Bind one native turn for this dispatch; the host API is a setter, so its
+    # result is not captured.
+    set_current_computer_use_turn_id(f"creator-{uuid.uuid4().hex}")
     stdout = io.StringIO()
     try:
         namespace: dict[str, Any] = {
@@ -296,7 +296,7 @@ async def run_computer_use_code(
         outcome.output = _clip(stdout.getvalue(), 12_000)
         with contextlib.suppress(Exception):
             await client.close()
-        _reset_turn(turn_token)
+        _reset_turn()
     return outcome
 
 
@@ -313,14 +313,12 @@ def _run(compiled: Any, namespace: dict[str, Any]):
     return _inner()
 
 
-def _reset_turn(token: Any) -> None:
+def _reset_turn() -> None:
     from qwenpaw.app.computer_use import set_current_computer_use_turn_id
 
-    # The host API takes a value, not a token; clearing to None ends the turn
-    # binding for this dispatch.
+    # Clearing to None ends the turn binding for this dispatch.
     with contextlib.suppress(Exception):
         set_current_computer_use_turn_id(None)
-    del token
 
 
 def _bounds_to_bbox(bounds: Any) -> BoundingBox | None:
