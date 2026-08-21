@@ -99,11 +99,22 @@ export const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
 export const IMAGE_PROTOCOLS = [
   "OpenAI 协议",
   "DashScope（百炼）",
+  "Google Gemini",
+  "Volcano Engine（火山引擎）",
+  "Black Forest Labs（FLUX）",
+  "Ideogram",
   "Aliyun Token Plan",
 ];
+// Kling and Vidu appear twice on purpose: they are served both as
+// Bailian-hosted models on the DashScope protocol and through their own
+// official APIs, and the protocol choice is what selects the channel.
 export const VIDEO_PROTOCOLS = [
   "DashScope（百炼）",
   "Volcano Engine（火山引擎）",
+  "Google Gemini（Veo）",
+  "MiniMax（海螺）",
+  "Kling（可灵官方）",
+  "Vidu（官方）",
   "Aliyun Token Plan",
 ];
 
@@ -127,6 +138,12 @@ export const PROTOCOL_LABEL_KEYS: Record<string, string> = {
   "ModelScope（魔搭）": "modelConfig.protocols.modelscope",
   百度千帆: "modelConfig.protocols.qianfan",
   "Volcano Engine（火山引擎）": "modelConfig.protocols.volcengine",
+  "Black Forest Labs（FLUX）": "modelConfig.protocols.bfl",
+  Ideogram: "modelConfig.protocols.ideogram",
+  "Google Gemini（Veo）": "modelConfig.protocols.googleGeminiVeo",
+  "MiniMax（海螺）": "modelConfig.protocols.minimaxHailuo",
+  "Kling（可灵官方）": "modelConfig.protocols.klingOfficial",
+  "Vidu（官方）": "modelConfig.protocols.viduOfficial",
   "小米 MiMo": "modelConfig.protocols.xiaomiMimo",
   自定义: "modelConfig.protocols.custom",
   "DashScope Fun-ASR": "modelConfig.protocols.dashscopeFunAsr",
@@ -378,7 +395,10 @@ type TabType = ModelType | "grounding";
 
 // Sections whose endpoint comes from a fixed protocol preset rather than
 // from user input.
-const PRESETS_BY_TYPE: Record<string, Record<string, ProtocolPreset>> = {
+export const PRESETS_BY_TYPE: Record<
+  string,
+  Record<string, ProtocolPreset>
+> = {
   asr: ASR_PRESETS,
   tts: TTS_PRESETS,
   s2v: S2V_PRESETS,

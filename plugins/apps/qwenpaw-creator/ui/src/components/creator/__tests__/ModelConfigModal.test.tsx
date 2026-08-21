@@ -5,6 +5,7 @@ import ModelConfigModal, {
   EMBEDDING_PROTOCOLS,
   IMAGE_PROTOCOLS,
   LLM_PROTOCOLS,
+  PRESETS_BY_TYPE,
   PROTOCOL_LABEL_KEYS,
   S2V_PROTOCOLS,
   TTS_PROTOCOLS,
@@ -379,6 +380,32 @@ describe("ModelConfigModal configuration lifecycle", () => {
 });
 
 describe("ModelConfigModal model presets", () => {
+  it("offers every preset protocol in its dropdown", () => {
+    // A preset the dropdown does not list is unreachable, and a saved
+    // protocol outside the list is silently reset on load — which would
+    // strand the media channels that are selected by protocol.
+    const listed: Record<string, readonly string[]> = {
+      asr: ASR_PROTOCOLS,
+      tts: TTS_PROTOCOLS,
+      s2v: S2V_PROTOCOLS,
+      embedding: EMBEDDING_PROTOCOLS,
+      image: IMAGE_PROTOCOLS,
+      video: VIDEO_PROTOCOLS,
+    };
+    for (const [type, presets] of Object.entries(PRESETS_BY_TYPE)) {
+      for (const protocol of Object.keys(presets)) {
+        expect(
+          listed[type],
+          `no protocol list for section "${type}"`,
+        ).toBeTruthy();
+        expect(
+          listed[type],
+          `preset "${protocol}" is missing from ${type} protocols`,
+        ).toContain(protocol);
+      }
+    }
+  });
+
   it("does NOT change protocol or base_url when model_name is changed", async () => {
     // Users must explicitly select the protocol they want.
     mountModal(presetsBaseConfig);
