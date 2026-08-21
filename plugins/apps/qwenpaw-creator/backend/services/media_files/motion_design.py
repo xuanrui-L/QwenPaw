@@ -632,12 +632,17 @@ def _validated_design(
     blueprint = str(raw.get("blueprint") or "").strip()
     uses_blueprint = bool(blueprint)
     _box_height: float | None = None
+    _box_width: float | None = None
     _raw_loc = raw.get("location")
     if isinstance(_raw_loc, Mapping):
         try:
             _box_height = float(_raw_loc.get("height", 0)) or None
         except (TypeError, ValueError):
             _box_height = None
+        try:
+            _box_width = float(_raw_loc.get("width", 0)) or None
+        except (TypeError, ValueError):
+            _box_width = None
     if uses_blueprint:
         # Catalog route: the VLM picked a verified GSAP skeleton and only
         # supplies frame-derived parameters; the html body is rendered
@@ -649,6 +654,7 @@ def _validated_design(
                     required_text,
                     palette=raw.get("palette"),
                     intensity=raw.get("intensity"),
+                    box_width=_box_width,
                     box_height=_box_height,
                 )
             else:
@@ -1879,6 +1885,7 @@ async def design_motion_overlays(
                 creation.text,
                 palette=palette_arg,
                 intensity=0.55,
+                box_width=location.width,
                 box_height=location.height,
             )
             motion = MotionGraphic(
@@ -1977,6 +1984,7 @@ async def design_motion_overlays(
                 creation.text,
                 palette=_THEME_BLUEPRINT_PALETTES.get(theme),
                 intensity=_UNIFORM_CAPTION_INTENSITY,
+                box_width=location.width,
                 box_height=location.height,
             )
             motion = MotionGraphic(

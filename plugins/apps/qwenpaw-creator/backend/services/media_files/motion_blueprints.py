@@ -76,19 +76,33 @@ def _clamped(value: object, fallback: float, low: float, high: float) -> float:
     return min(high, max(low, number))
 
 
+def _escape_text(text: str) -> str:
+    """Escape text for HTML, converting newlines to <br> tags."""
+    return "<br>".join(escape(line) for line in text.strip().splitlines())
+
+
 def _chars(text: str) -> str:
     """Wrap every visible character for per-character staggers."""
 
-    pieces: list[str] = []
-    for char in text.strip():
-        if char.isspace():
-            pieces.append("<i class='sp'>&nbsp;</i>")
-        else:
-            pieces.append(f"<b class='ch'>{escape(char)}</b>")
-    return "".join(pieces)
+    lines = text.strip().split("\n")
+    groups: list[str] = []
+    for line in lines:
+        pieces: list[str] = []
+        for char in line:
+            if char.isspace():
+                pieces.append("<i class='sp'>&nbsp;</i>")
+            else:
+                pieces.append(f"<b class='ch'>{escape(char)}</b>")
+        groups.append(f"<div class='line-div'>{''.join(pieces)}</div>")
+    return "".join(groups)
 
 
-def _caption_font_css(text: str, *, box_height: float | None = None) -> str:
+def _caption_font_css(
+    text: str,
+    *,
+    box_width: float | None = None,
+    box_height: float | None = None,
+) -> str:
     """Two-axis font clamp for one caption viewport.
 
     The document only knows its own viewport, so the size is expressed
@@ -102,18 +116,29 @@ def _caption_font_css(text: str, *, box_height: float | None = None) -> str:
     canvas stays consistent across overlays with very different box
     heights — a small box (0.18) gets a larger vh value, a tall box
     (0.85) gets a smaller one.
+
+    When *box_width* is provided, the vw term is scaled proportionally
+    so the font fits the overlay box width rather than the full viewport.
     """
 
-    length = max(1, len(re.sub(r"\s+", "", text)))
-    per_line = length if length <= 12 else math.ceil(length / 2)
-    lines = 1 if length <= 12 else 2
+    raw_lines = text.split("\n")
+    line_char_counts = [len(re.sub(r"\s+", "", line)) for line in raw_lines if line.strip()]
+    if not line_char_counts:
+        line_char_counts = [1]
+    per_line = max(line_char_counts)
+    lines = len(line_char_counts)
+    if len(raw_lines) <= 1:
+        per_line = per_line if per_line <= 12 else math.ceil(per_line / 2)
+        lines = 1 if per_line <= 12 else 2
     # CJK glyphs are roughly square. Width budget: glyph run plus the
     # widest card chrome (≈1.9em of padding/side accents) inside 80% of
-    # the viewport. Height budget: the tallest card stack (line-height
-    # plus vertical padding, gap and rule ≈2.4em per line) inside 76%,
+    # the box. Height budget: the tallest card stack (line-height plus
+    # vertical padding, gap and rule ≈2.4em per line) inside 76%,
     # leaving the root 8% inset and entrance travel untouched.
     vw = 80.0 / (per_line * 1.08 + 1.9)
     vh = 76.0 / (lines * 2.4)
+    if box_width is not None and box_width > 0:
+        vw *= box_width
     if box_height is not None and box_height > 0:
         vh *= 0.25 / box_height
     return f"min({vh:.1f}vh,{vw:.1f}vw)"
@@ -161,12 +186,13 @@ def _caption_stagger_pop(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """综艺花字：内容包裹式贴纸胶囊 + 逐字弹入 + 强调下划线。"""
 
     overshoot = 1.3 + intensity * 0.6
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{display:flex;flex-direction:column;align-items:center;gap:.18em;max-width:96%;padding:.34em .85em .3em;font-size:{font};background:{palette.paper}f2;border:.07em solid {palette.ink};border-radius:.55em;box-shadow:.14em .18em 0 {palette.secondary}59}}
@@ -190,6 +216,7 @@ def _caption_static_capsule(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """静态胶囊：全片像素级一致的解说/教学字幕。
@@ -201,13 +228,13 @@ def _caption_static_capsule(
     """
 
     del intensity  # 静态模板没有可调幅度，保持签名一致即可
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{width:max-content;max-width:94%;box-sizing:border-box;font-size:{font};padding:.28em .9em;border-radius:.42em;background:{palette.paper}f2;border:.04em solid {palette.ink}26;box-shadow:0 .08em .3em {palette.ink}33}}
 .text{{font-family:"PingFang SC","Noto Sans SC",sans-serif;font-weight:600;font-size:1em;line-height:1.35;letter-spacing:.02em;text-align:center;color:{palette.ink}}}
 """
-    body = f"<div class='wrap'><div class='card'><div class='text'>{escape(text.strip())}</div></div></div>"
+    body = f"<div class='wrap'><div class='card'><div class='text'>{_escape_text(text)}</div></div></div>"
     script = """
 tl.fromTo('.card',{autoAlpha:.35},{autoAlpha:1,duration:.3,ease:'power1.out'},0);
 tl.to('.card',{autoAlpha:1,duration:.1},.3);
@@ -220,20 +247,21 @@ def _caption_ink_reveal(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """电影字幕：大字直压画面 + 细描边投影保可读 + 侧色条 draw-on，
     无满框底板，仅文字底部一条包裹式半透明 scrim 融入画面。"""
 
     reveal = 0.55 + intensity * 0.25
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{display:flex;align-items:center;gap:.42em;max-width:96%;font-size:{font};padding:.22em .6em;border-radius:.3em;background:color-mix(in srgb,{palette.ink} 42%,transparent)}}
 .bar{{width:.14em;height:1.15em;border-radius:99px;background:{palette.primary};transform-origin:top;flex:none}}
 .text{{font-family:"PingFang SC","Songti SC",serif;font-weight:700;font-size:1em;line-height:1.32;letter-spacing:.06em;color:{palette.paper};text-shadow:0 .04em .12em {palette.ink},0 0 .5em {palette.ink}b3}}
 """
-    body = f"<div class='wrap'><div class='card'><div class='bar'></div><div class='text'>{escape(text.strip())}</div></div></div>"
+    body = f"<div class='wrap'><div class='card'><div class='bar'></div><div class='text'>{_escape_text(text)}</div></div></div>"
     script = f"""
 tl.fromTo('.card',{{autoAlpha:.5}},{{autoAlpha:1,duration:.45,ease:'power1.out'}},0);
 tl.fromTo('.bar',{{scaleY:.35,autoAlpha:.5}},{{scaleY:1,autoAlpha:1,duration:{reveal:.2f},ease:'power2.out'}},0);
@@ -249,13 +277,14 @@ def _caption_glow_breath(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """情绪光晕：无底板，文字发光呼吸直压画面，背后一团包裹式柔光晕，
     两侧星芒点缀随字号缩放。"""
 
     glow = 0.12 + intensity * 0.14
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;align-items:center;gap:.34em;max-width:96%;font-size:{font};padding:.3em .55em}}
@@ -263,7 +292,7 @@ def _caption_glow_breath(
 .text{{position:relative;text-align:center;font-family:"PingFang SC",sans-serif;font-weight:800;font-size:1em;line-height:1.3;color:{palette.paper};text-shadow:0 0 {glow:.2f}em {palette.primary},0 0 {glow * 2.4:.2f}em {palette.primary}99,0 .05em .14em {palette.ink}}}
 .spark{{position:relative;width:.34em;height:.34em;flex:none;background:{palette.primary};clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%)}}
 """
-    body = f"<div class='wrap'><div class='card'><i class='halo'></i><i class='spark'></i><div class='text'>{escape(text.strip())}</div><i class='spark'></i></div></div>"
+    body = f"<div class='wrap'><div class='card'><i class='halo'></i><i class='spark'></i><div class='text'>{_escape_text(text)}</div><i class='spark'></i></div></div>"
     script = """
 tl.fromTo('.card',{autoAlpha:.42,scale:.965},{autoAlpha:1,scale:1,duration:.7,ease:'power2.out'},0);
 tl.fromTo('.spark',{autoAlpha:.35,scale:.5,rotate:-40},{autoAlpha:1,scale:1,rotate:0,duration:.6,stagger:.18,ease:'back.out(1.6)'},.1);
@@ -279,12 +308,13 @@ def _caption_handwritten_note(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """手写笔记：纸纹底板 + 手写体微倾斜 + 墨水划线动画，适合 Vlog。"""
 
     tilt = -1.5 - intensity * 1.5
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;max-width:96%;font-size:{font};padding:.4em 1.1em .35em;background:{palette.paper}f0;border-radius:.6em;transform:rotate({tilt:.1f}deg);box-shadow:.2em .25em 0 {palette.secondary}40}}
@@ -309,12 +339,13 @@ def _caption_keyword_spotlight(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """关键词聚焦：左对齐，关键词高亮色块滑入，适合教学。"""
 
     highlight = 0.6 + intensity * 0.4
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;flex-direction:column;gap:.15em;max-width:96%;font-size:{font};padding:.3em .7em}}
@@ -327,15 +358,15 @@ def _caption_keyword_spotlight(
         keyword = max(words, key=len)
         before, _, after = text.partition(keyword)
         line_html = (
-            f"{escape(before)}"
+            f"{_escape_text(before)}"
             f"<span class='kw' style='position:relative;display:inline-block'>"
             f"<i class='marker'></i>"
             f"<span style='position:relative;z-index:1;font-weight:800;color:{palette.paper}'>"
             f"{escape(keyword)}</span></span>"
-            f"{escape(after)}"
+            f"{_escape_text(after)}"
         )
     else:
-        line_html = f"<span class='kw' style='position:relative;display:inline-block'><i class='marker'></i><span style='position:relative;z-index:1;font-weight:800;color:{palette.paper}'>{escape(text.strip())}</span></span>"
+        line_html = f"<span class='kw' style='position:relative;display:inline-block'><i class='marker'></i><span style='position:relative;z-index:1;font-weight:800;color:{palette.paper}'>{_escape_text(text)}</span></span>"
     body = f"<div class='wrap'><div class='card'><div class='line'>{line_html}</div></div></div>"
     script = """
 tl.fromTo('.card',{{autoAlpha:.35,x:'-3%'}},{{autoAlpha:1,x:'0%',duration:.4,ease:'power2.out'}},0);
@@ -350,12 +381,13 @@ def _caption_drama_whisper(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """低语独白：宋体大字宽字距，逐字淡入+垂直模糊，纯文字+横线，适合短剧。"""
 
     blur = 0.08 + intensity * 0.1
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;flex-direction:column;align-items:center;gap:.3em;max-width:96%;font-size:{font}}}
@@ -378,18 +410,19 @@ def _caption_neon_pulse(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """霓虹脉冲：暗底+亮色文字多层 glow 呼吸+霓虹描边，适合音乐/MV。"""
 
     glow = 0.15 + intensity * 0.2
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:flex;align-items:center;justify-content:center;max-width:96%;font-size:{font};padding:.35em .9em;border:.1em solid {palette.primary}8c;border-radius:.5em;background:{palette.ink}cc;box-shadow:0 0 {glow:.2f}em {palette.primary}66,inset 0 0 {glow * 0.5:.2f}em {palette.primary}33}}
 .text{{font-family:"PingFang SC","Arial Black",sans-serif;font-weight:900;font-size:1em;line-height:1.25;color:{palette.primary};text-shadow:0 0 {glow:.2f}em {palette.primary},0 0 {glow * 2:.2f}em {palette.primary}80,0 0 {glow * 4:.2f}em {palette.primary}40}}
 """
-    body = f"<div class='wrap'><div class='card'><div class='text'>{escape(text.strip())}</div></div></div>"
+    body = f"<div class='wrap'><div class='card'><div class='text'>{_escape_text(text)}</div></div></div>"
     script = f"""
 tl.fromTo('.card',{{autoAlpha:.3,scale:.96}},{{autoAlpha:1,scale:1,duration:.4,ease:'power2.out'}},0);
 tl.to('.text',{{textShadow:'0 0 {glow * 1.4:.2f}em {palette.primary},0 0 {glow * 2.8:.2f}em {palette.primary}aa,0 0 {glow * 5:.2f}em {palette.primary}66',duration:.8,ease:'sine.inOut'}},.3);
@@ -405,19 +438,20 @@ def _caption_brush_strike(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """墨笔横扫：粗体字 clip-path 横扫揭示+对角线扫过，通用动作型。"""
 
     sweep_dur = 0.4 + intensity * 0.2
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;max-width:96%;font-size:{font};padding:.3em .8em;overflow:hidden}}
 .accent{{position:absolute;left:-10%;top:-20%;width:30%;height:140%;background:{palette.primary}40;transform:rotate(-18deg) translateX(-120%);z-index:0}}
 .text{{position:relative;z-index:1;font-family:"PingFang SC","Arial Black",sans-serif;font-weight:900;font-size:1em;line-height:1.25;color:{palette.paper};text-shadow:0 .06em .15em {palette.ink};clip-path:inset(0 100% 0 0)}}
 """
-    body = f"<div class='wrap'><div class='card'><i class='accent'></i><div class='text'>{escape(text.strip())}</div></div></div>"
+    body = f"<div class='wrap'><div class='card'><i class='accent'></i><div class='text'>{_escape_text(text)}</div></div></div>"
     script = f"""
 tl.to('.text',{{clipPath:'inset(0 0% 0 0)',duration:{sweep_dur:.2f},ease:'power3.inOut'}},.1);
 tl.to('.accent',{{x:'420%',duration:{sweep_dur + 0.3:.2f},ease:'power2.inOut'}},.05);
@@ -1059,6 +1093,7 @@ def render_caption_blueprint(
     *,
     palette: object = None,
     intensity: object = None,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """Render one caption card blueprint; returns ``(html, hf duration)``."""
@@ -1071,6 +1106,7 @@ def render_caption_blueprint(
         text,
         validated_palette(palette),
         _clamped(intensity, 0.55, 0.0, 1.0),
+        box_width=box_width,
         box_height=box_height,
     )
 
