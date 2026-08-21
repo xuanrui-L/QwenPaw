@@ -76,6 +76,18 @@ _TRANSIENT_ERROR_MARKERS = (
     "temporarily",
 )
 
+# Error codes that indicate permanent structural issues requiring explicit
+# agent intervention. These errors will never resolve through project state
+# changes alone — the agent must modify the project (e.g., reduce reference
+# count) before retry is allowed.
+_DETERMINISTIC_ERROR_CODES = frozenset(
+    {
+        "IMAGE_REFERENCE_BUDGET_EXCEEDED",
+        "VIDEO_REFERENCE_BUDGET_EXCEEDED",
+        "IMAGE_MODEL_CAPABILITY_UNKNOWN",
+    },
+)
+
 
 def _is_transient_dispatch_error(exc: Exception) -> bool:
     text = str(exc).lower()
@@ -148,6 +160,7 @@ class WorkGraphScheduler:
         self._inflight: dict[str, set[str]] = {}
         self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
         self._cancelled_projects: set[str] = set()
+        self._deterministic_failure_nodes: dict[tuple[str, str], str] = {}
 
     def _transient_budget_available(
         self,
@@ -232,6 +245,11 @@ class WorkGraphScheduler:
         self._transient_last = {
             key: value
             for key, value in self._transient_last.items()
+            if key[0] != project_id
+        }
+        self._deterministic_failure_nodes = {
+            key: value
+            for key, value in self._deterministic_failure_nodes.items()
             if key[0] != project_id
         }
 
@@ -497,6 +515,8 @@ class WorkGraphScheduler:
         """
 
         for node in candidates:
+            if (project_id, node.node_id) in self._deterministic_failure_nodes:
+                continue
             fingerprint = node.dispatch_fingerprint or node.node_id
             ledger_key = (project_id, node.node_id, fingerprint)
             if ledger_key not in self._dispatched or node.node_id in inflight:
@@ -525,6 +545,10 @@ class WorkGraphScheduler:
         )
         try:
             await self.dispatch_node(project_id, node, fingerprint)
+            self._deterministic_failure_nodes.pop(
+                (project_id, node.node_id),
+                None,
+            )
         except Exception as exc:  # pylint: disable=broad-except
             ledger_key = (project_id, node.node_id, fingerprint)
             if _is_transient_dispatch_error(
@@ -554,6 +578,15 @@ class WorkGraphScheduler:
                 # prevents a paid retry until the node's inputs change.
                 # Failures without a record re-enter through the bounded
                 # no-record reopen in _dispatch_candidates.
+                # Only block retries for specific structural errors that
+                # require explicit agent intervention (e.g., reference
+                # budget exceeded). Other validation errors may resolve
+                # when project state changes.
+                error_code = getattr(exc, "code", None)
+                if error_code in _DETERMINISTIC_ERROR_CODES:
+                    self._deterministic_failure_nodes[
+                        (project_id, node.node_id)
+                    ] = str(exc)[:200]
                 logger.warning(
                     "work-graph dispatch failed project=%s node=%s: %s",
                     project_id,

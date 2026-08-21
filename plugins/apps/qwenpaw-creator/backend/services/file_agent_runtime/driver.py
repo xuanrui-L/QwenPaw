@@ -7336,17 +7336,17 @@ def _specialist_tool_recovery(
         or "IMAGE_REFERENCE_BUDGET_EXCEEDED" in error
     ):
         return (
-            "The execution layer resolved both Project-owned automatic image "
-            "references and explicit call references before provider dispatch, "
-            "and their deduplicated total exceeds the active model limit. No "
-            "provider call was made and no references were silently dropped. "
-            "Read error.details, then call read_project and use jq_project to "
-            "remove lower-priority reference IDs from the target variant, "
-            "storyboard creation, or lineup fields as appropriate; also shrink "
-            "referenceVersionIds/referenceImageUrls in the next call. Re-read "
-            "the Project and retry only after the resolved total is within "
-            "details.limit. Preserve the identity/storyboard anchors that are "
-            "actually essential."
+            "CRITICAL: The execution layer resolved both Project-owned automatic "
+            "image references and explicit call references before provider "
+            "dispatch, and their deduplicated total exceeds the active model "
+            "limit. No provider call was made. Read error.details for the exact "
+            "count (resolvedCount) and limit. You MUST call read_project, then "
+            "use jq_project to remove lower-priority reference IDs from the "
+            "target variant, storyboard creation, or lineup fields. The work "
+            "scheduler will NOT retry this node until the resolved total is "
+            "within details.limit. Verify the count after your changes by "
+            "re-reading the Project. Preserve only the identity/storyboard "
+            "anchors that are actually essential."
         )
     if name == "r2v_generation" and (
         code == "VIDEO_REFERENCE_BUDGET_EXCEEDED"
