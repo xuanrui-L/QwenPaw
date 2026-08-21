@@ -395,10 +395,7 @@ type TabType = ModelType | "grounding";
 
 // Sections whose endpoint comes from a fixed protocol preset rather than
 // from user input.
-export const PRESETS_BY_TYPE: Record<
-  string,
-  Record<string, ProtocolPreset>
-> = {
+export const PRESETS_BY_TYPE: Record<string, Record<string, ProtocolPreset>> = {
   asr: ASR_PRESETS,
   tts: TTS_PRESETS,
   s2v: S2V_PRESETS,
