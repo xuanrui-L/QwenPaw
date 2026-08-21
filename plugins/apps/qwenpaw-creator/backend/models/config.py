@@ -33,6 +33,7 @@ CREATOR_IMAGE_CONFIG_TOOL = "creator_image_model"
 CREATOR_VIDEO_CONFIG_TOOL = "creator_video_model"
 CREATOR_VLM_CONFIG_TOOL = "creator_vlm_model"
 CREATOR_GROUNDING_CONFIG_TOOL = "creator_web_grounding"
+CREATOR_LIVE_OPERATION_CONFIG_TOOL = "creator_live_operation"
 CREATOR_ASR_CONFIG_TOOL = "creator_asr_model"
 CREATOR_TTS_CONFIG_TOOL = "creator_tts_model"
 CREATOR_S2V_CONFIG_TOOL = "creator_s2v_model"
@@ -60,6 +61,7 @@ CREATOR_CONFIG_TOOLS = (
     CREATOR_VIDEO_CONFIG_TOOL,
     CREATOR_VLM_CONFIG_TOOL,
     CREATOR_GROUNDING_CONFIG_TOOL,
+    CREATOR_LIVE_OPERATION_CONFIG_TOOL,
     CREATOR_ASR_CONFIG_TOOL,
     CREATOR_TTS_CONFIG_TOOL,
     CREATOR_S2V_CONFIG_TOOL,
@@ -473,6 +475,7 @@ def _map_tool_to_section(tool_name: str) -> str:
         CREATOR_TEXT_CONFIG_TOOL: "llm",
         CREATOR_VLM_CONFIG_TOOL: "vlm",
         CREATOR_GROUNDING_CONFIG_TOOL: "grounding",
+        CREATOR_LIVE_OPERATION_CONFIG_TOOL: "live_operation",
         CREATOR_ASR_CONFIG_TOOL: "asr",
         CREATOR_TTS_CONFIG_TOOL: "tts",
         CREATOR_S2V_CONFIG_TOOL: "s2v",
@@ -1902,9 +1905,11 @@ def _load_skills_config_document() -> tuple[list, list]:
                     {
                         "name": _issue_entry_name(raw, index),
                         "path": str(
-                            raw.get("path", "")
-                            if isinstance(raw, Mapping)
-                            else "",
+                            (
+                                raw.get("path", "")
+                                if isinstance(raw, Mapping)
+                                else ""
+                            ),
                         ),
                         "reason": f"schema validation failed: {exc}"[:400],
                     },
@@ -1955,3 +1960,128 @@ def _clear_skills_config_cache():
     _SKILLS_CONFIG_CACHE = None
     _SKILLS_CONFIG_CACHE_PATH = None
     _SKILLS_CONFIG_CACHE_FINGERPRINT = None
+
+
+# ─── live operation (real websites driven by the agent) ────────────────
+# Only resource ceilings and how Creator asks live here. What a desktop
+# application is actually allowed to do stays in the host's own Computer Use
+# authorization store, so both entry points agree on one set of grants.
+_LIVE_OPERATION_DEFAULT_FPS = 25
+_LIVE_OPERATION_DEFAULT_WIDTH = 1280
+_LIVE_OPERATION_DEFAULT_HEIGHT = 720
+_LIVE_OPERATION_DEFAULT_TAKE_SECONDS = 300.0
+_LIVE_OPERATION_DEFAULT_TIMEOUT_SECONDS = 600.0
+_LIVE_OPERATION_IDENTITIES = frozenset({"auto", "user", "avatar", "guest"})
+
+
+def _live_operation_value(field: str, env_name: str, default: str = "") -> str:
+    tool_config = get_request_tool_config(CREATOR_LIVE_OPERATION_CONFIG_TOOL)
+    value = tool_config.get(field)
+    if value not in (None, ""):
+        return str(value)
+    section = _get_user_config().get("live_operation")
+    if isinstance(section, dict):
+        value = section.get(_map_user_field(field))
+        if value not in (None, ""):
+            return str(value)
+    return os.environ.get(env_name, default)
+
+
+def _live_operation_number(
+    field: str,
+    env_name: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = _live_operation_value(field, env_name)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    return min(max(value, minimum), maximum)
+
+
+def get_live_operation_enabled() -> bool:
+    """Whether the agent may operate real websites in this deployment."""
+    raw = _live_operation_value(
+        "enabled",
+        "CREATOR_LIVE_OPERATION_ENABLED",
+        "1",
+    )
+    return str(raw).strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def get_live_operation_identity() -> str:
+    """Which browser identity recordings run as.
+
+    ``guest`` is the default because a recorded screen must not carry the
+    user's logged-in accounts into footage that ends up in a video.
+    """
+    raw = _live_operation_value(
+        "identity",
+        "CREATOR_LIVE_OPERATION_IDENTITY",
+        "guest",
+    ).strip()
+    return raw if raw in _LIVE_OPERATION_IDENTITIES else "guest"
+
+
+def get_live_operation_fps() -> int:
+    return int(
+        _live_operation_number(
+            "fps",
+            "CREATOR_LIVE_OPERATION_FPS",
+            _LIVE_OPERATION_DEFAULT_FPS,
+            minimum=5,
+            maximum=60,
+        ),
+    )
+
+
+def get_live_operation_max_width() -> int:
+    return int(
+        _live_operation_number(
+            "max_width",
+            "CREATOR_LIVE_OPERATION_MAX_WIDTH",
+            _LIVE_OPERATION_DEFAULT_WIDTH,
+            minimum=320,
+            maximum=3840,
+        ),
+    )
+
+
+def get_live_operation_max_height() -> int:
+    return int(
+        _live_operation_number(
+            "max_height",
+            "CREATOR_LIVE_OPERATION_MAX_HEIGHT",
+            _LIVE_OPERATION_DEFAULT_HEIGHT,
+            minimum=240,
+            maximum=2160,
+        ),
+    )
+
+
+def get_live_operation_max_take_seconds() -> float:
+    """Ceiling for one take, so a forgotten stop cannot film forever."""
+    return _live_operation_number(
+        "max_take_seconds",
+        "CREATOR_LIVE_OPERATION_MAX_TAKE_SECONDS",
+        _LIVE_OPERATION_DEFAULT_TAKE_SECONDS,
+        minimum=10.0,
+        maximum=1800.0,
+    )
+
+
+def get_live_operation_timeout_seconds() -> float:
+    """Ceiling for one browser_use call, covering all of its steps."""
+    return _live_operation_number(
+        "timeout_seconds",
+        "CREATOR_LIVE_OPERATION_TIMEOUT_SECONDS",
+        _LIVE_OPERATION_DEFAULT_TIMEOUT_SECONDS,
+        minimum=30.0,
+        maximum=3600.0,
+    )

@@ -318,6 +318,86 @@
         ]
       },
       {
+        "name": "creator_live_operation",
+        "description": "QwenPaw Creator live website operation and take recording limits",
+        "icon": "\ud83d\udda5\ufe0f",
+        "requires_config": false,
+        "config_fields": [
+          {
+            "name": "enabled",
+            "label": "Live Operation Enabled",
+            "type": "select",
+            "required": false,
+            "default": "true",
+            "options": [
+              "true",
+              "false"
+            ],
+            "help": "Lets the agent operate real websites and record takes as Project source material."
+          },
+          {
+            "name": "identity",
+            "label": "Browser Identity",
+            "type": "select",
+            "required": false,
+            "default": "guest",
+            "options": [
+              "guest",
+              "avatar",
+              "user",
+              "auto"
+            ],
+            "help": "guest keeps recorded footage free of the user's logged-in accounts; user drives the real Chrome profile."
+          },
+          {
+            "name": "fps",
+            "label": "Take Frame Rate",
+            "type": "number",
+            "required": false,
+            "default": 25,
+            "min": 5,
+            "max": 60
+          },
+          {
+            "name": "max_width",
+            "label": "Take Max Width",
+            "type": "number",
+            "required": false,
+            "default": 1280,
+            "min": 320,
+            "max": 3840
+          },
+          {
+            "name": "max_height",
+            "label": "Take Max Height",
+            "type": "number",
+            "required": false,
+            "default": 720,
+            "min": 240,
+            "max": 2160
+          },
+          {
+            "name": "max_take_seconds",
+            "label": "Max Seconds Per Take",
+            "type": "number",
+            "required": false,
+            "default": 300,
+            "min": 10,
+            "max": 1800,
+            "help": "Ceiling for one recording, so a forgotten stop cannot film indefinitely."
+          },
+          {
+            "name": "timeout_seconds",
+            "label": "Max Seconds Per Call",
+            "type": "number",
+            "required": false,
+            "default": 600,
+            "min": 30,
+            "max": 3600
+          }
+        ]
+      },
+      {
         "name": "creator_asr_model",
         "description": "QwenPaw Creator speech-to-text configuration for source understanding",
         "icon": "🎙️",

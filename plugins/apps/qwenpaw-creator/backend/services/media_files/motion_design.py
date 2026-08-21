@@ -41,6 +41,10 @@ from services.media_files.keyframe_cache import (
     materialize_keyframe,
     verified_indexed_path,
 )
+from services.media_files.live_operation import (
+    facts_within,
+    read_take_manifest,
+)
 from services.media_files.motion_blueprints import (
     CONTENT_TYPES,
     blueprint_catalog_text,
@@ -721,7 +725,9 @@ def _validated_design(
         html,
         re.IGNORECASE,
     ):
-        raise ValidationError("design html 不允许包含脚本、本机文件或嵌入网页 URL")
+        raise ValidationError(
+            "design html 不允许包含脚本、本机文件或嵌入网页 URL",
+        )
     if re.search(
         r"""(?:src|href)\s*=\s*["']?\s*(?:https?:)?//""",
         html,
@@ -876,13 +882,86 @@ def _externalized_motion(
         # verify the bytes on disk still match before reusing them.
         file_store.abandon(staged)
         if not file_store.inspect(indexed).available:
-            raise StorageIntegrityError("动效文档路径已存在但内容不一致") from exc
+            raise StorageIntegrityError(
+                "动效文档路径已存在但内容不一致",
+            ) from exc
     return (
         motion.model_copy(
             update={"html": None, "html_file_id": indexed.file_id},
         ),
         indexed,
     )
+
+
+def _live_operation_facts(
+    *,
+    project: Project,
+    project_root: Path,
+    element: TimelineElement,
+    start_seconds: float,
+    end_seconds: float,
+) -> list[str]:
+    """Describe the real operations a recorded clip covers, if it has any.
+
+    Footage produced by live operation carries the coordinates and instants
+    its actions actually happened at. Handing those to the designer is what
+    lets emphasis land on the element that was clicked instead of on a guess
+    derived from looking at pixels. Ordinary footage has no such record and
+    simply yields nothing here.
+    """
+
+    render_source = element.render_source
+    if not isinstance(render_source, SourceVersionRenderSource):
+        return []
+    version = project.assets.source_versions_by_id.get(
+        render_source.version_id,
+    )
+    if version is None:
+        return []
+    manifest = read_take_manifest(
+        project,
+        AssetFileStore(project_root),
+        version,
+    )
+    if not manifest:
+        return []
+    facts = facts_within(
+        manifest,
+        start_ms=start_seconds * 1000,
+        end_ms=end_seconds * 1000,
+    )
+    if not facts:
+        return []
+    lines = [
+        "本片段来自真实操作录屏，以下是这段时间内真实发生的操作事实"
+        "（location 为归一化画布坐标，可直接用作 location 的 x/y/width/height）：",
+    ]
+    for fact in facts:
+        offset = float(fact.get("clip_offset_ms", 0)) / 1000
+        target = str(fact.get("target") or "").strip()
+        detail = f"- {offset:.2f}s {fact.get('op')}"
+        if target:
+            detail += f" → {target}"
+        location = fact.get("location")
+        if isinstance(location, Mapping):
+            detail += (
+                " location="
+                f"x={location.get('x')}, y={location.get('y')}, "
+                f"width={location.get('width')}, height={location.get('height')}"
+            )
+        else:
+            detail += "（无坐标）"
+        if fact.get("failed"):
+            detail += "（该操作失败）"
+        lines.append(detail)
+    lines.append(
+        "操作教程类画面的动效方法：空间上以事件坐标为锚，强调发生在操作真正"
+        "发生的位置，讲解锁定在目标元素的盒体上；时间上贴合动作时刻，持续"
+        "时长与动作节奏匹配；保持克制，服务于“看清操作”，不遮挡目标本体，"
+        "同屏只给一个焦点；全片操作强调的视觉语言保持自洽。具体用什么视觉"
+        "形式达到这些目的，由你根据画面自己创作。",
+    )
+    return lines
 
 
 def _design_task_text(
@@ -898,6 +977,7 @@ def _design_task_text(
     story_role: str | None = None,
     story_motif: str | None = None,
     content_type: str = "",
+    live_operation_facts: list[str] | None = None,
 ) -> str:
     creation = element.creation
     assert isinstance(creation, EditCreation)
@@ -926,10 +1006,14 @@ def _design_task_text(
             + "。若剧情语义允许，请换一种造型，形成有变化但统一的视觉节奏。",
         )
     if os_context:
-        lines.append("同一时段的猫咪 OS 语义如下；装饰造型必须呼应这些台词/情绪，但不得重复显示文字：")
+        lines.append(
+            "同一时段的猫咪 OS 语义如下；装饰造型必须呼应这些台词/情绪，但不得重复显示文字：",
+        )
         lines.extend(f"- {context}" for context in os_context)
     if avoid_locations:
-        lines.append("以下猫咪 OS/字幕卡会在同一时段出现，装饰动效的 location 盒子不得与它们重叠：")
+        lines.append(
+            "以下猫咪 OS/字幕卡会在同一时段出现，装饰动效的 location 盒子不得与它们重叠：",
+        )
         lines.extend(
             f"- {label}: {location.model_dump(mode='json')}"
             for label, location in avoid_locations
@@ -945,6 +1029,8 @@ def _design_task_text(
     }
     if content_type in _CONTENT_TYPE_HINTS:
         lines.append(_CONTENT_TYPE_HINTS[content_type])
+    if live_operation_facts:
+        lines.extend(live_operation_facts)
     lines.append(
         "附图是该片段内按时间顺序抽取的真实画面帧，请从中判断主体位置、留白区域和配色。严格按系统要求只输出一个 JSON 对象。",
     )
@@ -2439,6 +2525,13 @@ async def design_motion_overlays(
                         story_role=story_role,
                         story_motif=story_motif,
                         content_type=content_type,
+                        live_operation_facts=_live_operation_facts(
+                            project=project,
+                            project_root=project_root,
+                            element=element,
+                            start_seconds=start_seconds,
+                            end_seconds=end_seconds,
+                        ),
                     ),
                     frame_paths=frames,
                     canvas_size=canvas_size,
@@ -2508,14 +2601,16 @@ async def design_motion_overlays(
     # Text cards choose their final locations first. Decorations then receive
     # those committed-in-memory boxes as hard collision constraints.
     text_results = list(
-        await asyncio.gather(
-            *(
-                style_text_overlay(overlay, card_index)
-                for card_index, overlay in enumerate(text_overlays)
-            ),
-        )
-        if caption_style == "varied"
-        else [uniform_text_style(overlay) for overlay in text_overlays],
+        (
+            await asyncio.gather(
+                *(
+                    style_text_overlay(overlay, card_index)
+                    for card_index, overlay in enumerate(text_overlays)
+                ),
+            )
+            if caption_style == "varied"
+            else [uniform_text_style(overlay) for overlay in text_overlays]
+        ),
     )
     clip_results = list(
         await asyncio.gather(

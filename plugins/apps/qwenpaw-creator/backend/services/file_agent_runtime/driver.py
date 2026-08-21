@@ -55,6 +55,13 @@ from models.config import (
     get_web_grounding_verification_timeout_seconds,
     get_web_grounding_visual_search_timeout_seconds,
     get_image_model_name,
+    get_live_operation_enabled,
+    get_live_operation_fps,
+    get_live_operation_identity,
+    get_live_operation_max_height,
+    get_live_operation_max_take_seconds,
+    get_live_operation_max_width,
+    get_live_operation_timeout_seconds,
     get_video_backend,
     get_video_model_name,
 )
@@ -107,6 +114,17 @@ from services.runtime_files.atomic_store import atomic_replace_bytes
 from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
     ensure_media_call_budget,
+)
+from services.media_files.live_operation import (
+    LiveOperationError,
+    LiveOperationRun,
+    PublishedImage,
+    PublishedTake,
+    build_image_records,
+    build_take_records,
+    run_browser_code,
+    stable_id,
+    stage_and_publish_file,
 )
 from services.external_skills import (
     EXTERNAL_SKILL_TOOL_NAMES,
@@ -188,6 +206,7 @@ _BILLING_SENSITIVE_ARGUMENTS = ("durationSeconds", "resolution", "mode")
 
 GROUND_PROMPT_CONTEXT_TOOL_NAME = "ground_prompt_context"
 OBJECT_GROUNDING_TOOL_NAME = "ground_image_objects"
+BROWSER_USE_TOOL_NAME = "browser_use"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
@@ -613,6 +632,53 @@ def _object_grounding_tool_manifest() -> dict[str, Any]:
     }
 
 
+def _browser_use_tool_manifest() -> dict[str, Any]:
+    """Describe the live-operation tool the way the host browser tool does.
+
+    The description stays deliberately short: the authoritative reference is
+    the browser skill, which the model loads on demand.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": BROWSER_USE_TOOL_NAME,
+            "description": (
+                "用异步 Python 操作真实浏览器，驱动 QwenPaw 内置 Browser SDK。"
+                "代码在 Python 运行时执行，`Browser` 已在作用域内：\n"
+                "    browser = await Browser.connect()\n"
+                '    page = await browser.open("https://example.com")\n\n'
+                "完整权威参考在 browser skill 中；上下文压缩后请重新加载该 "
+                "skill。按 感知 → 行动 → 复核 循环工作：await page.snapshot() "
+                "读页面，用语义定位器操作，再 snapshot 确认。登录、验证码、"
+                "2FA 一律 await browser.handoff(...) 后停止。\n\n"
+                "作用域内还有 `recorder`：需要留下操作过程画面时 "
+                'await recorder.start(label="...")，做完这段操作后 '
+                "await recorder.stop()。只有 start 与 stop 之间的画面会被录制；"
+                "是否需要录屏由你判断——静态界面用截图配动效往往更好。"
+                "录屏与截图会自动入库为 Project 源素材。\n\n"
+                "参数 code：模块级 async Python（可直接 await；用 print() 输出"
+                "你需要看到的事实）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "projectId": {"type": "string", "minLength": 1},
+                    "code": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "模块级 async Python；`Browser` 与 `recorder` "
+                            "已在作用域内。"
+                        ),
+                    },
+                },
+                "required": ["projectId", "code"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
 def _creator_agent_tool_manifest(
     external_skills: list[LoadedSkill] | None = None,
 ) -> list[dict[str, Any]]:
@@ -620,6 +686,8 @@ def _creator_agent_tool_manifest(
     if get_web_grounding_enabled():
         manifest.append(_ground_prompt_context_tool_manifest())
     manifest.append(_object_grounding_tool_manifest())
+    if get_live_operation_enabled():
+        manifest.append(_browser_use_tool_manifest())
     if external_skills:
         manifest.extend(external_skill_tool_manifests(external_skills))
     manifest.append(delegate_tool_manifest())
@@ -2395,6 +2463,12 @@ class FileCreatorAgentRuntime:
                             request=request,
                             arguments=call.arguments,
                         )
+                    elif call.name == BROWSER_USE_TOOL_NAME:
+                        result = await self._run_browser_use(
+                            request=request,
+                            run_id=run_id,
+                            arguments=call.arguments,
+                        )
                     elif call.name in EXTERNAL_SKILL_TOOL_NAMES:
                         result = await self._run_external_skill_tool(
                             name=call.name,
@@ -2813,6 +2887,208 @@ class FileCreatorAgentRuntime:
                 suffix=".png",
             )
         return response
+
+    async def _run_browser_use(
+        self,
+        *,
+        request: CreatorMessageRecord,
+        run_id: str,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Run the model's browser code and publish whatever it recorded.
+
+        The flow is the model's to choose: this only executes what it wrote,
+        then turns any footage and screenshots into ordinary Project source
+        material so the rest of the pipeline can treat them like any other
+        asset.
+        """
+        code = str(arguments.get("code") or "")
+        if not code.strip():
+            raise FileAgentRuntimeError("browser_use requires code")
+        if not get_live_operation_enabled():
+            raise FileAgentRuntimeError(
+                "browser_use is disabled in this Creator configuration",
+            )
+        project_id = request.project_id
+        run_root = self.services.projects.project_root(project_id) / "runtime"
+        try:
+            outcome = await run_browser_code(
+                code,
+                run_root=run_root,
+                run_id=f"{run_id}-{uuid4().hex[:8]}",
+                identity=get_live_operation_identity(),
+                fps=get_live_operation_fps(),
+                max_width=get_live_operation_max_width(),
+                max_height=get_live_operation_max_height(),
+                max_take_seconds=get_live_operation_max_take_seconds(),
+                timeout_seconds=get_live_operation_timeout_seconds(),
+            )
+        except LiveOperationError as exc:
+            raise FileAgentRuntimeError(f"browser_use failed: {exc}") from exc
+        published = await asyncio.to_thread(
+            self._publish_live_operation_sync,
+            project_id,
+            request.message_id,
+            outcome,
+        )
+        response: dict[str, Any] = {
+            "ok": True,
+            "status": "success",
+            "output": outcome.output,
+            "takes": [item.as_dict() for item in published["takes"]],
+            "screenshots": [
+                item.as_dict() for item in published["screenshots"]
+            ],
+        }
+        if outcome.result_repr:
+            response["result"] = outcome.result_repr
+        if published["issues"]:
+            response["issues"] = published["issues"]
+        return response
+
+    def _publish_live_operation_sync(
+        self,
+        project_id: str,
+        request_id: str,
+        outcome: LiveOperationRun,
+    ) -> dict[str, Any]:
+        """Commit one run's takes and screenshots as Project source assets."""
+        takes: list[PublishedTake] = []
+        screenshots: list[PublishedImage] = []
+        issues: list[str] = []
+        if not outcome.takes and not outcome.screenshots:
+            return {
+                "takes": takes,
+                "screenshots": screenshots,
+                "issues": issues,
+            }
+        project_root = self.services.projects.project_root(project_id)
+        file_store = AssetFileStore(project_root)
+        changed = False
+        with self.services.projects.lifecycle_lock(project_id):
+            base = self.services.projects.read(project_id)
+            candidate = base.project.model_dump(mode="json")
+            files = candidate["assets"]["files_by_id"]
+            versions = candidate["assets"]["source_versions_by_id"]
+            for take in outcome.takes:
+                try:
+                    video = take.video_path.read_bytes()
+                except OSError as exc:
+                    issues.append(f"take_unreadable:{take.take_id}")
+                    logger.warning(
+                        "live operation take unreadable: %s (%s)",
+                        take.take_id,
+                        exc,
+                    )
+                    continue
+                manifest_payload = take.manifest.as_json_bytes()
+                (
+                    video_file,
+                    manifest_file,
+                    version,
+                    logical_asset_id,
+                ) = build_take_records(
+                    project_id=project_id,
+                    take_id=take.take_id,
+                    label=take.label,
+                    video=video,
+                    manifest_payload=manifest_payload,
+                    duration_seconds=take.manifest.duration_ms / 1000 or None,
+                    request_id=request_id,
+                )
+                for indexed, payload in (
+                    (video_file, video),
+                    (manifest_file, manifest_payload),
+                ):
+                    if indexed.file_id in files:
+                        continue
+                    stage_and_publish_file(
+                        file_store,
+                        content=payload,
+                        relative_uri=indexed.relative_uri,
+                        checksum=indexed.sha256,
+                        staging_id=f"live-op-{indexed.file_id[:40]}",
+                    )
+                    files[indexed.file_id] = indexed.model_dump(mode="json")
+                    changed = True
+                if version.version_id not in versions:
+                    versions[version.version_id] = version.model_dump(
+                        mode="json",
+                    )
+                    changed = True
+                takes.append(
+                    PublishedTake(
+                        take_id=take.take_id,
+                        label=take.label,
+                        workspace_ref=workspace_asset_ref(
+                            logical_asset_id,
+                            version.version_id,
+                        ),
+                        logical_asset_id=logical_asset_id,
+                        source_asset_version_id=version.version_id,
+                        manifest_file_id=manifest_file.file_id,
+                        summary=take.summary,
+                    ),
+                )
+            for index, raw_path in enumerate(outcome.screenshots):
+                path = Path(raw_path)
+                try:
+                    content = path.read_bytes()
+                except OSError:
+                    issues.append(f"screenshot_unreadable:{index}")
+                    continue
+                media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+                indexed, version, logical_asset_id = build_image_records(
+                    project_id=project_id,
+                    name=f"Live operation screenshot {index + 1}",
+                    content=content,
+                    media_type=media_type,
+                    request_id=request_id,
+                )
+                if indexed.file_id not in files:
+                    stage_and_publish_file(
+                        file_store,
+                        content=content,
+                        relative_uri=indexed.relative_uri,
+                        checksum=indexed.sha256,
+                        staging_id=f"live-op-{indexed.file_id[:40]}",
+                    )
+                    files[indexed.file_id] = indexed.model_dump(mode="json")
+                    changed = True
+                if version.version_id not in versions:
+                    versions[version.version_id] = version.model_dump(
+                        mode="json",
+                    )
+                    changed = True
+                screenshots.append(
+                    PublishedImage(
+                        workspace_ref=workspace_asset_ref(
+                            logical_asset_id,
+                            version.version_id,
+                        ),
+                        logical_asset_id=logical_asset_id,
+                        source_asset_version_id=version.version_id,
+                        file_id=indexed.file_id,
+                    ),
+                )
+            if changed:
+                commit = self.services.commits.commit(
+                    base=base,
+                    candidate=candidate,
+                    origin=ChangeOrigin.RUNTIME_TASK,
+                    review_policy=ReviewPolicy.AUTO_FIX,
+                    caused_by_request_id=request_id,
+                    round_id=stable_id("round", project_id, request_id),
+                    transaction_id=stable_id(
+                        "transaction",
+                        project_id,
+                        request_id,
+                    ),
+                    advance_accepted_baseline=True,
+                    _lifecycle_lock_held=True,
+                )
+                self.services.poller.note_commit(commit.snapshot)
+        return {"takes": takes, "screenshots": screenshots, "issues": issues}
 
     async def _promote_grounding_visuals(
         self,

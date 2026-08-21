@@ -275,6 +275,7 @@ def _edit_client(*, description: str):
             "patch_project",
             "ground_prompt_context",
             "ground_image_objects",
+            "browser_use",
             "elements_at",
             "delegate_to_agent",
         }
