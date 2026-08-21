@@ -164,6 +164,29 @@ def test_effective_name_derives_official_wan_base_for_r2v() -> None:
     )
 
 
+def test_effective_name_derives_suffix_for_bare_wan_family() -> None:
+    # Bare Wan family names (no mode suffix) must derive the mode suffix for
+    # r2v mode, because DashScope only recognizes the full IDs like
+    # "wan2.7-r2v", not the bare "wan2.7".
+    assert effective_video_model_name("wan2.7", "r2v", "wan") == "wan2.7-r2v"
+    assert effective_video_model_name("wan2.6", "r2v", "wan") == "wan2.6-r2v"
+    # t2v/i2v derive from the same capability declaration.
+    assert effective_video_model_name("wan2.7", "t2v", "wan") == "wan2.7-t2v"
+    assert effective_video_model_name("wan2.7", "i2v", "wan") == "wan2.7-i2v"
+    # Names with an existing suffix are not re-derived.
+    assert (
+        effective_video_model_name("wan2.7-r2v", "r2v", "wan") == "wan2.7-r2v"
+    )
+    assert (
+        effective_video_model_name("wan2.7-i2v", "r2v", "wan") == "wan2.7-r2v"
+    )
+    # Opaque names like "wanx-video" keep the historical byte-identical
+    # behaviour (no capability declares them, so nothing derives).
+    assert (
+        effective_video_model_name("wanx-video", "r2v", "wan") == "wanx-video"
+    )
+
+
 # ── capability matrix ────────────────────────────────────────────────────────
 
 
