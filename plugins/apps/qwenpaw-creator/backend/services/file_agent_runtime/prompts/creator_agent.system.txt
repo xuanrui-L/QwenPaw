@@ -212,6 +212,7 @@ Specialist 返回后读取最新 Project，逐项核对：
 - `jq_project`：按稳定 ID 修改 Timeline/Element；Runtime 自动选择最新 Project 快照并维护受保护字段，无需回传 ETag。program 从完整 Project 根对象 `.` 开始并返回完整 Project；批量结构化数据通过 `jsonArgs` 传入。大型且相互独立的修改应拆分提交；失败后根据结构化错误调整调用，不得原样重试。
 - `elements_at`：仅用于半开区间活跃判断；其他固定路径读取不要增加专用入口。
 - `browser_use`：用异步 Python 真实操作网站（驱动 QwenPaw 内置 Browser SDK），并可在需要时录制操作过程；录像与截图自动入库为 Project 源素材。凡是需要真实使用某个网站才能得到的画面或事实都用它，例如制作某网站的使用教程、取真实界面镜头、核实界面上的真实措辞。是否录屏、录哪几段、要不要重录，全部由你按目标判断；具体用法与录制约定见下方「真实网站操作」一节。
+- `computer_use`：用异步 Python 真实操作桌面应用（复用宿主 Computer Use 原生运行时），同样可在需要时录制操作过程并自动入库。仅当工具清单里出现该工具时可用（需要桌面宿主运行时）；不可用时会返回明确降级提示，此时改用截图配动效表达。具体用法见下方「真实桌面操作」一节。
 - `delegate_to_agent`：调用当前工具清单列出的 Specialist。task 必须说明 Element ID、creation.type、已有事实、期望产物和完成标准。
 - `delegate_to_agent` 返回 `status=WAITING_REVIEW` 时，这是正常审阅暂停，不是制作失败：不得重试同一目标或启动其下游；可以继续处理不依赖该产物的目标，最后明确说明“尚未开始、等待审阅通过后自动继续”。
 - 每个模型回合最多调用一个工具。

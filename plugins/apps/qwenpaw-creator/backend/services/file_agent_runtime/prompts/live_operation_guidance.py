@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 _SKILL_CANDIDATES = ("browser-zh", "browser-en")
 _FRONT_MATTER_FENCE = "---"
 
+# Where the host computer-use bundle keeps its own authoritative skill. It is
+# only importable at runtime, so the manual is read from disk by best-effort
+# path discovery rather than a static import.
+_COMPUTER_USE_SKILL_RELATIVE = (
+    "plugins/bundle/computer-use/skills/computer_use/SKILL.md"
+)
+
 # Creator's own contract on top of the host SDK. Recording bounds are the only
 # thing the model must decide deliberately, so that is what this states — with
 # no prescribed order of work, because the flow is the model's to design.
@@ -54,6 +61,37 @@ _CREATOR_SECTION = """
 - 定位失败时先 `await page.snapshot()` 看真实的 role 与可访问名，不要凭猜测重试
   同一个定位器。
 - 登录、验证码、2FA 一律 `await browser.handoff(...)` 后停止，绝不自动化。
+"""
+
+
+# Creator's desktop recording contract on top of the host computer-use runtime.
+_COMPUTER_USE_SECTION = """
+## Creator 扩展：桌面录制与产物（`desktop` / `recorder`）
+
+`computer_use` 的作用域里有 `desktop`（observe_window / list_windows /
+list_apps / launch_app / click / type_text / press_key / scroll / drag /
+invoke_element / set_value / close_window）与 `recorder`：
+
+- `await recorder.start(label="这段在做什么") -> take_id`：开始录制当前窗口。
+- `await recorder.stop() -> {take_id, label, summary}`：结束这一段。
+- `recorder.is_recording() -> bool`。
+
+先 `await desktop.observe_window()` 拿到窗口与元素，再动作，再 observe
+确认。录制会按当前窗口边界裁剪屏幕；只有 start–stop 之间的画面进入
+录像，因此片段里没有废镜头。是否录屏、录哪几段由你判断；只展示静态
+界面时，截图配动效往往更好。
+
+产物与浏览器完全同构：录像片段→源素材（可 observe_source_clip 看片、可作
+ Edit 的 render_source）；截图→图片素材；工具返回值给出每个片段与截图的
+ workspaceRef / sourceAssetVersionId。录制期间每个动作的坐标与时刻会自动记入
+该片段的事实清单，动效制作用它把强调放在操作真正发生的位置上。
+
+### 注意事项
+
+- 桌面操作需要桌面宿主运行时（仅 Windows / macOS）；无头服务上不可用，
+  工具会返回明确的降级提示。
+- 每个动作只根据最新的 observe 结果决定；`dispatched: true` 只说明输入已发
+  送，不代表应用完成。
 """
 
 
@@ -103,6 +141,27 @@ def load_host_browser_manual() -> str:
     return ""
 
 
+def load_host_computer_use_manual() -> str:
+    """Return the host computer-use skill body, or empty when not found."""
+    root = _skill_root()
+    # The bundle sits three levels up from the installed qwenpaw package
+    # (repo/plugins/bundle/...). Walk up from the package to find it, so the
+    # authoritative manual is reused verbatim rather than restated.
+    candidates: list[Path] = []
+    if root is not None:
+        repo = root.parent.parent.parent.parent
+        candidates.append(repo / _COMPUTER_USE_SKILL_RELATIVE)
+    for candidate in candidates:
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        body = _strip_front_matter(text)
+        if body:
+            return body
+    return ""
+
+
 def live_operation_guidance() -> str:
     """Render the browser guidance injected into the Creator system prompt.
 
@@ -124,7 +183,32 @@ def live_operation_guidance() -> str:
     if manual:
         parts.append(manual)
     parts.append(_CREATOR_SECTION.strip())
+    parts.append(_computer_use_guidance())
+    return "\n\n".join(part for part in parts if part)
+
+
+def _computer_use_guidance() -> str:
+    """Desktop guidance, injected only when the desktop tool is callable."""
+    from models.config import get_computer_use_enabled
+
+    if not get_computer_use_enabled():
+        return ""
+    manual = load_host_computer_use_manual()
+    header = (
+        "# 真实桌面操作（`computer_use`）\n\n"
+        "`computer_use` 让你用异步 Python 真实操作桌面应用（复用宿主 "
+        "Computer Use 原生运行时）。下面是它的完整参考，以及 Creator 侧的"
+        "录制约定。流程怎么组织由你决定。"
+    )
+    parts = [header]
+    if manual:
+        parts.append(manual)
+    parts.append(_COMPUTER_USE_SECTION.strip())
     return "\n\n".join(parts)
 
 
-__all__ = ["live_operation_guidance", "load_host_browser_manual"]
+__all__ = [
+    "live_operation_guidance",
+    "load_host_browser_manual",
+    "load_host_computer_use_manual",
+]

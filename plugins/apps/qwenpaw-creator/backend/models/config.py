@@ -2085,3 +2085,36 @@ def get_live_operation_timeout_seconds() -> float:
         minimum=30.0,
         maximum=3600.0,
     )
+
+
+def get_computer_use_enabled() -> bool:
+    """Whether the agent may operate desktop apps in this deployment.
+
+    Off by default: desktop control needs the Tauri host's native runtime and
+    is meaningless on a headless server, so it is opt-in rather than assumed.
+    """
+    raw = _live_operation_value(
+        "computer_use_enabled",
+        "CREATOR_COMPUTER_USE_ENABLED",
+        "0",
+    )
+    return str(raw).strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def get_computer_use_ask_policy() -> str:
+    """How Creator asks before a desktop action: 'always' or 'session'.
+
+    Only how Creator prompts lives here; the fact of what an app is allowed to
+    do stays in the host's Computer Use access store, so both entry points
+    agree on one set of persistent grants.
+    """
+    raw = (
+        _live_operation_value(
+            "computer_use_ask_policy",
+            "CREATOR_COMPUTER_USE_ASK_POLICY",
+            "always",
+        )
+        .strip()
+        .casefold()
+    )
+    return raw if raw in {"always", "session"} else "always"
