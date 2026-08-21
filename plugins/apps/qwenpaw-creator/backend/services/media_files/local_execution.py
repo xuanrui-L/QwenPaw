@@ -171,7 +171,7 @@ _MOTION_BURN_BATCH_SIZE = 8
 _SEGMENT_CACHE_MAX_ITEMS = 96
 # Renderer behaviour version for cached segments; bump on any semantic
 # change to segment rendering or overlay burning.
-_SEGMENT_CACHE_VERSION = 2
+_SEGMENT_CACHE_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +218,7 @@ class LocalMediaInput:
     start_seconds: float | None = None
     end_seconds: float | None = None
     duration_seconds: float | None = None
+    playback_rate: float = 1.0
     original_sound: str = "preserve"
     location: Mapping[str, Any] | None = None
     overlays: tuple[Mapping[str, Any], ...] = ()
@@ -531,7 +532,11 @@ class FfmpegLocalMediaRunner:
         durations: list[float] = []
         for item in spec.inputs:
             if item.start_seconds is not None and item.end_seconds is not None:
-                raw = item.end_seconds - item.start_seconds
+                raw = (item.end_seconds - item.start_seconds) / getattr(
+                    item,
+                    "playback_rate",
+                    1.0,
+                )
             elif item.duration_seconds is not None:
                 raw = item.duration_seconds
             else:
@@ -861,6 +866,8 @@ class FfmpegLocalMediaRunner:
         duration_seconds: float,
         freeze_duration: float = 0.0,
         freeze_audio: bool = False,
+        playback_rate: float = 1.0,
+        retime_audio: bool = False,
     ) -> str:
         """Build one anchor-based placement graph shared with the UI preview."""
 
@@ -904,7 +911,8 @@ class FfmpegLocalMediaRunner:
 
         # Build the video filter chain
         video_filters = (
-            f"[0:v]scale={box_width}:{box_height}:force_original_aspect_ratio=increase,"
+            f"[0:v]setpts=(PTS-STARTPTS)/{playback_rate:.12g},"
+            f"scale={box_width}:{box_height}:force_original_aspect_ratio=increase,"
             f"crop={box_width}:{box_height},setsar=1,format=rgba,"
             f"colorchannelmixer=aa={location['opacity']:.6f},"
             f"pad={padded_width}:{padded_height}:{pad_x}:{pad_y}:color=0x00000000,"
@@ -928,11 +936,34 @@ class FfmpegLocalMediaRunner:
             f"[bg][fg]overlay={overlay_x}:{overlay_y}:shortest=1,format=yuv420p[outv]"
         )
 
-        # Only pad audio when freezing a source that actually has a stream.
-        if freeze_audio:
-            filter_chain += f";[0:a]apad=pad_dur={freeze_duration:.6f}[a]"
+        # Keep source sound in sync with the retimed picture. ``atempo``
+        # historically accepts factors only in [0.5, 2], so decompose more
+        # extreme rates into a stable chain instead of rejecting a Project
+        # value that already passed schema validation.
+        if retime_audio or freeze_audio:
+            audio_filters = (
+                cls._atempo_filters(playback_rate) if retime_audio else []
+            )
+            if freeze_audio:
+                audio_filters.append(f"apad=pad_dur={freeze_duration:.6f}")
+            filter_chain += f";[0:a]{','.join(audio_filters)}[a]"
 
         return filter_chain
+
+    @staticmethod
+    def _atempo_filters(playback_rate: float) -> list[str]:
+        """Return an ffmpeg atempo chain whose factors multiply to rate."""
+
+        remaining = playback_rate
+        factors: list[float] = []
+        while remaining < 0.5:
+            factors.append(0.5)
+            remaining /= 0.5
+        while remaining > 2.0:
+            factors.append(2.0)
+            remaining /= 2.0
+        factors.append(remaining)
+        return [f"atempo={factor:.12g}" for factor in factors]
 
     def _segment_concurrency(self, segment_count: int) -> int:
         """Parallel segment renders for one composition.
@@ -976,6 +1007,7 @@ class FfmpegLocalMediaRunner:
                 "mediaType": item.media_type,
                 "start": item.start_seconds,
                 "end": item.end_seconds,
+                "playbackRate": item.playback_rate,
                 "sourceDuration": item.duration_seconds,
                 "segmentDuration": round(segment_duration, 6),
                 "freeze": round(freeze_duration, 6),
@@ -1079,13 +1111,24 @@ class FfmpegLocalMediaRunner:
                     "Edit Element 缺少可执行 source range",
                 )
             end_seconds = start_seconds + item.duration_seconds
+        source_window_seconds = end_seconds - start_seconds
+        rendered_window_seconds = source_window_seconds / item.playback_rate
         # For a transition pair, the tail of the `from` segment that
         # the `to` segment covers is simply not rendered; the rest of
         # the overlap is consumed by the xfade blend.
         tail_trim = tail_trims.get(item.source_ref, 0.0)
         segment_duration = max(
             1 / 30,
-            end_seconds - start_seconds - tail_trim,
+            rendered_window_seconds - tail_trim,
+        )
+
+        # ``-t`` is an input-side source range while ``tail_trim`` is in
+        # rendered Timeline time. Convert the latter back to source time;
+        # otherwise slow clips are cut to their raw duration and fast clips
+        # do not read enough frames.
+        source_read_duration = max(
+            item.playback_rate / 30,
+            source_window_seconds - tail_trim * item.playback_rate,
         )
 
         # Calculate freeze duration if target exceeds source
@@ -1095,10 +1138,18 @@ class FfmpegLocalMediaRunner:
             and item.start_seconds is not None
             and item.end_seconds is not None
         ):
-            source_duration = item.duration_seconds
-            target_duration = item.end_seconds - item.start_seconds
-            if target_duration > source_duration:
-                freeze_duration = target_duration - source_duration
+            available_source_duration = max(
+                0.0,
+                item.duration_seconds - start_seconds,
+            )
+            available_rendered_duration = (
+                min(source_read_duration, available_source_duration)
+                / item.playback_rate
+            )
+            if segment_duration > available_rendered_duration:
+                freeze_duration = (
+                    segment_duration - available_rendered_duration
+                )
 
         segment = segment_dir / f"{index:06d}.mp4"
         cache_key = self._segment_cache_key(
@@ -1139,17 +1190,17 @@ class FfmpegLocalMediaRunner:
             # apad references [0:a]; sources without an audio stream
             # (common for generated R2V footage) must keep the optional
             # 0:a? mapping or ffmpeg rejects the whole filtergraph.
-            freeze_audio = (
-                freeze_duration > 0
-                and not is_still_image
-                and self._probe_has_audio(item.path)
-            )
+            has_audio = not is_still_image and self._probe_has_audio(item.path)
+            freeze_audio = freeze_duration > 0 and has_audio
+            retime_audio = item.playback_rate != 1.0 and has_audio
             placement_filter = self._placement_filter(
                 item.location,
                 canvas_size=spec.canvas_size,
                 duration_seconds=segment_duration,
                 freeze_duration=freeze_duration,
                 freeze_audio=freeze_audio,
+                playback_rate=item.playback_rate,
+                retime_audio=retime_audio,
             )
 
             # Build FFmpeg arguments
@@ -1161,7 +1212,7 @@ class FfmpegLocalMediaRunner:
                     "-framerate",
                     "30",
                     "-t",
-                    f"{segment_duration:.6f}",
+                    f"{source_read_duration:.6f}",
                     "-i",
                     os.fspath(item.path),
                 ]
@@ -1191,7 +1242,7 @@ class FfmpegLocalMediaRunner:
             )
 
             # Map audio if present
-            if freeze_audio:
+            if freeze_audio or retime_audio:
                 ffmpeg_args.extend(["-map", "[a]"])
             else:
                 ffmpeg_args.extend(["-map", "0:a?"])
@@ -1235,7 +1286,7 @@ class FfmpegLocalMediaRunner:
         """
         warnings: list[str] = []
         segment_duration = (
-            item.end_seconds - item.start_seconds
+            (item.end_seconds - item.start_seconds) / item.playback_rate
             if item.start_seconds is not None and item.end_seconds is not None
             else item.duration_seconds
         )
@@ -1684,7 +1735,7 @@ class FfmpegLocalMediaRunner:
         ):
             return None
         segment_duration = (
-            item.end_seconds - item.start_seconds
+            (item.end_seconds - item.start_seconds) / item.playback_rate
             if item.start_seconds is not None and item.end_seconds is not None
             else item.duration_seconds
         )
@@ -1795,6 +1846,15 @@ class FfmpegLocalMediaRunner:
 
     @staticmethod
     def _validate_supported_directives(spec: LocalMediaExecutionSpec) -> None:
+        invalid_rates = [
+            item.playback_rate
+            for item in spec.inputs
+            if not math.isfinite(item.playback_rate) or item.playback_rate <= 0
+        ]
+        if invalid_rates:
+            raise ValidationError(
+                "默认 ffmpeg runner 要求 playback_rate 是有限正数",
+            )
         unsupported_transitions: list[str] = []
         for transition in spec.transitions:
             kind = str(transition.get("kind") or "cut").strip().casefold()
@@ -2019,6 +2079,7 @@ class _FrozenInput:
     start_seconds: float | None = None
     end_seconds: float | None = None
     duration_seconds: float | None = None
+    playback_rate: float = 1.0
     original_sound: str = "preserve"
     location: Mapping[str, Any] | None = None
     overlays: tuple[Mapping[str, Any], ...] = ()
@@ -2743,6 +2804,11 @@ def _timeline_execution(
                 duration_seconds=version.duration_seconds,
                 start_seconds=start_seconds,
                 end_seconds=end_seconds,
+                playback_rate=(
+                    render_source.playback_rate
+                    if isinstance(element.creation, EditCreation)
+                    else 1.0
+                ),
                 original_sound=(
                     element.creation.original_sound
                     if isinstance(element.creation, EditCreation)
@@ -2976,7 +3042,9 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # v8: caption blueprint font size scaled inversely by overlay
             # box height so apparent canvas-relative size stays consistent
             # across overlays with very different box dimensions.
-            "rendererVersion": 8,
+            # v9: Edit playback_rate retimes both picture and source sound;
+            # segment and transition durations now stay on Timeline time.
+            "rendererVersion": 9,
             "targetRef": resolved.target_ref,
             "inputs": [
                 {
@@ -2991,6 +3059,7 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
                     "sourceRef": item.source_ref,
                     "start": item.start_seconds,
                     "end": item.end_seconds,
+                    "playbackRate": item.playback_rate,
                     "originalSound": item.original_sound,
                     "location": item.location,
                     "overlays": [
@@ -3644,6 +3713,7 @@ class FileLocalMediaExecutionService:
                             "sourceUrl": item.source_url,
                             "start": item.start_seconds,
                             "end": item.end_seconds,
+                            "playbackRate": item.playback_rate,
                         }
                         for item in resolved.inputs
                     ],
@@ -3760,6 +3830,7 @@ class FileLocalMediaExecutionService:
                     start_seconds=frozen.start_seconds,
                     end_seconds=frozen.end_seconds,
                     duration_seconds=frozen.duration_seconds,
+                    playback_rate=frozen.playback_rate,
                     original_sound=frozen.original_sound,
                     location=frozen.location,
                     overlays=tuple(
@@ -3885,6 +3956,7 @@ class FileLocalMediaExecutionService:
                         "path": item.path.relative_to(project_root).as_posix(),
                         "start": item.start_seconds,
                         "end": item.end_seconds,
+                        "playbackRate": item.playback_rate,
                         "originalSound": item.original_sound,
                         "location": item.location,
                         "overlays": [dict(o) for o in item.overlays],

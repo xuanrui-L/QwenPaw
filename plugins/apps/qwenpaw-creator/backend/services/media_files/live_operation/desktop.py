@@ -59,6 +59,8 @@ def computer_use_status() -> dict[str, Any]:
     supported = screen_capture_supported()
     host_reachable = False
     platform_helper = False
+    host_feature_enabled = False
+    host_feature_state_available = False
     try:
         from qwenpaw.app.computer_use import HostRuntimeProvider
 
@@ -67,7 +69,23 @@ def computer_use_status() -> dict[str, Any]:
         host_reachable = bool(runtime.host_reachable)
     except Exception:  # noqa: BLE001 - runtime absent means simply unavailable
         logger.debug("computer-use runtime probe failed", exc_info=True)
-    available = platform_helper and host_reachable
+    try:
+        from computer_use.feature_state import (
+            get_computer_use_feature_state,
+        )
+
+        host_feature_state_available = True
+        host_feature_enabled = bool(
+            get_computer_use_feature_state().is_enabled(),
+        )
+    except Exception:  # noqa: BLE001 - bundle absence means unavailable
+        logger.debug("computer-use feature-state probe failed", exc_info=True)
+    available = (
+        platform_helper
+        and host_reachable
+        and host_feature_state_available
+        and host_feature_enabled
+    )
     return {
         "available": available,
         "recording_available": (
@@ -76,11 +94,24 @@ def computer_use_status() -> dict[str, Any]:
         "screen_capture_supported": supported,
         "native_helper_platform": platform_helper,
         "host_reachable": host_reachable,
+        "host_feature_state_available": host_feature_state_available,
+        "host_feature_enabled": host_feature_enabled,
         "ffmpeg": ffmpeg_available(),
     }
 
 
 def _unavailable_reason(status: dict[str, Any]) -> str:
+    if not status.get("host_feature_state_available"):
+        return (
+            "the host Computer Use plugin is unavailable; load the "
+            "computer-use plugin before enabling Creator desktop operation"
+        )
+    if not status.get("host_feature_enabled"):
+        return (
+            "Computer Use is turned off in the host; enable it in the "
+            "Computer Use panel before allowing any agent to control the "
+            "desktop"
+        )
     if (
         not status["native_helper_platform"]
         or not status["screen_capture_supported"]

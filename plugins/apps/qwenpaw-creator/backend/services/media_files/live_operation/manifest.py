@@ -89,11 +89,21 @@ def normalized_location(
     """
     if not viewport.usable:
         return None
+    # Playwright may report a partially clipped locator (negative origin or
+    # an edge beyond the viewport).  Motion overlays consume normalized
+    # *visible-canvas* coordinates, so intersect the box with the captured
+    # frame instead of emitting values outside ``0..1``.
+    left = max(0.0, box.x)
+    top = max(0.0, box.y)
+    right = min(viewport.width, box.x + box.width)
+    bottom = min(viewport.height, box.y + box.height)
+    if right <= left or bottom <= top:
+        return None
     return {
-        "x": round((box.x + box.width / 2) / viewport.width, 5),
-        "y": round((box.y + box.height / 2) / viewport.height, 5),
-        "width": round(box.width / viewport.width, 5),
-        "height": round(box.height / viewport.height, 5),
+        "x": round((left + right) / 2 / viewport.width, 5),
+        "y": round((top + bottom) / 2 / viewport.height, 5),
+        "width": round((right - left) / viewport.width, 5),
+        "height": round((bottom - top) / viewport.height, 5),
     }
 
 

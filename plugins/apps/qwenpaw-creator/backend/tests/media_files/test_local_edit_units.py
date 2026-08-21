@@ -114,6 +114,12 @@ def test_freeze_pads_video_and_references_audio_only_when_present():
     assert "[0:a]" not in silent
 
 
+def test_playback_rate_retimes_picture_and_source_audio() -> None:
+    chain = _filter(playback_rate=0.25, retime_audio=True)
+    assert "setpts=(PTS-STARTPTS)/0.25" in chain
+    assert "[0:a]atempo=0.5,atempo=0.5[a]" in chain
+
+
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
 
@@ -189,6 +195,93 @@ def test_still_image_input_renders_a_timed_segment(tmp_path) -> None:
     )
     duration = float(probe.stdout.strip())
     assert duration == pytest.approx(2.0, abs=0.15)
+
+
+@pytest.mark.skipif(
+    _FFMPEG is None or _FFPROBE is None,
+    reason="ffmpeg is not installed",
+)
+def test_video_playback_rate_controls_real_output_duration(tmp_path) -> None:
+    source = tmp_path / "source.mp4"
+    subprocess.run(
+        [
+            _FFMPEG,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=2",
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(source),
+        ],
+        check=True,
+    )
+    work_dir = tmp_path / "work-slow"
+    work_dir.mkdir()
+    output = tmp_path / "slow.mp4"
+    spec = LocalMediaExecutionSpec(
+        command=CreatorCommandType.COMPOSE_FINAL_VIDEO,
+        target_ref="timeline:main",
+        task_id="task-slow",
+        work_dir=work_dir,
+        output_path=output,
+        inputs=(
+            LocalMediaInput(
+                version_id="asset-version-slow",
+                file_id="file-slow",
+                checksum="sha256:slow-source-v1",
+                media_type="video/mp4",
+                path=source,
+                source_ref="element:slow",
+                start_seconds=0.0,
+                end_seconds=2.0,
+                duration_seconds=2.0,
+                playback_rate=0.5,
+            ),
+        ),
+        transitions=(),
+        audio_plan="preserve",
+        expected_duration_seconds=4.0,
+        canvas_size=(640, 360),
+    )
+
+    asyncio.run(FfmpegLocalMediaRunner(_FFMPEG).render(spec))
+
+    probe = subprocess.run(
+        [
+            _FFPROBE,
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,duration",
+            "-of",
+            "csv=p=0",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    durations = {
+        kind: float(duration)
+        for kind, duration in (
+            line.split(",") for line in probe.stdout.splitlines()
+        )
+    }
+    assert durations["video"] == pytest.approx(4.0, abs=0.15)
+    assert durations["audio"] == pytest.approx(4.0, abs=0.15)
 
 
 def _materialize_keyframe(project_root: Path, source: Path, timestamp: float):

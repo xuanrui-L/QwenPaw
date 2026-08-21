@@ -82,6 +82,21 @@ def test_normalized_location_needs_a_usable_viewport():
     assert normalized_location(box, Viewport(0.0, 0.0)) is None
 
 
+def test_normalized_location_intersects_partially_visible_targets():
+    viewport = Viewport(100.0, 100.0)
+    assert normalized_location(
+        BoundingBox(x=-20.0, y=80.0, width=40.0, height=40.0),
+        viewport,
+    ) == {"x": 0.1, "y": 0.9, "width": 0.2, "height": 0.2}
+    assert (
+        normalized_location(
+            BoundingBox(x=150.0, y=150.0, width=10.0, height=10.0),
+            viewport,
+        )
+        is None
+    )
+
+
 def test_viewport_comes_from_screencast_metadata():
     viewport = _viewport_from_metadata(
         {"deviceWidth": 1280, "deviceHeight": 720, "pageScaleFactor": 1},
@@ -382,6 +397,32 @@ def test_nothing_is_recorded_outside_a_take():
     assert [method for method, _ in inner.calls] == ["locator_action"]
 
 
+def test_scroll_records_timing_without_a_misleading_document_box():
+    manifest = TakeManifest(take_id="take-001")
+    link, inner = _link_with(
+        manifest,
+        bbox={"x": 0, "y": 0, "width": 1280, "height": 18000},
+    )
+    asyncio.run(
+        link.request(
+            "locator_action",
+            {
+                "workspace_id": "w",
+                "session_id": "s",
+                "page_id": "p",
+                "spec": [
+                    {"method": "locator", "args": ["body"], "kwargs": []},
+                ],
+                "action": "scroll",
+            },
+        ),
+    )
+
+    assert [method for method, _ in inner.calls] == ["locator_action"]
+    assert manifest.facts[0].op == "scroll"
+    assert manifest.facts[0].bbox is None
+
+
 def test_screenshots_are_collected_for_publication():
     link, _ = _link_with(None)
     asyncio.run(
@@ -528,6 +569,10 @@ def _fake_assembler(tmp_path: Path):
 def test_each_take_removes_its_cdp_listener(tmp_path: Path, monkeypatch):
     recorder = TakeRecorder(workspace=tmp_path)
     monkeypatch.setattr(recorder, "_assemble", _fake_assembler(tmp_path))
+    monkeypatch.setattr(
+        "services.media_files.live_operation.recorder._probe_output",
+        lambda _path: (1280, 720, 7120),
+    )
     cdp = _EventCdp()
 
     async def scenario():
@@ -541,6 +586,11 @@ def test_each_take_removes_its_cdp_listener(tmp_path: Path, monkeypatch):
 
     asyncio.run(scenario())
     assert [take.label for take in recorder.takes] == ["first", "second"]
+    assert [take.manifest.duration_ms for take in recorder.takes] == [
+        7120,
+        7120,
+    ]
+    assert [take.manifest.frame_count for take in recorder.takes] == [178, 178]
 
 
 def test_take_duration_ceiling_auto_stops_and_remains_collectable(
@@ -550,6 +600,10 @@ def test_take_duration_ceiling_auto_stops_and_remains_collectable(
     recorder = TakeRecorder(workspace=tmp_path)
     recorder._max_duration = 0.01
     monkeypatch.setattr(recorder, "_assemble", _fake_assembler(tmp_path))
+    monkeypatch.setattr(
+        "services.media_files.live_operation.recorder._probe_output",
+        lambda _path: (800, 600, 500),
+    )
     cdp = _EventCdp()
 
     async def scenario():
@@ -700,6 +754,26 @@ def test_model_code_cannot_escape_into_the_creator_backend(code: str):
         _compile(code)
 
 
+def test_model_code_rejects_non_cooperative_while_loops():
+    with pytest.raises(
+        LiveOperationError,
+        match="while loops are unavailable",
+    ):
+        _compile("while True:\n    pass")
+
+
+def test_model_code_bounds_range_before_it_can_block_the_event_loop():
+    from services.media_files.live_operation.bridge import _execute
+
+    with pytest.raises(LiveOperationError, match="limited to 1000 items"):
+        asyncio.run(_execute(_compile("list(range(1001))"), {}))
+
+    assert (
+        asyncio.run(_execute(_compile("result = list(range(1000))"), {}))
+        is None
+    )
+
+
 def test_model_print_is_captured_without_process_global_stdout():
     import io
 
@@ -732,6 +806,28 @@ def test_desktop_guidance_does_not_depend_on_browser_switch(monkeypatch):
     guidance = guidance_module.live_operation_guidance()
     assert "# 真实桌面操作" in guidance
     assert "# 真实网站操作" not in guidance
+
+
+def test_browser_guidance_stops_acquisition_once_acceptance_is_covered(
+    monkeypatch,
+):
+    from models import config
+    from services.file_agent_runtime.prompts import (
+        live_operation_guidance as guidance_module,
+    )
+
+    monkeypatch.setattr(config, "get_live_operation_enabled", lambda: True)
+    monkeypatch.setattr(config, "get_computer_use_enabled", lambda: False)
+    monkeypatch.setattr(
+        guidance_module,
+        "load_host_browser_manual",
+        lambda: "",
+    )
+
+    guidance = guidance_module.live_operation_guidance()
+
+    assert "素材达到验收标准后立即停止采集" in guidance
+    assert "批量 `patch_project`" in guidance
 
 
 def test_recording_defaults_to_the_page_just_opened():

@@ -24,7 +24,7 @@
     "numpy"
   ],
   "qwenpaw_version": {
-    "min": "2.0.1"
+    "min": "2.1.1b2"
   },
   "pack_exclude": [
     "backend/tests",

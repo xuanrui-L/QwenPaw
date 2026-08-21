@@ -28,8 +28,12 @@ from services.file_agent_runtime.driver import (
     _specialist_tool_recovery,
     _tool_call_transport_metadata,
 )
+from services.file_agent_runtime import driver as driver_module
 from services.file_agent_runtime.prompts import render_creator_system_prompt
-from services.media_files.live_operation import LiveOperationRun
+from services.media_files.live_operation import (
+    LiveOperationError,
+    LiveOperationRun,
+)
 from services.media_files.live_operation import RecordedTake, TakeManifest
 from services.observability import read_trace_records
 from services.project_files.facade import CreatorFileServices
@@ -308,6 +312,79 @@ def test_repeated_live_operations_in_one_request_use_unique_transactions(
     assert len(project.assets.source_versions_by_id) == 2
 
 
+def test_browser_operation_scratch_is_removed_after_publication(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services, _snapshot = _create_project(tmp_path, initial_goal=None)
+    runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
+    monkeypatch.setattr(
+        driver_module,
+        "get_live_operation_enabled",
+        lambda: True,
+    )
+
+    async def fake_run(code, *, run_root, run_id, **kwargs):
+        del code, kwargs
+        workspace = run_root / "live_operation" / run_id
+        workspace.mkdir(parents=True)
+        screenshot = workspace / "shot.png"
+        Image.new("RGB", (16, 12), color="navy").save(screenshot, format="PNG")
+        outcome = LiveOperationRun()
+        outcome.screenshots = [str(screenshot)]
+        return outcome
+
+    monkeypatch.setattr(driver_module, "run_browser_code", fake_run)
+    response = asyncio.run(
+        runtime._run_browser_use(
+            request=_record(1),
+            run_id="agent-run-1",
+            arguments={"code": "await Browser.connect()"},
+        ),
+    )
+
+    assert len(response["screenshots"]) == 1
+    scratch_parent = (
+        services.projects.project_root(PROJECT_ID) / "runtime/live_operation"
+    )
+    assert list(scratch_parent.iterdir()) == []
+
+
+def test_browser_operation_scratch_is_removed_after_execution_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services, _snapshot = _create_project(tmp_path, initial_goal=None)
+    runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
+    monkeypatch.setattr(
+        driver_module,
+        "get_live_operation_enabled",
+        lambda: True,
+    )
+
+    async def failing_run(code, *, run_root, run_id, **kwargs):
+        del code, kwargs
+        workspace = run_root / "live_operation" / run_id
+        workspace.mkdir(parents=True)
+        (workspace / "partial.mp4").write_bytes(b"partial")
+        raise LiveOperationError("strict locator failure")
+
+    monkeypatch.setattr(driver_module, "run_browser_code", failing_run)
+    with pytest.raises(FileAgentRuntimeError, match="strict locator failure"):
+        asyncio.run(
+            runtime._run_browser_use(
+                request=_record(1),
+                run_id="agent-run-1",
+                arguments={"code": "await Browser.connect()"},
+            ),
+        )
+
+    scratch_parent = (
+        services.projects.project_root(PROJECT_ID) / "runtime/live_operation"
+    )
+    assert list(scratch_parent.iterdir()) == []
+
+
 def test_factless_operation_take_is_rejected_before_publication(
     tmp_path,
 ) -> None:
@@ -456,8 +533,6 @@ async def _run_to_idle(driver, services, seq: int = 1, *, error: bool = False):
 def _authorization_gate_modes(monkeypatch, *, authorization: str) -> None:
     """Pin the authorization gate; creation pit stops are covered by
     test_creation_checkpoints.py."""
-
-    import services.file_agent_runtime.driver as driver_module
 
     monkeypatch.setattr(
         driver_module,
@@ -992,8 +1067,6 @@ def test_creator_agent_can_call_ground_prompt_context_tool(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from services.file_agent_runtime import driver as driver_module
-
     image_buffer = io.BytesIO()
     Image.new("RGB", (8, 8), color="blue").save(image_buffer, format="WEBP")
     image_bytes = image_buffer.getvalue()
@@ -1104,8 +1177,6 @@ def test_object_grounding_generated_url_is_scoped_to_current_project(
     tmp_path,
     monkeypatch,
 ) -> None:
-    from services.file_agent_runtime import driver as driver_module
-
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
     services, _snapshot = _create_project(tmp_path, initial_goal=None)
     runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)

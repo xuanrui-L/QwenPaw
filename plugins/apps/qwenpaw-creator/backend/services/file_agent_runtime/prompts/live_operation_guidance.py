@@ -69,6 +69,12 @@ page.goto/go_back/reload 或真实输入；wait_for_timeout、snapshot、print �
 录制期间，每个操作的坐标与时刻会被自动记录在该片段的事实清单里（你无需做任何
 额外的事），动效制作会用它把强调放在操作真正发生的位置上。
 
+**素材达到验收标准后立即停止采集。** 已有可播放 take、截图和事实清单足以覆盖用户
+要求时，不要为了“更完整”继续录屏、截图或重复 grounding。复用工具返回的
+`sourceAssetVersionId` 与事实清单；编排阶段先一次性查询所需 Project 状态，再用少量
+批量 `patch_project` 写入时间线，不要逐素材重读、逐元素往返。定位器试错只用于让
+真实操作成功，不能演变成无上限的素材研究。
+
 ### 本后端已验证的注意事项
 
 - 用 `await locator.scroll()` 滚动；坐标滚轮 `page.mouse.wheel(...)` 在当前后端
@@ -119,6 +125,10 @@ observation = await desktop.observe_window(window_id=window_id)
  Edit 的 render_source）；`observe_window` 返回的截图→图片素材；工具返回值给出每个片段与截图的
  workspaceRef / sourceAssetVersionId。录制期间每个动作的坐标与时刻会自动记入
 该片段的事实清单，动效制作用它把强调放在操作真正发生的位置上。
+
+素材一旦足以覆盖用户的验收标准，就停止新的 observe/录制并转入编排；复用已经返回
+的版本引用，先一次性查询所需 Project 状态，再批量写入时间线，避免逐素材、逐元素
+往返消耗主代理预算。
 
 ### 注意事项
 

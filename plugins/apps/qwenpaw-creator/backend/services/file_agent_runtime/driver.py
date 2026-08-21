@@ -16,6 +16,7 @@ import json
 import mimetypes
 from pathlib import Path, PurePosixPath
 import secrets
+import shutil
 import threading
 import time
 from typing import Any
@@ -3003,42 +3004,52 @@ class FileCreatorAgentRuntime:
         run_root = self.services.projects.project_root(project_id) / "runtime"
         operation_run_id = f"{run_id}-{uuid4().hex[:8]}"
         try:
-            outcome = await run_computer_use_code(
-                code,
-                run_root=run_root,
-                run_id=operation_run_id,
-                session_id=request.creator_session_id,
-                fps=get_live_operation_fps(),
-                max_take_seconds=get_live_operation_max_take_seconds(),
-                timeout_seconds=get_live_operation_timeout_seconds(),
+            try:
+                outcome = await run_computer_use_code(
+                    code,
+                    run_root=run_root,
+                    run_id=operation_run_id,
+                    session_id=request.creator_session_id,
+                    fps=get_live_operation_fps(),
+                    max_take_seconds=get_live_operation_max_take_seconds(),
+                    timeout_seconds=get_live_operation_timeout_seconds(),
+                )
+            except LiveOperationError as exc:
+                raise FileAgentRuntimeError(
+                    f"computer_use failed: {exc}",
+                ) from exc
+            _require_actionable_takes(
+                outcome,
+                tool_name=COMPUTER_USE_TOOL_NAME,
             )
-        except LiveOperationError as exc:
-            raise FileAgentRuntimeError(
-                f"computer_use failed: {exc}",
-            ) from exc
-        _require_actionable_takes(outcome, tool_name=COMPUTER_USE_TOOL_NAME)
-        published = await asyncio.to_thread(
-            self._publish_live_operation_sync,
-            project_id,
-            request.message_id,
-            operation_run_id,
-            outcome,
-        )
-        response: dict[str, Any] = {
-            "ok": True,
-            "status": "success",
-            "output": outcome.output,
-            "capability": computer_use_status(),
-            "takes": [item.as_dict() for item in published["takes"]],
-            "screenshots": [
-                item.as_dict() for item in published["screenshots"]
-            ],
-        }
-        if outcome.result_repr:
-            response["result"] = outcome.result_repr
-        if published["issues"]:
-            response["issues"] = published["issues"]
-        return response
+            published = await asyncio.to_thread(
+                self._publish_live_operation_sync,
+                project_id,
+                request.message_id,
+                operation_run_id,
+                outcome,
+            )
+            response: dict[str, Any] = {
+                "ok": True,
+                "status": "success",
+                "output": outcome.output,
+                "capability": computer_use_status(),
+                "takes": [item.as_dict() for item in published["takes"]],
+                "screenshots": [
+                    item.as_dict() for item in published["screenshots"]
+                ],
+            }
+            if outcome.result_repr:
+                response["result"] = outcome.result_repr
+            if published["issues"]:
+                response["issues"] = published["issues"]
+            return response
+        finally:
+            await asyncio.to_thread(
+                shutil.rmtree,
+                run_root / "live_operation" / operation_run_id,
+                True,
+            )
 
     async def _run_browser_use(
         self,
@@ -3065,41 +3076,50 @@ class FileCreatorAgentRuntime:
         run_root = self.services.projects.project_root(project_id) / "runtime"
         operation_run_id = f"{run_id}-{uuid4().hex[:8]}"
         try:
-            outcome = await run_browser_code(
-                code,
-                run_root=run_root,
-                run_id=operation_run_id,
-                identity=get_live_operation_identity(),
-                fps=get_live_operation_fps(),
-                max_width=get_live_operation_max_width(),
-                max_height=get_live_operation_max_height(),
-                max_take_seconds=get_live_operation_max_take_seconds(),
-                timeout_seconds=get_live_operation_timeout_seconds(),
+            try:
+                outcome = await run_browser_code(
+                    code,
+                    run_root=run_root,
+                    run_id=operation_run_id,
+                    identity=get_live_operation_identity(),
+                    fps=get_live_operation_fps(),
+                    max_width=get_live_operation_max_width(),
+                    max_height=get_live_operation_max_height(),
+                    max_take_seconds=get_live_operation_max_take_seconds(),
+                    timeout_seconds=get_live_operation_timeout_seconds(),
+                )
+            except LiveOperationError as exc:
+                raise FileAgentRuntimeError(
+                    f"browser_use failed: {exc}",
+                ) from exc
+            _require_actionable_takes(outcome, tool_name=BROWSER_USE_TOOL_NAME)
+            published = await asyncio.to_thread(
+                self._publish_live_operation_sync,
+                project_id,
+                request.message_id,
+                operation_run_id,
+                outcome,
             )
-        except LiveOperationError as exc:
-            raise FileAgentRuntimeError(f"browser_use failed: {exc}") from exc
-        _require_actionable_takes(outcome, tool_name=BROWSER_USE_TOOL_NAME)
-        published = await asyncio.to_thread(
-            self._publish_live_operation_sync,
-            project_id,
-            request.message_id,
-            operation_run_id,
-            outcome,
-        )
-        response: dict[str, Any] = {
-            "ok": True,
-            "status": "success",
-            "output": outcome.output,
-            "takes": [item.as_dict() for item in published["takes"]],
-            "screenshots": [
-                item.as_dict() for item in published["screenshots"]
-            ],
-        }
-        if outcome.result_repr:
-            response["result"] = outcome.result_repr
-        if published["issues"]:
-            response["issues"] = published["issues"]
-        return response
+            response: dict[str, Any] = {
+                "ok": True,
+                "status": "success",
+                "output": outcome.output,
+                "takes": [item.as_dict() for item in published["takes"]],
+                "screenshots": [
+                    item.as_dict() for item in published["screenshots"]
+                ],
+            }
+            if outcome.result_repr:
+                response["result"] = outcome.result_repr
+            if published["issues"]:
+                response["issues"] = published["issues"]
+            return response
+        finally:
+            await asyncio.to_thread(
+                shutil.rmtree,
+                run_root / "live_operation" / operation_run_id,
+                True,
+            )
 
     def _publish_live_operation_sync(
         self,

@@ -49,13 +49,18 @@ def test_status_reports_each_precondition_separately():
         "screen_capture_supported",
         "native_helper_platform",
         "host_reachable",
+        "host_feature_state_available",
+        "host_feature_enabled",
         "ffmpeg",
     ):
         assert key in status
     # Desktop control remains useful without recording; recording reports its
     # own stricter conjunction instead of disabling the whole tool.
     assert status["available"] == (
-        status["native_helper_platform"] and status["host_reachable"]
+        status["native_helper_platform"]
+        and status["host_reachable"]
+        and status["host_feature_state_available"]
+        and status["host_feature_enabled"]
     )
     assert status["recording_available"] == (
         status["available"]
@@ -79,8 +84,48 @@ def test_run_degrades_clearly_without_a_desktop_host(tmp_path: Path):
     assert (
         "headless" in outcome.output
         or "Windows and macOS" in outcome.output
+        or "plugin is unavailable" in outcome.output
+        or "turned off" in outcome.output
         or "ffmpeg" in outcome.output
     )
+
+
+def test_host_feature_kill_switch_blocks_creator_desktop_operation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        desktop_module,
+        "computer_use_status",
+        lambda: {
+            "available": False,
+            "host_feature_state_available": True,
+            "host_feature_enabled": False,
+            "native_helper_platform": True,
+            "screen_capture_supported": True,
+            "host_reachable": True,
+        },
+    )
+    loaded = False
+
+    def should_not_load(_session_id):
+        nonlocal loaded
+        loaded = True
+        raise AssertionError("native client must not load while host is off")
+
+    monkeypatch.setattr(desktop_module, "_load_native_client", should_not_load)
+    outcome = asyncio.run(
+        run_computer_use_code(
+            "await desktop.observe_window()",
+            run_root=tmp_path,
+            run_id="host-off",
+            session_id="creator-session",
+        ),
+    )
+
+    assert loaded is False
+    assert outcome.takes == []
+    assert "turned off in the host" in outcome.output
 
 
 def test_empty_desktop_code_is_rejected(tmp_path: Path):

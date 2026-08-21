@@ -31,7 +31,26 @@ from .session import LiveBrowserSession, LiveSessionError, workspace_dir
 logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT_CHARS = 12_000
+_MAX_RANGE_ITEMS = 1_000
 _SOURCE_NAME = "browser_use_code"
+
+
+def _bounded_range(*args: int) -> range:
+    """Return a small range suitable for one browser-operation program.
+
+    The bridge runs beside the Creator API server rather than in the host
+    Browser tool's disposable worker process.  Bounding a model-authored loop
+    keeps accidental or prompt-injected CPU work from monopolising the event
+    loop, where ``asyncio.wait_for`` cannot pre-empt synchronous Python.
+    """
+    value = range(*args)
+    if len(value) > _MAX_RANGE_ITEMS:
+        raise LiveOperationError(
+            "range is limited to "
+            f"{_MAX_RANGE_ITEMS} items in live-operation code",
+        )
+    return value
+
 
 _SAFE_BUILTINS = {
     name: getattr(builtins, name)
@@ -58,7 +77,6 @@ _SAFE_BUILTINS = {
         "min",
         "next",
         "print",
-        "range",
         "repr",
         "reversed",
         "round",
@@ -71,6 +89,7 @@ _SAFE_BUILTINS = {
         "zip",
     )
 }
+_SAFE_BUILTINS["range"] = _bounded_range
 
 
 class LiveOperationError(RuntimeError):
@@ -350,6 +369,13 @@ class _ModelCodeValidator(ast.NodeVisitor):
         )
 
     visit_ImportFrom = visit_Import
+
+    def visit_While(self, node: ast.While) -> None:  # noqa: N802
+        del node
+        raise LiveOperationError(
+            "while loops are unavailable in live-operation code; use a "
+            "bounded for loop or the Browser SDK's wait methods",
+        )
 
     def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
         if node.attr.startswith("_"):

@@ -157,6 +157,12 @@ class RecordingControlLink:
         """
         if method != _ACTION_METHOD or "spec" not in params:
             return None
+        # A locator scroll targets the scroll container (often ``body``), not
+        # a point the user acted on.  Its box can be the full document and
+        # produce locations many screens outside the captured viewport, which
+        # is actively misleading to later motion-design placement.
+        if str(params.get("action") or "") == "scroll":
+            return None
         probe = {
             key: value
             for key, value in params.items()

@@ -17,8 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-from dataclasses import dataclass
-import json
+from dataclasses import dataclass, replace
 import logging
 from pathlib import Path
 import shutil
@@ -27,6 +26,10 @@ import time
 from typing import Any
 
 from services.runtime_files.runtime_dependencies import resolve_ffmpeg
+from services.runtime_files.media_probe import (
+    MediaProbeError,
+    probe_media,
+)
 
 from .manifest import TakeManifest, Viewport
 
@@ -247,7 +250,6 @@ class TakeRecorder:
                     )
                 manifest.viewport = self._viewport
                 manifest.fps = self._fps
-                manifest.frame_count = len(frames)
                 video_path = await asyncio.to_thread(
                     self._assemble,
                     manifest.take_id,
@@ -258,13 +260,36 @@ class TakeRecorder:
                     max(stopped_at - self._started_at, _TAIL_FRAME_SECONDS)
                     * 1000,
                 )
-                manifest.duration_ms = max(span_ms, 0)
-                width, height = await asyncio.to_thread(
-                    _probe_size,
+                width, height, probed_duration_ms = await asyncio.to_thread(
+                    _probe_output,
                     video_path,
                 )
+                manifest.duration_ms = probed_duration_ms or max(span_ms, 0)
                 manifest.video_width = width
                 manifest.video_height = height
+                # Page.screencastFrame is sparse (it emits only on visual
+                # changes), while ffmpeg expands those inputs to the declared
+                # constant frame rate.  The encoded-frame count therefore
+                # derives from the finished media duration, not the number of
+                # JPEG events collected from CDP.
+                manifest.frame_count = max(
+                    1,
+                    round(manifest.duration_ms * self._fps / 1000),
+                )
+                # If container probing reports a shorter file than the wall
+                # clock (for example after a capture interruption), do not
+                # advertise action facts outside the playable media range.
+                manifest.facts = [
+                    replace(
+                        fact,
+                        t_end_ms=min(
+                            max(fact.t_end_ms, fact.t_start_ms),
+                            manifest.duration_ms,
+                        ),
+                    )
+                    for fact in manifest.facts
+                    if fact.t_start_ms < manifest.duration_ms
+                ]
                 take = RecordedTake(
                     take_id=manifest.take_id,
                     label=manifest.label,
@@ -438,40 +463,21 @@ def _viewport_from_metadata(raw: Any) -> Viewport | None:
     return viewport if viewport.usable else None
 
 
-def _probe_size(path: Path) -> tuple[int, int]:
-    """Return the assembled video's pixel size, or zeros when unknown."""
-    ffprobe = shutil.which("ffprobe")
-    if ffprobe is None:
-        return (0, 0)
+def _probe_output(path: Path) -> tuple[int, int, int]:
+    """Return authoritative width, height and duration of the final mp4.
+
+    The concat demuxer and CFR conversion can make the encoded duration differ
+    materially from the recorder's wall clock.  Project source metadata must
+    describe the media consumers actually read, so use Creator's shared
+    ffprobe/ffmpeg fallback rather than treating elapsed time as authoritative.
+    """
     try:
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=width,height",
-                "-of",
-                "json",
-                str(path),
-            ],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        streams = json.loads(result.stdout or "{}").get("streams") or []
-        if streams:
-            return (
-                int(streams[0].get("width") or 0),
-                int(streams[0].get("height") or 0),
-            )
-    except Exception:  # noqa: BLE001 - size is advisory metadata only
-        logger.debug("ffprobe size failed", exc_info=True)
-    return (0, 0)
+        probe = probe_media(str(path))
+    except (OSError, MediaProbeError, subprocess.SubprocessError):
+        logger.debug("browser take probe failed", exc_info=True)
+        return (0, 0, 0)
+    duration_ms = int(max(0.0, probe.duration_seconds or 0.0) * 1000)
+    return (probe.width or 0, probe.height or 0, duration_ms)
 
 
 __all__ = ["RecordedTake", "RecorderError", "TakeRecorder"]
