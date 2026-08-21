@@ -929,6 +929,7 @@ def _live_operation_facts(
         manifest,
         start_ms=start_seconds * 1000,
         end_ms=end_seconds * 1000,
+        playback_rate=render_source.playback_rate,
     )
     if not facts:
         return []

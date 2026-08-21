@@ -17,16 +17,25 @@ host has loaded it, so it is bound lazily.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
+import hashlib
 import io
 import logging
+import math
 import uuid
 from pathlib import Path
 from typing import Any
 
-from .bridge import LiveOperationError, LiveOperationRun, _clip, _compile
+from .bridge import (
+    LiveOperationError,
+    LiveOperationRun,
+    _clip,
+    _compile,
+    _execute,
+)
 from .manifest import ActionFact, BoundingBox
-from .recorder import RecordedTake
 from .screen_recorder import (
     ScreenRecorder,
     ffmpeg_available,
@@ -58,14 +67,12 @@ def computer_use_status() -> dict[str, Any]:
         host_reachable = bool(runtime.host_reachable)
     except Exception:  # noqa: BLE001 - runtime absent means simply unavailable
         logger.debug("computer-use runtime probe failed", exc_info=True)
-    available = (
-        supported
-        and platform_helper
-        and host_reachable
-        and (ffmpeg_available())
-    )
+    available = platform_helper and host_reachable
     return {
         "available": available,
+        "recording_available": (
+            available and supported and ffmpeg_available()
+        ),
         "screen_capture_supported": supported,
         "native_helper_platform": platform_helper,
         "host_reachable": host_reachable,
@@ -88,8 +95,6 @@ def _unavailable_reason(status: dict[str, Any]) -> str:
             "needs QwenPaw running on the desktop (Tauri host), not a "
             "headless server"
         )
-    if not status["ffmpeg"]:
-        return "ffmpeg is unavailable, so the screen cannot be recorded"
     return "desktop operation is unavailable in this environment"
 
 
@@ -107,7 +112,7 @@ def _load_native_client(session_id: str) -> Any:
     return ComputerUseClient(session_id)
 
 
-class DesktopController:
+class DesktopController:  # pylint: disable=too-many-public-methods
     """The ``desktop`` name the model sees: observe and act on the app.
 
     Every method forwards to the host's native client, so the vocabulary and
@@ -116,17 +121,30 @@ class DesktopController:
     coordinates are projected against.
     """
 
-    def __init__(self, client: Any, recorder: ScreenRecorder) -> None:
+    def __init__(
+        self,
+        client: Any,
+        recorder: ScreenRecorder,
+        workspace: Path,
+    ) -> None:
         self._client = client
         self._recorder = recorder
+        self._workspace = workspace
         self._window_bounds: dict[str, Any] | None = None
+        self._element_bounds: dict[str, dict[str, Any]] = {}
+        self._screenshot_geometry: dict[str, dict[str, Any]] = {}
+        self._screenshots: list[str] = []
 
     @property
     def window_bounds(self) -> dict[str, Any] | None:
         return self._window_bounds
 
+    @property
+    def screenshots(self) -> list[str]:
+        return list(self._screenshots)
+
     async def _execute(self, method: str, **params: Any) -> dict[str, Any]:
-        bbox = _bounds_to_bbox(params.get("bounds"))
+        bbox = self._action_bbox(method, params)
         manifest = self._recorder.manifest
         started_ms = self._recorder.elapsed_ms() if manifest else 0
         failed = False
@@ -142,22 +160,157 @@ class DesktopController:
                         op=method,
                         t_start_ms=started_ms,
                         t_end_ms=self._recorder.elapsed_ms(),
-                        target=str(params.get("element_id") or ""),
+                        target=_desktop_target(params),
                         bbox=bbox,
+                        screenshot_ref=str(params.get("screenshot_id") or ""),
                         failed=failed,
                     ),
                 )
         if method == "observe_window":
-            self._remember_bounds(result)
+            self._remember_observation(result)
         return result
 
-    def _remember_bounds(self, result: Any) -> None:
+    def _remember_observation(self, result: Any) -> None:
         if not isinstance(result, dict):
             return
         window = result.get("window")
         bounds = window.get("bounds") if isinstance(window, dict) else None
         if isinstance(bounds, dict):
             self._window_bounds = dict(bounds)
+        self._element_bounds = {}
+        accessibility = result.get("accessibility")
+        elements = (
+            accessibility.get("elements")
+            if isinstance(accessibility, dict)
+            else None
+        )
+        if isinstance(elements, list):
+            for element in elements:
+                if not isinstance(element, dict):
+                    continue
+                element_id = str(element.get("id") or "")
+                element_bounds = element.get("bounds")
+                if element_id and isinstance(element_bounds, dict):
+                    self._element_bounds[element_id] = dict(element_bounds)
+        screenshots = result.get("screenshots")
+        if not isinstance(screenshots, list):
+            return
+        for screenshot in screenshots:
+            if not isinstance(screenshot, dict):
+                continue
+            screenshot_id = str(screenshot.get("id") or "")
+            if screenshot_id:
+                self._screenshot_geometry[screenshot_id] = dict(screenshot)
+            self._save_screenshot(screenshot)
+
+    def _save_screenshot(self, screenshot: dict[str, Any]) -> None:
+        """Persist a native observation image for ordinary asset ingestion."""
+        url = screenshot.get("url")
+        if not isinstance(url, str) or not url.startswith("data:image/"):
+            return
+        header, separator, encoded = url.partition(",")
+        if not separator or ";base64" not in header:
+            return
+        media_type = header[5:].split(";", 1)[0].casefold()
+        suffix = {
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }.get(media_type)
+        if suffix is None:
+            return
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return
+        if not content:
+            return
+        digest = hashlib.sha256(content).hexdigest()[:16]
+        path = self._workspace / f"desktop-shot-{digest}{suffix}"
+        if not path.exists():
+            path.write_bytes(content)
+        value = str(path)
+        if value not in self._screenshots:
+            self._screenshots.append(value)
+
+    # pylint: disable-next=too-many-return-statements
+    def _action_bbox(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> BoundingBox | None:
+        """Resolve an action target against the latest native observation."""
+        direct = _bounds_to_bbox(params.get("bounds"), self._window_bounds)
+        if direct is not None:
+            return direct
+        if method == "drag":
+            source_id = str(params.get("source_element_id") or "")
+            target_id = str(params.get("target_element_id") or "")
+            source = _bounds_to_bbox(
+                self._element_bounds.get(source_id),
+                self._window_bounds,
+            )
+            target = _bounds_to_bbox(
+                self._element_bounds.get(target_id),
+                self._window_bounds,
+            )
+            if source is not None and target is not None:
+                left = min(source.x, target.x)
+                top = min(source.y, target.y)
+                right = max(source.x + source.width, target.x + target.width)
+                bottom = max(
+                    source.y + source.height,
+                    target.y + target.height,
+                )
+                return BoundingBox(left, top, right - left, bottom - top)
+        element_id = str(params.get("element_id") or "")
+        if element_id:
+            return _bounds_to_bbox(
+                self._element_bounds.get(element_id),
+                self._window_bounds,
+            )
+        screenshot_id = str(params.get("screenshot_id") or "")
+        geometry = self._screenshot_geometry.get(screenshot_id)
+        if not isinstance(geometry, dict):
+            return None
+        origin = geometry.get("origin")
+        origin_x = (
+            origin.get("x", 0)
+            if isinstance(origin, dict)
+            else geometry.get("x", 0)
+        )
+        origin_y = (
+            origin.get("y", 0)
+            if isinstance(origin, dict)
+            else geometry.get("y", 0)
+        )
+        if method == "drag":
+            try:
+                start_x = float(params["start_x"]) + float(origin_x)
+                start_y = float(params["start_y"]) + float(origin_y)
+                end_x = float(params["end_x"]) + float(origin_x)
+                end_y = float(params["end_y"]) + float(origin_y)
+            except (KeyError, TypeError, ValueError):
+                return None
+            return _bounds_to_bbox(
+                {
+                    "x": min(start_x, end_x),
+                    "y": min(start_y, end_y),
+                    "width": max(abs(end_x - start_x), 12.0),
+                    "height": max(abs(end_y - start_y), 12.0),
+                },
+                self._window_bounds,
+            )
+        try:
+            x = float(params["x"]) + float(origin_x)
+            y = float(params["y"]) + float(origin_y)
+        except (KeyError, TypeError, ValueError):
+            return None
+        return _bounds_to_bbox(
+            {"x": x - 12, "y": y - 12, "width": 24, "height": 24},
+            self._window_bounds,
+        )
 
     async def list_apps(self) -> dict[str, Any]:
         return await self._execute("list_apps")
@@ -165,8 +318,8 @@ class DesktopController:
     async def list_windows(self, **params: Any) -> dict[str, Any]:
         return await self._execute("list_windows", **params)
 
-    async def launch_app(self, name: str, **params: Any) -> dict[str, Any]:
-        return await self._execute("launch_app", name=name, **params)
+    async def launch_app(self, app: str, **params: Any) -> dict[str, Any]:
+        return await self._execute("launch_app", app=app, **params)
 
     async def observe_window(self, **params: Any) -> dict[str, Any]:
         return await self._execute("observe_window", **params)
@@ -174,8 +327,17 @@ class DesktopController:
     async def click(self, **params: Any) -> dict[str, Any]:
         return await self._execute("click", **params)
 
+    async def double_click(self, **params: Any) -> dict[str, Any]:
+        return await self._execute("click", count=2, **params)
+
+    async def right_click(self, **params: Any) -> dict[str, Any]:
+        return await self._execute("click", button="right", **params)
+
     async def type_text(self, text: str, **params: Any) -> dict[str, Any]:
         return await self._execute("type_text", text=text, **params)
+
+    async def type(self, text: str, **params: Any) -> dict[str, Any]:
+        return await self.type_text(text, **params)
 
     async def press_key(self, key: str, **params: Any) -> dict[str, Any]:
         return await self._execute("press_key", key=key, **params)
@@ -189,11 +351,29 @@ class DesktopController:
     async def invoke_element(self, **params: Any) -> dict[str, Any]:
         return await self._execute("invoke_element", **params)
 
+    async def invoke(self, **params: Any) -> dict[str, Any]:
+        return await self.invoke_element(**params)
+
+    async def begin_text_edit(self, **params: Any) -> dict[str, Any]:
+        return await self._execute(
+            "invoke_element",
+            expects_text_input=True,
+            **params,
+        )
+
     async def set_value(self, **params: Any) -> dict[str, Any]:
         return await self._execute("set_value", **params)
 
     async def close_window(self, **params: Any) -> dict[str, Any]:
         return await self._execute("close_window", **params)
+
+    async def sequence(self, steps: list[dict[str, Any]]) -> dict[str, Any]:
+        return await self._execute("sequence", steps=steps)
+
+    async def wait(self, wait_ms: int = 500) -> dict[str, Any]:
+        bounded = max(0, min(int(wait_ms), 30_000))
+        await asyncio.sleep(bounded / 1000)
+        return {"ok": True, "waited_ms": bounded}
 
 
 class DesktopRecorderHandle:
@@ -207,7 +387,7 @@ class DesktopRecorderHandle:
         self._recorder = recorder
         self._controller = controller
 
-    async def start(self, *, label: str = "", screen: str = "1") -> str:
+    async def start(self, *, label: str = "", screen: str = "0") -> str:
         return await asyncio.to_thread(
             self._recorder.start,
             label=label,
@@ -257,60 +437,44 @@ async def run_computer_use_code(
         max_duration_seconds=max_take_seconds,
     )
     client = _load_native_client(session_id)
-    controller = DesktopController(client, recorder)
+    controller = DesktopController(client, recorder, workspace)
     from qwenpaw.app.computer_use import set_current_computer_use_turn_id
+    from qwenpaw.app.agent_context import scoped_session_id
 
     # Bind one native turn for this dispatch; the host API is a setter, so its
     # result is not captured.
-    set_current_computer_use_turn_id(f"creator-{uuid.uuid4().hex}")
     stdout = io.StringIO()
-    try:
-        namespace: dict[str, Any] = {
-            "__name__": "__computer_use__",
-            "desktop": controller,
-            "recorder": DesktopRecorderHandle(recorder, controller),
-        }
-        with contextlib.redirect_stdout(stdout):
+    with scoped_session_id(session_id):
+        set_current_computer_use_turn_id(f"creator-{uuid.uuid4().hex}")
+        try:
+            namespace: dict[str, Any] = {
+                "__name__": "__computer_use__",
+                "desktop": controller,
+                "recorder": DesktopRecorderHandle(recorder, controller),
+            }
             value = await asyncio.wait_for(
-                _run(compiled, namespace),
+                _execute(compiled, namespace, output=stdout),
                 timeout=timeout_seconds,
             )
-        if value is not None:
-            outcome.result_repr = _clip(repr(value), 2_000)
-    except TimeoutError as exc:
-        raise LiveOperationError(
-            f"desktop code exceeded {timeout_seconds:g} seconds",
-        ) from exc
-    finally:
-        finished = await asyncio.to_thread(recorder.stop_if_recording)
-        if finished is not None:
-            video_path, manifest = finished
-            outcome.takes.append(
-                RecordedTake(
-                    take_id=manifest.take_id,
-                    label=manifest.label,
-                    video_path=video_path,
-                    manifest=manifest,
-                ),
-            )
-        outcome.output = _clip(stdout.getvalue(), 12_000)
-        with contextlib.suppress(Exception):
-            await client.close()
-        _reset_turn()
+            if value is not None:
+                outcome.result_repr = _clip(repr(value), 2_000)
+        except TimeoutError as exc:
+            raise LiveOperationError(
+                f"desktop code exceeded {timeout_seconds:g} seconds",
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - model-code boundary
+            raise LiveOperationError(
+                "desktop code failed: " f"{type(exc).__name__}: {exc}",
+            ) from exc
+        finally:
+            await asyncio.to_thread(recorder.stop_if_recording)
+            outcome.takes = recorder.takes
+            outcome.screenshots = controller.screenshots
+            outcome.output = _clip(stdout.getvalue(), 12_000)
+            with contextlib.suppress(Exception):
+                await client.close()
+            _reset_turn()
     return outcome
-
-
-def _run(compiled: Any, namespace: dict[str, Any]):
-    async def _inner() -> Any:
-        outcome = eval(
-            compiled,
-            namespace,
-        )  # noqa: S307 - the model's own code
-        if asyncio.iscoroutine(outcome):
-            outcome = await outcome
-        return outcome
-
-    return _inner()
 
 
 def _reset_turn() -> None:
@@ -321,18 +485,44 @@ def _reset_turn() -> None:
         set_current_computer_use_turn_id(None)
 
 
-def _bounds_to_bbox(bounds: Any) -> BoundingBox | None:
+def _desktop_target(params: dict[str, Any]) -> str:
+    element_id = str(params.get("element_id") or "")
+    if element_id:
+        return element_id
+    source = str(params.get("source_element_id") or "")
+    target = str(params.get("target_element_id") or "")
+    if source or target:
+        return f"{source} -> {target}".strip()
+    screenshot_id = str(params.get("screenshot_id") or "")
+    if screenshot_id:
+        return screenshot_id
+    return ""
+
+
+def _bounds_to_bbox(
+    bounds: Any,
+    window_bounds: dict[str, Any] | None = None,
+) -> BoundingBox | None:
     if not isinstance(bounds, dict):
         return None
     try:
-        return BoundingBox(
-            float(bounds.get("x", bounds.get("left", 0))),
-            float(bounds.get("y", bounds.get("top", 0))),
-            float(bounds["width"]),
-            float(bounds["height"]),
-        )
+        x = float(bounds.get("x", bounds.get("left", 0)))
+        y = float(bounds.get("y", bounds.get("top", 0)))
+        width = float(bounds["width"])
+        height = float(bounds["height"])
     except (KeyError, TypeError, ValueError):
         return None
+    if not all(math.isfinite(item) for item in (x, y, width, height)):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    if isinstance(window_bounds, dict):
+        try:
+            x -= float(window_bounds.get("x", window_bounds.get("left", 0)))
+            y -= float(window_bounds.get("y", window_bounds.get("top", 0)))
+        except (TypeError, ValueError):
+            pass
+    return BoundingBox(x, y, width, height)
 
 
 __all__ = [

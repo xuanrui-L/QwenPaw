@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _PLAYWRIGHT_VARIANT = "playwright"
+_CONTROL_LINK_INIT_LOCK = threading.Lock()
 
 
 class LiveSessionError(RuntimeError):
@@ -35,11 +37,17 @@ def ensure_control_link() -> None:
 
     if link_for(_PLAYWRIGHT_VARIANT) is not None:
         return
-    from qwenpaw.browser.control_link.playwright.adapter import (
-        PlaywrightControlLink,
-    )
+    # Creator workspaces may enter here from different event-loop threads.
+    # Keep the first-party default singleton even under a simultaneous cold
+    # start; the adapter itself already multiplexes owners and sessions.
+    with _CONTROL_LINK_INIT_LOCK:
+        if link_for(_PLAYWRIGHT_VARIANT) is not None:
+            return
+        from qwenpaw.browser.control_link.playwright.adapter import (
+            PlaywrightControlLink,
+        )
 
-    register_local(PlaywrightControlLink())
+        register_local(PlaywrightControlLink())
 
 
 class LiveBrowserSession:
@@ -61,6 +69,12 @@ class LiveBrowserSession:
     def browser(self) -> Any:
         """The SDK facade handed to agent code verbatim."""
         return self._browser
+
+    @property
+    def control_link(self) -> Any:
+        """The exact link selected when this browser engine connected."""
+        # pylint: disable-next=protected-access
+        return self._browser._engine.link  # noqa: SLF001
 
     async def close(self) -> None:
         for session in self._cdp_sessions.values():
@@ -106,17 +120,16 @@ class LiveBrowserSession:
         to the real session instead of opening a second browser that would
         show a different screen than the one being driven.
         """
-        from qwenpaw.browser.runtime.links import link_for
-
-        link = link_for(_PLAYWRIGHT_VARIANT)
-        if link is None:
-            raise LiveSessionError("no browser control link is registered")
+        link = self.control_link
+        provider = getattr(link, "inner", link)
         # pylint: disable-next=protected-access
         owner = self._browser._engine.session.owner  # noqa: SLF001
-        resolver = getattr(link, "_page", None)
+        resolver = getattr(provider, "_page", None)
         if resolver is None:
             raise LiveSessionError(
-                "the active browser backend exposes no page for recording",
+                "the active browser backend cannot produce video takes; "
+                "use guest/avatar identity for Playwright recording, or "
+                "capture screenshots with the current backend",
             )
         try:
             return resolver((owner.workspace_id, owner.session_id), page_id)

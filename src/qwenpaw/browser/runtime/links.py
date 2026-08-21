@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Callable, Iterable
 
 if TYPE_CHECKING:
@@ -11,6 +14,10 @@ if TYPE_CHECKING:
 
 _local: list["ControlLink"] = []
 _external: Callable[[], Iterable["ControlLink"]] = lambda: ()
+_scoped: ContextVar[tuple["ControlLink", ...]] = ContextVar(
+    "browser_scoped_control_links",
+    default=(),
+)
 
 
 def register_local(link: "ControlLink", *, priority: bool = False) -> None:
@@ -29,6 +36,24 @@ def unregister_local(link: "ControlLink") -> None:
         pass
 
 
+@contextmanager
+def scoped_links(links: Iterable["ControlLink"]) -> Iterator[None]:
+    """Temporarily prefer links only inside the current async context.
+
+    A feature that decorates a link for one operation must not mutate the
+    process-wide registry: the host can run several workspaces concurrently,
+    and a global priority link would intercept unrelated browser sessions.
+    Context variables follow the current asyncio task while remaining isolated
+    from sibling tasks and threads.
+    """
+    preferred = tuple(links)
+    token = _scoped.set((*preferred, *_scoped.get()))
+    try:
+        yield
+    finally:
+        _scoped.reset(token)
+
+
 def bind_external(
     source: Callable[[], Iterable["ControlLink"]],
 ) -> None:
@@ -39,7 +64,7 @@ def bind_external(
 
 def registered_links() -> tuple["ControlLink", ...]:
     """Snapshot every currently registered control link."""
-    return (*_local, *_external())
+    return (*_scoped.get(), *_local, *_external())
 
 
 def link_for(variant: str) -> "ControlLink | None":

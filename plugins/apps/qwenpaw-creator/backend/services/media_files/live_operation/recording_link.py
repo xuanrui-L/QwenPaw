@@ -56,6 +56,11 @@ class RecordingControlLink:
     def variant(self) -> str:
         return str(getattr(self._inner, "variant", "playwright"))
 
+    @property
+    def inner(self) -> Any:
+        """The provider owned by this run-scoped decorator."""
+        return self._inner
+
     def is_available(self) -> bool:
         return bool(self._inner.is_available())
 
@@ -98,16 +103,33 @@ class RecordingControlLink:
             failed = True
             raise
         finally:
-            manifest.record(
-                ActionFact(
-                    op=op,
-                    t_start_ms=started_ms,
-                    t_end_ms=self._elapsed_ms(),
-                    target=_target_description(method, params),
-                    bbox=bbox,
-                    failed=failed,
-                ),
-            )
+            current = self._manifest_source()
+            ended_ms = self._elapsed_ms()
+            if current is manifest:
+                manifest.record(
+                    ActionFact(
+                        op=op,
+                        t_start_ms=started_ms,
+                        t_end_ms=max(ended_ms, started_ms),
+                        target=_target_description(method, params),
+                        bbox=bbox,
+                        failed=failed,
+                    ),
+                )
+            elif manifest.duration_ms and started_ms < manifest.duration_ms:
+                # The hard duration watchdog can finish while an operation is
+                # in flight. Keep the visible portion of that action, bounded
+                # to the media that was actually written.
+                manifest.record(
+                    ActionFact(
+                        op=op,
+                        t_start_ms=started_ms,
+                        t_end_ms=manifest.duration_ms,
+                        target=_target_description(method, params),
+                        bbox=bbox,
+                        failed=failed,
+                    ),
+                )
         self._remember_screenshot(method, result)
         return result
 

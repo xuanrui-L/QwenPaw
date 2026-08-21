@@ -405,19 +405,7 @@
               "true",
               "false"
             ],
-            "help": "Lets the agent operate desktop apps via the native Computer Use runtime (Windows/macOS desktop host only). Off by default."
-          },
-          {
-            "name": "computer_use_ask_policy",
-            "label": "Desktop Approval Prompt",
-            "type": "select",
-            "required": false,
-            "default": "always",
-            "options": [
-              "always",
-              "session"
-            ],
-            "help": "How Creator asks before a desktop action. Persistent grants stay in the host Computer Use access store, shared with the desktop chat entry point."
+            "help": "Lets the agent operate desktop apps via the native Computer Use runtime (Windows/macOS desktop host only). Off by default. This switch does not bypass QwenPaw Computer Use grants or OS Accessibility and Screen Recording permissions."
           }
         ]
       },

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import math
 from typing import Any, Mapping, Sequence
 
 # A take is only worth annotating when its facts can be mapped onto video
@@ -42,6 +43,10 @@ class BoundingBox:
             box = cls(float(raw["x"]), float(raw["y"]), width, height)
         except (KeyError, TypeError, ValueError):
             return None
+        if not all(
+            math.isfinite(item) for item in (box.x, box.y, width, height)
+        ):
+            return None
         if width <= 0 or height <= 0:
             return None
         return box
@@ -65,7 +70,9 @@ class Viewport:
     @property
     def usable(self) -> bool:
         return (
-            self.width >= _MIN_VIEWPORT_PIXELS
+            math.isfinite(self.width)
+            and math.isfinite(self.height)
+            and self.width >= _MIN_VIEWPORT_PIXELS
             and self.height >= _MIN_VIEWPORT_PIXELS
         )
 
@@ -189,12 +196,15 @@ def facts_within(
     *,
     start_ms: float,
     end_ms: float,
+    playback_rate: float = 1.0,
 ) -> list[dict[str, Any]]:
     """Return the manifest facts a clip spanning ``[start, end)`` covers.
 
     Motion design asks per clip, so the window is applied here rather than
     making every caller re-derive which actions a cut actually contains.
     """
+    if not math.isfinite(playback_rate) or playback_rate <= 0:
+        return []
     raw_facts = manifest.get("facts")
     if not isinstance(raw_facts, Sequence):
         return []
@@ -207,10 +217,21 @@ def facts_within(
             fact_end = float(fact.get("t_end_ms", fact_start))
         except (TypeError, ValueError):
             continue
-        if fact_end < start_ms or fact_start >= end_ms:
+        if (
+            not math.isfinite(fact_start)
+            or not math.isfinite(fact_end)
+            or fact_end < fact_start
+            or fact_end <= start_ms
+            or fact_start >= end_ms
+        ):
             continue
         shifted = dict(fact)
-        shifted["clip_offset_ms"] = int(max(fact_start - start_ms, 0))
+        # Manifest facts use source-media time. The overlay, however, runs on
+        # timeline time, so a sped-up or slowed-down edit must scale the event
+        # offset by the source's playback rate.
+        shifted["clip_offset_ms"] = int(
+            max(fact_start - start_ms, 0) / playback_rate,
+        )
         selected.append(shifted)
     return selected
 

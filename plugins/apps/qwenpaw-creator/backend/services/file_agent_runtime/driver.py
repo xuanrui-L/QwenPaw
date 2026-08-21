@@ -658,8 +658,12 @@ def _browser_use_tool_manifest() -> dict[str, Any]:
                 "作用域内还有 `recorder`：需要留下操作过程画面时 "
                 'await recorder.start(label="...")，做完这段操作后 '
                 "await recorder.stop()。只有 start 与 stop 之间的画面会被录制；"
+                "每次 browser_use 都是新隔离会话，code 必须重新 "
+                "Browser.connect() 并 open/present 页面，不能沿用上次变量。"
                 "是否需要录屏由你判断——静态界面用截图配动效往往更好。"
                 "录屏与截图会自动入库为 Project 源素材。\n\n"
+                "若用户明确要求操作录像、教程镜头或动态演示素材，最终必须"
+                "至少产出一个 take；只有观察/print 或 takes 为空不能结束。\n\n"
                 "参数 code：模块级 async Python（可直接 await；用 print() 输出"
                 "你需要看到的事实）。"
             ),
@@ -702,6 +706,9 @@ def _computer_use_tool_manifest() -> dict[str, Any]:
                 "与 `recorder`（start/stop 屏录）。按 观察 → 行动 → 复核 "
                 "微环工作；await desktop.observe_window() 读窗口，再动作，"
                 "再 observe 确认。完整参考在 computer-use skill。录屏与截图"
+                "方法返回普通 dict/list（如 list_apps() 的 result['apps']，"
+                "每个 app 用 app['id']/app['display_name']），不是属性对象。"
+                "每次调用变量不保留，code 必须自包含地重新发现和 observe。"
                 "自动入库为 Project 源素材。桌面操作需要桌面宿主运行时；"
                 "不可用时工具会明确降级提示，此时改用截图配动效表达。\n\n"
                 "参数 code：模块级 async Python（可直接 await；用 print() 输出"
@@ -755,6 +762,33 @@ _TERMINAL_GOAL_STATUSES = frozenset(
 
 class FileAgentRuntimeError(RuntimeError):
     pass
+
+
+def _require_actionable_takes(
+    outcome: LiveOperationRun,
+    *,
+    tool_name: str,
+) -> None:
+    """Reject attempted takes that contain no visible operation facts."""
+    factless = [take for take in outcome.takes if not take.manifest.facts]
+    if not factless:
+        return
+    outcome.takes = [take for take in outcome.takes if take.manifest.facts]
+    if outcome.takes:
+        logger.warning(
+            "%s discarded %s factless take(s)",
+            tool_name,
+            len(factless),
+        )
+        return
+    take_ids = ", ".join(take.take_id for take in factless)
+    raise FileAgentRuntimeError(
+        f"{tool_name} recorded only factless footage ({take_ids}): the take "
+        "contains 0 real actions. wait_for_timeout, snapshot, and print are "
+        "not actions. Reconnect/open the target and re-record with at least "
+        "one awaited visible operation such as click, scroll, navigation, or "
+        "input.",
+    )
 
 
 class CreationCheckpointBlocked(FileAgentRuntimeError):
@@ -2967,12 +3001,13 @@ class FileCreatorAgentRuntime:
             )
         project_id = request.project_id
         run_root = self.services.projects.project_root(project_id) / "runtime"
+        operation_run_id = f"{run_id}-{uuid4().hex[:8]}"
         try:
             outcome = await run_computer_use_code(
                 code,
                 run_root=run_root,
-                run_id=f"{run_id}-{uuid4().hex[:8]}",
-                session_id=request.project_id,
+                run_id=operation_run_id,
+                session_id=request.creator_session_id,
                 fps=get_live_operation_fps(),
                 max_take_seconds=get_live_operation_max_take_seconds(),
                 timeout_seconds=get_live_operation_timeout_seconds(),
@@ -2981,10 +3016,12 @@ class FileCreatorAgentRuntime:
             raise FileAgentRuntimeError(
                 f"computer_use failed: {exc}",
             ) from exc
+        _require_actionable_takes(outcome, tool_name=COMPUTER_USE_TOOL_NAME)
         published = await asyncio.to_thread(
             self._publish_live_operation_sync,
             project_id,
             request.message_id,
+            operation_run_id,
             outcome,
         )
         response: dict[str, Any] = {
@@ -3026,11 +3063,12 @@ class FileCreatorAgentRuntime:
             )
         project_id = request.project_id
         run_root = self.services.projects.project_root(project_id) / "runtime"
+        operation_run_id = f"{run_id}-{uuid4().hex[:8]}"
         try:
             outcome = await run_browser_code(
                 code,
                 run_root=run_root,
-                run_id=f"{run_id}-{uuid4().hex[:8]}",
+                run_id=operation_run_id,
                 identity=get_live_operation_identity(),
                 fps=get_live_operation_fps(),
                 max_width=get_live_operation_max_width(),
@@ -3040,10 +3078,12 @@ class FileCreatorAgentRuntime:
             )
         except LiveOperationError as exc:
             raise FileAgentRuntimeError(f"browser_use failed: {exc}") from exc
+        _require_actionable_takes(outcome, tool_name=BROWSER_USE_TOOL_NAME)
         published = await asyncio.to_thread(
             self._publish_live_operation_sync,
             project_id,
             request.message_id,
+            operation_run_id,
             outcome,
         )
         response: dict[str, Any] = {
@@ -3065,6 +3105,7 @@ class FileCreatorAgentRuntime:
         self,
         project_id: str,
         request_id: str,
+        transaction_identity: str,
         outcome: LiveOperationRun,
     ) -> dict[str, Any]:
         """Commit one run's takes and screenshots as Project source assets."""
@@ -3197,7 +3238,7 @@ class FileCreatorAgentRuntime:
                     transaction_id=stable_id(
                         "transaction",
                         project_id,
-                        request_id,
+                        transaction_identity,
                     ),
                     advance_accepted_baseline=True,
                     _lifecycle_lock_held=True,

@@ -33,6 +33,11 @@ _CREATOR_SECTION = """
 
 `browser_use` 的作用域里除 `Browser` 外还有 `recorder`：
 
+**每一次 `browser_use` 调用都是新的隔离会话，变量绝不跨调用保留。** 每段 code
+都必须先执行 `browser = await Browser.connect()`，再 open/present 目标页面；即使
+上一条工具结果里出现过 `browser` / `page`，也不得直接沿用。一次调用中可以完成
+观察，也可以完成录制；如果先观察、下一次才录制，第二次仍须重新 connect/open。
+
 - `await recorder.start(label="这段在做什么") -> take_id`：开始录制当前操作的页面。
 - `await recorder.stop() -> {take_id, label, summary}`：结束这一段并落地成片段。
 - `recorder.is_recording() -> bool`：当前是否正在录制。
@@ -43,6 +48,16 @@ _CREATOR_SECTION = """
 **是否需要录屏由你判断**：真实的动态过程（连续操作、页面跳转、滚动浏览）值得录；
 只是要展示某个静态界面时，`await page.screenshot()` 配合动效通常更省也更清楚。
 需要重录时，重新操作一遍再录即可。
+
+若用户明确要“操作过程录像 / 软件教程镜头 / 动态演示素材”，验收时必须至少返回
+一个可播放 take；只有观察或 print、工具结果中的 `takes` 仍为空，都不算完成。可以先
+在一次调用中观察真实界面，再根据工具结果发起下一次调用完成录制；开始录制后必须
+做至少一个真实可见动作，并在复核结果后 stop。
+
+“真实可见动作”必须是实际 await 的页面变更操作，例如 locator.click/scroll、
+page.goto/go_back/reload 或真实输入；wait_for_timeout、snapshot、print 只是等待/感知，
+不是动作。take 的 summary 若显示 `0 actions` 会被质量门拒绝，必须重新录制，不能把
+注释里写着“滚动”但实际只 wait 的代码当成操作。
 
 产物会自动成为 Project 源素材，与用户上传的素材完全同构：
 - 录像片段 → 源素材（可用 `observe_source_clip` 看片、可作为 Edit Element 的
@@ -69,8 +84,27 @@ _COMPUTER_USE_SECTION = """
 ## Creator 扩展：桌面录制与产物（`desktop` / `recorder`）
 
 `computer_use` 的作用域里有 `desktop`（observe_window / list_windows /
-list_apps / launch_app / click / type_text / press_key / scroll / drag /
-invoke_element / set_value / close_window）与 `recorder`：
+list_apps / launch_app / click / double_click / right_click / type /
+type_text / press_key / scroll / drag / invoke / invoke_element /
+begin_text_edit / set_value / sequence / wait / close_window）与 `recorder`。
+参数沿用下面宿主 Computer Use 手册的字段；例如 `launch_app(app=...)`，不要
+改写成 `name=...`：
+
+每次 `computer_use` 也是新的隔离调用，Python 变量不跨调用保留；需要操作时必须在
+同一段 code 内重新 list/launch/observe。所有方法都返回普通 Python `dict/list`，
+不是带属性的对象。例如：
+
+```python
+apps_result = await desktop.list_apps()
+apps = apps_result.get("apps", [])
+for app in apps:
+    print(app["id"], app["display_name"])
+windows_result = await desktop.list_windows(app=apps[0]["id"])
+window_id = windows_result["windows"][0]["id"]
+observation = await desktop.observe_window(window_id=window_id)
+```
+
+不得写 `for app in apps_result`、`app.id` 或 `app.name`；原生协议没有这些对象属性。
 
 - `await recorder.start(label="这段在做什么") -> take_id`：开始录制当前窗口。
 - `await recorder.stop() -> {take_id, label, summary}`：结束这一段。
@@ -82,7 +116,7 @@ invoke_element / set_value / close_window）与 `recorder`：
 界面时，截图配动效往往更好。
 
 产物与浏览器完全同构：录像片段→源素材（可 observe_source_clip 看片、可作
- Edit 的 render_source）；截图→图片素材；工具返回值给出每个片段与截图的
+ Edit 的 render_source）；`observe_window` 返回的截图→图片素材；工具返回值给出每个片段与截图的
  workspaceRef / sourceAssetVersionId。录制期间每个动作的坐标与时刻会自动记入
 该片段的事实清单，动效制作用它把强调放在操作真正发生的位置上。
 
@@ -163,26 +197,22 @@ def load_host_computer_use_manual() -> str:
 
 
 def live_operation_guidance() -> str:
-    """Render the browser guidance injected into the Creator system prompt.
-
-    Empty when the capability is switched off, so a deployment without live
-    operation never pays for guidance about a tool the model cannot call.
-    """
+    """Render guidance for exactly the enabled live-operation tools."""
     from models.config import get_live_operation_enabled
 
-    if not get_live_operation_enabled():
-        return ""
-    manual = load_host_browser_manual()
-    header = (
-        "# 真实网站操作（`browser_use`）\n\n"
-        "`browser_use` 让你用异步 Python 真实操作网站：驱动的是 QwenPaw 自己的 "
-        "Browser SDK，不是 Playwright，未列出的方法不存在。下面是该 SDK 的完整"
-        "参考，以及 Creator 侧的录制约定。流程怎么组织由你决定。"
-    )
-    parts = [header]
-    if manual:
-        parts.append(manual)
-    parts.append(_CREATOR_SECTION.strip())
+    parts: list[str] = []
+    if get_live_operation_enabled():
+        manual = load_host_browser_manual()
+        parts.append(
+            "# 真实网站操作（`browser_use`）\n\n"
+            "`browser_use` 让你用异步 Python 真实操作网站：驱动的是 "
+            "QwenPaw 自己的 "
+            "Browser SDK，不是 Playwright，未列出的方法不存在。下面是该 SDK 的完整"
+            "参考，以及 Creator 侧的录制约定。流程怎么组织由你决定。",
+        )
+        if manual:
+            parts.append(manual)
+        parts.append(_CREATOR_SECTION.strip())
     parts.append(_computer_use_guidance())
     return "\n\n".join(part for part in parts if part)
 

@@ -1963,7 +1963,7 @@ def _clear_skills_config_cache():
 
 
 # ─── live operation (real websites driven by the agent) ────────────────
-# Only resource ceilings and how Creator asks live here. What a desktop
+# Only resource ceilings and capability switches live here. What a desktop
 # application is actually allowed to do stays in the host's own Computer Use
 # authorization store, so both entry points agree on one set of grants.
 _LIVE_OPERATION_DEFAULT_FPS = 25
@@ -2099,22 +2099,3 @@ def get_computer_use_enabled() -> bool:
         "0",
     )
     return str(raw).strip().casefold() not in {"0", "false", "no", "off"}
-
-
-def get_computer_use_ask_policy() -> str:
-    """How Creator asks before a desktop action: 'always' or 'session'.
-
-    Only how Creator prompts lives here; the fact of what an app is allowed to
-    do stays in the host's Computer Use access store, so both entry points
-    agree on one set of persistent grants.
-    """
-    raw = (
-        _live_operation_value(
-            "computer_use_ask_policy",
-            "CREATOR_COMPUTER_USE_ASK_POLICY",
-            "always",
-        )
-        .strip()
-        .casefold()
-    )
-    return raw if raw in {"always", "session"} else "always"

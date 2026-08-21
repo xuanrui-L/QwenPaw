@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 from dataclasses import dataclass
 import json
 import logging
@@ -78,12 +79,18 @@ class TakeRecorder:
         self._cdp: Any | None = None
         self._queue: asyncio.Queue | None = None
         self._pump: asyncio.Task | None = None
-        self._frames: list[tuple[float, bytes]] = []
+        self._frames: list[tuple[float, Path]] = []
+        self._frame_dir: Path | None = None
+        self._frame_handler: Any | None = None
         self._viewport: Viewport | None = None
         self._manifest: TakeManifest | None = None
         self._started_at = 0.0
         self._take_index = 0
         self._takes: list[RecordedTake] = []
+        self._watchdog: asyncio.Task | None = None
+        self._stop_lock = asyncio.Lock()
+        self._auto_stopped: RecordedTake | None = None
+        self._auto_stop_error: RecorderError | None = None
 
     @property
     def recording(self) -> bool:
@@ -120,25 +127,43 @@ class TakeRecorder:
         self._cdp = cdp_session
         self._frames = []
         self._viewport = None
+        self._auto_stopped = None
+        self._auto_stop_error = None
+        self._frame_dir = (self._workspace / f"{take_id}-frames").resolve()
+        shutil.rmtree(self._frame_dir, ignore_errors=True)
+        self._frame_dir.mkdir(parents=True, exist_ok=True)
         self._queue = asyncio.Queue()
         queue = self._queue
+        self._frame_handler = queue.put_nowait
         cdp_session.on(
             "Page.screencastFrame",
-            queue.put_nowait,
+            self._frame_handler,
         )
         self._pump = asyncio.ensure_future(self._drain(cdp_session, queue))
-        await cdp_session.send(
-            "Page.startScreencast",
-            {
-                "format": "jpeg",
-                "quality": _JPEG_QUALITY,
-                "maxWidth": self._max_width,
-                "maxHeight": self._max_height,
-                "everyNthFrame": 1,
-            },
-        )
         self._started_at = time.monotonic()
         self._manifest = TakeManifest(take_id=take_id, label=label)
+        try:
+            await cdp_session.send(
+                "Page.startScreencast",
+                {
+                    "format": "jpeg",
+                    "quality": _JPEG_QUALITY,
+                    "maxWidth": self._max_width,
+                    "maxHeight": self._max_height,
+                    "everyNthFrame": 1,
+                },
+            )
+        except BaseException:
+            self._manifest = None
+            self._cdp = None
+            await self._stop_pump(cdp_session)
+            if self._frame_dir is not None:
+                shutil.rmtree(self._frame_dir, ignore_errors=True)
+            self._frame_dir = None
+            raise
+        self._watchdog = asyncio.create_task(
+            self._enforce_duration(take_id),
+        )
         return take_id
 
     async def _drain(self, cdp_session: Any, queue: asyncio.Queue) -> None:
@@ -150,7 +175,11 @@ class TakeRecorder:
             except (TypeError, ValueError):
                 data = b""
             if data:
-                self._frames.append((time.monotonic(), data))
+                frame_dir = self._frame_dir
+                if frame_dir is not None:
+                    frame_path = frame_dir / f"f{len(self._frames):05d}.jpg"
+                    frame_path.write_bytes(data)
+                    self._frames.append((time.monotonic(), frame_path))
                 if self._viewport is None:
                     self._viewport = _viewport_from_metadata(
                         payload.get("metadata"),
@@ -166,55 +195,94 @@ class TakeRecorder:
             except Exception:  # noqa: BLE001 - a lost ack only stalls frames
                 logger.debug("screencast ack failed", exc_info=True)
 
-    async def stop(self) -> RecordedTake:
+    async def stop(  # pylint: disable=too-many-branches,too-many-statements
+        self,
+        *,
+        _from_watchdog: bool = False,
+    ) -> RecordedTake:
         """Stop filming and assemble the collected frames into one mp4."""
-        manifest = self._manifest
-        if manifest is None:
-            raise RecorderError("no take is recording")
-        cdp_session = self._cdp
-        self._manifest = None
-        self._cdp = None
-        if cdp_session is not None:
+        async with self._stop_lock:
+            manifest = self._manifest
+            if manifest is None:
+                if not _from_watchdog and self._auto_stopped is not None:
+                    take = self._auto_stopped
+                    self._auto_stopped = None
+                    return take
+                if not _from_watchdog and self._auto_stop_error is not None:
+                    error = self._auto_stop_error
+                    self._auto_stop_error = None
+                    raise error
+                raise RecorderError("no take is recording")
+            cdp_session = self._cdp
+            self._manifest = None
+            self._cdp = None
+            if not _from_watchdog:
+                await self._cancel_watchdog()
+            elif self._watchdog is asyncio.current_task():
+                self._watchdog = None
             try:
-                await cdp_session.send("Page.stopScreencast")
-            except Exception:  # noqa: BLE001 - the take still holds frames
-                logger.debug("stopScreencast failed", exc_info=True)
-        # Frames already in flight belong to this take: the last operation's
-        # result usually arrives a beat after the call that caused it.
-        await asyncio.sleep(0.35)
-        if self._pump is not None:
-            self._pump.cancel()
-            self._pump = None
-        frames = list(self._frames)
-        self._frames = []
-        if not frames:
-            raise RecorderError(
-                "the take captured no frames; the page did not change "
-                "visually between start and stop",
-            )
-        manifest.viewport = self._viewport
-        manifest.fps = self._fps
-        manifest.frame_count = len(frames)
-        video_path = await asyncio.to_thread(
-            self._assemble,
-            manifest.take_id,
-            frames,
-        )
-        span_ms = int(
-            (frames[-1][0] - frames[0][0] + _TAIL_FRAME_SECONDS) * 1000,
-        )
-        manifest.duration_ms = max(span_ms, 0)
-        width, height = await asyncio.to_thread(_probe_size, video_path)
-        manifest.video_width = width
-        manifest.video_height = height
-        take = RecordedTake(
-            take_id=manifest.take_id,
-            label=manifest.label,
-            video_path=video_path,
-            manifest=manifest,
-        )
-        self._takes.append(take)
-        return take
+                stopped_at = time.monotonic()
+                if cdp_session is not None:
+                    try:
+                        await cdp_session.send("Page.stopScreencast")
+                    except Exception:  # noqa: BLE001 - take still has frames
+                        logger.debug("stopScreencast failed", exc_info=True)
+                # Frames already in flight belong to this take: the last
+                # operation's result usually arrives just after the request.
+                await asyncio.sleep(0.35)
+                pump_error = None
+                if cdp_session is not None:
+                    pump_error = await self._stop_pump(cdp_session)
+                if pump_error is not None:
+                    raise RecorderError(
+                        "the browser frame stream failed while recording: "
+                        f"{type(pump_error).__name__}: {pump_error}",
+                    )
+                frames = list(self._frames)
+                self._frames = []
+                if not frames:
+                    raise RecorderError(
+                        "the take captured no frames; the page did not change "
+                        "visually between start and stop",
+                    )
+                manifest.viewport = self._viewport
+                manifest.fps = self._fps
+                manifest.frame_count = len(frames)
+                video_path = await asyncio.to_thread(
+                    self._assemble,
+                    manifest.take_id,
+                    frames,
+                    stopped_at,
+                )
+                span_ms = int(
+                    max(stopped_at - self._started_at, _TAIL_FRAME_SECONDS)
+                    * 1000,
+                )
+                manifest.duration_ms = max(span_ms, 0)
+                width, height = await asyncio.to_thread(
+                    _probe_size,
+                    video_path,
+                )
+                manifest.video_width = width
+                manifest.video_height = height
+                take = RecordedTake(
+                    take_id=manifest.take_id,
+                    label=manifest.label,
+                    video_path=video_path,
+                    manifest=manifest,
+                )
+                self._takes.append(take)
+                if _from_watchdog:
+                    self._auto_stopped = take
+                return take
+            except RecorderError as exc:
+                if _from_watchdog:
+                    self._auto_stop_error = exc
+                frame_dir = self._frame_dir
+                if frame_dir is not None:
+                    shutil.rmtree(frame_dir, ignore_errors=True)
+                self._frame_dir = None
+                raise
 
     async def stop_if_recording(self) -> RecordedTake | None:
         """Close an unfinished take so a forgotten stop still yields video."""
@@ -232,23 +300,72 @@ class TakeRecorder:
             and (time.monotonic() - self._started_at) > self._max_duration
         )
 
+    async def _enforce_duration(self, take_id: str) -> None:
+        """Hard-stop a take at its configured ceiling without losing it."""
+        try:
+            await asyncio.sleep(self._max_duration)
+            manifest = self._manifest
+            if manifest is not None and manifest.take_id == take_id:
+                await self.stop(_from_watchdog=True)
+        except RecorderError:
+            logger.debug("automatic take stop failed", exc_info=True)
+
+    async def _cancel_watchdog(self) -> None:
+        watchdog = self._watchdog
+        self._watchdog = None
+        if watchdog is None or watchdog is asyncio.current_task():
+            return
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog
+
+    async def _stop_pump(self, cdp_session: Any) -> Exception | None:
+        handler = self._frame_handler
+        self._frame_handler = None
+        if handler is not None:
+            remover = getattr(cdp_session, "remove_listener", None)
+            if not callable(remover):
+                remover = getattr(cdp_session, "off", None)
+            if callable(remover):
+                try:
+                    remover("Page.screencastFrame", handler)
+                except Exception:  # noqa: BLE001 - teardown is best-effort
+                    logger.debug(
+                        "screencast listener removal failed",
+                        exc_info=True,
+                    )
+        pump = self._pump
+        self._pump = None
+        pump_error: Exception | None = None
+        if pump is not None:
+            if pump.done() and not pump.cancelled():
+                try:
+                    pump.result()
+                except Exception as exc:  # noqa: BLE001 - returned to caller
+                    pump_error = exc
+            else:
+                pump.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump
+        self._queue = None
+        return pump_error
+
     def _assemble(
         self,
         take_id: str,
-        frames: list[tuple[float, bytes]],
+        frames: list[tuple[float, Path]],
+        stopped_at: float,
     ) -> Path:
         """Turn timestamped frames into a constant-rate mp4 with ffmpeg."""
         staging = (self._workspace / f"{take_id}-frames").resolve()
-        shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True, exist_ok=True)
         entries: list[str] = []
-        for index, (captured_at, data) in enumerate(frames):
-            name = f"f{index:05d}.jpg"
-            (staging / name).write_bytes(data)
+        for index, (captured_at, frame_path) in enumerate(frames):
+            name = frame_path.name
             following = (
                 frames[index + 1][0]
                 if index + 1 < len(frames)
-                else captured_at + _TAIL_FRAME_SECONDS
+                else max(stopped_at, captured_at + _TAIL_FRAME_SECONDS)
             )
             hold = max(following - captured_at, _MIN_FRAME_SECONDS)
             entries.append(f"file '{name}'\nduration {hold:.3f}\n")
@@ -293,6 +410,7 @@ class TakeRecorder:
             raise RecorderError(f"ffmpeg failed to assemble: {exc}") from exc
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+            self._frame_dir = None
         if result.returncode != 0 or not output.exists():
             raise RecorderError(
                 "ffmpeg failed to assemble the take: "

@@ -15,6 +15,8 @@ path — a desktop take is just source footage cropped to a window.
 
 from __future__ import annotations
 
+from dataclasses import replace
+import json
 import logging
 from pathlib import Path
 import shutil
@@ -26,7 +28,7 @@ from typing import Any, Mapping
 from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 
 from .manifest import TakeManifest, Viewport
-from .recorder import RecorderError
+from .recorder import RecordedTake, RecorderError
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class ScreenRecorder:
         self._output: Path | None = None
         self._started_at = 0.0
         self._take_index = 0
+        self._takes: list[RecordedTake] = []
 
     @property
     def recording(self) -> bool:
@@ -60,6 +63,11 @@ class ScreenRecorder:
     @property
     def manifest(self) -> TakeManifest | None:
         return self._manifest
+
+    @property
+    def takes(self) -> list[RecordedTake]:
+        """Every completed take, including ones stopped by agent code."""
+        return list(self._takes)
 
     def elapsed_ms(self) -> int:
         if not self.recording:
@@ -77,7 +85,7 @@ class ScreenRecorder:
         *,
         label: str = "",
         window_bounds: Mapping[str, Any] | None = None,
-        screen: str = "1",
+        screen: str = "0",
     ) -> str:
         """Begin capturing the screen, cropped to a window when known."""
         if self.recording:
@@ -94,6 +102,7 @@ class ScreenRecorder:
             fps=self._fps,
             screen=screen,
             crop=crop,
+            max_duration_seconds=self._max_duration,
             output=output,
         )
         if command is None:
@@ -109,7 +118,10 @@ class ScreenRecorder:
                 command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                # Never leave ffmpeg's progress stream unread: a PIPE fills on
+                # long takes and silently stalls capture. The command emits
+                # errors only, while stop validates the resulting media.
+                stderr=subprocess.DEVNULL,
             )
         except Exception as exc:  # noqa: BLE001 - surface a clear cause
             raise RecorderError(
@@ -133,19 +145,50 @@ class ScreenRecorder:
         self._manifest = None
         self._process = None
         self._output = None
-        duration_ms = int((time.monotonic() - self._started_at) * 1000)
+        elapsed_ms = int((time.monotonic() - self._started_at) * 1000)
         self._terminate(process)
         if not output.exists() or output.stat().st_size == 0:
             raise RecorderError(
                 "screen recording produced no output; the capture device may "
                 "be unavailable or screen-recording permission was denied",
             )
-        manifest.duration_ms = max(duration_ms, 0)
-        if manifest.viewport is not None:
-            # The capture is cropped to the window, so the recorded frame size
-            # is the window size actions are already projected against.
-            manifest.video_width = int(manifest.viewport.width)
-            manifest.video_height = int(manifest.viewport.height)
+        width, height, probed_duration_ms, frame_count = _probe_video(output)
+        manifest.duration_ms = probed_duration_ms or min(
+            max(elapsed_ms, 0),
+            int(self._max_duration * 1000),
+        )
+        if width and height:
+            manifest.video_width = width
+            manifest.video_height = height
+        elif manifest.viewport is not None:
+            # Probe-less fallback. The even-dimension scale can shave one
+            # pixel, so this metadata is advisory until ffprobe is available.
+            manifest.video_width = int(manifest.viewport.width) // 2 * 2
+            manifest.video_height = int(manifest.viewport.height) // 2 * 2
+        manifest.frame_count = frame_count or max(
+            1,
+            round(manifest.duration_ms * self._fps / 1000),
+        )
+        # ffmpeg's -t is the hard recording ceiling. Facts after that instant
+        # describe actions not present in the file and must not be advertised.
+        manifest.facts = [
+            replace(
+                fact,
+                t_end_ms=min(
+                    max(fact.t_end_ms, fact.t_start_ms),
+                    manifest.duration_ms,
+                ),
+            )
+            for fact in manifest.facts
+            if fact.t_start_ms < manifest.duration_ms
+        ]
+        take = RecordedTake(
+            take_id=manifest.take_id,
+            label=manifest.label,
+            video_path=output,
+            manifest=manifest,
+        )
+        self._takes.append(take)
         return output, manifest
 
     def stop_if_recording(self) -> tuple[Path, TakeManifest] | None:
@@ -185,6 +228,7 @@ def _capture_command(
     fps: int,
     screen: str,
     crop: str | None,
+    max_duration_seconds: float,
     output: Path,
 ) -> list[str] | None:
     """Build the platform screen-capture argv, or None where unsupported."""
@@ -197,6 +241,10 @@ def _capture_command(
     command = [
         ffmpeg,
         "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
         "-framerate",
         str(fps),
         *source,
@@ -213,6 +261,8 @@ def _capture_command(
         "libx264",
         "-preset",
         "veryfast",
+        "-t",
+        f"{max(0.1, float(max_duration_seconds)):g}",
         str(output),
     ]
     return command
@@ -252,6 +302,49 @@ def screen_capture_supported() -> bool:
 
 def ffmpeg_available() -> bool:
     return bool(resolve_ffmpeg() or shutil.which("ffmpeg"))
+
+
+def _probe_video(path: Path) -> tuple[int, int, int, int]:
+    """Return width, height, duration milliseconds and frame count."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return (0, 0, 0, 0)
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,duration,nb_frames",
+                "-of",
+                "json",
+                str(path),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+        streams = json.loads(result.stdout or "{}").get("streams") or []
+        if not streams:
+            return (0, 0, 0, 0)
+        stream = streams[0]
+        duration_ms = int(max(0.0, float(stream.get("duration") or 0)) * 1000)
+        raw_frames = stream.get("nb_frames")
+        frame_count = int(raw_frames) if str(raw_frames).isdigit() else 0
+        return (
+            int(stream.get("width") or 0),
+            int(stream.get("height") or 0),
+            duration_ms,
+            frame_count,
+        )
+    except Exception:  # noqa: BLE001 - metadata has a safe fallback
+        logger.debug("desktop take probe failed", exc_info=True)
+        return (0, 0, 0, 0)
 
 
 __all__ = [

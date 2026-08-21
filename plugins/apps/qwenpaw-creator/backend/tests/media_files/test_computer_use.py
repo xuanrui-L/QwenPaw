@@ -13,19 +13,21 @@ approval coordinator that single-sources grants to the host access store.
 from __future__ import annotations
 
 import asyncio
+import base64
 import sys
 from pathlib import Path
 
 import pytest
 
 from services.media_files.live_operation import (
+    RecordedTake,
+    TakeManifest,
     computer_use_status,
     run_computer_use_code,
 )
-from services.media_files.live_operation.approval import (
-    ApprovalOutcome,
-    DesktopApprovalCoordinator,
-    DesktopApprovalRequest,
+from services.media_files.live_operation import desktop as desktop_module
+from services.media_files.live_operation.desktop import (
+    DesktopController,
 )
 from services.media_files.live_operation.screen_recorder import (
     ScreenRecorder,
@@ -50,11 +52,14 @@ def test_status_reports_each_precondition_separately():
         "ffmpeg",
     ):
         assert key in status
-    # Availability is the conjunction of the parts, never more permissive.
+    # Desktop control remains useful without recording; recording reports its
+    # own stricter conjunction instead of disabling the whole tool.
     assert status["available"] == (
-        status["screen_capture_supported"]
-        and status["native_helper_platform"]
-        and status["host_reachable"]
+        status["native_helper_platform"] and status["host_reachable"]
+    )
+    assert status["recording_available"] == (
+        status["available"]
+        and status["screen_capture_supported"]
         and status["ffmpeg"]
     )
 
@@ -114,13 +119,14 @@ def test_capture_command_targets_the_platform_backend():
     command = _capture_command(
         ffmpeg="ffmpeg",
         fps=25,
-        screen="1",
+        screen="0",
         crop="crop=800:600:0:0",
+        max_duration_seconds=12,
         output=Path("/tmp/take.mp4"),
     )
     if sys.platform == "darwin":
         assert "avfoundation" in command
-        assert "1:none" in command
+        assert "0:none" in command
     elif sys.platform == "win32":
         assert "gdigrab" in command
         assert "desktop" in command
@@ -131,6 +137,7 @@ def test_capture_command_targets_the_platform_backend():
     joined = " ".join(command)
     assert "crop=800:600:0:0" in joined
     assert "libx264" in command
+    assert command[command.index("-t") + 1] == "12"
     assert command[-1] == "/tmp/take.mp4"
 
 
@@ -152,111 +159,170 @@ def test_stop_without_start_is_an_error(tmp_path: Path):
         recorder.stop()
 
 
-# ─── approval coordinator (single-sourced to host store) ─────────────────
+# ─── real bridge contracts with injected native/capture planes ──────────
 
 
-class _Decision:
-    def __init__(self, allowed: bool, source: str) -> None:
-        self.allowed = allowed
-        self.source = source
+class _FakeNativeClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.closed = False
+
+    async def execute(self, method, params):
+        from qwenpaw.app import agent_context
+
+        assert agent_context.get_current_session_id() == "creator-session"
+        self.calls.append((method, dict(params)))
+        return {"ok": True}
+
+    async def close(self):
+        self.closed = True
 
 
-class _FakeStore:
-    """A stand-in for the host ComputerUseAccessStore."""
+class _FakeScreenRecorder:
+    def __init__(self, *, workspace, fps, max_duration_seconds):
+        del fps, max_duration_seconds
+        self.workspace = workspace
+        self._manifest = None
+        self._takes = []
 
-    def __init__(self, existing: _Decision | None = None) -> None:
-        self._existing = existing
-        self.session_records: list[tuple[object, bool]] = []
-        self.persistent_records: list[object] = []
+    @property
+    def recording(self):
+        return self._manifest is not None
 
-    def resolve(self, request):
-        del request
-        return self._existing
+    @property
+    def manifest(self):
+        return self._manifest
 
-    def record_session(self, request, *, allowed):
-        self.session_records.append((request, allowed))
+    @property
+    def takes(self):
+        return list(self._takes)
 
-    def record_persistent(self, request):
-        self.persistent_records.append(request)
+    def elapsed_ms(self):
+        return 10 if self.recording else 0
+
+    def start(self, *, label="", window_bounds=None, screen="0"):
+        del window_bounds
+        assert screen == "0"
+        self._manifest = TakeManifest(
+            take_id="desktop-take-001",
+            label=label,
+        )
+        return self._manifest.take_id
+
+    def stop(self):
+        manifest = self._manifest
+        assert manifest is not None
+        self._manifest = None
+        manifest.duration_ms = 1000
+        manifest.frame_count = 25
+        output = self.workspace / "desktop-take-001.mp4"
+        output.write_bytes(b"fake-mp4")
+        self._takes.append(
+            RecordedTake(
+                take_id=manifest.take_id,
+                label=manifest.label,
+                video_path=output,
+                manifest=manifest,
+            ),
+        )
+        return output, manifest
+
+    def stop_if_recording(self):
+        return self.stop() if self.recording else None
 
 
-def _request() -> DesktopApprovalRequest:
-    return DesktopApprovalRequest(
-        session_id="s1",
-        canonical_app_id="com.example.app",
-        display_name="Example",
+def test_explicit_desktop_stop_survives_the_run_and_uses_creator_session(
+    tmp_path: Path,
+    monkeypatch,
+):
+    client = _FakeNativeClient()
+    monkeypatch.setattr(
+        desktop_module,
+        "computer_use_status",
+        lambda: {"available": True},
+    )
+    monkeypatch.setattr(
+        desktop_module,
+        "_load_native_client",
+        lambda _sid: client,
+    )
+    monkeypatch.setattr(desktop_module, "ScreenRecorder", _FakeScreenRecorder)
+
+    outcome = asyncio.run(
+        run_computer_use_code(
+            'await desktop.launch_app("app:calculator")\n'
+            'await recorder.start(label="addition")\n'
+            "await recorder.stop()",
+            run_root=tmp_path,
+            run_id="run-1",
+            session_id="creator-session",
+        ),
     )
 
-
-def test_existing_host_grant_is_honored_without_prompting():
-    store = _FakeStore(existing=_Decision(True, "persistent"))
-
-    def never(_request):  # pragma: no cover - must not be called
-        raise AssertionError("must not prompt when a host grant exists")
-
-    coordinator = DesktopApprovalCoordinator(never, store=store)
-    outcome = coordinator.decide(_request())
-    assert isinstance(outcome, ApprovalOutcome)
-    assert outcome.allowed is True
-    assert outcome.source == "persistent"
-    # Honoring an existing grant must not re-record it.
-    assert not store.session_records
+    assert len(outcome.takes) == 1
+    assert outcome.takes[0].video_path.read_bytes() == b"fake-mp4"
+    assert client.calls == [("launch_app", {"app": "app:calculator"})]
+    assert client.closed is True
 
 
-def test_decision_is_written_back_to_the_host_store():
-    store = _FakeStore(existing=None)
-    coordinator = DesktopApprovalCoordinator(
-        lambda _r: (True, True),
-        store=store,
+def test_observation_screenshot_and_element_coordinates_are_preserved(
+    tmp_path: Path,
+):
+    encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode("ascii")
+
+    class Client:
+        async def execute(self, method, params):
+            del params
+            if method == "observe_window":
+                return {
+                    "window": {
+                        "bounds": {
+                            "x": 100,
+                            "y": 50,
+                            "width": 800,
+                            "height": 600,
+                        },
+                    },
+                    "accessibility": {
+                        "elements": [
+                            {
+                                "id": "button-1",
+                                "bounds": {
+                                    "x": 120,
+                                    "y": 70,
+                                    "width": 40,
+                                    "height": 20,
+                                },
+                            },
+                        ],
+                    },
+                    "screenshots": [
+                        {
+                            "id": "shot-1",
+                            "origin": {"x": 100, "y": 50},
+                            "url": f"data:image/png;base64,{encoded}",
+                        },
+                    ],
+                }
+            return {"ok": True}
+
+    class Recorder:
+        manifest = TakeManifest(take_id="desktop-take-001")
+
+        @staticmethod
+        def elapsed_ms():
+            return 100
+
+    controller = DesktopController(Client(), Recorder(), tmp_path)
+    asyncio.run(controller.observe_window(window_id="window-1"))
+    asyncio.run(controller.click(element_id="button-1"))
+
+    assert len(controller.screenshots) == 1
+    assert Path(controller.screenshots[0]).read_bytes().endswith(b"image")
+    fact = Recorder.manifest.facts[0]
+    assert (fact.bbox.x, fact.bbox.y, fact.bbox.width, fact.bbox.height) == (
+        20.0,
+        20.0,
+        40.0,
+        20.0,
     )
-    outcome = coordinator.decide(_request())
-    assert outcome.allowed is True
-    assert outcome.source == "creator"
-    assert store.session_records[0][1] is True
-    # "Always allow" is the only persistent write.
-    assert len(store.persistent_records) == 1
-
-
-def test_session_only_grant_is_not_persisted():
-    store = _FakeStore(existing=None)
-    coordinator = DesktopApprovalCoordinator(
-        lambda _r: (True, False),
-        store=store,
-    )
-    coordinator.decide(_request())
-    assert store.session_records[0][1] is True
-    assert not store.persistent_records
-
-
-def test_a_refusal_is_never_persisted():
-    store = _FakeStore(existing=None)
-    coordinator = DesktopApprovalCoordinator(
-        lambda _r: (False, True),
-        store=store,
-    )
-    outcome = coordinator.decide(_request())
-    assert outcome.allowed is False
-    # A refusal must not become a standing block that silently denies later.
-    assert not store.persistent_records
-
-
-def test_a_failed_prompt_denies_rather_than_crashes():
-    store = _FakeStore(existing=None)
-
-    def boom(_request):
-        raise RuntimeError("prompt backend down")
-
-    coordinator = DesktopApprovalCoordinator(boom, store=store)
-    outcome = coordinator.decide(_request())
-    assert outcome.allowed is False
-    assert outcome.source == "prompt_error"
-
-
-def test_without_a_store_it_still_prompts_and_decides():
-    coordinator = DesktopApprovalCoordinator(
-        lambda _r: (True, False),
-        store=None,
-    )
-    outcome = coordinator.decide(_request())
-    assert outcome.allowed is True
-    assert outcome.source == "creator"

@@ -8,7 +8,7 @@ computer_use tool and writes valid closed-vocabulary desktop code, and that
 the tool degrades clearly instead of failing opaquely where no host exists.
 
     CREATOR_LIVE_OPERATION_REAL_TEST=1 \
-    DASHSCOPE_API_KEY=<key> \
+    TEXT_API_KEY=<key> \
     python -m pytest -m manual_real \
         tests/manual/test_real_computer_use.py -s
 """
@@ -134,6 +134,10 @@ def test_model_reaches_for_computer_use_and_writes_desktop_code() -> None:
     # The desktop vocabulary is the host's closed set; a browser-ism here would
     # mean the reused manual failed to teach the real surface.
     assert "Browser.connect" not in code
+    assert ".id" not in code
+    assert ".name" not in code
+    assert '"apps"' in code or "'apps'" in code
+    assert '"id"' in code or "'id'" in code
 
 
 def test_desktop_degrades_clearly_without_a_host(tmp_path: Path) -> None:

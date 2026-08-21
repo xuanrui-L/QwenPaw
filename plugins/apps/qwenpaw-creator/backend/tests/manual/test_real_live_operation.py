@@ -8,7 +8,7 @@ the same guidance a production run gets, and nothing about the order of steps
 is prescribed here.
 
     CREATOR_LIVE_OPERATION_REAL_TEST=1 \
-    DASHSCOPE_API_KEY=<key> \
+    TEXT_API_KEY=<key> \
     python -m pytest -m manual_real \
         tests/manual/test_real_live_operation.py -s
 
@@ -30,6 +30,7 @@ import pytest
 
 from models import config as model_config
 from services.media_files.live_operation import (
+    LiveOperationError,
     build_take_records,
     facts_within,
     run_browser_code,
@@ -68,7 +69,11 @@ def _reap_browsers():
             asyncio.run(link.close_all())
 
 
-_GOAL = "我要做一个「如何在 example.com 上查看页面内容」的教程视频，" + "请你真实操作这个网站，把值得放进教程的操作过程留成素材。"
+_GOAL = (
+    "我要做一个「如何在 example.com 上查看页面内容」的教程视频，请你真实操作"
+    "这个网站，把值得放进教程的操作过程留成素材。最终验收必须至少有一段可播放"
+    "录像：请用 recorder.start/stop 录下至少一次页面操作；只观察或打印不算完成。"
+)
 
 
 def _require_text_model() -> None:
@@ -94,8 +99,36 @@ def _model_client():
     return AgentScopeAgentChatClient(timeout_seconds=300.0)
 
 
+def _assert_publishable(outcome) -> None:
+    assert outcome is not None
+    assert (
+        outcome.takes
+    ), "the real model run finished without recorded footage"
+    for take in outcome.takes:
+        print(
+            f"take {take.take_id}: {take.summary} -> {take.video_path}",
+        )
+        assert take.video_path.is_file()
+        assert take.video_path.stat().st_size > 0
+        payload = json.loads(take.manifest.as_json_bytes())
+        print("manifest:", json.dumps(payload, ensure_ascii=False)[:800])
+        assert payload["video"]["frame_count"] > 0
+        assert payload["facts"], "a recorded take must carry action facts"
+        video_file, manifest_file, version, _ = build_take_records(
+            project_id="acceptance",
+            take_id=take.take_id,
+            label=take.label,
+            video=take.video_path.read_bytes(),
+            manifest_payload=take.manifest.as_json_bytes(),
+            duration_seconds=take.manifest.duration_ms / 1000 or None,
+            request_id="req-acceptance",
+        )
+        assert version.metadata["manifestFileId"] == manifest_file.file_id
+        assert video_file.media_type == "video/mp4"
+
+
 def test_model_chooses_how_to_operate_and_record(tmp_path: Path) -> None:
-    """One real model turn must produce runnable browser code on its own."""
+    """A real multi-turn model run must finish with publishable footage."""
     _require_text_model()
     from services.file_agent_runtime.prompts.live_operation_guidance import (
         live_operation_guidance,
@@ -137,54 +170,117 @@ def test_model_chooses_how_to_operate_and_record(tmp_path: Path) -> None:
             on_tool_call_delta=None,
         )
 
-    turn = asyncio.run(one_turn())
-    print("\n=== model turn ===")
-    print("finish reason:", turn.finish_reason)
-    print("tool calls:", [call.name for call in turn.tool_calls])
-    assert turn.tool_calls, "the model did not reach for browser_use"
-    call = turn.tool_calls[0]
-    assert call.name == "browser_use"
-    code = str(call.arguments.get("code") or "")
-    print("--- model authored code ---")
-    print(code)
-    # The closed SDK is what the model must write against; a Playwright-ism
-    # here would mean the reused manual failed to teach the real surface.
-    assert "Browser.connect" in code
-    assert "page.fill(" not in code
+    outcome = None
+    final_code = ""
+    # Production gives the model the result of each tool call. Its first call
+    # may legitimately perceive the real site before deciding what to film,
+    # so acceptance follows the same bounded continuation instead of grading
+    # an exploratory first turn as the final product.
+    for turn_index in range(1, 4):
+        turn = asyncio.run(one_turn())
+        print(f"\n=== model turn {turn_index} ===")
+        print("finish reason:", turn.finish_reason)
+        print("tool calls:", [call.name for call in turn.tool_calls])
+        if not turn.tool_calls:
+            break
+        assert len(turn.tool_calls) == 1
+        call = turn.tool_calls[0]
+        assert call.name == "browser_use"
+        code = str(call.arguments.get("code") or "")
+        print("--- model authored code ---")
+        print(code)
+        # The closed SDK is what the model must write against; a Playwright-ism
+        # here would mean the reused manual failed to teach the real surface.
+        assert "Browser.connect" in code
+        assert "page.fill(" not in code
 
-    outcome = asyncio.run(
-        run_browser_code(code, run_root=tmp_path, run_id="acceptance"),
-    )
-    print("--- tool output ---")
-    print(outcome.output)
-    print(
-        "takes:",
-        len(outcome.takes),
-        "screenshots:",
-        len(outcome.screenshots),
-    )
-    for take in outcome.takes:
+        try:
+            outcome = asyncio.run(
+                run_browser_code(
+                    code,
+                    run_root=tmp_path,
+                    run_id=f"acceptance-{turn_index}",
+                ),
+            )
+        except LiveOperationError as exc:
+            print("--- tool failed honestly ---")
+            print(type(exc).__name__, str(exc))
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": turn.content,
+                    "tool_calls": [call.history_dict()],
+                },
+            )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.call_id,
+                    "name": call.name,
+                    "content": json.dumps(
+                        {"ok": False, "error": str(exc)},
+                        ensure_ascii=False,
+                    ),
+                    "failed": True,
+                },
+            )
+            continue
+        print("--- tool output ---")
+        print(outcome.output)
         print(
-            f"take {take.take_id}: {take.summary} -> {take.video_path}",
+            "takes:",
+            len(outcome.takes),
+            "screenshots:",
+            len(outcome.screenshots),
         )
-        assert take.video_path.is_file()
-        assert take.video_path.stat().st_size > 0
-        payload = json.loads(take.manifest.as_json_bytes())
-        print("manifest:", json.dumps(payload, ensure_ascii=False)[:800])
-        assert payload["video"]["frame_count"] > 0
-        assert payload["facts"], "a recorded take must carry action facts"
-        # Every take must be publishable as ordinary source material.
-        video_file, manifest_file, version, _ = build_take_records(
-            project_id="acceptance",
-            take_id=take.take_id,
-            label=take.label,
-            video=take.video_path.read_bytes(),
-            manifest_payload=take.manifest.as_json_bytes(),
-            duration_seconds=take.manifest.duration_ms / 1000 or None,
-            request_id="req-acceptance",
+        actionable = [take for take in outcome.takes if take.manifest.facts]
+        factless_failure = bool(outcome.takes and not actionable)
+        quality_error = (
+            "recorded take has 0 real actions; wait/snapshot/print do not "
+            "count. Reconnect/open and re-record with click, scroll, "
+            "navigation, or input."
+            if factless_failure
+            else ""
         )
-        assert version.metadata["manifestFileId"] == manifest_file.file_id
-        assert video_file.media_type == "video/mp4"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": turn.content,
+                "tool_calls": [call.history_dict()],
+            },
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call.call_id,
+                "name": call.name,
+                "content": json.dumps(
+                    {
+                        "ok": not factless_failure,
+                        "qualityError": quality_error,
+                        "output": outcome.output,
+                        "takes": [
+                            {
+                                "takeId": take.take_id,
+                                "summary": take.summary,
+                            }
+                            for take in outcome.takes
+                        ],
+                        "screenshotCount": len(outcome.screenshots),
+                    },
+                    ensure_ascii=False,
+                ),
+                "failed": factless_failure,
+            },
+        )
+        if actionable:
+            outcome.takes = actionable
+            final_code = code
+            break
+
+    assert "recorder.start" in final_code
+    assert "recorder.stop" in final_code
+    _assert_publishable(outcome)
 
 
 def test_recorded_coordinates_reach_motion_design(tmp_path: Path) -> None:

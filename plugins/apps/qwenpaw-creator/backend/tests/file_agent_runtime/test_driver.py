@@ -20,13 +20,17 @@ from services.file_agent_runtime import (
     AgentToolCall,
     CallbackAgentChatClient,
     FileCreatorAgentRuntime,
+    FileAgentRuntimeError,
 )
 from services.file_agent_runtime.driver import (
     _ToolArgumentProgressReporter,
+    _require_actionable_takes,
     _specialist_tool_recovery,
     _tool_call_transport_metadata,
 )
 from services.file_agent_runtime.prompts import render_creator_system_prompt
+from services.media_files.live_operation import LiveOperationRun
+from services.media_files.live_operation import RecordedTake, TakeManifest
 from services.observability import read_trace_records
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project, VisualEntity
@@ -242,9 +246,9 @@ def _create_project(tmp_path, *, initial_goal: str | None):
             initial_message_id="message-initial"
             if initial_goal is not None
             else None,
-            initial_client_message_id="client-initial"
-            if initial_goal is not None
-            else None,
+            initial_client_message_id=(
+                "client-initial" if initial_goal is not None else None
+            ),
         )
 
     project = Project.new(project_id=PROJECT_ID, name="Initial")
@@ -261,6 +265,67 @@ def _create_project(tmp_path, *, initial_goal: str | None):
     )
     services.poller.note_commit(snapshot)
     return services, snapshot
+
+
+def test_repeated_live_operations_in_one_request_use_unique_transactions(
+    tmp_path,
+) -> None:
+    """A model may call browser_use more than once in one message.
+
+    Request identity remains the durable provenance, but each distinct tool
+    invocation needs its own transaction id or the second asset commit is
+    rejected as a replay of the first.
+    """
+    services, _snapshot = _create_project(tmp_path, initial_goal=None)
+    runtime = FileCreatorAgentRuntime(
+        services,
+        poll_interval_seconds=0.01,
+    )
+
+    def screenshot(name: str, color: str) -> LiveOperationRun:
+        path = tmp_path / name
+        Image.new("RGB", (16, 12), color=color).save(path, format="PNG")
+        outcome = LiveOperationRun()
+        outcome.screenshots = [str(path)]
+        return outcome
+
+    first = runtime._publish_live_operation_sync(
+        PROJECT_ID,
+        "same-message",
+        "operation-one",
+        screenshot("one.png", "red"),
+    )
+    second = runtime._publish_live_operation_sync(
+        PROJECT_ID,
+        "same-message",
+        "operation-two",
+        screenshot("two.png", "blue"),
+    )
+
+    assert len(first["screenshots"]) == 1
+    assert len(second["screenshots"]) == 1
+    project = services.projects.read(PROJECT_ID).project
+    assert len(project.assets.source_versions_by_id) == 2
+
+
+def test_factless_operation_take_is_rejected_before_publication(
+    tmp_path,
+) -> None:
+    video = tmp_path / "factless.mp4"
+    video.write_bytes(b"mp4")
+    manifest = TakeManifest(take_id="take-001", duration_ms=1000)
+    outcome = LiveOperationRun()
+    outcome.takes = [
+        RecordedTake(
+            take_id=manifest.take_id,
+            label="静止等待",
+            video_path=video,
+            manifest=manifest,
+        ),
+    ]
+
+    with pytest.raises(FileAgentRuntimeError, match="0 real actions"):
+        _require_actionable_takes(outcome, tool_name="browser_use")
 
 
 def _edit_client(*, description: str):

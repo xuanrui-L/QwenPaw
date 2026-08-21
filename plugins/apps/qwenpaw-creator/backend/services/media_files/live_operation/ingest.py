@@ -29,6 +29,12 @@ TAKE_SOURCE_KIND = "live_operation_take"
 SCREENSHOT_SOURCE_KIND = "live_operation_screenshot"
 MANIFEST_SCHEMA_NAME = "creator.live_operation.take_manifest"
 _MANIFEST_MEDIA_TYPE = "application/json"
+_IMAGE_SUFFIXES = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +193,8 @@ def build_image_records(
     logical_asset_id = stable_id("asset", project_id, checksum)
     version_id = stable_id("asset-version", project_id, checksum)
     file_id = stable_id("file", project_id, checksum)
-    suffix = ".png" if media_type.endswith("png") else ".jpg"
+    normalized_media_type = media_type.split(";", 1)[0].strip().casefold()
+    suffix = _IMAGE_SUFFIXES.get(normalized_media_type, ".img")
     indexed = IndexedFile(
         file_id=file_id,
         kind="source_original",
@@ -198,7 +205,7 @@ def build_image_records(
         ).as_posix(),
         sha256=checksum,
         size_bytes=len(content),
-        media_type=media_type,
+        media_type=normalized_media_type or "application/octet-stream",
         created_at=created_at,
     )
     version = SourceAssetVersion(
@@ -208,7 +215,7 @@ def build_image_records(
         file_id=file_id,
         checksum=checksum,
         media_kind="image",
-        media_type=media_type,
+        media_type=normalized_media_type or "application/octet-stream",
         created_at=created_at,
         metadata={
             "sourceKind": SCREENSHOT_SOURCE_KIND,
