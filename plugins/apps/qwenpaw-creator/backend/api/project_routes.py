@@ -64,7 +64,10 @@ from services.project_files.store import (
 from services.runtime_files.errors import RuntimeFileError
 from services.runtime_files.idempotency_store import IdempotencyRecordStore
 from services.runtime_files.locking import CrossProcessFileLock
-from services.runtime_files.session_store import ProjectRuntimeBootstrap
+from services.runtime_files.session_store import (
+    ProjectRuntimeBootstrap,
+    RuntimeSessionNotFound,
+)
 from services.storage_root import require_creator_data_root
 from services.project_files.serialization import load_project_json
 from utils.logger import setup_logger
@@ -235,24 +238,38 @@ async def list_projects(
     except (ProjectIntegrityError, ProjectStoreError) as exc:
         raise StorageIntegrityError(str(exc)) from exc
     page = records[offset : offset + limit]
+
+    def _build_items() -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for item in page:
+            try:
+                session = services.sessions.get_project_session_snapshot(
+                    item.project_id,
+                )
+                session_status: str | None = session.status.value
+            except RuntimeSessionNotFound:
+                session_status = None
+            items.append(
+                {
+                    "projectId": item.project_id,
+                    "name": item.name,
+                    "description": item.description,
+                    "scenario": item.scenario,
+                    "aspectRatio": item.aspect_ratio,
+                    "resolution": item.resolution,
+                    "contentType": item.content_type,
+                    "createdAt": item.created_at,
+                    "updatedAt": item.updated_at,
+                    "coverVersionId": item.cover_version_id,
+                    "coverVersionSource": item.cover_version_source,
+                    "finalVideoVersionId": item.final_video_version_id,
+                    "status": session_status,
+                },
+            )
+        return items
+
     return {
-        "items": [
-            {
-                "projectId": item.project_id,
-                "name": item.name,
-                "description": item.description,
-                "scenario": item.scenario,
-                "aspectRatio": item.aspect_ratio,
-                "resolution": item.resolution,
-                "contentType": item.content_type,
-                "createdAt": item.created_at,
-                "updatedAt": item.updated_at,
-                "coverVersionId": item.cover_version_id,
-                "coverVersionSource": item.cover_version_source,
-                "finalVideoVersionId": item.final_video_version_id,
-            }
-            for item in page
-        ],
+        "items": await asyncio.to_thread(_build_items),
         "limit": limit,
         "offset": offset,
     }
