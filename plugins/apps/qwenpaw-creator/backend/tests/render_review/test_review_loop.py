@@ -448,3 +448,55 @@ def test_schedule_gate_and_dedup(services, monkeypatch) -> None:
 
     asyncio.run(drive())
     assert calls == ["video-gate-1"]
+
+
+def test_challenge_questions_are_drafted_during_the_main_review(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """The plan-only question pass overlaps the frame-reading VLM call.
+
+    Both are model round trips with no data dependency between them, so
+    the challenge pass must not add its own latency to the round.
+    """
+    monkeypatch.setattr(
+        "models.config.is_render_challenge_enabled",
+        lambda: True,
+    )
+    order: list[str] = []
+
+    async def fake_questions(_context):
+        order.append("questions:start")
+        await asyncio.sleep(0.05)
+        order.append("questions:end")
+        return []
+
+    async def fake_chat_completion(content, **kwargs):
+        order.append("review:start")
+        await asyncio.sleep(0.05)
+        order.append("review:end")
+        return _vlm_response(verdict_major_failure=False)
+
+    monkeypatch.setattr(
+        "services.render_review.challenge.generate_challenge_questions",
+        fake_questions,
+    )
+    monkeypatch.setattr(review_module, "chat_completion", fake_chat_completion)
+    video = tmp_path / "render.mp4"
+    video.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+    report = asyncio.run(
+        review_module.review_render(
+            services,
+            project_id=PROJECT_ID,
+            video_path=video,
+            video_id="version-parallel",
+            round_number=1,
+            plan_context={"concept": "夜行"},
+        ),
+    )
+    assert report.verdict == "pass"
+    # Interleaved starts prove the two round trips overlapped.
+    assert order.index("questions:start") < order.index("review:end")
+    assert order.index("review:start") < order.index("questions:end")

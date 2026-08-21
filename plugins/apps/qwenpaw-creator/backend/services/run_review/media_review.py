@@ -347,6 +347,17 @@ async def _video_objective_facts(
         return None
 
 
+async def _image_objective_facts(
+    media_path: Path,
+) -> dict[str, Any] | None:
+    """Tier-0 objective facts for one still image (fail-open)."""
+    try:
+        return await asyncio.to_thread(collect_image_facts, media_path)
+    except Exception:  # noqa: BLE001 - facts are advisory-only
+        logger.exception("image objective facts failed")
+        return None
+
+
 def _focused_frame_targets(
     objective_facts: Mapping[str, Any] | None,
 ) -> list[tuple[int, str]]:
@@ -485,26 +496,22 @@ async def review_media_artifact(
     expected_faith: dict[str, str] = {}
     valid_timestamps: list[int] | None = None
     if kind == "element_video":
-        block = await asyncio.to_thread(
-            review_gates.run_review_gates,
-            media_path,
+        # Gates, frame stats, evidence frames and the objective facts are
+        # four independent passes over the same file; the focused frames
+        # below are the only step that needs their results.
+        block, sampled, frames, objective_facts = await asyncio.gather(
+            asyncio.to_thread(review_gates.run_review_gates, media_path),
+            asyncio.to_thread(frame_stats.sample_stats, media_path),
+            asyncio.to_thread(
+                extract_review_frames,
+                media_path,
+                max_frames=_VIDEO_REVIEW_FRAMES,
+                output_dir=frames_dir,
+            ),
+            _video_objective_facts(media_path, plan_context),
         )
         gate_block = block.to_dict()
-        sampled = await asyncio.to_thread(
-            frame_stats.sample_stats,
-            media_path,
-        )
         stats = {**sampled, "judgment": frame_stats.judge_stats(sampled)}
-        objective_facts = await _video_objective_facts(
-            media_path,
-            plan_context,
-        )
-        frames = await asyncio.to_thread(
-            extract_review_frames,
-            media_path,
-            max_frames=_VIDEO_REVIEW_FRAMES,
-            output_dir=frames_dir,
-        )
         focused = (
             await asyncio.to_thread(
                 _extract_focused_frames,
@@ -566,24 +573,22 @@ async def review_media_artifact(
             item["timestamp_ms"] for item in focused
         ]
     else:
-        sampled = await asyncio.to_thread(frame_stats.image_stats, media_path)
+        sampled, objective_facts = await asyncio.gather(
+            asyncio.to_thread(frame_stats.image_stats, media_path),
+            _image_objective_facts(media_path),
+        )
         stats = {**sampled, "judgment": frame_stats.judge_stats(sampled)}
-        try:
-            objective_facts = await asyncio.to_thread(
-                collect_image_facts,
-                media_path,
-            )
-        except Exception:  # noqa: BLE001 - facts are advisory-only
-            logger.exception("image objective facts failed")
-            objective_facts = None
         system_prompt = build_image_check_system_prompt()
         frame_lines = "- 第 1 张图 = 待审阅图像"
         image_paths = [str(media_path)]
     gate_lines = ""
     if gate_block is not None:
-        gate_lines = "\n\n【门禁证据块（vendored review gates）】\n" + json.dumps(
-            gate_block,
-            ensure_ascii=False,
+        gate_lines = (
+            "\n\n【门禁证据块（vendored review gates）】\n"
+            + json.dumps(
+                gate_block,
+                ensure_ascii=False,
+            )
         )
     facts_lines = ""
     if objective_facts:

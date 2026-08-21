@@ -531,33 +531,60 @@ async def review_render(  # pylint: disable=too-many-statements
     """Run one review round and persist the report beside the render."""
     reports_root = _reports_root(services, project_id)
     video_dir = reports_root / video_id
-    frames = await asyncio.to_thread(
-        extract_review_frames,
-        video_path,
-        output_dir=video_dir / f"frames-round-{round_number}",
-    )
-    audio_profile = await asyncio.to_thread(probe_audio_profile, video_path)
-    probe = await asyncio.to_thread(probe_media, str(video_path))
     context = dict(plan_context or {})
-    objective_facts: dict[str, Any] | None = None
-    try:
-        # Tier-0 objective facts (APE-benchmark port): advisory hints for
-        # the eight-row reasoning. Any failure only loses the hints.
-        from services.run_review.objective import collect_video_facts
-        from services.run_review.objective.asr_bridge import (
-            transcript_sentences,
-        )
 
-        transcript = await transcript_sentences(video_path)
-        objective_facts = await asyncio.to_thread(
-            collect_video_facts,
+    async def _objective_facts() -> dict[str, Any] | None:
+        try:
+            # Tier-0 objective facts (APE-benchmark port): advisory hints
+            # for the eight-row reasoning. Any failure only loses hints.
+            from services.run_review.objective import collect_video_facts
+            from services.run_review.objective.asr_bridge import (
+                transcript_sentences,
+            )
+
+            transcript = await transcript_sentences(video_path)
+            return await asyncio.to_thread(
+                collect_video_facts,
+                video_path,
+                expected_duration_seconds=context.get(
+                    "target_duration_seconds",
+                ),
+                transcript_sentences=transcript,
+            )
+        except Exception:  # noqa: BLE001 - facts are advisory-only
+            logger.exception("render objective facts collection failed")
+            return None
+
+    # Evidence gathering is four independent passes over the same file
+    # (frame seeks, loudness scan, container probe, objective facts):
+    # running them together turns their sum into their max.
+    frames, audio_profile, probe, objective_facts = await asyncio.gather(
+        asyncio.to_thread(
+            extract_review_frames,
             video_path,
-            expected_duration_seconds=context.get("target_duration_seconds"),
-            transcript_sentences=transcript,
-        )
-    except Exception:  # noqa: BLE001 - facts are advisory-only
-        logger.exception("render objective facts collection failed")
-        objective_facts = None
+            output_dir=video_dir / f"frames-round-{round_number}",
+        ),
+        asyncio.to_thread(probe_audio_profile, video_path),
+        asyncio.to_thread(probe_media, str(video_path)),
+        _objective_facts(),
+    )
+    # The challenge questions are written from the plan alone, so the
+    # text model can draft them while the VLM reads the frames; only the
+    # judging pass needs both.
+    challenge_questions: "asyncio.Task[list[Any]] | None" = None
+    try:
+        from models.config import is_render_challenge_enabled
+
+        if is_render_challenge_enabled():
+            from services.render_review.challenge import (
+                generate_challenge_questions,
+            )
+
+            challenge_questions = asyncio.ensure_future(
+                generate_challenge_questions(context),
+            )
+    except Exception:  # noqa: BLE001 - challenge pass is advisory-only
+        logger.exception("render challenge question drafting failed")
     user_text = build_review_user_text(
         frames=frames,
         audio_profile=audio_profile,
@@ -607,6 +634,8 @@ async def review_render(  # pylint: disable=too-many-statements
                 exc,
             )
     if report is None:
+        if challenge_questions is not None:
+            challenge_questions.cancel()
         raise RenderReviewError(
             f"review response invalid after {_VLM_ATTEMPTS} attempts: {last_error}",
         )
@@ -615,20 +644,15 @@ async def review_render(  # pylint: disable=too-many-statements
             update={"objective_facts": objective_facts},
         )
     try:
-        # Near-miss challenge pass (tier-3, default off): per-case defect
-        # hypotheses generated from the plan, judged on the same evidence
-        # frames. A confirmed major CT forces revise; the eight-row
-        # findings are always preserved alongside (gate caps, it never
-        # erases the rest of the report).
-        from models.config import is_render_challenge_enabled
+        # Near-miss challenge pass (tier-3): per-case defect hypotheses
+        # drafted from the plan (already in flight above), judged on the
+        # same evidence frames. A confirmed major CT forces revise; the
+        # eight-row findings are always preserved alongside (gate caps,
+        # it never erases the rest of the report).
+        if challenge_questions is not None:
+            from services.render_review.challenge import judge_challenges
 
-        if is_render_challenge_enabled():
-            from services.render_review.challenge import (
-                generate_challenge_questions,
-                judge_challenges,
-            )
-
-            questions = await generate_challenge_questions(context)
+            questions = await challenge_questions
             challenge_findings = await judge_challenges(
                 questions,
                 frames=frames,

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -124,65 +125,93 @@ def collect_video_facts(
     planned_shot_count: int | None = None,
     transcript_sentences: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """All CPU objective facts for one video artifact (thread-safe)."""
+    """All CPU objective facts for one video artifact (thread-safe).
+
+    The three decodes this needs (container probe, gray frame ladder,
+    mono PCM) are independent ffmpeg passes, so they are started
+    together in a small thread pool; every operator then runs on the
+    already-decoded buffers. Each operator stays individually fail-open.
+    """
     facts: dict[str, Any] = {}
-
-    def machine_param_block() -> dict[str, Any]:
-        return machine_ops.machine_param_facts(
-            probe_info(media_path),
-            expected_duration_seconds=expected_duration_seconds,
-            expected_aspect=expected_aspect,
+    decode_gray = is_operator_enabled("video_index")
+    decode_pcm = is_operator_enabled("audio_content")
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        probe_future = (
+            pool.submit(probe_info, media_path)
+            if is_operator_enabled("machine_params")
+            else None
+        )
+        gray_future = (
+            pool.submit(sample_gray_frames, media_path)
+            if decode_gray
+            else None
+        )
+        pcm_future = (
+            pool.submit(decode_pcm_mono, media_path) if decode_pcm else None
         )
 
-    _safe(facts, "machine_params", machine_param_block)
+        def machine_param_block() -> dict[str, Any]:
+            if probe_future is None:  # pragma: no cover - gate guards it
+                return {"status": "skipped", "skip_reason": "未探测容器信息"}
+            return machine_ops.machine_param_facts(
+                probe_future.result(),
+                expected_duration_seconds=expected_duration_seconds,
+                expected_aspect=expected_aspect,
+            )
 
-    samples: GraySamples | None = None
-    diffs: np.ndarray | None = None
-    index: dict[str, Any] | None = None
+        _safe(facts, "machine_params", machine_param_block)
 
-    def index_block() -> dict[str, Any]:
-        nonlocal samples, diffs, index
-        samples = sample_gray_frames(media_path)
-        diffs = index_ops.frame_diffs(samples)
-        index = index_ops.build_video_index(samples, diffs=diffs)
-        payload = dict(index)
-        if planned_shot_count is not None:
-            payload["planned_shot_count"] = planned_shot_count
-        # Keep the prompt block bounded: scenes stay, raw curve does not.
-        return payload
+        samples: GraySamples | None = None
+        diffs: np.ndarray | None = None
+        index: dict[str, Any] | None = None
 
-    _safe(facts, "video_index", index_block)
+        def index_block() -> dict[str, Any]:
+            nonlocal samples, diffs, index
+            if gray_future is None:  # pragma: no cover - gate guards it
+                return {"status": "skipped", "skip_reason": "未解码灰度帧"}
+            samples = gray_future.result()
+            diffs = index_ops.frame_diffs(samples)
+            index = index_ops.build_video_index(samples, diffs=diffs)
+            payload = dict(index)
+            if planned_shot_count is not None:
+                payload["planned_shot_count"] = planned_shot_count
+            # Keep the prompt block bounded: scenes stay, raw curve does
+            # not.
+            return payload
 
-    def light_block() -> dict[str, Any]:
-        if samples is None or diffs is None:
-            return {"status": "skipped", "skip_reason": "解码失败"}
-        rgb_frames = _rgb_probe_frames(media_path, samples.timestamps_ms)
-        return {
-            "sharpness": light_ops.sharpness_facts(
-                light_ops.representative_gray_frames(samples),
-            ),
-            "stability": light_ops.stability_facts(diffs),
-            "color": light_ops.color_facts(
-                [frame for _, frame in rgb_frames],
-            ),
-        }
+        _safe(facts, "video_index", index_block)
 
-    _safe(facts, "light_metrics", light_block)
+        def light_block() -> dict[str, Any]:
+            if samples is None or diffs is None:
+                return {"status": "skipped", "skip_reason": "解码失败"}
+            rgb_frames = _rgb_probe_frames(media_path, samples.timestamps_ms)
+            return {
+                "sharpness": light_ops.sharpness_facts(
+                    light_ops.representative_gray_frames(samples),
+                ),
+                "stability": light_ops.stability_facts(diffs),
+                "color": light_ops.color_facts(
+                    [frame for _, frame in rgb_frames],
+                ),
+            }
 
-    transcript_rows = [dict(row) for row in (transcript_sentences or [])]
-    transcript_text = " ".join(
-        str(row.get("text") or "") for row in transcript_rows
-    ).strip()
+        _safe(facts, "light_metrics", light_block)
 
-    def audio_block() -> dict[str, Any]:
-        pcm = decode_pcm_mono(media_path)
-        return audio_ops.audio_content_facts(
-            pcm,
-            PCM_SAMPLE_RATE,
-            transcript_text=transcript_text,
-        )
+        transcript_rows = [dict(row) for row in (transcript_sentences or [])]
+        transcript_text = " ".join(
+            str(row.get("text") or "") for row in transcript_rows
+        ).strip()
 
-    _safe(facts, "audio_content", audio_block)
+        def audio_block() -> dict[str, Any]:
+            if pcm_future is None:  # pragma: no cover - gate guards it
+                return {"status": "skipped", "skip_reason": "未解码音频"}
+            return audio_ops.audio_content_facts(
+                pcm_future.result(),
+                PCM_SAMPLE_RATE,
+                transcript_text=transcript_text,
+            )
+
+        _safe(facts, "audio_content", audio_block)
 
     def av_sync_block() -> dict[str, Any]:
         if not transcript_rows:
