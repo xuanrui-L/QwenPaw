@@ -11,7 +11,9 @@ from services.file_agent_runtime.prompts import load_file_agent_prompt
 pytestmark = pytest.mark.unit
 
 
-def test_creator_prompt_makes_single_shared_image_override_asset_fanout() -> None:
+def test_creator_prompt_makes_single_shared_image_override_asset_fanout() -> (
+    None
+):
     prompt = load_file_agent_prompt("creator_agent.system")
 
     assert "显式媒体预算覆盖默认资产拆分" in prompt
