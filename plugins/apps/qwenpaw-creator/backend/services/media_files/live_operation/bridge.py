@@ -302,6 +302,11 @@ class _BoundBrowser:
         return page
 
     def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise LiveOperationError(
+                f"private browser attribute {name!r} is unavailable in "
+                "live-operation code",
+            )
         return getattr(self._session.browser, name)
 
 

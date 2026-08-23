@@ -3195,10 +3195,20 @@ class FileCreatorAgentRuntime:
                 "takes": [item.as_dict() for item in published["takes"]],
                 "screenshots": [item.as_dict() for item in published["screenshots"]],
             }
+            observation_only = not response["takes"] and not response["screenshots"]
+            response["observationOnly"] = observation_only
+            response["completionEligible"] = not observation_only
             if outcome.result_repr:
                 response["result"] = outcome.result_repr
-            if published["issues"]:
-                response["issues"] = published["issues"]
+            issues = list(published["issues"])
+            if observation_only:
+                issues.append(
+                    "This browser_use call was observation-only and captured no "
+                    "media. Its output may guide another call, but it cannot "
+                    "satisfy a request that requires recorded tutorial footage.",
+                )
+            if issues:
+                response["issues"] = issues
             return response
         finally:
             await asyncio.to_thread(

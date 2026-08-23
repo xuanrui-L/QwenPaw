@@ -965,9 +965,17 @@ class FfmpegLocalMediaRunner:
         remaining = playback_rate
         factors: list[float] = []
         while remaining < 0.5:
+            if len(factors) >= 64:
+                raise ValueError(
+                    "playback_rate exceeds the supported audio retiming range",
+                )
             factors.append(0.5)
             remaining /= 0.5
         while remaining > 2.0:
+            if len(factors) >= 64:
+                raise ValueError(
+                    "playback_rate exceeds the supported audio retiming range",
+                )
             factors.append(2.0)
             remaining /= 2.0
         factors.append(remaining)

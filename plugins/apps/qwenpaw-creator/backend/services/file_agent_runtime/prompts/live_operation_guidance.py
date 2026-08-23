@@ -53,6 +53,8 @@ _CREATOR_SECTION = """
 一个可播放 take；只有观察或 print、工具结果中的 `takes` 仍为空，都不算完成。可以先
 在一次调用中观察真实界面，再根据工具结果发起下一次调用完成录制；开始录制后必须
 做至少一个真实可见动作，并在复核结果后 stop。
+无媒体的合法观察调用会明确返回 `observationOnly=true`、
+`completionEligible=false`；可以使用其输出继续工作，但不可据此结束教程任务。
 
 “真实可见动作”必须是实际 await 的页面变更操作，例如 locator.click/scroll、
 page.goto/go_back/reload 或真实输入；wait_for_timeout、snapshot、print 只是等待/感知，

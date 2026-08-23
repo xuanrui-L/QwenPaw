@@ -126,6 +126,18 @@ def test_atempo_filters_reject_invalid_playback_rate(playback_rate: float) -> No
         FfmpegLocalMediaRunner._atempo_filters(playback_rate)
 
 
+@pytest.mark.parametrize(
+    "playback_rate",
+    [
+        float.fromhex("0x0.0000000000001p-1022"),
+        float.fromhex("0x1.fffffffffffffp+1023"),
+    ],
+)
+def test_atempo_filters_bound_extreme_finite_rates(playback_rate: float) -> None:
+    with pytest.raises(ValueError, match="supported audio retiming range"):
+        FfmpegLocalMediaRunner._atempo_filters(playback_rate)
+
+
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
 

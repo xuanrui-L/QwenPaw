@@ -28,6 +28,7 @@ from services.media_files.live_operation.bridge import (
     AgentRecorder,
     LiveOperationError,
     _ActivePage,
+    _BoundBrowser,
     _compile,
     run_browser_code,
 )
@@ -48,6 +49,20 @@ pytestmark = pytest.mark.unit
 
 
 # ─── coordinate projection ──────────────────────────────────────────────
+
+
+def test_bound_browser_rejects_private_runtime_passthrough() -> None:
+    class BrowserFacade:
+        public_value = "visible"
+        _engine = object()
+
+    class Session:
+        browser = BrowserFacade()
+
+    browser = _BoundBrowser(Session(), _ActivePage())
+    assert browser.public_value == "visible"
+    with pytest.raises(LiveOperationError, match="private browser attribute"):
+        browser._engine
 
 
 def test_bounding_box_rejects_degenerate_rectangles():

@@ -422,6 +422,37 @@ def test_browser_operation_scratch_is_removed_after_publication(
     assert list(scratch_parent.iterdir()) == []
 
 
+def test_browser_observation_without_media_is_not_completion_eligible(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services, _snapshot = _create_project(tmp_path, initial_goal=None)
+    runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
+    monkeypatch.setattr(driver_module, "get_live_operation_enabled", lambda: True)
+
+    async def fake_run(code, *, run_root, run_id, **kwargs):
+        del code, run_root, run_id, kwargs
+        outcome = LiveOperationRun()
+        outcome.output = "two tabs observed"
+        return outcome
+
+    monkeypatch.setattr(driver_module, "run_browser_code", fake_run)
+    response = asyncio.run(
+        runtime._run_browser_use(
+            request=_record(1),
+            run_id="agent-run-1",
+            arguments={"code": "print(await browser.tabs.list())"},
+        ),
+    )
+
+    assert response["ok"] is True
+    assert response["observationOnly"] is True
+    assert response["completionEligible"] is False
+    assert response["takes"] == []
+    assert response["screenshots"] == []
+    assert "cannot satisfy" in response["issues"][0]
+
+
 def test_browser_operation_scratch_is_removed_after_execution_failure(
     tmp_path,
     monkeypatch,
