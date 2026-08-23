@@ -25,6 +25,7 @@ from services.file_agent_runtime import (
 from services.file_agent_runtime.driver import (
     _ToolArgumentProgressReporter,
     _live_operation_editing_context,
+    _remove_live_operation_scratch,
     _require_actionable_takes,
     _specialist_tool_recovery,
     _tool_call_transport_metadata,
@@ -490,6 +491,33 @@ def test_browser_operation_scratch_is_removed_after_execution_failure(
         services.projects.project_root(PROJECT_ID) / "runtime/live_operation"
     )
     assert list(scratch_parent.iterdir()) == []
+
+
+def test_live_operation_scratch_cleanup_rejects_escape_and_symlink(
+    tmp_path,
+) -> None:
+    run_root = tmp_path / "runtime"
+    scratch_root = run_root / "live_operation"
+    scratch_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+
+    _remove_live_operation_scratch(run_root, "../outside")
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+    redirect = scratch_root / "agent-run-link"
+    redirect.symlink_to(outside, target_is_directory=True)
+    _remove_live_operation_scratch(run_root, redirect.name)
+    assert redirect.is_symlink()
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+    ordinary = scratch_root / "agent-run-safe"
+    ordinary.mkdir()
+    (ordinary / "partial.mp4").write_bytes(b"partial")
+    _remove_live_operation_scratch(run_root, ordinary.name)
+    assert not ordinary.exists()
 
 
 def test_factless_operation_take_is_rejected_before_publication(

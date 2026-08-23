@@ -212,6 +212,53 @@ def _log_safe(value: object) -> str:
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
 
+def _remove_live_operation_scratch(
+    run_root: Path,
+    operation_run_id: str,
+) -> None:
+    """Best-effort cleanup that cannot escape the Project runtime tree."""
+    runtime_root = run_root.resolve(strict=False)
+    scratch_root = (runtime_root / "live_operation").resolve(strict=False)
+    if scratch_root.parent != runtime_root:
+        logger.error(
+            "refusing live-operation cleanup outside runtime root: %s",
+            _log_safe(scratch_root),
+        )
+        return
+    operation_leaf = Path(operation_run_id)
+    if (
+        not operation_run_id
+        or operation_leaf.name != operation_run_id
+        or operation_run_id in {".", ".."}
+    ):
+        logger.error(
+            "refusing invalid live-operation cleanup identity: %s",
+            _log_safe(operation_run_id),
+        )
+        return
+    cleanup_path = scratch_root / operation_run_id
+    resolved_cleanup = cleanup_path.resolve(strict=False)
+    if resolved_cleanup.parent != scratch_root:
+        logger.error(
+            "refusing live-operation cleanup outside scratch root: %s",
+            _log_safe(resolved_cleanup),
+        )
+        return
+    try:
+        # rmtree does not follow child directory symlinks. Resolving and
+        # checking the operation root above also prevents a top-level symlink
+        # or crafted identity from redirecting this cleanup outside Project.
+        shutil.rmtree(cleanup_path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning(
+            "live-operation scratch cleanup failed: %s",
+            _log_safe(cleanup_path),
+            exc_info=True,
+        )
+
+
 # Arguments the provider prices on: they must still match the approved scope
 # at invocation time, or the user would pay for terms they never saw.
 _BILLING_SENSITIVE_ARGUMENTS = ("durationSeconds", "resolution", "mode")
@@ -3171,9 +3218,9 @@ class FileCreatorAgentRuntime:
             return response
         finally:
             await asyncio.to_thread(
-                shutil.rmtree,
-                run_root / "live_operation" / operation_run_id,
-                True,
+                _remove_live_operation_scratch,
+                run_root,
+                operation_run_id,
             )
 
     async def _run_browser_use(
@@ -3253,9 +3300,9 @@ class FileCreatorAgentRuntime:
             return response
         finally:
             await asyncio.to_thread(
-                shutil.rmtree,
-                run_root / "live_operation" / operation_run_id,
-                True,
+                _remove_live_operation_scratch,
+                run_root,
+                operation_run_id,
             )
 
     def _publish_live_operation_sync(

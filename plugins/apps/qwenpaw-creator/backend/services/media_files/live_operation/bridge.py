@@ -33,6 +33,24 @@ logger = logging.getLogger(__name__)
 _MAX_OUTPUT_CHARS = 12_000
 _MAX_RANGE_ITEMS = 1_000
 _SOURCE_NAME = "browser_use_code"
+_UNSAFE_NAME_REFERENCES = frozenset(
+    {
+        "__import__",
+        "breakpoint",
+        "compile",
+        "delattr",
+        "eval",
+        "exec",
+        "getattr",
+        "globals",
+        "help",
+        "input",
+        "locals",
+        "open",
+        "setattr",
+        "vars",
+    },
+)
 
 
 def _bounded_range(*args: int) -> range:
@@ -416,9 +434,10 @@ class _ModelCodeValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
-        if node.id.startswith("__"):
+        if node.id.startswith("__") or node.id in _UNSAFE_NAME_REFERENCES:
             raise LiveOperationError(
-                "dunder names are unavailable in live-operation code",
+                "dunder, reflection, and process names are unavailable in "
+                "live-operation code",
             )
 
 

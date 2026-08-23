@@ -809,7 +809,10 @@ def test_a_syntax_error_is_reported_as_such():
         "import os",
         "from os import environ",
         "print(Browser.__dict__)",
+        "print(Browser.__class__.__base__.__subclasses__())",
         "print(__builtins__)",
+        "globals()",
+        'getattr(Browser, "__class__")',
     ),
 )
 def test_model_code_cannot_escape_into_the_creator_backend(code: str):
