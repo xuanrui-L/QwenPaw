@@ -120,6 +120,12 @@ def test_playback_rate_retimes_picture_and_source_audio() -> None:
     assert "[0:a]atempo=0.5,atempo=0.5[a]" in chain
 
 
+@pytest.mark.parametrize("playback_rate", [0.0, -1.0, float("nan"), float("inf")])
+def test_atempo_filters_reject_invalid_playback_rate(playback_rate: float) -> None:
+    with pytest.raises(ValueError, match="finite and greater than zero"):
+        FfmpegLocalMediaRunner._atempo_filters(playback_rate)
+
+
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
 
