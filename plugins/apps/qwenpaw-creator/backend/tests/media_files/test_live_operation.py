@@ -62,11 +62,13 @@ def test_bound_browser_rejects_private_runtime_passthrough() -> None:
     browser = _BoundBrowser(Session(), _ActivePage())
     assert browser.public_value == "visible"
     with pytest.raises(LiveOperationError, match="private browser attribute"):
-        browser._engine
+        getattr(browser, "_engine")
 
 
 def test_bounding_box_rejects_degenerate_rectangles():
-    assert BoundingBox.from_raw({"x": 1, "y": 2, "width": 0, "height": 5}) is None
+    assert (
+        BoundingBox.from_raw({"x": 1, "y": 2, "width": 0, "height": 5}) is None
+    )
     assert BoundingBox.from_raw({"x": 1, "y": 2, "width": 5}) is None
     assert BoundingBox.from_raw(None) is None
     assert (
@@ -163,7 +165,9 @@ def test_viewport_comes_from_screencast_metadata():
         {"deviceWidth": 1280, "deviceHeight": 720, "pageScaleFactor": 1},
     )
     assert viewport == Viewport(1280.0, 720.0)
-    assert _viewport_from_metadata({"deviceWidth": 0, "deviceHeight": 0}) is None
+    assert (
+        _viewport_from_metadata({"deviceWidth": 0, "deviceHeight": 0}) is None
+    )
     assert _viewport_from_metadata(None) is None
 
 
@@ -269,7 +273,8 @@ def test_only_screen_changing_verbs_become_facts():
     assert _operation_name("locator_action", {"action": "click"}) == "click"
     assert _operation_name("navigate", {}) == "navigate"
     assert (
-        _operation_name("input", {"kind": "mouse", "action": "click"}) == "mouse_click"
+        _operation_name("input", {"kind": "mouse", "action": "click"})
+        == "mouse_click"
     )
     # Perception must stay free: reading a page is not an action.
     assert _operation_name("capture_tree", {}) is None
@@ -286,7 +291,10 @@ def test_spec_description_renders_the_locator_call():
         },
         {"method": "first", "args": [], "kwargs": []},
     ]
-    assert _spec_description(spec) == 'get_by_role("button", name="Search").first()'
+    assert (
+        _spec_description(spec)
+        == 'get_by_role("button", name="Search").first()'
+    )
 
 
 def test_spec_description_omits_unset_optional_arguments():
@@ -823,7 +831,10 @@ def test_model_code_bounds_range_before_it_can_block_the_event_loop():
     with pytest.raises(LiveOperationError, match="limited to 1000 items"):
         asyncio.run(_execute(_compile("list(range(1001))"), {}))
 
-    assert asyncio.run(_execute(_compile("result = list(range(1000))"), {})) is None
+    assert (
+        asyncio.run(_execute(_compile("result = list(range(1000))"), {}))
+        is None
+    )
 
 
 def test_model_print_is_captured_without_process_global_stdout():

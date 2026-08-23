@@ -23,6 +23,23 @@ from typing import Any, Mapping, Sequence
 _MIN_VIEWPORT_PIXELS = 1.0
 
 
+def _finite_numbers(
+    source: Mapping[str, Any],
+    fields: Sequence[tuple[str, float]],
+) -> tuple[float, ...] | None:
+    """Read a fixed set of finite floats, or reject the set atomically."""
+    values: list[float] = []
+    for key, default in fields:
+        try:
+            value = float(source.get(key, default))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        values.append(value)
+    return tuple(values)
+
+
 @dataclass(frozen=True, slots=True)
 class BoundingBox:
     """One locator bounding box in viewport CSS pixels."""
@@ -124,55 +141,50 @@ def project_location_to_canvas(
     rectangle is worse than falling back to frame observation.
     """
 
-    def _number(
-        source: Mapping[str, Any],
-        key: str,
-        default: float,
-    ) -> float | None:
-        try:
-            value = float(source.get(key, default))
-        except (TypeError, ValueError):
-            return None
-        return value if math.isfinite(value) else None
-
-    source_x = _number(location, "x", 0.5)
-    source_y = _number(location, "y", 0.5)
-    source_width = _number(location, "width", 0.0)
-    source_height = _number(location, "height", 0.0)
-    if (
-        source_x is None
-        or source_y is None
-        or source_width is None
-        or source_height is None
-        or source_width <= 0
-        or source_height <= 0
-    ):
+    source_box = _finite_numbers(
+        location,
+        (("x", 0.5), ("y", 0.5), ("width", 0.0), ("height", 0.0)),
+    )
+    if source_box is None:
+        return None
+    source_x, source_y, source_width, source_height = source_box
+    if source_width <= 0 or source_height <= 0:
         return None
 
     canvas_placement = placement or {}
-    placed_x = _number(canvas_placement, "x", 0.5)
-    placed_y = _number(canvas_placement, "y", 0.5)
-    placed_width = _number(canvas_placement, "width", 1.0)
-    placed_height = _number(canvas_placement, "height", 1.0)
-    anchor_x = _number(canvas_placement, "anchor_x", 0.5)
-    anchor_y = _number(canvas_placement, "anchor_y", 0.5)
-    rotation = _number(canvas_placement, "rotation_degrees", 0.0)
-    if (
-        placed_x is None
-        or placed_y is None
-        or placed_width is None
-        or placed_height is None
-        or anchor_x is None
-        or anchor_y is None
-        or rotation is None
-        or placed_width <= 0
-        or placed_height <= 0
-        or anchor_x < 0
-        or anchor_x > 1
-        or anchor_y < 0
-        or anchor_y > 1
-        or abs(rotation) > 1e-6
-    ):
+    placement_values = _finite_numbers(
+        canvas_placement,
+        (
+            ("x", 0.5),
+            ("y", 0.5),
+            ("width", 1.0),
+            ("height", 1.0),
+            ("anchor_x", 0.5),
+            ("anchor_y", 0.5),
+            ("rotation_degrees", 0.0),
+        ),
+    )
+    if placement_values is None:
+        return None
+    (
+        placed_x,
+        placed_y,
+        placed_width,
+        placed_height,
+        anchor_x,
+        anchor_y,
+        rotation,
+    ) = placement_values
+    valid_placement = all(
+        (
+            placed_width > 0,
+            placed_height > 0,
+            0 <= anchor_x <= 1,
+            0 <= anchor_y <= 1,
+            abs(rotation) <= 1e-6,
+        ),
+    )
+    if not valid_placement:
         return None
 
     placement_left = placed_x - anchor_x * placed_width

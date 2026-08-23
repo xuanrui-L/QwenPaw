@@ -445,7 +445,9 @@ def _decor_wave_flow(
 .b2{{bottom:22%;background:linear-gradient(180deg,transparent,{palette.secondary}66);opacity:.62}}
 .b3{{bottom:40%;background:linear-gradient(180deg,transparent,{palette.paper}59);opacity:.5}}
 """
-    body = "<i class='band b1'></i><i class='band b2'></i><i class='band b3'></i>"
+    body = (
+        "<i class='band b1'></i><i class='band b2'></i><i class='band b3'></i>"
+    )
     script = f"""
 tl.to('.b1',{{y:'-{lift:.1f}%',duration:1.4,ease:'sine.inOut'}},0);
 tl.to('.b1',{{y:'0%',duration:1.4,ease:'sine.inOut'}},1.4);
@@ -569,7 +571,9 @@ def _decor_ink_splash(
 .b2{{left:48%;top:10%;width:26%;aspect-ratio:1;background:{palette.secondary};border-radius:56% 44% 48% 52% / 42% 58% 42% 58%}}
 .b3{{left:24%;top:52%;width:34%;aspect-ratio:1;background:{palette.paper};border-radius:48% 52% 58% 42% / 56% 46% 54% 44%;opacity:.5}}
 """
-    body = "<i class='blob b1'></i><i class='blob b2'></i><i class='blob b3'></i>"
+    body = (
+        "<i class='blob b1'></i><i class='blob b2'></i><i class='blob b3'></i>"
+    )
     script = f"""
 tl.to('.b1',{{borderRadius:'{58 - morph * 0.3:.0f}% {42 + morph * 0.3:.0f}% {46 + morph * 0.2:.0f}% {54 - morph * 0.2:.0f}% / {52 - morph * 0.2:.0f}% {48 + morph * 0.2:.0f}% {44 + morph * 0.3:.0f}% {56 - morph * 0.3:.0f}%',scale:1.06,duration:1.5,ease:'sine.inOut'}},0);
 tl.to('.b1',{{borderRadius:'42% 58% 54% 46% / 48% 44% 56% 52%',scale:1,duration:1.5,ease:'sine.inOut'}},1.5);
@@ -747,12 +751,15 @@ def _frame_pop_variety(
     """综艺贴纸框：撞色渐变边框 + 波点纹理流动 + 四角星星贴纸律动，闭环。"""
 
     wiggle = 8 + intensity * 8
-    css = _frame_geometry(window) + f"""
+    css = (
+        _frame_geometry(window)
+        + f"""
 .strip,.patch{{background:linear-gradient(135deg,{palette.primary},{palette.secondary})}}
 .tex{{position:absolute;inset:-8vh;background-image:radial-gradient(circle,{palette.paper}59 1vh,transparent 1.15vh);background-size:4vh 4vh}}
 .ring{{border:1.3vh solid {palette.paper};box-shadow:0 0 0 .5vh {palette.ink}33 inset}}
 .c{{background:{palette.paper};clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%);filter:drop-shadow(.3vh .4vh 0 {palette.ink}4d)}}
 """
+    )
     script = f"""
 tl.fromTo('.tex',{{x:'0vh',y:'0vh'}},{{x:'4vh',y:'4vh',duration:3.2,ease:'none'}},0);
 tl.to('.c1,.c4',{{rotate:{wiggle:.0f},scale:1.12,duration:1.6,ease:'sine.inOut'}},0);
@@ -782,7 +789,9 @@ def _frame_warm_journal(
     """手账拍立得框：奶油纸边框 + 细纹纸理 + 角上胶带与光点呼吸，闭环。"""
 
     breath = 0.06 + intensity * 0.08
-    css = _frame_geometry(window) + f"""
+    css = (
+        _frame_geometry(window)
+        + f"""
 .strip,.patch{{background:{palette.paper}}}
 .tex{{position:absolute;inset:-8vh;background-image:repeating-linear-gradient(45deg,{palette.secondary}1f 0,{palette.secondary}1f .5vh,transparent .5vh,transparent 3vh)}}
 .ring{{border:1.1vh solid #ffffff;box-shadow:0 .5vh 2.2vh {palette.ink}40,0 0 0 .35vh {palette.primary}59 inset}}
@@ -791,6 +800,7 @@ def _frame_warm_journal(
 .c2{{transform:translate(-54%,-46%) rotate(-38deg)}}
 .c3{{transform:translate(-46%,-54%) rotate(-38deg)}}
 """
+    )
     script = f"""
 tl.fromTo('.tex',{{x:'0vh',y:'0vh'}},{{x:'4.24vh',y:'4.24vh',duration:3.2,ease:'none'}},0);
 tl.to('.c1,.c4',{{scale:{1 + breath:.2f},duration:1.6,ease:'sine.inOut'}},0);
@@ -820,7 +830,9 @@ def _frame_kraft_paper(
     """牛皮纸框：棕色纸纹边框 + 遮盖胶带圆环 + 折角贴片，闭环。"""
 
     breath = 0.04 + intensity * 0.06
-    css = _frame_geometry(window) + f"""
+    css = (
+        _frame_geometry(window)
+        + f"""
 .strip,.patch{{background:linear-gradient(180deg,#c8a882,#b8956a)}}
 .tex{{position:absolute;inset:-8vh;background-image:repeating-linear-gradient(0deg,#a07850 0,#a07850 .3vh,transparent .3vh,transparent 2.2vh);opacity:.18}}
 .ring{{border:1.4vh solid #d4b896;box-shadow:0 .4vh 1.6vh {palette.ink}33,inset 0 0 0 .3vh #c8a88266}}
@@ -830,6 +842,7 @@ def _frame_kraft_paper(
 .c3{{transform:translate(-46%,-54%) rotate(5deg)}}
 .c4{{transform:translate(-54%,-54%) rotate(-7deg)}}
 """
+    )
     script = f"""
 tl.fromTo('.tex',{{x:'0vh',y:'0vh'}},{{x:'2.2vh',y:'0vh',duration:3.2,ease:'none'}},0);
 tl.to('.c1,.c4',{{scale:{1 + breath:.2f},duration:1.6,ease:'sine.inOut'}},0);
@@ -859,7 +872,9 @@ def _frame_chalk_board(
     """黑板粉笔框：深炭色条 + 白色粉笔灰尘虚线环 + 粉笔痕角标，闭环。"""
 
     dust = 0.4 + intensity * 0.4
-    css = _frame_geometry(window) + f"""
+    css = (
+        _frame_geometry(window)
+        + f"""
 .strip,.patch{{background:#2d3436}}
 .tex{{position:absolute;inset:-8vh;background-image:radial-gradient(circle,#ffffff{int(dust * 30):02x} .4vh,transparent .5vh);background-size:3vh 3vh;opacity:.5}}
 .ring{{border:.4vh dashed #ffffffcc;box-shadow:0 0 1.2vh #ffffff22 inset}}
@@ -869,6 +884,7 @@ def _frame_chalk_board(
 .c3{{transform:translate(-46%,-54%) rotate(8deg)}}
 .c4{{transform:translate(-54%,-54%) rotate(-5deg)}}
 """
+    )
     script = """
 tl.fromTo('.tex',{x:'0vh',y:'0vh'},{x:'3vh',y:'3vh',duration:3.2,ease:'none'},0);
 tl.to('.ring',{opacity:.7,duration:1.6,ease:'sine.inOut'},0);
@@ -898,12 +914,15 @@ def _frame_neon_glow(
     """霓虹灯框：暗底条 + primary 色霓虹发光环 + 发光角点，闭环。"""
 
     glow = 0.8 + intensity * 1.2
-    css = _frame_geometry(window) + f"""
+    css = (
+        _frame_geometry(window)
+        + f"""
 .strip,.patch{{background:#0d0d1a}}
 .tex{{position:absolute;inset:0;background:transparent}}
 .ring{{border:.5vh solid {palette.primary};box-shadow:0 0 {glow:.1f}vh {palette.primary}88,0 0 {glow * 2:.1f}vh {palette.primary}44,inset 0 0 {glow * 0.6:.1f}vh {palette.primary}66}}
 .c{{background:{palette.primary};border-radius:50%;width:2.4vh;height:2.4vh;box-shadow:0 0 {glow:.1f}vh {palette.primary},0 0 {glow * 2:.1f}vh {palette.primary}88}}
 """
+    )
     script = f"""
 tl.to('.ring',{{boxShadow:'0 0 {glow * 1.3:.1f}vh {palette.primary}aa,0 0 {glow * 2.6:.1f}vh {palette.primary}66,inset 0 0 {glow * 0.8:.1f}vh {palette.primary}88',duration:1.6,ease:'sine.inOut'}},0);
 tl.to('.ring',{{boxShadow:'0 0 {glow:.1f}vh {palette.primary}88,0 0 {glow * 2:.1f}vh {palette.primary}44,inset 0 0 {glow * 0.6:.1f}vh {palette.primary}66',duration:1.6,ease:'sine.inOut'}},1.6);

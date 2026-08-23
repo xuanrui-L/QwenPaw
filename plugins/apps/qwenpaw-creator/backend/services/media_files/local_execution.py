@@ -961,7 +961,9 @@ class FfmpegLocalMediaRunner:
         """Return an ffmpeg atempo chain whose factors multiply to rate."""
 
         if not math.isfinite(playback_rate) or playback_rate <= 0:
-            raise ValueError("playback_rate must be finite and greater than zero")
+            raise ValueError(
+                "playback_rate must be finite and greater than zero",
+            )
         remaining = playback_rate
         factors: list[float] = []
         while remaining < 0.5:

@@ -428,7 +428,11 @@ def test_browser_observation_without_media_is_not_completion_eligible(
 ) -> None:
     services, _snapshot = _create_project(tmp_path, initial_goal=None)
     runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
-    monkeypatch.setattr(driver_module, "get_live_operation_enabled", lambda: True)
+    monkeypatch.setattr(
+        driver_module,
+        "get_live_operation_enabled",
+        lambda: True,
+    )
 
     async def fake_run(code, *, run_root, run_id, **kwargs):
         del code, run_root, run_id, kwargs
@@ -950,7 +954,9 @@ def test_malformed_jq_project_arguments_recover_with_a_fresh_small_call(
     assert session.error is None
     assert turn == 5
     checks = [
-        event for event in events if event.event_type == "agent.tool_arguments_checked"
+        event
+        for event in events
+        if event.event_type == "agent.tool_arguments_checked"
     ]
     assert len(checks) == 2
     assert checks[0].payload["rawArgumentsBytes"] == 18_522
@@ -965,7 +971,9 @@ def test_malformed_jq_project_arguments_recover_with_a_fresh_small_call(
         if message.role == "tool"
         and message.metadata.get("toolCallId") == "malformed-write"
     ]
-    assert malformed_results[0]["error"]["type"] == "MalformedJqProjectArguments"
+    assert (
+        malformed_results[0]["error"]["type"] == "MalformedJqProjectArguments"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1161,7 +1169,9 @@ def test_initial_creation_runs_auto_fix_tool_loop_without_review(
     assert assistant_turns[0].source == "creator_agent"
     assert assistant_turns[0].metadata["actionId"] == "read-1"
     persisted_tool_call = assistant_turns[0].metadata["toolCall"]
-    assert {key: persisted_tool_call[key] for key in ("id", "name", "arguments")} == {
+    assert {
+        key: persisted_tool_call[key] for key in ("id", "name", "arguments")
+    } == {
         "id": "read-1",
         "name": "read_project",
         "arguments": {"projectId": PROJECT_ID},
@@ -1218,7 +1228,9 @@ def test_creator_agent_can_call_ground_prompt_context_tool(
 
     async def callback(messages, tools):
         nonlocal turn
-        assert "ground_prompt_context" in {item["function"]["name"] for item in tools}
+        assert "ground_prompt_context" in {
+            item["function"]["name"] for item in tools
+        }
         turn += 1
         if turn == 1:
             return _tool_turn(
@@ -1310,7 +1322,9 @@ def test_object_grounding_generated_url_is_scoped_to_current_project(
     )
     current_image.parent.mkdir(parents=True)
     current_image.write_bytes(image_bytes)
-    current_url = f"/generated/projects/{PROJECT_ID}/task-work/request-1/input.png"
+    current_url = (
+        f"/generated/projects/{PROJECT_ID}/task-work/request-1/input.png"
+    )
 
     def resolve(image_ref):
         return asyncio.run(
@@ -1358,7 +1372,9 @@ def test_stream_persistence_failure_is_not_reported_as_a_model_failure(
     assert session.error is not None
     assert session.error["code"] == "STREAM_PERSISTENCE_FAILED"
     assert session.error["retryable"] is True
-    failed = [event for event in events if event.event_type == "agent.run.failed"]
+    failed = [
+        event for event in events if event.event_type == "agent.run.failed"
+    ]
     assert failed[-1].payload["error"]["code"] == "STREAM_PERSISTENCE_FAILED"
 
 
@@ -1624,7 +1640,9 @@ def test_specialist_cancel_emits_terminal_event(
     )
 
     assert interrupted is True
-    assert cancel_entered.is_set(), "CancelledError never reached the specialist"
+    assert (
+        cancel_entered.is_set()
+    ), "CancelledError never reached the specialist"
     assert len(specialist_runs) == 1
     assert specialist_runs[0].status.value == "CANCELLED"
     terminal = [
@@ -1999,7 +2017,9 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
         "这不算重新生成已通过产物。"
     )
     assert specialist.final_summary_text == waiting_summary
-    blocked = [item for item in events if item.event_type == "subagent.blocked"]
+    blocked = [
+        item for item in events if item.event_type == "subagent.blocked"
+    ]
     assert len(blocked) == 1
     assert blocked[0].payload["waitingReview"] is True
     assert blocked[0].payload["reviewId"] == "review-ep22-storyboard"

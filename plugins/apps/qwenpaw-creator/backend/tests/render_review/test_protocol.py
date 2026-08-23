@@ -199,7 +199,9 @@ def test_concept_score_threshold_gates_the_verdict() -> None:
     # timestamp (other timestamp-less rows get normalized back to pass).
     report = _parse(_findings_payload(concept={"passed": True, "score": 5}))
     assert report.verdict == "revise"
-    concept = next(f for f in report.findings if f.dimension is ReviewDimension.CONCEPT)
+    concept = next(
+        f for f in report.findings if f.dimension is ReviewDimension.CONCEPT
+    )
     assert not concept.passed
     assert concept.severity == "major"
     passing = _parse(_findings_payload(concept={"passed": True, "score": 8}))

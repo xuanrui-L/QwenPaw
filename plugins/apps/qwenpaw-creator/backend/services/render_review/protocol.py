@@ -182,7 +182,7 @@ def build_review_user_text(
             "- 标注、字幕和装饰不得覆盖被点击、输入或需要阅读的目标；"
             "同一时刻只保留一个主焦点，字幕样式应全片统一。\n"
             "- 聚焦裁切必须保持满画布、无意外黑边；章节变化清楚，开场先给具体收益，"
-            "结尾给出明确收束而不是原始录屏硬停。"
+            "结尾给出明确收束而不是原始录屏硬停。",
         )
     return "\n\n".join(sections)
 
@@ -259,7 +259,9 @@ def parse_review_report(
     concept = next(
         item for item in findings if item.dimension is ReviewDimension.CONCEPT
     )
-    concept_veto = concept.score is not None and concept.score <= CONCEPT_WEAK_THRESHOLD
+    concept_veto = (
+        concept.score is not None and concept.score <= CONCEPT_WEAK_THRESHOLD
+    )
     if concept_veto and concept.passed:
         # Upstream veto rule: "execution polish cannot rescue an empty
         # concept" — normalize the row so the feedback loop sees it.
@@ -306,7 +308,9 @@ def findings_feedback_payload(report: RenderReviewReport) -> dict[str, Any]:
         "round": report.round,
         "max_rounds": MAX_REVIEW_ROUNDS,
         "verdict": report.verdict,
-        "findings": [item.model_dump(mode="json") for item in report.failed_findings()],
+        "findings": [
+            item.model_dump(mode="json") for item in report.failed_findings()
+        ],
     }
 
 

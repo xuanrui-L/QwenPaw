@@ -234,6 +234,51 @@ _VIDEO_FRAME_TOOL_NAMES = frozenset(
 )
 
 
+def _compact_live_operation_location(
+    location: object,
+) -> dict[str, float] | None:
+    """Return a finite, bounded-shape source location for model context."""
+    if not isinstance(location, Mapping):
+        return None
+    projected: dict[str, float] = {}
+    for key in ("x", "y", "width", "height"):
+        try:
+            value = float(location[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        projected[key] = round(value, 5)
+    return projected
+
+
+def _compact_live_operation_fact(raw_fact: object) -> dict[str, Any] | None:
+    """Validate and compact one tool-authored live-operation fact."""
+    if not isinstance(raw_fact, Mapping):
+        return None
+    try:
+        start_ms = int(raw_fact.get("t_start_ms", 0))
+        end_ms = int(raw_fact.get("t_end_ms", start_ms))
+    except (TypeError, ValueError):
+        return None
+    if start_ms < 0 or end_ms < start_ms:
+        return None
+    fact: dict[str, Any] = {
+        "op": str(raw_fact.get("op") or "")[:80],
+        "tStartMs": start_ms,
+        "tEndMs": end_ms,
+    }
+    target = str(raw_fact.get("target") or "").strip()
+    if target:
+        fact["target"] = target[:240]
+    location = _compact_live_operation_location(raw_fact.get("location"))
+    if location is not None:
+        fact["sourceLocation"] = location
+    if raw_fact.get("failed"):
+        fact["failed"] = True
+    return fact
+
+
 def _live_operation_editing_context(
     project: Project,
     project_root: Path,
@@ -271,40 +316,9 @@ def _live_operation_editing_context(
                 if fact_budget <= 0:
                     truncated = True
                     break
-                if not isinstance(raw_fact, Mapping):
+                fact = _compact_live_operation_fact(raw_fact)
+                if fact is None:
                     continue
-                try:
-                    start_ms = int(raw_fact.get("t_start_ms", 0))
-                    end_ms = int(raw_fact.get("t_end_ms", start_ms))
-                except (TypeError, ValueError):
-                    continue
-                if start_ms < 0 or end_ms < start_ms:
-                    continue
-                fact: dict[str, Any] = {
-                    "op": str(raw_fact.get("op") or "")[:80],
-                    "tStartMs": start_ms,
-                    "tEndMs": end_ms,
-                }
-                target = str(raw_fact.get("target") or "").strip()
-                if target:
-                    fact["target"] = target[:240]
-                location = raw_fact.get("location")
-                if isinstance(location, Mapping):
-                    projected: dict[str, float] = {}
-                    for key in ("x", "y", "width", "height"):
-                        try:
-                            value = float(location[key])
-                        except (KeyError, TypeError, ValueError):
-                            projected = {}
-                            break
-                        if not math.isfinite(value):
-                            projected = {}
-                            break
-                        projected[key] = round(value, 5)
-                    if projected:
-                        fact["sourceLocation"] = projected
-                if raw_fact.get("failed"):
-                    fact["failed"] = True
                 compact_facts.append(fact)
                 fact_budget -= 1
         video = manifest.get("video")
@@ -346,7 +360,9 @@ def _nested_tool_payload(arguments: Mapping[str, Any]) -> Mapping[str, Any]:
 # argument JSON under 4KB; the advisory fires at 2x that guidance so the
 # diagnosis surfaces payloads that ignored the instruction.
 JQ_PROJECT_ARGUMENT_SIZE_GUIDANCE_BYTES = 4 * 1024
-JQ_PROJECT_LARGE_ARGUMENT_ADVISORY_BYTES = 2 * JQ_PROJECT_ARGUMENT_SIZE_GUIDANCE_BYTES
+JQ_PROJECT_LARGE_ARGUMENT_ADVISORY_BYTES = (
+    2 * JQ_PROJECT_ARGUMENT_SIZE_GUIDANCE_BYTES
+)
 TOOL_ARGUMENT_PROGRESS_BYTES = 1024
 MAX_PERSISTED_RAW_TOOL_ARGUMENT_BYTES = 256 * 1024
 
@@ -466,10 +482,7 @@ def _specialist_waiting_review_summary(
             "审阅通过后，主线需对该 Element 重新委派 R2V 生成 Director 以继续生成视频；"
             "这不算重新生成已通过产物。"
         )
-    return (
-        f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；"
-        "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
-    )
+    return f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；" "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
 
 
 def _timelines_have_plan(project: Any, target_refs: list[str]) -> bool:
@@ -611,7 +624,11 @@ def _grounding_extension(path: Path, media_type: str) -> str:
     if suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
         return suffix
     guessed = mimetypes.guess_extension(media_type)
-    return guessed if guessed in {".jpg", ".jpeg", ".png", ".webp", ".gif"} else ".img"
+    return (
+        guessed
+        if guessed in {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+        else ".img"
+    )
 
 
 def _grounding_local_path(source: Mapping[str, Any]) -> Path | None:
@@ -1021,7 +1038,8 @@ class MalformedJqProjectArguments(FileAgentRuntimeError):
             )
         if diagnosis.unexpected_top_level:
             details.append(
-                "unexpected top-level " + ", ".join(diagnosis.unexpected_top_level),
+                "unexpected top-level "
+                + ", ".join(diagnosis.unexpected_top_level),
             )
         if diagnosis.json_repair_applied:
             details.append(
@@ -1074,7 +1092,8 @@ class MalformedJqProjectArguments(FileAgentRuntimeError):
             )
         if self.repeated_payload:
             recovery = (
-                "The same malformed payload was repeated. Do not resend it. " + recovery
+                "The same malformed payload was repeated. Do not resend it. "
+                + recovery
             )
         return {
             "ok": False,
@@ -1150,7 +1169,8 @@ def _jq_project_argument_diagnosis(
         if key in arguments and not isinstance(arguments[key], Mapping):
             invalid.append(key)
     if isinstance(arguments.get("stringArgs"), Mapping) and any(
-        not isinstance(value, str) for value in arguments["stringArgs"].values()
+        not isinstance(value, str)
+        for value in arguments["stringArgs"].values()
     ):
         invalid.append("stringArgs")
     unexpected = tuple(sorted(set(arguments) - allowed))
@@ -1162,7 +1182,9 @@ def _jq_project_argument_diagnosis(
         separators=(",", ":"),
     ).encode("utf-8")
     program = arguments.get("program")
-    program_bytes = len(program.encode("utf-8")) if isinstance(program, str) else 0
+    program_bytes = (
+        len(program.encode("utf-8")) if isinstance(program, str) else 0
+    )
     json_args = arguments.get("jsonArgs")
     json_args_bytes = (
         len(
@@ -1298,7 +1320,9 @@ class FileCreatorAgentRuntime:
         injected_model_client = model_client is not None
         self.model_client = model_client or AgentScopeAgentChatClient()
         self.source_model_client = source_model_client or (
-            self.model_client if injected_model_client else AgentScopeVlmChatClient()
+            self.model_client
+            if injected_model_client
+            else AgentScopeVlmChatClient()
         )
         self.poll_interval_seconds = poll_interval_seconds
         self.max_model_turns = max_model_turns
@@ -1828,7 +1852,8 @@ class FileCreatorAgentRuntime:
         if session.active_run_id is not None and handle is None:
             interrupted = any(
                 item.review_boundary is not None
-                and item.review_boundary.interrupted_run_id == session.active_run_id
+                and item.review_boundary.interrupted_run_id
+                == session.active_run_id
                 for item in user_messages
             )
             if interrupted:
@@ -2158,7 +2183,9 @@ class FileCreatorAgentRuntime:
                     session_id=session.session_id,
                     conversation_id=message.conversation_id,
                     intervention_run_id=run_id,
-                    interrupted_run_id=(context.review_boundary.interrupted_run_id),
+                    interrupted_run_id=(
+                        context.review_boundary.interrupted_run_id
+                    ),
                 )
             elif not needs_review:
                 # Unattended (YOLO) projects treat a succeeded mainline as a
@@ -2445,7 +2472,9 @@ class FileCreatorAgentRuntime:
                         "providerChunkCount": state.provider_chunk_count,
                         "complete": complete,
                         "stage": (
-                            "arguments_complete" if complete else "assembling_arguments"
+                            "arguments_complete"
+                            if complete
+                            else "assembling_arguments"
                         ),
                     },
                 )
@@ -2595,7 +2624,8 @@ class FileCreatorAgentRuntime:
                         if not diagnosis.safe_to_execute:
                             malformed_jq_attempts = next_attempt
                             repeated_payload = (
-                                diagnosis.fingerprint in malformed_jq_fingerprints
+                                diagnosis.fingerprint
+                                in malformed_jq_fingerprints
                             )
                             malformed_jq_fingerprints.add(
                                 diagnosis.fingerprint,
@@ -2714,9 +2744,11 @@ class FileCreatorAgentRuntime:
                             exc.attempt > MAX_MALFORMED_JQ_PROJECT_RETRIES
                         )
                     else:
-                        failure_fingerprint = _deterministic_tool_failure_fingerprint(
-                            call,
-                            exc,
+                        failure_fingerprint = (
+                            _deterministic_tool_failure_fingerprint(
+                                call,
+                                exc,
+                            )
                         )
                         if failure_fingerprint is not None:
                             failure_count = (
@@ -2726,9 +2758,9 @@ class FileCreatorAgentRuntime:
                                 )
                                 + 1
                             )
-                            deterministic_failure_counts[failure_fingerprint] = (
-                                failure_count
-                            )
+                            deterministic_failure_counts[
+                                failure_fingerprint
+                            ] = failure_count
                             repeated_failure_exhausted = (
                                 failure_count
                                 >= MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES
@@ -2771,7 +2803,10 @@ class FileCreatorAgentRuntime:
                         "arguments; the run stopped instead of starting "
                         "another model turn",
                     )
-            if turn_number == effective_max_turns and not finalization_turn_added:
+            if (
+                turn_number == effective_max_turns
+                and not finalization_turn_added
+            ):
                 # A healthy last-budget tool result used to be followed by an
                 # immediate run failure, before the model could observe the
                 # result and conclude. Grant exactly one non-runaway recovery
@@ -3125,7 +3160,9 @@ class FileCreatorAgentRuntime:
                 "output": outcome.output,
                 "capability": computer_use_status(),
                 "takes": [item.as_dict() for item in published["takes"]],
-                "screenshots": [item.as_dict() for item in published["screenshots"]],
+                "screenshots": [
+                    item.as_dict() for item in published["screenshots"]
+                ],
             }
             if outcome.result_repr:
                 response["result"] = outcome.result_repr
@@ -3193,9 +3230,13 @@ class FileCreatorAgentRuntime:
                 "status": "success",
                 "output": outcome.output,
                 "takes": [item.as_dict() for item in published["takes"]],
-                "screenshots": [item.as_dict() for item in published["screenshots"]],
+                "screenshots": [
+                    item.as_dict() for item in published["screenshots"]
+                ],
             }
-            observation_only = not response["takes"] and not response["screenshots"]
+            observation_only = (
+                not response["takes"] and not response["screenshots"]
+            )
             response["observationOnly"] = observation_only
             response["completionEligible"] = not observation_only
             if outcome.result_repr:
@@ -3394,7 +3435,9 @@ class FileCreatorAgentRuntime:
                 continue
             source["workspace_ref"] = entry["workspace_ref"]
             source["assetVersionRef"] = entry["workspace_ref"]
-            source["source_asset_version_id"] = entry["source_asset_version_id"]
+            source["source_asset_version_id"] = entry[
+                "source_asset_version_id"
+            ]
             source["logical_asset_id"] = entry["logical_asset_id"]
             source["indexed_file_id"] = entry["file_id"]
         context_lines = [
@@ -3506,7 +3549,8 @@ class FileCreatorAgentRuntime:
                     version_id=version_id,
                     logical_asset_id=logical_asset_id,
                     name=str(
-                        raw_source.get("title") or f"Grounding visual {index + 1}",
+                        raw_source.get("title")
+                        or f"Grounding visual {index + 1}",
                     )[:160],
                     file_id=file_id,
                     checksum=checksum,
@@ -3771,7 +3815,10 @@ class FileCreatorAgentRuntime:
             runtime_media_facts = []
             for part in native_media_parts:
                 video = part.get("video_url")
-                if isinstance(video, Mapping) and video.get("durationMs") is not None:
+                if (
+                    isinstance(video, Mapping)
+                    and video.get("durationMs") is not None
+                ):
                     runtime_media_facts.append(
                         {
                             "assetVersionId": video.get("versionId"),
@@ -3807,8 +3854,7 @@ class FileCreatorAgentRuntime:
                 )
             elif execution_mode == "delegated":
                 user_text += (
-                    "委派模式：不要中途询问方向或确认，自主完成 edit_plan "
-                    "与剪辑，决策写进 edit_plan 即可。"
+                    "委派模式：不要中途询问方向或确认，自主完成 edit_plan " "与剪辑，决策写进 edit_plan 即可。"
                 )
             elif execution_mode == "fine_tuning":
                 user_text += (
@@ -4167,7 +4213,9 @@ class FileCreatorAgentRuntime:
                         "runId": specialist_run_id,
                         "role": role_name,
                         "status": (
-                            "WAITING_REVIEW" if waiting_for_review else status.value
+                            "WAITING_REVIEW"
+                            if waiting_for_review
+                            else status.value
                         ),
                         "waitingReview": waiting_for_review,
                         "summary": summary,
@@ -4241,7 +4289,8 @@ class FileCreatorAgentRuntime:
                         if not diagnosis.safe_to_execute:
                             malformed_jq_attempts = next_attempt
                             repeated_payload = (
-                                diagnosis.fingerprint in malformed_jq_fingerprints
+                                diagnosis.fingerprint
+                                in malformed_jq_fingerprints
                             )
                             malformed_jq_fingerprints.add(
                                 diagnosis.fingerprint,
@@ -4329,9 +4378,11 @@ class FileCreatorAgentRuntime:
                         )
                     else:
                         failed = True
-                        failure_fingerprint = _deterministic_tool_failure_fingerprint(
-                            call,
-                            exc,
+                        failure_fingerprint = (
+                            _deterministic_tool_failure_fingerprint(
+                                call,
+                                exc,
+                            )
                         )
                         if failure_fingerprint is not None:
                             failure_count = (
@@ -4341,9 +4392,9 @@ class FileCreatorAgentRuntime:
                                 )
                                 + 1
                             )
-                            deterministic_failure_counts[failure_fingerprint] = (
-                                failure_count
-                            )
+                            deterministic_failure_counts[
+                                failure_fingerprint
+                            ] = failure_count
                             repeated_failure_exhausted = (
                                 failure_count
                                 >= MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES
@@ -4442,8 +4493,7 @@ class FileCreatorAgentRuntime:
                             {
                                 "type": "text",
                                 "text": (
-                                    "视频帧图注入失败，请基于工具返回的"
-                                    f"摘要继续或缩小窗口重试：{exc}"
+                                    "视频帧图注入失败，请基于工具返回的" f"摘要继续或缩小窗口重试：{exc}"
                                 ),
                             },
                         ]
@@ -4491,10 +4541,7 @@ class FileCreatorAgentRuntime:
                         page_content = [
                             {
                                 "type": "text",
-                                "text": (
-                                    "文档页图注入失败，请基于工具返回的"
-                                    f"文本摘要继续：{exc}"
-                                ),
+                                "text": ("文档页图注入失败，请基于工具返回的" f"文本摘要继续：{exc}"),
                             },
                         ]
                     if page_parts:
@@ -4735,13 +4782,16 @@ class FileCreatorAgentRuntime:
                 self.services,
                 project_id=project_id,
                 arguments=(
-                    inner_arguments if isinstance(inner_arguments, Mapping) else {}
+                    inner_arguments
+                    if isinstance(inner_arguments, Mapping)
+                    else {}
                 ),
             )
         if (
             spec is not None
             and spec.requires_execution_authorization
-            and get_execution_authorization_mode() != EXECUTION_AUTHORIZATION_ALLOW_ALL
+            and get_execution_authorization_mode()
+            != EXECUTION_AUTHORIZATION_ALLOW_ALL
         ):
             authorization_id = await self._await_execution_authorization(
                 project_id=project_id,
@@ -5002,7 +5052,9 @@ class FileCreatorAgentRuntime:
                     {
                         **dict(common),
                         "authorizationId": authorization.authorization_id,
-                        "authorizationToken": (authorization.authorization_token),
+                        "authorizationToken": (
+                            authorization.authorization_token
+                        ),
                         "checkpointPhase": phase,
                         "operation": authorization.operation,
                         "summary": authorization.summary,
@@ -5034,7 +5086,10 @@ class FileCreatorAgentRuntime:
                     call_id,
                     authorization.status.value,
                 )
-            if authorization.status is not ExecutionAuthorizationStatus.APPROVED:
+            if (
+                authorization.status
+                is not ExecutionAuthorizationStatus.APPROVED
+            ):
                 raise CreationCheckpointBlocked(phase, authorization.status)
 
     async def _creation_checkpoint_record(
@@ -5739,7 +5794,10 @@ class FileCreatorAgentRuntime:
             # Goal instead. CANCELLED/FAILED goals stay reusable — an
             # AgentDock interrupt deliberately resumes its cancelled
             # mainline under the same Goal identity.
-            if goal is not None and goal.status is not CreatorGoalStatus.COMPLETED:
+            if (
+                goal is not None
+                and goal.status is not CreatorGoalStatus.COMPLETED
+            ):
                 return goal, False
         created = await asyncio.to_thread(
             self.sessions.create_goal,
@@ -5823,11 +5881,17 @@ class FileCreatorAgentRuntime:
             )
             return
         model_required = graph.model_required_nodes()
-        if not after_failure and self.work_scheduler.enabled() and not model_required:
+        if (
+            not after_failure
+            and self.work_scheduler.enabled()
+            and not model_required
+        ):
             # Every remaining gap is machine-dispatchable (READY/RUNNING):
             # the scheduler owns it; a resume would only burn model turns.
             return
-        unfinished = [node.label for node in (model_required or unfinished_nodes)]
+        unfinished = [
+            node.label for node in (model_required or unfinished_nodes)
+        ]
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -5904,7 +5968,9 @@ class FileCreatorAgentRuntime:
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
                 "unfinishedElements": unfinished,
-                "modelRequiredNodes": [node.node_id for node in model_required[:12]],
+                "modelRequiredNodes": [
+                    node.node_id for node in model_required[:12]
+                ],
             },
         )
         await self._event(
@@ -5982,7 +6048,9 @@ class FileCreatorAgentRuntime:
             None,
         )
         mainline_goal = (
-            _message_text(mainline_request) if mainline_request is not None else ""
+            _message_text(mainline_request)
+            if mainline_request is not None
+            else ""
         )
         # Never assert that the intervention is resolved: when the branch
         # run ended by asking the user a question, claiming “已处理完成”
@@ -6136,7 +6204,9 @@ class FileCreatorAgentRuntime:
     ) -> None:
         handle = self._active.get(project_id)
         superseded = bool(
-            handle is not None and handle.run_id == run_id and handle.superseded,
+            handle is not None
+            and handle.run_id == run_id
+            and handle.superseded,
         )
         try:
             await asyncio.to_thread(
@@ -6157,7 +6227,9 @@ class FileCreatorAgentRuntime:
                         "code": (
                             "SUPERSEDED"
                             if superseded
-                            else ("SHUTDOWN" if self._stopping else "INTERRUPTED")
+                            else (
+                                "SHUTDOWN" if self._stopping else "INTERRUPTED"
+                            )
                         ),
                         "message": (
                             "Run superseded by an AgentDock request"
@@ -6439,7 +6511,8 @@ class FileCreatorAgentRuntime:
             except LockTimeoutError as exc:
                 if attempt == attempts:
                     logger.error(
-                        "terminal persistence gave up (%s) after %d " "attempts: %s",
+                        "terminal persistence gave up (%s) after %d "
+                        "attempts: %s",
                         description,
                         attempts,
                         exc,
@@ -6664,7 +6737,9 @@ def _message_text(message: CreatorMessageRecord) -> str:
             )
     refs = message.metadata.get("assetVersionRefs")
     if isinstance(refs, list):
-        exact_refs = [str(value).strip() for value in refs if str(value).strip()]
+        exact_refs = [
+            str(value).strip() for value in refs if str(value).strip()
+        ]
         if exact_refs:
             chunks.append(
                 "本轮已入库素材（本轮消息附件的 exact AssetVersion refs，"
@@ -6850,7 +6925,9 @@ def _elide_stale_snapshots(
 ) -> dict[int, str]:
     """Map message seq to a receipt for each superseded snapshot."""
 
-    snapshots: list[tuple[CreatorMessageRecord, _ProjectSnapshotEnvelope, str]] = []
+    snapshots: list[
+        tuple[CreatorMessageRecord, _ProjectSnapshotEnvelope, str]
+    ] = []
     for item in prior_context:
         if item.role != "tool" or item.source != _SNAPSHOT_SOURCE:
             continue
@@ -7017,7 +7094,8 @@ def _require_source_intelligence_associations(
         )
         if (
             intelligence is None
-            or intelligence.source_asset_version_id != source.selected_asset_version_id
+            or intelligence.source_asset_version_id
+            != source.selected_asset_version_id
         ):
             raise FileAgentRuntimeError(
                 "Source Intelligence selection does not match the current Source version "
