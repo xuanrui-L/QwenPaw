@@ -96,8 +96,14 @@ class _CreatorRoutingFileHandler(logging.Handler):
     def close_project(self, project_id: str) -> None:
         """Close and forget one Project target before its tree is deleted."""
 
+        # The id arrives from API path parameters; strip any directory
+        # components before composing the log path so a crafted id can
+        # never point the handler lookup outside the data root.
+        safe_id = os.path.basename(project_id)
+        if not safe_id or safe_id in {".", ".."}:
+            return
         try:
-            project_root = (self.data_root / project_id).resolve(strict=False)
+            project_root = (self.data_root / safe_id).resolve(strict=False)
             if project_root.parent != self.data_root:
                 return
             path = project_root / "observability" / "logs" / "creator.log"

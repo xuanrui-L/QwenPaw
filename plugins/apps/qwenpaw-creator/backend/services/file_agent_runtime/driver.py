@@ -204,6 +204,12 @@ from .subagents import (
 
 logger = setup_logger("creator.agent_runtime")
 
+
+def _log_safe(value: object) -> str:
+    """Neutralize CR/LF in user-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 # Arguments the provider prices on: they must still match the approved scope
 # at invocation time, or the user would pay for terms they never saw.
 _BILLING_SENSITIVE_ARGUMENTS = ("durationSeconds", "resolution", "mode")
@@ -6469,8 +6475,8 @@ class FileCreatorAgentRuntime:
                     logger.warning(
                         "reclaimed orphaned RUNNING run for durable "
                         "interrupt: project=%s run=%s",
-                        project_id,
-                        run.run_id,
+                        _log_safe(project_id),
+                        _log_safe(run.run_id),
                     )
                 session = await self._persist_terminal_state(
                     "interrupt lease release",
@@ -6510,8 +6516,8 @@ class FileCreatorAgentRuntime:
             # this path being silent hid a permanently wedged Session.
             logger.warning(
                 "idle interrupt cleanup failed: project=%s reason=%s",
-                project_id,
-                reason,
+                _log_safe(project_id),
+                _log_safe(reason),
                 exc_info=True,
             )
             return

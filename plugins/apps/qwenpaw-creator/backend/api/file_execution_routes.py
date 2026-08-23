@@ -381,6 +381,11 @@ async def cancel_task(
 _logger = logging.getLogger(__name__)
 
 
+def _log_safe(value: Any) -> str:
+    """Neutralize CR/LF in user-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _timeline_has_text_overlays_without_motion(
     services: CreatorFileServices,
     project_id: str,
@@ -523,7 +528,7 @@ async def render_timeline(
                         _logger.warning(
                             "auto design_motion_overlays failed for %s; "
                             "compose will use fallback static templates",
-                            target_ref,
+                            _log_safe(target_ref),
                             exc_info=True,
                         )
 
@@ -542,9 +547,9 @@ async def render_timeline(
                 # the durable Task; clients observe them through task polling.
                 _logger.error(
                     "compose failed project=%s timeline=%s task=%s",
-                    project_id,
-                    timeline_id,
-                    task_id,
+                    _log_safe(project_id),
+                    _log_safe(timeline_id),
+                    _log_safe(task_id),
                     exc_info=True,
                 )
                 return

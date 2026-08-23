@@ -97,6 +97,11 @@ from .dependencies import (
 logger = logging.getLogger("qwenpaw.creator.api.file_asset_routes")
 
 
+def _log_safe(value: Any) -> str:
+    """Neutralize CR/LF in user-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 router = APIRouter(
     prefix="/projects/{project_id}",
     tags=["asset-files"],
@@ -1669,7 +1674,7 @@ async def ingest_asset(
     item = result["items"][0]
     logger.info(
         "asset ingested: project=%s asset=%s status=%s",
-        project_id,
+        _log_safe(project_id),
         item["assetId"],
         result["status"],
     )
@@ -1795,7 +1800,7 @@ async def import_assets(
     )
     logger.info(
         "asset import started: project=%s import=%s files=%d",
-        project_id,
+        _log_safe(project_id),
         import_id,
         len(uploads),
     )
