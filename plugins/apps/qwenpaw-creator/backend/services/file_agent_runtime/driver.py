@@ -238,7 +238,10 @@ def _remove_live_operation_scratch(
         return
     cleanup_path = scratch_root / operation_run_id
     resolved_cleanup = cleanup_path.resolve(strict=False)
-    if resolved_cleanup.parent != scratch_root:
+    if (
+        resolved_cleanup == scratch_root
+        or not resolved_cleanup.is_relative_to(scratch_root)
+    ):
         logger.error(
             "refusing live-operation cleanup outside scratch root: %s",
             _log_safe(resolved_cleanup),

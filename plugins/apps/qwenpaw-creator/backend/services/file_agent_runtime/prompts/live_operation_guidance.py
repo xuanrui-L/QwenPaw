@@ -39,6 +39,9 @@ _CREATOR_SECTION = """
 观察，也可以完成录制；如果先观察、下一次才录制，第二次仍须重新 connect/open。
 代码直接使用顶层 `await`、`if`、`try` 和有界 `for`；不得定义 `def` / `async def`、
 `lambda` 或 `class`，这些定义会被运行时拒绝，以免递归或自建控制流阻塞同进程任务。
+桥接只开放教程操作所需的 Browser/Page API；会话生命周期由运行时负责，
+`browser.close()` 不可用，也不应由模型主动调用。open/present/goto 只接受绝对
+HTTP(S) URL；`file:`、`data:`、`javascript:` 等本地或脚本 scheme 会被拒绝。
 
 - `await recorder.start(label="这段在做什么") -> take_id`：开始录制当前操作的页面。
 - `await recorder.stop() -> {take_id, label, summary}`：结束这一段并落地成片段。

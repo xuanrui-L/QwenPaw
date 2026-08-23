@@ -22,6 +22,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .manifest import TakeManifest
 from .recorder import RecordedTake, TakeRecorder
@@ -33,12 +34,44 @@ logger = logging.getLogger(__name__)
 _MAX_OUTPUT_CHARS = 12_000
 _MAX_RANGE_ITEMS = 1_000
 _SOURCE_NAME = "browser_use_code"
+_ALLOWED_BROWSER_DELEGATIONS = frozenset(
+    {
+        "close_page",
+        "handoff",
+        "pages",
+        "session_status",
+        "switch_page",
+    },
+)
+_ALLOWED_PAGE_DELEGATIONS = frozenset(
+    {
+        "current_surface",
+        "frame_locator",
+        "get_by_label",
+        "get_by_placeholder",
+        "get_by_role",
+        "get_by_text",
+        "go_back",
+        "go_forward",
+        "keep",
+        "keyboard",
+        "locator",
+        "mouse",
+        "reload",
+        "screenshot",
+        "snapshot",
+        "wait_for_load_state",
+        "wait_for_timeout",
+    },
+)
 _UNSAFE_NAME_REFERENCES = frozenset(
     {
         "__import__",
         "breakpoint",
+        "classmethod",
         "compile",
         "delattr",
+        "dir",
         "eval",
         "exec",
         "getattr",
@@ -46,8 +79,13 @@ _UNSAFE_NAME_REFERENCES = frozenset(
         "help",
         "input",
         "locals",
+        "object",
         "open",
+        "property",
         "setattr",
+        "staticmethod",
+        "super",
+        "type",
         "vars",
     },
 )
@@ -128,6 +166,41 @@ class _ActivePage:
         self.page: Any = None
 
 
+def _validate_browser_url(url: str) -> str:
+    """Allow ordinary web navigation and fail closed for local/script URLs."""
+    normalized = str(url).strip()
+    if not normalized or any(ord(char) < 32 for char in normalized):
+        raise LiveOperationError(
+            "browser URLs must be non-empty HTTP(S) URLs without control "
+            "characters",
+        )
+    scheme = urlsplit(normalized).scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise LiveOperationError(
+            f"browser URL scheme {scheme or '[missing]'} is unavailable in "
+            "live-operation code; use an absolute HTTP(S) URL",
+        )
+    return normalized
+
+
+class _BoundPage:
+    """Expose the documented Page surface and validate every navigation."""
+
+    def __init__(self, page: Any) -> None:
+        self._page = page
+
+    async def goto(self, url: str) -> Any:
+        return await self._page.goto(_validate_browser_url(url))
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_") or name not in _ALLOWED_PAGE_DELEGATIONS:
+            raise LiveOperationError(
+                f"page method or attribute {name!r} is unavailable in "
+                "live-operation code",
+            )
+        return getattr(self._page, name)
+
+
 class AgentRecorder:
     """The ``recorder`` name the model sees inside its own code.
 
@@ -149,6 +222,11 @@ class AgentRecorder:
     async def start(self, page: Any = None, *, label: str = "") -> str:
         """Begin a take on ``page`` (default: the page just opened)."""
         target = page if page is not None else self._active_page.page
+        if isinstance(target, _BoundPage):
+            # The proxy is the model-facing value; CDP binding needs the SDK
+            # page retained inside it. This does not expose the raw page back
+            # to model code, whose AST cannot access private attributes.
+            target = target._page  # pylint: disable=protected-access
         if target is None:
             raise LiveSessionError(
                 "no page has been opened yet; open a page first: "
@@ -293,8 +371,9 @@ async def _run_browser_code_isolated(
 class _BoundBrowser:
     """Expose ``Browser.connect()`` while reusing this run's live session.
 
-    Opening a page is intercepted so recording can default to it; everything
-    else falls through to the real SDK facade untouched.
+    Opening a page is intercepted so recording can default to it. Delegation
+    is limited to the documented, run-safe orchestration surface; lifecycle
+    methods such as ``close`` remain owned by this bridge's ``finally`` block.
     """
 
     def __init__(
@@ -310,19 +389,21 @@ class _BoundBrowser:
         return self
 
     async def open(self, url: str | None = None) -> Any:
-        page = await self._session.browser.open(url)
+        resolved_url = None if url is None else _validate_browser_url(url)
+        page = await self._session.browser.open(resolved_url)
         self._active_page.page = page
-        return page
+        return _BoundPage(page)
 
     async def present(self, url: str | None = None) -> Any:
-        page = await self._session.browser.present(url)
+        resolved_url = None if url is None else _validate_browser_url(url)
+        page = await self._session.browser.present(resolved_url)
         self._active_page.page = page
-        return page
+        return _BoundPage(page)
 
     def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
+        if name.startswith("_") or name not in _ALLOWED_BROWSER_DELEGATIONS:
             raise LiveOperationError(
-                f"private browser attribute {name!r} is unavailable in "
+                f"browser method or attribute {name!r} is unavailable in "
                 "live-operation code",
             )
         return getattr(self._session.browser, name)

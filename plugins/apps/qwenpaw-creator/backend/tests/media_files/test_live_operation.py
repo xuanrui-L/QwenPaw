@@ -29,6 +29,7 @@ from services.media_files.live_operation.bridge import (
     LiveOperationError,
     _ActivePage,
     _BoundBrowser,
+    _BoundPage,
     _compile,
     run_browser_code,
 )
@@ -51,18 +52,82 @@ pytestmark = pytest.mark.unit
 # ─── coordinate projection ──────────────────────────────────────────────
 
 
-def test_bound_browser_rejects_private_runtime_passthrough() -> None:
+def test_bound_browser_allows_only_run_safe_sdk_delegations() -> None:
     class BrowserFacade:
         public_value = "visible"
         _engine = object()
+
+        async def pages(self):
+            return ["page-1"]
+
+        async def close(self):
+            raise AssertionError("bridge must own session cleanup")
 
     class Session:
         browser = BrowserFacade()
 
     browser = _BoundBrowser(Session(), _ActivePage())
-    assert browser.public_value == "visible"
-    with pytest.raises(LiveOperationError, match="private browser attribute"):
+    assert asyncio.run(browser.pages()) == ["page-1"]
+    with pytest.raises(LiveOperationError, match="unavailable"):
+        getattr(browser, "public_value")
+    with pytest.raises(LiveOperationError, match="unavailable"):
         getattr(browser, "_engine")
+    with pytest.raises(LiveOperationError, match="unavailable"):
+        getattr(browser, "close")
+
+
+def test_bound_browser_and_page_reject_non_http_navigation() -> None:
+    class RawPage:
+        def __init__(self) -> None:
+            self.urls: list[str] = []
+
+        async def goto(self, url: str):
+            self.urls.append(url)
+            return {"url": url}
+
+        async def snapshot(self):
+            return "snapshot"
+
+    class BrowserFacade:
+        def __init__(self) -> None:
+            self.page = RawPage()
+            self.urls: list[str | None] = []
+
+        async def open(self, url: str | None = None):
+            self.urls.append(url)
+            return self.page
+
+        async def present(self, url: str | None = None):
+            self.urls.append(url)
+            return self.page
+
+    class Session:
+        browser = BrowserFacade()
+
+    async def exercise() -> None:
+        active_page = _ActivePage()
+        browser = _BoundBrowser(Session(), active_page)
+        page = await browser.open("https://example.com/path")
+        assert isinstance(page, _BoundPage)
+        assert active_page.page is browser._session.browser.page
+        assert await page.snapshot() == "snapshot"
+        assert await page.goto("http://example.org/next") == {
+            "url": "http://example.org/next",
+        }
+        for unsafe in (
+            "file:///etc/passwd",
+            "data:text/html,unsafe",
+            "javascript:alert(1)",
+            "vbscript:msgbox(1)",
+            "example.net/no-scheme",
+            "https://example.com/line\nfeed",
+        ):
+            with pytest.raises(LiveOperationError, match="URL"):
+                await browser.present(unsafe)
+            with pytest.raises(LiveOperationError, match="URL"):
+                await page.goto(unsafe)
+
+    asyncio.run(exercise())
 
 
 def test_bounding_box_rejects_degenerate_rectangles():
@@ -813,6 +878,9 @@ def test_a_syntax_error_is_reported_as_such():
         "print(__builtins__)",
         "globals()",
         'getattr(Browser, "__class__")',
+        "type(Browser)",
+        "object()",
+        "dir(Browser)",
     ),
 )
 def test_model_code_cannot_escape_into_the_creator_backend(code: str):
@@ -915,6 +983,8 @@ def test_browser_guidance_stops_acquisition_once_acceptance_is_covered(
     assert "action 但画面完全不动" in guidance
     assert "教程成片" in guidance
     assert "AI 剪辑导演" in guidance
+    assert "`browser.close()` 不可用" in guidance
+    assert "open/present/goto 只接受绝对" in guidance
 
 
 def test_recording_defaults_to_the_page_just_opened():
@@ -953,3 +1023,13 @@ def test_recording_defaults_to_the_page_just_opened():
     take_id = asyncio.run(agent_recorder.start(label="first step"))
     assert take_id == "take-001"
     assert recorder.started_with == ("cdp-for-page-object", "first step")
+
+    explicit_page = _BoundPage("explicit-page-object")
+    take_id = asyncio.run(
+        agent_recorder.start(explicit_page, label="explicit page"),
+    )
+    assert take_id == "take-001"
+    assert recorder.started_with == (
+        "cdp-for-explicit-page-object",
+        "explicit page",
+    )
