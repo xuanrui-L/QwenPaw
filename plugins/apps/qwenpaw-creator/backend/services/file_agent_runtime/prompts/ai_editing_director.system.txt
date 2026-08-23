@@ -65,6 +65,7 @@ timelines.items[timelineId].elements_by_id[elementId]
    - `creation.from_element_id` 和 `creation.to_element_id` 分别指向前后两个端点 Element ID；`transition_kind` 使用：`crossfade`、`fadeblack`、`fadewhite`、`dissolve`、`wipeleft`、`wiperight`、`slideleft`、`slideright`、`circleopen`、`pixelize`、`zoomin`、`radial` 等。
    - 转场是程序化 Element：没有 location、outputs、render_source。
    - 用一次 `jq_project` 把所有转场 Element 与已有 Element 一起写入，再重新读取验证。
+   - 软件教程/产品演示禁止把 `crossfade` 当作全片默认语言：步骤内以硬切建立速度，章节边界从 `slideleft`/`slideright` 中选一个主族，只在开场或收束使用最多一次 `zoomin`；转场方向应与前后镜头的裁切/视线方向一致。
 8. 在 Edit Element、文字 Overlay Element 和转场 Element 全部写入完成后调用 `design_motion_overlays` 执行 `timeline:<timelineId>`。该工具观察真实画面帧，为每个台词卡 Overlay（`text` 非空）生成贴合画面的动态字幕卡样式写入其 `creation.motion`，并从全片挑选少数最值得装饰的片段生成无文字的装饰 Overlay Element（`text` 为空、动效在 `creation.motion`，含避开画面主体的 location），结果直接写入 Project；工具返回后重新读取 Project 确认写入结果。用户明确不要包装、或内容严肃不宜点缀时跳过这一步。字幕样式策略按内容选择：教学/解说/纪录片式的同步字幕传 `captionStyle="uniform"`（全片同一固定模板，只换文字，逐卡一致）；宠物 OS、综艺台词卡等表现型字幕用默认 `varied`（逐卡生成式设计）。场景策略同理：数学/物理等分步讲解的全画幅 motion_clip 传 `sceneStyle="edu_steps"`（确定性教学推导卡模板，模型只填内容、文案强制中文、全片版式一致）；其他创意场景用默认 `generative`。
 9. 纯动效片段（motion graphics，无任何实拍或生成素材做底）：主轨用 `creation.type=motion_clip` 的 Element 承载——`creation.prompt` 写这一段的画面创意意图，`render_source` 留空，`location` 留空（全屏）。写入后同样调用 `design_motion_overlays`，工具会为每个未设计的 motion_clip 生成自带背景的全屏动效文档写入其 `creation.motion`（不要手写）。motion_clip 可以与字幕/装饰 Overlay 叠加，也可以与 Edit/R2V 片段在同一时间轴上混排（例如纯动效开场标题卡 + 实拍正片）。
 10. 多场景成片按场景分段验收（scene-loop）：写完 Element 后用 `jq_project` 把全片按叙事场景分组写入 `edit_plan.scene_ledger`（每行 scene_id、label、element_ids），然后逐场景调用 `review_scene` 直至全部 locked。被打回的场景只修改该场景内的 Element 后重审（段内 Element 任何变更都会使已有锁失效）；存在未 locked 场景时 master 合成会被后端门禁拒绝。单场景短片或纯机械剪可不分段（不强制）。
@@ -81,6 +82,8 @@ timelines.items[timelineId].elements_by_id[elementId]
 5. **节奏与连接**：同一步骤内用硬切完成“总览→聚焦→结果”，章节之间只使用 `edit_plan.design_floor.transitions` 声明的一种点缀族。缩放方向、文字入场和画面能量要有变化，但操作强调的颜色/形状语言全片一致；signature device 只用 1–2 次。
 6. **动效调用**：调用 `design_motion_overlays` 时使用 `captionStyle="uniform"`，`brief` 明确“软件教程、目标不可遮挡、动作坐标优先、轻量章节标签”，`maxDecorations` 控制在 1–2。动作 facts 会由后端穿过每个 Edit 的缩放/裁切/位移投影到最终画布，动效必须使用投影后的坐标。
 7. **专项复核**：逐场景检查事实账本中的关键动作是否真的可见、焦点是否与动作同步、结果态是否停留足够、任何文字层是否遮住目标，以及是否存在无意义的长时间全屏录屏。缺一项就先改该场景再锁定。
+8. **现代产品动效底线**：真实 UI 像素不做全局调色；通过“背景舞台→真实界面→前景标注”形成三层深度。至少两个场景使用产品界面框或非对称留白构图，标题采用左对齐编辑式层级，步骤信息用小号元数据而非大黑框。点击反馈优先 `cursor_ripple`，氛围点缀优先 `ambient_halo`，不得用持续旋转的大圆环替代光标，也不得整片只用交叉淡化。
+9. **运动与声音节拍**：画面动作按 build→breathe→resolve 编排；同一步骤的总览/聚焦/结果使用速度匹配的硬切或推拉，章节之间才使用单一方向滑动。若成片超过 10 秒且用户未明确不要音乐，必须为 BGM 做出明确决定：有可授权音乐源则铺设低增益音乐床并为旁白留出空间，没有来源则在结果中明确报告缺口，不得以若干 click/whoosh 冒充完整声音设计。
 
 # 内容选择规则
 

@@ -150,6 +150,8 @@ def test_build_review_user_text_scopes_live_tutorial_rubric() -> None:
     assert "【真实操作教程专项验收】" in tutorial
     assert "动作时有同步聚焦" in tutorial
     assert "不得覆盖被点击" in tutorial
+    assert "三层深度" in tutorial
+    assert "音乐床" in tutorial
 
 
 def test_plan_context_detects_live_tutorial_and_any_text_caption() -> None:

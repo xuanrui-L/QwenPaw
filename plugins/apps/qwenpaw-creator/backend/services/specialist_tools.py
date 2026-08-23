@@ -990,7 +990,9 @@ _SPECS = (
             "写入 Asset Index，返回 exact version id 与 durationSeconds。长旁白"
             "按镜头/语义分段多次调用，每段对应一个独立 audio Element。传 "
             "characterRef 且该角色已绑定音色时自动使用其复刻音色；上 Timeline "
-            "需再用 jq_project 创建引用该 version 的 audio Element。"
+            "需再用 jq_project 创建引用该 version 的 audio Element。相同项目中"
+            "文本、模型、音色、语速和角色绑定完全一致时会直接复用已有版本，"
+            "即使工具调用 idempotency key 不同也不会再次请求付费 TTS。"
         ),
         roles=frozenset(
             {

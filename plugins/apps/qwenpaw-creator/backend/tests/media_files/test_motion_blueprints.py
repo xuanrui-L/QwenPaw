@@ -109,6 +109,21 @@ class TestBlueprintRendering:
         # Garbage input falls back to the default centered window.
         assert validated_frame_window(None)["width"] == pytest.approx(0.86)
 
+    def test_tutorial_family_is_modern_seek_safe_and_ui_faithful(self) -> None:
+        caption, _ = render_caption_blueprint(
+            "precision_subtitle",
+            "点击搜索框，输入 QwenPaw",
+        )
+        ripple, _ = render_decoration_blueprint("cursor_ripple")
+        frame, _ = render_frame_blueprint("product_ui")
+        assert "backdrop-filter:blur" in caption
+        assert "cursor" in ripple and "requestAnimationFrame" not in ripple
+        assert 'data-motion-frame="ring"' in frame
+        assert 'data-motion-window="' in frame
+        for html in (caption, ripple, frame):
+            assert "window.__hf" in html
+            assert "{{" not in html and "}}" not in html
+
 
 class TestBlueprintDesignValidation:
     _LOCATION = {

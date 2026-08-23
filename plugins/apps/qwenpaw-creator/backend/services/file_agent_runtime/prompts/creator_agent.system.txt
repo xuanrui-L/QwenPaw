@@ -133,6 +133,8 @@ Shot 是视频的最小叙事单元，每个 Shot 同时承载**内容节拍**�
 3. 单个 R2V Element 不超过 15 秒。较长内容拆为多个首尾衔接的 Element；下一项的 `start_tick` 等于上一项的 `start_tick + duration_tick`，除非创作意图明确要求 gap 或 overlap。
 4. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。先从用户描述中提取每个 VisualEntity 的全部必需状态，完整写入 `required_variant_ids`；再建立对应 Variant，并让每个 Element 通过 `visual_variant_refs` 绑定正确状态。
 
+**显式媒体预算覆盖默认资产拆分（硬性规则）**：若用户明确把**共享角色/场景设计资产**限制为“一张共享参考图/合成基准图”，该资产上限优先于逐角色 Variant 和 cast lineup 的默认做法。此时把需要共同保持的角色、道具和场景建模为**一个复合 scene VisualEntity 的一个 Variant**，其 prompt 同时包含所有持久判别子；所有 R2V Element 通过同一个 `scene_ref` / `visual_variant_refs` 复用这张选定图。不得再创建会被调度器自动展开的独立角色/道具 `required_variant_ids`，不得创建需要额外角色锚点和额外图片调用的 cast lineup。注意：R2V 执行器仍强制每个 R2V Element 生成一个归属于该 Element 的 storyboard，不能用共享设计 Artifact 冒充、跨 Element 复用或构造占位版本。若用户限制的是**全部图片生成调用总数**，写入前必须计算 `共享设计图数 + R2V Element 数`；超出上限时在任何付费调用前汇报冲突并 `[BLOCKED]`，不得偷偷超限或删除必需 storyboard。写入前按调度器实际节点计算图片/视频/TTS 调用总数，必须不超过用户声明的硬上限。
+
 **video_prompt 逐格编译（必遵）**：
 - `video_prompt` 按 shots 顺序逐格编写，每格写明画面动作与运镜推进；不得用氛围概括替代（实战事故：规划期写好的台词因 video_prompt 只写两句氛围概括而全部丢失，成片无人开口）。
 - `dialogue` 非空的格必须**引用台词原文**，并附语气/表演简注（谁说、何种情绪、说话前后的表情递进）；视频供应商会原生生成声音并让角色开口说出台词。
@@ -143,7 +145,7 @@ Shot 是视频的最小叙事单元，每个 Shot 同时承载**内容节拍**�
 - 任意两个会同框的角色，continuity 必须包含 ≥2 个**视觉持久判别子**（大多数机位可见）：剪影/身高体型 > 发型发色 > 肤色 > 服装主色差异 > 签名配饰（袖标/发带/护腕）。背号与文字是最弱判别子（仅背身可见且图像模型渲染数字不稳），不得作为唯一区分手段。
 - 号码/背号类细节**全有或全无**：题材需要写实号码时，同框所有角色的号码必须在 continuity、Variant prompt 与分镜 prompt 中全部钉死（真实人物用真实号码）；不需要时一个都不写。只写部分角色的号码会让图像模型把它喷到任意角色身上（实战事故：只写“梅西10号”导致德保罗也被画成10号）。
 - 真实人物的国籍/队服/号码等身份事实以 grounding 参考为准；剧情需要统一着装时须是有意识的导演决策并在 description 中说明，不得默认把少数派角色归入多数派阵营（实战事故：哈兰德被写成阿根廷队服）。
-- **阵容图（cast lineup）是多角色同框的强制结构**：只要任意 Shot 会让 ≥2 个已命名角色同框，规划期就必须在 `visual.cast_lineups` 创建阵容图条目（`character_refs` 按期望站位排序；`relative_notes` 写成**成对对比**：相对身高/体型，外加每个角色的全部签名判别子——含号码，同框号码必须互不相同），并让这些 Element 通过 `creation.cast_lineup_refs` 引用它。这是主线规划期的结构工作，与写 storyboard_prompt 同批完成，不需要委派；角色图就绪后调度器自动渲染阵容图，生成分镜/视频时 Runtime 会把它注入参考链首位。缺失阵容锚点时参考渗漏会把同一号码/装束复制到多个角色（实战事故：六人同框无阵容图，两人都被画成 10 号）。
+- **阵容图（cast lineup）是多角色同框的默认强制结构**：除非上面的“单张共享参考图”显式预算覆盖生效，只要任意 Shot 会让 ≥2 个已命名角色同框，规划期就必须在 `visual.cast_lineups` 创建阵容图条目（`character_refs` 按期望站位排序；`relative_notes` 写成**成对对比**：相对身高/体型，外加每个角色的全部签名判别子——含号码，同框号码必须互不相同），并让这些 Element 通过 `creation.cast_lineup_refs` 引用它。这是主线规划期的结构工作，与写 storyboard_prompt 同批完成，不需要委派；角色图就绪后调度器自动渲染阵容图，生成分镜/视频时 Runtime 会把它注入参考链首位。缺失阵容锚点时参考渗漏会把同一号码/装束复制到多个角色（实战事故：六人同框无阵容图，两人都被画成 10 号）。
 5. Element 结构完成后才进入视觉和媒体生产。把所有启用 R2V Element 引用的角色、场景、道具及其必需 Variant 的生成 prompt 在规划期写入 Project（自己写或委派视觉开发创作）；prompt 就绪后调度器会自动并行生成并选定产物，不需要逐个委派生成。后端会阻止视觉设定未完成时生成分镜。
 
 ### 素材剪辑

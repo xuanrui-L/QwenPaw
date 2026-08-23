@@ -22,6 +22,7 @@ import concurrent.futures
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
+from html import unescape
 import json
 import math
 import mimetypes
@@ -2345,7 +2346,11 @@ def _motion_document_matches_text(html: str, text: str) -> bool:
     needle = re.sub(r"\s+", "", text)
     if not needle:
         return True
-    plain = re.sub(r"<[^>]+>", "", html)
+    # Blueprint documents commonly split copy into per-character spans and
+    # represent spaces as ``&nbsp;``. Compare the browser-visible text, not
+    # the raw entity spelling, or valid waterfall titles silently fall back
+    # to the legacy pet-OS renderer.
+    plain = unescape(re.sub(r"<[^>]+>", "", html))
     return needle in re.sub(r"\s+", "", plain)
 
 

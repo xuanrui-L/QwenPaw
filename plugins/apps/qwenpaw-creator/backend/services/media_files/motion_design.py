@@ -2070,12 +2070,20 @@ async def design_motion_overlays(
                 anchor_x=0.5,
                 anchor_y=0.5,
             )
-        concept = f"全片统一解说字幕卡 {_UNIFORM_CAPTION_BLUEPRINT}"
+        uniform_blueprint = (
+            "precision_subtitle"
+            if content_type == "tutorial"
+            else _UNIFORM_CAPTION_BLUEPRINT
+        )
+        concept = f"全片统一解说字幕卡 {uniform_blueprint}"
         try:
             blueprint_html, _hf = render_caption_blueprint(
-                _UNIFORM_CAPTION_BLUEPRINT,
+                uniform_blueprint,
                 creation.text,
-                palette=_THEME_BLUEPRINT_PALETTES.get(theme),
+                palette=(
+                    content_type_palette(content_type)
+                    or _THEME_BLUEPRINT_PALETTES.get(theme)
+                ),
                 intensity=_UNIFORM_CAPTION_INTENSITY,
                 box_height=location.height,
             )

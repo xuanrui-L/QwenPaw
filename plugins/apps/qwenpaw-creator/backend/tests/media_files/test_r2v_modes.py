@@ -321,6 +321,116 @@ def _register_tts_audio(services: CreatorFileServices, monkeypatch) -> str:
     return result.source_asset_version_id
 
 
+def test_tts_semantic_retry_reuses_audio_across_new_idempotency_key(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A stale agent retry must not make a second billable TTS request."""
+
+    from models import tts_model
+    from services.media_files.audio_execution import execute_file_tts_command
+
+    services = _services(tmp_path, monkeypatch)
+    syntheses = 0
+
+    async def fake_synthesize(text, **_kwargs):
+        nonlocal syntheses
+        syntheses += 1
+        return tts_model.TTSSynthesis(
+            audio_bytes=b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 2048,
+            media_type="audio/wav",
+            model="qwen3-tts-flash",
+            voice="Cherry",
+            characters=len(text),
+        )
+
+    monkeypatch.setattr(tts_model, "synthesize", fake_synthesize)
+    arguments = {"text": "雨再大，也别让善意错过末班车。"}
+    first = asyncio.run(
+        execute_file_tts_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"element:{ELEMENT_ID}",
+            arguments=arguments,
+            idempotency_key="tts-first-planning-turn",
+        ),
+    )
+    second = asyncio.run(
+        execute_file_tts_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"element:{ELEMENT_ID}",
+            arguments=arguments,
+            idempotency_key="tts-stale-planning-turn",
+        ),
+    )
+
+    assert syntheses == 1
+    assert second.replayed is True
+    assert second.source_asset_version_id == first.source_asset_version_id
+    assert second.project_generation == first.project_generation
+
+
+@pytest.mark.parametrize(
+    "second_arguments",
+    (
+        {"text": "这是另一段旁白。"},
+        {"text": "雨再大，也别让善意错过末班车。", "voice": "Serena"},
+        {"text": "雨再大，也别让善意错过末班车。", "speechRate": 1.25},
+    ),
+)
+def test_tts_semantic_retry_does_not_reuse_a_different_request(
+    tmp_path,
+    monkeypatch,
+    second_arguments,
+) -> None:
+    """Text, voice and rate all belong to the paid synthesis identity."""
+
+    from models import tts_model
+    from services.media_files.audio_execution import execute_file_tts_command
+
+    services = _services(tmp_path, monkeypatch)
+    syntheses = 0
+
+    async def fake_synthesize(text, **kwargs):
+        nonlocal syntheses
+        syntheses += 1
+        return tts_model.TTSSynthesis(
+            audio_bytes=(
+                b"RIFF\x00\x00\x00\x00WAVE" + bytes([syntheses]) * 2048
+            ),
+            media_type="audio/wav",
+            model="qwen3-tts-flash",
+            voice=kwargs.get("voice") or "Cherry",
+            characters=len(text),
+        )
+
+    monkeypatch.setattr(tts_model, "synthesize", fake_synthesize)
+    first_arguments = {"text": "雨再大，也别让善意错过末班车。"}
+    first = asyncio.run(
+        execute_file_tts_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"element:{ELEMENT_ID}",
+            arguments=first_arguments,
+            idempotency_key="tts-distinct-first",
+        ),
+    )
+    second = asyncio.run(
+        execute_file_tts_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"element:{ELEMENT_ID}",
+            arguments=second_arguments,
+            idempotency_key="tts-distinct-second",
+        ),
+    )
+
+    assert syntheses == 2
+    assert second.replayed is False
+    assert second.source_asset_version_id != first.source_asset_version_id
+
+
 def test_s2v_dispatch_consumes_tts_audio_and_character_image(
     tmp_path,
     monkeypatch,

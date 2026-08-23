@@ -24,7 +24,14 @@ from services.media_files.local_execution import (
     FfmpegLocalMediaRunner,
     LocalMediaExecutionSpec,
     LocalMediaInput,
+    _motion_document_matches_text,
 )
+
+
+def test_motion_copy_match_uses_browser_visible_html_entities() -> None:
+    html = "<div><b>GitHub</b><i>&nbsp;</i><b>新手</b></div>"
+    assert _motion_document_matches_text(html, "GitHub 新手")
+    assert not _motion_document_matches_text(html, "GitHub 高手")
 
 
 def _candidate(ticks_per_second: int = 1000) -> dict:
