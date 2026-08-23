@@ -375,6 +375,32 @@ class _ModelCodeValidator(ast.NodeVisitor):
 
     visit_ImportFrom = visit_Import
 
+    def _reject_definition(self, kind: str) -> None:
+        raise LiveOperationError(
+            f"{kind} definitions are unavailable in live-operation code; "
+            "use top-level await and bounded control flow with the provided "
+            "Browser, desktop, and recorder objects",
+        )
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        del node
+        self._reject_definition("function")
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self,
+        node: ast.AsyncFunctionDef,
+    ) -> None:
+        del node
+        self._reject_definition("async function")
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        del node
+        self._reject_definition("lambda")
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        del node
+        self._reject_definition("class")
+
     def visit_While(self, node: ast.While) -> None:  # noqa: N802
         del node
         raise LiveOperationError(

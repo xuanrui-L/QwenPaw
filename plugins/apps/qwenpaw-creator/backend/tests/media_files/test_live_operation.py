@@ -825,6 +825,23 @@ def test_model_code_rejects_non_cooperative_while_loops():
         _compile("while True:\n    pass")
 
 
+@pytest.mark.parametrize(
+    "code",
+    (
+        "def recurse():\n    return recurse()\nrecurse()",
+        "async def recurse():\n    return await recurse()\nawait recurse()",
+        "recurse = lambda: recurse()\nrecurse()",
+        "class Recurse:\n    pass",
+    ),
+)
+def test_model_code_rejects_recursive_definition_surfaces(code: str):
+    with pytest.raises(
+        LiveOperationError,
+        match="definitions are unavailable",
+    ):
+        _compile(code)
+
+
 def test_model_code_bounds_range_before_it_can_block_the_event_loop():
     from services.media_files.live_operation.bridge import _execute
 
