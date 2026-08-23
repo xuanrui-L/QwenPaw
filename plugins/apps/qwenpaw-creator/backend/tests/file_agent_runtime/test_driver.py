@@ -24,6 +24,7 @@ from services.file_agent_runtime import (
 )
 from services.file_agent_runtime.driver import (
     _ToolArgumentProgressReporter,
+    _live_operation_editing_context,
     _require_actionable_takes,
     _specialist_tool_recovery,
     _tool_call_transport_metadata,
@@ -37,7 +38,11 @@ from services.media_files.live_operation import (
 from services.media_files.live_operation import RecordedTake, TakeManifest
 from services.observability import read_trace_records
 from services.project_files.facade import CreatorFileServices
-from services.project_files.models import Project, VisualEntity
+from services.project_files.models import (
+    Project,
+    SourceAssetVersion,
+    VisualEntity,
+)
 from services.project_files.review import ReviewDecisionItem
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
 from services.runtime_files.models import (
@@ -247,9 +252,9 @@ def _create_project(tmp_path, *, initial_goal: str | None):
             conversation_id=CONVERSATION_ID,
             initial_goal=initial_goal,
             goal_id=GOAL_ID if initial_goal is not None else None,
-            initial_message_id="message-initial"
-            if initial_goal is not None
-            else None,
+            initial_message_id=(
+                "message-initial" if initial_goal is not None else None
+            ),
             initial_client_message_id=(
                 "client-initial" if initial_goal is not None else None
             ),
@@ -269,6 +274,73 @@ def _create_project(tmp_path, *, initial_goal: str | None):
     )
     services.poller.note_commit(snapshot)
     return services, snapshot
+
+
+def test_live_operation_context_gives_edit_director_verified_action_facts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    project = Project.new(project_id=PROJECT_ID, name="Tutorial")
+    version = SourceAssetVersion(
+        version_id="asset-version-live-1",
+        logical_asset_id="asset-live-1",
+        name="搜索仓库",
+        file_id="file-live-1",
+        checksum="0" * 64,
+        media_kind="video",
+        media_type="video/mp4",
+        duration_seconds=4.2,
+        created_at=project.created_at,
+        metadata={
+            "sourceKind": "live_operation_take",
+            "manifestFileId": "file-manifest-1",
+        },
+    )
+    project.assets.source_versions_by_id[version.version_id] = version
+    monkeypatch.setattr(
+        driver_module,
+        "read_take_manifest",
+        lambda *_args, **_kwargs: {
+            "video": {"duration_ms": 4200},
+            "facts": [
+                {
+                    "op": "click",
+                    "t_start_ms": 1000,
+                    "t_end_ms": 1200,
+                    "target": 'get_by_role("button", name="Search")',
+                    "location": {
+                        "x": 0.5,
+                        "y": 0.2,
+                        "width": 0.3,
+                        "height": 0.08,
+                    },
+                },
+            ],
+        },
+    )
+
+    context = _live_operation_editing_context(project, tmp_path)
+
+    assert context is not None
+    assert context["schema"] == "creator.live_operation.editing_context"
+    assert context["sourceTakeCount"] == 1
+    take = context["takes"][0]
+    assert take["sourceAssetVersionId"] == version.version_id
+    assert take["durationMs"] == 4200
+    assert take["facts"] == [
+        {
+            "op": "click",
+            "tStartMs": 1000,
+            "tEndMs": 1200,
+            "target": 'get_by_role("button", name="Search")',
+            "sourceLocation": {
+                "x": 0.5,
+                "y": 0.2,
+                "width": 0.3,
+                "height": 0.08,
+            },
+        },
+    ]
 
 
 def test_repeated_live_operations_in_one_request_use_unique_transactions(
@@ -847,9 +919,7 @@ def test_malformed_jq_project_arguments_recover_with_a_fresh_small_call(
     assert session.error is None
     assert turn == 5
     checks = [
-        event
-        for event in events
-        if event.event_type == "agent.tool_arguments_checked"
+        event for event in events if event.event_type == "agent.tool_arguments_checked"
     ]
     assert len(checks) == 2
     assert checks[0].payload["rawArgumentsBytes"] == 18_522
@@ -864,9 +934,7 @@ def test_malformed_jq_project_arguments_recover_with_a_fresh_small_call(
         if message.role == "tool"
         and message.metadata.get("toolCallId") == "malformed-write"
     ]
-    assert (
-        malformed_results[0]["error"]["type"] == "MalformedJqProjectArguments"
-    )
+    assert malformed_results[0]["error"]["type"] == "MalformedJqProjectArguments"
 
 
 @pytest.mark.parametrize(
@@ -1062,9 +1130,7 @@ def test_initial_creation_runs_auto_fix_tool_loop_without_review(
     assert assistant_turns[0].source == "creator_agent"
     assert assistant_turns[0].metadata["actionId"] == "read-1"
     persisted_tool_call = assistant_turns[0].metadata["toolCall"]
-    assert {
-        key: persisted_tool_call[key] for key in ("id", "name", "arguments")
-    } == {
+    assert {key: persisted_tool_call[key] for key in ("id", "name", "arguments")} == {
         "id": "read-1",
         "name": "read_project",
         "arguments": {"projectId": PROJECT_ID},
@@ -1121,9 +1187,7 @@ def test_creator_agent_can_call_ground_prompt_context_tool(
 
     async def callback(messages, tools):
         nonlocal turn
-        assert "ground_prompt_context" in {
-            item["function"]["name"] for item in tools
-        }
+        assert "ground_prompt_context" in {item["function"]["name"] for item in tools}
         turn += 1
         if turn == 1:
             return _tool_turn(
@@ -1215,9 +1279,7 @@ def test_object_grounding_generated_url_is_scoped_to_current_project(
     )
     current_image.parent.mkdir(parents=True)
     current_image.write_bytes(image_bytes)
-    current_url = (
-        f"/generated/projects/{PROJECT_ID}/task-work/request-1/input.png"
-    )
+    current_url = f"/generated/projects/{PROJECT_ID}/task-work/request-1/input.png"
 
     def resolve(image_ref):
         return asyncio.run(
@@ -1265,9 +1327,7 @@ def test_stream_persistence_failure_is_not_reported_as_a_model_failure(
     assert session.error is not None
     assert session.error["code"] == "STREAM_PERSISTENCE_FAILED"
     assert session.error["retryable"] is True
-    failed = [
-        event for event in events if event.event_type == "agent.run.failed"
-    ]
+    failed = [event for event in events if event.event_type == "agent.run.failed"]
     assert failed[-1].payload["error"]["code"] == "STREAM_PERSISTENCE_FAILED"
 
 
@@ -1533,9 +1593,7 @@ def test_specialist_cancel_emits_terminal_event(
     )
 
     assert interrupted is True
-    assert (
-        cancel_entered.is_set()
-    ), "CancelledError never reached the specialist"
+    assert cancel_entered.is_set(), "CancelledError never reached the specialist"
     assert len(specialist_runs) == 1
     assert specialist_runs[0].status.value == "CANCELLED"
     terminal = [
@@ -1910,9 +1968,7 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
         "这不算重新生成已通过产物。"
     )
     assert specialist.final_summary_text == waiting_summary
-    blocked = [
-        item for item in events if item.event_type == "subagent.blocked"
-    ]
+    blocked = [item for item in events if item.event_type == "subagent.blocked"]
     assert len(blocked) == 1
     assert blocked[0].payload["waitingReview"] is True
     assert blocked[0].payload["reviewId"] == "review-ep22-storyboard"

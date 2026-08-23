@@ -8,6 +8,7 @@ import pytest
 
 from domain.errors import ValidationError
 from services.media_files.motion_blueprints import (
+    CAPTION_BLUEPRINTS,
     CAPTION_BLUEPRINT_ORDER,
     DECORATION_BLUEPRINTS,
     FRAME_BLUEPRINTS,
@@ -58,6 +59,28 @@ class TestBlueprintRendering:
             if extra_snippet is not None:
                 assert extra_snippet in html
 
+    @pytest.mark.parametrize(
+        ("names", "render"),
+        [
+            (
+                CAPTION_BLUEPRINTS,
+                lambda name: render_caption_blueprint(name, "测试 字幕"),
+            ),
+            (DECORATION_BLUEPRINTS, render_decoration_blueprint),
+            (FRAME_BLUEPRINTS, render_frame_blueprint),
+        ],
+        ids=["caption", "decoration", "frame"],
+    )
+    def test_every_blueprint_resolves_python_template_braces(
+        self,
+        names,
+        render,
+    ) -> None:
+        for name in names:
+            html, _duration = render(name)
+            assert "{{" not in html, name
+            assert "}}" not in html, name
+
     def test_unknown_blueprint_rejected(self) -> None:
         with pytest.raises(ValueError, match="unknown caption blueprint"):
             render_caption_blueprint("nope", "文字")
@@ -68,6 +91,11 @@ class TestBlueprintRendering:
         html, _ = render_caption_blueprint("ink_reveal", "<b>标签&文字</b>")
         assert "<b>标签" not in html
         assert "&lt;b&gt;" in html
+
+    def test_drama_whisper_keeps_the_first_frame_partly_visible(self) -> None:
+        html, _ = render_caption_blueprint("drama_whisper", "雨还没有停")
+        assert "'.ch',{autoAlpha:.25" in html
+        assert "'.ch',{autoAlpha:0" not in html
 
     def test_frame_window_clamps_to_keep_real_borders(self) -> None:
         window = validated_frame_window(

@@ -173,6 +173,17 @@ def build_review_user_text(
             for dimension in ReviewDimension
         ),
     ]
+    if plan_context.get("live_operation_tutorial"):
+        sections.append(
+            "【真实操作教程专项验收】\n"
+            "- 关键步骤必须出现可辨识的真实动作与结果态，不能只有旁白、标题或静态页面。\n"
+            "- 动作前有总览定位，动作时有同步聚焦，动作后保留足够时间证明结果；"
+            "连续长录屏、无焦点滚动或没有结果证明属于节奏/概念缺陷。\n"
+            "- 标注、字幕和装饰不得覆盖被点击、输入或需要阅读的目标；"
+            "同一时刻只保留一个主焦点，字幕样式应全片统一。\n"
+            "- 聚焦裁切必须保持满画布、无意外黑边；章节变化清楚，开场先给具体收益，"
+            "结尾给出明确收束而不是原始录屏硬停。"
+        )
     return "\n\n".join(sections)
 
 
@@ -248,9 +259,7 @@ def parse_review_report(
     concept = next(
         item for item in findings if item.dimension is ReviewDimension.CONCEPT
     )
-    concept_veto = (
-        concept.score is not None and concept.score <= CONCEPT_WEAK_THRESHOLD
-    )
+    concept_veto = concept.score is not None and concept.score <= CONCEPT_WEAK_THRESHOLD
     if concept_veto and concept.passed:
         # Upstream veto rule: "execution polish cannot rescue an empty
         # concept" — normalize the row so the feedback loop sees it.
@@ -297,9 +306,7 @@ def findings_feedback_payload(report: RenderReviewReport) -> dict[str, Any]:
         "round": report.round,
         "max_rounds": MAX_REVIEW_ROUNDS,
         "verdict": report.verdict,
-        "findings": [
-            item.model_dump(mode="json") for item in report.failed_findings()
-        ],
+        "findings": [item.model_dump(mode="json") for item in report.failed_findings()],
     }
 
 

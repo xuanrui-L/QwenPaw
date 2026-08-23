@@ -73,11 +73,7 @@ _VOICEOVER_ROLES = frozenset({"voiceover", "narration", "dialogue"})
 
 
 def _reports_root(services: "CreatorFileServices", project_id: str) -> Path:
-    return (
-        services.projects.project_root(project_id)
-        / "runtime"
-        / "render-review"
-    )
+    return services.projects.project_root(project_id) / "runtime" / "render-review"
 
 
 def _chain_path(reports_root: Path, target_ref: str) -> Path:
@@ -169,9 +165,7 @@ def _admit_round(
     chain_path = _chain_path(reports_root, target_ref)
     with _chain_lock(reports_root, target_ref):
         state = _read_json(chain_path) or {}
-        reviewed = [
-            str(item) for item in state.get("reviewed_video_ids") or []
-        ]
+        reviewed = [str(item) for item in state.get("reviewed_video_ids") or []]
         if video_id in reviewed or video_id == str(
             state.get("last_video_id") or "",
         ):
@@ -187,9 +181,7 @@ def _admit_round(
             rounds_completed = int(state.get("rounds_completed") or 0)
             if rounds_completed >= MAX_REVIEW_ROUNDS:
                 return None
-            chain_id = (
-                str(state.get("chain_id") or "") or f"chain-{uuid4().hex[:12]}"
-            )
+            chain_id = str(state.get("chain_id") or "") or f"chain-{uuid4().hex[:12]}"
             round_number = rounds_completed + 1
         else:
             # Absent or closed chain: a fresh composition starts a new chain
@@ -301,23 +293,16 @@ def _finalize_round(
         state = _read_json(chain_path) or {}
         claim = state.get("claim") or {}
         now = datetime.now(UTC).isoformat()
-        reviewed = [
-            str(item) for item in state.get("reviewed_video_ids") or []
-        ]
+        reviewed = [str(item) for item in state.get("reviewed_video_ids") or []]
         if video_id not in reviewed:
             reviewed.append(video_id)
         reviewed = reviewed[-_REVIEWED_HISTORY_LIMIT:]
-        if (
-            claim.get("video_id") != video_id
-            or str(claim.get("owner") or "") != owner
-        ):
+        if claim.get("video_id") != video_id or str(claim.get("owner") or "") != owner:
             state["reviewed_video_ids"] = reviewed
             state["updated_at"] = now
             _write_json(chain_path, state)
             return "superseded", False
-        needs_feedback = (
-            report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS
-        )
+        needs_feedback = report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS
         outcome = "completed"
         feedback_sent = False
         if needs_feedback:
@@ -351,9 +336,7 @@ def _finalize_round(
                         report=report,
                         target_ref=target_ref,
                         chain_id=chain_id,
-                        freshness_guard=(
-                            lambda: _resolve_selected() == video_id
-                        ),
+                        freshness_guard=(lambda: _resolve_selected() == video_id),
                     )
                 except RequestAdmissionConflict:
                     # A concurrent compose switched the selected render
@@ -446,6 +429,7 @@ def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
     timeline = timelines.get(stripped) or timelines.get(target_ref)
     expects_voiceover = False
     expects_subtitles = False
+    live_operation_versions: set[str] = set()
     if timeline is not None:
         edit_plan = getattr(timeline, "edit_plan", None)
         if edit_plan is not None:
@@ -464,12 +448,27 @@ def derive_plan_context(project: Any, target_ref: str) -> dict[str, Any]:
                 if _is_voiceover_audio(project, creation):
                     expects_voiceover = True
             elif kind == "overlay":
-                overlay_kind = getattr(creation, "overlay_kind", "")
                 text = str(getattr(creation, "text", "") or "").strip()
-                if overlay_kind in ("pet_os", "interview_summary") and text:
+                if text:
                     expects_subtitles = True
+            render_source = getattr(element, "render_source", None)
+            version_id = str(getattr(render_source, "version_id", "") or "")
+            if not version_id:
+                continue
+            sources = getattr(
+                getattr(project, "assets", None),
+                "source_versions_by_id",
+                None,
+            )
+            version = (sources or {}).get(version_id)
+            metadata = getattr(version, "metadata", None) or {}
+            if str(metadata.get("sourceKind") or "") == "live_operation_take":
+                live_operation_versions.add(version_id)
     context["expects_voiceover"] = expects_voiceover
     context["expects_subtitles"] = expects_subtitles
+    if live_operation_versions:
+        context["live_operation_tutorial"] = True
+        context["live_operation_take_count"] = len(live_operation_versions)
     return context
 
 
@@ -854,9 +853,7 @@ def schedule_render_review(
 
         if not is_self_review_enabled():
             return
-        if str(published_result.get("commandType") or "") != (
-            "COMPOSE_FINAL_VIDEO"
-        ):
+        if str(published_result.get("commandType") or "") != ("COMPOSE_FINAL_VIDEO"):
             return
         indexed = published_result.get("indexedFile")
         artifact = published_result.get("artifactVersion")

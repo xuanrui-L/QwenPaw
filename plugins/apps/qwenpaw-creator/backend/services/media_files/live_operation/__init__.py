@@ -34,6 +34,7 @@ from .manifest import (
     Viewport,
     facts_within,
     normalized_location,
+    project_location_to_canvas,
 )
 from .recorder import RecordedTake, RecorderError, TakeRecorder
 from .session import LiveBrowserSession, LiveSessionError
@@ -60,6 +61,7 @@ __all__ = [
     "facts_within",
     "ffmpeg_available",
     "normalized_location",
+    "project_location_to_canvas",
     "read_take_manifest",
     "run_browser_code",
     "run_computer_use_code",

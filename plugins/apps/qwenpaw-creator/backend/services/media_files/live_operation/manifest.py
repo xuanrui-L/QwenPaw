@@ -107,6 +107,97 @@ def normalized_location(
     }
 
 
+def project_location_to_canvas(
+    location: Mapping[str, Any],
+    placement: Mapping[str, Any] | None,
+) -> dict[str, float] | None:
+    """Project a source-frame box through an Edit Element placement.
+
+    Action manifests describe positions in the *source video*.  Once an Edit
+    zooms, crops, or moves that video, those coordinates are no longer canvas
+    coordinates.  This function applies the same axis-aligned placement model
+    as the renderer, intersects the result with the visible canvas, and gives
+    motion design the box that is actually on screen.
+
+    Rotated placements deliberately return ``None``: projecting an
+    axis-aligned source box through rotation would need a polygon, and a fake
+    rectangle is worse than falling back to frame observation.
+    """
+
+    def _number(
+        source: Mapping[str, Any],
+        key: str,
+        default: float,
+    ) -> float | None:
+        try:
+            value = float(source.get(key, default))
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    source_x = _number(location, "x", 0.5)
+    source_y = _number(location, "y", 0.5)
+    source_width = _number(location, "width", 0.0)
+    source_height = _number(location, "height", 0.0)
+    if (
+        source_x is None
+        or source_y is None
+        or source_width is None
+        or source_height is None
+        or source_width <= 0
+        or source_height <= 0
+    ):
+        return None
+
+    canvas_placement = placement or {}
+    placed_x = _number(canvas_placement, "x", 0.5)
+    placed_y = _number(canvas_placement, "y", 0.5)
+    placed_width = _number(canvas_placement, "width", 1.0)
+    placed_height = _number(canvas_placement, "height", 1.0)
+    anchor_x = _number(canvas_placement, "anchor_x", 0.5)
+    anchor_y = _number(canvas_placement, "anchor_y", 0.5)
+    rotation = _number(canvas_placement, "rotation_degrees", 0.0)
+    if (
+        placed_x is None
+        or placed_y is None
+        or placed_width is None
+        or placed_height is None
+        or anchor_x is None
+        or anchor_y is None
+        or rotation is None
+        or placed_width <= 0
+        or placed_height <= 0
+        or anchor_x < 0
+        or anchor_x > 1
+        or anchor_y < 0
+        or anchor_y > 1
+        or abs(rotation) > 1e-6
+    ):
+        return None
+
+    placement_left = placed_x - anchor_x * placed_width
+    placement_top = placed_y - anchor_y * placed_height
+    source_left = source_x - source_width / 2
+    source_top = source_y - source_height / 2
+    left = placement_left + source_left * placed_width
+    top = placement_top + source_top * placed_height
+    right = left + source_width * placed_width
+    bottom = top + source_height * placed_height
+
+    visible_left = max(0.0, left)
+    visible_top = max(0.0, top)
+    visible_right = min(1.0, right)
+    visible_bottom = min(1.0, bottom)
+    if visible_right <= visible_left or visible_bottom <= visible_top:
+        return None
+    return {
+        "x": round((visible_left + visible_right) / 2, 5),
+        "y": round((visible_top + visible_bottom) / 2, 5),
+        "width": round(visible_right - visible_left, 5),
+        "height": round(visible_bottom - visible_top, 5),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ActionFact:
     """One recorded operation with its position and instant in the take."""
@@ -253,4 +344,5 @@ __all__ = [
     "Viewport",
     "facts_within",
     "normalized_location",
+    "project_location_to_canvas",
 ]

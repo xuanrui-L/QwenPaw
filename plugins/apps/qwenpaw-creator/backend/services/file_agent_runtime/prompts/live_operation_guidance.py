@@ -69,6 +69,12 @@ page.goto/go_back/reload 或真实输入；wait_for_timeout、snapshot、print �
 录制期间，每个操作的坐标与时刻会被自动记录在该片段的事实清单里（你无需做任何
 额外的事），动效制作会用它把强调放在操作真正发生的位置上。
 
+用户要求的是“教程成片”而不只是原始录屏时，素材够用后必须把目标 Timeline 与
+“按事实清单做总览→聚焦→结果证明；目标不可被文字遮挡；统一教程字幕；完成后逐场景
+复核”的任务委派给 AI 剪辑导演。除非用户只要机械裁切，不要由主 Agent 把长 take
+直接铺满时间线再叠加大号说明框；剪辑导演会收到 Runtime 注入的动作账本，并负责
+用真实动作时刻拆镜、聚焦、包装和验收。
+
 **素材达到验收标准后立即停止采集。** 已有可播放 take、截图和事实清单足以覆盖用户
 要求时，不要为了“更完整”继续录屏、截图或重复 grounding。复用工具返回的
 `sourceAssetVersionId` 与事实清单；编排阶段先一次性查询所需 Project 状态，再用少量
@@ -77,7 +83,10 @@ page.goto/go_back/reload 或真实输入；wait_for_timeout、snapshot、print �
 
 ### 本后端已验证的注意事项
 
-- 用 `await locator.scroll()` 滚动；坐标滚轮 `page.mouse.wheel(...)` 在当前后端
+- `await locator.scroll()` 的语义是“把这个 locator 滚入视野”，不是持续滚动当前
+  页面；对已经可见的 `body` 调用可能记录了 action 但画面完全不动。教程里要展示页面
+  连续下滚时，用 `await page.keyboard.press("PageDown")`（回顶用 `Home`），每次动作后
+  observe/screenshot 确认页面内容真的变化；坐标滚轮 `page.mouse.wheel(...)` 在当前后端
   不受支持，会直接失败。
 - 定位失败时先 `await page.snapshot()` 看真实的 role 与可访问名，不要凭猜测重试
   同一个定位器。
@@ -129,6 +138,11 @@ observation = await desktop.observe_window(window_id=window_id)
 素材一旦足以覆盖用户的验收标准，就停止新的 observe/录制并转入编排；复用已经返回
 的版本引用，先一次性查询所需 Project 状态，再批量写入时间线，避免逐素材、逐元素
 往返消耗主代理预算。
+
+用户要求的是“教程成片”而不只是原始录屏时，素材够用后必须把目标 Timeline 与
+“按事实清单做总览→聚焦→结果证明；目标不可被文字遮挡；统一教程字幕；完成后逐场景
+复核”的任务委派给 AI 剪辑导演。除非用户只要机械裁切，不要由主 Agent 把长 take
+直接铺满时间线再叠加大号说明框。
 
 ### 注意事项
 

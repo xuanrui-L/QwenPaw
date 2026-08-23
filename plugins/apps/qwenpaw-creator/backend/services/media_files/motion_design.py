@@ -43,6 +43,7 @@ from services.media_files.keyframe_cache import (
 )
 from services.media_files.live_operation import (
     facts_within,
+    project_location_to_canvas,
     read_take_manifest,
 )
 from services.media_files.motion_blueprints import (
@@ -447,9 +448,7 @@ def _validated_location(raw: Any) -> ElementLocation:
         "rotation_degrees",
         "opacity",
     }
-    payload = {
-        key: value for key, value in dict(raw).items() if key in allowed
-    }
+    payload = {key: value for key, value in dict(raw).items() if key in allowed}
     location = ElementLocation.model_validate(payload)
     if not 0.01 <= location.width <= 1.0 or not 0.01 <= location.height <= 1.0:
         raise ValidationError("动效盒子必须在画布尺寸的 1% 到 100% 之间")
@@ -784,9 +783,7 @@ def _validated_design(
                 "若做逐字动画，每个字用独立元素包裹，字符本身原样保留）",
             )
         cleaned = (
-            visible_core.replace(wanted_core, "", 1)
-            if wanted_core
-            else visible_core
+            visible_core.replace(wanted_core, "", 1) if wanted_core else visible_core
         )
         if len(cleaned) > 6:
             raise ValidationError(
@@ -822,9 +819,7 @@ def _validated_design(
         motif=(
             f"blueprint:{blueprint}"
             if uses_blueprint and required_text is None
-            else motif
-            if required_text is None
-            else "caption_card"
+            else motif if required_text is None else "caption_card"
         ),
         template_version=MOTION_TEMPLATE_VERSION if uses_template else None,
         theme=theme,
@@ -935,8 +930,14 @@ def _live_operation_facts(
         return []
     lines = [
         "本片段来自真实操作录屏，以下是这段时间内真实发生的操作事实"
-        "（location 为归一化画布坐标，可直接用作 location 的 x/y/width/height）：",
+        "（location 已穿过当前 Edit 的缩放/裁切/位移，表示最终成片中的"
+        "归一化画布坐标，可直接用作 location 的 x/y/width/height）：",
     ]
+    placement = (
+        element.location.model_dump(mode="json")
+        if element.location is not None
+        else None
+    )
     for fact in facts:
         offset = float(fact.get("clip_offset_ms", 0)) / 1000
         target = str(fact.get("target") or "").strip()
@@ -945,11 +946,17 @@ def _live_operation_facts(
             detail += f" → {target}"
         location = fact.get("location")
         if isinstance(location, Mapping):
-            detail += (
-                " location="
-                f"x={location.get('x')}, y={location.get('y')}, "
-                f"width={location.get('width')}, height={location.get('height')}"
-            )
+            canvas_location = project_location_to_canvas(location, placement)
+            if canvas_location is not None:
+                detail += (
+                    " location="
+                    f"x={canvas_location.get('x')}, "
+                    f"y={canvas_location.get('y')}, "
+                    f"width={canvas_location.get('width')}, "
+                    f"height={canvas_location.get('height')}"
+                )
+            else:
+                detail += "（目标在当前裁切中不可见或画面有旋转，无可靠坐标）"
         else:
             detail += "（无坐标）"
         if fact.get("failed"):
@@ -1115,8 +1122,7 @@ async def _design_document(
     """Design one document with bounded retries; returns design or skip reason."""
 
     base_content: list[dict[str, Any]] = [
-        multimodal_media_part(path.resolve().as_uri(), "image")
-        for path in frame_paths
+        multimodal_media_part(path.resolve().as_uri(), "image") for path in frame_paths
     ]
     feedback = ""
     last_error = "动效设计失败"
@@ -1147,14 +1153,16 @@ async def _design_document(
             )
         except ValidationError as exc:
             last_error = str(exc)
-            feedback = f"\n上一次输出被拒绝，原因：{last_error}。" "请修正后重新只输出一个 JSON 对象。"
+            feedback = (
+                f"\n上一次输出被拒绝，原因：{last_error}。"
+                "请修正后重新只输出一个 JSON 对象。"
+            )
             continue
         if isinstance(design, str):
             return design
         motion, location, concept = design
         if any(
-            _locations_overlap(location, forbidden)
-            for forbidden in forbidden_locations
+            _locations_overlap(location, forbidden) for forbidden in forbidden_locations
         ):
             last_error = "装饰动效位置与同一时段的猫咪 OS/字幕卡重叠"
             feedback = (
@@ -1211,7 +1219,9 @@ async def _design_document(
             else min_coverage
         )
         if 0.0 <= probe.visible_coverage < effective_min_coverage:
-            last_error = f"卡片内容只覆盖盒子面积的 {probe.visible_coverage:.0%}，太小了"
+            last_error = (
+                f"卡片内容只覆盖盒子面积的 {probe.visible_coverage:.0%}，太小了"
+            )
             feedback = (
                 f"\n上一次输出被拒绝，原因：{last_error}。"
                 "html 视口本身就是这张卡片，卡片主体必须撑满视口"
@@ -1220,7 +1230,10 @@ async def _design_document(
             )
             continue
         if probe.edge_contact > max_edge_contact:
-            last_error = f"卡片内容溢出了视口边缘被裁掉" f"（边缘接触率 {probe.edge_contact:.0%}）"
+            last_error = (
+                f"卡片内容溢出了视口边缘被裁掉"
+                f"（边缘接触率 {probe.edge_contact:.0%}）"
+            )
             feedback = (
                 f"\n上一次输出被拒绝，原因：{last_error}。"
                 "整句台词和卡片装饰必须完整落在视口内、四周留出边距："
@@ -1293,17 +1306,13 @@ async def _select_decoration_ids(
         )
         raw = _parse_design_json(answer).get("selected")
         if isinstance(raw, list):
-            picked = [
-                item for item in raw if isinstance(item, str) and item in known
-            ]
+            picked = [item for item in raw if isinstance(item, str) and item in known]
             return set(picked[:budget])
     except Exception:  # pragma: no cover - selection falls back below
         pass
     step = len(edit_elements) / budget
     return {
-        edit_elements[
-            min(len(edit_elements) - 1, round(index * step))
-        ].element_id
+        edit_elements[min(len(edit_elements) - 1, round(index * step))].element_id
         for index in range(budget)
     }
 
@@ -1617,9 +1626,7 @@ def _is_keyword_overlay(element: TimelineElement) -> bool:
         return False
     if _is_frame_overlay(element):
         return False
-    wording = (
-        f"{element.element_id} {element.label or ''} {creation.prompt or ''}"
-    )
+    wording = f"{element.element_id} {element.label or ''} {creation.prompt or ''}"
     return any(marker in wording for marker in ("关键词", "大字", "keyword"))
 
 
@@ -1813,7 +1820,8 @@ async def design_motion_overlays(
                     answer = await vlm_model.chat_completion(
                         [{"type": "text", "text": task_text}],
                         system_prompt=(
-                            "你是数学教学视频的内容编辑，只输出一个 JSON 对象，" "不输出任何其他文字。"
+                            "你是数学教学视频的内容编辑，只输出一个 JSON 对象，"
+                            "不输出任何其他文字。"
                         ),
                         temperature=0.3,
                         max_tokens=800,
@@ -1825,7 +1833,9 @@ async def design_motion_overlays(
                     )
                 except (ValidationError, ValueError) as exc:
                     last_error = str(exc)
-                    task_text += f"\n上一次输出被拒绝：{last_error}。请修正后重新只输出 JSON。"
+                    task_text += (
+                        f"\n上一次输出被拒绝：{last_error}。请修正后重新只输出 JSON。"
+                    )
                     continue
                 except Exception as exc:  # noqa: BLE001 - model transport
                     return {**entry, "status": "failed", "error": str(exc)}
@@ -1861,9 +1871,7 @@ async def design_motion_overlays(
         creation = element.creation
         assert isinstance(creation, MotionClipCreation)
         entry = {"elementId": element.element_id}
-        segment_duration = (
-            element.span.duration_tick / timeline.ticks_per_second
-        )
+        segment_duration = element.span.duration_tick / timeline.ticks_per_second
         neighbour_concepts = [
             f"第 {index + 1} 段："
             f"{getattr(clip.creation, 'prompt', '') or getattr(clip.creation, 'intent', '')}"
@@ -1879,7 +1887,8 @@ async def design_motion_overlays(
             task_lines.append(f"整片创意 brief：{brief}")
         if neighbour_concepts:
             task_lines.append(
-                "其他片段的意图（保持风格连贯但画面各异）：" + "；".join(neighbour_concepts),
+                "其他片段的意图（保持风格连贯但画面各异）："
+                + "；".join(neighbour_concepts),
             )
         async with semaphore:
             try:
@@ -1922,9 +1931,7 @@ async def design_motion_overlays(
         reason = reason.replace("\r", "\\r").replace("\n", "\\n")
         creation = overlay.creation
         assert isinstance(creation, OverlayCreation)
-        emotion = (
-            creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
-        )
+        emotion = creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
         location = ElementLocation(
             x=0.50,
             y=0.88,
@@ -2035,9 +2042,7 @@ async def design_motion_overlays(
         # guard, never by the request filter.
         if _is_trusted_caption_motion(creation.motion):
             return {**entry, "status": "already_styled"}
-        emotion = (
-            creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
-        )
+        emotion = creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
         location = overlay.location or ElementLocation(
             x=0.50,
             y=0.88,
@@ -2141,8 +2146,7 @@ async def design_motion_overlays(
                         project_root,
                         source_path=source_path,
                         source_identity=identity,
-                        timestamp_seconds=window_start
-                        + span_seconds * fraction,
+                        timestamp_seconds=window_start + span_seconds * fraction,
                         width=_KEYFRAME_WIDTH,
                         ffmpeg_path=ffmpeg_path,
                     )
@@ -2266,9 +2270,7 @@ async def design_motion_overlays(
         edit_duration = max(1, edit.span.duration_tick)
         overlay_start = overlay.span.start_tick
         overlay_end = overlay_start + overlay.span.duration_tick
-        rel_start = (
-            max(overlay_start, edit_start) - edit_start
-        ) / edit_duration
+        rel_start = (max(overlay_start, edit_start) - edit_start) / edit_duration
         rel_end = (
             min(overlay_end, edit_start + edit.span.duration_tick) - edit_start
         ) / edit_duration
@@ -2280,9 +2282,7 @@ async def design_motion_overlays(
         )
         if isinstance(frames, dict):
             return {**entry, **frames}
-        duration_seconds = (
-            overlay.span.duration_tick / timeline.ticks_per_second
-        )
+        duration_seconds = overlay.span.duration_tick / timeline.ticks_per_second
         task_lines = [
             "请为下面的关键词效果自由设计一个动态花字。",
             f"创意意图：{creation.prompt}",
@@ -2380,9 +2380,7 @@ async def design_motion_overlays(
         edit_duration = max(1, edit.span.duration_tick)
         overlay_start = overlay.span.start_tick
         overlay_end = overlay_start + overlay.span.duration_tick
-        rel_start = (
-            max(overlay_start, edit_start) - edit_start
-        ) / edit_duration
+        rel_start = (max(overlay_start, edit_start) - edit_start) / edit_duration
         rel_end = (
             min(overlay_end, edit_start + edit.span.duration_tick) - edit_start
         ) / edit_duration
@@ -2400,9 +2398,7 @@ async def design_motion_overlays(
                 ),
                 card_index=card_index,
             )
-        duration_seconds = (
-            overlay.span.duration_tick / timeline.ticks_per_second
-        )
+        duration_seconds = overlay.span.duration_tick / timeline.ticks_per_second
         async with semaphore:
             try:
                 design = await _design_document(
@@ -2471,9 +2467,7 @@ async def design_motion_overlays(
         )
         if isinstance(frames, dict):
             return {**entry, **frames}
-        segment_duration = (
-            element.span.duration_tick / timeline.ticks_per_second
-        )
+        segment_duration = element.span.duration_tick / timeline.ticks_per_second
         element_end = element.span.start_tick + element.span.duration_tick
         avoid_locations: list[tuple[str, ElementLocation]] = []
         os_context: list[str] = []
@@ -2621,9 +2615,7 @@ async def design_motion_overlays(
             ),
         ),
     )
-    frame_results = [
-        style_frame_overlay(overlay) for overlay in frame_overlays
-    ]
+    frame_results = [style_frame_overlay(overlay) for overlay in frame_overlays]
     keyword_results = list(
         await asyncio.gather(
             *(style_keyword_overlay(overlay) for overlay in keyword_overlays),
@@ -2677,9 +2669,7 @@ async def design_motion_overlays(
         candidate = current.project.model_dump(mode="json")
         timelines = candidate["timelines"]["items"]
         timeline_key = (
-            timeline.timeline_id
-            if timeline.timeline_id in timelines
-            else target_ref
+            timeline.timeline_id if timeline.timeline_id in timelines else target_ref
         )
         elements = timelines[timeline_key]["elements_by_id"]
         for item in designed:
@@ -2758,9 +2748,7 @@ def _design_canvas_size(project: Project) -> tuple[int, int]:
         ratio = float(width_part) / float(height_part)
     except (AttributeError, TypeError, ValueError, ZeroDivisionError):
         ratio = 16 / 9
-    base = (
-        1080 if "1080" in str(project.settings.resolution).casefold() else 720
-    )
+    base = 1080 if "1080" in str(project.settings.resolution).casefold() else 720
     if ratio >= 1:
         height = base
         width = round(height * ratio)

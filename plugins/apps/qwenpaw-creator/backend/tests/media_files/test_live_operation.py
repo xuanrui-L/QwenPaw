@@ -22,6 +22,7 @@ from services.media_files.live_operation import (
     build_take_records,
     facts_within,
     normalized_location,
+    project_location_to_canvas,
 )
 from services.media_files.live_operation.bridge import (
     AgentRecorder,
@@ -50,9 +51,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_bounding_box_rejects_degenerate_rectangles():
-    assert (
-        BoundingBox.from_raw({"x": 1, "y": 2, "width": 0, "height": 5}) is None
-    )
+    assert BoundingBox.from_raw({"x": 1, "y": 2, "width": 0, "height": 5}) is None
     assert BoundingBox.from_raw({"x": 1, "y": 2, "width": 5}) is None
     assert BoundingBox.from_raw(None) is None
     assert (
@@ -97,14 +96,59 @@ def test_normalized_location_intersects_partially_visible_targets():
     )
 
 
+def test_action_location_projects_through_zoomed_edit_placement():
+    assert project_location_to_canvas(
+        {"x": 0.75, "y": 0.25, "width": 0.1, "height": 0.08},
+        {
+            "x": 0.35,
+            "y": 0.65,
+            "width": 1.5,
+            "height": 1.5,
+            "anchor_x": 0.5,
+            "anchor_y": 0.5,
+        },
+    ) == {"x": 0.725, "y": 0.275, "width": 0.15, "height": 0.12}
+
+
+def test_action_location_projects_through_inset_and_clips_to_canvas():
+    assert project_location_to_canvas(
+        {"x": 0.95, "y": 0.5, "width": 0.2, "height": 0.2},
+        {
+            "x": 0.5,
+            "y": 0.5,
+            "width": 0.8,
+            "height": 0.8,
+            "anchor_x": 0.5,
+            "anchor_y": 0.5,
+        },
+    ) == {"x": 0.86, "y": 0.5, "width": 0.16, "height": 0.16}
+    assert (
+        project_location_to_canvas(
+            {"x": 0.98, "y": 0.5, "width": 0.08, "height": 0.2},
+            {
+                "x": -0.6,
+                "y": 0.5,
+                "width": 1.0,
+                "height": 1.0,
+            },
+        )
+        is None
+    )
+
+
+def test_action_location_fails_closed_for_rotated_or_malformed_placement():
+    source = {"x": 0.5, "y": 0.5, "width": 0.2, "height": 0.2}
+    assert project_location_to_canvas(source, None) == source
+    assert project_location_to_canvas(source, {"rotation_degrees": 15}) is None
+    assert project_location_to_canvas({"x": "bad"}, None) is None
+
+
 def test_viewport_comes_from_screencast_metadata():
     viewport = _viewport_from_metadata(
         {"deviceWidth": 1280, "deviceHeight": 720, "pageScaleFactor": 1},
     )
     assert viewport == Viewport(1280.0, 720.0)
-    assert (
-        _viewport_from_metadata({"deviceWidth": 0, "deviceHeight": 0}) is None
-    )
+    assert _viewport_from_metadata({"deviceWidth": 0, "deviceHeight": 0}) is None
     assert _viewport_from_metadata(None) is None
 
 
@@ -210,8 +254,7 @@ def test_only_screen_changing_verbs_become_facts():
     assert _operation_name("locator_action", {"action": "click"}) == "click"
     assert _operation_name("navigate", {}) == "navigate"
     assert (
-        _operation_name("input", {"kind": "mouse", "action": "click"})
-        == "mouse_click"
+        _operation_name("input", {"kind": "mouse", "action": "click"}) == "mouse_click"
     )
     # Perception must stay free: reading a page is not an action.
     assert _operation_name("capture_tree", {}) is None
@@ -228,10 +271,7 @@ def test_spec_description_renders_the_locator_call():
         },
         {"method": "first", "args": [], "kwargs": []},
     ]
-    assert (
-        _spec_description(spec)
-        == 'get_by_role("button", name="Search").first()'
-    )
+    assert _spec_description(spec) == 'get_by_role("button", name="Search").first()'
 
 
 def test_spec_description_omits_unset_optional_arguments():
@@ -768,10 +808,7 @@ def test_model_code_bounds_range_before_it_can_block_the_event_loop():
     with pytest.raises(LiveOperationError, match="limited to 1000 items"):
         asyncio.run(_execute(_compile("list(range(1001))"), {}))
 
-    assert (
-        asyncio.run(_execute(_compile("result = list(range(1000))"), {}))
-        is None
-    )
+    assert asyncio.run(_execute(_compile("result = list(range(1000))"), {})) is None
 
 
 def test_model_print_is_captured_without_process_global_stdout():
@@ -828,6 +865,10 @@ def test_browser_guidance_stops_acquisition_once_acceptance_is_covered(
 
     assert "素材达到验收标准后立即停止采集" in guidance
     assert "批量 `patch_project`" in guidance
+    assert 'page.keyboard.press("PageDown")' in guidance
+    assert "action 但画面完全不动" in guidance
+    assert "教程成片" in guidance
+    assert "AI 剪辑导演" in guidance
 
 
 def test_recording_defaults_to_the_page_just_opened():
