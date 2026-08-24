@@ -136,7 +136,8 @@ def test_token_plan_video_probe_uses_models_endpoint() -> None:
             "Google Gemini（Veo）",
             "https://generativelanguage.googleapis.com/v1beta",
             "veo-3.1-generate-preview",
-            "https://generativelanguage.googleapis.com/v1beta/models/veo-3.1-generate-preview",
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "veo-3.1-generate-preview",
             {},
         ),
         (
@@ -191,13 +192,24 @@ def test_direct_video_probes_are_read_only_and_protocol_specific(
         assert headers["Authorization"] == "Bearer sk-test"
 
 
-def test_video_probe_rejects_unknown_model_before_network() -> None:
+@pytest.mark.parametrize(
+    ("model_name", "protocol"),
+    [
+        ("private-video-gateway", "DashScope（百炼）"),
+        ("doubao-seedance-2.0-pro", "Volcano Engine（火山引擎）"),
+        ("doubao-seedance-2.0-lite", "Volcano Engine（火山引擎）"),
+    ],
+)
+def test_video_probe_rejects_unknown_model_before_network(
+    model_name,
+    protocol,
+) -> None:
     with pytest.raises(ValueError, match="VIDEO_MODEL_CAPABILITY_UNKNOWN"):
         _probe_payload(
             _request(
                 type="video",
-                model_name="private-video-gateway",
-                protocol="DashScope（百炼）",
+                model_name=model_name,
+                protocol=protocol,
                 provider=None,
             ),
         )

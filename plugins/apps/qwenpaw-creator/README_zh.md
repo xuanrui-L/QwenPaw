@@ -53,6 +53,12 @@ Wan3.0 可生成 2–30 秒视频，支持 480P / 720P / 1080P、`adaptive` 与�
 
 官方参考：[Wan3.0 视频生成 API](https://help.aliyun.com/zh/model-studio/wan3-video-generation-api-reference)、[百炼新旧调用地址说明](https://help.aliyun.com/zh/model-studio/qwen-api-via-dashscope)。
 
+#### 从旧版 Creator 升级视频模型配置
+
+- 旧 preset 中的 `doubao-seedance-2.0-pro` / `doubao-seedance-2.0-lite` 是非官方别名，升级后不会再按家族猜测能力。请在模型配置中重新选择带发布日期的官方精确 ID，例如 `doubao-seedance-2-0-260128`、`doubao-seedance-2-0-fast-260128` 或 `doubao-seedance-2-0-mini-260615`；未收录的别名会 fail-closed，且不会发起网络或计费请求。
+- `happyhorse-1.1` 实际只提供 t2v / i2v / r2v，没有 `happyhorse-1.1-video-edit`；需要视频编辑时请使用明确支持该模式的精确模型（百炼当前为 `happyhorse-1.0-video-edit`）。
+- 裸模型名 `wan2.7` 在 r2v 请求中会提交官方模式模型 `wan2.7-r2v`；这是模型 payload 的有意修正。已有完整模型名（如 `wan2.7-i2v`）会按所选 Element 模式替换对应后缀。
+
 当前模型矩阵按能力展示：
 
 - **LLM / VLM**：OpenAI 兼容协议、DashScope / 百炼、Anthropic Claude、DeepSeek、Google Gemini、百度千帆、火山引擎和自定义提供商；

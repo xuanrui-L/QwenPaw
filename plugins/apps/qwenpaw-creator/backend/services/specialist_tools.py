@@ -309,7 +309,7 @@ _R2V_ARGUMENTS = _arguments_schema(
                 "视频生成模式，缺省 r2v（storyboard + 参考图，保持现状）。"
                 "t2v：纯文本生视频；i2v：首帧生视频（需 firstFrameRef）；"
                 "video_edit：按 prompt 指令编辑已有视频（需 videoRef，仅 "
-                "HappyHorse 模型）。支持的组合以当前模型的能力矩阵为准，"
+                "HappyHorse 1.0 模型）。支持的组合以当前精确模型能力为准，"
                 "不支持时会返回可读错误并提示替代。"
             ),
         },
@@ -333,10 +333,18 @@ _R2V_ARGUMENTS = _arguments_schema(
         "ratio": {
             "type": "string",
             "enum": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4"],
+            "description": (
+                "跨供应商候选画幅；实际可用值以当前协议 + 精确模型能力为准，"
+                "执行层会在上传或建单前拒绝不支持的值。"
+            ),
         },
         "resolution": {
             "type": "string",
             "enum": ["480P", "720P", "1080P", "480p", "720p", "1080p"],
+            "description": (
+                "跨供应商候选分辨率；实际可用值以当前协议 + 精确模型能力"
+                "为准，schema 枚举不代表每个模型都支持全部选项。"
+            ),
         },
         "watermark": {
             "type": "boolean",

@@ -53,6 +53,12 @@ Wan3.0 generates 2–30 second clips with 480P / 720P / 1080P output, `adaptive`
 
 Official references: [Wan3.0 video-generation API](https://help.aliyun.com/zh/model-studio/wan3-video-generation-api-reference) and [Bailian legacy/workspace endpoint guidance](https://help.aliyun.com/zh/model-studio/qwen-api-via-dashscope).
 
+#### Upgrading video-model configuration from an earlier Creator release
+
+- The former presets `doubao-seedance-2.0-pro` and `doubao-seedance-2.0-lite` were non-official aliases. Creator no longer guesses their capabilities. Re-select a dated official exact ID such as `doubao-seedance-2-0-260128`, `doubao-seedance-2-0-fast-260128`, or `doubao-seedance-2-0-mini-260615`. Unknown aliases fail closed before any network or billable request.
+- `happyhorse-1.1` actually provides t2v / i2v / r2v but no `happyhorse-1.1-video-edit`. For video editing, select an exact model that documents the mode (currently `happyhorse-1.0-video-edit` on Bailian).
+- A bare `wan2.7` configuration now submits the official `wan2.7-r2v` sibling for an r2v request. This is an intentional payload correction; complete names such as `wan2.7-i2v` have their mode suffix replaced to match the selected Element mode.
+
 The current model matrix is grouped by capability:
 
 - **LLM / VLM**: OpenAI-compatible APIs, DashScope / Bailian, Anthropic Claude, DeepSeek, Google Gemini, Baidu Qianfan, Volcano Engine, and custom providers;

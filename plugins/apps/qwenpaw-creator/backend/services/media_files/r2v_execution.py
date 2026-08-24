@@ -915,6 +915,14 @@ def _assert_r2v_reference_budget(
 
     if not is_wan3_video_model(effective_model) or not video_ids:
         return
+    max_input_duration = capability.max_reference_video_duration_seconds
+    max_combined_duration = capability.max_input_output_duration_seconds
+    if max_input_duration is None or max_combined_duration is None:
+        raise VideoModelCapabilityError(
+            "VIDEO_MODEL_CAPABILITY_UNKNOWN: Wan3.0 参考视频能力缺少官方时长"
+            "预算，未创建上游任务。",
+            details={**details, "knownDurationBudgetRequired": True},
+        )
     durations: list[float] = []
     for version_id in video_ids:
         duration = media_version_duration_seconds(project, version_id)
@@ -932,21 +940,22 @@ def _assert_r2v_reference_budget(
             )
         durations.append(duration)
     input_duration = sum(durations)
-    if input_duration > 15 or (
+    if input_duration > max_input_duration or (
         output_duration_seconds is not None
-        and input_duration + output_duration_seconds > 30
+        and input_duration + output_duration_seconds > max_combined_duration
     ):
         raise VideoReferenceBudgetError(
             "VIDEO_REFERENCE_DURATION_EXCEEDED: Wan3.0 参考视频总时长"
             f" {input_duration:.2f} 秒，输出时长 {output_duration_seconds or 0} "
-            "秒；官方要求参考视频合计不超过 15 秒，且输入视频"
-            "与输出视频时长之和不超过 30 秒。",
+            f"秒；官方要求参考视频合计不超过 {max_input_duration} 秒，且"
+            "输入视频与输出视频时长之和不超过 "
+            f"{max_combined_duration} 秒。",
             details={
                 **details,
                 "inputVideoDurationSeconds": input_duration,
                 "outputDurationSeconds": output_duration_seconds,
-                "maxInputVideoDurationSeconds": 15,
-                "maxCombinedDurationSeconds": 30,
+                "maxInputVideoDurationSeconds": max_input_duration,
+                "maxCombinedDurationSeconds": max_combined_duration,
             },
         )
 

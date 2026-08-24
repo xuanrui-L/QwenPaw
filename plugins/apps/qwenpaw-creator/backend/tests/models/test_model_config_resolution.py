@@ -180,6 +180,7 @@ def test_bailian_video_models_accept_legacy_and_workspace_api_roots(
         "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/tasks/task-wan3"
     )
 
+
 def test_video_provider_poll_interval_is_request_configurable() -> None:
     with _tool_configs(
         {config.CREATOR_VIDEO_CONFIG_TOOL: {"poll_interval_seconds": 2.5}},

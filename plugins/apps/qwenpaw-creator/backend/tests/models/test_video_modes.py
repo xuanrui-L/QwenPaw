@@ -832,18 +832,19 @@ def test_wan_reference_media_uses_dashscope_temp_upload(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "expected"),
+    ("model_name", "expected", "duration_budget"),
     [
-        ("happyhorse-1.1-r2v", (9, 0, 9)),
-        ("wan3.0-video", (10, 5, 15)),
-        ("wan2.7-r2v-2026-06-12", (5, 5, 5)),
-        ("wan2.6-r2v-flash", (5, 3, 5)),
-        ("doubao-seedance-2-0-260128", (9, 3, 12)),
+        ("happyhorse-1.1-r2v", (9, 0, 9), (None, None)),
+        ("wan3.0-video", (10, 5, 15), (15, 30)),
+        ("wan2.7-r2v-2026-06-12", (5, 5, 5), (None, None)),
+        ("wan2.6-r2v-flash", (5, 3, 5), (None, None)),
+        ("doubao-seedance-2-0-260128", (9, 3, 12), (None, None)),
     ],
 )
 def test_video_reference_capabilities_follow_official_model_limits(
     model_name,
     expected,
+    duration_budget,
 ) -> None:
     capability = video_reference_capability(model_name)
 
@@ -853,6 +854,10 @@ def test_video_reference_capabilities_follow_official_model_limits(
         capability.max_reference_videos,
         capability.max_reference_media,
     ) == expected
+    assert (
+        capability.max_reference_video_duration_seconds,
+        capability.max_input_output_duration_seconds,
+    ) == duration_budget
     assert capability.documentation_url.startswith("https://")
 
     # Unknown aliases must stay unknown instead of inheriting Wan guesses.

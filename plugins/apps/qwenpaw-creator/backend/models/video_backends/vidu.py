@@ -44,8 +44,10 @@ def _with_duration(spec: dict, low: int, high: int) -> dict:
     return {**spec, "durations": (low, high)}
 
 
-# Vidu publishes independent accepted-model tables for each endpoint.  These
-# are deliberately not inferred from the reference2video table.
+# Vidu publishes independent accepted-model tables for each endpoint. Mode
+# membership below is explicit and never inferred from the r2v table; entries
+# reuse an r2v constraint mapping only where the independently documented
+# duration/resolution/ratio values are identical.
 _VIDU_DIRECT_MODE_SPECS: dict[str, dict[str, dict]] = {
     "r2v": VIDU_DIRECT_SPECS,
     "t2v": {

@@ -39,6 +39,13 @@ HAPPYHORSE_VIDEO_EDIT_MAX_INPUT_SECONDS = 60
 HAPPYHORSE_VIDEO_EDIT_KEPT_SECONDS = 15
 HAPPYHORSE_VIDEO_EDIT_MAX_REFERENCE_IMAGES = 5
 
+# Wan3.0 All-in-One request and reference-video duration contract.
+WAN_30_RESOLUTIONS = frozenset({"480P", "720P", "1080P"})
+WAN_30_RATIOS = frozenset({"adaptive", "16:9", "4:3", "1:1", "3:4", "9:16"})
+WAN_30_MIN_DURATION_SECONDS = 2
+WAN_30_MAX_DURATION_SECONDS = 30
+WAN_30_MAX_REFERENCE_VIDEO_SECONDS = 15
+
 
 @dataclass(frozen=True, slots=True)
 class VideoReferenceCapability:
@@ -49,6 +56,8 @@ class VideoReferenceCapability:
     max_reference_videos: int
     max_reference_media: int
     documentation_url: str
+    max_reference_video_duration_seconds: int | None = None
+    max_input_output_duration_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +199,8 @@ _WAN_30_REFERENCE_CAPABILITY = VideoReferenceCapability(
     # smaller combined-media cap, so the combined ceiling is their sum.
     max_reference_media=15,
     documentation_url=_WAN_30_REFERENCE_DOCUMENTATION,
+    max_reference_video_duration_seconds=WAN_30_MAX_REFERENCE_VIDEO_SECONDS,
+    max_input_output_duration_seconds=WAN_30_MAX_DURATION_SECONDS,
 )
 _WAN_26_REFERENCE_CAPABILITY = VideoReferenceCapability(
     family="wan2.6-r2v",
@@ -408,13 +419,6 @@ _KNOWN_SUFFIX_SEGMENTS = ("-video-edit", "-t2v", "-i2v", "-r2v")
 _CONFIGURED_NAME_BACKENDS = frozenset(
     {"seedance2", "veo", "kling", "minimax", "vidu"},
 )
-
-# Wan3.0 is an All-in-One model: the same ID serves t2v/i2v/r2v instead of
-# using the per-mode siblings employed by Wan2.x.
-WAN_30_RESOLUTIONS = frozenset({"480P", "720P", "1080P"})
-WAN_30_RATIOS = frozenset({"adaptive", "16:9", "4:3", "1:1", "3:4", "9:16"})
-WAN_30_MIN_DURATION_SECONDS = 2
-WAN_30_MAX_DURATION_SECONDS = 30
 
 # --- Official per-family request constraints -------------------------------
 # Veo 3.1 (Gemini API): durationSeconds is one of "4"/"6"/"8" and must be 8
@@ -1002,13 +1006,11 @@ def effective_video_model_name(
     """The model name a submission will actually carry.
 
     Single source of truth for both the submit path and the execution
-    authorization snapshot: HappyHorse names every mode (so even the default
-    r2v derives ``-r2v``), other Bailian families derive for the non-default
-    modes and whenever the configured name encodes a *different* mode (a
-    configured ``wan2.7-i2v`` cannot serve an r2v request as-is, so it
-    resolves to ``wan2.7-r2v``). A mode-less configured name keeps the
-    historical byte-identical r2v behaviour, and seedance2 always uses the
-    configured name as-is.
+    authorization snapshot: HappyHorse and Wan2.x name every mode, so a bare
+    family name also derives the official sibling for the default r2v mode
+    (``wan2.7`` -> ``wan2.7-r2v``). A configured name encoding another mode is
+    replaced in place (``wan2.7-i2v`` -> ``wan2.7-r2v``). All-in-One Wan3 and
+    backends in ``_CONFIGURED_NAME_BACKENDS`` keep the configured name as-is.
     """
 
     configured = model_name.strip()
@@ -1381,6 +1383,7 @@ __all__ = [
     "VideoReferenceCapability",
     "VIDEO_MODES",
     "WAN_30_MAX_DURATION_SECONDS",
+    "WAN_30_MAX_REFERENCE_VIDEO_SECONDS",
     "WAN_30_MIN_DURATION_SECONDS",
     "WAN_30_RATIOS",
     "WAN_30_RESOLUTIONS",
