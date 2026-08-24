@@ -215,6 +215,9 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
                         "anchor_x": 0.5, "anchor_y": 0.5,
                         "rotation_degrees": 0, "opacity": 1,
                     },
+                    "outputs": {
+                        "video": {"slot_id": f"element:{element_id}:video"},
+                    },
                     "creation": {
                         "type": "r2v",
                         "intent": "雨夜山路空镜",
