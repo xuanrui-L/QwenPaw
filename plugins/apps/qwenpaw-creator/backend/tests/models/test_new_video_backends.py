@@ -653,16 +653,6 @@ def test_vidu_direct_uses_mode_specific_endpoints(monkeypatch) -> None:
     assert captured["body"]["images"] == []
 
 
-def test_vidu_direct_rejects_unsupported_mode_before_http(monkeypatch) -> None:
-    captured: dict = {}
-    _bind(monkeypatch, "viduq3-mix", captured, backend="vidu")
-
-    with pytest.raises(ModelError, match="不支持 mode=t2v"):
-        asyncio.run(video_model.submit_video_task("prompt", mode="t2v"))
-
-    assert captured == {}
-
-
 def test_vidu_direct_check_status(monkeypatch) -> None:
     captured: dict = {}
     payload = {

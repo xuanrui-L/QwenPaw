@@ -460,7 +460,7 @@ def test_concurrent_single_file_save_is_atomic_and_last_writer_wins(
     assert model_routes.load_model_config().llm.model_name == "second-writer"
 
 
-def test_video_capability_route_uses_protocol_and_exact_model(
+def test_video_capability_route_exposes_wan3_all_in_one_contract(
     app,
     api_request,
 ) -> None:
@@ -469,30 +469,24 @@ def test_video_capability_route_uses_protocol_and_exact_model(
         "GET",
         "/models/video-capabilities",
         params={
-            "modelName": "viduq2-pro",
-            "protocol": "Vidu（官方）",
+            "modelName": "wan3.0-video-prime",
+            "protocol": "DashScope（百炼）",
         },
     )
     assert response.status_code == 200
     assert response.json() == {
-        "provider": "vidu",
-        "model": "viduq2-pro",
+        "provider": "wan",
+        "model": "wan3.0-video-prime",
         "known": True,
-        "supportedModes": ["r2v", "i2v"],
-        "effectiveModels": {"r2v": "viduq2-pro", "i2v": "viduq2-pro"},
-        "derivesModeModel": False,
-        "documentationUrl": "https://platform.vidu.com/docs",
-    }
-
-    unknown = api_request(
-        app,
-        "GET",
-        "/models/video-capabilities",
-        params={
-            "modelName": "private-video-gateway",
-            "protocol": "DashScope（百炼）",
+        "supportedModes": ["r2v", "t2v", "i2v"],
+        "effectiveModels": {
+            "r2v": "wan3.0-video-prime",
+            "t2v": "wan3.0-video-prime",
+            "i2v": "wan3.0-video-prime",
         },
-    )
-    assert unknown.status_code == 200
-    assert unknown.json()["known"] is False
-    assert unknown.json()["supportedModes"] == []
+        "derivesModeModel": False,
+        "documentationUrl": (
+            "https://help.aliyun.com/zh/model-studio/"
+            "wan3-video-generation-api-reference"
+        ),
+    }

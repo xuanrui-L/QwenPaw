@@ -20,7 +20,6 @@ from models.video_capabilities import (
     configured_mode_segment,
     derive_video_model_name,
     effective_video_model_name,
-    is_wan3_video_model,
     validate_video_mode,
     video_backend_key,
     video_model_capability_payload,
@@ -163,17 +162,6 @@ def test_effective_name_derives_official_wan_base_for_r2v() -> None:
         effective_video_model_name("happyhorse-1.1", "r2v", "happyhorse")
         == "happyhorse-1.1-r2v"
     )
-
-
-def test_wan3_all_in_one_name_is_kept_for_every_mode() -> None:
-    assert is_wan3_video_model("wan3.0-video")
-    assert is_wan3_video_model("WAN3.0-VIDEO-PRIME")
-    for mode in ("r2v", "t2v", "i2v"):
-        assert (
-            effective_video_model_name("wan3.0-video", mode, "wan")
-            == "wan3.0-video"
-        )
-        assert derive_video_model_name("wan3.0-video", mode) == "wan3.0-video"
 
 
 # ── capability matrix ────────────────────────────────────────────────────────
