@@ -134,6 +134,7 @@ def _quarantined_stale_targets(tasks: Sequence[Any]) -> set[str]:
 
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
 _COMPOSE_COMMANDS = {CreatorCommandType.COMPOSE_FINAL_VIDEO.value}
+_SCRIPT_COMMANDS = {CreatorCommandType.GENERATE_TIMELINE_SCRIPT.value}
 
 # Publication stays non-blocking, but dependent unattended work waits for the
 # asynchronous reviewer to settle. Otherwise a short image review can replace
@@ -769,6 +770,8 @@ class WorkGraphScheduler:
             dispatch = self._r2v_dispatch or _default_r2v_dispatch
         elif node.command in _COMPOSE_COMMANDS:
             dispatch = _default_compose_dispatch
+        elif node.command in _SCRIPT_COMMANDS:
+            dispatch = _default_script_dispatch
         else:
             dispatch = self._image_dispatch or _default_image_dispatch
         return await dispatch(
@@ -800,6 +803,33 @@ async def _default_image_dispatch(
         services,
         project_id=project_id,
         command=command,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def _default_script_dispatch(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    command: str | None = None,
+    target_ref: str,
+    arguments: dict[str, Any],
+    idempotency_key: str,
+) -> Any:
+    """Draft one timeline's script via the text model (free of media spend)."""
+
+    # pylint: disable=import-outside-toplevel
+    from services.media_files.script_execution import (
+        execute_file_script_command,
+    )
+
+    # The script entry point has a single command and takes no command kwarg.
+    del command
+    return await execute_file_script_command(
+        services,
+        project_id=project_id,
         target_ref=target_ref,
         arguments=arguments,
         idempotency_key=idempotency_key,
