@@ -18,7 +18,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Body, Header, Request, Response, status
+from fastapi import APIRouter, Body, Header, Query, Request, Response, status
 from pydantic import ValidationError as PydanticValidationError
 
 from domain.errors import ConflictError, StorageIntegrityError, ValidationError
@@ -1063,30 +1063,52 @@ async def get_resolved_models() -> dict[str, Any]:
     model, so mode workbenches can show the model their element will bill
     against.  Read-only.
     """
-    from models.video_capabilities import (
-        effective_video_model_name,
-        video_backend_key,
-    )
+    from models.video_capabilities import video_model_capability_payload
 
     video_model = model_config.get_video_model_name()
-    backend_key = video_backend_key(video_model)
+    protocol_backend = model_config.get_video_backend()
+    capability = video_model_capability_payload(
+        video_model,
+        protocol_backend,
+    )
     return {
         "video": {
-            "provider": model_config.get_video_backend(),
+            "provider": capability["provider"],
             "model": video_model,
-            "byMode": {
-                mode: effective_video_model_name(
-                    video_model,
-                    mode,
-                    backend_key,
-                )
-                for mode in ("r2v", "t2v", "i2v", "video_edit")
-            },
+            "known": capability["known"],
+            "supportedModes": capability["supportedModes"],
+            "byMode": capability["effectiveModels"],
         },
         "s2v": {
             "model": model_config.get_s2v_model_name(),
         },
     }
+
+
+@router.get("/video-capabilities")
+async def get_video_capabilities(
+    model_name: str = Query(default="", alias="modelName"),
+    protocol: str = Query(default=""),
+) -> dict[str, object]:
+    """Exact, documented generation modes for one video selection.
+
+    The settings UI calls this before saving, so query values take priority;
+    omitted values resolve to the active runtime configuration.  This route is
+    read-only and never probes or bills an upstream provider.
+    """
+
+    from models.video_capabilities import video_model_capability_payload
+
+    selected_model = model_name.strip() or model_config.get_video_model_name()
+    selected_backend = (
+        model_config.video_backend_for_protocol(protocol)
+        if protocol.strip()
+        else model_config.get_video_backend()
+    )
+    return video_model_capability_payload(
+        selected_model,
+        selected_backend or "",
+    )
 
 
 @router.get("/tts-capabilities")
@@ -1679,6 +1701,54 @@ def _probe_payload(
         if "dashscope" in body.protocol.casefold() or "百炼" in body.protocol:
             return _dashscope_policy_probe(body, headers)
         return _openai_model_probe(body, headers)
+    if body.type == "video":
+        from models.video_capabilities import video_model_capability
+
+        video_backend = model_config.video_backend_for_protocol(
+            body.protocol,
+        ) or ""
+        capability = video_model_capability(
+            body.model_name,
+            video_backend,
+        )
+        if not capability.known:
+            raise ValueError(
+                "VIDEO_MODEL_CAPABILITY_UNKNOWN: 精确模型 ID 与协议组合"
+                "未收录，已停止连接探测",
+            )
+        if video_backend == "veo":
+            headers.pop("Authorization", None)
+            headers["x-goog-api-key"] = body.api_key
+            return (
+                f"{base}/models/{body.model_name}",
+                headers,
+                {"_get_probe": True},
+            )
+        if video_backend == "minimax":
+            return (
+                f"{base}/v1/query/video_generation",
+                headers,
+                {
+                    "_get_probe": True,
+                    "task_id": "creator-connection-probe",
+                },
+            )
+        if video_backend == "kling":
+            return (
+                f"{base}/tasks",
+                headers,
+                {
+                    "_get_probe": True,
+                    "task_ids": "creator-connection-probe",
+                },
+            )
+        if video_backend == "vidu":
+            headers["Authorization"] = f"Token {body.api_key}"
+            return (
+                f"{base}/ent/v2/credits",
+                headers,
+                {"_get_probe": True, "show_detail": "false"},
+            )
     if "volcano" in body.protocol.casefold() or "火山" in body.protocol:
         # Zero-cost Ark probe: the task-list API is read-only and free,
         # unlike posting a real generation task.

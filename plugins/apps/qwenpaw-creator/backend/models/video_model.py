@@ -553,7 +553,11 @@ async def submit_video_task(
     uses_seedance = protocol_backend == "seedance2"
     backend_key = video_backend_key(model_name, protocol_backend)
     try:
-        normalized_mode = validate_video_mode(backend_key, model_name, mode)
+        normalized_mode = validate_video_mode(
+            protocol_backend,
+            model_name,
+            mode,
+        )
     except ValueError as exc:
         raise ModelError(str(exc), model_name=model_name) from exc
 
@@ -777,6 +781,7 @@ async def submit_video_task(
         # Official Vidu channel (api.vidu.com).
         url, submit_headers, body = vidu_backend.build_submit_request(
             prompt=prompt,
+            mode=normalized_mode,
             media=media,
             ratio=ratio,
             duration=duration,

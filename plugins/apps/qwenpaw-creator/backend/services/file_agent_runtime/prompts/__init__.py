@@ -39,6 +39,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "project_id",
             "workspace_schema",
             "tts_guidance",
+            "video_model_guidance",
             "external_skills",
         ),
         _spec(
@@ -129,6 +130,8 @@ def render_creator_system_prompt(
     from services.file_agent_runtime.prompts.tts_guidance import (
         delegator_guidance,
     )
+    from models import config as model_config
+    from models.video_capabilities import video_model_delegator_guidance
 
     if external_skills is None:
         # Isolated by design: the loader never raises, a broken skill only
@@ -141,6 +144,10 @@ def render_creator_system_prompt(
         project_id=project_id,
         workspace_schema=workspace_schema,
         tts_guidance=delegator_guidance(),
+        video_model_guidance=video_model_delegator_guidance(
+            model_config.get_video_model_name(),
+            model_config.get_video_backend(),
+        ),
         external_skills=external_skills,
     )
 

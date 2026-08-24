@@ -41,8 +41,13 @@ import {
   getHostProviderApiKey,
   getRealApiKey,
   getTtsCapabilities,
+  getVideoCapabilities,
 } from "@/api/creator";
-import type { HostProviderInfo, TtsCapabilities } from "@/api/creator";
+import type {
+  HostProviderInfo,
+  TtsCapabilities,
+  VideoModelCapabilities,
+} from "@/api/creator";
 import type {
   GroundingConfig,
   ModelConfigData,
@@ -311,7 +316,7 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
 const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    // Family base names: the backend derives the per-mode sibling
+    // Wan/HappyHorse family base names: the backend derives the per-mode sibling
     // (wan2.7 → wan2.7-t2v/-i2v/-r2v) at submission, so no mode suffix
     // is configured here. The kling/ and vidu/ entries are the
     // Bailian-hosted third-party models served by the same
@@ -337,8 +342,9 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
     // (up to 30 images + 10 videos) and 4-30s output.
     models: [
       "doubao-seedance-2-5-260628",
-      "doubao-seedance-2.0-pro",
-      "doubao-seedance-2.0-lite",
+      "doubao-seedance-2-0-260128",
+      "doubao-seedance-2-0-fast-260128",
+      "doubao-seedance-2-0-mini-260615",
     ],
   },
   "Google Gemini（Veo）": {
@@ -353,7 +359,8 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   },
   "MiniMax（海螺）": {
     base_url: "https://api.minimax.io",
-    // Hailuo: 768P at 6/10s, 1080P at 6s; S2V-01 is the only subject
+    // Hailuo: 768P at 6/10s, 1080P at 6s (Hailuo-02 also has 512P);
+    // S2V-01 is the only subject
     // reference model (1 character image). China endpoint:
     // https://api.minimaxi.com
     models: [
@@ -372,8 +379,8 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   },
   "Vidu（官方）": {
     base_url: "https://api.vidu.com",
-    // Official reference2video channel (Token auth), 1-7 reference
-    // images; viduq2-pro additionally accepts reference videos.
+    // Official Vidu channel (Token auth). Mode support is per exact model:
+    // e.g. q3-turbo supports t2v/i2v/r2v while q3-mix is r2v-only.
     models: ["viduq3-mix", "viduq3-turbo", "viduq3", "viduq2-pro", "viduq2"],
   },
   "Aliyun Token Plan": {
@@ -596,31 +603,12 @@ const PANE_OF_TYPE: Record<TabType, SettingsPane> = {
   s2v: "media",
 };
 
-// Mirror of backend models/video_capabilities.py (VIDEO_MODE_MATRIX and
-// video_backend_key): a configured family model derives its per-mode
-// siblings at submission time, so the card can show which capabilities the
-// chosen family covers. Keep in sync with the backend matrix. Note:
-// happyhorse-1.1 has no -video-edit sibling on Bailian (verified via the
-// zero-cost sync probe), so video_edit is not advertised for the family.
-const VIDEO_MODE_MATRIX: Record<string, string[]> = {
-  happyhorse: ["r2v", "t2v", "i2v"],
-  wan: ["r2v", "t2v", "i2v"],
-  seedance2: ["r2v"],
-};
-
 const VIDEO_MODE_LABEL_KEYS: Record<string, string> = {
   r2v: "modelConfig.videoModeR2v",
   t2v: "modelConfig.videoModeT2v",
   i2v: "modelConfig.videoModeI2v",
   video_edit: "modelConfig.videoModeEdit",
 };
-
-export function videoBackendKey(modelName: string): string {
-  const name = (modelName || "").toLocaleLowerCase();
-  if (name.includes("happyhorse")) return "happyhorse";
-  if (name.includes("seedance")) return "seedance2";
-  return "wan";
-}
 
 // Per-pane title/description plus one scenario hint reusing the onboarding
 // guide copy, so the settings center and the guide never diverge.
@@ -949,6 +937,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   const [hostProviders, setHostProviders] = useState<HostProviderInfo[]>([]);
   const [ttsCapabilities, setTtsCapabilities] =
     useState<TtsCapabilities | null>(null);
+  const [videoCapabilities, setVideoCapabilities] =
+    useState<VideoModelCapabilities | null>(null);
+  const [videoCapabilitiesLoading, setVideoCapabilitiesLoading] =
+    useState(false);
+  const [videoCapabilitiesError, setVideoCapabilitiesError] = useState(false);
   // What the user actually typed in a model-name dropdown. Filtering by the
   // field value would hide every other model once one is configured, so the
   // full catalog shows on open and narrows only while typing.
@@ -966,6 +959,38 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       .then(setTtsCapabilities)
       .catch(() => setTtsCapabilities(null));
   }, []);
+
+  useEffect(() => {
+    if (!open || !config.video.model_name.trim()) {
+      setVideoCapabilities(null);
+      setVideoCapabilitiesLoading(false);
+      setVideoCapabilitiesError(false);
+      return;
+    }
+    let active = true;
+    setVideoCapabilities(null);
+    setVideoCapabilitiesLoading(true);
+    setVideoCapabilitiesError(false);
+    const timer = window.setTimeout(() => {
+      getVideoCapabilities(config.video.model_name, config.video.protocol)
+        .then((value) => {
+          if (active) setVideoCapabilities(value);
+        })
+        .catch(() => {
+          if (active) {
+            setVideoCapabilities(null);
+            setVideoCapabilitiesError(true);
+          }
+        })
+        .finally(() => {
+          if (active) setVideoCapabilitiesLoading(false);
+        });
+    }, 120);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [open, config.video.model_name, config.video.protocol]);
 
   const STATIC_PROVIDER_IDS = new Set(Object.values(PROTOCOL_TO_PROVIDER_ID));
 
@@ -2830,8 +2855,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       : !!item.model_name;
     const isTested = tested[type] === true;
 
-    // The family model derives its per-mode siblings server-side, so show
-    // what the currently chosen video family actually covers.
+    const videoModes = videoCapabilities?.supportedModes ?? [];
     const videoFamilyBlock =
       type === "video" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2839,11 +2863,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             {t("modelConfig.videoFamilyCaps")}
           </span>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {(
-              VIDEO_MODE_MATRIX[videoBackendKey(config.video.model_name)] ?? [
-                "r2v",
-              ]
-            ).map((mode) => (
+            {videoModes.map((mode) => (
               <span
                 key={mode}
                 style={{
@@ -2858,6 +2878,23 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 {t(VIDEO_MODE_LABEL_KEYS[mode] ?? mode)}
               </span>
             ))}
+            {videoCapabilitiesLoading && (
+              <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>
+                {t("modelConfig.videoCapabilitiesLoading")}
+              </span>
+            )}
+            {!videoCapabilitiesLoading &&
+              videoCapabilities &&
+              !videoCapabilities.known && (
+                <span style={{ fontSize: 11, color: "var(--color-error)" }}>
+                  {t("modelConfig.videoCapabilityUnknown")}
+                </span>
+              )}
+            {!videoCapabilitiesLoading && videoCapabilitiesError && (
+              <span style={{ fontSize: 11, color: "var(--color-error)" }}>
+                {t("modelConfig.videoCapabilityUnavailable")}
+              </span>
+            )}
           </div>
           <span
             style={{
@@ -2866,7 +2903,13 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               lineHeight: 1.6,
             }}
           >
-            {t("modelConfig.videoFamilyNote")}
+            {!videoCapabilitiesLoading &&
+              videoCapabilities &&
+              t(
+                videoCapabilities?.derivesModeModel
+                  ? "modelConfig.videoFamilyNote"
+                  : "modelConfig.videoExactModelNote",
+              )}
           </span>
           <span
             style={{

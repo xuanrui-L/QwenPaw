@@ -794,19 +794,13 @@ def _validated_request_mode(arguments: Mapping[str, Any]) -> str:
     """Normalize the requested mode against the runtime capability matrix."""
 
     from models import config as model_config
-    from models.video_capabilities import (
-        validate_video_mode,
-        video_backend_key,
-    )
+    from models.video_capabilities import validate_video_mode
 
     model_name = model_config.get_video_model_name()
-    backend_key = video_backend_key(
-        model_name,
-        model_config.get_video_backend(),
-    )
+    protocol_backend = model_config.get_video_backend()
     try:
         return validate_video_mode(
-            backend_key,
+            protocol_backend,
             model_name,
             str(arguments.get("mode") or "r2v"),
         )
