@@ -352,6 +352,11 @@ async def execute_file_script_command(
         raise ValidationError(f"timeline 不存在: {timeline_id}")
 
     fingerprint = _request_fingerprint(project, timeline)
+    # Stale re-drafts share the node's dispatch idempotency key but must not
+    # reuse the previous publish transaction: scope the durable ids by the
+    # request fingerprint. Identical inputs never reach publish — the
+    # semantic replay below returns the existing version first.
+    idempotency_key = f"{idempotency_key}:{fingerprint[:16]}"
     replay = _existing_replay(
         services,
         project,
