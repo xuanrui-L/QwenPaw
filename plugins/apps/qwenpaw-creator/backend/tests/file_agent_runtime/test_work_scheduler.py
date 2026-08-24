@@ -564,6 +564,10 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
         "list_tasks",
         lambda _project_id: list(records),
     )
+    # The ticks below are the whole schedule: the post-dispatch wake would add
+    # background ticks whose timing, not the ledger, decides the dispatch
+    # count.
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
 
     async def scenario():
         # First tick: fails with deterministic error.
@@ -595,9 +599,9 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
             scheduler._deterministic_failure_nodes
         )
 
-        # Every dispatch wakes the background loop, which ticks on its own
-        # timing; the durable record must keep those ticks from paying for
-        # the same node again.
+        # Later ticks must not pay for the node twice: the durable record
+        # left by the successful dispatch keeps the recordless reopen from
+        # re-arming the ledger.
         for _ in range(3):
             await scheduler.tick(PROJECT_ID)
             await _drain()
