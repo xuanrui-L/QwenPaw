@@ -59,6 +59,31 @@ def _project() -> Project:
         },
     )
     project.visual.entities.order.append("char:a")
+    for entity_id, kind, variant_id, version_id, name in (
+        ("prop:bird", "prop", "var:bird", "art:bird-main", "纸鹤道具图"),
+        ("scene:rain", "scene", "var:rain", "art:rain-main", "雨夜场景图"),
+    ):
+        project.visual.entities.items[entity_id] = VisualEntity(
+            entity_id=entity_id,
+            kind=kind,
+            name=name,
+            required_variant_ids=[variant_id],
+            variants={
+                "items": {
+                    variant_id: VisualVariant(
+                        variant_id=variant_id,
+                        selected_artifact_version_id=version_id,
+                    ),
+                },
+                "order": [variant_id],
+            },
+        )
+        project.visual.entities.order.append(entity_id)
+        project.assets.artifact_versions_by_id[version_id] = _artifact(
+            version_id,
+            slot_id=f"slot:{entity_id}",
+            name=name,
+        )
     project.assets.artifact_versions_by_id["art:a-main"] = _artifact(
         "art:a-main",
         slot_id="slot:char-a",
@@ -101,7 +126,13 @@ def _project() -> Project:
         location=ElementLocation(),
         creation=R2VCreation(
             character_refs=["char:a"],
-            visual_variant_refs={"char:a": "var:x"},
+            prop_refs=["prop:bird"],
+            scene_ref="scene:rain",
+            visual_variant_refs={
+                "char:a": "var:x",
+                "prop:bird": "var:bird",
+                "scene:rain": "var:rain",
+            },
             video_reference_version_ids=["src:upload-1", "art:extra"],
         ),
         outputs={
@@ -126,11 +157,13 @@ def test_preview_mirrors_submit_order_and_shifts_without_storyboard() -> None:
     ] == [
         (1, "art:sb-1", "storyboard"),
         (2, "art:a-main", "artifact"),
-        (3, "src:upload-1", "source"),
-        (4, "art:extra", "artifact"),
+        (3, "art:bird-main", "artifact"),
+        (4, "art:rain-main", "artifact"),
+        (5, "src:upload-1", "source"),
+        (6, "art:extra", "artifact"),
     ]
     assert preview["references"][0]["name"] == "第一镜 分镜图"
-    assert preview["references"][2]["name"] == "用户上传参考"
+    assert preview["references"][4]["name"] == "用户上传参考"
 
     # Without a selected storyboard the chain starts at [Image 1] with the
     # first resolved visual reference.
@@ -142,6 +175,8 @@ def test_preview_mirrors_submit_order_and_shifts_without_storyboard() -> None:
         (item["index"], item["versionId"]) for item in shifted["references"]
     ] == [
         (1, "art:a-main"),
-        (2, "src:upload-1"),
-        (3, "art:extra"),
+        (2, "art:bird-main"),
+        (3, "art:rain-main"),
+        (4, "src:upload-1"),
+        (5, "art:extra"),
     ]

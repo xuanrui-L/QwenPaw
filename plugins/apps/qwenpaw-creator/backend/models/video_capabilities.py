@@ -1219,55 +1219,231 @@ def _family_constraint_guidance(
     return ""
 
 
+def _model_reference_syntax_guidance(
+    model_name: str,
+    protocol_backend: str = "",
+) -> str:
+    """Exact provider token contract for references in the prompt text.
+
+    Reference payload order and prompt identifiers are different concepts.
+    Some providers expose literal identifiers, some number images and videos
+    independently, and others carry references only in structured request
+    fields.  Never invent one universal ``Image N`` convention.
+    """
+
+    normalized = model_name.strip()
+    backend = video_backend_key(normalized, protocol_backend)
+    if is_wan3_video_model(normalized):
+        return (
+            "- Wan3.0 All-in-One：中文 Prompt 用“图1、图2 …”和“视频1、"
+            "视频2 …”；图片与视频按 media 中各自类型的出现顺序分别计数；"
+            "storyboard 是第一张参考图，因此为“图1”。每次引用同时说明素材"
+            "中的具体主体、动作或用途，不得改写成 HappyHorse 方括号语法。"
+        )
+    if is_happyhorse_model(normalized):
+        return (
+            "- HappyHorse：只能使用 `[Image 1]`、`[Image 2]` …；这是 media "
+            "数组中所有图片共用的单一顺序，storyboard 固定为第一张，因此是 "
+            "`[Image 1]`。每次标记后说明图中具体对象。不要改写成“图1”、"
+            "`image1` 或 `character1`，也不存在 `[Video N]`。"
+        )
+    if backend == "wan":
+        if _WAN_27_REFERENCE_PATTERN.fullmatch(normalized):
+            return (
+                "- Wan 2.7：中文 Prompt 用“图1、图2 …”和“视频1、视频2 …”；"
+                "英文 Prompt 用 `Image 1`、`Video 1`（首字母大写且英文单词与"
+                "数字间有空格）。图片与视频按 media 中各自类型的出现顺序"
+                "分别计数；storyboard 是第一张 reference_image，因此为“图1”。"
+                "不得使用 Wan 2.6 的 `character1`。"
+            )
+        if _WAN_26_REFERENCE_PATTERN.fullmatch(normalized):
+            return (
+                "- Wan 2.6：只用 `character1`、`character2` …；按 "
+                "reference_urls 的图片/视频混合总顺序统一计数，不按媒体类型"
+                "分开。Runtime 的 storyboard 排在第一，因此对应 `character1`。"
+                "每个 reference_url 必须只有一个主体；不得使用 Wan 2.7 的"
+                "“图1/视频1”或 HappyHorse 方括号。"
+            )
+        return (
+            "- 当前 Wan 名称没有匹配到已知 2.6/2.7 引用协议；不得猜测“图1”"
+            "或 `character1`，在付费 R2V 提交前报告阻塞。"
+        )
+    if backend == "seedance2":
+        return (
+            "- Seedance API：中文 Prompt 用“图片1、图片2 …”“视频1、视频2 …”"
+            "（有音频输入时用“音频1 …”），按 content 中同类型素材的出现顺序"
+            "分别计数；英文可用 `image1`、`video1`。storyboard 是第一张 "
+            "reference_image，因此为“图片1”。不得带 HappyHorse 方括号，也"
+            "不要把 Wan 的“图1”当成统一语法。"
+        )
+    if backend == "kling":
+        if "/" in normalized:
+            return (
+                "- Kling 百炼托管 Omni：严格使用 `<<<image_1>>>`、"
+                "`<<<image_2>>>` … 与 `<<<video_1>>>`；图片和视频分别按 media "
+                "顺序计数，storyboard 是 `<<<image_1>>>`。"
+            )
+        return (
+            "- Kling 官方直连 Omni：严格使用 `@image_1`、`@image_2` … 与 "
+            "`@video_1`；这些 ID 与 contents 中 refer_image/feature_video 的 id "
+            "一致，storyboard 是 `@image_1`。不得使用百炼的三尖括号语法。"
+        )
+    if backend == "veo":
+        return (
+            "- Veo 3.1：参考图通过结构化 `referenceImages` 传入，官方 Prompt "
+            "没有 `[Image N]`、`图N` 或 `@image_N` 位置标记。Prompt 直接用"
+            "自然语言描述要保留的角色/产品及动作；参考职责只作为编译前合同，"
+            "不要把虚构编号写进最终 Prompt。"
+        )
+    if backend == "minimax":
+        return (
+            "- MiniMax S2V-01：唯一角色图通过结构化 `subject_reference` 传入，"
+            "Prompt 直接用角色名称描述动作；没有官方图片序号标记，不得写"
+            " `[Image 1]`、`图1` 或 `@image_1`。"
+        )
+    if backend == "vidu":
+        if "/" in normalized:
+            return (
+                "- Vidu 百炼托管参考生视频：中文 Prompt 的图片强调段使用"
+                "“图1为…；图2为…”并按输入图片顺序计数；只有官方文档明确"
+                "支持的标记才使用。参考视频没有已文档化的位置标记时，用"
+                "自然语言说明其动作/运镜职责，不发明 `视频N`。"
+            )
+        return (
+            "- Vidu 官方直连 flat reference2video：图片/视频通过结构化 "
+            "`images`/`videos` 数组传入，官方 Prompt 没有位置标记。当前"
+            " Runtime 未使用 subjects API，因此不得发明 `图1` 或 `@subject`；"
+            "直接用自然语言描述目标主体与动作。"
+        )
+    return (
+        "- 当前模型没有已知的 Prompt 引用标记协议；不得套用任何其他模型的"
+        "编号语法，必须在付费 R2V 提交前报告阻塞。"
+    )
+
+
 def video_model_prompt_guidance(
     model_name: str,
     protocol_backend: str = "",
 ) -> str:
-    """Model-specific prompt-writing rules injected into the R2V director.
-
-    The baseline reference-order contract lives in the static prompt; this
-    only adds requirements that depend on which video model is configured,
-    so the static prompt stays model-agnostic.
-    """
+    """Model-specific prompt-writing rules injected into Creator and R2V."""
 
     normalized = model_name.strip() or "未配置"
-    if is_wan3_video_model(normalized):
-        return (
-            f"当前视频生成模型是 `{normalized}`（Wan3.0 All-in-One）。"
-            "video prompt 必须按官方多模态引用协议书写：\n"
-            "- 参考图与参考视频分别编号：按 media 中同类素材的顺序使用“图1、图2”"
-            "与“视频1、视频2”；storyboard 是第一张参考图，即“图1”。\n"
-            "- 引用时同时说明素材中的具体主体及其动作或用途，避免只写编号。\n"
-            + _reference_guidance(normalized, protocol_backend)
-            + "\n"
-            + _family_constraint_guidance(normalized, protocol_backend)
-            + "\n"
-            + _mode_guidance(normalized, protocol_backend)
-        )
-    if is_happyhorse_model(normalized):
-        return (
-            f"当前视频生成模型是 `{normalized}`（HappyHorse 参考生视频），"
-            "video prompt 必须遵守其参考指代协议：\n"
-            "- 用 `[Image N]` 指代第 N 个参考素材，顺序与 Element creation 的"
-            " exact reference version 列表一致；storyboard 是第一参考，即 `[Image 1]`。\n"
-            "- 每次指代都要说明该参考图中的具体对象，例如“[Image 1] 分镜图中的角色”。\n"
-            + _reference_guidance(normalized, protocol_backend)
-            + "\n"
-            "- 视频时长必须是 3–15 秒的整数；分辨率仅支持 720P 或 1080P。\n"
-            + _mode_guidance(normalized, protocol_backend)
-        )
-    family_guidance = _family_constraint_guidance(
+    backend = video_backend_key(normalized, protocol_backend)
+    extra: list[str] = []
+    if backend == "seedance2":
+        # Prompt contract follows the official Seedance guides:
+        # https://ark.volcengine.com/region:cn-beijing/docs/82379/2607689?lang=zh
+        family = seedance_video_generation(normalized) or "未知"
+        if family == "2.5":
+            extra.append(
+                "- Seedance 2.5 可以使用整数秒时间段；区间必须连续、无空档，"
+                "不得使用小数秒。动作节点稠密时，把相邻节点合并为 3–6 个"
+                "可执行时间段，每段只写一个核心状态变化与明确结束状态。",
+            )
+        else:
+            extra.append(
+                f"- Seedance {family} 不套用 2.5 的时间戳语法；使用“镜头 1 / "
+                "镜头 2 …”或顺序段落表达镜头与动作推进，不写时间戳。",
+            )
+    family_constraints = _family_constraint_guidance(
         normalized,
         protocol_backend,
     )
+    return "\n".join(
+        item
+        for item in (
+            f"当前视频生成模型是 `{normalized}`。引用标记必须按该模型/通道"
+            "编译，以下字面语法是硬性协议：",
+            _model_reference_syntax_guidance(normalized, protocol_backend),
+            "- 参考职责是语义合同，不等于所有模型都要在最终 Prompt 中逐项写"
+            "编号。仅当上方协议提供官方标记时才把标记写进 Prompt；结构化引用"
+            "模型只用自然语言。无论哪种协议，采用项/排除项必须和 Runtime "
+            "实际提交素材一致，storyboard 只提供阅读顺序、近似构图、动作链和"
+            "镜头节奏，最终视频不继承宫格、边框、编号、箭头、彩色标记、"
+            "说明文字、草图媒介或占位角色。",
+            *extra,
+            _reference_guidance(normalized, protocol_backend),
+            family_constraints,
+            _mode_guidance(normalized, protocol_backend),
+        )
+        if item
+    )
+
+
+def video_model_duration_guidance(
+    model_name: str,
+    protocol_backend: str = "",
+) -> str:
+    """Concise duration planning contract for the Creator main agent.
+
+    Duration is a provider capability, never a global Creator default.  Keep
+    this surface beside the submit-time capability tables so planning can
+    accept a 3-second beat or a 30-second generation unit when the configured
+    model actually supports it, while still rejecting an invalid pairing.
+    """
+
+    normalized = model_name.strip() or "未配置"
+    backend = video_backend_key(normalized, protocol_backend)
+    if is_wan3_video_model(normalized):
+        return (
+            f"当前视频模型 `{normalized}`（Wan3.0 All-in-One）支持 "
+            "2–30 秒整数。可按内容直接规划 2 秒短段或 30 秒长段，不套用"
+            "固定 8–10 秒；t2v/i2v/r2v 均保持同一模型 ID。"
+        )
+    if backend == "happyhorse":
+        return (
+            f"当前视频模型 `{normalized}` 的 r2v/t2v/i2v 生成时长必须为 "
+            f"{HAPPYHORSE_MIN_DURATION_SECONDS}–"
+            f"{HAPPYHORSE_MAX_DURATION_SECONDS} 秒整数。3 秒短段合法；"
+            "30 秒单段不合法，必须换用支持 30 秒的模型或按叙事边界拆段。"
+        )
+    if backend == "seedance2":
+        family = seedance_video_generation(normalized)
+        spec = SEEDANCE_FAMILY_SPECS.get(family or "")
+        if spec is not None:
+            _resolutions, low, high, allows_auto = spec
+            auto = "，也可用 -1 让模型自动规划" if allows_auto else ""
+            return (
+                f"当前视频模型 `{normalized}`（Seedance {family}）支持 "
+                f"{low}–{high} 秒整数{auto}。只要叙事适合，允许直接规划为"
+                f" {low} 秒短段或 {high} 秒长段，不套用 8–10 秒默认值。"
+            )
+    if backend == "veo":
+        if "lite" in normalized.casefold():
+            reference_note = "该 Lite 型号不支持 r2v 参考图。"
+        else:
+            reference_note = "r2v 或 1080p/4k 时必须为 8 秒。"
+        return (
+            f"当前视频模型 `{normalized}` 只支持 4、6 或 8 秒；"
+            + reference_note
+            + " 不得把范围中间的其他整数当作合法值。"
+        )
+    if backend == "kling":
+        if is_kling_omni_model(normalized):
+            return (
+                f"当前视频模型 `{normalized}` 支持 3–15 秒整数；携带特征"
+                "参考视频时上限降为 10 秒。"
+            )
+        return f"当前视频模型 `{normalized}` 只支持 5 或 10 秒。"
+    if backend == "minimax":
+        return (
+            f"当前视频模型 `{normalized}` 的时长是离散能力：Hailuo 768P"
+            " 支持 6/10 秒，1080P 仅 6 秒；T2V-01/I2V-01 为 6 秒。"
+        )
+    if backend == "vidu":
+        spec = VIDU_MODEL_SPECS.get(normalized) or VIDU_DIRECT_SPECS.get(
+            normalized,
+        )
+        if spec is not None:
+            low, high = spec["durations"]
+            return (
+                f"当前视频模型 `{normalized}` 支持 {low}–{high} 秒整数。"
+                "按内容选择任一合法时长，不套用固定 8–10 秒。"
+            )
     return (
-        f"当前视频生成模型是 `{normalized}`。video prompt 用自然语言直接描述"
-        "参考素材中的主体、场景与动作；参考素材顺序与 Element creation 的"
-        " exact reference version 列表一致，storyboard 是第一参考。\n"
-        + _reference_guidance(normalized, protocol_backend)
-        + "\n"
-        + (family_guidance + "\n" if family_guidance else "")
-        + _mode_guidance(normalized, protocol_backend)
+        f"当前视频模型 `{normalized}` 没有可注入的确定性时长表。不要使用"
+        " Creator 全局默认时长；必须依据该模型的 provider 能力确认合法值，"
+        "无法确认时在付费提交前报告阻塞。"
     )
 
 
@@ -1399,6 +1575,7 @@ __all__ = [
     "video_model_capability",
     "video_model_capability_payload",
     "video_model_delegator_guidance",
+    "video_model_duration_guidance",
     "video_model_prompt_guidance",
     "video_model_supported_modes",
     "video_reference_capability",

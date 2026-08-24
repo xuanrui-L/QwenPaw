@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path, PurePosixPath
@@ -258,6 +259,60 @@ class _ResolvedRequest:
     mode: str = "generate"
     source_lang: str = ""
     target_lang: str = ""
+
+
+def _storyboard_panel_aspect_contract(
+    aspect_ratio: str,
+    panel_count: int | None = None,
+) -> str:
+    """Deterministic per-panel video-frame contract for storyboard calls."""
+
+    ratio = aspect_ratio.strip() or "16:9"
+    layout = ""
+    if panel_count and panel_count > 0:
+        side = math.ceil(math.sqrt(panel_count))
+        unused = side * side - panel_count
+        layout = (
+            f" Use a strict {side} columns by {side} rows square lattice. "
+            f"Place exactly {panel_count} story panels in row-major reading "
+            f"order and leave the remaining {unused} lattice slots as pure "
+            "blank outer-canvas whitespace, not illustrated placeholder "
+            "panels. A square lattice is mandatory because it preserves the "
+            "outer ratio for every equal cell. Do not use an asymmetric, "
+            "masonry, 2+3, 3+2 or mixed-size layout."
+        )
+    return (
+        "[STORYBOARD PANEL ASPECT CONTRACT — HARD REQUIREMENT]\n"
+        f"The target video aspect ratio is {ratio}. EVERY individual "
+        f"storyboard panel's inner picture frame must be exactly {ratio}, "
+        "with identical width-to-height proportion across all panels. The "
+        f"outer storyboard delivery canvas is also {ratio}, but it is only "
+        "a container. Use identical panel sizes, a complete axis-aligned "
+        "border around every illustrated panel, and gutters whose horizontal "
+        "and vertical dimensions scale proportionally to the target ratio."
+        f"{layout} Never stretch, "
+        "squash, crop, merge, skew or substitute square/portrait/landscape "
+        "panels merely to fill the sheet. Do not add a title, header, footer, "
+        "panel number, caption, label, legend, timestamp or any other margin "
+        "text. Unless a panel explicitly requires multiple copies or twins, "
+        "show exactly one visual instance of each named character in that "
+        "panel; the same character recurring across sequential panels must "
+        "never be duplicated or cloned inside one panel."
+    )
+
+
+def _append_storyboard_panel_aspect_contract(
+    prompt: str,
+    aspect_ratio: str,
+    panel_count: int | None = None,
+) -> str:
+    marker = "[STORYBOARD PANEL ASPECT CONTRACT — HARD REQUIREMENT]"
+    if marker in prompt:
+        return prompt
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"{_storyboard_panel_aspect_contract(aspect_ratio, panel_count)}"
+    )
 
 
 def _stable_id(prefix: str, project_id: str, idempotency_key: str) -> str:
@@ -686,6 +741,13 @@ def _resolve_request(
             )
         if not prompt:
             raise ValidationError("生成分镜图需要 storyboard prompt")
+        # Paid image calls cannot bypass the target video frame because an
+        # older or explicitly supplied prompt omitted the per-panel rule.
+        prompt = _append_storyboard_panel_aspect_contract(
+            prompt,
+            project.settings.aspect_ratio,
+            len(creation.shots.order),
+        )
         version_ids = list(
             resolve_r2v_visual_reference_version_ids(
                 project,

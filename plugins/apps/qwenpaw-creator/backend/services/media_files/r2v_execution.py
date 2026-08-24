@@ -492,6 +492,17 @@ def _failed_task_conflict(
 def _is_transient_materialize_error(error: BaseException) -> bool:
     if isinstance(error, httpx.TransportError):
         return True
+    # Large public CDNs can legitimately rotate the selected edge between
+    # getaddrinfo and the TLS connection.  The secure downloader still rejects
+    # that individual hop (so DNS rebinding remains fail-closed), then a fresh
+    # materialization attempt performs a new DNS resolution and connection.
+    # Treat only this exact peer-pinning rejection as transient; private,
+    # reserved or malformed addresses remain deterministic validation errors.
+    if (
+        isinstance(error, ValidationError)
+        and "peer 不属于当前跳 DNS 预解析集合" in str(error)
+    ):
+        return True
     return is_transient_error_message(str(error))
 
 

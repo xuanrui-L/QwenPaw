@@ -97,6 +97,33 @@ def test_broken_entries_stay_isolated(tmp_path, monkeypatch) -> None:
     assert not invalid.available
 
 
+def test_professional_media_prompt_skill_is_builtin(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The Creator ships the detailed prompt compiler without config."""
+
+    _configure(tmp_path, monkeypatch, [])
+    builtin_root = Path(__file__).resolve().parents[2] / "skills"
+    monkeypatch.setattr(external_skills, "_BUILTIN_SKILLS_ROOT", builtin_root)
+    external_skills._clear_load_cache()
+
+    loaded = {skill.entry.name: skill for skill in load_skills()}
+    skill = loaded["professional-media-prompts"]
+    assert "N=ceil(sqrt(P))" in skill.skill_md
+    assert "同一格内每个已命名角色只能" in skill.skill_md
+    assert "`clear spatial labels` 和 `no text`" in skill.skill_md
+    assert skill.available
+    parsed = external_skills.parse_skill_md(skill.skill_md)
+    assert "角色身份板/设定图" in parsed["description"]
+    assert "电影分镜图" in parsed["body"]
+    assert "参考资产职责映射" in parsed["body"]
+    assert "Seedance 2.5" in parsed["body"]
+    assert "不存在通用 `image1` 语法" in parsed["body"]
+    assert "Kling 百炼 Omni" in parsed["body"]
+    assert "每一个独立面板内部画框" in parsed["body"]
+
+
 # ── Driver loop: progressive disclosure end to end ───────────────────────────
 
 

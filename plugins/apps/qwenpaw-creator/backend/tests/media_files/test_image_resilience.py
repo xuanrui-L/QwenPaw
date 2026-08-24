@@ -22,7 +22,9 @@ from services.media_files.image_execution import (
     FileImageExecutionService,
     ImageModelCapabilityError,
     ImageReferenceBudgetError,
+    _append_storyboard_panel_aspect_contract,
     _resolve_request,
+    _storyboard_panel_aspect_contract,
 )
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
@@ -45,6 +47,53 @@ _SAFETY_MESSAGE = (
     "Your request was rejected by the safety system"
 )
 _PHOTO_URL = "https://example.com/messi-photo.jpg"
+
+
+def test_storyboard_panel_aspect_contract_preserves_each_video_frame() -> None:
+    contract = _storyboard_panel_aspect_contract("9:16", 5)
+    assert "target video aspect ratio is 9:16" in contract
+    assert "EVERY individual storyboard panel" in contract
+    assert "outer storyboard delivery canvas is also 9:16" in contract
+    assert "strict 3 columns by 3 rows square lattice" in contract
+    assert "remaining 4 lattice slots as pure blank" in contract
+    assert "Do not use an asymmetric, masonry, 2+3, 3+2" in contract
+    assert "Do not add a title, header, footer" in contract
+    assert "Never stretch, squash, crop, merge, skew" in contract
+    assert "exactly one visual instance of each named character" in contract
+    assert "never be duplicated or cloned inside one panel" in contract
+
+    appended = _append_storyboard_panel_aspect_contract(
+        "legacy storyboard prompt",
+        "9:16",
+    )
+    assert appended.startswith("legacy storyboard prompt")
+    assert appended.count("STORYBOARD PANEL ASPECT CONTRACT") == 1
+    assert (
+        _append_storyboard_panel_aspect_contract(appended, "9:16")
+        == appended
+    )
+
+
+def test_storyboard_resolution_appends_project_panel_ratio_before_spend(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path, monkeypatch)
+    snapshot = services.projects.read(PROJECT_ID)
+    snapshot.project.settings.aspect_ratio = "9:16"
+    resolved = _resolve_request(
+        snapshot=snapshot,
+        project_root=services.projects.project_root(PROJECT_ID),
+        command=CreatorCommandType.GENERATE_STORYBOARD_IMAGE,
+        target_ref=f"element:{ELEMENT_ID}",
+        arguments={"prompt": "legacy prompt without a panel ratio"},
+    )
+    assert "EVERY individual storyboard panel's inner picture frame" in (
+        resolved.prompt
+    )
+    assert "exactly 9:16" in resolved.prompt
+    assert "strict 1 columns by 1 rows square lattice" in resolved.prompt
+    assert resolved.aspect_ratio == "9:16"
 
 
 class _CountingProvider:

@@ -150,6 +150,16 @@ class DashScopeImageModel(BaseImageModel):
             _mask_key(api_key),
             base_url,
         )
+        # qwen-image3 multi-reference identity boards and storyboards routinely
+        # take several minutes on the synchronous multimodal endpoint.  A
+        # 240-second legacy default caused the caller to abandon a possibly
+        # billed render and submit another one.  Keep other DashScope image
+        # families unchanged while giving qwen-image3 a production-safe wait.
+        default_timeout = (
+            900
+            if model_name.strip().casefold().startswith("qwen-image-3")
+            else 240
+        )
         return cls(
             model_name=model_name,
             api_key=api_key,
@@ -160,9 +170,12 @@ class DashScopeImageModel(BaseImageModel):
                 int(
                     os.environ.get(
                         "DASHSCOPE_IMAGE_TIMEOUT",
-                        os.environ.get("IMAGE_TIMEOUT", "240"),
+                        os.environ.get(
+                            "IMAGE_TIMEOUT",
+                            str(default_timeout),
+                        ),
                     )
-                    or 240,
+                    or default_timeout,
                 ),
             ),
             concurrency=_configured_int(

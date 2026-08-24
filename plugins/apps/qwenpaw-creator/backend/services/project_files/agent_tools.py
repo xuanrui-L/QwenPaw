@@ -552,6 +552,8 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "用一组小而扁平的操作列表修改 Project，适用于 90% 的日常写入"
             "（新建/更新实体、Element、改字段）；需要计算的复杂变换才用 "
             "jq_project。每个 op 独立且浅（value 嵌套勿超 2 层）："
+            "ops 必须直接传 JSON 数组，绝不能把数组序列化为字符串；长 Prompt "
+            "正文应拆成后续独立 add/replace op，避免换行或冒号触发二次解析。"
             'add/replace/remove 用 RFC 6901 path（如 "/timelines/items/'
             'timeline:main/elements_by_id/elem:x"，数组末尾用 "-"）；'
             "upsert_entity 用于 EntityCollection（如 visual.entities 或某实体的 "

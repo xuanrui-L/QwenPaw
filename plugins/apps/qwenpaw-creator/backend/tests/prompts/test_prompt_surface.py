@@ -88,7 +88,8 @@ def test_creator_owns_timeline_element_planning() -> None:
     for responsibility in (
         "Timeline Element",
         "creation.type=r2v/t2v/i2v/s2v/edit/overlay/transition/audio",
-        "单个 R2V Element 的时长必须符合本轮注入的当前精确视频模型能力上限",
+        "单个 R2V Element 的时长必须落在「当前视频模型时长要求」内",
+        "不设 Creator 全局上限",
         "jq_project",
     ):
         assert responsibility in prompt
@@ -104,13 +105,89 @@ def test_visual_prompt_reuses_an_existing_variant_sheet_by_default() -> None:
     assert "生成前去重（硬性规则）" in prompt
     assert "generated_artifact_version_ids" in prompt
     assert "重复委派、继续执行或重新进入同一目标不等于用户要求重做" in prompt
+    assert "视觉开发 Agent **不得再调用** `image_generation`" in prompt
+    assert "产生重复付费图片" in prompt
 
 
-def test_r2v_prompt_requires_text_free_storyboards_without_blind_retry() -> (
+def test_visual_prompt_requires_a_cinematic_identity_board_contract() -> None:
+    prompt = load_file_agent_prompt("visual_development_agent.system")
+    for requirement in (
+        "电影感艺术身份板",
+        "大型、略偏离中心的英雄全身视角",
+        "不得重叠、融合、堆叠",
+        "小型轮廓研究区",
+        "小型表情研究区",
+        "小型细节研究区",
+        "名称、角色、核心情绪、视觉标志",
+        "相同脸部与比例",
+    ):
+        assert requirement in prompt
+    assert "不得同时要求 `clear spatial labels` 与 `no text`" in prompt
+    assert "无文字视觉拓扑" in prompt
+
+
+def test_creator_compiles_dense_action_nodes_without_uniform_timestamps() -> (
+    None
+):
+    prompt = load_file_agent_prompt("creator_agent.system")
+    assert "professional-media-prompts" in prompt
+    assert "动作密集、蒙太奇" in prompt
+    assert "6–15 个短动作节点" in prompt
+    assert "3–6 个核心电影段落" in prompt
+    assert "10 秒内的 12 个节点" in prompt
+    assert "机械分配 12 个小数时间戳" in prompt
+    assert "不为每格/每个 Shot 设置 2–4 秒建议区间或 5 秒硬上限" in prompt
+    assert "单个常规 Shot 不超过 5 秒" not in prompt
+    assert "3–4 秒极短段通常只承载一个占主导的连续微动作" in prompt
+    assert "专业完整不等于重复冗长" in prompt
+    assert "每一个分镜格内部画框" in prompt
+    assert "网格自然比例不匹配时用外侧留白和格间距吸收" in prompt
+
+
+def test_creator_duration_is_injected_from_the_active_video_model(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    prompt = render_creator_system_prompt(
+        project_id="project-duration-test",
+        workspace_schema="SCHEMA",
+        external_skills="",
+    )
+    assert "happyhorse-1.1" in prompt
+    assert "3–15 秒整数" in prompt
+    assert "3 秒短段合法" in prompt
+    assert "30 秒单段不合法" in prompt
+    assert "不设置统一的 8–10 秒、10 秒或 15 秒默认值" in prompt
+    assert "`[Image 1]`、`[Image 2]`" in prompt
+    assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
+    assert "主 Agent 自己编写 `video_prompt` 时也必须逐条遵守" in prompt
+    assert "`ops` 必须直接传原生 JSON 数组" in prompt
+
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "doubao-seedance-2-5-260628",
+    )
+    prompt = render_creator_system_prompt(
+        project_id="project-duration-test",
+        workspace_schema="SCHEMA",
+        external_skills="",
+    )
+    assert "4–30 秒整数" in prompt
+    assert "30 秒长段" in prompt
+
+
+def test_r2v_prompt_supports_clean_and_annotated_storyboard_modes() -> (
     None
 ):
     prompt = load_file_agent_prompt("r2v_generation_director.system")
-    assert "分镜图画面纯净性（硬性规则）" in prompt
+    assert "分镜交付模式与画面纯净性（硬性规则）" in prompt
+    assert "生成参考分镜（R2V 默认）" in prompt
+    assert "制作标注分镜（仅显式请求）" in prompt
     assert (
         "No panel numbers, no captions, no labels, no subtitles, "
         "no watermarks, no annotation text in the image."
@@ -120,6 +197,30 @@ def test_r2v_prompt_requires_text_free_storyboards_without_blind_retry() -> (
     assert "No text except" in prompt
     assert "不要在未看到图片内容时臆测检查结果" in prompt
     assert "不要因此自动重复调用 `image_generation`" in prompt
+    for legend in (
+        "红色=主体运动",
+        "蓝色=摄影机运动",
+        "绿色=构图/景别/视觉重心",
+        "橙色=光线方向",
+        "紫色=声音/情绪",
+    ):
+        assert legend in prompt
+    assert "最终视频不得继承宫格、边框、镜头号、箭头、彩色标记" in prompt
+    assert "每段只承担一个主要状态变化" in prompt
+    assert "不得给 10 秒内的 12 格机械分配 12 个小数时间戳" in prompt
+    assert "每一个宫格内部画框的宽高比必须严格等于" in prompt
+    assert "不得把“整张图为 16:9”误解为“内部格子可以是方形”" in prompt
+    assert "N=ceil(sqrt(P))" in prompt
+    assert "5 个动作节点必须用 3×3 槽位" in prompt
+    assert "禁止 5 格使用 2+3/3+2 非对称排布" in prompt
+    assert "同一格内每个已命名角色只能出现一个视觉实例" in prompt
+    assert "不得在某一格克隆出第二个副本" in prompt
+    assert "结构化请求字段承载的模型只用自然语言，不发明编号" in prompt
+    assert (
+        "storyboard → cast_lineup_refs（声明顺序）→ character_refs（声明顺序）"
+        "→ prop_refs（声明顺序）→ scene_ref"
+    ) in prompt
+    assert "[Image 3]=道具" in prompt
 
 
 def test_source_prompt_requires_outer_vlm_timeline_and_controlled_commit() -> (
@@ -218,8 +319,8 @@ def test_video_model_guidance_switches_on_configured_model(
     _set_video_model(monkeypatch, "happyhorse-1.1-r2v")
     prompt = _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
     assert "happyhorse-1.1-r2v" in prompt
-    assert "[Image N]" in prompt
-    assert "storyboard 是第一参考，即 `[Image 1]`" in prompt
+    assert "`[Image 1]`、`[Image 2]`" in prompt
+    assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
     assert "不支持参考视频" in prompt
     assert "{{video_model_guidance}}" not in prompt
     _set_video_model(monkeypatch, "wan2.7-r2v")
@@ -228,6 +329,8 @@ def test_video_model_guidance_switches_on_configured_model(
     assert "视频最多 5 个" in prompt
     assert "合计最多 5 个" in prompt
     assert "[Image N]" not in prompt
+    assert "`[Image 1]`、`[Image 2]`" not in prompt
+    assert "中文 Prompt 用“图1、图2" in prompt
     _set_video_model(monkeypatch, "wan3.0-video")
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     specialist = _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)

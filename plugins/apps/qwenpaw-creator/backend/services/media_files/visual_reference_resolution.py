@@ -24,16 +24,24 @@ def _owner_entity_id(owner_ref: str | None) -> str | None:
 
 
 def _entity_ids(creation: R2VCreation) -> list[str]:
+    """Return the stable semantic order used by prompt reference mappings.
+
+    Characters establish identity first, props follow as interaction anchors,
+    and the scene comes last as the broad environment reference.  This order
+    is part of the provider-facing ``[Image N]`` contract; changing it without
+    changing the authored prompt silently swaps reference responsibilities.
+    """
+
     return list(
         dict.fromkeys(
             [
                 *creation.character_refs,
+                *creation.prop_refs,
                 *(
                     [creation.scene_ref]
                     if creation.scene_ref is not None
                     else []
                 ),
-                *creation.prop_refs,
             ],
         ),
     )

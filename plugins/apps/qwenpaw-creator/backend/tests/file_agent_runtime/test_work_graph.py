@@ -45,6 +45,7 @@ def _entity(entity_id: str, variants: dict[str, str | None]) -> VisualEntity:
             "items": {
                 variant_id: VisualVariant(
                     variant_id=variant_id,
+                    prompt="专业视觉资产 prompt",
                     selected_artifact_version_id=selected,
                 )
                 for variant_id, selected in variants.items()
@@ -318,6 +319,23 @@ def test_missing_storyboard_prompt_is_a_model_required_gap() -> None:
     assert storyboard.missing == ("storyboard_prompt 缺失",)
     # The scheduler cannot solve this: it needs a model turn.
     assert storyboard in graph.model_required_nodes()
+
+
+def test_missing_visual_prompt_is_a_model_required_gap() -> None:
+    project = _project()
+    entity = _entity("char:hero", {"var:default": None})
+    entity.variants.items["var:default"].prompt = ""
+    project.visual.entities.items[entity.entity_id] = entity
+    project.visual.entities.order.append(entity.entity_id)
+
+    graph = derive_work_graph(project)
+    visual = graph.by_id["visual:char:hero:var:default"]
+    assert visual.status is WorkNodeStatus.GATED
+    assert visual.missing == ("visual_prompt 缺失",)
+    # A one-line entity description fallback must never start a paid image
+    # task before visual development has committed its production prompt.
+    assert visual in graph.model_required_nodes()
+    assert visual not in graph.ready_media_nodes()
 
 
 def _element_with_landed_storyboard(

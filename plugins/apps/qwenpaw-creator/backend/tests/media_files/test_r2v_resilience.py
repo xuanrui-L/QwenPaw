@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from domain.errors import ConflictError
+from domain.errors import ConflictError, ValidationError
 from services.media_files import r2v_execution
 from services.media_files.image_execution import FileImageExecutionService
 from services.media_files.r2v_execution import FileR2VExecutionService
@@ -276,6 +276,27 @@ def test_veo_download_auth_is_resolved_only_for_materialization(
     assert captured["kwargs"]["request_headers"] == {
         "x-goog-api-key": "new-secret",
     }
+
+
+def test_public_cdn_dns_peer_rotation_is_retried(tmp_path, monkeypatch):
+    sentinel = object()
+    calls = []
+
+    async def stub(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ValidationError(
+                "远程视频连接 peer 不属于当前跳 DNS 预解析集合",
+            )
+        return sentinel
+
+    result = _run_materialize(
+        _mat_worker(tmp_path, monkeypatch),
+        monkeypatch,
+        stub,
+    )
+    assert result is sentinel
+    assert len(calls) == 3
 
 
 _MP4 = b"\x00\x00\x00\x18ftypmp42" + b"stale-video" * 64

@@ -483,6 +483,19 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 fingerprint,
             ):
                 status, task = WorkNodeStatus.READY, None
+            missing: tuple[str, ...] = ()
+            if (
+                status is WorkNodeStatus.READY
+                and not (variant.prompt or "").strip()
+            ):
+                # Entity descriptions are continuity facts, not production
+                # prompts.  Dispatching their one-line fallback caused real
+                # qwen-image jobs to race ahead of visual development during
+                # a 60-second acceptance run (2026-08-24).  Keep the node in
+                # the model-required lane until the committed Variant owns a
+                # deliberate prompt, just as storyboards already do.
+                status = WorkNodeStatus.GATED
+                missing = ("visual_prompt 缺失",)
             add(
                 WorkNode(
                     node_id=node_id,
@@ -497,6 +510,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         if status is WorkNodeStatus.FAILED
                         else None
                     ),
+                    missing=missing,
                     locator={"page": "assets", "assetId": entity_id},
                     command="GENERATE_ASSET",
                     target_ref=f"asset:{entity_id}",
