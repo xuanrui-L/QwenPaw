@@ -380,7 +380,7 @@
     "needS2v": "Configure for talking-head scenarios; pair with TTS or uploaded audio as the driving source.",
     "videoFamilyCaps": "Exact model capabilities",
     "videoFamilyNote": "This is a Wan/HappyHorse model cluster: submission derives a model suffix from the explicit Element type. This does not auto-create t2v/i2v Elements.",
-    "videoAllInOneNote": "Wan3.0 is an All-in-One model: t2v, i2v, and r2v all submit the same model ID. It supports 480P/720P/1080P output, native audio, and videos up to 30 seconds.",
+    "videoAllInOneNote": "wan3.0-video and wan3.0-video-prime are both All-in-One models: t2v, i2v, and r2v submit the selected model ID unchanged. They support 480P/720P/1080P output, native audio, and videos up to 30 seconds.",
     "videoExactModelNote": "This model has an exact single-model capability declaration. Submission keeps its model ID; unsupported modes are rejected before media upload or task creation.",
     "videoCapabilitiesLoading": "Checking capabilities…",
     "videoCapabilityUnknown": "Exact model ID is not registered; all video-generation modes will fail closed",
@@ -398,7 +398,7 @@
     "translateModelLabel": "Translation model (optional)",
     "translateCardNote": "image_generation mode=translate uses this model to translate in-image text while keeping the layout; empty means the default qwen-mt-image, sharing the image model's DashScope API Key (DashScope protocol only).",
     "imageEndpointNote": "Set Base URL to the API root (https://dashscope.aliyuncs.com/api/v1): every Bailian qwen-image / wan-image model shares the multimodal-generation service path, appended automatically by the backend; in-image translation uses the image2image path, appended the same way.",
-    "videoEndpointNote": "Set Base URL to the selected provider's API root; the backend appends its official submit path. Bailian models default to the legacy DashScope root and also support same-region Workspace roots. Capabilities come from the backend documentation table, never from a real generation probe."
+    "videoEndpointNote": "Bailian defaults to the legacy root https://dashscope.aliyuncs.com/api/v1, which needs no WorkspaceId; a same-region workspace root such as https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1 is also accepted. The backend appends official paths, and Test Connection is read-only—it never creates a billable generation task."
   },
   "modelBadges": {
     "textModel": "Text Model",
@@ -1189,7 +1189,7 @@
     "modelGuideImageGen": "Image Generation",
     "modelGuideImageGenProtocols": "OpenAI Protocol (gpt-image-2), DashScope (Bailian: qwen-image 3.0/2.0, wan2.7-image, z-image-turbo), Google Gemini (Nano Banana: gemini-3-pro-image and siblings, up to 14 reference images), Volcano Engine (doubao-seedream 5.0/4.5/4.0), Black Forest Labs (FLUX.2), Ideogram (typography specialist)",
     "modelGuideVideoGen": "Video Generation",
-    "modelGuideVideoGenProtocols": "Capabilities are validated by protocol and exact model ID. DashScope includes Wan3.0 All-in-One (t2v/i2v/r2v, up to 30s), Wan2.7 / HappyHorse families, hosted Kling, and r2v-only hosted Vidu models. Other protocols include official Seedance IDs, Veo 3.1, MiniMax, Kling, and model-specific Vidu capabilities. The protocol selects hosted vs official channels.",
+    "modelGuideVideoGenProtocols": "Capabilities are validated by protocol and exact model ID. DashScope includes wan3.0-video / wan3.0-video-prime All-in-One (t2v/i2v/r2v, 2–30s), Wan2.7 / HappyHorse families, hosted Kling, and r2v-only hosted Vidu models. Other protocols include official Seedance IDs, Veo 3.1, MiniMax, Kling, and model-specific Vidu capabilities. The protocol selects hosted vs official channels.",
     "modelGuideAsrTitle": "ASR Speech Recognition",
     "modelGuideAsrProtocols": "DashScope Fun-ASR, DashScope Qwen3-ASR, OpenAI Whisper",
     "modelGuideVoice": "Narration / talking-head",
@@ -1205,7 +1205,7 @@
     "modelGuideGoConfigure": "Configure →",
     "modelGuideWhatModels": "What models for what scenarios?",
     "modelGuideProviders": "Currently supported providers / protocols",
-    "modelGuideSetupDesc": "Fill in Base URL, API Key and Model Name in 'Model Configuration', enable after passing 'Test Connection'; VLM can directly reuse multimodal-capable LLM configuration."
+    "modelGuideSetupDesc": "For a first Bailian Wan3 setup, select DashScope, keep the legacy default https://dashscope.aliyuncs.com/api/v1, enter the key, and choose wan3.0-video or wan3.0-video-prime. Existing workspace users may enter a same-region Workspace root instead. Enable it after the read-only Test Connection; this never creates a billable video task. VLM can reuse a multimodal-capable LLM configuration."
   },
   "tourMocks": {
     "sampleTimeline": "Sample: Timeline after planning",

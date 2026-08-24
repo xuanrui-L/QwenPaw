@@ -42,13 +42,24 @@ Before your first project, open **Model Configuration** at the lower right of th
 | Sources with speech / transcription | ASR                                       | Turn speech into text for editing and subtitles                  |
 | Voice-over / digital-human delivery | TTS + digital human                       | Synthesize narration and dialogue; drive talking-video segments  |
 
+#### Bailian Wan3.0 quick setup
+
+1. Select the **DashScope (Bailian)** protocol under Video Generation.
+2. For the simplest setup, keep the legacy default Base URL, `https://dashscope.aliyuncs.com/api/v1`. It requires no WorkspaceId and works with both legacy and current Bailian models. If you already use a Bailian workspace, you can instead enter its same-region root, `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1`; the API key, model, and workspace must belong to the same region.
+3. Enter your DashScope API key and select either `wan3.0-video` or `wan3.0-video-prime`. Both are All-in-One models: the same model ID handles text-to-video, image-to-video, and reference-to-video without a mode suffix.
+4. Select **Test Connection**, then save and enable the model after it passes. The connection check is read-only and never creates a billable video task; actual generation still shows the model, parameters, and estimated-cost confirmation card first.
+
+Wan3.0 generates 2–30 second clips with 480P / 720P / 1080P output, `adaptive` plus six fixed aspect ratios, and native audio. Reference-to-video accepts up to 10 images and 5 videos; reference videos total at most 15 seconds, and when video input is present the input plus output duration must not exceed 30 seconds. Creator exposes the same constraints to settings, the Agent, and the execution layer, rejecting unsupported input before upload or task creation.
+
+Official references: [Wan3.0 video-generation API](https://help.aliyun.com/zh/model-studio/wan3-video-generation-api-reference) and [Bailian legacy/workspace endpoint guidance](https://help.aliyun.com/zh/model-studio/qwen-api-via-dashscope).
+
 The current model matrix is grouped by capability:
 
 - **LLM / VLM**: OpenAI-compatible APIs, DashScope / Bailian, Anthropic Claude, DeepSeek, Google Gemini, Baidu Qianfan, Volcano Engine, and custom providers;
 - **Grounding**: Serper (Google) or Tavily; the validation model can reuse an LLM / VLM connection or be configured separately;
 - **Image generation**: OpenAI-compatible APIs (`gpt-image-2`), DashScope / Bailian (`qwen-image-3.0`, `wan2.7-image`, `z-image-turbo`), Google Gemini (Nano Banana family; `gemini-3-pro-image` takes up to 14 reference images), Volcano Engine (`doubao-seedream` 5.0/4.5/4.0), Black Forest Labs (FLUX.2, up to 8 reference images), and Ideogram (typography and in-image text specialist);
 - **Video generation**:
-  - DashScope / Bailian: `wan3.0-video` is one All-in-One model for t2v / i2v / r2v, 480P / 720P / 1080P, native audio, and clips up to 30 seconds; `wan2.7` and `happyhorse-1.1` derive mode siblings from an explicitly selected element type; Bailian also hosts the `kling/kling-v3-*` and r2v-only `vidu/viduq3-*_reference2video` models;
+  - DashScope / Bailian: `wan3.0-video` and `wan3.0-video-prime` are All-in-One models for t2v / i2v / r2v, 480P / 720P / 1080P, native audio, and clips up to 30 seconds; `wan2.7` and `happyhorse-1.1` derive mode siblings from an explicitly selected element type; Bailian also hosts the `kling/kling-v3-*` and r2v-only `vidu/viduq3-*_reference2video` models;
   - Volcano Engine: `doubao-seedance-2-5-260628` (up to 30s, omni reference of up to 30 images + 10 videos) and the documented `doubao-seedance-2-0-*` IDs;
   - Google Gemini: `veo-3.1` (4/6/8s, forced to 8s with reference images or 1080p/4k output, up to 3 reference images);
   - MiniMax Hailuo: `MiniMax-Hailuo-2.3` and siblings (768P at 6/10s, 1080P at 6s); subject reference is served by `S2V-01` only;
