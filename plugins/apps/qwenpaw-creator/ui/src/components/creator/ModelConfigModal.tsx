@@ -311,14 +311,16 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
 const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
-    // Family base names: the backend derives the per-mode sibling
-    // (wan2.7 → wan2.7-t2v/-i2v/-r2v) at submission, so no mode suffix
-    // is configured here. The kling/ and vidu/ entries are the
+    // Wan3.0 is All-in-One and keeps one model ID for t2v/i2v/r2v; Wan2.7
+    // and HappyHorse derive their per-mode sibling at submission. The kling/
+    // and vidu/ entries are the
     // Bailian-hosted third-party models served by the same
     // video-synthesis endpoint (kling v3: t2v/i2v/refer≤7; vidu:
     // reference-to-video only, 1-7 images).
     models: [
       "wan2.7",
+      "wan3.0-video",
+      "wan3.0-video-prime",
       "happyhorse-1.1",
       "kling/kling-v3-omni-video-generation",
       "kling/kling-v3-video-generation",
@@ -620,6 +622,10 @@ export function videoBackendKey(modelName: string): string {
   if (name.includes("happyhorse")) return "happyhorse";
   if (name.includes("seedance")) return "seedance2";
   return "wan";
+}
+
+function isWan3VideoModel(modelName: string): boolean {
+  return /^wan3\.0-video(?:-prime)?$/i.test((modelName || "").trim());
 }
 
 // Per-pane title/description plus one scenario hint reusing the onboarding
@@ -2866,7 +2872,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               lineHeight: 1.6,
             }}
           >
-            {t("modelConfig.videoFamilyNote")}
+            {t(
+              isWan3VideoModel(config.video.model_name)
+                ? "modelConfig.videoAllInOneNote"
+                : "modelConfig.videoFamilyNote",
+            )}
           </span>
           <span
             style={{
@@ -2875,7 +2885,11 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               lineHeight: 1.6,
             }}
           >
-            {t("modelConfig.videoEndpointNote")}
+            {t(
+              isWan3VideoModel(config.video.model_name)
+                ? "modelConfig.videoWan3EndpointNote"
+                : "modelConfig.videoEndpointNote",
+            )}
           </span>
         </div>
       ) : null;

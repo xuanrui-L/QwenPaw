@@ -380,6 +380,13 @@ describe("ModelConfigModal configuration lifecycle", () => {
 });
 
 describe("ModelConfigModal model presets", () => {
+  it("offers Wan3.0 while keeping the legacy Bailian URL as default", () => {
+    const bailian = PRESETS_BY_TYPE.video["DashScope（百炼）"];
+    expect(bailian.models).toContain("wan3.0-video");
+    expect(bailian.models).toContain("wan3.0-video-prime");
+    expect(bailian.base_url).toBe("https://dashscope.aliyuncs.com/api/v1");
+  });
+
   it("offers every preset protocol in its dropdown", () => {
     // A preset the dropdown does not list is unreachable, and a saved
     // protocol outside the list is silently reset on load — which would

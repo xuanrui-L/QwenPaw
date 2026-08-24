@@ -143,6 +143,43 @@ def test_wan_video_urls_accept_api_root_or_full_endpoint(monkeypatch) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "model_name",
+    ["wan2.7", "wan3.0-video", "kling/kling-v3-video-generation"],
+)
+def test_bailian_video_models_accept_legacy_and_workspace_api_roots(
+    monkeypatch,
+    model_name,
+) -> None:
+    monkeypatch.setattr(config, "get_video_backend", lambda: "wan")
+    monkeypatch.setattr(
+        config,
+        "get_video_model_name",
+        lambda: model_name,
+    )
+    monkeypatch.setattr(
+        config,
+        "get_video_base_url",
+        lambda: "https://dashscope.aliyuncs.com/api/v1",
+    )
+    assert config.get_video_submit_url() == (
+        "https://dashscope.aliyuncs.com/api/v1/"
+        "services/aigc/video-generation/video-synthesis"
+    )
+
+    monkeypatch.setattr(
+        config,
+        "get_video_base_url",
+        lambda: "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1",
+    )
+    assert config.get_video_submit_url() == (
+        "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/"
+        "services/aigc/video-generation/video-synthesis"
+    )
+    assert config.get_video_task_url("task-wan3") == (
+        "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/tasks/task-wan3"
+    )
+
 def test_video_provider_poll_interval_is_request_configurable() -> None:
     with _tool_configs(
         {config.CREATOR_VIDEO_CONFIG_TOOL: {"poll_interval_seconds": 2.5}},

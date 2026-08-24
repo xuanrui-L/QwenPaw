@@ -388,7 +388,7 @@
       },
       {
         "name": "creator_video_model",
-        "description": "QwenPaw Creator reference-to-video configuration",
+        "description": "QwenPaw Creator multi-mode video generation configuration",
         "icon": "🎬",
         "requires_config": true,
         "config_fields": [
@@ -406,7 +406,8 @@
             "type": "text",
             "required": false,
             "default": "https://dashscope.aliyuncs.com/api/v1",
-            "placeholder": "https://dashscope.aliyuncs.com/api/v1"
+            "placeholder": "https://dashscope.aliyuncs.com/api/v1",
+            "help": "The legacy DashScope API root remains the default for compatibility. Bailian video models also accept a regional Workspace API root when its model and API Key are in the same region."
           },
           {
             "name": "model",
@@ -415,7 +416,7 @@
             "required": false,
             "default": "wan2.7-r2v",
             "placeholder": "wan2.7-r2v",
-            "help": "Supported: Bailian wan2.x r2v family, Bailian happyhorse-1.x-r2v, Volcano doubao-seedance-2.x. Environment fallback: VIDEO_MODEL_NAME."
+            "help": "Supported: Bailian wan3.0-video All-in-One, wan2.x and happyhorse-1.x families, plus the Creator video presets. Environment fallback: VIDEO_MODEL_NAME."
           },
           {
             "name": "submit_timeout",

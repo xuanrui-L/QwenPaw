@@ -22,6 +22,7 @@ from models.video_capabilities import (
     configured_mode_segment,
     derive_video_model_name,
     effective_video_model_name,
+    is_wan3_video_model,
     validate_video_mode,
     video_backend_key,
     video_model_prompt_guidance,
@@ -179,6 +180,17 @@ def test_effective_name_keeps_legacy_wan_r2v_behaviour() -> None:
         effective_video_model_name("happyhorse-1.1", "r2v", "happyhorse")
         == "happyhorse-1.1-r2v"
     )
+
+
+def test_wan3_all_in_one_name_is_kept_for_every_mode() -> None:
+    assert is_wan3_video_model("wan3.0-video")
+    assert is_wan3_video_model("WAN3.0-VIDEO-PRIME")
+    for mode in ("r2v", "t2v", "i2v"):
+        assert (
+            effective_video_model_name("wan3.0-video", mode, "wan")
+            == "wan3.0-video"
+        )
+        assert derive_video_model_name("wan3.0-video", mode) == "wan3.0-video"
 
 
 # ── capability matrix ────────────────────────────────────────────────────────
@@ -368,6 +380,13 @@ def test_guidance_describes_the_mode_matrix_per_model() -> None:
     assert "不支持的 mode（video_edit）" in wan
     assert "[Image N]" not in wan
 
+    wan3 = video_model_prompt_guidance("wan3.0-video")
+    assert "All-in-One" in wan3
+    assert "图1、图2" in wan3
+    assert "图片最多 10 张" in wan3
+    assert "视频最多 5 个" in wan3
+    assert "2–30 秒" in wan3
+
     seedance = video_model_prompt_guidance("doubao-seedance-2.0-pro")
     assert "图片最多 9 张" in seedance
     assert "视频最多 3 个" in seedance
@@ -550,6 +569,66 @@ def test_wan_submit_body_keeps_prompt_extend(monkeypatch) -> None:
     )
 
     assert captured["body"]["parameters"]["prompt_extend"] is False
+
+
+@pytest.mark.parametrize("mode", ["t2v", "i2v", "r2v"])
+def test_wan3_all_in_one_payload_uses_one_model_and_no_prompt_extend(
+    monkeypatch,
+    mode,
+) -> None:
+    captured: dict = {}
+    _bind(monkeypatch, "wan3.0-video", captured)
+    kwargs = {
+        "mode": mode,
+        "ratio": "adaptive",
+        "duration": 30,
+        "resolution": "480p",
+        "generate_audio": False,
+    }
+    if mode == "i2v":
+        kwargs["first_frame_url"] = "/generated/storyboard.png"
+    elif mode == "r2v":
+        kwargs["reference_image_url_list"] = [
+            "/generated/storyboard.png",
+            "/generated/anchor.png",
+        ]
+
+    asyncio.run(video_model.submit_video_task("镜头缓慢推进", **kwargs))
+
+    body = captured["body"]
+    assert body["model"] == "wan3.0-video"
+    assert body["parameters"] == {
+        "resolution": "480P",
+        "ratio": "adaptive",
+        "watermark": False,
+        "duration": 30,
+        "audio": False,
+    }
+    assert "prompt_extend" not in body["parameters"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"duration": 31}, "duration must"),
+        ({"resolution": "4K"}, "resolution must"),
+        ({"ratio": "21:9"}, "ratio must"),
+    ],
+)
+def test_wan3_rejects_unsupported_parameters_before_submission(
+    monkeypatch,
+    kwargs,
+    message,
+) -> None:
+    _bind(monkeypatch, "wan3.0-video")
+    with pytest.raises(ModelError, match=message):
+        asyncio.run(
+            video_model.submit_video_task(
+                "prompt",
+                mode="t2v",
+                **kwargs,
+            ),
+        )
 
 
 def test_happyhorse_rejects_video_reference(monkeypatch) -> None:
@@ -739,6 +818,7 @@ def test_wan_reference_media_uses_dashscope_temp_upload(
     ("model_name", "expected"),
     [
         ("happyhorse-1.1-r2v", (9, 0, 9)),
+        ("wan3.0-video", (10, 5, 15)),
         ("wan2.7-r2v-2026-06-12", (5, 5, 5)),
         ("wan2.6-r2v-flash", (5, 3, 5)),
         ("doubao-seedance-2.0-pro", (9, 3, 12)),

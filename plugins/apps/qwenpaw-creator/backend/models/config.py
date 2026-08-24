@@ -12,7 +12,6 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
-
 from services.runtime_files.locking import CrossProcessFileLock
 
 try:

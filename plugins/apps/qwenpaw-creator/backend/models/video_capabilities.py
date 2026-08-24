@@ -58,6 +58,10 @@ _HAPPYHORSE_REFERENCE_DOCUMENTATION = (
 _WAN_27_REFERENCE_DOCUMENTATION = (
     "https://help.aliyun.com/zh/model-studio/video-to-video-guide"
 )
+_WAN_30_REFERENCE_DOCUMENTATION = (
+    "https://help.aliyun.com/zh/model-studio/"
+    "wan3-video-generation-api-reference"
+)
 _WAN_26_REFERENCE_DOCUMENTATION = (
     "https://help.aliyun.com/zh/model-studio/"
     "legacy-wan-reference-to-video-api-reference"
@@ -88,6 +92,10 @@ _HAPPYHORSE_REFERENCE_PATTERN = re.compile(
 )
 _WAN_27_REFERENCE_PATTERN = re.compile(
     r"^wan2\.7(?:-r2v)?(?:-20\d{2}-\d{2}-\d{2})?$",
+    re.IGNORECASE,
+)
+_WAN_30_REFERENCE_PATTERN = re.compile(
+    r"^wan3\.0-video(?:-prime)?$",
     re.IGNORECASE,
 )
 _WAN_26_REFERENCE_PATTERN = re.compile(
@@ -154,6 +162,15 @@ _WAN_27_REFERENCE_CAPABILITY = VideoReferenceCapability(
     max_reference_videos=5,
     max_reference_media=5,
     documentation_url=_WAN_27_REFERENCE_DOCUMENTATION,
+)
+_WAN_30_REFERENCE_CAPABILITY = VideoReferenceCapability(
+    family="wan3.0-video",
+    max_reference_images=10,
+    max_reference_videos=5,
+    # The official contract declares independent image/video maxima and no
+    # smaller combined-media cap, so the combined ceiling is their sum.
+    max_reference_media=15,
+    documentation_url=_WAN_30_REFERENCE_DOCUMENTATION,
 )
 _WAN_26_REFERENCE_CAPABILITY = VideoReferenceCapability(
     family="wan2.6-r2v",
@@ -298,6 +315,13 @@ _KNOWN_SUFFIX_SEGMENTS = ("-video-edit", "-t2v", "-i2v", "-r2v")
 _CONFIGURED_NAME_BACKENDS = frozenset(
     {"seedance2", "veo", "kling", "minimax", "vidu"},
 )
+
+# Wan3.0 is an All-in-One model: the same ID serves t2v/i2v/r2v instead of
+# using the per-mode siblings employed by Wan2.x.
+WAN_30_RESOLUTIONS = frozenset({"480P", "720P", "1080P"})
+WAN_30_RATIOS = frozenset({"adaptive", "16:9", "4:3", "1:1", "3:4", "9:16"})
+WAN_30_MIN_DURATION_SECONDS = 2
+WAN_30_MAX_DURATION_SECONDS = 30
 
 # --- Official per-family request constraints -------------------------------
 # Veo 3.1 (Gemini API): durationSeconds is one of "4"/"6"/"8" and must be 8
@@ -526,6 +550,12 @@ def is_happyhorse_model(model_name: str) -> bool:
     return model_name.strip().casefold().startswith(HAPPYHORSE_MODEL_PREFIX)
 
 
+def is_wan3_video_model(model_name: str) -> bool:
+    """True for Wan3.0 All-in-One video generation model IDs."""
+
+    return _WAN_30_REFERENCE_PATTERN.fullmatch(model_name.strip()) is not None
+
+
 def is_vidu_model(model_name: str) -> bool:
     """True when the configured video model is a Bailian-hosted Vidu model."""
 
@@ -581,6 +611,8 @@ def video_reference_capability(  # pylint: disable=too-many-return-statements
         return None
     if _HAPPYHORSE_REFERENCE_PATTERN.fullmatch(normalized):
         return _HAPPYHORSE_REFERENCE_CAPABILITY
+    if _WAN_30_REFERENCE_PATTERN.fullmatch(normalized):
+        return _WAN_30_REFERENCE_CAPABILITY
     if _WAN_27_REFERENCE_PATTERN.fullmatch(normalized):
         return _WAN_27_REFERENCE_CAPABILITY
     if _WAN_26_REFERENCE_PATTERN.fullmatch(normalized):
@@ -704,6 +736,8 @@ def derive_video_model_name(model_name: str, mode: str) -> str:
     if suffix is None:
         raise ValueError(f"未知的视频生成 mode {mode!r}")
     base = model_name.strip()
+    if is_wan3_video_model(base):
+        return base
     lowered = base.casefold()
     for segment in _KNOWN_SUFFIX_SEGMENTS:
         index = lowered.find(segment)
@@ -762,6 +796,8 @@ def effective_video_model_name(
 
     configured = model_name.strip()
     backend = backend_key.strip().casefold()
+    if is_wan3_video_model(configured):
+        return configured
     if backend in _CONFIGURED_NAME_BACKENDS:
         return configured
     normalized_mode = (mode or "r2v").strip().casefold() or "r2v"
@@ -847,6 +883,14 @@ def _family_constraint_guidance(
     # pylint: disable=too-many-return-statements
     backend = video_backend_key(model_name)
     lowered = model_name.strip().casefold()
+    if is_wan3_video_model(model_name):
+        return "\n".join(
+            [
+                "- Wan3.0 是 All-in-One 模型，t2v/i2v/r2v 均提交同一个模型名，不派生模式后缀。",
+                "- 时长 duration 为 2–30 秒的整数；分辨率仅支持 480P/720P/1080P；画幅支持 adaptive/16:9/4:3/1:1/3:4/9:16。",
+                "- 默认生成有声视频；仅在内容不需要声音时设置 generateAudio=false。",
+            ],
+        )
     if backend == "veo":
         lines = [
             "- 时长 duration 仅支持 4/6/8 秒；使用参考图（r2v）或 1080p/4k 分辨率时必须为 8 秒。",
@@ -948,6 +992,19 @@ def video_model_prompt_guidance(model_name: str) -> str:
     """
 
     normalized = model_name.strip() or "未配置"
+    if is_wan3_video_model(normalized):
+        return (
+            f"当前视频生成模型是 `{normalized}`（Wan3.0 All-in-One）。"
+            "video prompt 必须按官方多模态引用协议书写：\n"
+            "- 参考图与参考视频分别编号：按 media 中同类素材的顺序使用“图1、图2”"
+            "与“视频1、视频2”；storyboard 是第一张参考图，即“图1”。\n"
+            "- 引用时同时说明素材中的具体主体及其动作或用途，避免只写编号。\n"
+            + _reference_guidance(normalized)
+            + "\n"
+            + _family_constraint_guidance(normalized)
+            + "\n"
+            + _mode_guidance(normalized)
+        )
     if is_happyhorse_model(normalized):
         return (
             f"当前视频生成模型是 `{normalized}`（HappyHorse 参考生视频），"
@@ -1014,6 +1071,10 @@ __all__ = [
     "VideoReferenceCapability",
     "VIDEO_MODES",
     "VIDEO_MODE_MATRIX",
+    "WAN_30_MAX_DURATION_SECONDS",
+    "WAN_30_MIN_DURATION_SECONDS",
+    "WAN_30_RATIOS",
+    "WAN_30_RESOLUTIONS",
     "configured_mode_segment",
     "derive_video_model_name",
     "effective_video_model_name",
@@ -1021,6 +1082,7 @@ __all__ = [
     "is_kling_omni_model",
     "is_minimax_video_model",
     "is_vidu_model",
+    "is_wan3_video_model",
     "seedance_video_generation",
     "validate_video_mode",
     "video_backend_key",

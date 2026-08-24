@@ -1472,6 +1472,26 @@ def _dashscope_policy_probe(
     )
 
 
+def _dashscope_video_task_probe(
+    body: ModelConnectionTestRequest,
+    headers: dict[str, str],
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Validate a DashScope video endpoint with a zero-cost task lookup.
+
+    The task endpoint is shared by Bailian's video models on both legacy and
+    Workspace API roots.  Unlike the temporary-upload policy endpoint, this
+    checks the configured host itself without creating a billable task.
+    """
+
+    base = body.base_url.rstrip("/")
+    submit_suffix = "/services/aigc/video-generation/video-synthesis"
+    api_root = base[: -len(submit_suffix)] if base.endswith(submit_suffix) else base
+    # A syntactically valid but nonexistent task ID produces the documented
+    # UNKNOWN status without creating or billing a generation task.
+    task_id = "11111111-1111-4111-8111-111111111111"
+    return f"{api_root}/tasks/{task_id}", headers, {"_get_probe": True}
+
+
 def _openai_model_probe(
     body: ModelConnectionTestRequest,
     headers: dict[str, str],
@@ -1689,6 +1709,17 @@ def _probe_payload(
         )
     if "token plan" in body.protocol.casefold():
         return _token_plan_models_probe(body, headers)
+    if body.type == "video":
+        hostname = (urlparse(body.base_url).hostname or "").casefold()
+        is_dashscope_protocol = (
+            "dashscope" in body.protocol.casefold() or "百炼" in body.protocol
+        )
+        if is_dashscope_protocol and (
+            hostname
+            in {"dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com"}
+            or hostname.endswith(".maas.aliyuncs.com")
+        ):
+            return _dashscope_video_task_probe(body, headers)
     return _dashscope_policy_probe(body, headers)
 
 

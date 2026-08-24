@@ -48,7 +48,7 @@ Creator 通过 QwenPaw 的 **Apps（应用中心）** 安装和打开。启动 Q
 - **Grounding**：Serper（Google）或 Tavily；验证模型可复用 LLM / VLM，也可单独配置；
 - **图片生成**：OpenAI 兼容协议（`gpt-image-2`）、DashScope / 百炼（`qwen-image-3.0`、`wan2.7-image`、`z-image-turbo`）、Google Gemini（Nano Banana 家族，`gemini-3-pro-image` 最多 14 张参考图）、火山引擎（`doubao-seedream` 5.0/4.5/4.0）、Black Forest Labs（FLUX.2，最多 8 张参考图）、Ideogram（排版与文字渲染专长）；
 - **视频生成**：
-  - DashScope / 百炼：`wan2.7`、`happyhorse-1.1` 会按元素类型自动选择 t2v / i2v / r2v；百炼同时托管 `kling/kling-v3-*` 与 `vidu/viduq3-*_reference2video` 系列；
+  - DashScope / 百炼：`wan3.0-video` 以单一 All-in-One 模型统一支持 t2v / i2v / r2v、480P / 720P / 1080P 与最长 30 秒有声视频；`wan2.7`、`happyhorse-1.1` 会按元素类型自动选择对应家族模型；百炼同时托管 `kling/kling-v3-*` 与 `vidu/viduq3-*_reference2video` 系列；
   - 火山引擎：`doubao-seedance-2.5`（最长 30 秒，全模态参考最多 30 图 + 10 视频）与 `doubao-seedance-2.0` 系列；
   - Google Gemini：`veo-3.1`（时长 4/6/8 秒，带参考图或 1080p/4k 时固定 8 秒，参考图最多 3 张）；
   - MiniMax 海螺：`MiniMax-Hailuo-2.3` 等（768P 支持 6/10 秒，1080P 仅 6 秒），主体参考仅 `S2V-01`；

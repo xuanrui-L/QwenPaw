@@ -29,7 +29,6 @@ def _request(**overrides) -> ModelConnectionTestRequest:
     ("type_", "model_name", "protocol", "provider"),
     [
         ("asr", "fun-asr", "DashScope Fun-ASR", "fun-asr"),
-        ("video", "wan2.7-r2v-flash", "DashScope（百炼）", None),
     ],
 )
 def test_dashscope_probe_uses_upload_policy(
@@ -54,6 +53,39 @@ def test_dashscope_probe_uses_upload_policy(
         "model": model_name,
     }
     # Never a billable async task submission.
+    assert "X-DashScope-Async" not in headers
+
+
+@pytest.mark.parametrize(
+    ("base_url", "model_name"),
+    [
+        ("https://dashscope.aliyuncs.com/api/v1", "wan2.7-r2v"),
+        (
+            "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1",
+            "wan3.0-video",
+        ),
+        (
+            "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1",
+            "kling/kling-v3-video-generation",
+        ),
+    ],
+)
+def test_bailian_video_probe_uses_configured_root_without_billing(
+    base_url,
+    model_name,
+) -> None:
+    url, headers, payload = _probe_payload(
+        _request(
+            type="video",
+            base_url=base_url,
+            model_name=model_name,
+            protocol="DashScope（百炼）",
+            provider=None,
+        ),
+    )
+
+    assert url == f"{base_url}/tasks/11111111-1111-4111-8111-111111111111"
+    assert payload == {"_get_probe": True}
     assert "X-DashScope-Async" not in headers
 
 

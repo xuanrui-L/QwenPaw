@@ -332,11 +332,11 @@ _R2V_ARGUMENTS = _arguments_schema(
         "durationSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
         "ratio": {
             "type": "string",
-            "enum": ["16:9", "9:16", "1:1", "4:3", "3:4"],
+            "enum": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4"],
         },
         "resolution": {
             "type": "string",
-            "enum": ["720P", "1080P", "720p", "1080p"],
+            "enum": ["480P", "720P", "1080P", "480p", "720p", "1080p"],
         },
         "watermark": {
             "type": "boolean",

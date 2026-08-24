@@ -113,6 +113,7 @@ def _project_with_image_references(count: int) -> tuple[Project, list[str]]:
     ("model_name", "backend", "count", "limit"),
     [
         ("wan2.7-r2v", "wan", 6, 5),
+        ("wan3.0-video", "wan", 11, 10),
         ("happyhorse-1.1-r2v", "wan", 10, 9),
         ("doubao-seedance-2.0-pro", "seedance2", 10, 9),
     ],
