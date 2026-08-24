@@ -502,6 +502,38 @@ def _migrate_v7_to_v8(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[7] = _migrate_v7_to_v8
 
 
+def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
+    """Introduce the project-blueprint narrative fields.
+
+    v9 adds ``Project.narrative_edges`` plus per-Timeline display fields
+    (``title`` / ``synopsis`` / ``planned_duration_seconds``). Legacy
+    projects are presented as a single narrative node (single-video
+    generation / edit); no script artifact is backfilled — the blueprint
+    maps existing information (creative_brief, element intents, shot
+    tables, edit_plan) read-only instead.
+    """
+
+    migrated = dict(document)
+    migrated.setdefault("narrative_edges", [])
+    timelines = dict(migrated.get("timelines") or {})
+    items = dict(timelines.get("items") or {})
+    for timeline_id, timeline in list(items.items()):
+        if not isinstance(timeline, Mapping):
+            continue
+        updated = dict(timeline)
+        updated.setdefault("title", "")
+        updated.setdefault("synopsis", "")
+        updated.setdefault("planned_duration_seconds", None)
+        items[timeline_id] = updated
+    timelines["items"] = items
+    migrated["timelines"] = timelines
+    migrated["schema_version"] = 9
+    return migrated
+
+
+PROJECT_MIGRATIONS[8] = _migrate_v8_to_v9
+
+
 def migrate_project_document(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Return a detached document at the current Project schema version.
 
