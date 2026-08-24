@@ -19,9 +19,10 @@ Documented request fields used here: ``model``, ``prompt`` (<=2000
 characters), ``duration``, ``resolution``, ``first_frame_image``
 (image-to-video; URL or ``data:image/...;base64,`` data URL) and
 ``subject_reference`` (S2V-01 only: one character subject carrying
-exactly one image; its request omits duration/resolution). Duration/resolution combinations follow the official
-matrix: Hailuo models render 768P at 6 or 10 seconds and 1080P at 6
-seconds only; the 01-generation models render 720P at 6 seconds.
+exactly one image; its request omits duration/resolution).
+Duration/resolution combinations follow the official matrix: Hailuo
+models render 768P at 6 or 10 seconds and 1080P at 6 seconds only; the
+01-generation models render 720P at 6 seconds.
 """
 
 from __future__ import annotations

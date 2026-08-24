@@ -116,7 +116,9 @@ def _project_with_video_references(
     project = Project.new(project_id="reference-duration", name="Duration")
     candidate = project.model_dump(mode="json")
     created_at = project.created_at.isoformat()
-    version_ids = [f"video-reference-{index}" for index in range(len(durations))]
+    version_ids = [
+        f"video-reference-{index}" for index in range(len(durations))
+    ]
     for version_id, duration in zip(version_ids, durations, strict=True):
         url = f"https://cdn.test/{version_id}.mp4"
         candidate["assets"]["source_versions_by_id"][version_id] = {

@@ -318,9 +318,7 @@ VIDEO_MODES = ("r2v", "t2v", "i2v", "video_edit")
 _DASHSCOPE_VIDEO_DOCUMENTATION = (
     "https://help.aliyun.com/zh/model-studio/video-generation-api-reference"
 )
-_SEEDANCE_VIDEO_DOCUMENTATION = (
-    "https://www.volcengine.com/docs/82379/1520757"
-)
+_SEEDANCE_VIDEO_DOCUMENTATION = "https://www.volcengine.com/docs/82379/1520757"
 _VEO_VIDEO_DOCUMENTATION = "https://ai.google.dev/gemini-api/docs/veo"
 _KLING_DIRECT_DOCUMENTATION = (
     "https://kling.ai/document-api/api/video/video-generation"
@@ -339,13 +337,11 @@ _HAPPYHORSE_10_MODEL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _WAN_27_MODEL_PATTERN = re.compile(
-    r"^wan2\.7(?:-(?:r2v|t2v|i2v))?"
-    r"(?:-20\d{2}-\d{2}-\d{2})?$",
+    r"^wan2\.7(?:-(?:r2v|t2v|i2v))?(?:-20\d{2}-\d{2}-\d{2})?$",
     re.IGNORECASE,
 )
 _WAN_26_MODEL_PATTERN = re.compile(
-    r"^wan2\.6(?:-(?:r2v(?:-flash)?|t2v|i2v))?"
-    r"(?:-20\d{2}-\d{2}-\d{2})?$",
+    r"^wan2\.6(?:-(?:r2v(?:-flash)?|t2v|i2v))?(?:-20\d{2}-\d{2}-\d{2})?$",
     re.IGNORECASE,
 )
 
@@ -712,6 +708,9 @@ def video_model_capability(
     This is the canonical capability lookup used by API, prompts and submit
     validation.  It intentionally does not inherit a provider-wide mode set.
     """
+    # Exact model registration is intentionally fail-closed and each provider
+    # has a distinct naming contract, so the branches are the registry itself.
+    # pylint: disable=too-many-branches
 
     model = model_name.strip()
     lowered = model.casefold()
@@ -919,9 +918,7 @@ def validate_video_mode(
         if not capability.known:
             supported_text = "无（精确模型 ID 未收录）"
         unknown_prefix = (
-            "VIDEO_MODEL_CAPABILITY_UNKNOWN: "
-            if not capability.known
-            else ""
+            "VIDEO_MODEL_CAPABILITY_UNKNOWN: " if not capability.known else ""
         )
         raise ValueError(
             f"{unknown_prefix}当前视频模型 `{model_name}`（{capability.backend}）不支持 "
@@ -1114,14 +1111,17 @@ def _family_constraint_guidance(
     documented request contract instead of discovering violations as
     provider rejections.
     """
-    # pylint: disable=too-many-return-statements
+    # Provider guidance mirrors each official request contract explicitly.
+    # pylint: disable=too-many-branches,too-many-return-statements
     backend = video_backend_key(model_name, protocol_backend)
     lowered = model_name.strip().casefold()
     if is_wan3_video_model(model_name):
         return "\n".join(
             [
                 "- Wan3.0 是 All-in-One 模型，t2v/i2v/r2v 均提交同一个模型名，不派生模式后缀。",
-                "- 时长 duration 为 2–30 秒的整数；分辨率仅支持 480P/720P/1080P；画幅支持 adaptive/16:9/4:3/1:1/3:4/9:16。",
+                "- 时长 duration 为 2–30 秒的整数；分辨率仅支持 "
+                "480P/720P/1080P；画幅支持 "
+                "adaptive/16:9/4:3/1:1/3:4/9:16。",
                 "- 默认生成有声视频；仅在内容不需要声音时设置 generateAudio=false。",
             ],
         )
@@ -1177,7 +1177,9 @@ def _family_constraint_guidance(
         return "\n".join(
             [
                 f"- prompt 不超过 {MINIMAX_MAX_PROMPT_CHARS} 字符。",
-                "- Hailuo 2.3/Fast：768P 支持 6 或 10 秒，1080P 仅支持 6 秒；Hailuo-02 还支持 512P 6/10 秒；T2V-01/I2V-01 系列仅支持 720P 6 秒。",
+                "- Hailuo 2.3/Fast：768P 支持 6 或 10 秒，1080P 仅支持 "
+                "6 秒；Hailuo-02 还支持 512P 6/10 秒；T2V-01/I2V-01 "
+                "系列仅支持 720P 6 秒。",
                 "- r2v（主体参考）仅 S2V-01 支持，且只接受 1 张角色参考图；其他 MiniMax 模型不支持 r2v。",
             ],
         )
@@ -1292,9 +1294,7 @@ def video_model_delegator_guidance(
         )
         for mode in supported
     }
-    mapping = "、".join(
-        f"{mode}→`{effective[mode]}`" for mode in supported
-    )
+    mapping = "、".join(f"{mode}→`{effective[mode]}`" for mode in supported)
     rejected = [mode for mode in VIDEO_MODES if mode not in supported]
     suffix_note = (
         "该家族会在提交时派生模式后缀。"
@@ -1302,9 +1302,7 @@ def video_model_delegator_guidance(
         else "该模型是单模型能力声明，提交时保持原模型 ID。"
     )
     rejected_note = (
-        " 不得创建这些视频类型：" + "、".join(rejected) + "。"
-        if rejected
-        else ""
+        " 不得创建这些视频类型：" + "、".join(rejected) + "。" if rejected else ""
     )
     constraints = _family_constraint_guidance(normalized, protocol_backend)
     guidance = (

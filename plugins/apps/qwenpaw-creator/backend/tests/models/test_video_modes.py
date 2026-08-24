@@ -175,8 +175,16 @@ def test_effective_name_derives_official_wan_base_for_r2v() -> None:
         ("wan", "happyhorse-1.1", {"r2v", "t2v", "i2v"}),
         ("seedance2", "doubao-seedance-2-5-260628", {"r2v", "t2v", "i2v"}),
         ("seedance2", "doubao-seedance-2-0-260128", {"r2v", "t2v", "i2v"}),
-        ("seedance2", "doubao-seedance-2-0-fast-260128", {"r2v", "t2v", "i2v"}),
-        ("seedance2", "doubao-seedance-2-0-mini-260615", {"r2v", "t2v", "i2v"}),
+        (
+            "seedance2",
+            "doubao-seedance-2-0-fast-260128",
+            {"r2v", "t2v", "i2v"},
+        ),
+        (
+            "seedance2",
+            "doubao-seedance-2-0-mini-260615",
+            {"r2v", "t2v", "i2v"},
+        ),
         ("veo", "veo-3.1-generate-preview", {"r2v", "t2v", "i2v"}),
         ("veo", "veo-3.1-fast-generate-preview", {"r2v", "t2v", "i2v"}),
         ("veo", "veo-3.1-lite-generate-preview", {"t2v", "i2v"}),
@@ -197,7 +205,9 @@ def test_exact_preset_capability_matrix(backend, model_name, expected) -> None:
     assert video_model_supported_modes(model_name, backend) == expected
 
 
-def test_hosted_single_model_capabilities_do_not_inherit_provider_union() -> None:
+def test_hosted_single_model_capabilities_do_not_inherit_provider_union() -> (
+    None
+):
     assert video_model_supported_modes(
         "kling/kling-v3-video-generation",
         "wan",
@@ -375,7 +385,7 @@ def test_happyhorse_11_video_edit_rejected_before_provider(
                 resolution="720P",
             ),
         )
-    assert captured == {}
+    assert not captured
 
 
 # ── prompt guidance ──────────────────────────────────────────────────────────

@@ -364,9 +364,7 @@ def _validate_wan3_parameters(
             model_name=model_name,
         )
     if duration != -1 and not (
-        WAN_30_MIN_DURATION_SECONDS
-        <= duration
-        <= WAN_30_MAX_DURATION_SECONDS
+        WAN_30_MIN_DURATION_SECONDS <= duration <= WAN_30_MAX_DURATION_SECONDS
     ):
         raise ModelError(
             f"Wan3.0 duration must be -1 (smart duration) or an integer "

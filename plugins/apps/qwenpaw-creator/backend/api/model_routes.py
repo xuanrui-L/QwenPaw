@@ -1507,7 +1507,9 @@ def _dashscope_video_task_probe(
 
     base = body.base_url.rstrip("/")
     submit_suffix = "/services/aigc/video-generation/video-synthesis"
-    api_root = base[: -len(submit_suffix)] if base.endswith(submit_suffix) else base
+    api_root = (
+        base[: -len(submit_suffix)] if base.endswith(submit_suffix) else base
+    )
     # A syntactically valid but nonexistent task ID produces the documented
     # UNKNOWN status without creating or billing a generation task.
     task_id = "11111111-1111-4111-8111-111111111111"
@@ -1724,18 +1726,21 @@ def _probe_payload(
     if body.type == "video":
         from models.video_capabilities import video_model_capability
 
-        video_backend = model_config.video_backend_for_protocol(
-            body.protocol,
-        ) or ""
+        video_backend = (
+            model_config.video_backend_for_protocol(
+                body.protocol,
+            )
+            or ""
+        )
         capability = video_model_capability(
             body.model_name,
             video_backend,
         )
         if not capability.known:
-            raise ValueError(
-                "VIDEO_MODEL_CAPABILITY_UNKNOWN: 精确模型 ID 与协议组合"
-                "未收录，已停止连接探测",
+            unknown_capability_error = (
+                "VIDEO_MODEL_CAPABILITY_UNKNOWN: 精确模型 ID 与协议组合" + "未收录，已停止连接探测"
             )
+            raise ValueError(unknown_capability_error)
         if video_backend == "veo":
             headers.pop("Authorization", None)
             headers["x-goog-api-key"] = body.api_key

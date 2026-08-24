@@ -59,7 +59,11 @@ _VIDU_DIRECT_MODE_SPECS: dict[str, dict[str, dict]] = {
         "viduq1": VIDU_DIRECT_SPECS["viduq1"],
     },
     "i2v": {
-        "viduq3-turbo": _with_duration(VIDU_DIRECT_SPECS["viduq3-turbo"], 1, 16),
+        "viduq3-turbo": _with_duration(
+            VIDU_DIRECT_SPECS["viduq3-turbo"],
+            1,
+            16,
+        ),
         "viduq2-pro": _with_duration(VIDU_DIRECT_SPECS["viduq2-pro"], 1, 10),
         "viduq1": VIDU_DIRECT_SPECS["viduq1"],
         "vidu2.0": {
@@ -95,7 +99,10 @@ def build_submit_request(
     base_url: str,
 ) -> tuple[str, dict, dict]:
     """Render the mode-specific official-channel Vidu request."""
-    # pylint: disable=too-many-branches
+    # The official Vidu endpoint has mode-specific validation and payloads.
+    # Keep that contract visible in one adapter instead of hiding it in
+    # generic helpers that would blur provider rules.
+    # pylint: disable=too-many-branches,too-many-statements
     model = model_name.strip()
     try:
         normalized_mode = validate_video_mode("vidu", model, mode)

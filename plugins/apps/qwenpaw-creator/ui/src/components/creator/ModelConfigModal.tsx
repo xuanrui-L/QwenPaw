@@ -2884,7 +2884,9 @@ export default function ModelConfigModal({ open, onClose }: Props) {
               </span>
             ))}
             {videoCapabilitiesLoading && (
-              <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>
+              <span
+                style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}
+              >
                 {t("modelConfig.videoCapabilitiesLoading")}
               </span>
             )}
@@ -2914,8 +2916,8 @@ export default function ModelConfigModal({ open, onClose }: Props) {
                 isWan3VideoModel(config.video.model_name)
                   ? "modelConfig.videoAllInOneNote"
                   : videoCapabilities.derivesModeModel
-                    ? "modelConfig.videoFamilyNote"
-                    : "modelConfig.videoExactModelNote",
+                  ? "modelConfig.videoFamilyNote"
+                  : "modelConfig.videoExactModelNote",
               )}
           </span>
           <span

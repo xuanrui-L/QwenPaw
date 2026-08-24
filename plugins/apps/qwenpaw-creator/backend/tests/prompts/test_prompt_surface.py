@@ -231,7 +231,9 @@ def test_video_model_guidance_switches_on_configured_model(
     _set_video_model(monkeypatch, "wan3.0-video")
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     specialist = _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
-    delegator = render_creator_system_prompt(project_id="project-guidance-test")
+    delegator = render_creator_system_prompt(
+        project_id="project-guidance-test",
+    )
     for rendered in (specialist, delegator):
         assert "Wan3.0" in rendered
         assert "2–30 秒" in rendered
