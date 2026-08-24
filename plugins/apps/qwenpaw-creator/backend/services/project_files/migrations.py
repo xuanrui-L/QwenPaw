@@ -554,7 +554,7 @@ def _voiced_spans_v8(
 
 
 def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
-    """Make the audio mixing ``role`` an explicit stored fact.
+    """Stamp audio ``creation.role`` and introduce the narrative blueprint.
 
     v9 requires ``creation.role`` on audio Elements so the
     narration-overlap gate cannot be bypassed by omitting the field.
@@ -569,9 +569,17 @@ def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
     ``sfx`` instead (mixed verbatim, not gated). That track keeps
     playing and the project keeps loading; re-authoring it as narration
     is an explicit user/agent decision the gate can then arbitrate.
+
+    v9 also adds ``Project.narrative_edges`` plus per-Timeline display
+    fields (``title`` / ``synopsis`` / ``planned_duration_seconds``).
+    Legacy projects are presented as a single narrative node
+    (single-video generation / edit); no script artifact is backfilled —
+    the blueprint maps existing information (creative_brief, element
+    intents, shot tables, edit_plan) read-only instead.
     """
 
     migrated = dict(document)
+    migrated.setdefault("narrative_edges", [])
     timelines = dict(migrated.get("timelines") or {})
     items = dict(timelines.get("items") or {})
     for timeline_id, timeline in list(items.items()):
@@ -617,10 +625,13 @@ def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
                     timeline_id,
                     element_id,
                 )
+        updated_timeline = dict(timeline)
         if changed:
-            updated_timeline = dict(timeline)
             updated_timeline["elements_by_id"] = elements
-            items[timeline_id] = updated_timeline
+        updated_timeline.setdefault("title", "")
+        updated_timeline.setdefault("synopsis", "")
+        updated_timeline.setdefault("planned_duration_seconds", None)
+        items[timeline_id] = updated_timeline
     timelines["items"] = items
     migrated["timelines"] = timelines
     migrated["schema_version"] = 9
