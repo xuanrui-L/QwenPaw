@@ -836,7 +836,7 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
     async def callback(_messages, tools):
         nonlocal parent_turn
         names = {item["function"]["name"] for item in tools}
-        if "image_generation" in names:
+        if "delegate_to_agent" not in names:
             specialist_started.set()
             await asyncio.Event().wait()
         parent_turn += 1
@@ -847,7 +847,7 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
                 arguments={
                     "role": "visual_development_agent",
                     "target_refs": ["asset:hero"],
-                    "task": "生成角色图",
+                    "task": "编写角色视觉 Prompt",
                 },
             )
         return AgentModelTurn(content="视觉模型超时，当前运行已结束。")
@@ -1716,18 +1716,18 @@ def test_specialist_cancel_emits_terminal_event(
             names = {item["function"]["name"] for item in tools}
             if "delegate_to_agent" in names:
                 return _delegate_call(
-                    "delegate-visual",
-                    role="visual_development_agent",
-                    target_refs=["project:assets"],
-                    task="整体视觉",
+                    "delegate-r2v",
+                    role="r2v_generation_director",
+                    target_refs=["element:ep1"],
+                    task="分镜生成",
                 )
             if cancel_phase == "waiting_runtime":
                 # Specialist turn: park the run in a long-running tool.
                 return _media_call(
                     "gen-1",
                     name="image_generation",
-                    target_ref="asset:hero",
-                    arguments={"prompt": "hero"},
+                    target_ref="element:ep1",
+                    arguments={"prompt": "storyboard"},
                 )
             # Specialist turn: block forever until the parent is interrupted.
             await _block_until_cancelled()
@@ -1928,19 +1928,19 @@ def test_costly_specialist_tool_waits_for_file_authorization(
                 return _media_call(
                     "generate-image-1",
                     name="image_generation",
-                    target_ref="asset:hero",
-                    arguments={"prompt": "hero portrait"},
+                    target_ref="element:ep1",
+                    arguments={"prompt": "ep1 storyboard"},
                 )
-            return AgentModelTurn(content="[SUCCESS]\n角色图已生成。")
+            return AgentModelTurn(content="[SUCCESS]\n分镜图已生成。")
         parent_turn += 1
         if parent_turn == 1:
             return _delegate_call(
-                "delegate-visual-1",
-                role="visual_development_agent",
-                target_refs=["asset:hero"],
-                task="生成角色图",
+                "delegate-r2v-storyboard-1",
+                role="r2v_generation_director",
+                target_refs=["element:ep1"],
+                task="生成 ep1 分镜图",
             )
-        return AgentModelTurn(content="视觉 Specialist 已完成。")
+        return AgentModelTurn(content="R2V Specialist 已完成。")
 
     async def scenario():
         services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")

@@ -96,7 +96,7 @@ def test_design_images_only_need_the_plan_checkpoint() -> None:
     )
 
 
-def _visual_delegation_client():
+def _r2v_delegation_client():
     parent_turn = 0
     specialist_turn = 0
 
@@ -113,29 +113,29 @@ def _visual_delegation_client():
                             name="image_generation",
                             arguments={
                                 "projectId": PROJECT_ID,
-                                "targetRef": "asset:hero",
-                                "arguments": {"prompt": "hero portrait"},
+                                "targetRef": "element:ep1",
+                                "arguments": {"prompt": "ep1 storyboard"},
                             },
                         ),
                     ),
                 )
-            return AgentModelTurn(content="[SUCCESS]\n角色图已生成。")
+            return AgentModelTurn(content="[SUCCESS]\n分镜图已生成。")
         parent_turn += 1
         if parent_turn == 1:
             return AgentModelTurn(
                 tool_calls=(
                     AgentToolCall(
-                        call_id="delegate-visual-1",
+                        call_id="delegate-r2v-1",
                         name="delegate_to_agent",
                         arguments={
-                            "role": "visual_development_agent",
-                            "target_refs": ["asset:hero"],
-                            "task": "生成角色图",
+                            "role": "r2v_generation_director",
+                            "target_refs": ["element:ep1"],
+                            "task": "生成 ep1 分镜图",
                         },
                     ),
                 ),
             )
-        return AgentModelTurn(content="视觉 Specialist 已完成。")
+        return AgentModelTurn(content="R2V Specialist 已完成。")
 
     return CallbackAgentChatClient(callback)
 
@@ -143,7 +143,7 @@ def _visual_delegation_client():
 def _driver_with_recorded_media(services, invocations: list[str]):
     driver = FileCreatorAgentRuntime(
         services,
-        model_client=_visual_delegation_client(),
+        model_client=_r2v_delegation_client(),
         poll_interval_seconds=0.01,
     )
 
@@ -210,6 +210,35 @@ def test_plan_checkpoint_blocks_generation_until_the_user_approves(
             decision={
                 "provider": pending.requested_provider,
                 "model": pending.requested_model,
+                "maxCost": 0,
+                "maxCandidates": 1,
+            },
+        )
+        design_authorization_id = checkpoint_authorization_id(
+            PROJECT_ID,
+            CHECKPOINT_DESIGN,
+        )
+        await _wait_for(
+            lambda: any(
+                item.authorization_id == design_authorization_id
+                for item in driver.executions.list_execution_authorizations(
+                    PROJECT_ID,
+                )
+            ),
+        )
+        design_pending = driver.executions.get_execution_authorization(
+            PROJECT_ID,
+            design_authorization_id,
+        )
+        assert not invocations
+        driver.executions.decide_execution_authorization(
+            PROJECT_ID,
+            design_authorization_id,
+            authorization_token=design_pending.authorization_token,
+            status=ExecutionAuthorizationStatus.APPROVED,
+            decision={
+                "provider": design_pending.requested_provider,
+                "model": design_pending.requested_model,
                 "maxCost": 0,
                 "maxCandidates": 1,
             },

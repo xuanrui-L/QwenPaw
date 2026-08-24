@@ -495,7 +495,7 @@ def _build_vidu_body(
     on the viduq3 ad/mix/plain/turbo models only.
     """
 
-    normalized_model = model_name.strip()
+    normalized_model = model_name.strip().casefold()
     spec = VIDU_MODEL_SPECS.get(normalized_model)
     if spec is None:
         raise ModelError(

@@ -10,7 +10,7 @@ without exceeding HappyHorse's per-task duration contract.
 Run from the repository root::
 
     uv run python \
-      plugins/apps/qwenpaw-creator/backend/scripts/run_real_short_drama_e2e.py
+      plugins/apps/qwenpaw-creator/backend/scripts/manual/run_real_short_drama_e2e.py
 
 ``DASHSCOPE_API_KEY`` must already be present in the environment. The script
 reuses it in-process for text, qwen-image-3.0-pro and happyhorse-1.1 only.
@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = BACKEND_DIR.parents[3]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
@@ -49,8 +49,8 @@ min_dialogue_ratio 设为 0，并在 narrative 明写“有意静默”。
    location 为全画幅。只要 3 个关键动作 Shot，三者共同描述这一段 3 秒连续动作，不平均分配时长。
 3. 一张供视频模型消费的纯净生成参考分镜：禁止编号、箭头、色标、注释、镜头文字、UI 与时间戳；
    prompt 要逐格明确构图、人物动作、连续性、灯光与可见状态，保持阿沐身份和纸鹤空间关系稳定。
-   3 个面板必须放入严格 2×2 等尺寸槽位并按行优先排列，第 4 个槽位保持纯留白；每个已绘制面板
-   的内部画框严格为 16:9，同一格只能出现一个阿沐，禁止非对称、混合尺寸和角色克隆。
+   3 个面板使用紧凑的 2 列×2 行等尺寸布局并按行优先排列，末行的第 3 格居中；空余面积只作
+   无边框外层留白，不画第 4 个空槽。每个面板内部画框严格为 16:9，同一格只能出现一个阿沐。
 4. 一个严格 3 秒的 HappyHorse R2V 视频；video_prompt 要写清主体、动作时间顺序、摄影机、光线、
    环境动态、身份连续性、首尾状态与负向约束，不要把分镜表布局或标注生成进成片。
 
@@ -94,9 +94,9 @@ narrative 明写“有意静默”及原因。
 每个 R2V Element 恰好创建 5 个 Shot，5 个 Shot 是该 15 秒段落中的动作/镜头节点，不平均分配时长，
 但必须覆盖准备、推进、转折/风险、反应/突破和清楚末态。每个 Element 生成一张恰好 5 格的纯净生成
 参考分镜。最重要的画幅硬规则：Project 与最终视频为 16:9，**每一个独立分镜格的内部画框也必须严格
-为 16:9**。整张分镜图仍按 16:9 输出；5 个面板必须放入严格 3×3 等尺寸槽位并按行优先排列，后 4 个
-槽位保持纯留白且不得画占位内容；绝不能把格子拉伸、压扁、裁边、合并或改成另一宽高比。禁止 2+3、
-3+2、masonry 或英雄大格布局；同一格只能出现一个阿沐。禁止分镜编号、箭头、色标、说明文字、字幕、
+为 16:9**。整张分镜图仍按 16:9 输出；5 个面板使用紧凑的 3 列×2 行等尺寸布局并按行优先排列，
+末行两格居中，剩余面积只作无边框外层留白，不画空槽或占位内容；绝不能把格子拉伸、压扁、裁边、
+合并或改成另一宽高比。禁止 masonry、英雄大格或混合尺寸布局；同一格只能出现一个阿沐。禁止分镜编号、箭头、色标、说明文字、字幕、
 时间戳、UI。
 
 每个 video_prompt 必须使用当前 HappyHorse 官方语法，按 Runtime 实际图片顺序写 `[Image 1]`、
@@ -153,9 +153,9 @@ ONE_MINUTE_ELEMENT_COMMON = """\
 无对白、旁白、TTS、字幕、Logo、水印或额外人物，以雨、机械、风、海浪和音乐表达。
 
 使用 professional-media-prompts skill 编写一张恰好 5 格的纯净生成参考分镜 Prompt。
-硬规则：每一个独立分镜格的内部画框都严格为 16:9，整张输出也为 16:9；五格自然比例装不下
-时使用严格 3×3 等尺寸槽位，按行优先放入五格并让后四个槽位保持纯留白；不拉伸、不压扁、不
-裁边、不合并、不改成另一宽高比，不使用 2+3/3+2、masonry、英雄大格或混合尺寸布局。同一格
+硬规则：每一个独立分镜格的内部画框都严格为 16:9，整张输出也为 16:9；五格使用紧凑的
+3 列×2 行等尺寸布局，按行优先排列并把末行两格居中，剩余面积只作无边框外层留白，不画空槽；
+不拉伸、不压扁、不裁边、不合并、不改成另一宽高比，不使用 masonry、英雄大格或混合尺寸布局。同一格
 只能出现一个阿沐。按 Shot 顺序逐格写动作相位与末态、景别/机位/构图、主体/道具/环境空间关系、
 主体和摄影机运动、光线与衔接；禁止分镜编号、箭头、色标、说明文字、字幕、时间戳、UI。
 

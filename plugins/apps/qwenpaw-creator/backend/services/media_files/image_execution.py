@@ -269,17 +269,31 @@ def _storyboard_panel_aspect_contract(
 
     ratio = aspect_ratio.strip() or "16:9"
     layout = ""
-    if panel_count and panel_count > 0:
+    if panel_count and panel_count > 1:
         side = math.ceil(math.sqrt(panel_count))
-        unused = side * side - panel_count
+        try:
+            ratio_width, ratio_height = (
+                float(part.strip()) for part in ratio.split(":", 1)
+            )
+        except (TypeError, ValueError):
+            ratio_width, ratio_height = 16.0, 9.0
+        if ratio_width < ratio_height:
+            rows = side
+            columns = math.ceil(panel_count / rows)
+        else:
+            columns = side
+            rows = math.ceil(panel_count / columns)
         layout = (
-            f" Use a strict {side} columns by {side} rows square lattice. "
+            f" Use a compact {columns} columns by {rows} rows layout of "
+            "equal-size picture frames. "
             f"Place exactly {panel_count} story panels in row-major reading "
-            f"order and leave the remaining {unused} lattice slots as pure "
-            "blank outer-canvas whitespace, not illustrated placeholder "
-            "panels. A square lattice is mandatory because it preserves the "
-            "outer ratio for every equal cell. Do not use an asymmetric, "
-            "masonry, 2+3, 3+2 or mixed-size layout."
+            "order. If the final row is incomplete, center its remaining "
+            "equal-size panels and absorb the unused area as unframed outer "
+            "canvas whitespace; never draw, frame or fill a placeholder "
+            "panel. This compact rectangular layout deliberately preserves "
+            "each panel's target ratio while using whitespace instead of "
+            "distortion. Do not use masonry, a hero panel or mixed-size "
+            "frames."
         )
     return (
         "[STORYBOARD PANEL ASPECT CONTRACT — HARD REQUIREMENT]\n"
@@ -782,17 +796,10 @@ def _resolve_request(
         variant = _variant_for(entity, arguments)
         prompt = explicit_prompt or (variant.prompt.strip() if variant else "")
         if not prompt:
-            prompt = "，".join(
-                item
-                for item in (
-                    entity.name.strip(),
-                    entity.description.strip(),
-                    project.visual.style.strip(),
-                )
-                if item
+            raise ValidationError(
+                "生成视觉 Asset 需要显式 prompt 或已提交的 Variant prompt；"
+                "实体名称、简介和全局风格只是连续性事实，不能作为付费生成兜底",
             )
-        if not prompt:
-            raise ValidationError("生成视觉 Asset 需要 prompt 或描述")
         version_ids = [
             *(variant.reference_asset_version_ids if variant else []),
             *(variant.reference_artifact_version_ids if variant else []),

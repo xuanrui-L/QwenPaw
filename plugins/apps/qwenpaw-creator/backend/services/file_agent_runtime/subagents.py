@@ -14,7 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from domain.enums import SpecialistRole
 from models import config as model_config
 from models.image.base import image_model_prompt_guidance
-from models.video_capabilities import video_model_prompt_guidance
+from models.video_capabilities import (
+    video_model_duration_guidance,
+    video_model_prompt_guidance,
+)
 from services.file_agent_runtime.prompts import render_file_agent_prompt
 from services.file_agent_runtime.prompts import tts_guidance
 from services.project_files.models import Project
@@ -268,6 +271,10 @@ def specialist_system_prompt(
         # are injected from the runtime-resolved video model so the static
         # prompt stays model-agnostic.
         values["video_model_guidance"] = video_model_prompt_guidance(
+            model_config.get_video_model_name(),
+            model_config.get_video_backend(),
+        )
+        values["video_duration_guidance"] = video_model_duration_guidance(
             model_config.get_video_model_name(),
             model_config.get_video_backend(),
         )

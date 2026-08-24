@@ -19,7 +19,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-BACKEND_DIR = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
@@ -84,7 +84,7 @@ single restored cyan origami crane. No dialogue.
 
 [Image 1] is the three-panel storyboard. Adopt only its reading order,
 approximate composition, preparation-to-transfer-to-illumination action chain
-and camera rhythm. Do not render its 2×2 lattice, blank slot, gutters, borders,
+and camera rhythm. Do not render its compact sheet layout, outer whitespace, gutters, borders,
 panel divisions or storyboard layout into the video.
 
 [Image 2] is Amu's character identity. Preserve its one rounded head, compact

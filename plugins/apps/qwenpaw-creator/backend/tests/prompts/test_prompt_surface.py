@@ -105,8 +105,8 @@ def test_visual_prompt_reuses_an_existing_variant_sheet_by_default() -> None:
     assert "生成前去重（硬性规则）" in prompt
     assert "generated_artifact_version_ids" in prompt
     assert "重复委派、继续执行或重新进入同一目标不等于用户要求重做" in prompt
-    assert "视觉开发 Agent **不得再调用** `image_generation`" in prompt
-    assert "产生重复付费图片" in prompt
+    assert "`image_generation` 不注册给视觉开发 Agent" in prompt
+    assert "从工具权限层避免同一 slot 并发或重复付费" in prompt
 
 
 def test_visual_prompt_requires_a_cinematic_identity_board_contract() -> None:
@@ -141,7 +141,8 @@ def test_creator_compiles_dense_action_nodes_without_uniform_timestamps() -> (
     assert "3–4 秒极短段通常只承载一个占主导的连续微动作" in prompt
     assert "专业完整不等于重复冗长" in prompt
     assert "每一个分镜格内部画框" in prompt
-    assert "网格自然比例不匹配时用外侧留白和格间距吸收" in prompt
+    assert "网格的自然比例与外层画布不匹配时" in prompt
+    assert "外侧留白、统一格间距及末行居中吸收" in prompt
 
 
 def test_creator_duration_is_injected_from_the_active_video_model(
@@ -208,17 +209,18 @@ def test_r2v_prompt_supports_clean_and_annotated_storyboard_modes() -> None:
     assert "不得给 10 秒内的 12 格机械分配 12 个小数时间戳" in prompt
     assert "每一个宫格内部画框的宽高比必须严格等于" in prompt
     assert "不得把“整张图为 16:9”误解为“内部格子可以是方形”" in prompt
-    assert "N=ceil(sqrt(P))" in prompt
-    assert "5 个动作节点必须用 3×3 槽位" in prompt
-    assert "禁止 5 格使用 2+3/3+2 非对称排布" in prompt
+    assert "紧凑、规则、等尺寸的矩形网格" in prompt
+    assert "横屏 6 格通常为 3 列×2 行" in prompt
+    assert "不得用重复角色或重复末镜填空" in prompt
+    assert "并不要求方阵" in prompt
     assert "同一格内每个已命名角色只能出现一个视觉实例" in prompt
     assert "不得在某一格克隆出第二个副本" in prompt
     assert "结构化请求字段承载的模型只用自然语言，不发明编号" in prompt
     assert (
         "storyboard → cast_lineup_refs（声明顺序）→ character_refs（声明顺序）"
-        "→ prop_refs（声明顺序）→ scene_ref"
+        "→ scene_ref → prop_refs（声明顺序）"
     ) in prompt
-    assert "[Image 3]=道具" in prompt
+    assert "[Image 3]=场景" in prompt
 
 
 def test_source_prompt_requires_outer_vlm_timeline_and_controlled_commit() -> (
@@ -320,7 +322,10 @@ def test_video_model_guidance_switches_on_configured_model(
     assert "`[Image 1]`、`[Image 2]`" in prompt
     assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
     assert "不支持参考视频" in prompt
+    assert "3–15 秒整数" in prompt
+    assert "分辨率仅支持 720P/1080P" in prompt
     assert "{{video_model_guidance}}" not in prompt
+    assert "{{video_duration_guidance}}" not in prompt
     _set_video_model(monkeypatch, "wan2.7-r2v")
     prompt = _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
     assert "图片最多 5 张" in prompt

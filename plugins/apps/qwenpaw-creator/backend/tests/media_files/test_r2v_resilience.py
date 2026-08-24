@@ -11,8 +11,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from domain.errors import ConflictError, ValidationError
+from domain.errors import ConflictError
 from services.media_files import r2v_execution
+from services.media_files.secure_video_stream import PeerAddressMismatchError
 from services.media_files.image_execution import FileImageExecutionService
 from services.media_files.r2v_execution import FileR2VExecutionService
 from services.project_files.facade import CreatorFileServices
@@ -285,7 +286,7 @@ def test_public_cdn_dns_peer_rotation_is_retried(tmp_path, monkeypatch):
     async def stub(*_args, **_kwargs):
         calls.append(1)
         if len(calls) < 3:
-            raise ValidationError(
+            raise PeerAddressMismatchError(
                 "远程视频连接 peer 不属于当前跳 DNS 预解析集合",
             )
         return sentinel

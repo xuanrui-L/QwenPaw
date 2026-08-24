@@ -118,16 +118,8 @@ _HAPPYHORSE_REFERENCE_PATTERN = re.compile(
     r"^happyhorse-1\.(?:0|1)(?:-r2v)?$",
     re.IGNORECASE,
 )
-_WAN_27_REFERENCE_PATTERN = re.compile(
-    r"^wan2\.7(?:-r2v)?(?:-20\d{2}-\d{2}-\d{2})?$",
-    re.IGNORECASE,
-)
 _WAN_30_REFERENCE_PATTERN = re.compile(
     r"^wan3\.0-video(?:-prime)?$",
-    re.IGNORECASE,
-)
-_WAN_26_REFERENCE_PATTERN = re.compile(
-    r"^wan2\.6(?:-r2v(?:-flash)?)?(?:-20\d{2}-\d{2}-\d{2})?$",
     re.IGNORECASE,
 )
 _SEEDANCE_20_REFERENCE_PATTERN = re.compile(
@@ -575,7 +567,7 @@ VIDU_DIRECT_SPECS: dict[str, dict] = {
         "audio": True,
     },
     "viduq2-pro": {
-        "durations": (0, 10),
+        "durations": (1, 10),
         "resolutions": ("540p", "720p", "1080p"),
         "default_resolution": "720p",
         "ratios": _VIDU_DIRECT_Q2_RATIOS,
@@ -826,9 +818,9 @@ def video_reference_capability(  # pylint: disable=too-many-return-statements
         return _HAPPYHORSE_REFERENCE_CAPABILITY
     if _WAN_30_REFERENCE_PATTERN.fullmatch(normalized):
         return _WAN_30_REFERENCE_CAPABILITY
-    if _WAN_27_REFERENCE_PATTERN.fullmatch(normalized):
+    if _WAN_27_MODEL_PATTERN.fullmatch(normalized):
         return _WAN_27_REFERENCE_CAPABILITY
-    if _WAN_26_REFERENCE_PATTERN.fullmatch(normalized):
+    if _WAN_26_MODEL_PATTERN.fullmatch(normalized):
         return _WAN_26_REFERENCE_CAPABILITY
     if _VEO_31_LITE_REFERENCE_PATTERN.fullmatch(normalized):
         return _VEO_31_LITE_REFERENCE_CAPABILITY
@@ -1115,6 +1107,16 @@ def _family_constraint_guidance(
     # pylint: disable=too-many-branches,too-many-return-statements
     backend = video_backend_key(model_name, protocol_backend)
     lowered = model_name.strip().casefold()
+    if backend == "happyhorse":
+        return "\n".join(
+            [
+                f"- 时长 duration 为 {HAPPYHORSE_MIN_DURATION_SECONDS}–"
+                f"{HAPPYHORSE_MAX_DURATION_SECONDS} 秒的整数。",
+                "- 分辨率仅支持 720P/1080P；画幅仅支持 "
+                + "/".join(sorted(HAPPYHORSE_RATIOS))
+                + "。",
+            ],
+        )
     if is_wan3_video_model(model_name):
         return "\n".join(
             [
@@ -1184,7 +1186,7 @@ def _family_constraint_guidance(
             ],
         )
     if backend == "vidu":
-        name = model_name.strip()
+        name = model_name.strip().casefold()
         spec = VIDU_MODEL_SPECS.get(name) or VIDU_DIRECT_SPECS.get(name)
         if spec is None:
             return (
@@ -1251,7 +1253,7 @@ def _model_reference_syntax_guidance(
             "`image1` 或 `character1`，也不存在 `[Video N]`。"
         )
     if backend == "wan":
-        if _WAN_27_REFERENCE_PATTERN.fullmatch(normalized):
+        if _WAN_27_MODEL_PATTERN.fullmatch(normalized):
             return (
                 "- Wan 2.7：中文 Prompt 用“图1、图2 …”和“视频1、视频2 …”；"
                 "英文 Prompt 用 `Image 1`、`Video 1`（首字母大写且英文单词与"
@@ -1259,7 +1261,7 @@ def _model_reference_syntax_guidance(
                 "分别计数；storyboard 是第一张 reference_image，因此为“图1”。"
                 "不得使用 Wan 2.6 的 `character1`。"
             )
-        if _WAN_26_REFERENCE_PATTERN.fullmatch(normalized):
+        if _WAN_26_MODEL_PATTERN.fullmatch(normalized):
             return (
                 "- Wan 2.6：只用 `character1`、`character2` …；按 "
                 "reference_urls 的图片/视频混合总顺序统一计数，不按媒体类型"
@@ -1417,7 +1419,7 @@ def video_model_duration_guidance(
         return (
             f"当前视频模型 `{normalized}` 只支持 4、6 或 8 秒；"
             + reference_note
-            + " 不得把范围中间的其他整数当作合法值。"
+            + "不得把范围中间的其他整数当作合法值。"
         )
     if backend == "kling":
         if is_kling_omni_model(normalized):
@@ -1429,8 +1431,9 @@ def video_model_duration_guidance(
             " 支持 6/10 秒，1080P 仅 6 秒；T2V-01/I2V-01 为 6 秒。"
         )
     if backend == "vidu":
-        spec = VIDU_MODEL_SPECS.get(normalized) or VIDU_DIRECT_SPECS.get(
-            normalized,
+        lookup_name = normalized.casefold()
+        spec = VIDU_MODEL_SPECS.get(lookup_name) or VIDU_DIRECT_SPECS.get(
+            lookup_name,
         )
         if spec is not None:
             low, high = spec["durations"]

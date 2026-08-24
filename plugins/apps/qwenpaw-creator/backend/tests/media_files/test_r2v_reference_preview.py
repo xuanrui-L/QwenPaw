@@ -157,8 +157,8 @@ def test_preview_mirrors_submit_order_and_shifts_without_storyboard() -> None:
     ] == [
         (1, "art:sb-1", "storyboard"),
         (2, "art:a-main", "artifact"),
-        (3, "art:bird-main", "artifact"),
-        (4, "art:rain-main", "artifact"),
+        (3, "art:rain-main", "artifact"),
+        (4, "art:bird-main", "artifact"),
         (5, "src:upload-1", "source"),
         (6, "art:extra", "artifact"),
     ]
@@ -175,8 +175,8 @@ def test_preview_mirrors_submit_order_and_shifts_without_storyboard() -> None:
         (item["index"], item["versionId"]) for item in shifted["references"]
     ] == [
         (1, "art:a-main"),
-        (2, "art:bird-main"),
-        (3, "art:rain-main"),
+        (2, "art:rain-main"),
+        (3, "art:bird-main"),
         (4, "src:upload-1"),
         (5, "art:extra"),
     ]

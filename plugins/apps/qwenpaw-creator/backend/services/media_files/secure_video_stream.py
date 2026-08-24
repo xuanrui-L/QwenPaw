@@ -58,6 +58,10 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 VideoContainer = Literal["mp4", "quicktime", "webm", "matroska", "mpeg", "avi"]
 
 
+class PeerAddressMismatchError(ValidationError):
+    """The connected CDN peer differs from this hop's pinned DNS result."""
+
+
 @dataclass(frozen=True, slots=True)
 class MaterializedVideo:
     """A verified Task-local file ready for immutable Asset publication."""
@@ -826,7 +830,7 @@ class SecureR2VVideoMaterializer:
                         ) as response:
                             peer = _response_peer(response)
                             if peer not in current.addresses:
-                                raise ValidationError(
+                                raise PeerAddressMismatchError(
                                     "远程视频连接 peer 不属于当前跳 DNS 预解析集合",
                                 )
                             if response.status_code in _REDIRECT_STATUSES:
@@ -1060,6 +1064,7 @@ __all__ = [
     "DEFAULT_MAX_VIDEO_BYTES",
     "DEFAULT_TOTAL_TIMEOUT_SECONDS",
     "MaterializedVideo",
+    "PeerAddressMismatchError",
     "SecureR2VVideoMaterializer",
     "materialize_r2v_video",
 ]

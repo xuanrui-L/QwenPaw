@@ -54,9 +54,10 @@ def test_storyboard_panel_aspect_contract_preserves_each_video_frame() -> None:
     assert "target video aspect ratio is 9:16" in contract
     assert "EVERY individual storyboard panel" in contract
     assert "outer storyboard delivery canvas is also 9:16" in contract
-    assert "strict 3 columns by 3 rows square lattice" in contract
-    assert "remaining 4 lattice slots as pure blank" in contract
-    assert "Do not use an asymmetric, masonry, 2+3, 3+2" in contract
+    assert "compact 2 columns by 3 rows layout" in contract
+    assert "center its remaining equal-size panels" in contract
+    assert "never draw, frame or fill a placeholder panel" in contract
+    assert "Do not use masonry, a hero panel or mixed-size frames" in contract
     assert "Do not add a title, header, footer" in contract
     assert "Never stretch, squash, crop, merge, skew" in contract
     assert "exactly one visual instance of each named character" in contract
@@ -91,7 +92,8 @@ def test_storyboard_resolution_appends_project_panel_ratio_before_spend(
         resolved.prompt
     )
     assert "exactly 9:16" in resolved.prompt
-    assert "strict 1 columns by 1 rows square lattice" in resolved.prompt
+    assert "columns by" not in resolved.prompt
+    assert "placeholder panel" not in resolved.prompt
     assert resolved.aspect_ratio == "9:16"
 
 
@@ -380,6 +382,31 @@ def test_generate_asset_artifact_name_includes_the_variant_id(
 
     with pytest.raises(ValidationError, match="必须提供 variantId"):
         resolve(snapshot, {})
+
+
+def test_generate_asset_rejects_entity_description_as_paid_prompt_fallback(
+    tmp_path,
+) -> None:
+    snapshot = _snapshot(
+        variants={
+            "items": {
+                "var:empty": {
+                    "variant_id": "var:empty",
+                    "prompt": "",
+                },
+            },
+            "order": ["var:empty"],
+        },
+    )
+
+    with pytest.raises(ValidationError, match="不能作为付费生成兜底"):
+        _resolve_request(
+            snapshot=snapshot,
+            project_root=Path(tmp_path),
+            command=CreatorCommandType.GENERATE_ASSET,
+            target_ref="asset:char:haaland",
+            arguments={"variantId": "var:empty"},
+        )
 
 
 def _with_remote_variant_refs(

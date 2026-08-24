@@ -97,6 +97,7 @@ def _select_slot(
     owner_ref: str,
     version_id: str,
     provenance: list[str] | None = None,
+    task_id: str | None = None,
 ) -> None:
     project.assets.artifact_slots_by_id[slot_id] = ArtifactSlot(
         slot_id=slot_id,
@@ -125,6 +126,7 @@ def _select_slot(
         input_fingerprint="sha256:" + "1" * 64,
         based_on_generation=1,
         provenance_refs=provenance or [],
+        metadata={"taskId": task_id} if task_id else {},
         created_at="2026-08-05T00:00:00Z",
     )
 
@@ -485,6 +487,81 @@ def test_stale_marks_but_does_not_regenerate() -> None:
     assert node.status is WorkNodeStatus.STALE
     # STALE is terminal for the scheduler: not READY, not dispatched.
     assert node not in graph.ready_media_nodes()
+
+
+@pytest.mark.parametrize("changed_input", ["aspect_ratio", "shot_count"])
+def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
+    changed_input,
+) -> None:
+    project = _project()
+    _add_element(project, _element("elem:one"))
+    node_id = "storyboard:elem:one"
+    original = derive_work_graph(project).by_id[node_id].dispatch_fingerprint
+    task = _task(
+        "image_generation",
+        "element:elem:one",
+        TaskStatus.SUCCEEDED,
+        idempotency_key=f"dag-{node_id}-{original}",
+    )
+    _select_slot(
+        project,
+        slot_id="element:elem:one:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:one",
+        version_id="art:sb",
+        task_id=task.task_id,
+    )
+    assert (
+        derive_work_graph(project, tasks=[task]).by_id[node_id].status
+        is WorkNodeStatus.DONE
+    )
+
+    if changed_input == "aspect_ratio":
+        project.settings.aspect_ratio = "9:16"
+    else:
+        creation = (
+            project.timelines.items["timeline:main"]
+            .elements_by_id["elem:one"]
+            .creation
+        )
+        second = Shot(
+            shot_id="elem:one-shot-2",
+            description="第二镜头",
+            camera="⊙ 静止",
+            framing="近景",
+            duration_seconds=2,
+        )
+        creation.shots.items[second.shot_id] = second
+        creation.shots.order.append(second.shot_id)
+
+    assert (
+        derive_work_graph(project, tasks=[task]).by_id[node_id].status
+        is WorkNodeStatus.STALE
+    )
+
+
+def test_failed_storyboard_reopens_when_aspect_ratio_changes() -> None:
+    project = _project()
+    _add_element(project, _element("elem:one"))
+    node_id = "storyboard:elem:one"
+    original = derive_work_graph(project).by_id[node_id].dispatch_fingerprint
+    failed = _task(
+        "image_generation",
+        "element:elem:one",
+        TaskStatus.FAILED,
+        error={"message": "provider rejected layout"},
+        idempotency_key=f"dag-{node_id}-{original}",
+    )
+    assert (
+        derive_work_graph(project, tasks=[failed]).by_id[node_id].status
+        is WorkNodeStatus.FAILED
+    )
+
+    project.settings.aspect_ratio = "9:16"
+    assert (
+        derive_work_graph(project, tasks=[failed]).by_id[node_id].status
+        is WorkNodeStatus.READY
+    )
 
 
 def test_storyboard_waits_for_all_referenced_entities_not_just_bindings() -> (

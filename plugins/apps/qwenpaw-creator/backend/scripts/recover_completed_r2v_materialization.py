@@ -31,7 +31,50 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--task-id", required=True)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "validate recoverability without mutating Runtime or Project "
+            "state"
+        ),
+    )
     return parser.parse_args()
+
+
+def _reopen_materialization_state(
+    current: Any,
+    *,
+    provider_task_id: str,
+    provider_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a claim-free provider-success state safe for another attempt.
+
+    A previous recovery can fail after reopening ``FAILED`` to
+    ``PROVIDER_SUCCEEDED``.  Accept both phases so the operator can rerun this
+    script without hand-editing the durable state; ownership and provider
+    result must still match exactly.
+    """
+
+    if (
+        current.phase not in {"FAILED", "PROVIDER_SUCCEEDED"}
+        or current.provider_task_id != provider_task_id
+        or current.provider_result != provider_result
+    ):
+        raise RuntimeError("R2V state changed before repair")
+    dumped = current.model_dump(mode="python")
+    dumped.update(
+        {
+            "phase": "PROVIDER_SUCCEEDED",
+            "last_error": None,
+            "materialize_owner": None,
+            "materialize_claim_token": None,
+            "materialize_claimed_at_epoch": None,
+            "materialize_heartbeat_at_epoch": None,
+            "materialize_claim_expires_at_epoch": None,
+        },
+    )
+    return dumped
 
 
 async def _recover(args: argparse.Namespace) -> dict[str, Any]:
@@ -66,32 +109,30 @@ async def _recover(args: argparse.Namespace) -> dict[str, Any]:
             )
         if not state.provider_task_id:
             raise RuntimeError("repair refuses state without provider task id")
-
-        def reopen_materialization(current):
-            if (
-                current.phase != "FAILED"
-                or current.provider_task_id != state.provider_task_id
-                or current.provider_result != result
-            ):
-                raise RuntimeError("R2V state changed before repair")
-            dumped = current.model_dump(mode="python")
-            dumped.update(
-                {
-                    "phase": "PROVIDER_SUCCEEDED",
-                    "last_error": None,
-                    "materialize_owner": None,
-                    "materialize_claim_token": None,
-                    "materialize_claimed_at_epoch": None,
-                    "materialize_heartbeat_at_epoch": None,
-                    "materialize_claim_expires_at_epoch": None,
-                },
-            )
-            return dumped
+        _reopen_materialization_state(
+            state,
+            provider_task_id=state.provider_task_id,
+            provider_result=result,
+        )
+        if args.dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "project_id": args.project_id,
+                "task_id": args.task_id,
+                "provider_task_id": state.provider_task_id,
+                "recoverable_phase": state.phase,
+                "provider_resubmitted": False,
+            }
 
         worker._update_state_sync(
             args.project_id,
             args.task_id,
-            reopen_materialization,
+            lambda current: _reopen_materialization_state(
+                current,
+                provider_task_id=state.provider_task_id,
+                provider_result=result,
+            ),
         )
         claim = await worker._claim_materialize(task)
         if claim is None:

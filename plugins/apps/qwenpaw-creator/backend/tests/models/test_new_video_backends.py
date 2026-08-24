@@ -581,6 +581,29 @@ def test_vidu_direct_request_shape(monkeypatch) -> None:
         )
 
 
+def test_viduq2_pro_rejects_zero_duration_and_normalizes_model_case() -> None:
+    common = {
+        "prompt": "A subject follows the reference.",
+        "mode": "r2v",
+        "media": [{"type": "image", "url": "https://cdn.example/ref.png"}],
+        "ratio": "16:9",
+        "resolution": "720p",
+        "generate_audio": False,
+        "model_name": "VIDUQ2-PRO",
+        "api_key": "sk-test",
+        "base_url": "https://api.vidu.com",
+    }
+    with pytest.raises(ModelError, match="between 1 and 10"):
+        vidu_backend.build_submit_request(duration=0, **common)
+
+    _url, _headers, body = vidu_backend.build_submit_request(
+        duration=1,
+        **common,
+    )
+    assert body["model"] == "viduq2-pro"
+    assert body["duration"] == 1
+
+
 def test_vidu_direct_uses_mode_specific_endpoints(monkeypatch) -> None:
     captured: dict = {}
     _bind(

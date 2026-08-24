@@ -424,6 +424,8 @@ def test_guidance_describes_the_mode_matrix_per_model() -> None:
     assert "不支持的 mode（video_edit）" in happyhorse
     assert "`[Image 1]`、`[Image 2]`" in happyhorse
     assert "1–9 张图片" in happyhorse
+    assert "3–15 秒" in happyhorse
+    assert "分辨率仅支持 720P/1080P" in happyhorse
 
     happyhorse_10 = video_model_prompt_guidance("happyhorse-1.0-r2v")
     assert "video_edit：" in happyhorse_10
@@ -436,11 +438,23 @@ def test_guidance_describes_the_mode_matrix_per_model() -> None:
     assert "Image 1" in wan
     assert "图片与视频" in wan
     assert "不得使用 Wan 2.6 的 `character1`" in wan
+    for configured_suffix in ("i2v", "t2v"):
+        configured = video_model_prompt_guidance(
+            f"wan2.7-{configured_suffix}",
+        )
+        assert "Wan 2.7：" in configured
+        assert "报告阻塞" not in configured
 
     wan_26 = video_model_prompt_guidance("wan2.6-r2v")
     assert "`character1`、`character2`" in wan_26
     assert "图片/视频混合总顺序" in wan_26
     assert "Wan 2.7 的“图1/视频1”" in wan_26
+    for configured_suffix in ("i2v", "t2v"):
+        configured = video_model_prompt_guidance(
+            f"wan2.6-{configured_suffix}",
+        )
+        assert "Wan 2.6：" in configured
+        assert "报告阻塞" not in configured
 
     wan3 = video_model_prompt_guidance("wan3.0-video")
     assert "All-in-One" in wan3
@@ -524,6 +538,11 @@ def test_duration_guidance_has_no_global_creator_default() -> None:
     veo = video_model_duration_guidance("veo-3.1-generate-preview")
     assert "只支持 4、6 或 8 秒" in veo
     assert "r2v 或 1080p/4k 时必须为 8 秒" in veo
+    assert "。 不得" not in veo
+
+    vidu = video_model_duration_guidance("VIDUQ2-PRO")
+    assert "1–10 秒整数" in vidu
+    assert "报告阻塞" not in vidu
 
 
 # ---------------------------------------------------------------------------

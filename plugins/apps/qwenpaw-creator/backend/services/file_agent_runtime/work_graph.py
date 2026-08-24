@@ -417,25 +417,53 @@ def _artifact_is_stale(
     project: Project,
     version_id: str | None,
     upstream_selected: Iterable[str | None],
+    *,
+    node_id: str = "",
+    dispatch_fingerprint: str = "",
+    tasks: Sequence[Any] = (),
 ) -> bool:
-    """True when provenance shows an upstream selection changed since.
+    """True when provenance or an automatic dispatch input changed since.
 
     Conservative: only flags when the artifact recorded provenance refs
-    and an upstream node's *current* selection is absent from them. An
-    empty provenance never flags.
+    and an upstream node's *current* selection is absent from them. For
+    scheduler-owned artifacts, the durable Task idempotency key also records
+    the work-graph fingerprint; this catches prompt/aspect/panel-count changes
+    that do not appear in media provenance. Agent/manual artifacts without a
+    graph identity remain conservative instead of being invalidated by guess.
     """
 
     if not version_id:
         return False
     artifact = project.assets.artifact_versions_by_id.get(version_id)
-    if artifact is None or not artifact.provenance_refs:
+    if artifact is None:
         return False
-    provenance = {
-        ref.removeprefix("artifact-version:").removeprefix("asset-version:")
-        for ref in artifact.provenance_refs
-    }
-    for selected in upstream_selected:
-        if selected and selected not in provenance:
+    if artifact.stale:
+        return True
+    if artifact.provenance_refs:
+        provenance = {
+            ref.removeprefix("artifact-version:").removeprefix(
+                "asset-version:",
+            )
+            for ref in artifact.provenance_refs
+        }
+        for selected in upstream_selected:
+            if selected and selected not in provenance:
+                return True
+    if node_id and dispatch_fingerprint:
+        task_id = str(artifact.metadata.get("taskId") or "")
+        task = next(
+            (
+                candidate
+                for candidate in tasks
+                if str(getattr(candidate, "task_id", "")) == task_id
+            ),
+            None,
+        )
+        key = str(getattr(task, "idempotency_key", "") or "")
+        graph_prefix = f"dag-{node_id}-"
+        if key.startswith(graph_prefix) and not key.startswith(
+            f"{graph_prefix}{dispatch_fingerprint}",
+        ):
             return True
     return False
 
@@ -644,6 +672,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             fingerprint = _fingerprint(
                 storyboard_id,
                 creation.storyboard_prompt,
+                project.settings.aspect_ratio,
+                len(creation.shots.order),
                 sorted(selected for selected in upstream_selected if selected),
             )
             if task is not None:
@@ -655,6 +685,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         project,
                         storyboard_slot,
                         upstream_selected,
+                        node_id=storyboard_id,
+                        dispatch_fingerprint=fingerprint,
+                        tasks=tasks,
                     )
                     else WorkNodeStatus.DONE
                 )

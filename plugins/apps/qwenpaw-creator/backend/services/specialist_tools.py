@@ -136,7 +136,7 @@ class SpecialistToolSpec:
         """Let a visual Project-assets run address its Asset children."""
 
         return (
-            self.name in {"image_generation", "create_character_voice"}
+            self.name == "create_character_voice"
             and role is SpecialistRole.VISUAL_DEVELOPMENT
             and _PROJECT_ASSETS_TARGET_REF in admitted_target_refs
         )
@@ -152,11 +152,10 @@ class SpecialistToolSpec:
             role=role,
             admitted_target_refs=admitted_target_refs,
         ):
-            # Cast lineups are visual assets too: a Project-assets run may
-            # generate the group anchor alongside individual entity images.
-            return (
-                target_ref.startswith("asset:") and bool(target_ref[6:])
-            ) or (target_ref.startswith("lineup:") and bool(target_ref[7:]))
+            # Project-wide visual development may enroll voices for its
+            # character assets. Image generation is scheduler-owned and is
+            # intentionally absent from this role.
+            return target_ref.startswith("asset:") and bool(target_ref[6:])
         return target_ref in admitted_target_refs
 
     def manifest(
@@ -851,7 +850,6 @@ _SPECS = (
         ),
         roles=frozenset(
             {
-                SpecialistRole.VISUAL_DEVELOPMENT,
                 SpecialistRole.R2V_GENERATION_DIRECTOR,
             },
         ),

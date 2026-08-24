@@ -15,7 +15,10 @@ import pytest
 
 from domain.errors import StorageIntegrityError, ValidationError
 from services.media_files import secure_video_stream
-from services.media_files.secure_video_stream import SecureR2VVideoMaterializer
+from services.media_files.secure_video_stream import (
+    PeerAddressMismatchError,
+    SecureR2VVideoMaterializer,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -295,7 +298,7 @@ async def test_remote_rejects_peer_outside_dns_set_and_private_dns(
             headers={"content-type": "video/mp4"},
         )
 
-    with pytest.raises(ValidationError, match="预解析集合"):
+    with pytest.raises(PeerAddressMismatchError, match="预解析集合"):
         await _materialize(
             {"url": "https://video.example/result", "media_type": "video/mp4"},
             project_root,

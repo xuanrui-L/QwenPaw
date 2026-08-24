@@ -122,7 +122,11 @@ from utils.paths import media_task_scope, task_work_root
 
 # pylint: enable=no-name-in-module
 
-from .secure_video_stream import MaterializedVideo, materialize_r2v_video
+from .secure_video_stream import (
+    MaterializedVideo,
+    PeerAddressMismatchError,
+    materialize_r2v_video,
+)
 
 _MAX_VIDEO_BYTES = 256 * 1024 * 1024
 _SUBMIT_TIMEOUT_SECONDS = 180.0
@@ -498,9 +502,7 @@ def _is_transient_materialize_error(error: BaseException) -> bool:
     # materialization attempt performs a new DNS resolution and connection.
     # Treat only this exact peer-pinning rejection as transient; private,
     # reserved or malformed addresses remain deterministic validation errors.
-    if isinstance(error, ValidationError) and "peer 不属于当前跳 DNS 预解析集合" in str(
-        error,
-    ):
+    if isinstance(error, PeerAddressMismatchError):
         return True
     return is_transient_error_message(str(error))
 
