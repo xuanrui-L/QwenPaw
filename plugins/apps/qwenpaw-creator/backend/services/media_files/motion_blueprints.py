@@ -122,7 +122,9 @@ def _caption_font_css(
     """
 
     raw_lines = text.split("\n")
-    line_char_counts = [len(re.sub(r"\s+", "", line)) for line in raw_lines if line.strip()]
+    line_char_counts = [
+        len(re.sub(r"\s+", "", line)) for line in raw_lines if line.strip()
+    ]
     if not line_char_counts:
         line_char_counts = [1]
     per_line = max(line_char_counts)

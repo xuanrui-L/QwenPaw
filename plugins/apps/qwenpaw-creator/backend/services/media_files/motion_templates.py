@@ -78,7 +78,11 @@ def render_caption_template(
     safe_text = "<br>".join(escape(line) for line in text.strip().splitlines())
     lines = [line for line in text.strip().splitlines() if line.strip()]
     max_line_length = max((len(line) for line in lines), default=1)
-    font_size = _compute_caption_font_size(max_line_length, box_width, box_height)
+    font_size = _compute_caption_font_size(
+        max_line_length,
+        box_width,
+        box_height,
+    )
     palettes = {
         "comic_patrol": ("#fff8df", "#231f1a", "#ff9a2f"),
         "soft_journal": ("#fffaf2", "#55473d", "#e99e88"),

@@ -925,7 +925,9 @@ class SourceMemoryService:
         self._surface_session_error(job, failure_message)
 
     def _surface_session_error(
-        self, job: SourceMemoryBuildJob, message: str,
+        self,
+        job: SourceMemoryBuildJob,
+        message: str,
     ) -> None:
         """Surface a background task failure to the session status so the
         project card reflects the error."""
@@ -933,7 +935,10 @@ class SourceMemoryService:
             session = self.services.sessions.get_project_session_snapshot(
                 job.project_id,
             )
-        except (RuntimeSessionNotFound, Exception):  # pylint: disable=broad-except
+        except (
+            RuntimeSessionNotFound,
+            Exception,
+        ):  # pylint: disable=broad-except
             return
         passive = {
             CreatorSessionStatus.IDLE,
