@@ -526,6 +526,7 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
     _enable_yolo(monkeypatch)
 
     calls: list[dict] = []
+    records: list = []
     fail_first = True
 
     class BudgetExceededError(ValidationError):
@@ -538,11 +539,30 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
         if fail_first:
             fail_first = False
             raise BudgetExceededError("4 张参考图超过模型限制 3 张")
+        # Real executors leave the durable record behind, so the node is no
+        # longer recordless once it succeeds.
+        records.append(
+            SimpleNamespace(
+                kind="image_generation",
+                status=TaskStatus.SUCCEEDED,
+                error=None,
+                result={"outputRef": "artifact-version:ok"},
+                metadata={"targetRef": kwargs["target_ref"]},
+                input_refs=[kwargs["target_ref"]],
+                idempotency_key=kwargs["idempotency_key"],
+                updated_at="2026-08-12T00:00:01Z",
+            ),
+        )
         return SimpleNamespace(status="SUCCEEDED")
 
     scheduler = WorkGraphScheduler(
         services,
         image_dispatch=conditional_dispatch,
+    )
+    monkeypatch.setattr(
+        scheduler.executions,
+        "list_tasks",
+        lambda _project_id: list(records),
     )
 
     async def scenario():
@@ -574,6 +594,14 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
         assert (PROJECT_ID, "visual:char:a:var:0") not in (
             scheduler._deterministic_failure_nodes
         )
+
+        # Every dispatch wakes the background loop, which ticks on its own
+        # timing; the durable record must keep those ticks from paying for
+        # the same node again.
+        for _ in range(3):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        assert len(calls) == 2
 
         await scheduler.shutdown()
 
