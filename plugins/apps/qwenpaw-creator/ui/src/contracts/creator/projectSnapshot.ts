@@ -322,6 +322,26 @@ export interface AudioCreationDocument extends ProjectJsonRecord {
   pan: number;
 }
 
+export interface InteractionOptionDocument extends ProjectJsonRecord {
+  /** Points at Project.narrative_edges.edge_id: label/target derive from the edge. */
+  edge_ref: string;
+  hotspot?: ElementLocationDocument | null;
+}
+
+/** Audience-choice element at the end of a branching source timeline (schema v9). */
+export interface InteractionCreationDocument extends ProjectJsonRecord {
+  type: "interaction";
+  question: string;
+  options: InteractionOptionDocument[];
+  countdown_seconds?: number | null;
+  /** Edge taken when the countdown expires without a click. */
+  default_edge_ref?: string | null;
+  /** Base frame: last element_video frame of the previous segment (artifact ref). */
+  base_frame_ref?: string | null;
+  motion?: MotionGraphicDocument | null;
+  fallback?: "static_endcard" | "split_publish";
+}
+
 export type ElementCreationDocument =
   | R2VCreationDocument
   | T2VCreationDocument
@@ -331,7 +351,8 @@ export type ElementCreationDocument =
   | OverlayCreationDocument
   | MotionClipCreationDocument
   | TransitionCreationDocument
-  | AudioCreationDocument;
+  | AudioCreationDocument
+  | InteractionCreationDocument;
 
 // Creation types produced by a video generation provider.
 export type VideoCreationDocument =
@@ -426,12 +447,29 @@ export interface EditPlanDocument extends ProjectJsonRecord {
 export interface TimelineDocument extends ProjectJsonRecord {
   timeline_id: string;
   ticks_per_second: number;
+  /** Narrative-node display title (schema v9; absent on older snapshots). */
+  title?: string;
+  /** Narrative-node synopsis (schema v9; absent on older snapshots). */
+  synopsis?: string;
+  /** Planned duration in seconds (schema v9; absent on older snapshots). */
+  planned_duration_seconds?: number | null;
   edit_plan?: EditPlanDocument | null;
   elements_by_id: Record<string, TimelineElementDocument>;
 }
 
+/** Branching narrative edge between two Timelines (schema v9). */
+export interface NarrativeEdgeDocument extends ProjectJsonRecord {
+  edge_id: string;
+  source_timeline_id: string;
+  target_timeline_id: string;
+  /** Option copy, e.g. 「选择A · 揭发真相」. */
+  label: string;
+  /** Choice question copy (shared by edges of the same source). */
+  prompt: string;
+}
+
 export interface ProjectDocument extends ProjectJsonRecord {
-  schema_version: 4;
+  schema_version: number;
   project_id: string;
   generation: number;
   created_at: string;
@@ -444,6 +482,8 @@ export interface ProjectDocument extends ProjectJsonRecord {
   sources: ProjectSourceCatalogDocument;
   visual: VisualDevelopmentDocument;
   timelines: ProjectEntityCollection<TimelineDocument>;
+  /** Branching edges between timelines (schema v9; [] / absent = no branches). */
+  narrative_edges?: NarrativeEdgeDocument[];
   assets: ProjectAssetIndexDocument;
 }
 

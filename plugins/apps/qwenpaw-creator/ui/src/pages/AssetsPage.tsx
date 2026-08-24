@@ -53,6 +53,7 @@ import { visualVariantLabel } from "@/lib/visualVariants";
 import { useTranslation } from "react-i18next";
 
 type FilterKey =
+  | "byOwner"
   | "all"
   | "source"
   | "artifact"
@@ -94,10 +95,13 @@ type AssetItemGroup = {
   label: string | null;
   badge?: string;
   countLabel?: string;
+  /** Ownership groups link back to the blueprint (plan §4.7). */
+  blueprint?: boolean;
   items: AssetItem[];
 };
 
 const FILTERS: Array<{ key: FilterKey; labelKey: string }> = [
+  { key: "byOwner", labelKey: "assets.byOwner" },
   { key: "all", labelKey: "assets.all" },
   { key: "source", labelKey: "assets.source" },
   { key: "artifact", labelKey: "assets.artifact" },
@@ -601,6 +605,78 @@ function visualItemGroups(
 }
 
 /**
+ * Ownership projection (plan §4.7): scripts / visual development (per
+ * entity) / research & understanding / shots & final cuts / source assets.
+ */
+function ownerItemGroups(
+  project: ProjectDocument,
+  items: AssetItem[],
+): AssetItemGroup[] {
+  const scriptItems: AssetItem[] = [];
+  const visualItems: AssetItem[] = [];
+  const researchItems: AssetItem[] = [];
+  const shotItems: AssetItem[] = [];
+  const sourceItems: AssetItem[] = [];
+  const otherItems: AssetItem[] = [];
+  const SHOT_KINDS = new Set([
+    "element_video",
+    "final_video",
+    "timeline_render",
+    "r2v_storyboard_image",
+    "storyboard",
+  ]);
+  for (const item of items) {
+    if (item.kind === "source") {
+      sourceItems.push(item);
+      continue;
+    }
+    if (item.kind === "visual") {
+      visualItems.push(item);
+      continue;
+    }
+    const artifactKind = (item.raw as ArtifactVersionDocument).kind ?? "";
+    if (artifactKind === "timeline_script") {
+      scriptItems.push(item);
+    } else if (artifactKind === "research_report") {
+      researchItems.push(item);
+    } else if (SHOT_KINDS.has(artifactKind)) {
+      shotItems.push(item);
+    } else if (item.entityId) {
+      visualItems.push(item);
+    } else {
+      otherItems.push(item);
+    }
+  }
+  const groups: AssetItemGroup[] = [];
+  const push = (key: string, labelKey: string, groupItems: AssetItem[]) => {
+    if (!groupItems.length) return;
+    groups.push({
+      key: `owner:${key}`,
+      label: i18n.t(labelKey),
+      countLabel: i18n.t("assets.items", { count: groupItems.length }),
+      blueprint: true,
+      items: groupItems,
+    });
+  };
+  push("script", "assets.groupScript", scriptItems);
+  if (visualItems.length) {
+    groups.push(
+      ...visualItemGroups(project, visualItems).map((group) => ({
+        ...group,
+        key: `owner:visual:${group.key}`,
+        badge: group.badge ?? i18n.t("assets.groupVisual"),
+        blueprint: true,
+      })),
+    );
+  }
+  push("research", "assets.groupResearch", researchItems);
+  push("shots", "assets.groupShots", shotItems);
+  push("sources", "assets.groupSources", sourceItems);
+  push("other", "assets.groupOther", otherItems);
+  return groups;
+}
+
+/**
  * Intelligence version bound to one exact SourceAssetVersion. Repeated
  * analyses keep every record, so the Source's current pointer wins and
  * older versions fall back to their newest analysis by created_at.
@@ -923,7 +999,7 @@ export default function AssetsPage() {
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [filter, setFilter] = useState<FilterKey>("all");
+  const [filter, setFilter] = useState<FilterKey>("byOwner");
   const [search, setSearch] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -958,6 +1034,7 @@ export default function AssetsPage() {
     return allItems.filter((item) => {
       const filterMatch =
         filter === "all" ||
+        filter === "byOwner" ||
         filter === item.kind ||
         filter === item.mediaKind ||
         (filter === "artifact" &&
@@ -972,6 +1049,7 @@ export default function AssetsPage() {
     });
   }, [allItems, filter, search]);
   const itemGroups = useMemo(() => {
+    if (filter === "byOwner" && project) return ownerItemGroups(project, items);
     if (filter === "visual") return visualItemGroups(project, items);
     return [
       {
@@ -1204,6 +1282,16 @@ export default function AssetsPage() {
                             {group.countLabel}
                           </span>
                         )}
+                        {group.blueprint && (
+                          <button
+                            type="button"
+                            data-asset-group-blueprint={group.key}
+                            onClick={() => navigate(`/project/${id}`)}
+                            className="ml-auto rounded px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+                          >
+                            {t("assets.viewInBlueprint")}
+                          </button>
+                        )}
                       </div>
                     )}
                     {group.items.map((item) => {
@@ -1287,7 +1375,8 @@ export default function AssetsPage() {
                           </div>
                           <div className="p-3">
                             <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
-                              {item.kind === "visual" && filter === "visual"
+                              {item.kind === "visual" &&
+                              (filter === "visual" || filter === "byOwner")
                                 ? item.cardName || item.name
                                 : item.name}
                             </h3>

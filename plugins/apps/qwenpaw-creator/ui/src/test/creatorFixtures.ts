@@ -95,11 +95,14 @@ export const projectDocument: ProjectDocument = {
     },
   },
   timelines: {
-    order: ["timeline:main"],
+    order: ["timeline:main", "timeline:ep2"],
     items: {
       "timeline:main": {
         timeline_id: "timeline:main",
         ticks_per_second: 1000,
+        title: "第1集 · 晨光出发",
+        synopsis: "橘猫从清晨出发，隔窗看见午饭。",
+        planned_duration_seconds: 20,
         elements_by_id: {
           "edit-opening": {
             element_id: "edit-opening",
@@ -273,8 +276,17 @@ export const projectDocument: ProjectDocument = {
           },
         },
       },
+      "timeline:ep2": {
+        timeline_id: "timeline:ep2",
+        ticks_per_second: 1000,
+        title: "第2集 · 星夜归途",
+        synopsis: "夜幕降临，橘猫在星光下回家。",
+        planned_duration_seconds: 18,
+        elements_by_id: {},
+      },
     },
   },
+  narrative_edges: [],
   assets: {
     files_by_id: {
       "file:source-video": {

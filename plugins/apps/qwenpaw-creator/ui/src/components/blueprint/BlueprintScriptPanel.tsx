@@ -1,0 +1,516 @@
+import { useEffect, useMemo, useState } from "react";
+import { message } from "antd";
+import { Check, LayoutList, MessageSquareText, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
+import type {
+  ProjectDocument,
+  TimelineElementDocument,
+} from "@/contracts/creator";
+import { getArtifactVersionMediaUrl } from "@/api/creator";
+import { useCreatorSessionStore } from "@/store/creatorSessionStore";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import {
+  selectTimelineScriptSlot,
+  summarizeTimeline,
+} from "@/selectors/blueprintSelectors";
+import {
+  orderedTimelineElements,
+  selectTimelineById,
+} from "@/selectors/timelineElementSelectors";
+import { TONE_CHIP } from "./tones";
+
+/* ------------------------------------------------------------------ */
+/* Line-based markdown rendering (same visual as the demo BlockView).   */
+/* ------------------------------------------------------------------ */
+
+type ScriptBlock =
+  | { kind: "scene"; text: string }
+  | { kind: "hook"; text: string }
+  | { kind: "line"; character: string; parenthetical?: string; text: string }
+  | { kind: "action"; text: string };
+
+const LINE_PATTERN = /^\*\*(.+?)\*\*\s*(?:[（(](.+?)[)）])?\s*[:：]\s*(.*)$/;
+
+export function parseScriptMarkdown(markdown: string): ScriptBlock[] {
+  const blocks: ScriptBlock[] = [];
+  for (const raw of markdown.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (/^#{1,6}\s/.test(line)) {
+      blocks.push({ kind: "scene", text: line.replace(/^#{1,6}\s+/, "") });
+      continue;
+    }
+    if (line.startsWith(">")) {
+      blocks.push({ kind: "hook", text: line.replace(/^>\s?/, "") });
+      continue;
+    }
+    const dialogue = line.match(LINE_PATTERN);
+    if (dialogue) {
+      blocks.push({
+        kind: "line",
+        character: dialogue[1],
+        parenthetical: dialogue[2],
+        text: dialogue[3],
+      });
+      continue;
+    }
+    blocks.push({ kind: "action", text: line });
+  }
+  return blocks;
+}
+
+function BlockView({ block }: { block: ScriptBlock }) {
+  if (block.kind === "scene") {
+    return (
+      <span className="mb-1.5 mt-3.5 inline-block rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-[var(--color-text-secondary)] first:mt-0">
+        {block.text}
+      </span>
+    );
+  }
+  if (block.kind === "line") {
+    return (
+      <p className="my-1 ml-8">
+        <b className="mr-2 text-[var(--color-text-primary)]">
+          {block.character}
+        </b>
+        {block.parenthetical && (
+          <span className="mr-1.5 text-xs text-[var(--color-text-tertiary)]">
+            （{block.parenthetical}）
+          </span>
+        )}
+        {block.text}
+      </p>
+    );
+  }
+  if (block.kind === "hook") {
+    return (
+      <div className="mt-2.5 rounded-r-lg border-l-[3px] border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+        {block.text}
+      </div>
+    );
+  }
+  return <p className="my-1 text-[var(--color-text-secondary)]">{block.text}</p>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Legacy read-only mapping for projects created before scripts.        */
+/* ------------------------------------------------------------------ */
+
+function LegacyMapping({
+  project,
+  elements,
+}: {
+  project: ProjectDocument;
+  elements: TimelineElementDocument[];
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-3">
+      <div className="rounded-r-lg border-l-[3px] border-[var(--color-border-strong)] bg-[var(--color-bg-secondary)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+        {t("blueprint.legacyScriptHint")}
+      </div>
+      {project.strategy.creative_brief && (
+        <div>
+          <span className="mb-1.5 inline-block rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-[var(--color-text-secondary)]">
+            {t("blueprint.legacyBrief")}
+          </span>
+          <p className="whitespace-pre-wrap text-[var(--color-text-secondary)]">
+            {project.strategy.creative_brief}
+          </p>
+        </div>
+      )}
+      {elements.map((element) => {
+        const creation = element.creation;
+        const intent =
+          "intent" in creation && typeof creation.intent === "string"
+            ? creation.intent
+            : "";
+        const narrative =
+          "narrative" in creation && typeof creation.narrative === "string"
+            ? creation.narrative
+            : "";
+        if (!intent && !narrative && creation.type !== "r2v") return null;
+        return (
+          <div key={element.element_id}>
+            <span className="mb-1.5 inline-block rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-[var(--color-text-secondary)]">
+              {element.label || element.element_id}
+            </span>
+            {(intent || narrative) && (
+              <p className="text-[var(--color-text-secondary)]">
+                {narrative || intent}
+              </p>
+            )}
+            {creation.type === "r2v" && creation.shots.order.length > 0 && (
+              <table className="mt-1.5 w-full border-collapse text-xs">
+                <tbody>
+                  {creation.shots.order.map((shotId) => {
+                    const shot = creation.shots.items[shotId];
+                    if (!shot) return null;
+                    return (
+                      <tr
+                        key={shotId}
+                        className="border-b border-dashed border-[var(--color-border)] last:border-b-0"
+                      >
+                        <td className="py-1 pr-2 text-[var(--color-text-tertiary)]">
+                          {shot.camera || shot.framing || "—"}
+                        </td>
+                        <td className="py-1 text-[var(--color-text-secondary)]">
+                          {shot.description}
+                          {shot.dialogue ? ` · ${shot.dialogue}` : ""}
+                        </td>
+                        <td className="py-1 pl-2 text-right tabular-nums text-[var(--color-text-tertiary)]">
+                          {shot.duration_seconds != null
+                            ? `${shot.duration_seconds}s`
+                            : ""}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Panel                                                                */
+/* ------------------------------------------------------------------ */
+
+interface BlueprintScriptPanelProps {
+  project: ProjectDocument;
+  projectId: string;
+  timelineId: string | null;
+  open: boolean;
+  onClose: () => void;
+  onOpenTimeline: (timelineId: string) => void;
+  onOpenVisualEntity: (entityId: string) => void;
+}
+
+/**
+ * Inline script review panel: overlays only the workspace column so the
+ * AgentDock stays visible. Approval lives in the dock DecisionTray — this
+ * panel only offers editing actions (hard rule §2).
+ */
+export default function BlueprintScriptPanel({
+  project,
+  projectId,
+  timelineId,
+  open,
+  onClose,
+  onOpenTimeline,
+  onOpenVisualEntity,
+}: BlueprintScriptPanelProps) {
+  const { t } = useTranslation();
+  const patchProject = useProjectSnapshotStore((state) => state.patch);
+  const timeline = selectTimelineById(project, timelineId);
+  const script = useMemo(
+    () => selectTimelineScriptSlot(project, timelineId),
+    [project, timelineId],
+  );
+  const summary = useMemo(
+    () =>
+      timelineId
+        ? summarizeTimeline(
+            project,
+            timelineId,
+            Math.max(0, project.timelines.order.indexOf(timelineId)),
+          )
+        : null,
+    [project, timelineId],
+  );
+  const elements = useMemo(
+    () =>
+      orderedTimelineElements(timeline).filter((element) => element.enabled),
+    [timeline],
+  );
+  const [scriptText, setScriptText] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const selectedVersionId = script?.selected?.version_id ?? null;
+
+  useEffect(() => {
+    if (!open || !selectedVersionId) {
+      setScriptText(null);
+      setLoadError(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    fetch(getArtifactVersionMediaUrl(selectedVersionId))
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.text();
+      })
+      .then((text) => {
+        if (!cancelled) setScriptText(text);
+      })
+      .catch((error: Error) => {
+        if (!cancelled) setLoadError(error.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, selectedVersionId]);
+
+  const [synopsisDraft, setSynopsisDraft] = useState("");
+  useEffect(() => {
+    setSynopsisDraft(timeline?.synopsis ?? "");
+  }, [timeline?.synopsis, timelineId, open]);
+
+  const blocks = useMemo(
+    () => (scriptText ? parseScriptMarkdown(scriptText) : []),
+    [scriptText],
+  );
+  const castEntities = useMemo(() => {
+    const referenced = new Set<string>();
+    for (const element of elements) {
+      const creation = element.creation;
+      if (creation.type === "r2v") {
+        creation.character_refs.forEach((ref) => referenced.add(ref));
+        if (creation.scene_ref) referenced.add(creation.scene_ref);
+        creation.prop_refs.forEach((ref) => referenced.add(ref));
+      } else if (creation.type === "s2v" && creation.character_ref) {
+        referenced.add(creation.character_ref);
+      }
+    }
+    return project.visual.entities.order
+      .filter((entityId) => referenced.has(entityId))
+      .map((entityId) => project.visual.entities.items[entityId])
+      .filter(Boolean);
+  }, [elements, project]);
+
+  if (!open || !timeline || !timelineId || !summary) return null;
+
+  const title =
+    timeline.title || t("blueprint.episodeN", { n: summary.index + 1 });
+  const synopsisDirty = synopsisDraft !== (timeline.synopsis ?? "");
+
+  const saveSynopsis = async () => {
+    try {
+      const hasField = typeof timeline.synopsis === "string";
+      await patchProject(projectId, [
+        {
+          op: hasField ? "replace" : "add",
+          path: `/timelines/items/${timelineId}/synopsis`,
+          before: hasField ? timeline.synopsis : undefined,
+          missingBefore: !hasField,
+          value: synopsisDraft,
+        },
+      ]);
+      message.success(t("blueprint.synopsisSaved"));
+    } catch (error) {
+      message.error(
+        t("blueprint.synopsisSaveFailed", {
+          detail: (error as Error).message,
+        }),
+      );
+    }
+  };
+
+  const requestChanges = () => {
+    void useCreatorSessionStore.getState().sendMessage({
+      message: t("blueprint.requestChangesMessage", { title }),
+    });
+    message.success(t("blueprint.requestChangesQueued"));
+  };
+
+  return (
+    <div
+      data-blueprint-script-panel
+      className="panel-enter absolute inset-0 z-30 flex min-h-0 flex-col bg-[var(--color-bg-layout)]"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)] px-5 py-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <button
+            type="button"
+            onClick={onClose}
+            className="icon-button !h-8 !w-8 shrink-0"
+            title={t("blueprint.closeScriptPanel")}
+          >
+            <X className="h-4 w-4" />
+          </button>
+          <MessageSquareText className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />
+          <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
+            {t("blueprint.scriptPanelTitle", { title })}
+          </h3>
+          {script?.selected ? (
+            <>
+              <span className="shrink-0 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--color-text-secondary)]">
+                {t("blueprint.scriptVersion", {
+                  count: script.slot.version_ids.length,
+                })}
+              </span>
+              {script.selected.stale && (
+                <span
+                  className={`shrink-0 rounded px-1.5 text-[10px] font-semibold leading-[18px] ${TONE_CHIP.wait}`}
+                >
+                  {t("blueprint.scriptStaleChip")}
+                </span>
+              )}
+            </>
+          ) : (
+            <span
+              className={`shrink-0 rounded px-1.5 text-[10px] font-semibold leading-[18px] ${TONE_CHIP.idle}`}
+            >
+              {t("blueprint.legacyChip")}
+            </span>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="inline-flex items-center gap-1 text-[11px] text-[var(--color-text-tertiary)]">
+            <Check className="h-3 w-3" />
+            {t("blueprint.approvalInDock")}
+          </span>
+          <button type="button" className="btn-secondary" onClick={requestChanges}>
+            {t("blueprint.requestChanges")}
+          </button>
+          <span className="mx-0.5 h-[22px] w-px bg-[var(--color-border)]" />
+          <button
+            type="button"
+            onClick={() => onOpenTimeline(timelineId)}
+            className="inline-flex items-center gap-2 rounded-[10px] bg-[var(--color-accent)] px-5 py-2.5 text-sm font-bold leading-none text-white shadow-[0_2px_8px_rgba(255,127,22,.35)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)] hover:shadow-[0_4px_14px_rgba(255,127,22,.4)]"
+          >
+            <LayoutList className="h-4 w-4" />
+            {t("blueprint.enterTimeline")}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,7fr)_minmax(0,3fr)]">
+        <div
+          data-creator-field={`script:${timelineId}/body`}
+          data-creator-field-label={t("blueprint.scriptPanelTitle", { title })}
+          data-creator-path={
+            script?.selected
+              ? `artifact:${script.slot.slot_id}@${script.selected.version_id}`
+              : undefined
+          }
+          className="min-h-0 overflow-y-auto border-r border-[var(--color-border)] bg-[var(--color-bg-primary)] px-6 py-5 text-[13px] leading-[1.9] text-[var(--color-text-primary)]"
+        >
+          {script?.selected ? (
+            loading ? (
+              <p className="text-xs text-[var(--color-text-tertiary)]">
+                {t("blueprint.scriptLoading")}
+              </p>
+            ) : loadError ? (
+              <p className="text-xs text-[var(--color-danger,#ef4444)]">
+                {t("blueprint.scriptLoadFailed", { detail: loadError })}
+              </p>
+            ) : (
+              blocks.map((block, index) => (
+                <BlockView key={index} block={block} />
+              ))
+            )
+          ) : (
+            <LegacyMapping project={project} elements={elements} />
+          )}
+        </div>
+        <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto bg-[var(--color-bg-secondary)]/45 p-4">
+          <div>
+            <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
+              {t("blueprint.synopsisLabel")}
+            </span>
+            <textarea
+              value={synopsisDraft}
+              onChange={(event) => setSynopsisDraft(event.target.value)}
+              data-creator-field={`timeline:${timelineId}/synopsis`}
+              data-creator-field-label={`${title} · ${t(
+                "blueprint.synopsis",
+              )}`}
+              data-creator-path={`/timelines/items/${timelineId}/synopsis`}
+              rows={4}
+              className="w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs leading-relaxed text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)] focus:shadow-[0_0_0_2px_rgba(255,127,22,.1)]"
+            />
+            {synopsisDirty && (
+              <button
+                type="button"
+                onClick={() => void saveSynopsis()}
+                className="btn-secondary mt-1.5 !px-2.5 !py-1 !text-[11px]"
+              >
+                {t("blueprint.saveSynopsis")}
+              </button>
+            )}
+          </div>
+          <div>
+            <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
+              {t("blueprint.stageStatus")}
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              <span
+                className={`rounded px-1.5 text-[10px] font-semibold leading-[18px] ${
+                  summary.hasScript ? TONE_CHIP.done : TONE_CHIP.idle
+                }`}
+              >
+                {t("blueprint.stageScript")}
+              </span>
+              <span
+                className={`rounded px-1.5 text-[10px] font-semibold leading-[18px] ${
+                  summary.videoReady > 0
+                    ? summary.videoReady === summary.videoTotal
+                      ? TONE_CHIP.done
+                      : TONE_CHIP.run
+                    : TONE_CHIP.idle
+                }`}
+              >
+                {t("blueprint.stageVideo", {
+                  ready: summary.videoReady,
+                  total: summary.videoTotal,
+                })}
+              </span>
+              <span
+                className={`rounded px-1.5 text-[10px] font-semibold leading-[18px] ${
+                  summary.renderReady ? TONE_CHIP.done : TONE_CHIP.idle
+                }`}
+              >
+                {t("blueprint.stageRender")}
+              </span>
+            </div>
+          </div>
+          {castEntities.length > 0 && (
+            <div>
+              <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
+                {t("blueprint.castLabel")}
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {castEntities.map((entity) => (
+                  <button
+                    key={entity.entity_id}
+                    type="button"
+                    title={t("blueprint.openVisualDetail")}
+                    onClick={() => onOpenVisualEntity(entity.entity_id)}
+                    className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  >
+                    {entity.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div>
+            <span className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
+              {t("blueprint.planLabel")}
+            </span>
+            <p className="text-xs leading-relaxed text-[var(--color-text-secondary)]">
+              {t("blueprint.planElements", { count: summary.elementCount })}
+            </p>
+            {summary.durationSeconds > 0 && (
+              <p className="text-xs leading-relaxed text-[var(--color-text-secondary)]">
+                {t("blueprint.planDuration", {
+                  seconds: Math.round(summary.durationSeconds),
+                })}
+              </p>
+            )}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}

@@ -290,7 +290,8 @@ describe("AssetsPage Project projection", () => {
     installMockFetch(ingestRoutes());
     renderPage();
 
-    fireEvent.click(screen.getByText("双人组"));
+    // The default 按归属 view shows the lineup card's ownership card name.
+    fireEvent.click(screen.getByText("双人组（阵容图）"));
 
     expect(await screen.findByText("相对关系说明")).toBeInTheDocument();
     expect(screen.getAllByText(/左矮右高/).length).toBeGreaterThan(0);

@@ -168,8 +168,12 @@ describe("R2V Workbench page", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "返回视频方案" }));
+    // The creative brief moved to the blueprint page; the plan page now
+    // greets with the episode rail (multi-timeline fixture).
     await waitFor(() =>
-      expect(screen.getByText("创作总纲")).toBeInTheDocument(),
+      expect(
+        screen.getByRole("button", { name: "收起剧集栏" }),
+      ).toBeInTheDocument(),
     );
     expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();
   });

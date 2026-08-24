@@ -2,6 +2,7 @@ import {
   Navigate,
   Outlet,
   createHashRouter,
+  useLocation,
   type RouteObject,
 } from "react-router-dom";
 import { Suspense, lazy } from "react";
@@ -9,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import ProjectLayout from "@/components/layout/ProjectLayout";
 import PageSkeleton from "@/components/PageSkeleton";
 import { loadWithChunkRecovery } from "@/lib/lazyWithChunkRecovery";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { NavigationRuntime, navigate, useParams } from "@/routing/navigation";
 
 const HomePage = lazy(() =>
@@ -22,6 +24,9 @@ const AssetsPage = lazy(() =>
 );
 const R2VWorkbenchPage = lazy(() =>
   loadWithChunkRecovery(() => import("@/pages/R2VWorkbenchPage")),
+);
+const BlueprintPage = lazy(() =>
+  loadWithChunkRecovery(() => import("@/pages/BlueprintPage")),
 );
 const BlueprintDemoPage = lazy(() =>
   loadWithChunkRecovery(() => import("@/pages/BlueprintDemoPage")),
@@ -42,10 +47,38 @@ function suspended(
 
 export const FORMAL_CREATOR_ROUTES = [
   "/",
+  "/project/:id",
+  "/project/:id/t/:timelineId/plan",
+  "/project/:id/t/:timelineId/plan/element/:elementId",
   "/project/:id/plan",
   "/project/:id/plan/element/:elementId",
   "/project/:id/assets",
 ] as const;
+
+/**
+ * Legacy /project/:id/plan entry: redirect to the primary timeline's
+ * parameterized route once the snapshot is loaded (skeleton before that).
+ */
+function LegacyPlanRedirect() {
+  const { id = "" } = useParams();
+  const timelineId = useProjectSnapshotStore((state) =>
+    state.projectId === id
+      ? state.project?.timelines.order.find(
+          (candidate) => state.project?.timelines.items[candidate],
+        ) ?? null
+      : null,
+  );
+  const location = useLocation();
+  if (!timelineId) return <PageSkeleton type="editor" />;
+  return (
+    <Navigate
+      to={`/project/${id}/t/${encodeURIComponent(timelineId)}/plan${
+        location.search
+      }`}
+      replace
+    />
+  );
+}
 
 function RouteRuntime() {
   return (
@@ -70,7 +103,7 @@ export function NotFoundPage({ projectId }: { projectId?: string }) {
         <button
           type="button"
           onClick={() =>
-            navigate(projectId ? `/project/${projectId}/plan` : "/", true)
+            navigate(projectId ? `/project/${projectId}` : "/", true)
           }
           className="mt-4 rounded border border-[var(--color-border)] bg-white px-3 py-1.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] dark:bg-[var(--color-bg-primary)]"
         >
@@ -113,14 +146,26 @@ export const CREATOR_ROUTE_OBJECTS: RouteObject[] = [
         element: <ProjectLayout />,
         children: [
           {
-            id: "project-default",
+            id: "project-blueprint",
             index: true,
-            element: <Navigate to="plan" replace />,
+            element: suspended(<BlueprintPage />, "editor"),
           },
           {
+            id: "project-timeline-plan",
+            path: "t/:timelineId/plan",
+            element: suspended(<PlanPage />),
+          },
+          {
+            id: "project-timeline-element-workbench",
+            path: "t/:timelineId/plan/element/:elementId",
+            element: suspended(<R2VWorkbenchPage />, "editor"),
+          },
+          {
+            // Legacy path: redirect to the primary timeline's parameterized
+            // plan route once the snapshot store carries the timeline order.
             id: "project-plan",
             path: "plan",
-            element: suspended(<PlanPage />),
+            element: <LegacyPlanRedirect />,
           },
           {
             id: "project-element-workbench",

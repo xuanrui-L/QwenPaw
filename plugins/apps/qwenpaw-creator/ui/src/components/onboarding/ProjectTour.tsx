@@ -27,7 +27,12 @@ export default function ProjectTour() {
 
   const STEPS: TourStepBlueprint[] = [
     {
-      selectors: ['[data-onboarding-id="creative-brief"]'],
+      // The creative brief moved to the blueprint page; fall back to the plan
+      // header so the tour still anchors its first step on this page.
+      selectors: [
+        '[data-onboarding-id="creative-brief"]',
+        "[data-plan-page] header",
+      ],
       title: t("onboarding.projectTourBrief"),
       description: t("onboarding.projectTourBriefDesc"),
     },
