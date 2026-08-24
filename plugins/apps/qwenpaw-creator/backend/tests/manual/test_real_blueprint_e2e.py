@@ -186,10 +186,55 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
     )
     assert len(updated_project["narrative_edges"]) == 1
 
-    # 5. Work graph derives without error on the branching project.
+    # 5. Work graph derives script nodes for the branching project.
     graph = client.get(f"/projects/{project_id}/work-graph")
     assert graph.status_code == 200, graph.text
+    nodes = {node["id"]: node for node in graph.json()["nodes"]}
+    script_node_id = f"script:{primary_id}"
+    assert script_node_id in nodes, sorted(nodes)
+    assert nodes[script_node_id]["status"] in ("ready", "stale")
 
-    # 6. Interactive bundle fails closed before any final cut exists.
+    # 6. Dispatch the script node: REAL qwen drafts the episode script and
+    #    the pipeline persists it as a timeline_script artifact version.
+    dispatched = client.post(
+        f"/projects/{project_id}/work-graph/nodes/{script_node_id}/dispatch",
+    )
+    assert dispatched.status_code == 200, dispatched.text
+
+    import time
+
+    slot_id = f"script:{primary_id}"
+    deadline = time.time() + 240
+    script_markdown = ""
+    while time.time() < deadline:
+        latest = _snapshot(client, project_id)
+        latest_project = latest["project"] if "project" in latest else latest
+        slot = latest_project["assets"]["artifact_slots_by_id"].get(slot_id)
+        if slot and slot.get("selected_version_id"):
+            version = latest_project["assets"]["artifact_versions_by_id"][
+                slot["selected_version_id"]
+            ]
+            indexed = latest_project["assets"]["files_by_id"][
+                version["file_id"]
+            ]
+            root = os.environ["CREATOR_DATA_ROOT"]
+            from pathlib import Path
+
+            candidates = list(Path(root).rglob(indexed["relative_uri"]))
+            assert candidates, indexed["relative_uri"]
+            script_markdown = candidates[0].read_text(encoding="utf-8")
+            break
+        time.sleep(3)
+    assert script_markdown.strip(), "script artifact never materialized"
+    assert "场" in script_markdown or "#" in script_markdown
+    print("REAL-SCRIPT-DRAFT chars:", len(script_markdown))
+
+    # 7. Interactive bundle still fails closed before any final cut exists.
     bundle = client.get(f"/projects/{project_id}/interactive-bundle")
     assert bundle.status_code == 409, bundle.text
+
+    # 8. Rough-cut fails closed too (no artifacts yet).
+    rough = client.get(
+        f"/projects/{project_id}/timelines/{primary_id}/rough-cut",
+    )
+    assert rough.status_code == 409, rough.text
