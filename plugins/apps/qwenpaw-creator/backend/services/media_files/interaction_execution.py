@@ -332,6 +332,9 @@ async def execute_file_interaction_command(
         )
 
     fingerprint = _request_fingerprint(creation, edges_by_id)
+    # 与 script_execution 一致：stale 重派共享节点派发 key，但发布事务
+    # 必须换新 id；用请求指纹为持久 id 定界，避免撞旧事务。
+    idempotency_key = f"{idempotency_key}:{fingerprint[:16]}"
     motion = creation.motion
     if (
         _motion_is_drafted(motion)
