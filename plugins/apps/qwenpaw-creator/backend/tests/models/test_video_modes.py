@@ -415,6 +415,9 @@ def test_happyhorse_11_video_edit_rejected_before_provider(
 # ── prompt guidance ──────────────────────────────────────────────────────────
 
 
+# One matrix test intentionally compares every provider to catch syntax leaks
+# between adjacent model families.
+# pylint: disable-next=too-many-statements
 def test_guidance_describes_the_mode_matrix_per_model() -> None:
     happyhorse = video_model_prompt_guidance("happyhorse-1.1-r2v")
     assert "生成模式矩阵" in happyhorse

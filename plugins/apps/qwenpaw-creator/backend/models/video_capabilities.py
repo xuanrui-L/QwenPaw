@@ -1219,6 +1219,9 @@ def _family_constraint_guidance(
     return ""
 
 
+# Each return is an exact provider-specific protocol, kept separate to avoid
+# accidentally blending incompatible reference syntaxes.
+# pylint: disable-next=too-many-return-statements
 def _model_reference_syntax_guidance(
     model_name: str,
     protocol_backend: str = "",
@@ -1315,10 +1318,7 @@ def _model_reference_syntax_guidance(
             " Runtime 未使用 subjects API，因此不得发明 `图1` 或 `@subject`；"
             "直接用自然语言描述目标主体与动作。"
         )
-    return (
-        "- 当前模型没有已知的 Prompt 引用标记协议；不得套用任何其他模型的"
-        "编号语法，必须在付费 R2V 提交前报告阻塞。"
-    )
+    return "- 当前模型没有已知的 Prompt 引用标记协议；不得套用任何其他模型的" "编号语法，必须在付费 R2V 提交前报告阻塞。"
 
 
 def video_model_prompt_guidance(
@@ -1370,6 +1370,8 @@ def video_model_prompt_guidance(
     )
 
 
+# Duration guidance mirrors the provider capability families above.
+# pylint: disable-next=too-many-return-statements
 def video_model_duration_guidance(
     model_name: str,
     protocol_backend: str = "",
@@ -1420,10 +1422,7 @@ def video_model_duration_guidance(
         )
     if backend == "kling":
         if is_kling_omni_model(normalized):
-            return (
-                f"当前视频模型 `{normalized}` 支持 3–15 秒整数；携带特征"
-                "参考视频时上限降为 10 秒。"
-            )
+            return f"当前视频模型 `{normalized}` 支持 3–15 秒整数；携带特征" "参考视频时上限降为 10 秒。"
         return f"当前视频模型 `{normalized}` 只支持 5 或 10 秒。"
     if backend == "minimax":
         return (

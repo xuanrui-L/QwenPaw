@@ -69,8 +69,7 @@ def test_storyboard_panel_aspect_contract_preserves_each_video_frame() -> None:
     assert appended.startswith("legacy storyboard prompt")
     assert appended.count("STORYBOARD PANEL ASPECT CONTRACT") == 1
     assert (
-        _append_storyboard_panel_aspect_contract(appended, "9:16")
-        == appended
+        _append_storyboard_panel_aspect_contract(appended, "9:16") == appended
     )
 
 

@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+# flake8: noqa: E501
 """Real qwen-image3 → HappyHorse prompt-contract regression.
 
 The script reuses approved local identity assets, renders a corrected
@@ -183,7 +185,9 @@ async def _run(args: argparse.Namespace) -> Path:
     ordered_video_refs = [storyboard_path, *references]
     provider_task_id = await submit_video_task(
         prompt=VIDEO_PROMPT,
-        reference_image_url_list=[path.as_uri() for path in ordered_video_refs],
+        reference_image_url_list=[
+            path.as_uri() for path in ordered_video_refs
+        ],
         ratio="16:9",
         duration=3,
         resolution="720P",

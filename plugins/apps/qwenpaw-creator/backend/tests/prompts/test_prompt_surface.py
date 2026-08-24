@@ -181,9 +181,7 @@ def test_creator_duration_is_injected_from_the_active_video_model(
     assert "30 秒长段" in prompt
 
 
-def test_r2v_prompt_supports_clean_and_annotated_storyboard_modes() -> (
-    None
-):
+def test_r2v_prompt_supports_clean_and_annotated_storyboard_modes() -> None:
     prompt = load_file_agent_prompt("r2v_generation_director.system")
     assert "分镜交付模式与画面纯净性（硬性规则）" in prompt
     assert "生成参考分镜（R2V 默认）" in prompt

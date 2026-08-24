@@ -498,9 +498,8 @@ def _is_transient_materialize_error(error: BaseException) -> bool:
     # materialization attempt performs a new DNS resolution and connection.
     # Treat only this exact peer-pinning rejection as transient; private,
     # reserved or malformed addresses remain deterministic validation errors.
-    if (
-        isinstance(error, ValidationError)
-        and "peer 不属于当前跳 DNS 预解析集合" in str(error)
+    if isinstance(error, ValidationError) and "peer 不属于当前跳 DNS 预解析集合" in str(
+        error,
     ):
         return True
     return is_transient_error_message(str(error))

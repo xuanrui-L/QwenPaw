@@ -1,3 +1,5 @@
+# -*- coding: utf-8 -*-
+# flake8: noqa: E501
 """Run a billed Creator short-drama acceptance flow with real providers.
 
 The runner owns an isolated Creator data root and never persists an API key.
@@ -234,7 +236,9 @@ def _arguments() -> argparse.Namespace:
 def _configure_environment(run_root: Path) -> Path:
     shared_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not shared_key:
-        raise RuntimeError("DASHSCOPE_API_KEY is required for the real E2E run")
+        raise RuntimeError(
+            "DASHSCOPE_API_KEY is required for the real E2E run",
+        )
 
     data_root = (run_root / "data").resolve()
     config_path = data_root / "config" / "model_config.json"
@@ -417,6 +421,9 @@ def _task_report(executions: Any, project_id: str) -> list[dict[str, Any]]:
     return report
 
 
+# The real-provider runner intentionally keeps the resumable orchestration in
+# one routine so its deadline and state transitions have a single owner.
+# pylint: disable-next=too-many-branches,too-many-statements
 async def _run(
     run_root: Path,
     timeout: float,
@@ -484,11 +491,7 @@ async def _run(
 
         project = Project.new(
             project_id=project_id,
-            name=(
-                "真实 E2E：雨夜灯塔（60 秒）"
-                if is_minute
-                else "真实 E2E：雨夜纸鹤（3 秒）"
-            ),
+            name=("真实 E2E：雨夜灯塔（60 秒）" if is_minute else "真实 E2E：雨夜纸鹤（3 秒）"),
             description=(
                 "qwen-image3 + happyhorse1.1 的 Creator 一分钟真实端到端验收"
                 if is_minute
@@ -634,11 +637,8 @@ async def _run(
                         flush=True,
                     )
 
-            if (
-                is_minute
-                and 0 < minute_element_phases_queued < len(
-                    ONE_MINUTE_ELEMENT_GOALS,
-                )
+            if is_minute and 0 < minute_element_phases_queued < len(
+                ONE_MINUTE_ELEMENT_GOALS,
             ):
                 previous_id, previous_start = minute_element_specs[
                     minute_element_phases_queued - 1
@@ -772,10 +772,14 @@ def main() -> int:
     args = _arguments()
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_root = (
-        args.output_root
-        if args.output_root is not None
-        else REPOSITORY_ROOT / "tmp" / "creator-real-e2e" / stamp
-    ).expanduser().resolve()
+        (
+            args.output_root
+            if args.output_root is not None
+            else REPOSITORY_ROOT / "tmp" / "creator-real-e2e" / stamp
+        )
+        .expanduser()
+        .resolve()
+    )
     if args.resume:
         if not run_root.is_dir():
             raise RuntimeError("--resume output root does not exist")

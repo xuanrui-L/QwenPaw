@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Adopt a billed, provider-succeeded R2V result after download failure.
 
 This repair path never calls the video provider's submit endpoint.  It is for
@@ -6,6 +7,10 @@ provider result URL but the local Task failed while materializing that URL.
 The signed result is downloaded through the same SSRF-safe materializer,
 published under the Task's pre-admitted stable IDs, and committed to Project.
 """
+
+# This narrowly scoped recovery utility deliberately resumes the owning
+# service's durable internal state machine instead of submitting a new job.
+# pylint: disable=protected-access
 
 from __future__ import annotations
 
@@ -90,7 +95,9 @@ async def _recover(args: argparse.Namespace) -> dict[str, Any]:
         )
         claim = await worker._claim_materialize(task)
         if claim is None:
-            raise RuntimeError("could not claim provider result materialization")
+            raise RuntimeError(
+                "could not claim provider result materialization",
+            )
         stable = _ids(
             task.project_id,
             str(task.idempotency_key or task.task_id),
