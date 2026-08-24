@@ -276,7 +276,10 @@ ARTIFACT_SLOT_KINDS = frozenset(
         "cast_lineup_image",
         "element_video",
         "final_video",
+        "interactive_bundle",
         "r2v_storyboard_image",
+        "research_report",
+        "timeline_script",
         "visual_asset_image",
     },
 )
@@ -1094,6 +1097,47 @@ class AudioCreation(StrictModel):
         return value
 
 
+class InteractionOption(StrictModel):
+    """One tappable audience choice; copy/target derive from the edge."""
+
+    # Points at Project.narrative_edges[*].edge_id — the edge is the single
+    # source of truth for option label and target timeline.
+    edge_ref: str = Field(min_length=1)
+    # Tap hotspot in normalized canvas space; None = auto layout by the
+    # generated motion.
+    hotspot: ElementLocation | None = None
+
+
+class InteractionCreation(StrictModel):
+    """Audience-choice element: a clickable html_css motion rendered on the
+    last frame of the source episode. Exported through InteractiveManifest
+    (never baked into a plain mp4)."""
+
+    type: Literal["interaction"]
+    question: str = Field(min_length=1)
+    options: list[InteractionOption] = Field(min_length=1)
+    countdown_seconds: float | None = Field(default=None, gt=0)
+    # Edge taken when the countdown expires without a tap.
+    default_edge_ref: str | None = None
+    # Anchor frame: artifact-version ref of the source episode's last frame.
+    base_frame_ref: str | None = None
+    motion: MotionGraphic | None = None
+    fallback: Literal["static_endcard", "split_publish"] = "split_publish"
+
+    @model_validator(mode="after")
+    def _validate_options(self) -> InteractionCreation:
+        refs = [option.edge_ref for option in self.options]
+        if len(refs) != len(set(refs)):
+            raise ValueError("interaction options cannot repeat edge_ref")
+        if self.default_edge_ref is not None and (
+            self.default_edge_ref not in refs
+        ):
+            raise ValueError(
+                "interaction default_edge_ref must be one of its options",
+            )
+        return self
+
+
 ElementCreation = Annotated[
     R2VCreation
     | T2VCreation
@@ -1103,7 +1147,8 @@ ElementCreation = Annotated[
     | OverlayCreation
     | MotionClipCreation
     | TransitionCreation
-    | AudioCreation,
+    | AudioCreation
+    | InteractionCreation,
     Field(discriminator="type"),
 ]
 
@@ -1220,6 +1265,12 @@ class Timeline(StrictModel):
     """One time coordinate system containing freely overlapping Elements."""
 
     timeline_id: EntityId
+    # Narrative-node display fields consumed by the project blueprint: a
+    # Timeline doubles as one narrative node (episode / ending / the single
+    # video). All optional so pre-v9 projects stay valid untouched.
+    title: str = ""
+    synopsis: str = ""
+    planned_duration_seconds: float | None = Field(default=None, gt=0)
     ticks_per_second: int = Field(
         default=DEFAULT_TIMELINE_TICKS_PER_SECOND,
         gt=0,
@@ -1304,6 +1355,43 @@ class Timeline(StrictModel):
         )
 
 
+class NarrativeEdge(StrictModel):
+    """Branch link between two narrative nodes (Timelines). Linear projects
+    keep this empty; the blueprint derives its structure shape from
+    len(timelines) x bool(narrative_edges) — no extra enum."""
+
+    edge_id: EntityId
+    source_timeline_id: EntityId
+    target_timeline_id: EntityId
+    # Option label shown to the audience, e.g. "选择A · 揭发真相".
+    label: str = ""
+    # Choice question copy; edges sharing a source share the prompt.
+    prompt: str = ""
+
+
+class InteractionPoint(StrictModel):
+    """One choice point inside the interactive manifest."""
+
+    source_timeline_id: EntityId
+    at_seconds: float = Field(ge=0)
+    question: str = ""
+    options: list[InteractionOption] = Field(min_length=1)
+    countdown_seconds: float | None = Field(default=None, gt=0)
+    default_edge_ref: str | None = None
+
+
+class InteractiveManifest(StrictModel):
+    """Content of an interactive_bundle artifact: segment videos + choice
+    points. The final deliverable of a branching project is this bundle
+    (html player + manifest + segment mp4s), not a single mp4."""
+
+    schema_version: Literal[1] = 1
+    entry_timeline_id: EntityId
+    # timeline_id -> final_video ArtifactVersion ref for that segment.
+    segments: dict[EntityId, str] = Field(default_factory=dict)
+    interactions: list[InteractionPoint] = Field(default_factory=list)
+
+
 class Project(StrictModel):
     schema_version: Literal[9] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
@@ -1325,7 +1413,24 @@ class Project(StrictModel):
             order=[DEFAULT_TIMELINE_ID],
         ),
     )
+    narrative_edges: list[NarrativeEdge] = Field(default_factory=list)
     assets: AssetIndex = Field(default_factory=AssetIndex)
+
+    @model_validator(mode="after")
+    def _validate_narrative_edges(self) -> Project:
+        seen: set[str] = set()
+        for edge in self.narrative_edges:
+            if edge.edge_id in seen:
+                raise ValueError("narrative edge ids must be unique")
+            seen.add(edge.edge_id)
+            for ref in (edge.source_timeline_id, edge.target_timeline_id):
+                if ref not in self.timelines.items:
+                    raise ValueError(
+                        f"narrative edge references unknown timeline {ref!r}",
+                    )
+            if edge.source_timeline_id == edge.target_timeline_id:
+                raise ValueError("narrative edge cannot loop onto itself")
+        return self
 
     @model_validator(mode="before")
     @classmethod

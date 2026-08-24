@@ -23,6 +23,15 @@ const AssetsPage = lazy(() =>
 const R2VWorkbenchPage = lazy(() =>
   loadWithChunkRecovery(() => import("@/pages/R2VWorkbenchPage")),
 );
+const BlueprintDemoPage = lazy(() =>
+  loadWithChunkRecovery(() => import("@/pages/BlueprintDemoPage")),
+);
+const BlueprintDemoPlanPage = lazy(() =>
+  loadWithChunkRecovery(() => import("@/pages/BlueprintDemoPlanPage")),
+);
+const BlueprintDemoAssetsPage = lazy(() =>
+  loadWithChunkRecovery(() => import("@/pages/BlueprintDemoAssetsPage")),
+);
 
 function suspended(
   element: React.ReactNode,
@@ -83,6 +92,21 @@ export const CREATOR_ROUTE_OBJECTS: RouteObject[] = [
     element: <RouteRuntime />,
     children: [
       { id: "home", path: "/", element: suspended(<HomePage />, "grid") },
+      {
+        id: "blueprint-demo",
+        path: "/blueprint-demo",
+        element: suspended(<BlueprintDemoPage />, "editor"),
+      },
+      {
+        id: "blueprint-demo-plan",
+        path: "/blueprint-demo/:id/plan",
+        element: suspended(<BlueprintDemoPlanPage />, "editor"),
+      },
+      {
+        id: "blueprint-demo-assets",
+        path: "/blueprint-demo/:id/assets",
+        element: suspended(<BlueprintDemoAssetsPage />, "grid"),
+      },
       {
         id: "project",
         path: "/project/:id",
