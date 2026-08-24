@@ -36,7 +36,7 @@ VIDEO 复用 LLM 凭证走 wan），前端 vite 5179，真实项目 `蓝图终�
    `source-version://` 时间码约定）→ `timeline_script` artifact 落盘。
 2. **图像**：qwen-image-2.0-pro 经 storyboard 管线真实产出分镜（画面与 prompt 吻合），
    进入 DecisionTray StoryboardReview，人工 Keep 通过。
-3. **视频**：wan 真实生成镜头视频（`element:el:sc01:video` done）。
+3. **视频**：wan 真实生成两条镜头视频（`video:el:sc01`、`video:el:sc02` 均 done）。
 4. **检查点/授权真实闭环**：structure 检查点、付费生成确认均在 AgentDock DecisionTray
    真实弹出并经人工 Continue 放行（审阅模式 confirm 路径）。
 5. **浏览器目验**（截图见本目录）：
@@ -47,8 +47,14 @@ VIDEO 复用 LLM 凭证走 wan），前端 vite 5179，真实项目 `蓝图终�
    - `verify-branching.png` 分支画布形态
    - `verify-selection.png` 划选文本 → SelectionToolbar → dock 选区附件 chip
 6. **粗剪**：`GET /timelines/{tid}/rough-cut` 返回真实 draft mp4（ffmpeg 拼接分镜/镜头）。
-7. **互动包**：分支项目全链路（双集成片 + 真实动效）后 `GET /interactive-bundle`
-   导出 zip（manifest + 播放器 + 分段视频），本地打开可点击选项跳转分支。
+7. **成片合成**：`POST /timelines/{tid}/render` 两条时间线真实合成
+   （`timeline:timeline:main:render`、`timeline:tl:ep2:render` 均落盘 final_video）。
+8. **互动包端到端（真实产物 + 浏览器实点）**：`GET /interactive-bundle` 导出 zip
+   （2,745,318 字节：`index.html` + `manifest.json` + `segments/timeline_main.mp4`
+   1,644,142 B + `segments/tl_ep2.mp4` 1,104,453 B）。本地起 http 服务用 Playwright
+   实际播放：入口段播完弹出选择层（问题「是否进入旧宅？」，选项「选择 · 进入旧宅」，
+   来自 `edge_index`），点击后 `video.src` 切换到 `segments/tl_ep2.mp4` 且分支段可解码
+   播放，覆盖层关闭 —— 判定 **PASS**（截图 `bundle-choice.png`、`bundle-branch.png`）。
 
 ## 四、实施中发现并修复的真实集成缺陷
 
