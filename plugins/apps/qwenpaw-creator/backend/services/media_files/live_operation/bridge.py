@@ -301,7 +301,7 @@ async def _run_browser_code_isolated(
     max_take_seconds: float,
     timeout_seconds: float,
 ) -> LiveOperationRun:
-    """Decorate only this task's browser links for one complete invocation."""
+    """Run one invocation on links owned or explicitly selected by Creator."""
     workspace = workspace_dir(run_root, run_id)
     outcome = LiveOperationRun()
     recorder = TakeRecorder(
@@ -312,52 +312,52 @@ async def _run_browser_code_isolated(
         max_duration_seconds=max_take_seconds,
     )
     links, owned_playwright = _recording_links(recorder)
-    from qwenpaw.browser.runtime.links import scoped_links
 
-    # Engines bind a link at connect time. A ContextVar overlay makes that
-    # decoration visible only to this asyncio task, so sibling workspaces can
-    # operate the same provider concurrently without their facts crossing.
+    # The SDK Engine binds this explicit wrapper directly. Nothing is added to
+    # QwenPaw's shared control-link registry, even briefly.
     try:
-        with scoped_links(links):
-            session = await LiveBrowserSession.connect(identity=identity)
-            selected = session.control_link
-            if not isinstance(selected, RecordingControlLink):
-                await session.close()
-                raise LiveOperationError(
-                    "the selected browser backend could not be isolated for "
-                    "recording",
-                )
-            active_page = _ActivePage()
-            stdout = io.StringIO()
-            try:
-                namespace: dict[str, Any] = {
-                    "__name__": "__browser_use__",
-                    "Browser": _BoundBrowser(session, active_page),
-                    "recorder": AgentRecorder(session, recorder, active_page),
-                }
-                value = await asyncio.wait_for(
-                    _execute(compiled, namespace, output=stdout),
-                    timeout=timeout_seconds,
-                )
-                if value is not None:
-                    outcome.result_repr = _clip(repr(value), 2_000)
-            except TimeoutError as exc:
-                raise LiveOperationError(
-                    f"browser code exceeded {timeout_seconds:g} seconds",
-                ) from exc
-            except Exception as exc:  # noqa: BLE001 - model-code boundary
-                raise LiveOperationError(
-                    "browser code failed: " f"{type(exc).__name__}: {exc}",
-                ) from exc
-            finally:
-                # A take the model forgot to stop still becomes usable footage
-                # rather than being discarded with the captured frames.
-                with contextlib.suppress(Exception):
-                    await recorder.stop_if_recording()
-                outcome.takes = recorder.takes
-                outcome.screenshots = selected.screenshots
-                outcome.output = _clip(stdout.getvalue(), _MAX_OUTPUT_CHARS)
-                await session.close()
+        session = await LiveBrowserSession.connect(
+            links=links,
+            identity=identity,
+        )
+        selected = session.control_link
+        if not isinstance(selected, RecordingControlLink):
+            await session.close()
+            raise LiveOperationError(
+                "the selected browser backend could not be isolated for "
+                "recording",
+            )
+        active_page = _ActivePage()
+        stdout = io.StringIO()
+        try:
+            namespace: dict[str, Any] = {
+                "__name__": "__browser_use__",
+                "Browser": _BoundBrowser(session, active_page),
+                "recorder": AgentRecorder(session, recorder, active_page),
+            }
+            value = await asyncio.wait_for(
+                _execute(compiled, namespace, output=stdout),
+                timeout=timeout_seconds,
+            )
+            if value is not None:
+                outcome.result_repr = _clip(repr(value), 2_000)
+        except TimeoutError as exc:
+            raise LiveOperationError(
+                f"browser code exceeded {timeout_seconds:g} seconds",
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - model-code boundary
+            raise LiveOperationError(
+                "browser code failed: " f"{type(exc).__name__}: {exc}",
+            ) from exc
+        finally:
+            # A take the model forgot to stop still becomes usable footage
+            # rather than being discarded with the captured frames.
+            with contextlib.suppress(Exception):
+                await recorder.stop_if_recording()
+            outcome.takes = recorder.takes
+            outcome.screenshots = selected.screenshots
+            outcome.output = _clip(stdout.getvalue(), _MAX_OUTPUT_CHARS)
+            await session.close()
     finally:
         # This in-process filming provider belongs to the current event loop.
         # Closing it here prevents Playwright state from leaking into another
@@ -412,7 +412,7 @@ class _BoundBrowser:
 def _recording_links(
     recorder: TakeRecorder,
 ) -> tuple[tuple[RecordingControlLink, ...], Any]:
-    """Wrap each available variant without changing the global registry."""
+    """Wrap available providers without changing QwenPaw's registry."""
     from qwenpaw.browser.control_link.playwright.adapter import (
         PlaywrightControlLink,
     )

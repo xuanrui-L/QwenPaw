@@ -1,53 +1,26 @@
 # -*- coding: utf-8 -*-
-"""One live browser session: the main-repo SDK plus a recording channel.
+"""One Creator-owned browser session plus its recording channel.
 
-The agent drives the page through QwenPaw's own Browser SDK, unchanged — its
-perception projection, semantic locators, identity adjudication and error
-teaching all come from the main repository. Creator adds exactly two things
-around it: a control link registered in-process so the SDK works inside the
-Creator runtime, and a CDP channel used only to film the page.
+The agent still drives QwenPaw's Browser SDK, but Creator constructs the
+``Browser`` facade with an explicit recording link.  It never registers that
+link with QwenPaw's process-wide browser runtime, so a recording cannot change
+which provider an ordinary QwenPaw task resolves or intercept its operations.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
-import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_PLAYWRIGHT_VARIANT = "playwright"
-_CONTROL_LINK_INIT_LOCK = threading.Lock()
+_IDENTITIES = frozenset({"auto", "user", "avatar", "guest"})
 
 
 class LiveSessionError(RuntimeError):
     """A live browser session could not be established or used."""
-
-
-def ensure_control_link() -> None:
-    """Make the SDK usable in this process without touching the main repo.
-
-    In the host the browser normally runs behind a worker plane that registers
-    its own links. Creator drives the SDK directly, so the same first-party
-    Playwright link is registered here through the main repo's public registry
-    when nothing has claimed the variant yet.
-    """
-    from qwenpaw.browser.runtime.links import link_for, register_local
-
-    if link_for(_PLAYWRIGHT_VARIANT) is not None:
-        return
-    # Creator workspaces may enter here from different event-loop threads.
-    # Keep the first-party default singleton even under a simultaneous cold
-    # start; the adapter itself already multiplexes owners and sessions.
-    with _CONTROL_LINK_INIT_LOCK:
-        if link_for(_PLAYWRIGHT_VARIANT) is not None:
-            return
-        from qwenpaw.browser.control_link.playwright.adapter import (
-            PlaywrightControlLink,
-        )
-
-        register_local(PlaywrightControlLink())
 
 
 class LiveBrowserSession:
@@ -58,12 +31,92 @@ class LiveBrowserSession:
         self._cdp_sessions: dict[str, Any] = {}
 
     @classmethod
-    async def connect(cls, *, identity: str = "guest") -> "LiveBrowserSession":
-        """Connect through the main-repo SDK with recording attached."""
-        ensure_control_link()
-        from qwenpaw.browser import Browser
+    async def connect(
+        cls,
+        *,
+        links: tuple[Any, ...],
+        identity: str = "guest",
+    ) -> "LiveBrowserSession":
+        """Build an SDK browser from explicit Creator-owned links.
 
-        return cls(await Browser.connect(identity=identity))
+        Identity adjudication intentionally mirrors ``Engine.connect``.  The
+        important difference is assembly: the selected link is passed straight
+        to ``Engine`` rather than being inserted into, and rediscovered from,
+        QwenPaw's shared runtime registry.
+        """
+        if identity not in _IDENTITIES:
+            raise LiveSessionError(
+                f"unsupported browser identity {identity!r}; expected one of "
+                "auto, user, avatar, or guest",
+            )
+
+        from qwenpaw.config.utils import load_config
+        from qwenpaw.browser import Browser
+        from qwenpaw.browser.runtime.engine import Engine
+        from qwenpaw.browser.runtime.identity import resolve_identity
+        from qwenpaw.browser.runtime.launch_resolve import resolve_launch_env
+        from qwenpaw.browser.runtime.ownership_adapter import build_session
+        from qwenpaw.browser.sdk.contracts import Owner
+
+        available: dict[str, bool] = {}
+        by_variant: dict[str, Any] = {}
+        for link in links:
+            variant = str(getattr(link, "variant", ""))
+            if not variant or variant in by_variant:
+                continue
+            by_variant[variant] = link
+            try:
+                available[variant] = bool(link.is_available())
+            except Exception:  # noqa: BLE001 - provider probe boundary
+                logger.debug(
+                    "live-operation provider availability probe failed",
+                    exc_info=True,
+                )
+                available[variant] = False
+
+        config = load_config().browser
+        resolution = resolve_identity(
+            model_identity=identity,
+            config_identity=config.identity,
+            chrome_available=available.get("chrome", False),
+            engine_backend=config.backend,
+        )
+        link = by_variant.get(resolution.variant)
+        if link is None or not available.get(resolution.variant, False):
+            if resolution.identity == "user":
+                raise LiveSessionError(
+                    "requested user browser is unavailable; connect the "
+                    "Chrome extension, or record with avatar/guest identity",
+                )
+            raise LiveSessionError(
+                "no available browser provider for Creator live operation "
+                f"({resolution.variant})",
+            )
+
+        supported = frozenset(
+            getattr(link, "supported_contexts", {"incognito", "profile"}),
+        )
+        if resolution.context not in supported:
+            raise LiveSessionError(
+                f"browser provider {resolution.variant} does not support "
+                f"the {resolution.context!r} context required by "
+                f"{resolution.identity!r} identity",
+            )
+
+        owner = Owner(
+            workspace_id=uuid.uuid4().hex,
+            session_id=uuid.uuid4().hex,
+        )
+        runtime_session = await build_session(
+            link,
+            context=resolution.context,
+            owner=owner,
+            variant=resolution.variant,
+            identity=resolution.identity,
+            launch=resolve_launch_env(config),
+        )
+
+        return cls(Browser(Engine(link=link, session=runtime_session)))
 
     @property
     def browser(self) -> Any:
@@ -84,7 +137,11 @@ class LiveBrowserSession:
                 logger.debug("cdp detach failed", exc_info=True)
         self._cdp_sessions.clear()
         try:
-            await self._browser.close()
+            # Call the owned Engine directly. ``Browser.close`` also clears
+            # the current SDK execution context, which may belong to an
+            # unrelated QwenPaw task when Creator is embedded in the host.
+            # pylint: disable-next=protected-access
+            await self._browser._engine.close()  # noqa: SLF001
         except Exception:  # noqa: BLE001 - the run's result already stands
             logger.debug("browser close failed", exc_info=True)
 
@@ -149,6 +206,5 @@ def workspace_dir(root: Path, run_id: str) -> Path:
 __all__ = [
     "LiveBrowserSession",
     "LiveSessionError",
-    "ensure_control_link",
     "workspace_dir",
 ]

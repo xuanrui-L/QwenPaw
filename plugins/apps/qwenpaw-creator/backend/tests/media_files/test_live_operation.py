@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,7 +44,10 @@ from services.media_files.live_operation.recording_link import (
     _operation_name,
 )
 
-from services.media_files.live_operation.session import LiveSessionError
+from services.media_files.live_operation.session import (
+    LiveBrowserSession,
+    LiveSessionError,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -657,32 +661,97 @@ def test_take_duration_ceiling_auto_stops_and_remains_collectable(
     assert len(recorder.takes) == 1
 
 
-def test_scoped_browser_links_are_isolated_between_concurrent_tasks():
+def test_creator_browser_sessions_are_explicit_and_host_safe(monkeypatch):
     from qwenpaw.browser.runtime import links as runtime_links
+    from qwenpaw.browser.sdk.contracts import Owner
+    from qwenpaw.browser.sdk.execution_context import (
+        ExecutionContext,
+        get_execution_context,
+        reset_execution_context,
+        set_execution_context,
+    )
 
     class Link:
-        variant = "test"
+        variant = "playwright"
+        supported_contexts = frozenset({"incognito", "profile"})
 
         def __init__(self, name):
             self.name = name
+            self.calls = []
 
-    global_link = Link("global")
+        def is_available(self):
+            return True
+
+        async def request(self, method, params, *, timeout=None):
+            del timeout
+            self.calls.append((method, dict(params)))
+            if method == "open_session":
+                return {"headless": True}
+            if method == "new_page":
+                return {"page_id": f"page-{self.name}", "url": ""}
+            return {}
+
+    global_link = Link("qwenpaw-host")
     one = Link("one")
     two = Link("two")
     runtime_links.register_local(global_link)
+    before = runtime_links.registered_links()
 
-    async def see_scoped(link):
-        with runtime_links.scoped_links([link]):
-            await asyncio.sleep(0.02)
-            return runtime_links.link_for("test")
+    monkeypatch.setattr(
+        "qwenpaw.config.utils.load_config",
+        lambda: SimpleNamespace(
+            browser=SimpleNamespace(identity="auto", backend="auto"),
+        ),
+    )
+    monkeypatch.setattr(
+        "qwenpaw.browser.runtime.launch_resolve.resolve_launch_env",
+        lambda _config: {},
+    )
+
+    async def use_explicit(link):
+        session = await LiveBrowserSession.connect(
+            links=(link,),
+            identity="guest",
+        )
+        assert session.control_link is link
+        page = await session.browser.open()
+        await asyncio.sleep(0.02)
+        await session.close()
+        return page.id
 
     async def scenario():
-        return await asyncio.gather(see_scoped(one), see_scoped(two))
+        host_context = ExecutionContext(
+            owner=Owner(workspace_id="host", session_id="host-session"),
+        )
+        host_browser = object()
+        host_context.browser = host_browser
+        token = set_execution_context(host_context)
+        try:
+            pages = await asyncio.gather(
+                use_explicit(one),
+                use_explicit(two),
+            )
+            # Creator teardown must not clear an enclosing QwenPaw browser.
+            assert get_execution_context().browser is host_browser
+            return pages
+        finally:
+            reset_execution_context(token)
 
     try:
-        observed = asyncio.run(scenario())
-        assert observed == [one, two]
-        assert runtime_links.link_for("test") is global_link
+        assert asyncio.run(scenario()) == ["page-one", "page-two"]
+        assert runtime_links.registered_links() == before
+        assert runtime_links.link_for("playwright") is global_link
+        assert not global_link.calls
+        assert [method for method, _ in one.calls] == [
+            "open_session",
+            "new_page",
+            "close_session",
+        ]
+        assert [method for method, _ in two.calls] == [
+            "open_session",
+            "new_page",
+            "close_session",
+        ]
     finally:
         runtime_links.unregister_local(global_link)
 
