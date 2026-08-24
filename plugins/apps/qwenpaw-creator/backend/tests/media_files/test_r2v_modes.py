@@ -17,6 +17,7 @@ from services.media_files.r2v_execution import (
     VideoModelCapabilityError,
     VideoReferenceBudgetError,
     _assert_r2v_reference_budget,
+    _resolve_reference_versions,
 )
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
@@ -109,13 +110,40 @@ def _project_with_image_references(count: int) -> tuple[Project, list[str]]:
     return Project.model_validate(candidate), version_ids
 
 
+def _project_with_video_references(
+    durations: list[float],
+) -> tuple[Project, list[str]]:
+    project = Project.new(project_id="reference-duration", name="Duration")
+    candidate = project.model_dump(mode="json")
+    created_at = project.created_at.isoformat()
+    version_ids = [f"video-reference-{index}" for index in range(len(durations))]
+    for version_id, duration in zip(version_ids, durations, strict=True):
+        url = f"https://cdn.test/{version_id}.mp4"
+        candidate["assets"]["source_versions_by_id"][version_id] = {
+            "version_id": version_id,
+            "logical_asset_id": f"asset-{version_id}",
+            "name": version_id,
+            "checksum": hashlib.sha256(url.encode()).hexdigest(),
+            "media_kind": "video",
+            "media_type": "video/mp4",
+            "duration_seconds": duration,
+            "created_at": created_at,
+            "metadata": {
+                "sourceKind": "remote_url",
+                "checksumKind": "source_url_sha256",
+                "publicSourceUrl": url,
+            },
+        }
+    return Project.model_validate(candidate), version_ids
+
+
 @pytest.mark.parametrize(
     ("model_name", "backend", "count", "limit"),
     [
         ("wan2.7-r2v", "wan", 6, 5),
         ("wan3.0-video", "wan", 11, 10),
         ("happyhorse-1.1-r2v", "wan", 10, 9),
-        ("doubao-seedance-2.0-pro", "seedance2", 10, 9),
+        ("doubao-seedance-2-0-260128", "seedance2", 10, 9),
     ],
 )
 def test_execution_rejects_resolved_video_reference_budget(
@@ -161,6 +189,46 @@ def test_execution_fails_closed_for_unknown_video_model(
 
     assert captured.value.code == "VIDEO_MODEL_CAPABILITY_UNKNOWN"
     assert captured.value.details["knownModelRequired"] is True
+
+
+@pytest.mark.parametrize(
+    ("durations", "output_duration"),
+    [([8.0, 8.0], 10), ([7.0, 8.0], 16)],
+)
+def test_wan3_rejects_reference_video_duration_over_official_limits(
+    monkeypatch,
+    durations,
+    output_duration,
+) -> None:
+    project, version_ids = _project_with_video_references(durations)
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "wan3.0-video",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+
+    with pytest.raises(
+        VideoReferenceBudgetError,
+        match="VIDEO_REFERENCE_DURATION_EXCEEDED",
+    ):
+        _assert_r2v_reference_budget(
+            project,
+            version_ids,
+            output_duration_seconds=output_duration,
+        )
+
+
+def test_r2v_resolves_reference_video_versions(tmp_path) -> None:
+    project, version_ids = _project_with_video_references([5.0])
+    urls, checksums, provenance, read_set = _resolve_reference_versions(
+        project=project,
+        project_root=tmp_path,
+        version_ids=version_ids,
+    )
+
+    assert urls == ["https://cdn.test/video-reference-0.mp4"]
+    assert len(checksums) == len(provenance) == len(read_set) == 1
 
 
 def _services(tmp_path, monkeypatch, extra_creation=None):

@@ -600,7 +600,11 @@ async def submit_video_task(
     uses_seedance = protocol_backend == "seedance2"
     backend_key = video_backend_key(model_name, protocol_backend)
     try:
-        normalized_mode = validate_video_mode(backend_key, model_name, mode)
+        normalized_mode = validate_video_mode(
+            protocol_backend,
+            model_name,
+            mode,
+        )
     except ValueError as exc:
         raise ModelError(str(exc), model_name=model_name) from exc
 
@@ -836,6 +840,7 @@ async def submit_video_task(
         # Official Vidu channel (api.vidu.com).
         url, submit_headers, body = vidu_backend.build_submit_request(
             prompt=prompt,
+            mode=normalized_mode,
             media=media,
             ratio=ratio,
             duration=duration,
@@ -949,7 +954,6 @@ async def submit_video_task(
             happyhorse_resolution or wan3_resolution or default_resolution
         )
         if normalized_mode == "t2v":
-            # Wan2.7 documents prompt_extend; Wan3.0 and HappyHorse do not.
             parameters = {
                 "resolution": active_resolution,
                 "ratio": ratio,
@@ -958,6 +962,7 @@ async def submit_video_task(
             }
             if uses_wan3:
                 parameters["audio"] = bool(generate_audio)
+                parameters["prompt_extend"] = True
             elif not uses_happyhorse:
                 parameters["prompt_extend"] = False
             body = {
@@ -976,6 +981,7 @@ async def submit_video_task(
             if uses_wan3:
                 parameters["ratio"] = ratio
                 parameters["audio"] = bool(generate_audio)
+                parameters["prompt_extend"] = True
             elif not uses_happyhorse:
                 parameters["prompt_extend"] = False
             body = {
@@ -1012,7 +1018,7 @@ async def submit_video_task(
             elif uses_wan3:
                 parameters["resolution"] = wan3_resolution
                 parameters["audio"] = bool(generate_audio)
-                parameters.pop("prompt_extend")
+                parameters["prompt_extend"] = True
             body = {
                 "model": effective_model,
                 "input": {

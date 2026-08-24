@@ -458,3 +458,41 @@ def test_concurrent_single_file_save_is_atomic_and_last_writer_wins(
     assert persisted["llm"]["api_key"] == "second-api-key"
     assert persisted["oss"]["access_key_secret"] == "second-oss-secret"
     assert model_routes.load_model_config().llm.model_name == "second-writer"
+
+
+def test_video_capability_route_uses_protocol_and_exact_model(
+    app,
+    api_request,
+) -> None:
+    response = api_request(
+        app,
+        "GET",
+        "/models/video-capabilities",
+        params={
+            "modelName": "viduq2-pro",
+            "protocol": "Vidu（官方）",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "vidu",
+        "model": "viduq2-pro",
+        "known": True,
+        "supportedModes": ["r2v", "i2v"],
+        "effectiveModels": {"r2v": "viduq2-pro", "i2v": "viduq2-pro"},
+        "derivesModeModel": False,
+        "documentationUrl": "https://platform.vidu.com/docs",
+    }
+
+    unknown = api_request(
+        app,
+        "GET",
+        "/models/video-capabilities",
+        params={
+            "modelName": "private-video-gateway",
+            "protocol": "DashScope（百炼）",
+        },
+    )
+    assert unknown.status_code == 200
+    assert unknown.json()["known"] is False
+    assert unknown.json()["supportedModes"] == []

@@ -506,9 +506,11 @@ def _resolve_reference_versions(
         if source_url:
             indexed = project.assets.files_by_id.get(version.file_id)
             if indexed is None or not indexed.media_type.casefold().startswith(
-                "image/",
+                ("image/", "video/"),
             ):
-                raise ValidationError(f"R2V reference 不是图片: {version_id}")
+                raise ValidationError(
+                    f"R2V reference 不是图片或视频: {version_id}",
+                )
             ref = f"artifact-version:{version_id}"
             urls.append(source_url)
             checksums.append(version.checksum)
@@ -525,8 +527,12 @@ def _resolve_reference_versions(
             continue
         remote_url = public_source_url(source) if source is not None else None
         if remote_url is not None:
-            if not version.media_type.casefold().startswith("image/"):
-                raise ValidationError(f"R2V reference 不是图片: {version_id}")
+            if not version.media_type.casefold().startswith(
+                ("image/", "video/"),
+            ):
+                raise ValidationError(
+                    f"R2V reference 不是图片或视频: {version_id}",
+                )
             ref = f"asset-version:{version_id}"
             urls.append(remote_url)
             checksums.append(version.checksum)
@@ -550,8 +556,12 @@ def _resolve_reference_versions(
             raise StorageIntegrityError(
                 f"R2V reference checksum/index 不一致: {version_id}",
             )
-        if not indexed.media_type.casefold().startswith("image/"):
-            raise ValidationError(f"R2V reference 不是图片: {version_id}")
+        if not indexed.media_type.casefold().startswith(
+            ("image/", "video/"),
+        ):
+            raise ValidationError(
+                f"R2V reference 不是图片或视频: {version_id}",
+            )
         inspection = files.inspect(indexed)
         if not inspection.available:
             raise StorageIntegrityError(
@@ -794,19 +804,13 @@ def _validated_request_mode(arguments: Mapping[str, Any]) -> str:
     """Normalize the requested mode against the runtime capability matrix."""
 
     from models import config as model_config
-    from models.video_capabilities import (
-        validate_video_mode,
-        video_backend_key,
-    )
+    from models.video_capabilities import validate_video_mode
 
     model_name = model_config.get_video_model_name()
-    backend_key = video_backend_key(
-        model_name,
-        model_config.get_video_backend(),
-    )
+    protocol_backend = model_config.get_video_backend()
     try:
         return validate_video_mode(
-            backend_key,
+            protocol_backend,
             model_name,
             str(arguments.get("mode") or "r2v"),
         )
@@ -817,12 +821,16 @@ def _validated_request_mode(arguments: Mapping[str, Any]) -> str:
 def _assert_r2v_reference_budget(
     project: Project,
     version_ids: Sequence[str],
+    *,
+    project_root: Path | None = None,
+    output_duration_seconds: int | None = None,
 ) -> None:
     """Fail before admission when Project references exceed model limits."""
 
     from models import config as model_config
     from models.video_capabilities import (
         effective_video_model_name,
+        is_wan3_video_model,
         video_backend_key,
         video_reference_capability,
         video_reference_violation,
@@ -887,24 +895,60 @@ def _assert_r2v_reference_budget(
         image_count=len(image_ids),
         video_count=len(video_ids),
     )
-    if violation is None:
+    if violation is not None:
+        raise VideoReferenceBudgetError(
+            "VIDEO_REFERENCE_BUDGET_EXCEEDED: 执行层解析 storyboard 与 Project "
+            f"exact reference version 后，共得到 {details['resolvedCount']} 个"
+            f"参考素材，但视频模型 {effective_model} 的官方限制为：{violation}。"
+            "执行层没有静默截断，也没有创建任务、上传素材或调用 provider。"
+            "请先 read_project，缩减目标 Element 的角色、场景、道具、阵容锚点"
+            "或 video_reference_version_ids，再用已变更的 Project 重试。",
+            details={
+                **details,
+                "modelFamily": capability.family,
+                "maxReferenceImages": capability.max_reference_images,
+                "maxReferenceVideos": capability.max_reference_videos,
+                "maxReferenceMedia": capability.max_reference_media,
+                "documentationUrl": capability.documentation_url,
+            },
+        )
+
+    if not is_wan3_video_model(effective_model) or not video_ids:
         return
-    raise VideoReferenceBudgetError(
-        "VIDEO_REFERENCE_BUDGET_EXCEEDED: 执行层解析 storyboard 与 Project "
-        f"exact reference version 后，共得到 {details['resolvedCount']} 个"
-        f"参考素材，但视频模型 {effective_model} 的官方限制为：{violation}。"
-        "执行层没有静默截断，也没有创建任务、上传素材或调用 provider。"
-        "请先 read_project，缩减目标 Element 的角色、场景、道具、阵容锚点"
-        "或 video_reference_version_ids，再用已变更的 Project 重试。",
-        details={
-            **details,
-            "modelFamily": capability.family,
-            "maxReferenceImages": capability.max_reference_images,
-            "maxReferenceVideos": capability.max_reference_videos,
-            "maxReferenceMedia": capability.max_reference_media,
-            "documentationUrl": capability.documentation_url,
-        },
-    )
+    durations: list[float] = []
+    for version_id in video_ids:
+        duration = media_version_duration_seconds(project, version_id)
+        if duration is None and project_root is not None:
+            duration = effective_video_duration_seconds(
+                project,
+                project_root,
+                version_id,
+            )
+        if duration is None:
+            raise VideoReferenceBudgetError(
+                "VIDEO_REFERENCE_DURATION_UNKNOWN: Wan3.0 参考视频"
+                f" {version_id} 缺少可验证的时长，未创建上游任务。",
+                details={**details, "unknownDurationVersionId": version_id},
+            )
+        durations.append(duration)
+    input_duration = sum(durations)
+    if input_duration > 15 or (
+        output_duration_seconds is not None
+        and input_duration + output_duration_seconds > 30
+    ):
+        raise VideoReferenceBudgetError(
+            "VIDEO_REFERENCE_DURATION_EXCEEDED: Wan3.0 参考视频总时长"
+            f" {input_duration:.2f} 秒，输出时长 {output_duration_seconds or 0} "
+            "秒；官方要求参考视频合计不超过 15 秒，且输入视频"
+            "与输出视频时长之和不超过 30 秒。",
+            details={
+                **details,
+                "inputVideoDurationSeconds": input_duration,
+                "outputDurationSeconds": output_duration_seconds,
+                "maxInputVideoDurationSeconds": 15,
+                "maxCombinedDurationSeconds": 30,
+            },
+        )
 
 
 def _resolve_request(
@@ -1015,7 +1059,12 @@ def _resolve_request(
                 ],
             ),
         )
-        _assert_r2v_reference_budget(project, version_ids)
+        _assert_r2v_reference_budget(
+            project,
+            version_ids,
+            project_root=project_root,
+            output_duration_seconds=duration_seconds,
+        )
         urls, checksums, provenance, read_set = _resolve_reference_versions(
             project=project,
             project_root=project_root,

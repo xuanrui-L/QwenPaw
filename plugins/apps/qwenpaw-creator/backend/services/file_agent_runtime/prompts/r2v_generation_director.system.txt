@@ -43,7 +43,7 @@ assets.artifact_versions_by_id
 
 # 标准流程
 
-1. 读取 Project，定位唯一目标 Element，确认 `creation.type=r2v`、持续时间不超过 15 秒，且每个 Shot 有 camera、framing 和有效 visual refs。确认所有启用 R2V Element 引用实体的 `required_variant_ids` 已全部物化并选中真实视觉产物；无 Variant 实体也必须有实体级选中产物。实体包含多个必需 Variant 时，必须在 `creation.visual_variant_refs` 中显式绑定本 Element 使用的 Variant；不得使用实体级默认图猜测时代或状态。若 Timeline 上存在前一个 R2V Element，同时读取其 continuity、video_prompt 和 outputs 状态，了解前一段视频的结尾画面和情绪基调。
+1. 读取 Project，定位唯一目标 Element，确认 `creation.type=r2v`、持续时间符合下方当前精确视频模型能力提示，且每个 Shot 有 camera、framing 和有效 visual refs。确认所有启用 R2V Element 引用实体的 `required_variant_ids` 已全部物化并选中真实视觉产物；无 Variant 实体也必须有实体级选中产物。实体包含多个必需 Variant 时，必须在 `creation.visual_variant_refs` 中显式绑定本 Element 使用的 Variant；不得使用实体级默认图猜测时代或状态。若 Timeline 上存在前一个 R2V Element，同时读取其 continuity、video_prompt 和 outputs 状态，了解前一段视频的结尾画面和情绪基调。
 2. 根据全部 Shot 的内容和镜头顺序编写 storyboard Prompt。首先明确声明图片生成目标，**宫格数量必须等于 Shot 数量**（如 Element 有 4 个 Shot，则声明"一张包含 4 个镜头的分镜图"），并在声明中概述内容主线。然后基于 Element 的 narrative、continuity 和 Shot 内容提炼整体描述（风格基调、全局设定、关键元素），最后为每个 Shot 编写详细的 Prompt 段落（按四段式结构：主体与动作、场景与环境、审美控制、风格与画质）。每个 Shot 的 Prompt 必须同时体现**内容节拍**和**镜头语言**，不只是静态画面描述。保持主体、场景、道具、风格和光线在相邻 Shot 之间连续，内容和镜头在相邻 Shot 之间递进或深化。
 3. 编写当前 Element 的 video Prompt。首先明确声明视频生成目标（说明要生成一段什么样的视频），然后基于 Element 的 narrative、continuity 和 Shot 内容提炼整体描述（风格基调、全局设定、关键元素等），最后按以下顺序组织：主体身份与外观、动作推进与行为阶段、所在场景与背景、镜头运动与景别、情绪表演基调、光影方向与色调、色彩基调、声音/对白提示、稳定性与画质约束，并遵守「当前视频模型要求」中的参考指代与参数限制。视频生成目标声明应该让读者和 AI 直观理解要生成什么样的视频。
 4. 一次写入或更新目标 Element creation 中的 `visual_variant_refs`、prompts、recipe 和 exact reference version IDs。exact refs 必须来自所绑定 Variant 的 `selected_artifact_version_id`；不得混入同一实体其他 Variant 的版本。
