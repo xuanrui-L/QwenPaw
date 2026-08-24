@@ -146,7 +146,13 @@ describe("PlanPage Timeline/Element frontend", () => {
     ]);
     const { container } = renderPage("/project/p1/plan?element=r2v-window");
 
-    expect(screen.getByText("创作总纲")).toBeInTheDocument();
+    // The creative brief moved to the blueprint page; the multi-timeline
+    // fixture shows the episode rail plus the timeline-title heading instead.
+    expect(
+      screen.getByRole("button", { name: "收起剧集栏" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("第1集 · 晨光出发").length).toBeGreaterThan(0);
+    expect(screen.queryByText("创作总纲")).not.toBeInTheDocument();
     expect(screen.getByText("6 项内容")).toBeInTheDocument();
     expect(screen.getByText(/4 轨/)).not.toHaveTextContent("可上下滚动");
     expect(screen.getAllByText("午饭名场面").length).toBeGreaterThan(0);
