@@ -175,6 +175,15 @@ class DesktopController:  # pylint: disable=too-many-public-methods
         return list(self._screenshots)
 
     async def _execute(self, method: str, **params: Any) -> dict[str, Any]:
+        return await self._execute_recorded(method, method, params)
+
+    async def _execute_recorded(
+        self,
+        method: str,
+        fact_op: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute one native verb under its precise manifest operation."""
         bbox = self._action_bbox(method, params)
         manifest = self._recorder.manifest
         started_ms = self._recorder.elapsed_ms() if manifest else 0
@@ -188,7 +197,7 @@ class DesktopController:  # pylint: disable=too-many-public-methods
             if manifest is not None and method not in _READ_ONLY_METHODS:
                 manifest.record(
                     ActionFact(
-                        op=method,
+                        op=fact_op,
                         t_start_ms=started_ms,
                         t_end_ms=self._recorder.elapsed_ms(),
                         target=_desktop_target(params),
@@ -359,10 +368,18 @@ class DesktopController:  # pylint: disable=too-many-public-methods
         return await self._execute("click", **params)
 
     async def double_click(self, **params: Any) -> dict[str, Any]:
-        return await self._execute("click", count=2, **params)
+        return await self._execute_recorded(
+            "click",
+            "double_click",
+            {**params, "count": 2},
+        )
 
     async def right_click(self, **params: Any) -> dict[str, Any]:
-        return await self._execute("click", button="right", **params)
+        return await self._execute_recorded(
+            "click",
+            "right_click",
+            {**params, "button": "right"},
+        )
 
     async def type_text(self, text: str, **params: Any) -> dict[str, Any]:
         return await self._execute("type_text", text=text, **params)

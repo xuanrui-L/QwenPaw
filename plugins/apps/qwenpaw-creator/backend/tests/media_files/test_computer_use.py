@@ -267,8 +267,11 @@ def test_observation_screenshot_and_element_coordinates_are_preserved(
     encoded = base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode("ascii")
 
     class Client:
+        def __init__(self):
+            self.calls = []
+
         async def execute(self, method, params):
-            del params
+            self.calls.append((method, dict(params)))
             if method == "observe_window":
                 return {
                     "window": {
@@ -309,12 +312,24 @@ def test_observation_screenshot_and_element_coordinates_are_preserved(
         def elapsed_ms():
             return 100
 
-    controller = DesktopController(Client(), Recorder(), tmp_path)
+    client = Client()
+    controller = DesktopController(client, Recorder(), tmp_path)
     asyncio.run(controller.observe_window(window_id="window-1"))
     asyncio.run(controller.click(element_id="button-1"))
+    asyncio.run(controller.double_click(element_id="button-1"))
+    asyncio.run(controller.right_click(element_id="button-1"))
 
     assert len(controller.screenshots) == 1
     assert Path(controller.screenshots[0]).read_bytes().endswith(b"image")
+    assert [fact.op for fact in Recorder.manifest.facts] == [
+        "click",
+        "double_click",
+        "right_click",
+    ]
+    assert client.calls[-2:] == [
+        ("click", {"element_id": "button-1", "count": 2}),
+        ("click", {"element_id": "button-1", "button": "right"}),
+    ]
     fact = Recorder.manifest.facts[0]
     assert (fact.bbox.x, fact.bbox.y, fact.bbox.width, fact.bbox.height) == (
         20.0,

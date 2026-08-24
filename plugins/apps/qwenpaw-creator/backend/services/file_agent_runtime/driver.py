@@ -276,6 +276,7 @@ MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
 DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 300.0
 _LIVE_EDIT_CONTEXT_MAX_TAKES = 12
 _LIVE_EDIT_CONTEXT_MAX_FACTS = 80
+_LIVE_EDIT_CONTEXT_MAX_RAW_FACTS = 320
 
 # Tool results that may carry video-frame refs to inject as native
 # images: the synchronous reader and the background-task harvester.
@@ -351,8 +352,10 @@ def _live_operation_editing_context(
     live_versions.sort(key=lambda item: item.version_id)
     takes: list[dict[str, Any]] = []
     fact_budget = _LIVE_EDIT_CONTEXT_MAX_FACTS
+    raw_fact_budget = _LIVE_EDIT_CONTEXT_MAX_RAW_FACTS
     truncated = len(live_versions) > _LIVE_EDIT_CONTEXT_MAX_TAKES
-    for version in live_versions[:_LIVE_EDIT_CONTEXT_MAX_TAKES]:
+    selected_versions = live_versions[:_LIVE_EDIT_CONTEXT_MAX_TAKES]
+    for version_index, version in enumerate(selected_versions):
         manifest = read_take_manifest(project, store, version)
         if not isinstance(manifest, Mapping):
             continue
@@ -362,15 +365,20 @@ def _live_operation_editing_context(
             raw_facts,
             (str, bytes),
         ):
+            scanned = 0
             for raw_fact in raw_facts:
-                if fact_budget <= 0:
+                if fact_budget <= 0 or raw_fact_budget <= 0:
                     truncated = True
                     break
+                scanned += 1
+                raw_fact_budget -= 1
                 fact = _compact_live_operation_fact(raw_fact)
                 if fact is None:
                     continue
                 compact_facts.append(fact)
                 fact_budget -= 1
+            if scanned < len(raw_facts):
+                truncated = True
         video = manifest.get("video")
         duration_ms = None
         if isinstance(video, Mapping):
@@ -386,7 +394,9 @@ def _live_operation_editing_context(
                 "facts": compact_facts,
             },
         )
-        if fact_budget <= 0:
+        if fact_budget <= 0 or raw_fact_budget <= 0:
+            if version_index + 1 < len(selected_versions):
+                truncated = True
             break
     if not takes:
         return None

@@ -208,14 +208,31 @@ def load_host_browser_manual() -> str:
 
 def load_host_computer_use_manual() -> str:
     """Return the host computer-use skill body, or empty when not found."""
-    root = _skill_root()
-    # The bundle sits three levels up from the installed qwenpaw package
-    # (repo/plugins/bundle/...). Walk up from the package to find it, so the
-    # authoritative manual is reused verbatim rather than restated.
     candidates: list[Path] = []
+    # The enabled plugin exposes its Python package from the bundle root. This
+    # is the stable installed-layout signal and does not assume where qwenpaw
+    # itself lives (editable checkout, wheel, or desktop bundle).
+    try:
+        import computer_use  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001 - optional plugin may be half-loaded
+        logger.debug("computer-use package discovery failed", exc_info=True)
+        computer_use = None
+    module_file = getattr(computer_use, "__file__", None)
+    if module_file:
+        bundle_root = Path(module_file).resolve().parent.parent
+        candidates.append(
+            bundle_root / "skills" / "computer_use" / "SKILL.md",
+        )
+
+    # Source checkouts may render guidance before the plugin package is on
+    # sys.path. Search trusted ancestors instead of depending on an exact
+    # number of parent hops from qwenpaw/agents/skills.
+    root = _skill_root()
     if root is not None:
-        repo = root.parent.parent.parent.parent
-        candidates.append(repo / _COMPUTER_USE_SKILL_RELATIVE)
+        for parent in (root, *root.parents):
+            candidate = parent / _COMPUTER_USE_SKILL_RELATIVE
+            if candidate not in candidates:
+                candidates.append(candidate)
     for candidate in candidates:
         try:
             text = candidate.read_text(encoding="utf-8")

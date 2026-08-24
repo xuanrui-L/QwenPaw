@@ -343,6 +343,31 @@ def test_live_operation_context_gives_edit_director_verified_action_facts(
         },
     ]
 
+    second = version.model_copy(
+        update={
+            "version_id": "asset-version-live-2",
+            "logical_asset_id": "asset-live-2",
+            "file_id": "file-live-2",
+        },
+    )
+    project.assets.source_versions_by_id[second.version_id] = second
+    monkeypatch.setattr(driver_module, "_LIVE_EDIT_CONTEXT_MAX_FACTS", 1)
+    monkeypatch.setattr(driver_module, "_LIVE_EDIT_CONTEXT_MAX_RAW_FACTS", 10)
+    monkeypatch.setattr(
+        driver_module,
+        "read_take_manifest",
+        lambda *_args, **_kwargs: {
+            "video": {"duration_ms": 1000},
+            "facts": [
+                {"op": "click", "t_start_ms": 0, "t_end_ms": 1},
+            ],
+        },
+    )
+    outer_bounded = _live_operation_editing_context(project, tmp_path)
+    assert outer_bounded is not None
+    assert outer_bounded["includedTakeCount"] == 1
+    assert outer_bounded["truncated"] is True
+
 
 def test_repeated_live_operations_in_one_request_use_unique_transactions(
     tmp_path,
