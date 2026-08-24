@@ -258,6 +258,7 @@ def _caption_precision_subtitle(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """现代软件教程字幕：轻量玻璃底、状态点与进度线。
@@ -268,7 +269,7 @@ def _caption_precision_subtitle(
     """
 
     del intensity
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}}
 .card{{position:relative;display:grid;grid-template-columns:.28em auto;align-items:center;column-gap:.42em;width:max-content;max-width:96%;padding:.30em .78em .34em;font-size:{font};border:1px solid {palette.paper}26;border-radius:.28em;background:{palette.ink}d9;box-shadow:0 .16em .65em #0000004d;backdrop-filter:blur(.28em)}}
@@ -296,11 +297,12 @@ def _caption_editorial_title(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """产品片编辑式标题：左对齐 waterfall 字组、短标尺与轻量景深。"""
 
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     overshoot = 1.02 + intensity * 0.08
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-start}}
@@ -327,12 +329,13 @@ def _caption_chapter_label(
     palette: BlueprintPalette,
     intensity: float,
     *,
+    box_width: float | None = None,
     box_height: float | None = None,
 ) -> tuple[str, float]:
     """软件教程章节元数据：单行左对齐、窄边和方向性推进。"""
 
     del intensity
-    font = _caption_font_css(text, box_height=box_height)
+    font = _caption_font_css(text, box_width=box_width, box_height=box_height)
     css = f"""
 .wrap{{position:absolute;inset:0;display:flex;align-items:center;justify-content:flex-start}}
 .tag{{position:relative;display:flex;align-items:center;gap:.48em;width:max-content;max-width:96%;padding:.22em .58em .22em .34em;font-size:{font};border-left:.12em solid {palette.primary};border-top:1px solid {palette.paper}26;border-right:1px solid {palette.paper}26;border-bottom:1px solid {palette.paper}26;border-radius:0 .22em .22em 0;background:{palette.ink}d9;box-shadow:0 .12em .45em #00000042}}
