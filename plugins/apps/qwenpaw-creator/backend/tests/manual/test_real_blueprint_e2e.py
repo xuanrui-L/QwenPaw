@@ -34,6 +34,11 @@ def client(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("TEXT_API_KEY", os.environ.get("DASHSCOPE_API_KEY", ""))
     monkeypatch.setenv("TEXT_MODEL_NAME", "qwen-plus")
+    monkeypatch.setenv("IMAGE_MODEL", "DASHSCOPE")
+    monkeypatch.setenv(
+        "DASHSCOPE_IMAGE_API_KEY",
+        os.environ.get("DASHSCOPE_API_KEY", ""),
+    )
     (tmp_path / "creator-root" / "config").mkdir(parents=True, exist_ok=True)
 
     from fastapi import FastAPI
@@ -186,6 +191,56 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
     )
     assert len(updated_project["narrative_edges"]) == 1
 
+    # 4b. Add one r2v element BEFORE script drafting so the script node
+    #     stays fresh when the storyboard later depends on it.
+    latest = _snapshot(client, project_id)
+    latest_project = latest["project"] if "project" in latest else latest
+    element_id = "el:sc01"
+    _patch(
+        client,
+        project_id,
+        latest,
+        [
+            _op(
+                latest_project,
+                "add",
+                f"/timelines/items/{primary_id}/elements_by_id/{element_id}",
+                {
+                    "element_id": element_id,
+                    "label": "SC-01 雨夜山路",
+                    "span": {"start_tick": 0, "duration_tick": 4000},
+                    "location": {
+                        "coordinate_space": "normalized_canvas",
+                        "x": 0.5, "y": 0.5, "width": 1, "height": 1,
+                        "anchor_x": 0.5, "anchor_y": 0.5,
+                        "rotation_degrees": 0, "opacity": 1,
+                    },
+                    "creation": {
+                        "type": "r2v",
+                        "intent": "雨夜山路空镜",
+                        "storyboard_prompt": (
+                            "暴雨夜的盘山公路，远光灯划开浓雾，"
+                            "冷蓝色调电影感，9:16 竖幅"
+                        ),
+                        "video_prompt": "镜头缓慢前推，雨刷摆动",
+                        "shots": {
+                            "items": {
+                                "shot:1": {
+                                    "shot_id": "shot:1",
+                                    "description": "山路空镜",
+                                    "camera": "↑ 推近",
+                                    "framing": "全景",
+                                    "duration_seconds": 4,
+                                },
+                            },
+                            "order": ["shot:1"],
+                        },
+                    },
+                },
+            ),
+        ],
+    )
+
     # 5. Work graph derives script nodes for the branching project.
     graph = client.get(f"/projects/{project_id}/work-graph")
     assert graph.status_code == 200, graph.text
@@ -238,3 +293,34 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
         f"/projects/{project_id}/timelines/{primary_id}/rough-cut",
     )
     assert rough.status_code == 409, rough.text
+
+    # 9b. Dispatch the storyboard node: REAL qwen-image renders it.
+    dispatched = client.post(
+        f"/projects/{project_id}/work-graph/nodes/storyboard:{element_id}/dispatch",
+    )
+    assert dispatched.status_code == 200, dispatched.text
+
+    storyboard_slot = f"element:{element_id}:storyboard"
+    deadline = time.time() + 360
+    storyboard_ready = False
+    while time.time() < deadline:
+        latest = _snapshot(client, project_id)
+        latest_project = latest["project"] if "project" in latest else latest
+        slot = latest_project["assets"]["artifact_slots_by_id"].get(
+            storyboard_slot,
+        )
+        if slot and slot.get("selected_version_id"):
+            storyboard_ready = True
+            break
+        time.sleep(5)
+    assert storyboard_ready, "storyboard artifact never materialized"
+    print("REAL-STORYBOARD-OK")
+
+    # 10. Rough-cut now succeeds: a real draft mp4 from the storyboard still.
+    rough = client.get(
+        f"/projects/{project_id}/timelines/{primary_id}/rough-cut",
+    )
+    assert rough.status_code == 200, rough.text
+    assert rough.headers["content-type"].startswith("video/mp4")
+    assert len(rough.content) > 5000
+    print("REAL-ROUGH-CUT bytes:", len(rough.content))
