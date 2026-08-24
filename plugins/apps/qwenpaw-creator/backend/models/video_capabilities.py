@@ -1352,8 +1352,7 @@ def video_model_prompt_guidance(
     return "\n".join(
         item
         for item in (
-            f"当前视频生成模型是 `{normalized}`。引用标记必须按该模型/通道"
-            "编译，以下字面语法是硬性协议：",
+            f"当前视频生成模型是 `{normalized}`。引用标记必须按该模型/通道" "编译，以下字面语法是硬性协议：",
             _model_reference_syntax_guidance(normalized, protocol_backend),
             "- 参考职责是语义合同，不等于所有模型都要在最终 Prompt 中逐项写"
             "编号。仅当上方协议提供官方标记时才把标记写进 Prompt；结构化引用"
