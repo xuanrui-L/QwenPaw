@@ -12,7 +12,10 @@ import {
 } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
-import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
+import {
+  selectPrimaryTimeline,
+  selectTimelineById,
+} from "@/selectors/timelineElementSelectors";
 import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
@@ -183,14 +186,19 @@ function referenceVersionName(
 
 export default function R2VWorkbenchPage() {
   const { t } = useTranslation();
-  const { id = "", elementId = "" } = useParams();
+  const { id = "", elementId = "", timelineId: timelineIdParam } = useParams();
   const query = useSearchParams();
   const reviewMode = query.get("review") === "1";
   const reviewField = query.get("field");
   const reviewPulse = query.get("reviewPulse");
   const versionFromUrl = query.get("version");
+  // Route param wins (parameterized /t/:timelineId/...); the legacy route
+  // falls back to the primary timeline.
+  const planBase = timelineIdParam
+    ? `/project/${id}/t/${encodeURIComponent(timelineIdParam)}/plan`
+    : `/project/${id}/plan`;
   useReviewFieldFocus({
-    path: `/project/${id}/plan/element/${elementId}`,
+    path: `${planBase}/element/${elementId}`,
     field: reviewField,
     enabled: reviewMode,
     pulse: reviewPulse,
@@ -212,7 +220,13 @@ export default function R2VWorkbenchPage() {
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
-  const timeline = useMemo(() => selectPrimaryTimeline(project), [project]);
+  const timeline = useMemo(
+    () =>
+      timelineIdParam
+        ? selectTimelineById(project, timelineIdParam)
+        : selectPrimaryTimeline(project),
+    [project, timelineIdParam],
+  );
   const authorityElement = timeline?.elements_by_id[elementId] ?? null;
   const elementDraft = useProjectDraft<TimelineElementDocument | null>(
     authorityElement,
@@ -321,7 +335,7 @@ export default function R2VWorkbenchPage() {
     return () => window.removeEventListener("beforeunload", warn);
   }, [elementDraft.dirty]);
 
-  const planPath = `/project/${id}/plan`;
+  const planPath = planBase;
   const backToPlan = useCallback(() => {
     const navigateBack = () =>
       navigate(

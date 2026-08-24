@@ -7,6 +7,7 @@ import {
   FileOutput,
   Info,
   Loader2,
+  PanelLeftOpen,
   RefreshCw,
 } from "lucide-react";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
@@ -21,10 +22,10 @@ import {
   overlayContentKind,
   resolveTimelineRender,
   selectPrimaryTimeline,
+  selectTimelineById,
   timelineEndTick,
 } from "@/selectors/timelineElementSelectors";
 import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
-import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { useReviewFieldFocus } from "@/routing/reviewFocus";
 import { useProjectDraft } from "@/lib/useProjectDraft";
 import { startVisiblePolling } from "@/lib/visiblePolling";
@@ -32,6 +33,7 @@ import { useNarrowWorkspace, useDetailRail } from "@/lib/useNarrowWorkspace";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
 import ElementList from "@/components/timeline/ElementList";
 import ElementDetail from "@/components/timeline/ElementDetail";
+import EpisodeRail from "@/components/blueprint/EpisodeRail";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
 import VisualCoverageCheckpoint from "@/components/creator/VisualCoverageCheckpoint";
@@ -50,7 +52,7 @@ function sec(tick: number, ticksPerSecond: number): string {
 
 export default function PlanPage() {
   const { t } = useTranslation();
-  const { id = "" } = useParams();
+  const { id = "", timelineId: timelineIdParam } = useParams();
   const query = useSearchParams();
   const project = useProjectSnapshotStore((state) =>
     state.projectId === id ? state.project : null,
@@ -62,7 +64,16 @@ export default function PlanPage() {
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
-  const timeline = useMemo(() => selectPrimaryTimeline(project), [project]);
+  // Route param wins (parameterized /t/:timelineId/plan); the legacy
+  // unparameterized route falls back to the primary timeline.
+  const timeline = useMemo(
+    () =>
+      timelineIdParam
+        ? selectTimelineById(project, timelineIdParam)
+        : selectPrimaryTimeline(project),
+    [project, timelineIdParam],
+  );
+  const [railCollapsed, setRailCollapsed] = useState(false);
   const visualCoverage = useMemo(
     () => (project ? selectVisualVariantCoverage(project) : null),
     [project],
@@ -141,8 +152,11 @@ export default function PlanPage() {
   const reviewMode = query.get("review") === "1";
   const reviewField = query.get("field");
   const reviewPulse = query.get("reviewPulse");
+  const base = timelineIdParam
+    ? `/project/${id}/t/${encodeURIComponent(timelineIdParam)}/plan`
+    : `/project/${id}/plan`;
   useReviewFieldFocus({
-    path: `/project/${id}/plan`,
+    path: base,
     field: reviewField,
     enabled: reviewMode,
     pulse: reviewPulse,
@@ -186,7 +200,6 @@ export default function PlanPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedElement]);
 
-  const base = `/project/${id}/plan`;
   const leaveDraft = useCallback(
     (next: () => void) => {
       if (!elementDraft.dirty) {
@@ -658,44 +671,51 @@ export default function PlanPage() {
     />
   );
 
+  const multiTimeline = project.timelines.order.length > 1;
+  const switchEpisode = (nextTimelineId: string) => {
+    if (nextTimelineId === timeline.timeline_id) return;
+    leaveDraft(() =>
+      navigate(`/project/${id}/t/${encodeURIComponent(nextTimelineId)}/plan`),
+    );
+  };
+
   return (
-    <div
-      data-plan-page
-      className={`flex h-full min-h-0 flex-col bg-[var(--color-bg-layout)] ${
-        previewOpen ? "overflow-y-auto overscroll-contain" : "overflow-hidden"
-      }`}
-    >
+    <div data-plan-page className="flex h-full min-h-0 bg-[var(--color-bg-layout)]">
+      {/* Episode rail: fully zero-width when collapsed (plan §4.6); the
+          expand entry is the plain button at the header's left end. */}
+      {multiTimeline && !railCollapsed && (
+        <EpisodeRail
+          project={project}
+          activeTimelineId={timeline.timeline_id}
+          onCollapse={() => setRailCollapsed(true)}
+          onSwitch={switchEpisode}
+        />
+      )}
+      <div
+        className={`flex min-h-0 min-w-0 flex-1 flex-col ${
+          previewOpen ? "overflow-y-auto overscroll-contain" : "overflow-hidden"
+        }`}
+      >
       {/* Container queries are scoped to the header and the editor grid so
           the TimelineCanvas subtree never gains size containment. */}
       <header className="@container flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)]/60 px-5 py-3 backdrop-blur">
-        <div data-onboarding-id="creative-brief" className="min-w-0">
-          {project.strategy.creative_brief ||
-          project.strategy.creative_direction ? (
-            <details className="max-w-3xl">
-              <summary className="w-fit cursor-pointer select-none text-base font-semibold text-[var(--color-text-primary)]">
-                {t("plan.creativeBrief")}
-              </summary>
-              <div
-                data-creator-field="project:strategy/creative_brief"
-                data-creator-path={projectJsonPointer(
-                  "strategy",
-                  "creative_brief",
-                )}
-                data-creator-field-label={t("plan.creativeBrief")}
-                className="mt-2 max-h-[92px] overflow-y-auto whitespace-pre-wrap rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-3 text-xs leading-5 text-[var(--color-text-secondary)]"
-              >
-                {project.strategy.creative_brief}
-                {project.strategy.creative_direction &&
-                  `\n\n${t("plan.creativeDirectionLabel", {
-                    direction: project.strategy.creative_direction,
-                  })}`}
-              </div>
-            </details>
-          ) : (
-            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-              {t("plan.creativeBrief")}
-            </h2>
+        <div className="flex min-w-0 items-center gap-2">
+          {multiTimeline && railCollapsed && (
+            <button
+              type="button"
+              onClick={() => setRailCollapsed(false)}
+              className="btn-secondary shrink-0"
+              title={t("blueprint.expandEpisodeRail")}
+            >
+              <PanelLeftOpen className="h-3.5 w-3.5" />
+              {t("blueprint.episodesCount", {
+                count: project.timelines.order.length,
+              })}
+            </button>
           )}
+          <h2 className="truncate text-base font-semibold text-[var(--color-text-primary)]">
+            {timeline.title || t("blueprint.timelineEdit")}
+          </h2>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2 pr-5">
           {/* When the workspace runs out of width the three info chips fold
@@ -903,6 +923,7 @@ export default function PlanPage() {
           onDismiss={() => setExportProgress(null)}
         />
       )}
+      </div>
     </div>
   );
 }
