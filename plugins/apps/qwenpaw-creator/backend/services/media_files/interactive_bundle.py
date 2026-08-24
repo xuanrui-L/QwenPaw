@@ -74,7 +74,7 @@ def _interaction_points(
     return points
 
 
-def _reachable_timeline_ids(project: Project) -> list[str]:
+def reachable_timeline_ids(project: Project) -> list[str]:
     """Entry timeline plus everything reachable through narrative edges.
 
     Linear projects have no edges; every ordered timeline is then part of the
@@ -107,7 +107,7 @@ def derive_interactive_manifest(project: Project) -> InteractiveManifest:
     """Project → manifest. Fails closed when a reachable segment lacks its
     final cut, mirroring the work-graph assembly gate."""
 
-    reachable = _reachable_timeline_ids(project)
+    reachable = reachable_timeline_ids(project)
     segments: dict[str, str] = {}
     interactions: list[InteractionPoint] = []
     missing: list[str] = []
