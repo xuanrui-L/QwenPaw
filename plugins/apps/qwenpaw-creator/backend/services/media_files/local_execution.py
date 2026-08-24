@@ -145,6 +145,12 @@ if TYPE_CHECKING:
 
 logger = setup_logger("services.media_files.local_execution")
 
+
+def _log_safe(value: object) -> str:
+    """Neutralize CR/LF in user-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 _RETIRED_MOTION_MOTIFS = (
     "speed_lines",
     "side_eye",
@@ -1842,7 +1848,7 @@ class FfmpegLocalMediaRunner:
             # the note in the log instead.
             logger.warning(
                 "默认 ffmpeg runner 忽略自由文本 audio_plan（保留原声）: %s",
-                str(spec.audio_plan).strip(),
+                _log_safe(str(spec.audio_plan).strip()),
             )
 
     def _concat(
@@ -3277,7 +3283,7 @@ class FileLocalMediaExecutionService:
         )
         logger.info(
             "local_media execute: project=%s task=%s command=%s",
-            project_id,
+            _log_safe(project_id),
             ids["task_id"],
             command_value.value,
         )

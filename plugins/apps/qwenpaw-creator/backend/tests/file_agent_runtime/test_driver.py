@@ -546,6 +546,11 @@ async def _wait_for(predicate, *, timeout: float = 30.0) -> None:
 def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
     parent_turn = 0
     specialist_started = asyncio.Event()
+    # The hanging specialist never returns, so any finite budget trips
+    # its wall-clock guard; keep the budget generous enough that normal
+    # parent turns survive even on heavily loaded CI runners (a 0.02s
+    # budget was flaky there — parent turns got killed as collateral).
+    turn_timeout = 5.0
 
     async def callback(_messages, tools):
         nonlocal parent_turn
@@ -568,7 +573,11 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
 
     async def scenario():
         services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
-        driver = _driver(services, callback, model_turn_timeout_seconds=0.02)
+        driver = _driver(
+            services,
+            callback,
+            model_turn_timeout_seconds=turn_timeout,
+        )
         await driver.start()
         driver.notify(PROJECT_ID)
         await asyncio.wait_for(specialist_started.wait(), timeout=2.0)
@@ -580,7 +589,7 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
 
     specialist = asyncio.run(scenario())
     assert specialist.status.value == "FAILED"
-    assert "model turn exceeded 0.02 seconds" in (
+    assert f"model turn exceeded {turn_timeout:g} seconds" in (
         specialist.final_summary_text or ""
     )
 

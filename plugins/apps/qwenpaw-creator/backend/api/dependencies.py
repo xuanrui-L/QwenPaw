@@ -253,6 +253,11 @@ def _unexpected_error(error: Exception) -> CreatorError:
             value = getattr(error, attribute, None)
             if value not in (None, ""):
                 details[key] = str(value)
+        # codeql[py/stack-trace-exposure]: this branch only admits
+        # AppError-style domain errors whose messages are curated at
+        # raise time (credentials redacted, no stack frames); truly
+        # unexpected exceptions take the INTERNAL_ERROR branch below
+        # and never expose their text.
         mapped = CreatorError(str(error), details=details)
         mapped.status_code = status_code
         mapped.code = code

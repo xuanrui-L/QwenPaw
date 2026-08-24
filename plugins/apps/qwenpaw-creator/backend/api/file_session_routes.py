@@ -75,6 +75,12 @@ from .file_execution_routes import _cancel_task_sync
 
 logger = logging.getLogger("qwenpaw.creator.api.file_session_routes")
 
+
+def _log_safe(value: Any) -> str:
+    """Neutralize CR/LF in user-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 router = APIRouter(
     prefix="/projects/{project_id}",
     tags=["creator-session-files"],
@@ -158,7 +164,7 @@ def _schedule_stop_cleanup(
         except Exception:  # pylint: disable=broad-except
             logger.warning(
                 "deferred stop cleanup failed for %s",
-                project_id,
+                _log_safe(project_id),
                 exc_info=True,
             )
 
@@ -471,9 +477,9 @@ async def post_message(
     parts, intent = _message_parts(request)
     logger.info(
         "agent dock message: conversation=%s client_message_id=%s content=%s",
-        request.conversation_id,
-        request.client_message_id,
-        intent,
+        _log_safe(request.conversation_id),
+        _log_safe(request.client_message_id),
+        _log_safe(intent),
     )
     key = resolve_idempotency_key(
         idempotency_key,
@@ -578,7 +584,7 @@ async def post_message(
     )
     logger.info(
         "message posted: project=%s session=%s seq=%d replayed=%s",
-        project_id,
+        _log_safe(project_id),
         session.session_id,
         admitted.message.message_seq,
         admitted.replayed,

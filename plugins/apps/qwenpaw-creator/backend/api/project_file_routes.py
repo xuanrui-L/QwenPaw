@@ -94,6 +94,12 @@ router = APIRouter(
 
 logger = logging.getLogger("qwenpaw.creator.api.project_file_routes")
 
+
+def _log_safe(value: Any) -> str:
+    """Neutralize CR/LF in user-provided values before logging."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 _PATCH_IDEMPOTENCY_SCOPE = "PATCH /projects/{projectId}/project"
 
 
@@ -972,9 +978,9 @@ async def decide_project_review(
     )
     logger.info(
         "review decided: project=%s review=%s decisions=%s feedback=%s",
-        project_id,
-        review_id,
-        decisions_summary,
+        _log_safe(project_id),
+        _log_safe(review_id),
+        _log_safe(decisions_summary),
         "yes" if request.rejection_feedback is not None else "no",
     )
     key = resolve_idempotency_key(
