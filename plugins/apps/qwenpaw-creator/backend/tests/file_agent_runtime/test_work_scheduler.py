@@ -9,7 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 from domain.enums import TaskStatus
-from services.file_agent_runtime.work_scheduler import WorkGraphScheduler
+from services.file_agent_runtime.work_graph import WorkNode, WorkNodeStatus
+from services.file_agent_runtime.work_scheduler import (
+    WorkGraphScheduler,
+    _blocked_by_active_media_review,
+    _blocked_by_active_sync_review,
+)
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     Project,
@@ -20,6 +25,63 @@ from services.project_files.models import (
 pytestmark = pytest.mark.unit
 
 PROJECT_ID = "scheduler-project"
+
+
+@pytest.mark.parametrize(
+    ("kind", "blocked"),
+    [
+        ("visual", False),
+        ("lineup", False),
+        ("storyboard", True),
+        ("video", True),
+        ("compose", True),
+    ],
+)
+def test_async_media_review_fences_only_dependent_billed_work(
+    kind,
+    blocked,
+) -> None:
+    node = WorkNode(
+        node_id=f"{kind}:one",
+        kind=kind,
+        label=kind,
+        status=WorkNodeStatus.READY,
+    )
+    assert _blocked_by_active_media_review(
+        node,
+        frozenset({"element:e:storyboard"}),
+    ) is blocked
+    assert _blocked_by_active_media_review(node, frozenset()) is False
+
+
+@pytest.mark.parametrize(
+    ("kind", "blocked"),
+    [
+        ("visual", False),
+        ("lineup", False),
+        ("storyboard", True),
+        ("video", True),
+        ("compose", True),
+    ],
+)
+def test_sync_review_is_a_pre_generation_scheduler_gate(
+    kind,
+    blocked,
+) -> None:
+    node = WorkNode(
+        node_id=f"{kind}:sync",
+        kind=kind,
+        label=kind,
+        status=WorkNodeStatus.READY,
+    )
+    assert _blocked_by_active_sync_review(
+        node,
+        sync_review_pending=True,
+    ) is blocked
+    assert not _blocked_by_active_sync_review(
+        node,
+        sync_review_pending=False,
+    )
 
 
 def _entity(entity_id: str, variants: dict[str, str | None]) -> VisualEntity:
@@ -400,7 +462,18 @@ def test_cancel_project_does_not_resurrect_dispatch_and_wake_rearms(
     asyncio.run(scenario())
 
 
-def test_deterministic_error_blocks_retries(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "IMAGE_REFERENCE_BUDGET_EXCEEDED",
+        "VIDEO_MODEL_CAPABILITY_UNKNOWN",
+    ],
+)
+def test_deterministic_error_blocks_retries(
+    tmp_path,
+    monkeypatch,
+    error_code,
+):
     """Errors with specific codes (e.g., IMAGE_REFERENCE_BUDGET_EXCEEDED)
     must block all further retries until the project is modified and the
     node succeeds. This prevents hot-looping on structural errors that
@@ -413,7 +486,7 @@ def test_deterministic_error_blocks_retries(tmp_path, monkeypatch):
     calls: list[dict] = []
 
     class BudgetExceededError(ValidationError):
-        code = "IMAGE_REFERENCE_BUDGET_EXCEEDED"
+        code = error_code
 
     async def rejecting_dispatch(inner_services, **kwargs):  # noqa: ARG001
         del inner_services

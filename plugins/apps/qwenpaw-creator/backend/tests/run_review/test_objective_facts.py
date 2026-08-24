@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -48,6 +51,55 @@ def test_cut_detection_finds_the_hard_cut() -> None:
     # diffs[19] sits between frame 19 and 20 -> cut at frame 20 (2500ms).
     assert index["cut_points_ms"] == [2500]
     assert len(index["scenes"]) == 2
+
+
+def test_collect_video_facts_reuses_predecoded_gray_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.run_review.objective import facts as facts_module
+
+    samples = _samples_from_frames(
+        [np.full((36, 64), 40), np.full((36, 64), 200)],
+    )
+    monkeypatch.setattr(
+        facts_module,
+        "is_operator_enabled",
+        lambda key: key == "video_index",
+    )
+
+    def unexpected_decode(_path):
+        raise AssertionError("predecoded frames must not be decoded again")
+
+    monkeypatch.setattr(facts_module, "sample_gray_frames", unexpected_decode)
+    result = collect_video_facts(
+        Path("unused.mp4"),
+        predecoded_gray_samples=samples,
+    )
+    assert result["video_index"]["sampled_frames"] == 2
+
+
+def test_easyocr_reader_is_initialized_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.run_review.objective import ocr_check
+
+    calls: list[int] = []
+
+    def fake_reader(*_args, **_kwargs):
+        calls.append(1)
+        time.sleep(0.02)
+        return object()
+
+    monkeypatch.setattr(
+        ocr_check,
+        "easyocr",
+        SimpleNamespace(Reader=fake_reader),
+    )
+    monkeypatch.setattr(ocr_check, "_READER", None)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        readers = list(pool.map(lambda _index: ocr_check._reader(), range(8)))
+    assert len(calls) == 1
+    assert all(reader is readers[0] for reader in readers)
 
 
 def test_freeze_segments_require_sustained_stillness() -> None:

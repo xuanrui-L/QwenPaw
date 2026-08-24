@@ -144,6 +144,7 @@ def collect_video_facts(
     expected_texts: Sequence[str] | None = None,
     planned_shot_count: int | None = None,
     transcript_sentences: Sequence[Mapping[str, Any]] | None = None,
+    predecoded_gray_samples: GraySamples | None = None,
 ) -> dict[str, Any]:
     """All CPU objective facts for one video artifact (thread-safe).
 
@@ -170,7 +171,7 @@ def collect_video_facts(
         )
         gray_future = (
             pool.submit(sample_gray_frames, media_path)
-            if decode_gray
+            if decode_gray and predecoded_gray_samples is None
             else None
         )
         pcm_future = (
@@ -197,9 +198,13 @@ def collect_video_facts(
             if "samples" not in shared:
                 try:
                     shared["samples"] = (
-                        gray_future.result()
-                        if gray_future is not None
-                        else None
+                        predecoded_gray_samples
+                        if predecoded_gray_samples is not None
+                        else (
+                            gray_future.result()
+                            if gray_future is not None
+                            else None
+                        )
                     )
                 except Exception as exc:  # noqa: BLE001 - fail-open
                     logger.warning("gray frame decode failed: %s", exc)

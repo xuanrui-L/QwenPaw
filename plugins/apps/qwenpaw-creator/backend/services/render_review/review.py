@@ -183,26 +183,33 @@ def _admit_round(
         ):
             # The same video is already being reviewed (replayed schedule).
             return None
-        if state.get("status") == "open":
-            rounds_completed = int(state.get("rounds_completed") or 0)
-            if rounds_completed >= MAX_REVIEW_ROUNDS:
-                return None
-            chain_id = (
-                str(state.get("chain_id") or "") or f"chain-{uuid4().hex[:12]}"
-            )
-            round_number = rounds_completed + 1
-        else:
-            # Absent or closed chain: a fresh composition starts a new chain
-            # while the reviewed-history dedup carries over.
-            state = {}
-            chain_id = f"chain-{uuid4().hex[:12]}"
-            round_number = 1
+        rounds_completed = int(state.get("rounds_completed") or 0)
+        attempts_started = max(
+            rounds_completed,
+            int(state.get("attempts_started") or 0),
+            # State written before the physical cap may have reset
+            # rounds_completed when a closed chain reopened, but its reviewed
+            # history is still proof of already-paid review attempts.
+            len(reviewed),
+        )
+        if attempts_started >= MAX_REVIEW_ROUNDS:
+            return None
+        # The cap is physical and target-wide, not scoped to whichever
+        # logical chain happens to be open. A pass, a superseding compose or
+        # a stale finalization must never reset paid VLM/challenge attempts
+        # back to round one. The stable chain id also keeps feedback request
+        # identities monotonic across those transitions.
+        chain_id = (
+            str(state.get("chain_id") or "") or f"chain-{uuid4().hex[:12]}"
+        )
+        round_number = attempts_started + 1
         now = datetime.now(UTC).isoformat()
         state.update(
             {
                 "chain_id": chain_id,
                 "target_ref": target_ref,
-                "rounds_completed": int(state.get("rounds_completed") or 0),
+                "rounds_completed": rounds_completed,
+                "attempts_started": round_number,
                 "status": "open",
                 "reviewed_video_ids": reviewed,
                 "claim": {
@@ -563,18 +570,38 @@ async def review_render(  # pylint: disable=too-many-statements,too-many-branche
             from services.run_review.objective.asr_bridge import (
                 transcript_sentences,
             )
+            from services.run_review.objective.media_io import (
+                sample_gray_frames,
+            )
+            from services.run_review.objective.video_index import (
+                build_video_index,
+            )
             from services.run_review.operator_registry import (
                 is_operator_enabled,
             )
 
             # The transcript only feeds the ASR-backed sync facts, so a
             # disabled av_sync operator must also skip the paid call
-            # (same rule as the media tier).
-            transcript = (
-                await transcript_sentences(video_path)
-                if is_operator_enabled("av_sync")
-                else None
-            )
+            # (same rule as the media tier).  Predecode the shared gray
+            # ladder first: a single-shot render has no cut to align speech
+            # against, so ASR would add cost and latency without producing a
+            # measurable result.  The samples are passed through to the
+            # objective collector to avoid decoding the video twice.
+            transcript = None
+            gray_samples = None
+            if is_operator_enabled("av_sync"):
+                try:
+                    gray_samples = await asyncio.to_thread(
+                        sample_gray_frames,
+                        video_path,
+                    )
+                    if build_video_index(gray_samples).get("cut_count", 0) > 0:
+                        transcript = await transcript_sentences(video_path)
+                except Exception:  # noqa: BLE001 - collector stays fail-open
+                    logger.exception(
+                        "render cut precheck failed; falling back to ASR",
+                    )
+                    transcript = await transcript_sentences(video_path)
             return await asyncio.to_thread(
                 collect_video_facts,
                 video_path,
@@ -584,6 +611,7 @@ async def review_render(  # pylint: disable=too-many-statements,too-many-branche
                 expected_aspect=context.get("aspect_ratio"),
                 expected_texts=context.get("planned_texts"),
                 transcript_sentences=transcript,
+                predecoded_gray_samples=gray_samples,
             )
         except Exception:  # noqa: BLE001 - facts are advisory-only
             logger.exception("render objective facts collection failed")

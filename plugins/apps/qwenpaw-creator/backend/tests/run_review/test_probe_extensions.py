@@ -172,6 +172,33 @@ def test_probe_parsing_anti_hallucination_rules() -> None:
     assert report.verdict == "revise"
 
 
+@pytest.mark.parametrize("missing_field", ["reason", "suggestion"])
+def test_confirmed_probe_requires_actionable_evidence(
+    missing_field: str,
+) -> None:
+    probe = {
+        "probe_id": "uq_render_3",
+        "verdict": "CT",
+        "evidence_timestamp_ms": 2000,
+        "reason": "画面在 2s 处冻结",
+        "suggestion": "重新生成该段",
+    }
+    probe[missing_field] = ""
+    report = parse_media_report(
+        _probe_response({"defect_findings": [probe]}),
+        kind="element_video",
+        artifact_ref="artifact-version:v1",
+        round_number=1,
+        gate_block=None,
+        stats=None,
+        expected_defects={"uq_render_3": "major"},
+        valid_timestamps=[0, 1000, 2000],
+    )
+    assert report.defect_findings[0].needs_review is True
+    assert report.confirmed_probes() == []
+    assert report.verdict == "pass"
+
+
 def test_probe_parsing_backward_compatible_without_probe_arrays() -> None:
     report = parse_media_report(
         _probe_response({}),

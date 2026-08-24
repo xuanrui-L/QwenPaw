@@ -20,6 +20,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
+from uuid import uuid4
 
 from models.vlm_model import chat_completion, multimodal_media_part
 from schemas.run_review import (
@@ -79,6 +80,16 @@ _MAX_FOCUSED_FRAMES = 6
 # weak references, so an unreferenced task could be garbage-collected in
 # the middle of a multi-second gates/VLM round.
 _ACTIVE_REVIEW_TASKS: dict[str, set["asyncio.Task[Any]"]] = {}
+# Registered synchronously at scheduling time, before the detached coroutine
+# gets its first event-loop turn. The unattended scheduler uses these slots as
+# a short-lived dependency fence so it cannot spend on downstream media that
+# this review may replace a few seconds later.
+_ACTIVE_REVIEW_SLOTS: dict[str, dict[str, int]] = {}
+# Publication reserves a slot before the Project commit becomes visible.
+# The token is transferred to ``schedule_media_review`` after commit; this
+# closes the commit-listener race where downstream R2V/compose could wake in
+# the few milliseconds before the detached review was registered.
+_REVIEW_RESERVATIONS: dict[str, tuple[str, str]] = {}
 _VIDEO_CHECK_KEYS = (
     "devices",
     "type_fonts",
@@ -95,6 +106,65 @@ REVIEWED_COMMANDS: dict[str, str] = {
     "GENERATE_STORYBOARD_IMAGE": "image",
     "GENERATE_R2V_VIDEO": "element_video",
 }
+
+
+def _increment_active_slot(project_id: str, slot_id: str) -> None:
+    project_slots = _ACTIVE_REVIEW_SLOTS.setdefault(project_id, {})
+    project_slots[slot_id] = project_slots.get(slot_id, 0) + 1
+
+
+def _decrement_active_slot(project_id: str, slot_id: str) -> None:
+    project_slots = _ACTIVE_REVIEW_SLOTS.get(project_id)
+    if project_slots is None:
+        return
+    remaining = project_slots.get(slot_id, 0) - 1
+    if remaining > 0:
+        project_slots[slot_id] = remaining
+    else:
+        project_slots.pop(slot_id, None)
+    if not project_slots:
+        _ACTIVE_REVIEW_SLOTS.pop(project_id, None)
+
+
+def reserve_media_review(
+    services: "CreatorFileServices",
+    *,
+    project_id: str,
+    published_result: Mapping[str, Any],
+) -> str | None:
+    """Reserve the selected artifact slot before publishing its commit."""
+
+    del services  # kept in the signature to mirror the scheduling boundary
+    try:
+        from models.config import is_media_review_enabled
+
+        if not is_media_review_enabled():
+            return None
+        if str(published_result.get("commandType") or "") not in REVIEWED_COMMANDS:
+            return None
+        artifact = published_result.get("artifactVersion")
+        if not isinstance(artifact, Mapping):
+            return None
+        slot_id = str(artifact.get("slot_id") or "")
+        if not slot_id:
+            return None
+        token = f"media-review-reservation-{uuid4().hex}"
+        _REVIEW_RESERVATIONS[token] = (project_id, slot_id)
+        _increment_active_slot(project_id, slot_id)
+        return token
+    except Exception:
+        logger.exception("media review reservation failed")
+        return None
+
+
+def release_media_review_reservation(token: str | None) -> None:
+    """Release a reservation whose publication did not converge."""
+
+    if not token:
+        return
+    reserved = _REVIEW_RESERVATIONS.pop(token, None)
+    if reserved is not None:
+        _decrement_active_slot(*reserved)
 
 
 def _reports_root(services: "CreatorFileServices", project_id: str) -> Path:
@@ -222,6 +292,11 @@ def _parse_probes(
             # Anti-hallucination: an NA must explain itself.
             needs_review = True
         if verdict == "CT":
+            if not reason or not suggestion:
+                # A timestamp alone is not actionable evidence. Both the
+                # observation and a concrete remediation are required before
+                # a model verdict may influence automatic regeneration.
+                needs_review = True
             if timestamp is None:
                 needs_review = True
             elif valid_timestamps is not None and not any(
@@ -365,11 +440,14 @@ async def _video_objective_facts(
         # one cut to measure against; a single-shot element (the common
         # case) would burn the ASR call for a "nothing to compare" note.
         transcript = None
+        predecoded_gray_samples = None
         if is_operator_enabled("av_sync"):
-            multi_shot = len(shots) >= 2 or await asyncio.to_thread(
-                _has_cuts,
-                media_path,
-            )
+            multi_shot = len(shots) >= 2
+            if not multi_shot:
+                predecoded_gray_samples, multi_shot = await asyncio.to_thread(
+                    _gray_samples_and_has_cuts,
+                    media_path,
+                )
             if multi_shot:
                 transcript = await transcript_sentences(media_path)
         return await asyncio.to_thread(
@@ -380,24 +458,31 @@ async def _video_objective_facts(
             expected_texts=plan_context.get("planned_texts"),
             planned_shot_count=len(shots) or None,
             transcript_sentences=transcript,
+            predecoded_gray_samples=predecoded_gray_samples,
         )
     except Exception:  # noqa: BLE001 - facts are advisory-only
         logger.exception("objective facts collection failed")
         return None
 
 
-def _has_cuts(media_path: Path) -> bool:
-    """Cheap pre-check: does this artifact contain any shot change?"""
+def _gray_samples_and_has_cuts(media_path: Path):
+    """Decode once and return both reusable samples and the cut decision."""
     try:
         from services.run_review.objective import video_index as index_ops
         from services.run_review.objective.media_io import sample_gray_frames
 
         samples = sample_gray_frames(media_path)
         index = index_ops.build_video_index(samples)
-        return int(index.get("cut_count") or 0) > 0
+        return samples, int(index.get("cut_count") or 0) > 0
     except Exception:  # noqa: BLE001 - unknown means "do not spend ASR"
         logger.warning("cut pre-check failed for %s", media_path)
-        return False
+        return None, False
+
+
+def _has_cuts(media_path: Path) -> bool:
+    """Compatibility wrapper for callers that only need the decision."""
+    _, has_cuts = _gray_samples_and_has_cuts(media_path)
+    return has_cuts
 
 
 async def _image_objective_facts(
@@ -942,6 +1027,7 @@ def schedule_media_review(
     *,
     project_id: str,
     published_result: Mapping[str, Any],
+    reservation_token: str | None = None,
 ) -> None:
     """Detach an advisory review round for a published media artifact.
 
@@ -949,6 +1035,12 @@ def schedule_media_review(
     (fresh generation, idempotent replay, crash recovery) may call it; the
     review-side admission dedups already-reviewed versions.
     """
+    reserved = (
+        _REVIEW_RESERVATIONS.pop(reservation_token, None)
+        if reservation_token
+        else None
+    )
+    reservation_transferred = False
     try:
         from models.config import is_media_review_enabled
 
@@ -986,6 +1078,16 @@ def schedule_media_review(
             ),
         )
         _ACTIVE_REVIEW_TASKS.setdefault(project_id, set()).add(task)
+        slot_id = str(artifact.get("slot_id") or "")
+        if reserved == (project_id, slot_id):
+            # The active count was installed before Project publication.
+            reservation_transferred = True
+        else:
+            if reserved is not None:
+                _decrement_active_slot(*reserved)
+                reserved = None
+            if slot_id:
+                _increment_active_slot(project_id, slot_id)
 
         def _log_outcome(done: asyncio.Task[Any]) -> None:
             project_tasks = _ACTIVE_REVIEW_TASKS.get(project_id)
@@ -993,6 +1095,26 @@ def schedule_media_review(
                 project_tasks.discard(done)
                 if not project_tasks:
                     _ACTIVE_REVIEW_TASKS.pop(project_id, None)
+            project_slots = _ACTIVE_REVIEW_SLOTS.get(project_id)
+            if project_slots is not None and slot_id:
+                _decrement_active_slot(project_id, slot_id)
+            # A clean review changes no Project field, so the commit listener
+            # has nothing to wake on. Re-evaluate the graph after every
+            # terminal review; feedback-driven outcomes are harmlessly
+            # deduplicated by the scheduler fingerprint.
+            try:
+                from services.file_agent_runtime.registry import (
+                    get_creator_agent_runtime,
+                )
+
+                runtime = get_creator_agent_runtime()
+                if (
+                    runtime is not None
+                    and runtime.services.root == services.root
+                ):
+                    runtime.work_scheduler.wake(project_id)
+            except Exception:  # noqa: BLE001 - advisory wake is best-effort
+                logger.exception("failed to wake scheduler after media review")
             if not done.cancelled() and done.exception() is not None:
                 logger.error(
                     "media review task crashed: %s",
@@ -1003,6 +1125,9 @@ def schedule_media_review(
     except Exception:
         # Scheduling must never disturb the publishing path.
         logger.exception("media review scheduling failed")
+    finally:
+        if reserved is not None and not reservation_transferred:
+            _decrement_active_slot(*reserved)
 
 
 def cancel_project_media_reviews(project_id: str) -> None:
@@ -1010,12 +1135,25 @@ def cancel_project_media_reviews(project_id: str) -> None:
 
     for task in _ACTIVE_REVIEW_TASKS.pop(project_id, set()):
         task.cancel()
+    for token, reserved in list(_REVIEW_RESERVATIONS.items()):
+        if reserved[0] == project_id:
+            _REVIEW_RESERVATIONS.pop(token, None)
+    _ACTIVE_REVIEW_SLOTS.pop(project_id, None)
+
+
+def active_media_review_slots(project_id: str) -> frozenset[str]:
+    """Return slots whose selected artifact is still under async review."""
+
+    return frozenset(_ACTIVE_REVIEW_SLOTS.get(project_id, {}))
 
 
 __all__ = [
     "REVIEWED_COMMANDS",
+    "active_media_review_slots",
     "parse_media_report",
     "cancel_project_media_reviews",
+    "release_media_review_reservation",
+    "reserve_media_review",
     "review_media_artifact",
     "run_media_review_loop",
     "schedule_media_review",

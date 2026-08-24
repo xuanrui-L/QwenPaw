@@ -85,6 +85,7 @@ _DETERMINISTIC_ERROR_CODES = frozenset(
         "IMAGE_REFERENCE_BUDGET_EXCEEDED",
         "VIDEO_REFERENCE_BUDGET_EXCEEDED",
         "IMAGE_MODEL_CAPABILITY_UNKNOWN",
+        "VIDEO_MODEL_CAPABILITY_UNKNOWN",
     },
 )
 
@@ -132,6 +133,30 @@ def _quarantined_stale_targets(tasks: Sequence[Any]) -> set[str]:
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
 _COMPOSE_COMMANDS = {CreatorCommandType.COMPOSE_FINAL_VIDEO.value}
 
+# Publication stays non-blocking, but dependent unattended work waits for the
+# asynchronous reviewer to settle. Otherwise a short image review can replace
+# a storyboard while a paid two-minute video is already running; that finished
+# video is quarantined as stale and the provider gets billed a second time.
+# Independent visual/lineup image nodes remain parallel.
+_MEDIA_REVIEW_DEPENDENT_KINDS = frozenset({"storyboard", "video", "compose"})
+
+
+def _blocked_by_active_media_review(
+    node: WorkNode,
+    active_slots: frozenset[str],
+) -> bool:
+    return bool(active_slots) and node.kind in _MEDIA_REVIEW_DEPENDENT_KINDS
+
+
+def _blocked_by_active_sync_review(
+    node: WorkNode,
+    *,
+    sync_review_pending: bool,
+) -> bool:
+    """Fence storyboard/video/compose until pre-generation text review ends."""
+
+    return sync_review_pending and node.kind in _MEDIA_REVIEW_DEPENDENT_KINDS
+
 DispatchHook = Callable[[str, WorkGraph], Awaitable[None]]
 
 
@@ -159,6 +184,7 @@ class WorkGraphScheduler:
         self._transient_last: dict[tuple[str, str, str], float] = {}
         self._inflight: dict[str, set[str]] = {}
         self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._sync_gate_rechecks: dict[str, asyncio.TimerHandle] = {}
         self._cancelled_projects: set[str] = set()
         self._deterministic_failure_nodes: dict[tuple[str, str], str] = {}
 
@@ -221,6 +247,9 @@ class WorkGraphScheduler:
                 pass
         self._loops.clear()
         self._dispatch_tasks.clear()
+        for handle in self._sync_gate_rechecks.values():
+            handle.cancel()
+        self._sync_gate_rechecks.clear()
         self._cancelled_projects.clear()
 
     def cancel_project(self, project_id: str) -> None:
@@ -234,6 +263,9 @@ class WorkGraphScheduler:
             task.cancel()
         self._inflight.pop(project_id, None)
         self._wakes.pop(project_id, None)
+        recheck = self._sync_gate_rechecks.pop(project_id, None)
+        if recheck is not None:
+            recheck.cancel()
         self._dispatched = {
             key for key in self._dispatched if key[0] != project_id
         }
@@ -364,6 +396,24 @@ class WorkGraphScheduler:
             )
 
         graph = derive_work_graph(snapshot.project, tasks=tasks)
+        from services.run_review import admission
+        from services.run_review.media_review import active_media_review_slots
+
+        reviewing_slots = active_media_review_slots(project_id)
+        reports_root = (
+            self.services.projects.project_root(project_id)
+            / "runtime"
+            / "run-review"
+        )
+        sync_fences = await asyncio.to_thread(
+            admission.active_sync_fences,
+            reports_root,
+        )
+        sync_review_pending = bool(sync_fences)
+        if sync_review_pending:
+            delay = admission.sync_fence_expiry_delay(sync_fences)
+            if delay is not None:
+                self._schedule_sync_gate_recheck(project_id, delay)
         inflight = self._inflight.setdefault(project_id, set())
         try:
             # Wallet fuse: a spent budget pauses automatic dispatch; the
@@ -390,6 +440,22 @@ class WorkGraphScheduler:
         for node in self._dispatch_candidates(project_id, graph, tasks):
             if capacity <= 0:
                 break
+            if _blocked_by_active_sync_review(
+                node,
+                sync_review_pending=sync_review_pending,
+            ):
+                logger.info(
+                    "work-graph node %s waits for synchronous text review",
+                    node.node_id,
+                )
+                continue
+            if _blocked_by_active_media_review(node, reviewing_slots):
+                logger.info(
+                    "work-graph node %s waits for async review of %s",
+                    node.node_id,
+                    sorted(reviewing_slots),
+                )
+                continue
             fingerprint = node.dispatch_fingerprint or node.node_id
             ledger_key = (project_id, node.node_id, fingerprint)
             if ledger_key in self._dispatched or node.node_id in inflight:
@@ -420,6 +486,30 @@ class WorkGraphScheduler:
         if self._on_tick is not None:
             await self._on_tick(project_id, graph)
         return graph
+
+    def _schedule_sync_gate_recheck(
+        self,
+        project_id: str,
+        delay: float,
+    ) -> None:
+        """Wake once when a crash/abandoned-review fence becomes fail-open."""
+
+        loop = asyncio.get_running_loop()
+        due = loop.time() + delay
+        current = self._sync_gate_rechecks.get(project_id)
+        if current is not None and not current.cancelled():
+            if current.when() <= due:
+                return
+            current.cancel()
+
+        def recheck() -> None:
+            self._sync_gate_rechecks.pop(project_id, None)
+            self.wake(project_id)
+
+        self._sync_gate_rechecks[project_id] = loop.call_later(
+            delay,
+            recheck,
+        )
 
     def _dispatch_candidates(
         self,

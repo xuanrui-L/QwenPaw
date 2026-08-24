@@ -37,12 +37,32 @@ _TRACE_COMPONENT = "run_review"
 _TEXT_MODEL_TIMEOUT_SECONDS = 120.0
 _VALUE_CHAR_LIMIT = 2000
 _PAYLOAD_CHAR_LIMIT = 12000
+_PERSISTENT_MEDIA_GATE_GROUPS = frozenset(
+    {"shots", "overlay_text", "motion"},
+)
 
 # Pointer classification: (group, stage, substring patterns). The first
 # matching group in this order wins when one commit spans several groups.
+# Generation-driving shot/prompt text must win over the broader strategy
+# fields: it is the content the pre-generation fence is specifically meant
+# to validate before storyboard/R2V spend begins.
 _POINTER_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "shots",
+        "text",
+        (
+            "/creation/shots",
+            "/creation/intent",
+            "/creation/narrative",
+            "/creation/continuity",
+            "/creation/storyboard_prompt",
+            "/creation/video_prompt",
+            "/creation/script",
+            "/creation/reason",
+            "/creation/prompt",
+        ),
+    ),
     ("strategy", "text", ("/strategy/",)),
-    ("shots", "text", ("/creation/shots",)),
     ("overlay_text", "text", ("/creation/text",)),
     ("motion", "motion", ("/creation/motion",)),
 )
@@ -54,6 +74,16 @@ def classify_pointers(
     changed_pointers: Sequence[str],
 ) -> tuple[str, str, list[str]] | None:
     """Return ``(group, stage, matched_pointers)`` for the winning group."""
+    groups = classify_pointer_groups(changed_pointers)
+    return groups[0] if groups else None
+
+
+def classify_pointer_groups(
+    changed_pointers: Sequence[str],
+) -> list[tuple[str, str, list[str]]]:
+    """Return every affected review group in stable priority order."""
+
+    groups: list[tuple[str, str, list[str]]] = []
     for group, stage, patterns in _POINTER_GROUPS:
         matched = [
             pointer
@@ -61,8 +91,58 @@ def classify_pointers(
             if any(pattern in pointer for pattern in patterns)
         ]
         if matched:
-            return group, stage, matched
-    return None
+            groups.append((group, stage, matched))
+    return groups
+
+
+def _has_reviewable_content(value: Any) -> bool:
+    """Whether a changed subtree contains creative text worth reviewing."""
+
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Mapping):
+        return any(_has_reviewable_content(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_reviewable_content(item) for item in value)
+    return False
+
+
+def reviewable_changed_pointers(
+    project_json: Mapping[str, Any],
+    changed_pointers: Sequence[str],
+) -> list[str]:
+    """Expand structural parent changes into reviewable creative pointers.
+
+    The Project diff intentionally emits one parent pointer when an entire
+    Element is created. The old substring-only classifier therefore missed
+    the exact first commit that made storyboard/video nodes READY. Walk only
+    each changed subtree, stop at the first reviewable boundary, and return
+    stable synthetic pointers without changing the public Project diff.
+    """
+
+    expanded: list[str] = []
+
+    def walk(value: Any, pointer: str) -> None:
+        if classify_pointers([pointer]) is not None:
+            if _has_reviewable_content(value):
+                expanded.append(pointer)
+            return
+        if isinstance(value, Mapping):
+            for key in sorted(value):
+                token = str(key).replace("~", "~0").replace("/", "~1")
+                child = f"{pointer}/{token}" if pointer else f"/{token}"
+                walk(value[key], child)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                child = f"{pointer}/{index}" if pointer else f"/{index}"
+                walk(item, child)
+
+    for pointer in changed_pointers:
+        value = _resolve_pointer(project_json, pointer)
+        if value is None:
+            continue
+        walk(value, pointer)
+    return list(dict.fromkeys(expanded))
 
 
 def _resolve_pointer(document: Mapping[str, Any], pointer: str) -> Any:
@@ -207,13 +287,14 @@ async def _review_and_script(
     stage: str,
     payload_text: str,
     strategy_payload: str,
+    shots_payload: str,
 ) -> tuple[str, dict[str, Any] | None]:
     """Appeal review plus (for shots commits) the script-to-shots check.
 
     The two calls run concurrently on the worker's private loop; the
     script check is fail-open internally and never raises.
     """
-    if not strategy_payload:
+    if not strategy_payload or not shots_payload:
         return await _review_async(stage, payload_text), None
     from services.run_review.script_review import run_script_check
 
@@ -221,7 +302,7 @@ async def _review_and_script(
         _review_async(stage, payload_text),
         run_script_check(
             strategy_payload=strategy_payload,
-            shots_payload=payload_text,
+            shots_payload=shots_payload,
         ),
     )
     return response, script_check
@@ -248,13 +329,14 @@ def _strategy_payload(project_json: Mapping[str, Any]) -> str:
     return json.dumps(filled, ensure_ascii=False)
 
 
-def maybe_sync_review(  # pylint: disable=too-many-return-statements
+def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
     *,
     project_id: str,
     project_root: Path,
     project_json: Mapping[str, Any],
     changed_pointers: Sequence[str],
     transaction_id: str,
+    gate_token: str | None = None,
 ) -> dict[str, Any] | None:
     """Sync review entry for the jq_project worker thread. Fail-open.
 
@@ -262,28 +344,19 @@ def maybe_sync_review(  # pylint: disable=too-many-return-statements
     or ``None`` when review is off, not applicable, deduped, capped or
     failed.
     """
+    reports_root = project_root / "runtime" / "run-review"
+    failed_groups: set[str] = set()
     try:
         from models.config import is_sync_review_enabled
 
         if not is_sync_review_enabled():
             return None
-        classified = classify_pointers(changed_pointers)
-        if classified is None:
-            return None
-        group, stage, matched = classified
-        payload_text = _payload_text(project_json, matched)
-        if not payload_text.strip():
-            return None
-        content_hash = hashlib.sha256(
-            payload_text.encode("utf-8"),
-        ).hexdigest()
-        reports_root = project_root / "runtime" / "run-review"
-        round_number = admission.admit_sync_review(
-            reports_root,
-            pointer_group=group,
-            content_hash=content_hash,
+        expanded_pointers = reviewable_changed_pointers(
+            project_json,
+            changed_pointers,
         )
-        if round_number is None:
+        classified = classify_pointer_groups(expanded_pointers)
+        if not classified:
             return None
         try:
             asyncio.get_running_loop()
@@ -294,70 +367,209 @@ def maybe_sync_review(  # pylint: disable=too-many-return-statements
             # worker cannot block on one, so the advisory is skipped.
             logger.warning("sync review skipped: called on a running loop")
             return None
-        response = asyncio.run(
-            _review_and_script(
-                stage,
-                payload_text,
-                # Script-to-shots check only reviews shot-list commits,
-                # needs a filled-in strategy to compare against, and is
-                # individually switchable in the self-review 高级配置.
-                (
-                    _strategy_payload(project_json)
-                    if group == "shots" and _script_check_enabled()
-                    else ""
+
+        jobs: list[dict[str, Any]] = []
+        for group, stage, matched in classified:
+            payload_text = _payload_text(project_json, matched)
+            if not payload_text.strip():
+                continue
+            content_hash = hashlib.sha256(
+                payload_text.encode("utf-8"),
+            ).hexdigest()
+            round_number = admission.admit_sync_review(
+                reports_root,
+                pointer_group=group,
+                content_hash=content_hash,
+            )
+            if round_number is None:
+                continue
+            failed_groups.add(group)
+            jobs.append(
+                {
+                    "group": group,
+                    "stage": stage,
+                    "matched": matched,
+                    "payload_text": payload_text,
+                    "content_hash": content_hash,
+                    "round_number": round_number,
+                },
+            )
+        if not jobs:
+            return None
+
+        shots_pointers = [
+            pointer
+            for pointer in changed_pointers
+            if "/creation/shots" in pointer
+        ]
+        shots_payload = _payload_text(project_json, shots_pointers)
+        script_strategy = (
+            _strategy_payload(project_json)
+            if shots_payload and _script_check_enabled()
+            else ""
+        )
+
+        async def review_all() -> list[Any]:
+            # A mixed repair often updates strategy and generation prompts in
+            # the same atomic commit.  Review every affected group in
+            # parallel: selecting only one left the other group's durable
+            # blocker orphaned until its five-minute crash TTL.
+            return list(
+                await asyncio.gather(
+                    *(
+                        _review_and_script(
+                            str(job["stage"]),
+                            str(job["payload_text"]),
+                            script_strategy
+                            if job["group"] == "shots"
+                            else "",
+                            shots_payload
+                            if job["group"] == "shots"
+                            else "",
+                        )
+                        for job in jobs
+                    ),
+                    return_exceptions=True,
                 ),
-            ),
-        )
-        response_text, script_check = response
-        advisory = parse_sync_advisory(
-            response_text,
-            stage=stage,
-            transaction_id=transaction_id,
-            pointer_group=group,
-            reviewed_pointers=matched,
-            round_number=round_number,
-        )
+            )
+
+        responses = asyncio.run(review_all())
         from services.run_review.script_review import (
             script_check_has_findings,
         )
 
-        if script_check is not None:
-            advisory = advisory.model_copy(
-                update={"script_check": script_check},
-            )
-        clean = not advisory.weak_scores() and not script_check_has_findings(
-            script_check,
-        )
-        admission.settle_sync_review(
-            reports_root,
-            pointer_group=group,
-            content_hash=content_hash,
-            clean=clean,
-        )
-        admission.write_json(
-            reports_root
-            / "sync"
-            / f"{admission.safe_ref(transaction_id)}.json",
-            advisory.model_dump(mode="json"),
-        )
-        trace_event(
-            "run_review.sync_advisory",
-            component=_TRACE_COMPONENT,
-            attributes={
-                "pointerGroup": group,
-                "stage": stage,
-                "round": round_number,
-                "clean": clean,
-                "scriptFindings": script_check_has_findings(script_check),
-                "transactionId": transaction_id,
-            },
-            projectId=project_id,
-        )
-        if clean:
+        delivered: list[dict[str, Any]] = []
+        multi = len(jobs) > 1
+        for job, response in zip(jobs, responses, strict=True):
+            group = str(job["group"])
+            stage = str(job["stage"])
+            matched = list(job["matched"])
+            content_hash = str(job["content_hash"])
+            round_number = int(job["round_number"])
+            if isinstance(response, BaseException):
+                admission.clear_sync_blocker(
+                    reports_root,
+                    pointer_group=group,
+                )
+                failed_groups.discard(group)
+                logger.error(
+                    "sync review group failed for project %s txn %s "
+                    "group %s: %s",
+                    project_id,
+                    transaction_id,
+                    group,
+                    response,
+                )
+                continue
+            try:
+                response_text, script_check = response
+                advisory = parse_sync_advisory(
+                    response_text,
+                    stage=stage,
+                    transaction_id=transaction_id,
+                    pointer_group=group,
+                    reviewed_pointers=matched,
+                    round_number=round_number,
+                )
+                if script_check is not None:
+                    advisory = advisory.model_copy(
+                        update={"script_check": script_check},
+                    )
+                clean = (
+                    not advisory.weak_scores()
+                    and not script_check_has_findings(script_check)
+                )
+                admission.settle_sync_review(
+                    reports_root,
+                    pointer_group=group,
+                    content_hash=content_hash,
+                    clean=clean,
+                )
+                # A weak inline review must remain effective during the next
+                # agent turn. A clean follow-up or the hard cap releases it.
+                if (
+                    clean
+                    or round_number >= admission.MAX_SYNC_REVIEW_ROUNDS
+                    or group not in _PERSISTENT_MEDIA_GATE_GROUPS
+                ):
+                    admission.clear_sync_blocker(
+                        reports_root,
+                        pointer_group=group,
+                    )
+                elif gate_token is not None:
+                    admission.hold_sync_blocker(
+                        reports_root,
+                        project_id=project_id,
+                        pointer_group=group,
+                        reviewed_pointers=matched,
+                        round_number=round_number,
+                    )
+                report_name = admission.safe_ref(transaction_id)
+                if multi:
+                    report_name += f"-{admission.safe_ref(group)}"
+                admission.write_json(
+                    reports_root / "sync" / f"{report_name}.json",
+                    advisory.model_dump(mode="json"),
+                )
+                trace_event(
+                    "run_review.sync_advisory",
+                    component=_TRACE_COMPONENT,
+                    attributes={
+                        "pointerGroup": group,
+                        "stage": stage,
+                        "round": round_number,
+                        "clean": clean,
+                        "scriptFindings": script_check_has_findings(
+                            script_check,
+                        ),
+                        "transactionId": transaction_id,
+                    },
+                    projectId=project_id,
+                )
+                failed_groups.discard(group)
+                if not clean:
+                    delivered.append(advisory.model_dump(mode="json"))
+            except Exception:  # noqa: BLE001 - per-group advisory fail-open
+                admission.clear_sync_blocker(
+                    reports_root,
+                    pointer_group=group,
+                )
+                failed_groups.discard(group)
+                logger.exception(
+                    "sync review group parse/settle failed for project %s "
+                    "txn %s group %s",
+                    project_id,
+                    transaction_id,
+                    group,
+                )
+
+        if not delivered:
             return None
-        return advisory.model_dump(mode="json")
+        if len(delivered) == 1:
+            return delivered[0]
+        return {
+            "transaction_id": transaction_id,
+            "pointer_group": "multiple",
+            "reviewed_pointers": list(
+                dict.fromkeys(
+                    pointer
+                    for item in delivered
+                    for pointer in item.get("reviewed_pointers") or []
+                ),
+            ),
+            "round": max(int(item.get("round") or 0) for item in delivered),
+            "advisories": delivered,
+            "summary": "；".join(
+                str(item.get("summary") or "") for item in delivered
+            ),
+        }
     except Exception:
         # Advisory only: a review failure must never disturb the commit.
+        for failed_group in failed_groups:
+            admission.clear_sync_blocker(
+                reports_root,
+                pointer_group=failed_group,
+            )
         logger.exception(
             "sync review failed for project %s txn %s",
             project_id,
@@ -367,7 +579,9 @@ def maybe_sync_review(  # pylint: disable=too-many-return-statements
 
 
 __all__ = [
+    "classify_pointer_groups",
     "classify_pointers",
     "maybe_sync_review",
     "parse_sync_advisory",
+    "reviewable_changed_pointers",
 ]

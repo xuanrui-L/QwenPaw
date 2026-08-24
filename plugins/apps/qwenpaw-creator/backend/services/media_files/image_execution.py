@@ -88,7 +88,11 @@ from services.media_files.visual_design_readiness import (
 from services.observability import report_error
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
-from services.run_review.media_review import schedule_media_review
+from services.run_review.media_review import (
+    release_media_review_reservation,
+    reserve_media_review,
+    schedule_media_review,
+)
 from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     canonical_json_bytes,
@@ -2338,6 +2342,11 @@ class FileImageExecutionService:
         if not isinstance(task.result, dict):
             raise StorageIntegrityError("RUNNING 图片 Task 缺少可重放 result")
         result = dict(task.result)
+        review_reservation = reserve_media_review(
+            self.services,
+            project_id=task.project_id,
+            published_result=result,
+        )
 
         def commit_if_live() -> tuple[str, TaskRecord, ProjectSnapshot | None]:
             # Cancellation and Project import share one lifecycle decision.
@@ -2420,10 +2429,15 @@ class FileImageExecutionService:
                     )
                 return "SUCCEEDED", latest, snapshot
 
-        outcome, current_task, snapshot = await asyncio.to_thread(
-            commit_if_live,
-        )
+        try:
+            outcome, current_task, snapshot = await asyncio.to_thread(
+                commit_if_live,
+            )
+        except BaseException:
+            release_media_review_reservation(review_reservation)
+            raise
         if outcome == "CANCELLED":
+            release_media_review_reservation(review_reservation)
             await self._quarantine(
                 task=current_task,
                 ids=ids,
@@ -2433,6 +2447,7 @@ class FileImageExecutionService:
             )
             raise ConflictError("图片 Task 已取消，迟到结果已隔离")
         if outcome == "STALE":
+            release_media_review_reservation(review_reservation)
             await self._quarantine(
                 task=current_task,
                 ids=ids,
@@ -2442,29 +2457,41 @@ class FileImageExecutionService:
             )
             raise ConflictError("图片生成期间 Project 已变化，结果已隔离")
         if outcome != "SUCCEEDED" or snapshot is None:
+            release_media_review_reservation(review_reservation)
             raise ConflictError(f"图片 Task 已终止: {outcome}")
-        await asyncio.to_thread(self.services.poller.note_commit, snapshot)
-        success = (
-            current_task.result
-            if isinstance(current_task.result, dict)
-            else {
-                **result,
-                "projectEtag": snapshot.etag,
-                "projectGeneration": snapshot.generation,
-            }
-        )
-        await self._finish_run(
-            task.project_id,
-            ids["run_id"],
-            SpecialistRunStatus.SUCCEEDED,
-            summary=(
-                "已生成并选择 "
-                + ArtifactVersion.model_validate(
-                    success["artifactVersion"],
-                ).name
-            ),
-        )
-        return self._result_from_task(current_task, replayed=replayed)
+        try:
+            await asyncio.to_thread(self.services.poller.note_commit, snapshot)
+            success = (
+                current_task.result
+                if isinstance(current_task.result, dict)
+                else {
+                    **result,
+                    "projectEtag": snapshot.etag,
+                    "projectGeneration": snapshot.generation,
+                }
+            )
+            await self._finish_run(
+                task.project_id,
+                ids["run_id"],
+                SpecialistRunStatus.SUCCEEDED,
+                summary=(
+                    "已生成并选择 "
+                    + ArtifactVersion.model_validate(
+                        success["artifactVersion"],
+                    ).name
+                ),
+            )
+            return self._result_from_task(
+                current_task,
+                replayed=replayed,
+                review_reservation=review_reservation,
+            )
+        except BaseException:
+            # A commit-listener wake may already have observed this fence. Do
+            # not strand it if post-commit work fails before ownership moves
+            # to the detached review task.
+            release_media_review_reservation(review_reservation)
+            raise
 
     @staticmethod
     def _result_is_converged(
@@ -2791,25 +2818,36 @@ class FileImageExecutionService:
                 )
                 return commit.snapshot
 
-        snapshot = await asyncio.to_thread(commit_rescue)
-        if snapshot is None:
-            return None
-        await asyncio.to_thread(self.services.poller.note_commit, snapshot)
-        logger.info(
-            "rescued quarantined image result | task=%s target=%s",
-            task.task_id,
-            result.get("targetRef"),
-        )
-        published = {
-            **result,
-            "projectEtag": snapshot.etag,
-            "projectGeneration": snapshot.generation,
-        }
-        schedule_media_review(
+        review_reservation = reserve_media_review(
             self.services,
             project_id=task.project_id,
-            published_result=published,
+            published_result=result,
         )
+        try:
+            snapshot = await asyncio.to_thread(commit_rescue)
+            if snapshot is None:
+                release_media_review_reservation(review_reservation)
+                return None
+            await asyncio.to_thread(self.services.poller.note_commit, snapshot)
+            logger.info(
+                "rescued quarantined image result | task=%s target=%s",
+                task.task_id,
+                result.get("targetRef"),
+            )
+            published = {
+                **result,
+                "projectEtag": snapshot.etag,
+                "projectGeneration": snapshot.generation,
+            }
+            schedule_media_review(
+                self.services,
+                project_id=task.project_id,
+                published_result=published,
+                reservation_token=review_reservation,
+            )
+        except BaseException:
+            release_media_review_reservation(review_reservation)
+            raise
         return FileImageExecutionResult(
             task_id=task.task_id,
             run_id=str(task.run_id or ""),
@@ -2922,6 +2960,7 @@ class FileImageExecutionService:
         task: TaskRecord,
         *,
         replayed: bool,
+        review_reservation: str | None = None,
     ) -> FileImageExecutionResult:
         result = task.result if isinstance(task.result, dict) else {}
         try:
@@ -2942,6 +2981,7 @@ class FileImageExecutionService:
             self.services,
             project_id=task.project_id,
             published_result=result,
+            reservation_token=review_reservation,
         )
         return FileImageExecutionResult(
             task_id=task.task_id,

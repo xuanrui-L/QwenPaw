@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -15,7 +16,10 @@ from schemas.render_review import (
     ReviewFrame,
 )
 from services.render_review.challenge import (
+    clear_question_cache,
     filter_questions,
+    generate_challenge_questions,
+    judge_challenges,
     parse_challenge_verdicts,
 )
 from services.render_review.protocol import findings_feedback_payload
@@ -52,6 +56,20 @@ def test_filter_questions_drops_straw_men_and_anchorless() -> None:
     )
     assert len(accepted) == 1
     assert accepted[0]["anchor"] == "红色灯笼"
+
+
+def test_filter_questions_requires_anchor_inside_question() -> None:
+    accepted = filter_questions(
+        [
+            {
+                "question": "请确认画面后半段没有突然变成蓝色",
+                "anchor": "红色灯笼",
+                "severity": "major",
+            },
+        ],
+        plan_context=_PLAN,
+    )
+    assert accepted == []
 
 
 def test_filter_questions_caps_at_six() -> None:
@@ -119,6 +137,34 @@ def test_parse_challenge_verdicts_anti_hallucination() -> None:
     )
     verdicts = {item.question_id: item.verdict for item in findings}
     assert verdicts == {"cq1": "CT", "cq2": "ET", "cq3": "ET"}
+
+
+@pytest.mark.parametrize("missing_field", ["reason", "suggestion"])
+def test_confirmed_challenge_requires_actionable_evidence(
+    missing_field: str,
+) -> None:
+    verdict = {
+        "question_id": "cq1",
+        "verdict": "CT",
+        "evidence_timestamp_ms": 2000,
+        "reason": "灯笼在 2s 变蓝",
+        "suggestion": "统一灯笼颜色",
+    }
+    verdict[missing_field] = ""
+    findings = parse_challenge_verdicts(
+        json.dumps({"verdicts": [verdict]}, ensure_ascii=False),
+        questions=[
+            {
+                "question_id": "cq1",
+                "question": "请确认灯笼没有变色",
+                "anchor": "灯笼",
+                "severity": "major",
+            },
+        ],
+        valid_timestamps=[0, 1000, 2000],
+    )
+    assert findings[0].verdict == "ET"
+    assert findings[0].suggestion == ""
 
 
 def _report(**overrides) -> RenderReviewReport:
@@ -191,6 +237,108 @@ def test_report_schema_stays_backward_compatible() -> None:
     report = RenderReviewReport.model_validate(legacy)
     assert report.challenge_findings == []
     assert report.objective_facts is None
+
+
+def test_question_generation_is_cached_by_plan_fingerprint(
+    monkeypatch,
+) -> None:
+    clear_question_cache()
+    calls = 0
+
+    async def fake_completion(_prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps(
+            {
+                "questions": [
+                    {
+                        "question": "请确认红色灯笼没有在后半段变蓝",
+                        "anchor": "红色灯笼",
+                        "severity": "major",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(
+        "models.text_model.chat_completion",
+        fake_completion,
+    )
+
+    async def scenario() -> None:
+        first = await generate_challenge_questions(_PLAN)
+        second = await generate_challenge_questions(dict(_PLAN))
+        changed = await generate_challenge_questions(
+            {**_PLAN, "project_brief": "老人提着红色灯笼走过雪地"},
+        )
+        assert first == second
+        assert changed
+
+    asyncio.run(scenario())
+    assert calls == 2
+    clear_question_cache()
+
+
+def test_challenge_hypotheses_share_one_batched_vlm_call(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    calls = 0
+    observed_prompt = ""
+
+    async def fake_completion(content, **_kwargs):
+        nonlocal calls, observed_prompt
+        calls += 1
+        observed_prompt = content[0]["text"]
+        return json.dumps(
+            {
+                "verdicts": [
+                    {
+                        "question_id": f"cq{index}",
+                        "verdict": "ET",
+                        "evidence_timestamp_ms": 0,
+                        "reason": "未发现该缺陷",
+                        "suggestion": "",
+                    }
+                    for index in range(1, 4)
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(
+        "models.vlm_model.chat_completion",
+        fake_completion,
+    )
+    monkeypatch.setattr(
+        "models.vlm_model.multimodal_media_part",
+        lambda uri, media_type: {
+            "type": "image_url",
+            "image_url": {"url": uri},
+            "media_type": media_type,
+        },
+    )
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"frame")
+    questions = [
+        {
+            "question_id": f"cq{index}",
+            "question": f"请确认红色灯笼没有出现缺陷 {index}",
+            "anchor": "红色灯笼",
+            "severity": "major",
+        }
+        for index in range(1, 4)
+    ]
+    findings = asyncio.run(
+        judge_challenges(
+            questions,
+            frames=[ReviewFrame(timestamp_ms=0, image_path=str(frame))],
+        ),
+    )
+    assert [item.question_id for item in findings] == ["cq1", "cq2", "cq3"]
+    assert calls == 1
+    assert all(f"cq{index}" in observed_prompt for index in range(1, 4))
 
 
 def test_build_review_user_text_injects_objective_facts() -> None:

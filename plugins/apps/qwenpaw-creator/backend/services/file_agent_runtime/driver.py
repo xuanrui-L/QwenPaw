@@ -3774,6 +3774,32 @@ class FileCreatorAgentRuntime:
                 "review regeneration may only delegate the rejected targets: "
                 + ", ".join(sorted(feedback_target_refs)),
             )
+        review_repair_sources = {
+            "run_review_feedback",
+            "render_review_feedback",
+        }
+        if request.source in review_repair_sources:
+            prior_runs = await asyncio.to_thread(
+                self.executions.list_specialist_runs,
+                project_id,
+            )
+            already_repaired = {
+                target_ref
+                for record in prior_runs
+                if record.caused_by_message_id == request.message_id
+                and record.status is SpecialistRunStatus.SUCCEEDED
+                for target_ref in record.target_refs
+            }
+            repeated = already_repaired.intersection(delegated.target_refs)
+            if repeated:
+                raise FileAgentRuntimeError(
+                    "review feedback already has a successful repair "
+                    "delegation for: "
+                    + ", ".join(sorted(repeated))
+                    + "; do not pay for another regeneration in the same "
+                    "feedback goal. Let the work scheduler compose the "
+                    "selected artifact and finish this goal.",
+                )
         role = delegated.role
         role_name = role.value
         snapshot = await asyncio.to_thread(
@@ -3781,6 +3807,31 @@ class FileCreatorAgentRuntime:
             project_id,
         )
         delegated.validate_project_targets(project=snapshot.project)
+        repair_attempts: dict[str, int] = {}
+        if request.source in review_repair_sources:
+            from services.run_review import admission
+
+            reports_root = (
+                self.services.projects.project_root(project_id)
+                / "runtime"
+                / "run-review"
+            )
+            admitted_attempts = await asyncio.to_thread(
+                admission.admit_repair_attempts,
+                reports_root,
+                target_refs=delegated.target_refs,
+                attempt_id=f"{request.message_id}:{parent_action_id}",
+            )
+            if admitted_attempts is None:
+                raise FileAgentRuntimeError(
+                    "automated review repair budget is exhausted for: "
+                    + ", ".join(sorted(delegated.target_refs))
+                    + f"; each target allows at most "
+                    f"{admission.MAX_REPAIR_ATTEMPTS} physical repair "
+                    "delegations. Preserve the unresolved findings and "
+                    "stop automatic paid retries.",
+                )
+            repair_attempts = admitted_attempts
         specialist_run_id = f"specialist-run-{uuid4().hex}"
         round_id = tools.context.round_id or f"agent-round-{parent_run_id}"
         prompt = specialist_system_prompt(
@@ -3792,6 +3843,8 @@ class FileCreatorAgentRuntime:
             target_refs=delegated.target_refs,
         )
         record_metadata: dict[str, Any] = {"parentActionId": parent_action_id}
+        if repair_attempts:
+            record_metadata["reviewRepairAttempts"] = repair_attempts
         if request.source == "review_rejection_feedback":
             record_metadata.update(
                 {

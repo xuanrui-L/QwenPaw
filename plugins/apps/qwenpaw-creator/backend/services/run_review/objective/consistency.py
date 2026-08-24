@@ -55,7 +55,11 @@ def _center_crop(frame: np.ndarray) -> np.ndarray:
 @lru_cache(maxsize=1)
 def _face_cascade() -> Any:
     """Parse the Haar cascade once per process (XML parse is not cheap)."""
-    if cv2 is None:  # pragma: no cover - optional dependency
+    if (
+        cv2 is None
+        or not hasattr(cv2, "CascadeClassifier")
+        or not hasattr(cv2, "data")
+    ):  # pragma: no cover - optional/version-dependent dependency
         return None
     cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
@@ -69,7 +73,7 @@ def _subject_region(frame: np.ndarray) -> tuple[np.ndarray, str]:
         try:
             cascade = _face_cascade()
             if cascade is None:
-                raise RuntimeError("face cascade unavailable")
+                return _center_crop(frame), "center"
             # cv2 needs writable, contiguous input; decoded frames are
             # read-only views over the ffmpeg buffer.
             faces = cascade.detectMultiScale(

@@ -90,7 +90,9 @@ def feedback_text(
         f"{admission.MAX_MEDIA_REVIEW_ROUNDS} 轮】\n"
         f"产物 {report.artifact_ref}（{command}）未通过旁路审阅。请针对 "
         f"{target_ref} 仅修复下列结构化审阅发现中列出的问题（重新生成或调整"
-        "提示词），不要扩大改动范围。\n\n"
+        "提示词），不要扩大改动范围。同一反馈目标只允许一次成功修复生成；"
+        "新媒体写入 selected output 后结束本反馈目标，由 Work Scheduler 自动"
+        "重合成，不要为了强制合成再次生成媒体。\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 

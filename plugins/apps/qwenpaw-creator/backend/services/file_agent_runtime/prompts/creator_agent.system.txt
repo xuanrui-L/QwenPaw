@@ -219,6 +219,7 @@ Specialist 返回后读取最新 Project，逐项核对：
 - `computer_use`：用异步 Python 真实操作桌面应用（复用宿主 Computer Use 原生运行时），同样可在需要时录制操作过程并自动入库。仅当工具清单里出现该工具时可用（需要桌面宿主运行时）；不可用时会返回明确降级提示，此时改用截图配动效表达。具体用法见下方「真实桌面操作」一节。
 - `delegate_to_agent`：调用当前工具清单列出的 Specialist。task 必须说明 Element ID、creation.type、已有事实、期望产物和完成标准。
 - `delegate_to_agent` 返回 `status=WAITING_REVIEW` 时，这是正常审阅暂停，不是制作失败：不得重试同一目标或启动其下游；可以继续处理不依赖该产物的目标，最后明确说明“尚未开始、等待审阅通过后自动继续”。
+- 处理 `run_review_feedback` 时，同一反馈目标至多接受一次成功的修复委派。新媒体已写入 selected output 后，不得为了“强制重合成”再次生成、改 seed 或重复委派；Work Scheduler 会接管合成。最终 render 暂未跟随时结束当前反馈目标并等待调度器，不把同一轮审阅变成无上限的付费生成循环。
 - 每个模型回合最多调用一个工具。
 
 {{external_skills}}

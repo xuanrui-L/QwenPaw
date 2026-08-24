@@ -93,7 +93,11 @@ from services.media_files.visual_reference_resolution import (
 from services.observability import report_error
 from services.project_files.remote_cache import public_source_url
 from services.project_files.store import ProjectSnapshot
-from services.run_review.media_review import schedule_media_review
+from services.run_review.media_review import (
+    release_media_review_reservation,
+    reserve_media_review,
+    schedule_media_review,
+)
 from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     canonical_json_bytes,
@@ -4272,6 +4276,12 @@ class FileR2VExecutionService:
         stable: Mapping[str, str],
         result: Mapping[str, Any],
     ) -> None:
+        review_reservation = reserve_media_review(
+            self.services,
+            project_id=task.project_id,
+            published_result=result,
+        )
+
         def commit_if_live() -> tuple[str, TaskRecord, ProjectSnapshot | None]:
             with self.services.projects.lifecycle_lock(task.project_id):
                 latest = self.executions.get_task(
@@ -4352,8 +4362,13 @@ class FileR2VExecutionService:
                     )
                 return "SUCCEEDED", latest, snapshot
 
-        outcome, latest, snapshot = await asyncio.to_thread(commit_if_live)
+        try:
+            outcome, latest, snapshot = await asyncio.to_thread(commit_if_live)
+        except BaseException:
+            release_media_review_reservation(review_reservation)
+            raise
         if outcome == "CANCELLED":
+            release_media_review_reservation(review_reservation)
             await self._quarantine(
                 latest,
                 stable,
@@ -4363,6 +4378,7 @@ class FileR2VExecutionService:
             )
             return
         if outcome == "STALE":
+            release_media_review_reservation(review_reservation)
             await self._quarantine(
                 latest,
                 stable,
@@ -4372,27 +4388,33 @@ class FileR2VExecutionService:
             )
             return
         if outcome != "SUCCEEDED" or snapshot is None:
+            release_media_review_reservation(review_reservation)
             return
-        await asyncio.to_thread(self.services.poller.note_commit, snapshot)
-        success = (
-            latest.result
-            if isinstance(latest.result, dict)
-            else {
-                **dict(result),
-                "projectEtag": snapshot.etag,
-                "projectGeneration": snapshot.generation,
-            }
-        )
-        # Run-review hook: every successful convergence (fresh render,
-        # idempotent replay, crash recovery) flows through this single
-        # point. Scheduling is advisory and idempotent: the switch, the
-        # command filter and the already-reviewed dedup live on the review
-        # side.
-        schedule_media_review(
-            self.services,
-            project_id=task.project_id,
-            published_result=success,
-        )
+        try:
+            await asyncio.to_thread(self.services.poller.note_commit, snapshot)
+            success = (
+                latest.result
+                if isinstance(latest.result, dict)
+                else {
+                    **dict(result),
+                    "projectEtag": snapshot.etag,
+                    "projectGeneration": snapshot.generation,
+                }
+            )
+            # Run-review hook: every successful convergence (fresh render,
+            # idempotent replay, crash recovery) flows through this single
+            # point. Scheduling is advisory and idempotent: the switch, the
+            # command filter and the already-reviewed dedup live on the review
+            # side.
+            schedule_media_review(
+                self.services,
+                project_id=task.project_id,
+                published_result=success,
+                reservation_token=review_reservation,
+            )
+        except BaseException:
+            release_media_review_reservation(review_reservation)
+            raise
         await self._finish_run(
             task.project_id,
             str(task.run_id),

@@ -875,6 +875,85 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
     )
 
 
+def test_run_review_feedback_allows_one_successful_repair_delegation(
+    tmp_path,
+) -> None:
+    """One review goal cannot turn into an unbounded paid-media loop."""
+
+    parent_turn = 0
+    specialist_turns = 0
+
+    async def callback(messages, tools):
+        nonlocal parent_turn, specialist_turns
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            specialist_turns += 1
+            return AgentModelTurn(content="[SUCCESS] 修复产物已写入 selected output。")
+        parent_turn += 1
+        if parent_turn <= 2:
+            return _delegate_call(
+                f"delegate-review-{parent_turn}",
+                role="visual_development_agent",
+                target_refs=["asset:hero"],
+                task="修复本轮异步审阅发现并生成一次新产物",
+            )
+        assert "already has a successful repair delegation" in messages[-1][
+            "content"
+        ]
+        return AgentModelTurn(content="一次修复已完成，等待调度器处理下游。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal=None)
+        message = services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[
+                {
+                    "type": "text",
+                    "text": "【运行审阅反馈 · 第 1/2 轮】只修复 asset:hero",
+                },
+            ],
+            source="run_review_feedback",
+            channel=MessageChannel.RUNTIME,
+            classification=MessageClassification.MUTATION_INSTRUCTION,
+            metadata={"runReview": {"round": 1}},
+        ).message
+        services.sessions.create_goal(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            root_message_seq=message.message_seq,
+            intent="修复异步审阅发现",
+            goal_id=GOAL_ID,
+        )
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_consumed(services)
+        await driver.wait_until_idle(PROJECT_ID)
+        runs = driver.executions.list_specialist_runs(PROJECT_ID)
+        await driver.stop()
+        repair_state = json.loads(
+            (
+                services.projects.project_root(PROJECT_ID)
+                / "runtime"
+                / "run-review"
+                / "repair-budget"
+                / "state.json"
+            ).read_text(encoding="utf-8"),
+        )
+        return runs, repair_state
+
+    runs, repair_state = asyncio.run(scenario())
+    assert parent_turn == 3
+    assert specialist_turns == 1
+    assert len(runs) == 1
+    assert runs[0].status.value == "SUCCEEDED"
+    assert repair_state["targets"]["asset:hero"]["attempts_started"] == 1
+
+
 def _corrupted_jq_call(*, call_id: str, etag: str) -> AgentToolCall:
     """Mirror a syntax-repaired call whose program drifted into jsonArgs."""
 

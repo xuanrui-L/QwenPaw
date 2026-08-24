@@ -20,6 +20,7 @@ verification falls back to the pure-VLM path.
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,7 @@ GRAY_ZONE_HIGH = 0.7
 GRAY_ZONE_LOW = 0.3
 
 _READER = None
+_READER_LOCK = Lock()
 
 
 def ocr_available() -> bool:
@@ -47,7 +49,13 @@ def ocr_available() -> bool:
 def _reader():  # pragma: no cover - requires easyocr install
     global _READER  # pylint: disable=global-statement
     if _READER is None:
-        _READER = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
+        with _READER_LOCK:
+            if _READER is None:
+                _READER = easyocr.Reader(
+                    ["ch_sim", "en"],
+                    gpu=False,
+                    verbose=False,
+                )
     return _READER
 
 

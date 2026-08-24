@@ -25,15 +25,19 @@ alarm rate survivable):
   evidence.
 
 Switchable as the ``challenge`` review operator (auto-on; an explicitly
-set ``CREATOR_RENDER_CHALLENGE_ENABLED`` still overrides it). The pass
-adds one text-model and one VLM call per render review round, and the
-drafting half overlaps the main review.
+set ``CREATOR_RENDER_CHALLENGE_ENABLED`` still overrides it). Question
+drafting is cached by canonical plan fingerprint and overlaps the main
+review. All accepted hypotheses are judged in one multimodal batch: the VLM
+already evaluates them together, avoiding six copies of the same frame set.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
+import hashlib
 import json
 import re
+import threading
 from typing import Any, Mapping, Sequence
 
 from schemas.render_review import ChallengeFinding, ReviewFrame
@@ -48,15 +52,23 @@ _TEXT_LIMIT = 240
 # concurrently; keep parity with the tier-1 text review timeout.
 _TEXT_MODEL_TIMEOUT_SECONDS = 120.0
 _FRAME_REF_TOLERANCE_MS = 500
+_QUESTION_CACHE_LIMIT = 64
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
-# Near-miss polarity marker: the question must ask to CONFIRM absence.
-_POLARITY_PATTERN = re.compile(r"确认|是否(没有|未|不存在|保持)")
+# Near-miss polarity marker: the question must contain an actual negative
+# assertion. ``确认`` alone is not polarity — otherwise an unrelated positive
+# question can pass merely by starting with "please confirm".
+_POLARITY_PATTERN = re.compile(r"没有|未(?:出现|保持|达到|包含|呈现)|不存在|不应|不该|不再|保持不")
+
+_QUESTION_CACHE: "OrderedDict[str, tuple[dict[str, str], ...]]" = (
+    OrderedDict()
+)
+_QUESTION_CACHE_LOCK = threading.Lock()
 
 _GENERATION_SYSTEM_PROMPT = """你是一名视频审阅出题人，负责根据剪辑计划为一条成片生成「近失误挑错题」：每题假设一个具体的、似是而非的缺陷，让审阅者去证伪。
 
 出题纪律：
 1. 只能挑计划确实要求过的东西：每题必须带 anchor 字段，anchor 必须是计划文本中的原文片段（逐字），挑计划没要求的错（straw-man）会被程序丢弃。
-2. 每题必须绑定具体对象（某一镜/某个元素/某段文字），提问形如「请确认X没有Y」。
+2. 每题必须绑定具体对象（某一镜/某个元素/某段文字），提问形如「请确认X没有Y」；anchor 原文必须逐字出现在 question 中。
 3. 缺陷假设要具体可验证（颜色变了、元素缺了、顺序反了、文字错了），不要出「整体质量如何」这类开放题。
 4. 最多 6 题，优先出最可能真实发生的缺陷。
 5. severity：影响内容成立的（主体错误/元素缺失/顺序错乱/文字错误）为 major；观感瑕疵为 minor。
@@ -121,9 +133,19 @@ def filter_questions(
         anchor = str(item.get("anchor") or "").strip()[:_TEXT_LIMIT]
         if not question or not anchor:
             continue
-        # Straw-man filter: the anchor must literally exist in the plan.
+        # Straw-man filter: the anchor must literally exist in the plan and
+        # in the question. Merely borrowing an unrelated plan substring does
+        # not make the proposed defect traceable to the plan.
         if anchor not in corpus:
             logger.info("challenge question dropped (straw-man): %s", anchor)
+            continue
+        normalized_anchor = re.sub(r"\s+", "", anchor).casefold()
+        normalized_question = re.sub(r"\s+", "", question).casefold()
+        if normalized_anchor not in normalized_question:
+            logger.info(
+                "challenge question dropped (anchor not in question): %s",
+                anchor,
+            )
             continue
         if not _POLARITY_PATTERN.search(question):
             continue
@@ -151,7 +173,21 @@ def filter_questions(
 async def generate_challenge_questions(
     plan_context: Mapping[str, Any],
 ) -> list[dict[str, str]]:
-    """Text-model question generation followed by the program filters."""
+    """Generate questions once per canonical plan, then reuse across renders."""
+
+    canonical = json.dumps(
+        dict(plan_context),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    cache_key = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    with _QUESTION_CACHE_LOCK:
+        cached = _QUESTION_CACHE.get(cache_key)
+        if cached is not None:
+            _QUESTION_CACHE.move_to_end(cache_key)
+            return [dict(item) for item in cached]
     try:
         from models.text_model import chat_completion
 
@@ -164,13 +200,29 @@ async def generate_challenge_questions(
             timeout=_TEXT_MODEL_TIMEOUT_SECONDS,
         )
         payload = _extract_json_object(response)
-        return filter_questions(
+        questions = filter_questions(
             payload.get("questions"),
             plan_context=plan_context,
         )
+        if questions:
+            with _QUESTION_CACHE_LOCK:
+                _QUESTION_CACHE[cache_key] = tuple(
+                    dict(item) for item in questions
+                )
+                _QUESTION_CACHE.move_to_end(cache_key)
+                while len(_QUESTION_CACHE) > _QUESTION_CACHE_LIMIT:
+                    _QUESTION_CACHE.popitem(last=False)
+        return questions
     except Exception:  # noqa: BLE001 - advisory-only
         logger.exception("challenge question generation failed")
         return []
+
+
+def clear_question_cache() -> None:
+    """Clear the bounded process cache (tests/config reloads)."""
+
+    with _QUESTION_CACHE_LOCK:
+        _QUESTION_CACHE.clear()
 
 
 def parse_challenge_verdicts(
@@ -213,9 +265,22 @@ def parse_challenge_verdicts(
                 abs(timestamp - valid) <= _FRAME_REF_TOLERANCE_MS
                 for valid in valid_timestamps
             )
-            if not in_bounds:
+            evidence_complete = in_bounds and bool(reason) and bool(suggestion)
+            if not evidence_complete:
                 verdict = "ET"
-                reason = "（CT 证据帧无效，按未确认处理：" + reason[:120] + "）"
+                missing: list[str] = []
+                if not in_bounds:
+                    missing.append("证据帧无效")
+                if not reason:
+                    missing.append("未附具体理由")
+                if not suggestion:
+                    missing.append("未附修复建议")
+                original_reason = reason[:120]
+                reason = "（CT 证据不完整：" + "、".join(missing)
+                if original_reason:
+                    reason += "；原理由：" + original_reason
+                reason += "，按未确认处理）"
+                suggestion = ""
         findings.append(
             ChallengeFinding(
                 question_id=question_id,
@@ -235,7 +300,8 @@ async def judge_challenges(
     *,
     frames: Sequence[ReviewFrame],
 ) -> list[ChallengeFinding]:
-    """One VLM verdict round over the already-extracted evidence frames."""
+    """One batched VLM verdict round over the extracted evidence frames."""
+
     if not questions:
         return []
     try:
@@ -282,6 +348,7 @@ async def judge_challenges(
 
 __all__ = [
     "filter_questions",
+    "clear_question_cache",
     "generate_challenge_questions",
     "judge_challenges",
     "parse_challenge_verdicts",
