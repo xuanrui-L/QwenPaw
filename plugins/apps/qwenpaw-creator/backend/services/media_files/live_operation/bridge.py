@@ -21,6 +21,7 @@ import io
 import logging
 import time
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -543,8 +544,17 @@ async def _execute(
                 output.flush()
 
         safe_builtins["print"] = captured_print
-    namespace.setdefault("__builtins__", safe_builtins)
-    outcome = eval(compiled, namespace)  # noqa: S307 - the model's own code
+    execution_globals = dict(namespace)
+    # Never trust a caller-supplied ``__builtins__`` entry, and do not expose a
+    # mutable builtins dict even if a future validator change makes that name
+    # reachable. ``eval`` is intentional: a code object compiled with
+    # ``PyCF_ALLOW_TOP_LEVEL_AWAIT`` returns the coroutine that must then be
+    # awaited.
+    execution_globals["__builtins__"] = MappingProxyType(safe_builtins)
+    outcome = eval(  # noqa: S307 - AST-validated model code, sealed globals
+        compiled,
+        execution_globals,
+    )
     if asyncio.iscoroutine(outcome):
         outcome = await outcome
     logger.info(

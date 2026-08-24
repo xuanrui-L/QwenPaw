@@ -895,6 +895,25 @@ def test_model_print_is_captured_without_process_global_stdout():
     assert output.getvalue() == "isolated:7\n"
 
 
+def test_model_code_cannot_inherit_caller_supplied_builtins():
+    from services.media_files.live_operation.bridge import _execute
+
+    called = False
+
+    def injected_escape():
+        nonlocal called
+        called = True
+
+    with pytest.raises(NameError, match="injected_escape"):
+        asyncio.run(
+            _execute(
+                _compile("injected_escape()"),
+                {"__builtins__": {"injected_escape": injected_escape}},
+            ),
+        )
+    assert called is False
+
+
 def test_empty_code_is_rejected_before_a_browser_is_launched(tmp_path: Path):
     with pytest.raises(LiveOperationError, match="empty"):
         asyncio.run(run_browser_code("   ", run_root=tmp_path, run_id="run-1"))
