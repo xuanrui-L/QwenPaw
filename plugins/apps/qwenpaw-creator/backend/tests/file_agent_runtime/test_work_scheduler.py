@@ -47,10 +47,13 @@ def test_async_media_review_fences_only_dependent_billed_work(
         label=kind,
         status=WorkNodeStatus.READY,
     )
-    assert _blocked_by_active_media_review(
-        node,
-        frozenset({"element:e:storyboard"}),
-    ) is blocked
+    assert (
+        _blocked_by_active_media_review(
+            node,
+            frozenset({"element:e:storyboard"}),
+        )
+        is blocked
+    )
     assert _blocked_by_active_media_review(node, frozenset()) is False
 
 
@@ -74,10 +77,13 @@ def test_sync_review_is_a_pre_generation_scheduler_gate(
         label=kind,
         status=WorkNodeStatus.READY,
     )
-    assert _blocked_by_active_sync_review(
-        node,
-        sync_review_pending=True,
-    ) is blocked
+    assert (
+        _blocked_by_active_sync_review(
+            node,
+            sync_review_pending=True,
+        )
+        is blocked
+    )
     assert not _blocked_by_active_sync_review(
         node,
         sync_review_pending=False,

@@ -59,9 +59,7 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 # question can pass merely by starting with "please confirm".
 _POLARITY_PATTERN = re.compile(r"没有|未(?:出现|保持|达到|包含|呈现)|不存在|不应|不该|不再|保持不")
 
-_QUESTION_CACHE: "OrderedDict[str, tuple[dict[str, str], ...]]" = (
-    OrderedDict()
-)
+_QUESTION_CACHE: "OrderedDict[str, tuple[dict[str, str], ...]]" = OrderedDict()
 _QUESTION_CACHE_LOCK = threading.Lock()
 
 _GENERATION_SYSTEM_PROMPT = """你是一名视频审阅出题人，负责根据剪辑计划为一条成片生成「近失误挑错题」：每题假设一个具体的、似是而非的缺陷，让审阅者去证伪。

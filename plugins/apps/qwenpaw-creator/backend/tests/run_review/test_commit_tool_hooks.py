@@ -151,9 +151,7 @@ def test_parent_commit_registers_fence_until_inline_review_finishes(
     worker.start()
     assert started.wait(5)
     reports_root = (
-        boundary.store.project_root(PROJECT_ID)
-        / "runtime"
-        / "run-review"
+        boundary.store.project_root(PROJECT_ID) / "runtime" / "run-review"
     )
     assert admission.active_sync_fences(reports_root)
     release.set()
@@ -162,4 +160,4 @@ def test_parent_commit_registers_fence_until_inline_review_finishes(
     assert outcome.get("reviewAdvisory") is not None
     # Strategy is reviewed inline but is not itself a generation input, so it
     # must not leave a cross-turn media blocker behind.
-    assert admission.active_sync_fences(reports_root) == ()
+    assert not admission.active_sync_fences(reports_root)

@@ -140,7 +140,10 @@ def reserve_media_review(
 
         if not is_media_review_enabled():
             return None
-        if str(published_result.get("commandType") or "") not in REVIEWED_COMMANDS:
+        if (
+            str(published_result.get("commandType") or "")
+            not in REVIEWED_COMMANDS
+        ):
             return None
         artifact = published_result.get("artifactVersion")
         if not isinstance(artifact, Mapping):
@@ -1035,10 +1038,12 @@ def schedule_media_review(
     (fresh generation, idempotent replay, crash recovery) may call it; the
     review-side admission dedups already-reviewed versions.
     """
-    reserved = (
-        _REVIEW_RESERVATIONS.pop(reservation_token, None)
+    # A reservation always names a non-empty slot, so the empty pair reads as
+    # "nothing reserved" and keeps the release path free of optional unpacking.
+    reserved_project, reserved_slot = (
+        _REVIEW_RESERVATIONS.pop(reservation_token, ("", ""))
         if reservation_token
-        else None
+        else ("", "")
     )
     reservation_transferred = False
     try:
@@ -1079,13 +1084,16 @@ def schedule_media_review(
         )
         _ACTIVE_REVIEW_TASKS.setdefault(project_id, set()).add(task)
         slot_id = str(artifact.get("slot_id") or "")
-        if reserved == (project_id, slot_id):
+        if reserved_slot and (reserved_project, reserved_slot) == (
+            project_id,
+            slot_id,
+        ):
             # The active count was installed before Project publication.
             reservation_transferred = True
         else:
-            if reserved is not None:
-                _decrement_active_slot(*reserved)
-                reserved = None
+            if reserved_slot:
+                _decrement_active_slot(reserved_project, reserved_slot)
+                reserved_slot = ""
             if slot_id:
                 _increment_active_slot(project_id, slot_id)
 
@@ -1126,8 +1134,8 @@ def schedule_media_review(
         # Scheduling must never disturb the publishing path.
         logger.exception("media review scheduling failed")
     finally:
-        if reserved is not None and not reservation_transferred:
-            _decrement_active_slot(*reserved)
+        if reserved_slot and not reservation_transferred:
+            _decrement_active_slot(reserved_project, reserved_slot)
 
 
 def cancel_project_media_reviews(project_id: str) -> None:

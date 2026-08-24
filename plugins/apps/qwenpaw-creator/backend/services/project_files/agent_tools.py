@@ -1038,9 +1038,7 @@ class AgentProjectTools:
                 changed_pointers=(
                     sync_fence[2] if sync_fence is not None else None
                 ),
-                gate_token=(
-                    sync_fence[1] if sync_fence is not None else None
-                ),
+                gate_token=(sync_fence[1] if sync_fence is not None else None),
             )
             if advisory is not None:
                 commit_result = commit_result.model_copy(
@@ -1168,9 +1166,7 @@ class AgentProjectTools:
                 return None
             project_id = str(candidate.get("project_id") or "")
             reports_root = (
-                self.store.project_root(project_id)
-                / "runtime"
-                / "run-review"
+                self.store.project_root(project_id) / "runtime" / "run-review"
             )
             token = admission.begin_sync_fence(
                 reports_root,
@@ -1407,9 +1403,7 @@ class AgentProjectTools:
                 changed_pointers=(
                     sync_fence[2] if sync_fence is not None else None
                 ),
-                gate_token=(
-                    sync_fence[1] if sync_fence is not None else None
-                ),
+                gate_token=(sync_fence[1] if sync_fence is not None else None),
             )
             if advisory is not None:
                 commit_result = commit_result.model_copy(

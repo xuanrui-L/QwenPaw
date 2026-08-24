@@ -897,9 +897,10 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
                 target_refs=["asset:hero"],
                 task="修复本轮异步审阅发现并生成一次新产物",
             )
-        assert "already has a successful repair delegation" in messages[-1][
-            "content"
-        ]
+        assert (
+            "already has a successful repair delegation"
+            in messages[-1]["content"]
+        )
         return AgentModelTurn(content="一次修复已完成，等待调度器处理下游。")
 
     async def scenario():

@@ -131,13 +131,16 @@ def test_superseded_media_review_still_consumes_physical_budget(
     root = tmp_path / "run-review"
     assert _admit(root, "v-old") == 1
     assert _admit(root, "v-new") == 2
-    assert admission.finalize_media_round(
-        root,
-        slot_id=SLOT_ID,
-        version_id="v-old",
-        owner="owner-a",
-        counted=False,
-    ) is False
+    assert (
+        admission.finalize_media_round(
+            root,
+            slot_id=SLOT_ID,
+            version_id="v-old",
+            owner="owner-a",
+            counted=False,
+        )
+        is False
+    )
     assert _finalize(root, "v-new")
     assert _admit(root, "v-third") is None
     state = admission.read_json(
@@ -163,17 +166,23 @@ def test_repair_budget_is_atomic_idempotent_and_hard_capped(
         target_refs=[target],
         attempt_id="repair-2",
     ) == {target: 2}
-    assert admission.admit_repair_attempts(
-        root,
-        target_refs=[target],
-        attempt_id="repair-4",
-    ) is None
+    assert (
+        admission.admit_repair_attempts(
+            root,
+            target_refs=[target],
+            attempt_id="repair-4",
+        )
+        is None
+    )
     # Multi-target admission is all-or-nothing when one target is spent.
-    assert admission.admit_repair_attempts(
-        root,
-        target_refs=[target, "element:e2"],
-        attempt_id="repair-multi",
-    ) is None
+    assert (
+        admission.admit_repair_attempts(
+            root,
+            target_refs=[target, "element:e2"],
+            attempt_id="repair-multi",
+        )
+        is None
+    )
     state = admission.read_json(root / "repair-budget" / "state.json")
     assert "element:e2" not in state["targets"]
 

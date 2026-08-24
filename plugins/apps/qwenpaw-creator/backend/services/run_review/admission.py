@@ -361,8 +361,7 @@ def hold_sync_blocker(
     """
 
     write_json(
-        _sync_blocker_dir(reports_root)
-        / f"{safe_ref(pointer_group)}.json",
+        _sync_blocker_dir(reports_root) / f"{safe_ref(pointer_group)}.json",
         {
             "token": f"sync-blocker-{safe_ref(pointer_group)}",
             "project_id": project_id,

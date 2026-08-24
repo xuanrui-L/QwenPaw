@@ -13,6 +13,7 @@ import pytest
 from models import text_model
 from services.run_review import admission, text_review
 from services.run_review.text_review import (
+    classify_pointer_groups,
     classify_pointers,
     maybe_sync_review,
     parse_sync_advisory,
@@ -69,11 +70,17 @@ def _sync_review(tmp_path: Path, *, txn: str, project_json=None):
 
 def test_classify_pointers_priority_and_match() -> None:
     assert classify_pointers(["/settings/resolution"]) is None
-    group, stage, _ = classify_pointers(
-        [MOTION_PTR, "/strategy/creative_brief"],
+    # Declaration order decides the winner: strategy outranks motion.
+    assert classify_pointers([MOTION_PTR, "/strategy/creative_brief"]) == (
+        "strategy",
+        "text",
+        ["/strategy/creative_brief"],
     )
-    assert (group, stage) == ("strategy", "text")
-    assert classify_pointers([MOTION_PTR])[:2] == ("motion", "motion")
+    assert classify_pointers([MOTION_PTR]) == (
+        "motion",
+        "motion",
+        [MOTION_PTR],
+    )
 
 
 def test_parse_sync_advisory_derives_ok_deterministically() -> None:
@@ -296,7 +303,7 @@ def test_generation_text_blocker_survives_repair_turn_but_not_hard_cap(
     assert len(blockers) == 1
     assert blockers[0]["pointer_group"] == "shots"
     assert review("纸船穿过金色倒影驶入晨雾", "txn-shots-2") is not None
-    assert admission.active_sync_fences(reports_root) == ()
+    assert not admission.active_sync_fences(reports_root)
 
 
 def test_whole_element_create_expands_nested_generation_text() -> None:
@@ -326,11 +333,11 @@ def test_whole_element_create_expands_nested_generation_text() -> None:
             },
         },
     }
-    root = (
-        "/timelines/items/timeline:main/elements_by_id/elem:one"
-    )
+    root = "/timelines/items/timeline:main/elements_by_id/elem:one"
     expanded = reviewable_changed_pointers(project, [root])
     assert f"{root}/creation/shots" in expanded
     assert f"{root}/creation/storyboard_prompt" in expanded
     assert f"{root}/creation/video_prompt" in expanded
-    assert classify_pointers(expanded)[0] == "shots"
+    groups = classify_pointer_groups(expanded)
+    assert groups
+    assert groups[0][0] == "shots"

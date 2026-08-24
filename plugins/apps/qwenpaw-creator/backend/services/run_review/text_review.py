@@ -329,6 +329,186 @@ def _strategy_payload(project_json: Mapping[str, Any]) -> str:
     return json.dumps(filled, ensure_ascii=False)
 
 
+def _admit_sync_review_jobs(
+    project_json: Mapping[str, Any],
+    classified: Sequence[tuple[str, str, list[str]]],
+    *,
+    reports_root: Path,
+    failed_groups: set[str],
+) -> list[dict[str, Any]]:
+    """Admit every affected group and describe the review call it needs.
+
+    A group already reviewed at the same content hash (or over its round
+    cap) is dropped by admission. ``failed_groups`` collects the durable
+    blockers so an outer failure can release them.
+    """
+
+    jobs: list[dict[str, Any]] = []
+    for group, stage, matched in classified:
+        payload_text = _payload_text(project_json, matched)
+        if not payload_text.strip():
+            continue
+        content_hash = hashlib.sha256(
+            payload_text.encode("utf-8"),
+        ).hexdigest()
+        round_number = admission.admit_sync_review(
+            reports_root,
+            pointer_group=group,
+            content_hash=content_hash,
+        )
+        if round_number is None:
+            continue
+        failed_groups.add(group)
+        jobs.append(
+            {
+                "group": group,
+                "stage": stage,
+                "matched": matched,
+                "payload_text": payload_text,
+                "content_hash": content_hash,
+                "round_number": round_number,
+            },
+        )
+    return jobs
+
+
+def _settle_sync_review_job(
+    job: Mapping[str, Any],
+    response: Any,
+    *,
+    project_id: str,
+    reports_root: Path,
+    transaction_id: str,
+    gate_token: str | None,
+    multi: bool,
+    failed_groups: set[str],
+) -> dict[str, Any] | None:
+    """Settle one group's round; return its advisory when not clean.
+
+    Fail-open per group: a failed call or an unparsable verdict releases
+    that group's blocker and leaves the other groups untouched.
+    """
+
+    from services.run_review.script_review import script_check_has_findings
+
+    group = str(job["group"])
+    stage = str(job["stage"])
+    matched = list(job["matched"])
+    content_hash = str(job["content_hash"])
+    round_number = int(job["round_number"])
+    if isinstance(response, BaseException):
+        admission.clear_sync_blocker(reports_root, pointer_group=group)
+        failed_groups.discard(group)
+        logger.error(
+            "sync review group failed for project %s txn %s group %s: %s",
+            project_id,
+            transaction_id,
+            group,
+            response,
+        )
+        return None
+    try:
+        response_text, script_check = response
+        advisory = parse_sync_advisory(
+            response_text,
+            stage=stage,
+            transaction_id=transaction_id,
+            pointer_group=group,
+            reviewed_pointers=matched,
+            round_number=round_number,
+        )
+        if script_check is not None:
+            advisory = advisory.model_copy(
+                update={"script_check": script_check},
+            )
+        clean = not advisory.weak_scores() and not script_check_has_findings(
+            script_check,
+        )
+        admission.settle_sync_review(
+            reports_root,
+            pointer_group=group,
+            content_hash=content_hash,
+            clean=clean,
+        )
+        # A weak inline review must remain effective during the next
+        # agent turn. A clean follow-up or the hard cap releases it.
+        if (
+            clean
+            or round_number >= admission.MAX_SYNC_REVIEW_ROUNDS
+            or group not in _PERSISTENT_MEDIA_GATE_GROUPS
+        ):
+            admission.clear_sync_blocker(reports_root, pointer_group=group)
+        elif gate_token is not None:
+            admission.hold_sync_blocker(
+                reports_root,
+                project_id=project_id,
+                pointer_group=group,
+                reviewed_pointers=matched,
+                round_number=round_number,
+            )
+        report_name = admission.safe_ref(transaction_id)
+        if multi:
+            report_name += f"-{admission.safe_ref(group)}"
+        admission.write_json(
+            reports_root / "sync" / f"{report_name}.json",
+            advisory.model_dump(mode="json"),
+        )
+        trace_event(
+            "run_review.sync_advisory",
+            component=_TRACE_COMPONENT,
+            attributes={
+                "pointerGroup": group,
+                "stage": stage,
+                "round": round_number,
+                "clean": clean,
+                "scriptFindings": script_check_has_findings(script_check),
+                "transactionId": transaction_id,
+            },
+            projectId=project_id,
+        )
+        failed_groups.discard(group)
+        return None if clean else advisory.model_dump(mode="json")
+    except Exception:  # noqa: BLE001 - per-group advisory fail-open
+        admission.clear_sync_blocker(reports_root, pointer_group=group)
+        failed_groups.discard(group)
+        logger.exception(
+            "sync review group parse/settle failed for project %s "
+            "txn %s group %s",
+            project_id,
+            transaction_id,
+            group,
+        )
+        return None
+
+
+def _merge_sync_advisories(
+    delivered: Sequence[dict[str, Any]],
+    transaction_id: str,
+) -> dict[str, Any] | None:
+    """One tool-result payload for however many groups spoke up."""
+
+    if not delivered:
+        return None
+    if len(delivered) == 1:
+        return delivered[0]
+    return {
+        "transaction_id": transaction_id,
+        "pointer_group": "multiple",
+        "reviewed_pointers": list(
+            dict.fromkeys(
+                pointer
+                for item in delivered
+                for pointer in item.get("reviewed_pointers") or []
+            ),
+        ),
+        "round": max(int(item.get("round") or 0) for item in delivered),
+        "advisories": list(delivered),
+        "summary": "；".join(
+            str(item.get("summary") or "") for item in delivered
+        ),
+    }
+
+
 def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
     *,
     project_id: str,
@@ -368,32 +548,12 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
             logger.warning("sync review skipped: called on a running loop")
             return None
 
-        jobs: list[dict[str, Any]] = []
-        for group, stage, matched in classified:
-            payload_text = _payload_text(project_json, matched)
-            if not payload_text.strip():
-                continue
-            content_hash = hashlib.sha256(
-                payload_text.encode("utf-8"),
-            ).hexdigest()
-            round_number = admission.admit_sync_review(
-                reports_root,
-                pointer_group=group,
-                content_hash=content_hash,
-            )
-            if round_number is None:
-                continue
-            failed_groups.add(group)
-            jobs.append(
-                {
-                    "group": group,
-                    "stage": stage,
-                    "matched": matched,
-                    "payload_text": payload_text,
-                    "content_hash": content_hash,
-                    "round_number": round_number,
-                },
-            )
+        jobs = _admit_sync_review_jobs(
+            project_json,
+            classified,
+            reports_root=reports_root,
+            failed_groups=failed_groups,
+        )
         if not jobs:
             return None
 
@@ -420,12 +580,8 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
                         _review_and_script(
                             str(job["stage"]),
                             str(job["payload_text"]),
-                            script_strategy
-                            if job["group"] == "shots"
-                            else "",
-                            shots_payload
-                            if job["group"] == "shots"
-                            else "",
+                            script_strategy if job["group"] == "shots" else "",
+                            shots_payload if job["group"] == "shots" else "",
                         )
                         for job in jobs
                     ),
@@ -434,135 +590,24 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
             )
 
         responses = asyncio.run(review_all())
-        from services.run_review.script_review import (
-            script_check_has_findings,
-        )
 
         delivered: list[dict[str, Any]] = []
         multi = len(jobs) > 1
         for job, response in zip(jobs, responses, strict=True):
-            group = str(job["group"])
-            stage = str(job["stage"])
-            matched = list(job["matched"])
-            content_hash = str(job["content_hash"])
-            round_number = int(job["round_number"])
-            if isinstance(response, BaseException):
-                admission.clear_sync_blocker(
-                    reports_root,
-                    pointer_group=group,
-                )
-                failed_groups.discard(group)
-                logger.error(
-                    "sync review group failed for project %s txn %s "
-                    "group %s: %s",
-                    project_id,
-                    transaction_id,
-                    group,
-                    response,
-                )
-                continue
-            try:
-                response_text, script_check = response
-                advisory = parse_sync_advisory(
-                    response_text,
-                    stage=stage,
-                    transaction_id=transaction_id,
-                    pointer_group=group,
-                    reviewed_pointers=matched,
-                    round_number=round_number,
-                )
-                if script_check is not None:
-                    advisory = advisory.model_copy(
-                        update={"script_check": script_check},
-                    )
-                clean = (
-                    not advisory.weak_scores()
-                    and not script_check_has_findings(script_check)
-                )
-                admission.settle_sync_review(
-                    reports_root,
-                    pointer_group=group,
-                    content_hash=content_hash,
-                    clean=clean,
-                )
-                # A weak inline review must remain effective during the next
-                # agent turn. A clean follow-up or the hard cap releases it.
-                if (
-                    clean
-                    or round_number >= admission.MAX_SYNC_REVIEW_ROUNDS
-                    or group not in _PERSISTENT_MEDIA_GATE_GROUPS
-                ):
-                    admission.clear_sync_blocker(
-                        reports_root,
-                        pointer_group=group,
-                    )
-                elif gate_token is not None:
-                    admission.hold_sync_blocker(
-                        reports_root,
-                        project_id=project_id,
-                        pointer_group=group,
-                        reviewed_pointers=matched,
-                        round_number=round_number,
-                    )
-                report_name = admission.safe_ref(transaction_id)
-                if multi:
-                    report_name += f"-{admission.safe_ref(group)}"
-                admission.write_json(
-                    reports_root / "sync" / f"{report_name}.json",
-                    advisory.model_dump(mode="json"),
-                )
-                trace_event(
-                    "run_review.sync_advisory",
-                    component=_TRACE_COMPONENT,
-                    attributes={
-                        "pointerGroup": group,
-                        "stage": stage,
-                        "round": round_number,
-                        "clean": clean,
-                        "scriptFindings": script_check_has_findings(
-                            script_check,
-                        ),
-                        "transactionId": transaction_id,
-                    },
-                    projectId=project_id,
-                )
-                failed_groups.discard(group)
-                if not clean:
-                    delivered.append(advisory.model_dump(mode="json"))
-            except Exception:  # noqa: BLE001 - per-group advisory fail-open
-                admission.clear_sync_blocker(
-                    reports_root,
-                    pointer_group=group,
-                )
-                failed_groups.discard(group)
-                logger.exception(
-                    "sync review group parse/settle failed for project %s "
-                    "txn %s group %s",
-                    project_id,
-                    transaction_id,
-                    group,
-                )
+            advisory_payload = _settle_sync_review_job(
+                job,
+                response,
+                project_id=project_id,
+                reports_root=reports_root,
+                transaction_id=transaction_id,
+                gate_token=gate_token,
+                multi=multi,
+                failed_groups=failed_groups,
+            )
+            if advisory_payload is not None:
+                delivered.append(advisory_payload)
 
-        if not delivered:
-            return None
-        if len(delivered) == 1:
-            return delivered[0]
-        return {
-            "transaction_id": transaction_id,
-            "pointer_group": "multiple",
-            "reviewed_pointers": list(
-                dict.fromkeys(
-                    pointer
-                    for item in delivered
-                    for pointer in item.get("reviewed_pointers") or []
-                ),
-            ),
-            "round": max(int(item.get("round") or 0) for item in delivered),
-            "advisories": delivered,
-            "summary": "；".join(
-                str(item.get("summary") or "") for item in delivered
-            ),
-        }
+        return _merge_sync_advisories(delivered, transaction_id)
     except Exception:
         # Advisory only: a review failure must never disturb the commit.
         for failed_group in failed_groups:

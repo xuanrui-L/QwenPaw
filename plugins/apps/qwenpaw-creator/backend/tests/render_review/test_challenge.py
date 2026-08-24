@@ -69,7 +69,7 @@ def test_filter_questions_requires_anchor_inside_question() -> None:
         ],
         plan_context=_PLAN,
     )
-    assert accepted == []
+    assert not accepted
 
 
 def test_filter_questions_caps_at_six() -> None:

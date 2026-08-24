@@ -157,6 +157,7 @@ def _blocked_by_active_sync_review(
 
     return sync_review_pending and node.kind in _MEDIA_REVIEW_DEPENDENT_KINDS
 
+
 DispatchHook = Callable[[str, WorkGraph], Awaitable[None]]
 
 
@@ -343,57 +344,11 @@ class WorkGraphScheduler:
         # Without this, compose stays GATED (scene locks expired) but
         # auto_review_stale_scenes only runs inside compose execution —
         # a chicken-and-egg deadlock that halts the unattended pipeline.
-        try:
-            from services.render_review.scene_review import (
-                auto_review_stale_scenes,
-                collect_scene_review_targets,
-            )
-
-            for timeline_id in snapshot.project.timelines.order:
-                timeline = snapshot.project.timelines.items[timeline_id]
-                stale, drafts = collect_scene_review_targets(timeline)
-                if stale or drafts:
-                    review_timeout = min(
-                        max(len(stale) + len(drafts), 1)
-                        * int(get_vlm_timeout_seconds()),
-                        600,
-                    )
-                    try:
-                        await asyncio.wait_for(
-                            auto_review_stale_scenes(
-                                self.services,
-                                project_id=project_id,
-                                timeline_ref=f"timeline:{timeline_id}",
-                                timeline=timeline,
-                            ),
-                            timeout=review_timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "pre-compose auto-rereview timed out after "
-                            "%ds for %s; proceeding with stale graph",
-                            review_timeout,
-                            project_id,
-                        )
-                        break
-                    snapshot, tasks = await asyncio.gather(
-                        asyncio.to_thread(
-                            self.services.projects.read,
-                            project_id,
-                        ),
-                        asyncio.to_thread(
-                            self.executions.list_tasks,
-                            project_id,
-                        ),
-                    )
-                    break
-        except Exception:  # pylint: disable=broad-except
-            logger.warning(
-                "pre-compose auto-rereview failed for %s; proceeding "
-                "with stale graph",
-                project_id,
-                exc_info=True,
-            )
+        snapshot, tasks = await self._rereview_stale_scenes(
+            project_id,
+            snapshot,
+            tasks,
+        )
 
         graph = derive_work_graph(snapshot.project, tasks=tasks)
         from services.run_review import admission
@@ -486,6 +441,72 @@ class WorkGraphScheduler:
         if self._on_tick is not None:
             await self._on_tick(project_id, graph)
         return graph
+
+    async def _rereview_stale_scenes(
+        self,
+        project_id: str,
+        snapshot: Any,
+        tasks: Sequence[Any],
+    ) -> tuple[Any, Sequence[Any]]:
+        """Re-review expired scene locks, returning the state to derive on.
+
+        Fail-open: any failure (timeout included) keeps the state that was
+        read before, so a review outage only leaves the graph stale.
+        """
+
+        try:
+            from services.render_review.scene_review import (
+                auto_review_stale_scenes,
+                collect_scene_review_targets,
+            )
+
+            for timeline_id in snapshot.project.timelines.order:
+                timeline = snapshot.project.timelines.items[timeline_id]
+                stale, drafts = collect_scene_review_targets(timeline)
+                if not (stale or drafts):
+                    continue
+                review_timeout = min(
+                    max(len(stale) + len(drafts), 1)
+                    * int(get_vlm_timeout_seconds()),
+                    600,
+                )
+                try:
+                    await asyncio.wait_for(
+                        auto_review_stale_scenes(
+                            self.services,
+                            project_id=project_id,
+                            timeline_ref=f"timeline:{timeline_id}",
+                            timeline=timeline,
+                        ),
+                        timeout=review_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "pre-compose auto-rereview timed out after "
+                        "%ds for %s; proceeding with stale graph",
+                        review_timeout,
+                        project_id,
+                    )
+                    break
+                fresh_snapshot, fresh_tasks = await asyncio.gather(
+                    asyncio.to_thread(
+                        self.services.projects.read,
+                        project_id,
+                    ),
+                    asyncio.to_thread(
+                        self.executions.list_tasks,
+                        project_id,
+                    ),
+                )
+                return fresh_snapshot, fresh_tasks
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "pre-compose auto-rereview failed for %s; proceeding "
+                "with stale graph",
+                project_id,
+                exc_info=True,
+            )
+        return snapshot, tasks
 
     def _schedule_sync_gate_recheck(
         self,

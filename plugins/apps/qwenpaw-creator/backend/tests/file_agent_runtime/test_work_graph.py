@@ -551,7 +551,7 @@ def test_stale_final_render_reopens_compose() -> None:
 
 
 def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
-    """Frozen source selections are authoritative even if impact missed stale."""
+    """Frozen selections are authoritative even if impact missed stale."""
 
     project = _project()
     _add_element(project, _element("elem:one"))
@@ -584,9 +584,10 @@ def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
             },
         ],
     }
-    assert derive_work_graph(project).by_id[
-        "compose:final"
-    ].status is WorkNodeStatus.DONE
+    assert (
+        derive_work_graph(project).by_id["compose:final"].status
+        is WorkNodeStatus.DONE
+    )
 
     _select_slot(
         project,

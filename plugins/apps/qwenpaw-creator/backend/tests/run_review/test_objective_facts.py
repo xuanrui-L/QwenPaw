@@ -96,8 +96,9 @@ def test_easyocr_reader_is_initialized_once_under_concurrency(
         SimpleNamespace(Reader=fake_reader),
     )
     monkeypatch.setattr(ocr_check, "_READER", None)
+    reader_factory = ocr_check._reader  # pylint: disable=protected-access
     with ThreadPoolExecutor(max_workers=8) as pool:
-        readers = list(pool.map(lambda _index: ocr_check._reader(), range(8)))
+        readers = list(pool.map(lambda _index: reader_factory(), range(8)))
     assert len(calls) == 1
     assert all(reader is readers[0] for reader in readers)
 
