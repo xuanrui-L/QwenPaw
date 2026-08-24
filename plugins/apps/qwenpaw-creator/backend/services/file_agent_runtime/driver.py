@@ -2417,6 +2417,16 @@ class FileCreatorAgentRuntime:
             if item.conversation_id == request.conversation_id
             and item.message_seq < request.message_seq
         ]
+        # 选区解析需要当前 Project 快照（artifact:<slot>@<version> 定位与
+        # 版本过期判断）；同一份快照复用于下方的回合预算估算。
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            snapshot_project: Project | None = snapshot.project
+        except Exception:  # pylint: disable=broad-except
+            snapshot_project = None
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -2430,7 +2440,16 @@ class FileCreatorAgentRuntime:
             },
             {
                 "role": "user",
-                "content": _continuation_message_text(request, prior_context),
+                "content": _continuation_message_text(
+                    request,
+                    prior_context,
+                    project=snapshot_project,
+                    project_root=(
+                        self.services.projects.project_root(project_id)
+                        if snapshot_project is not None
+                        else None
+                    ),
+                ),
             },
         ]
         tool_call_count = 0
@@ -2443,17 +2462,14 @@ class FileCreatorAgentRuntime:
         # (one element per jq_project call plus one delegation each), so
         # the runaway cap scales with the current timeline size instead of
         # failing healthy long runs.
-        try:
-            snapshot = await asyncio.to_thread(
-                self.services.projects.read,
-                project_id,
-            )
-            element_count = sum(
+        element_count = (
+            sum(
                 len(timeline.elements_by_id)
-                for timeline in snapshot.project.timelines.items.values()
+                for timeline in snapshot_project.timelines.items.values()
             )
-        except Exception:
-            element_count = 0
+            if snapshot_project is not None
+            else 0
+        )
         turn_budget = scale_mainline_max_model_turns(
             self.max_model_turns,
             element_count,
@@ -5130,7 +5146,22 @@ class FileCreatorAgentRuntime:
 
         if get_creation_checkpoint_mode() != CREATION_CHECKPOINT_REQUIRED:
             return
-        for phase in required_checkpoint_phases(spec.name, role):
+        # required_checkpoint_phases 拿不到 project，多集判定（structure/
+        # script 阶段仅多 timeline 项目生效）在调用点从快照读出后传入；
+        # 读取失败按单 timeline 处理（新阶段静默，老阶梯不受影响）。
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            timeline_count = len(snapshot.project.timelines.order)
+        except Exception:  # pylint: disable=broad-except
+            timeline_count = None
+        for phase in required_checkpoint_phases(
+            spec.name,
+            role,
+            timeline_count=timeline_count,
+        ):
             authorization = await self._creation_checkpoint_record(
                 project_id=project_id,
                 round_id=round_id,
@@ -6835,7 +6866,119 @@ class FileCreatorAgentRuntime:
                 )
 
 
-def _message_text(message: CreatorMessageRecord) -> str:
+# 选区契约（方案 3.5b）：selection.path 指向 artifact 文本时的窗口大小。
+_ARTIFACT_SELECTION_WINDOW = 300
+
+
+def _parse_artifact_selection_path(path: Any) -> tuple[str, str] | None:
+    """``artifact:<slot_id>@<version_id>`` → (slot_id, version_id)。
+
+    project.json 内的选区 path 是 RFC 6901 指针（现状不变）；剧本/调研
+    等 artifact 文本的选区用本前缀定位文件与版本，配合 start/end 字符
+    偏移截取上下文窗口。
+    """
+
+    if not isinstance(path, str) or not path.startswith("artifact:"):
+        return None
+    slot_id, sep, version_id = path.removeprefix("artifact:").rpartition("@")
+    if not sep or not slot_id or not version_id:
+        return None
+    return slot_id, version_id
+
+
+def _selection_offset(value: Any, default: int = 0) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _artifact_selection_note(
+    project: Project,
+    project_root: Path,
+    selection: Mapping[str, Any],
+) -> str | None:
+    """一条 artifact 选区的注入文本：上下文窗口或版本过期提示。
+
+    版本一致性：selection 携带 ``@<version_id>``；Agent 处理时选中版本
+    已变更的选区不能按旧偏移错位应用，注入过期提示让模型请用户重新
+    定位，而不是静默改错位置。
+    """
+
+    parsed = _parse_artifact_selection_path(selection.get("path"))
+    if parsed is None:
+        return None
+    slot_id, version_id = parsed
+    label = str(selection.get("label") or selection.get("field") or slot_id)
+    slot = project.assets.artifact_slots_by_id.get(slot_id)
+    if slot is None:
+        return f"[选区提示] 「{label}」引用的 artifact 槽位 {slot_id} 已不存在，" "请让用户重新选择。"
+    if slot.selected_version_id != version_id:
+        return (
+            f"[选区提示] 「{label}」选区所在版本已过期："
+            f"选区固定在 {slot_id}@{version_id}，而该槽位当前选中版本是 "
+            f"{slot.selected_version_id or '（无）'}。字符偏移不可复用，"
+            "请提醒用户在新版本上重新选择，不要按旧偏移修改。"
+        )
+    version = project.assets.artifact_versions_by_id.get(version_id)
+    indexed = (
+        project.assets.files_by_id.get(version.file_id)
+        if version is not None
+        else None
+    )
+    if indexed is None:
+        return None
+    try:
+        text = (project_root / indexed.relative_uri).read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+    start = _selection_offset(selection.get("start"))
+    end = max(_selection_offset(selection.get("end"), start), start)
+    start = min(start, len(text))
+    end = min(end, len(text))
+    window_start = max(0, start - _ARTIFACT_SELECTION_WINDOW)
+    window_end = min(len(text), end + _ARTIFACT_SELECTION_WINDOW)
+    prefix = "…" if window_start > 0 else ""
+    suffix = "…" if window_end < len(text) else ""
+    return (
+        f"[选区上下文 · {slot_id}@{version_id} · 字符 {start}-{end}，"
+        "«»之间为用户选中文本，前后为 ±300 字符窗口]\n"
+        f"{prefix}{text[window_start:start]}«{text[start:end]}»"
+        f"{text[end:window_end]}{suffix}"
+    )
+
+
+def _artifact_selection_notes(
+    message: CreatorMessageRecord,
+    project: Project,
+    project_root: Path,
+) -> list[str]:
+    context = message.metadata.get("context")
+    if not isinstance(context, Mapping):
+        return []
+    selections: list[Any] = [context.get("selection")]
+    raw_list = context.get("selections")
+    if isinstance(raw_list, list):
+        selections.extend(raw_list)
+    notes: list[str] = []
+    for item in selections:
+        if not isinstance(item, Mapping):
+            continue
+        note = _artifact_selection_note(project, project_root, item)
+        if note is not None:
+            notes.append(note)
+    return notes
+
+
+def _message_text(
+    message: CreatorMessageRecord,
+    *,
+    project: Project | None = None,
+    project_root: Path | None = None,
+) -> str:
     chunks: list[str] = []
     for part in message.content_parts:
         if part.type == "text" and part.text:
@@ -6893,6 +7036,12 @@ def _message_text(message: CreatorMessageRecord) -> str:
                     separators=(",", ":"),
                 ),
             )
+    # artifact 文本选区（path=artifact:<slot>@<version>）解析注入：
+    # 调用点提供 project 快照与项目根目录时才生效（方案 3.5b）。
+    if project is not None and project_root is not None:
+        chunks.extend(
+            _artifact_selection_notes(message, project, project_root),
+        )
     return "\n".join(chunks).strip() or "请处理本消息中的项目请求。"
 
 
@@ -7121,10 +7270,17 @@ def _compact_wire_project_snapshots(messages: list[dict[str, Any]]) -> None:
 def _continuation_message_text(
     request: CreatorMessageRecord,
     prior_context: list[CreatorMessageRecord],
+    *,
+    project: Project | None = None,
+    project_root: Path | None = None,
 ) -> str:
     """Carry one durable AgentDock Conversation into the next Agent run."""
 
-    current = _message_text(request)
+    current = _message_text(
+        request,
+        project=project,
+        project_root=project_root,
+    )
     if not prior_context:
         return current
     snapshot_receipts = _elide_stale_snapshots(prior_context)
