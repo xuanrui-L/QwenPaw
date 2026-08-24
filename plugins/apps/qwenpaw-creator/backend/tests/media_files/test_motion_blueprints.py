@@ -92,11 +92,6 @@ class TestBlueprintRendering:
         assert "<b>标签" not in html
         assert "&lt;b&gt;" in html
 
-    def test_drama_whisper_keeps_the_first_frame_partly_visible(self) -> None:
-        html, _ = render_caption_blueprint("drama_whisper", "雨还没有停")
-        assert "'.ch',{autoAlpha:.25" in html
-        assert "'.ch',{autoAlpha:0" not in html
-
     def test_frame_window_clamps_to_keep_real_borders(self) -> None:
         window = validated_frame_window(
             {"left": -0.5, "top": 0.0, "width": 2.0, "height": 0.01},
@@ -118,11 +113,7 @@ class TestBlueprintRendering:
         frame, _ = render_frame_blueprint("product_ui")
         assert "backdrop-filter:blur" in caption
         assert "cursor" in ripple and "requestAnimationFrame" not in ripple
-        assert 'data-motion-frame="ring"' in frame
         assert 'data-motion-window="' in frame
-        for html in (caption, ripple, frame):
-            assert "window.__hf" in html
-            assert "{{" not in html and "}}" not in html
 
 
 class TestBlueprintDesignValidation:

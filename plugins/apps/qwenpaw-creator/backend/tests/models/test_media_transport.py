@@ -26,9 +26,6 @@ def test_media_transport_api_key_mask_never_reveals_a_secret_fragment() -> (
     secret = "sk-sensitive-prefix-and-private-suffix"
 
     assert _mask_key(secret) == "[redacted]"
-    assert not any(
-        part in _mask_key(secret) for part in ("sk-", "sensitive", "suffix")
-    )
     assert _mask_key("") == "(empty)"
 
 

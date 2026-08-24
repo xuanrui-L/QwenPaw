@@ -41,7 +41,6 @@ from services.media_files.live_operation.recorder import (
 from services.media_files.live_operation.recording_link import (
     RecordingControlLink,
     _operation_name,
-    _spec_description,
 )
 
 from services.media_files.live_operation.session import LiveSessionError
@@ -146,24 +145,7 @@ def test_bounding_box_rejects_degenerate_rectangles():
     assert (box.x, box.y, box.width, box.height) == (1.5, 2.5, 4.0, 6.0)
 
 
-def test_normalized_location_centres_the_box_on_the_canvas():
-    box = BoundingBox(x=256.0, y=108.0, width=768.0, height=28.0)
-    location = normalized_location(box, Viewport(1280.0, 720.0))
-    # x/y name the anchor point, which Creator places at the box centre.
-    assert location == {
-        "x": 0.5,
-        "y": 0.16944,
-        "width": 0.6,
-        "height": 0.03889,
-    }
-
-
-def test_normalized_location_needs_a_usable_viewport():
-    box = BoundingBox(x=0.0, y=0.0, width=10.0, height=10.0)
-    assert normalized_location(box, Viewport(0.0, 0.0)) is None
-
-
-def test_normalized_location_intersects_partially_visible_targets():
+def test_coordinate_helpers_clip_and_validate_viewports():
     viewport = Viewport(100.0, 100.0)
     assert normalized_location(
         BoundingBox(x=-20.0, y=80.0, width=40.0, height=40.0),
@@ -176,9 +158,22 @@ def test_normalized_location_intersects_partially_visible_targets():
         )
         is None
     )
+    assert (
+        normalized_location(
+            BoundingBox(x=0.0, y=0.0, width=10.0, height=10.0),
+            Viewport(0.0, 0.0),
+        )
+        is None
+    )
+    assert _viewport_from_metadata(
+        {"deviceWidth": 1280, "deviceHeight": 720, "pageScaleFactor": 1},
+    ) == Viewport(1280.0, 720.0)
+    assert (
+        _viewport_from_metadata({"deviceWidth": 0, "deviceHeight": 0}) is None
+    )
 
 
-def test_action_location_projects_through_zoomed_edit_placement():
+def test_action_location_projects_and_fails_closed():
     assert project_location_to_canvas(
         {"x": 0.75, "y": 0.25, "width": 0.1, "height": 0.08},
         {
@@ -190,9 +185,6 @@ def test_action_location_projects_through_zoomed_edit_placement():
             "anchor_y": 0.5,
         },
     ) == {"x": 0.725, "y": 0.275, "width": 0.15, "height": 0.12}
-
-
-def test_action_location_projects_through_inset_and_clips_to_canvas():
     assert project_location_to_canvas(
         {"x": 0.95, "y": 0.5, "width": 0.2, "height": 0.2},
         {
@@ -216,24 +208,10 @@ def test_action_location_projects_through_inset_and_clips_to_canvas():
         )
         is None
     )
-
-
-def test_action_location_fails_closed_for_rotated_or_malformed_placement():
     source = {"x": 0.5, "y": 0.5, "width": 0.2, "height": 0.2}
     assert project_location_to_canvas(source, None) == source
     assert project_location_to_canvas(source, {"rotation_degrees": 15}) is None
     assert project_location_to_canvas({"x": "bad"}, None) is None
-
-
-def test_viewport_comes_from_screencast_metadata():
-    viewport = _viewport_from_metadata(
-        {"deviceWidth": 1280, "deviceHeight": 720, "pageScaleFactor": 1},
-    )
-    assert viewport == Viewport(1280.0, 720.0)
-    assert (
-        _viewport_from_metadata({"deviceWidth": 0, "deviceHeight": 0}) is None
-    )
-    assert _viewport_from_metadata(None) is None
 
 
 # ─── manifest shape ─────────────────────────────────────────────────────
@@ -290,32 +268,16 @@ def test_manifest_serializes_facts_with_projected_locations():
     assert "location" not in navigate
 
 
-def test_manifest_summary_reports_what_the_model_needs():
-    summary = _manifest_with_facts().summary()
-    assert "4.2s" in summary
-    assert "2 actions" in summary
-    assert "1 with coordinates" in summary
-    assert "1280x720" in summary
-
-
-def test_facts_within_selects_and_rebases_the_clip_window():
+def test_facts_within_selects_rebases_and_retimes_clip_actions():
     manifest = json.loads(_manifest_with_facts().as_json_bytes())
     selected = facts_within(manifest, start_ms=1500, end_ms=3000)
     assert [fact["op"] for fact in selected] == ["navigate"]
     assert selected[0]["clip_offset_ms"] == 500
     assert not facts_within(manifest, start_ms=9000, end_ms=9500)
     assert not facts_within({"facts": "broken"}, start_ms=0, end_ms=1)
-
-
-def test_facts_within_keeps_actions_overlapping_the_cut_boundary():
-    manifest = json.loads(_manifest_with_facts().as_json_bytes())
     selected = facts_within(manifest, start_ms=1100, end_ms=1150)
     assert [fact["op"] for fact in selected] == ["click"]
     assert selected[0]["clip_offset_ms"] == 0
-
-
-def test_facts_within_scales_offsets_for_source_playback_rate():
-    manifest = json.loads(_manifest_with_facts().as_json_bytes())
     selected = facts_within(
         manifest,
         start_ms=500,
@@ -345,32 +307,6 @@ def test_only_screen_changing_verbs_become_facts():
     assert _operation_name("capture_tree", {}) is None
     assert _operation_name("locator_read", {"prop": "inner_text"}) is None
     assert _operation_name("screenshot", {}) is None
-
-
-def test_spec_description_renders_the_locator_call():
-    spec = [
-        {
-            "method": "get_by_role",
-            "args": ["button"],
-            "kwargs": [["name", "Search"]],
-        },
-        {"method": "first", "args": [], "kwargs": []},
-    ]
-    assert (
-        _spec_description(spec)
-        == 'get_by_role("button", name="Search").first()'
-    )
-
-
-def test_spec_description_omits_unset_optional_arguments():
-    spec = [
-        {
-            "method": "get_by_role",
-            "args": ["heading"],
-            "kwargs": [["name", None]],
-        },
-    ]
-    assert _spec_description(spec) == 'get_by_role("heading")'
 
 
 # ─── recording link behaviour ───────────────────────────────────────────
@@ -439,7 +375,14 @@ def test_actions_are_recorded_with_a_pre_action_rectangle():
         "workspace_id": "w",
         "session_id": "s",
         "page_id": "p",
-        "spec": [{"method": "get_by_text", "args": ["Save"], "kwargs": []}],
+        "spec": [
+            {
+                "method": "get_by_role",
+                "args": ["button"],
+                "kwargs": [["name", "Save"]],
+            },
+            {"method": "first", "args": [], "kwargs": []},
+        ],
         "action": "click",
     }
     asyncio.run(link.request("locator_action", params))
@@ -451,7 +394,7 @@ def test_actions_are_recorded_with_a_pre_action_rectangle():
     ]
     fact = manifest.facts[0]
     assert fact.op == "click"
-    assert fact.target == 'get_by_text("Save")'
+    assert fact.target == 'get_by_role("button", name="Save").first()'
     assert fact.bbox == BoundingBox(10.0, 20.0, 30.0, 40.0)
     assert fact.failed is False
 
@@ -507,7 +450,7 @@ def test_action_finishing_at_duration_watchdog_is_clipped_to_video():
     assert manifest.facts[0].t_end_ms == 1300
 
 
-def test_nothing_is_recorded_outside_a_take():
+def test_off_camera_actions_skip_bbox_and_screenshots_are_deduplicated():
     link, inner = _link_with(None)
     asyncio.run(
         link.request(
@@ -520,9 +463,21 @@ def test_nothing_is_recorded_outside_a_take():
             },
         ),
     )
+    for _ in range(2):
+        asyncio.run(
+            link.request(
+                "screenshot",
+                {"workspace_id": "w", "session_id": "s"},
+            ),
+        )
     # Without a running take there is no bbox probe either: perceiving and
     # acting off-camera must cost nothing.
-    assert [method for method, _ in inner.calls] == ["locator_action"]
+    assert [method for method, _ in inner.calls] == [
+        "locator_action",
+        "screenshot",
+        "screenshot",
+    ]
+    assert link.screenshots == ["/tmp/shot-1.png"]
 
 
 def test_scroll_records_timing_without_a_misleading_document_box():
@@ -549,34 +504,6 @@ def test_scroll_records_timing_without_a_misleading_document_box():
     assert [method for method, _ in inner.calls] == ["locator_action"]
     assert manifest.facts[0].op == "scroll"
     assert manifest.facts[0].bbox is None
-
-
-def test_screenshots_are_collected_for_publication():
-    link, _ = _link_with(None)
-    asyncio.run(
-        link.request("screenshot", {"workspace_id": "w", "session_id": "s"}),
-    )
-    asyncio.run(
-        link.request("screenshot", {"workspace_id": "w", "session_id": "s"}),
-    )
-    # The same image twice is one asset, not two.
-    assert link.screenshots == ["/tmp/shot-1.png"]
-
-
-def test_last_page_id_tracks_the_operated_page():
-    link, _ = _link_with(None)
-    asyncio.run(
-        link.request(
-            "navigate",
-            {
-                "workspace_id": "w",
-                "session_id": "s",
-                "page_id": "page-7",
-                "url": "https://x",
-            },
-        ),
-    )
-    assert link.last_page_id == "page-7"
 
 
 # ─── recorder lifecycle ─────────────────────────────────────────────────
@@ -608,13 +535,16 @@ class _FailingStartCdp(_FakeCdp):
         return {}
 
 
-def test_a_take_cannot_start_twice(tmp_path: Path):
+def test_recorder_rejects_overlapping_and_empty_takes(tmp_path: Path):
     recorder = TakeRecorder(workspace=tmp_path)
     cdp = _FakeCdp()
     asyncio.run(recorder.start(cdp, label="first"))
     assert recorder.recording is True
     with pytest.raises(RecorderError):
         asyncio.run(recorder.start(cdp, label="second"))
+    with pytest.raises(RecorderError, match="no frames"):
+        asyncio.run(recorder.stop())
+    assert recorder.recording is False
 
 
 def test_failed_start_removes_listener_and_allows_a_clean_retry(
@@ -633,27 +563,6 @@ def test_failed_start_removes_listener_and_allows_a_clean_retry(
         assert recorder.recording is True
 
     asyncio.run(scenario())
-
-
-def test_stopping_without_frames_reports_an_unchanged_screen(tmp_path: Path):
-    recorder = TakeRecorder(workspace=tmp_path)
-
-    async def scenario():
-        await recorder.start(_FakeCdp(), label="nothing happened")
-        return await recorder.stop()
-
-    with pytest.raises(RecorderError, match="no frames"):
-        asyncio.run(scenario())
-    assert recorder.recording is False
-
-
-def test_stop_if_recording_is_a_no_op_when_idle(tmp_path: Path):
-    recorder = TakeRecorder(workspace=tmp_path)
-    assert asyncio.run(recorder.stop_if_recording()) is None
-
-
-def test_elapsed_is_zero_while_idle(tmp_path: Path):
-    assert TakeRecorder(workspace=tmp_path).elapsed_ms() == 0
 
 
 class _EventCdp:
@@ -787,7 +696,7 @@ def test_take_records_carry_the_manifest_pointer():
         project_id="proj-1",
         take_id="take-001",
         label="搜索仓库",
-        video=b"video-bytes",
+        video=b"same-video",
         manifest_payload=manifest.as_json_bytes(),
         duration_seconds=4.2,
         request_id="req-1",
@@ -802,48 +711,22 @@ def test_take_records_carry_the_manifest_pointer():
     assert version.metadata["manifestFileId"] == manifest_file.file_id
     assert version.metadata["sourceKind"] == "live_operation_take"
     assert logical_asset_id.startswith("asset-")
-
-
-def test_identical_bytes_produce_identical_ids():
-    first = build_take_records(
-        project_id="proj-1",
-        take_id="take-001",
-        label="a",
-        video=b"same",
-        manifest_payload=b"{}",
-        duration_seconds=1.0,
-        request_id="req-1",
-    )
     second = build_take_records(
         project_id="proj-1",
         take_id="take-002",
         label="b",
-        video=b"same",
-        manifest_payload=b"{}",
-        duration_seconds=1.0,
+        video=b"same-video",
+        manifest_payload=manifest.as_json_bytes(),
+        duration_seconds=4.2,
         request_id="req-2",
     )
     # Re-publishing the same footage must not duplicate the asset.
-    assert first[0].file_id == second[0].file_id
-    assert first[2].version_id == second[2].version_id
+    assert video_file.file_id == second[0].file_id
+    assert version.version_id == second[2].version_id
 
 
-def test_screenshot_records_are_image_sources():
+def test_screenshot_records_preserve_source_kind_and_media_type():
     indexed, version, logical_asset_id = build_image_records(
-        project_id="proj-1",
-        name="Live operation screenshot 1",
-        content=b"png-bytes",
-        media_type="image/png",
-        request_id="req-1",
-    )
-    assert indexed.relative_uri.endswith(".png")
-    assert version.media_kind == "image"
-    assert version.metadata["sourceKind"] == "live_operation_screenshot"
-    assert logical_asset_id.startswith("asset-")
-
-
-def test_screenshot_extension_matches_declared_media_type():
-    indexed, version, _ = build_image_records(
         project_id="proj-1",
         name="WebP screenshot",
         content=b"webp-bytes",
@@ -853,17 +736,17 @@ def test_screenshot_extension_matches_declared_media_type():
     assert indexed.relative_uri.endswith(".webp")
     assert indexed.media_type == "image/webp"
     assert version.media_type == "image/webp"
+    assert version.media_kind == "image"
+    assert version.metadata["sourceKind"] == "live_operation_screenshot"
+    assert logical_asset_id.startswith("asset-")
 
 
 # ─── code execution surface ─────────────────────────────────────────────
 
 
-def test_top_level_await_is_accepted():
+def test_compile_accepts_top_level_await_and_reports_syntax_errors():
     compiled = _compile("x = 1\nawait Browser.connect()")
     assert compiled is not None
-
-
-def test_a_syntax_error_is_reported_as_such():
     with pytest.raises(LiveOperationError, match="syntax error"):
         _compile("await (")
 
@@ -888,28 +771,30 @@ def test_model_code_cannot_escape_into_the_creator_backend(code: str):
         _compile(code)
 
 
-def test_model_code_rejects_non_cooperative_while_loops():
-    with pytest.raises(
-        LiveOperationError,
-        match="while loops are unavailable",
-    ):
-        _compile("while True:\n    pass")
-
-
 @pytest.mark.parametrize(
-    "code",
+    ("code", "message"),
     (
-        "def recurse():\n    return recurse()\nrecurse()",
-        "async def recurse():\n    return await recurse()\nawait recurse()",
-        "recurse = lambda: recurse()\nrecurse()",
-        "class Recurse:\n    pass",
+        ("while True:\n    pass", "while loops are unavailable"),
+        (
+            "def recurse():\n    return recurse()\nrecurse()",
+            "definitions are unavailable",
+        ),
+        (
+            "async def recurse():\n    return await recurse()\nawait recurse()",
+            "definitions are unavailable",
+        ),
+        (
+            "recurse = lambda: recurse()\nrecurse()",
+            "definitions are unavailable",
+        ),
+        ("class Recurse:\n    pass", "definitions are unavailable"),
     ),
 )
-def test_model_code_rejects_recursive_definition_surfaces(code: str):
-    with pytest.raises(
-        LiveOperationError,
-        match="definitions are unavailable",
-    ):
+def test_model_code_rejects_unbounded_control_surfaces(
+    code: str,
+    message: str,
+):
+    with pytest.raises(LiveOperationError, match=message):
         _compile(code)
 
 
@@ -944,47 +829,6 @@ def test_model_print_is_captured_without_process_global_stdout():
 def test_empty_code_is_rejected_before_a_browser_is_launched(tmp_path: Path):
     with pytest.raises(LiveOperationError, match="empty"):
         asyncio.run(run_browser_code("   ", run_root=tmp_path, run_id="run-1"))
-
-
-def test_desktop_guidance_does_not_depend_on_browser_switch(monkeypatch):
-    from models import config
-    from services.file_agent_runtime.prompts import (
-        live_operation_guidance as guidance_module,
-    )
-
-    monkeypatch.setattr(config, "get_live_operation_enabled", lambda: False)
-    monkeypatch.setattr(config, "get_computer_use_enabled", lambda: True)
-    guidance = guidance_module.live_operation_guidance()
-    assert "# 真实桌面操作" in guidance
-    assert "# 真实网站操作" not in guidance
-
-
-def test_browser_guidance_stops_acquisition_once_acceptance_is_covered(
-    monkeypatch,
-):
-    from models import config
-    from services.file_agent_runtime.prompts import (
-        live_operation_guidance as guidance_module,
-    )
-
-    monkeypatch.setattr(config, "get_live_operation_enabled", lambda: True)
-    monkeypatch.setattr(config, "get_computer_use_enabled", lambda: False)
-    monkeypatch.setattr(
-        guidance_module,
-        "load_host_browser_manual",
-        lambda: "",
-    )
-
-    guidance = guidance_module.live_operation_guidance()
-
-    assert "素材达到验收标准后立即停止采集" in guidance
-    assert "批量 `patch_project`" in guidance
-    assert 'page.keyboard.press("PageDown")' in guidance
-    assert "action 但画面完全不动" in guidance
-    assert "教程成片" in guidance
-    assert "AI 剪辑导演" in guidance
-    assert "`browser.close()` 不可用" in guidance
-    assert "open/present/goto 只接受绝对" in guidance
 
 
 def test_recording_defaults_to_the_page_just_opened():

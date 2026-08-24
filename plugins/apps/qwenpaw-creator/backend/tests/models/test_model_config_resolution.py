@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
 """Config-tree resolution: env fallbacks, request overrides, turn limits."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -20,7 +21,6 @@ from models.image.base import _mask_key as mask_image_api_key
 from models.image.dashscope_provider import DashScopeImageModel
 from models.image.openai_provider import OpenAIImageModel
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -28,10 +28,6 @@ def test_image_api_key_mask_never_reveals_a_secret_fragment() -> None:
     secret = "sk-sensitive-prefix-and-private-suffix"
 
     assert mask_image_api_key(secret) == "[redacted]"
-    assert not any(
-        part in mask_image_api_key(secret)
-        for part in ("sk-", "sensitive", "suffix")
-    )
     assert mask_image_api_key("") == "(empty)"
 
 

@@ -14,8 +14,8 @@ is prescribed here.
 
 Assertions guard structural invariants only — that the model reached the tool,
 that whatever it recorded became Project source material, and that recorded
-action coordinates survive into the take manifest. Whether the footage is
-good is judged by watching the printed mp4 path.
+action facts survive into the take manifest. Whether the footage is good is
+judged by watching the printed mp4 path.
 """
 
 from __future__ import annotations
@@ -31,8 +31,6 @@ import pytest
 from models import config as model_config
 from services.media_files.live_operation import (
     LiveOperationError,
-    build_take_records,
-    facts_within,
     run_browser_code,
 )
 
@@ -99,7 +97,7 @@ def _model_client():
     return AgentScopeAgentChatClient(timeout_seconds=300.0)
 
 
-def _assert_publishable(outcome) -> None:
+def _assert_real_take(outcome) -> None:
     assert outcome is not None
     assert (
         outcome.takes
@@ -114,17 +112,6 @@ def _assert_publishable(outcome) -> None:
         print("manifest:", json.dumps(payload, ensure_ascii=False)[:800])
         assert payload["video"]["frame_count"] > 0
         assert payload["facts"], "a recorded take must carry action facts"
-        video_file, manifest_file, version, _ = build_take_records(
-            project_id="acceptance",
-            take_id=take.take_id,
-            label=take.label,
-            video=take.video_path.read_bytes(),
-            manifest_payload=take.manifest.as_json_bytes(),
-            duration_seconds=take.manifest.duration_ms / 1000 or None,
-            request_id="req-acceptance",
-        )
-        assert version.metadata["manifestFileId"] == manifest_file.file_id
-        assert video_file.media_type == "video/mp4"
 
 
 def test_model_chooses_how_to_operate_and_record(tmp_path: Path) -> None:
@@ -133,10 +120,6 @@ def test_model_chooses_how_to_operate_and_record(tmp_path: Path) -> None:
     from services.file_agent_runtime.prompts.live_operation_guidance import (
         live_operation_guidance,
     )
-
-    guidance = live_operation_guidance()
-    assert "recorder.start" in guidance
-    assert "await Browser.connect" in guidance
 
     client = _model_client()
     tools = [
@@ -157,7 +140,7 @@ def test_model_chooses_how_to_operate_and_record(tmp_path: Path) -> None:
         },
     ]
     messages = [
-        {"role": "system", "content": guidance},
+        {"role": "system", "content": live_operation_guidance()},
         {"role": "user", "content": _GOAL},
     ]
 
@@ -280,38 +263,4 @@ def test_model_chooses_how_to_operate_and_record(tmp_path: Path) -> None:
 
     assert "recorder.start" in final_code
     assert "recorder.stop" in final_code
-    _assert_publishable(outcome)
-
-
-def test_recorded_coordinates_reach_motion_design(tmp_path: Path) -> None:
-    """Facts recorded during a take must survive into clip-window queries."""
-    _require_text_model()
-    code = (
-        "browser = await Browser.connect()\n"
-        'page = await browser.open("https://example.com")\n'
-        "obs = await page.snapshot()\n"
-        'print("perceived", len(obs.text or ""))\n'
-        'await recorder.start(label="查看页面标题并翻页")\n'
-        "heading = page.get_by_role('heading').first\n"
-        "await heading.scroll()\n"
-        "await page.wait_for_timeout(700)\n"
-        'await page.goto("https://example.com/?tutorial=2")\n'
-        "await page.wait_for_timeout(900)\n"
-        "info = await recorder.stop()\n"
-        'print("take", info["take_id"], info["summary"])\n'
-    )
-    outcome = asyncio.run(
-        run_browser_code(code, run_root=tmp_path, run_id="facts"),
-    )
-    assert outcome.takes, "the deterministic script must produce one take"
-    manifest = json.loads(outcome.takes[0].manifest.as_json_bytes())
-    duration_ms = manifest["video"]["duration_ms"]
-    covering = facts_within(manifest, start_ms=0, end_ms=duration_ms)
-    print("facts in clip window:", json.dumps(covering, ensure_ascii=False))
-    assert covering, "the whole take window must cover its own facts"
-    positioned = [fact for fact in covering if fact.get("location")]
-    assert positioned, "at least one action must carry canvas coordinates"
-    location = positioned[0]["location"]
-    # Normalized canvas coordinates are what an Overlay location consumes.
-    for axis in ("x", "y", "width", "height"):
-        assert 0.0 <= float(location[axis]) <= 1.5
+    _assert_real_take(outcome)

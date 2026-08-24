@@ -385,10 +385,7 @@ def test_repeated_live_operations_in_one_request_use_unique_transactions(
     assert len(project.assets.source_versions_by_id) == 2
 
 
-def test_browser_operation_scratch_is_removed_after_publication(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def _browser_runtime(tmp_path, monkeypatch, runner):
     services, _snapshot = _create_project(tmp_path, initial_goal=None)
     runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
     monkeypatch.setattr(
@@ -396,7 +393,30 @@ def test_browser_operation_scratch_is_removed_after_publication(
         "get_live_operation_enabled",
         lambda: True,
     )
+    monkeypatch.setattr(driver_module, "run_browser_code", runner)
+    return services, runtime
 
+
+def _run_browser_tool(runtime):
+    return asyncio.run(
+        runtime._run_browser_use(
+            request=_record(1),
+            run_id="agent-run-1",
+            arguments={"code": "await Browser.connect()"},
+        ),
+    )
+
+
+def _live_operation_scratch(services):
+    return (
+        services.projects.project_root(PROJECT_ID) / "runtime/live_operation"
+    )
+
+
+def test_browser_operation_scratch_is_removed_after_publication(
+    tmp_path,
+    monkeypatch,
+) -> None:
     async def fake_run(code, *, run_root, run_id, **kwargs):
         del code, kwargs
         workspace = run_root / "live_operation" / run_id
@@ -407,48 +427,25 @@ def test_browser_operation_scratch_is_removed_after_publication(
         outcome.screenshots = [str(screenshot)]
         return outcome
 
-    monkeypatch.setattr(driver_module, "run_browser_code", fake_run)
-    response = asyncio.run(
-        runtime._run_browser_use(
-            request=_record(1),
-            run_id="agent-run-1",
-            arguments={"code": "await Browser.connect()"},
-        ),
-    )
+    services, runtime = _browser_runtime(tmp_path, monkeypatch, fake_run)
+    response = _run_browser_tool(runtime)
 
     assert len(response["screenshots"]) == 1
-    scratch_parent = (
-        services.projects.project_root(PROJECT_ID) / "runtime/live_operation"
-    )
-    assert list(scratch_parent.iterdir()) == []
+    assert list(_live_operation_scratch(services).iterdir()) == []
 
 
 def test_browser_observation_without_media_is_not_completion_eligible(
     tmp_path,
     monkeypatch,
 ) -> None:
-    services, _snapshot = _create_project(tmp_path, initial_goal=None)
-    runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
-    monkeypatch.setattr(
-        driver_module,
-        "get_live_operation_enabled",
-        lambda: True,
-    )
-
     async def fake_run(code, *, run_root, run_id, **kwargs):
         del code, run_root, run_id, kwargs
         outcome = LiveOperationRun()
         outcome.output = "two tabs observed"
         return outcome
 
-    monkeypatch.setattr(driver_module, "run_browser_code", fake_run)
-    response = asyncio.run(
-        runtime._run_browser_use(
-            request=_record(1),
-            run_id="agent-run-1",
-            arguments={"code": "print(await browser.tabs.list())"},
-        ),
-    )
+    _services, runtime = _browser_runtime(tmp_path, monkeypatch, fake_run)
+    response = _run_browser_tool(runtime)
 
     assert response["ok"] is True
     assert response["observationOnly"] is True
@@ -462,14 +459,6 @@ def test_browser_operation_scratch_is_removed_after_execution_failure(
     tmp_path,
     monkeypatch,
 ) -> None:
-    services, _snapshot = _create_project(tmp_path, initial_goal=None)
-    runtime = FileCreatorAgentRuntime(services, poll_interval_seconds=0.01)
-    monkeypatch.setattr(
-        driver_module,
-        "get_live_operation_enabled",
-        lambda: True,
-    )
-
     async def failing_run(code, *, run_root, run_id, **kwargs):
         del code, kwargs
         workspace = run_root / "live_operation" / run_id
@@ -477,20 +466,11 @@ def test_browser_operation_scratch_is_removed_after_execution_failure(
         (workspace / "partial.mp4").write_bytes(b"partial")
         raise LiveOperationError("strict locator failure")
 
-    monkeypatch.setattr(driver_module, "run_browser_code", failing_run)
+    services, runtime = _browser_runtime(tmp_path, monkeypatch, failing_run)
     with pytest.raises(FileAgentRuntimeError, match="strict locator failure"):
-        asyncio.run(
-            runtime._run_browser_use(
-                request=_record(1),
-                run_id="agent-run-1",
-                arguments={"code": "await Browser.connect()"},
-            ),
-        )
+        _run_browser_tool(runtime)
 
-    scratch_parent = (
-        services.projects.project_root(PROJECT_ID) / "runtime/live_operation"
-    )
-    assert list(scratch_parent.iterdir()) == []
+    assert list(_live_operation_scratch(services).iterdir()) == []
 
 
 def test_live_operation_scratch_cleanup_rejects_escape_and_symlink(

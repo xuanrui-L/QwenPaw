@@ -2,6 +2,7 @@
 # flake8: noqa: E501
 # pylint: disable=unused-argument
 """r2v_generation mode plumbing through the durable execution service."""
+
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +39,6 @@ from .conftest import (
     make_r2v_element,
     r2v_project_services,
 )
-
 
 pytestmark = pytest.mark.unit
 
@@ -163,7 +163,9 @@ def test_execution_fails_closed_for_unknown_video_model(
 
 
 def _services(tmp_path, monkeypatch, extra_creation=None):
-    elements = [make_r2v_element(ELEMENT_ID, video_prompt="动画，猫从左向右追逐老鼠，动作连续")]
+    elements = [
+        make_r2v_element(ELEMENT_ID, video_prompt="动画，猫从左向右追逐老鼠，动作连续"),
+    ]
     if extra_creation is not None:
         elements.append(
             TimelineElement(
@@ -321,48 +323,54 @@ def _register_tts_audio(services: CreatorFileServices, monkeypatch) -> str:
     return result.source_asset_version_id
 
 
+def _run_semantic_tts_pair(services, monkeypatch, second_arguments):
+    from models import tts_model
+    from services.media_files.audio_execution import execute_file_tts_command
+
+    syntheses = 0
+
+    async def fake_synthesize(text, **kwargs):
+        nonlocal syntheses
+        syntheses += 1
+        return tts_model.TTSSynthesis(
+            audio_bytes=(
+                b"RIFF\x00\x00\x00\x00WAVE" + bytes([syntheses]) * 2048
+            ),
+            media_type="audio/wav",
+            model="qwen3-tts-flash",
+            voice=kwargs.get("voice") or "Cherry",
+            characters=len(text),
+        )
+
+    monkeypatch.setattr(tts_model, "synthesize", fake_synthesize)
+    first_arguments = {"text": "雨再大，也别让善意错过末班车。"}
+
+    def execute(arguments, key):
+        return asyncio.run(
+            execute_file_tts_command(
+                services,
+                project_id=PROJECT_ID,
+                target_ref=f"element:{ELEMENT_ID}",
+                arguments=arguments,
+                idempotency_key=key,
+            ),
+        )
+
+    first = execute(first_arguments, "tts-first")
+    second = execute(second_arguments, "tts-second")
+    return syntheses, first, second
+
+
 def test_tts_semantic_retry_reuses_audio_across_new_idempotency_key(
     tmp_path,
     monkeypatch,
 ) -> None:
     """A stale agent retry must not make a second billable TTS request."""
 
-    from models import tts_model
-    from services.media_files.audio_execution import execute_file_tts_command
-
-    services = _services(tmp_path, monkeypatch)
-    syntheses = 0
-
-    async def fake_synthesize(text, **_kwargs):
-        nonlocal syntheses
-        syntheses += 1
-        return tts_model.TTSSynthesis(
-            audio_bytes=b"RIFF\x00\x00\x00\x00WAVE" + b"\x00" * 2048,
-            media_type="audio/wav",
-            model="qwen3-tts-flash",
-            voice="Cherry",
-            characters=len(text),
-        )
-
-    monkeypatch.setattr(tts_model, "synthesize", fake_synthesize)
-    arguments = {"text": "雨再大，也别让善意错过末班车。"}
-    first = asyncio.run(
-        execute_file_tts_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments=arguments,
-            idempotency_key="tts-first-planning-turn",
-        ),
-    )
-    second = asyncio.run(
-        execute_file_tts_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments=arguments,
-            idempotency_key="tts-stale-planning-turn",
-        ),
+    syntheses, first, second = _run_semantic_tts_pair(
+        _services(tmp_path, monkeypatch),
+        monkeypatch,
+        {"text": "雨再大，也别让善意错过末班车。"},
     )
 
     assert syntheses == 1
@@ -386,44 +394,10 @@ def test_tts_semantic_retry_does_not_reuse_a_different_request(
 ) -> None:
     """Text, voice and rate all belong to the paid synthesis identity."""
 
-    from models import tts_model
-    from services.media_files.audio_execution import execute_file_tts_command
-
-    services = _services(tmp_path, monkeypatch)
-    syntheses = 0
-
-    async def fake_synthesize(text, **kwargs):
-        nonlocal syntheses
-        syntheses += 1
-        return tts_model.TTSSynthesis(
-            audio_bytes=(
-                b"RIFF\x00\x00\x00\x00WAVE" + bytes([syntheses]) * 2048
-            ),
-            media_type="audio/wav",
-            model="qwen3-tts-flash",
-            voice=kwargs.get("voice") or "Cherry",
-            characters=len(text),
-        )
-
-    monkeypatch.setattr(tts_model, "synthesize", fake_synthesize)
-    first_arguments = {"text": "雨再大，也别让善意错过末班车。"}
-    first = asyncio.run(
-        execute_file_tts_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments=first_arguments,
-            idempotency_key="tts-distinct-first",
-        ),
-    )
-    second = asyncio.run(
-        execute_file_tts_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref=f"element:{ELEMENT_ID}",
-            arguments=second_arguments,
-            idempotency_key="tts-distinct-second",
-        ),
+    syntheses, first, second = _run_semantic_tts_pair(
+        _services(tmp_path, monkeypatch),
+        monkeypatch,
+        second_arguments,
     )
 
     assert syntheses == 2

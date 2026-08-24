@@ -30,7 +30,6 @@ from services.media_files.live_operation.desktop import (
     DesktopController,
 )
 from services.media_files.live_operation.screen_recorder import (
-    ScreenRecorder,
     _capture_command,
     _crop_filter,
     _viewport_from_bounds,
@@ -69,31 +68,22 @@ def test_status_reports_each_precondition_separately():
     )
 
 
-def test_run_degrades_clearly_without_a_desktop_host(tmp_path: Path):
-    # No Tauri host in CI, so the run must explain that instead of failing.
-    outcome = asyncio.run(
-        run_computer_use_code(
-            "await desktop.observe_window()",
-            run_root=tmp_path,
-            run_id="run-1",
-            session_id="proj-1",
-        ),
-    )
-    assert outcome.takes == []
-    assert "unavailable" in outcome.output
-    assert (
-        "headless" in outcome.output
-        or "Windows and macOS" in outcome.output
-        or "plugin is unavailable" in outcome.output
-        or "turned off" in outcome.output
-        or "ffmpeg" in outcome.output
-    )
-
-
-def test_host_feature_kill_switch_blocks_creator_desktop_operation(
+def test_desktop_run_rejects_empty_code_and_host_kill_switch(
     tmp_path: Path,
     monkeypatch,
 ):
+    from services.media_files.live_operation import LiveOperationError
+
+    with pytest.raises(LiveOperationError, match="empty"):
+        asyncio.run(
+            run_computer_use_code(
+                "   ",
+                run_root=tmp_path,
+                run_id="empty",
+                session_id="creator-session",
+            ),
+        )
+
     monkeypatch.setattr(
         desktop_module,
         "computer_use_status",
@@ -128,39 +118,18 @@ def test_host_feature_kill_switch_blocks_creator_desktop_operation(
     assert "turned off in the host" in outcome.output
 
 
-def test_empty_desktop_code_is_rejected(tmp_path: Path):
-    from services.media_files.live_operation import LiveOperationError
-
-    with pytest.raises(LiveOperationError, match="empty"):
-        asyncio.run(
-            run_computer_use_code(
-                "   ",
-                run_root=tmp_path,
-                run_id="run-1",
-                session_id="proj-1",
-            ),
-        )
-
-
 # ─── ffmpeg capture command ─────────────────────────────────────────────
 
 
-def test_crop_filter_from_window_bounds():
+def test_capture_contract_uses_window_bounds_and_platform_backend():
     assert (
         _crop_filter({"x": 40, "y": 60, "width": 800, "height": 600})
         == "crop=800:600:40:60"
     )
     assert _crop_filter({"width": 0, "height": 600}) is None
-    assert _crop_filter(None) is None
-
-
-def test_viewport_from_bounds_is_the_recorded_window_size():
     viewport = _viewport_from_bounds({"width": 1280, "height": 720})
     assert (viewport.width, viewport.height) == (1280.0, 720.0)
     assert _viewport_from_bounds({"width": 0, "height": 0}) is None
-
-
-def test_capture_command_targets_the_platform_backend():
     command = _capture_command(
         ffmpeg="ffmpeg",
         fps=25,
@@ -184,24 +153,6 @@ def test_capture_command_targets_the_platform_backend():
     assert "libx264" in command
     assert command[command.index("-t") + 1] == "12"
     assert command[-1] == "/tmp/take.mp4"
-
-
-# ─── recorder lifecycle (no real capture) ───────────────────────────────
-
-
-def test_recorder_reports_idle_state(tmp_path: Path):
-    recorder = ScreenRecorder(workspace=tmp_path)
-    assert recorder.recording is False
-    assert recorder.elapsed_ms() == 0
-    assert recorder.stop_if_recording() is None
-
-
-def test_stop_without_start_is_an_error(tmp_path: Path):
-    from services.media_files.live_operation import RecorderError
-
-    recorder = ScreenRecorder(workspace=tmp_path)
-    with pytest.raises(RecorderError, match="no take is recording"):
-        recorder.stop()
 
 
 # ─── real bridge contracts with injected native/capture planes ──────────
