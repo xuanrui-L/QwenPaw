@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronUp,
   Clapperboard,
   Download,
   Play,
+  RotateCcw,
   X,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -25,6 +27,190 @@ const SOURCE_STYLE: Record<RoughCutSource, string> = {
   none: "bg-black/50",
 };
 
+/* ------------------------------------------------------------------ */
+/* Cinema preview: plays the WHOLE story in narrative order; at branch  */
+/* points the audience choice surfaces so every fork is previewable.    */
+/* ------------------------------------------------------------------ */
+
+interface CinemaOption {
+  edgeId: string;
+  label: string;
+  target: string;
+}
+
+function PreviewCinema({
+  project,
+  startId,
+  labelOf,
+  srcOf,
+  onClose,
+}: {
+  project: ProjectDocument;
+  startId: string;
+  labelOf: (timelineId: string) => string;
+  srcOf: (timelineId: string) => string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const [currentId, setCurrentId] = useState(startId);
+  const [segmentIndex, setSegmentIndex] = useState(1);
+  const [options, setOptions] = useState<CinemaOption[] | null>(null);
+  const [ended, setEnded] = useState(false);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    setCurrentId(startId);
+    setSegmentIndex(1);
+    setOptions(null);
+    setEnded(false);
+    setError(false);
+  }, [startId]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const edges = project.narrative_edges;
+
+  const interactionQuestion = useMemo(() => {
+    const timeline = project.timelines.items[currentId];
+    if (!timeline) return null;
+    for (const element of Object.values(timeline.elements_by_id)) {
+      if (element.enabled && element.creation.type === "interaction") {
+        return element.creation.question || null;
+      }
+    }
+    return null;
+  }, [project, currentId]);
+
+  const advanceTo = useCallback((timelineId: string) => {
+    setCurrentId(timelineId);
+    setSegmentIndex((index) => index + 1);
+    setOptions(null);
+    setEnded(false);
+    setError(false);
+  }, []);
+
+  const handleEnded = useCallback(() => {
+    const outgoing = edges.filter(
+      (edge) => edge.source_timeline_id === currentId,
+    );
+    if (outgoing.length > 1) {
+      setOptions(
+        outgoing.map((edge) => ({
+          edgeId: edge.edge_id,
+          label:
+            edge.label || edge.prompt || labelOf(edge.target_timeline_id),
+          target: edge.target_timeline_id,
+        })),
+      );
+      return;
+    }
+    if (outgoing.length === 1) {
+      advanceTo(outgoing[0].target_timeline_id);
+      return;
+    }
+    if (edges.length === 0) {
+      // Linear story: fall through the ordered timelines.
+      const order = project.timelines.order;
+      const next = order[order.indexOf(currentId) + 1];
+      if (next) {
+        advanceTo(next);
+        return;
+      }
+    }
+    setEnded(true);
+  }, [edges, currentId, project, labelOf, advanceTo]);
+
+  // Portal to <body>: the strip's backdrop-filter would otherwise become
+  // the containing block for this fixed overlay and clip it.
+  return createPortal(
+    <div
+      data-roughcut-cinema
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-fit max-w-[86vw] overflow-hidden rounded-3xl border border-white/10 bg-black shadow-[0_32px_96px_rgba(0,0,0,.6)]"
+        onClick={(event) => event.stopPropagation()}
+      >
+        {error ? (
+          <div className="flex h-40 w-80 items-center justify-center px-6 text-center text-xs text-white/70">
+            {t("blueprint.roughCutFailed")}
+          </div>
+        ) : (
+          <video
+            key={currentId}
+            src={srcOf(currentId)}
+            controls
+            autoPlay
+            playsInline
+            onEnded={handleEnded}
+            onError={() => setError(true)}
+            className="block h-[min(76vh,760px)] w-auto max-w-full bg-black"
+          />
+        )}
+
+        {/* Branch choice overlay — every fork stays previewable. */}
+        {options && (
+          <div className="absolute inset-0 flex flex-col items-center justify-end gap-2.5 bg-gradient-to-t from-black/85 via-black/35 to-transparent pb-[12%]">
+            <p className="mb-1 px-6 text-center text-sm font-bold text-white drop-shadow">
+              {interactionQuestion ?? t("blueprint.previewChoice")}
+            </p>
+            {options.map((option) => (
+              <button
+                key={option.edgeId}
+                type="button"
+                onClick={() => advanceTo(option.target)}
+                className="w-[min(78%,320px)] rounded-xl border border-white/40 bg-white/10 px-4 py-2.5 text-[13px] font-bold text-white backdrop-blur-md transition-all hover:scale-[1.03] hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/50"
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Story finished — offer replay from the entry. */}
+        {ended && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70 backdrop-blur-sm">
+            <button
+              type="button"
+              onClick={() => {
+                setSegmentIndex(0);
+                advanceTo(project.timelines.order[0]);
+              }}
+              className="inline-flex h-16 w-16 items-center justify-center rounded-full border-2 border-[var(--color-accent)] bg-[var(--color-accent)]/25 text-white transition-all hover:scale-105 hover:bg-[var(--color-accent)]/60"
+              title={t("blueprint.previewReplay")}
+            >
+              <RotateCcw className="h-6 w-6" />
+            </button>
+            <p className="text-xs font-semibold text-white/80">
+              {t("blueprint.previewReplay")}
+            </p>
+          </div>
+        )}
+
+        <span className="absolute left-3 top-3 rounded-full bg-black/45 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-md">
+          {segmentIndex} · {labelOf(currentId)}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          title={t("blueprint.closeRoughCutPlayer")}
+          className="absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 interface BlueprintRoughCutStripProps {
   project: ProjectDocument;
   onSelectTimeline: (timelineId: string) => void;
@@ -43,7 +229,6 @@ export default function BlueprintRoughCutStrip({
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
-  const [playError, setPlayError] = useState(false);
   const frames = useMemo(() => selectRoughCutFrames(project), [project]);
   const readyCount = frames.filter((frame) => frame.source === "final").length;
   const timelineIds = useMemo(
@@ -71,20 +256,8 @@ export default function BlueprintRoughCutStrip({
   };
 
   const togglePlay = (timelineId: string) => {
-    setPlayError(false);
     setPlayingId((current) => (current === timelineId ? null : timelineId));
-    setCollapsed(false);
   };
-
-  // Escape closes the inline player.
-  useEffect(() => {
-    if (!playingId) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setPlayingId(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [playingId]);
 
   return (
     <section
@@ -96,6 +269,15 @@ export default function BlueprintRoughCutStrip({
           <Clapperboard className="h-3.5 w-3.5 text-[var(--color-accent)]" />
           {t("blueprint.roughCut")}
         </span>
+        <button
+          type="button"
+          data-roughcut-preview-all
+          onClick={() => setPlayingId(project.timelines.order[0])}
+          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--color-accent)] px-2.5 py-1 text-[10px] font-bold text-white shadow-[0_2px_8px_rgba(255,127,22,.3)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)]"
+        >
+          <Play className="h-3 w-3" />
+          {t("blueprint.previewAll")}
+        </button>
         <span className="hidden min-w-0 truncate text-[11px] text-[var(--color-text-tertiary)] lg:block">
           {t("blueprint.roughCutHint", {
             ready: readyCount,
@@ -162,45 +344,16 @@ export default function BlueprintRoughCutStrip({
         </span>
       </div>
       {playingId && (
-        <div
-          data-roughcut-player
-          className="absolute bottom-[calc(100%+10px)] right-5 z-30 w-fit max-w-[min(76vw,900px)] overflow-hidden rounded-2xl border border-white/10 bg-black/90 shadow-[0_24px_64px_rgba(0,0,0,.45)] backdrop-blur-xl"
-        >
-          {playError ? (
-            <div className="flex h-32 w-72 items-center justify-center px-6 text-center text-xs text-white/70">
-              {t("blueprint.roughCutFailed")}
-            </div>
-          ) : (
-            // w-fit container + auto width: the frame hugs the video's own
-            // aspect ratio, so portrait cuts show no pillar-box bars.
-            <video
-              key={playingId}
-              src={
-                finalCutUrlOf(playingId) ??
-                getTimelineRoughCutUrl(project.project_id, playingId)
-              }
-              controls
-              autoPlay
-              playsInline
-              onError={() => setPlayError(true)}
-              className="block h-[min(52vh,440px)] w-auto max-w-full bg-black"
-            />
-          )}
-          <span className="absolute left-2.5 top-2.5 rounded-full bg-black/45 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-md">
-            {timelineLabelOf(playingId)} ·{" "}
-            {finalCutUrlOf(playingId)
-              ? t("blueprint.finalCutBadge")
-              : t("blueprint.roughCut")}
-          </span>
-          <button
-            type="button"
-            onClick={() => setPlayingId(null)}
-            title={t("blueprint.closeRoughCutPlayer")}
-            className="absolute right-2.5 top-2.5 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
+        <PreviewCinema
+          project={project}
+          startId={playingId}
+          labelOf={timelineLabelOf}
+          srcOf={(timelineId) =>
+            finalCutUrlOf(timelineId) ??
+            getTimelineRoughCutUrl(project.project_id, timelineId)
+          }
+          onClose={() => setPlayingId(null)}
+        />
       )}
       {!collapsed && (
         <div className="mt-2 flex items-stretch gap-1.5 overflow-x-auto pb-1">

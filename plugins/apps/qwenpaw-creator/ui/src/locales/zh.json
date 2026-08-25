@@ -1833,6 +1833,9 @@
     "promptSaved": "Prompt 已保存",
     "promptSaveFailed": "保存失败：{{detail}}",
     "visualApproveHint": "设计确认在创作助手的待决策卡中完成，此处仅编辑",
-    "noDesignYet": "设计图待生成"
+    "noDesignYet": "设计图待生成",
+    "previewAll": "预览全片",
+    "previewChoice": "选择故事走向",
+    "previewReplay": "重新播放"
   }
 }
