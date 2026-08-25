@@ -98,6 +98,7 @@
     "copyFailed": "Failed to copy project",
     "recreateProject": "Recreate {{name}}",
     "recreateFailed": "Failed to get recreate parameters",
+    "projectGone": "Project no longer exists; it may have been deleted elsewhere",
     "loadFailed": "Failed to load project list",
     "notSet": "Not set",
     "previewFinal": "Preview {{name}} final",

@@ -98,6 +98,7 @@
     "copyFailed": "复制项目失败",
     "recreateProject": "重新创作 {{name}}",
     "recreateFailed": "获取重新创作参数失败",
+    "projectGone": "项目已不存在，可能已在别处被删除",
     "loadFailed": "加载项目列表失败",
     "notSet": "未设置",
     "previewFinal": "预览 {{name}} 成片",

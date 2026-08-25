@@ -35,6 +35,7 @@ from starlette.datastructures import UploadFile
 
 from domain.errors import (
     ConflictError,
+    NotFoundError,
     StorageIntegrityError,
     ValidationError,
     BadRequestError,
@@ -55,6 +56,7 @@ from services.project_files.models import (
     ProjectSettings,
 )
 from services.project_files.store import (
+    InvalidProjectId,
     ProjectAlreadyExists,
     ProjectIntegrityError,
     ProjectNotFound,
@@ -532,8 +534,10 @@ async def get_recreate_params(
 
     try:
         return await asyncio.to_thread(operation)
-    except ProjectNotFound:
-        raise
+    except ProjectNotFound as exc:
+        raise NotFoundError(str(exc)) from exc
+    except InvalidProjectId as exc:
+        raise BadRequestError(str(exc)) from exc
     except (ProjectIntegrityError, ProjectStoreError) as exc:
         raise StorageIntegrityError(str(exc)) from exc
 
@@ -666,8 +670,10 @@ async def copy_project(
 
     try:
         result = await asyncio.to_thread(operation)
-    except ProjectNotFound:
-        raise
+    except ProjectNotFound as exc:
+        raise NotFoundError(str(exc)) from exc
+    except InvalidProjectId as exc:
+        raise BadRequestError(str(exc)) from exc
     except (ConflictError, StorageIntegrityError):
         raise
     except (ProjectIntegrityError, ProjectStoreError, RuntimeFileError) as exc:
@@ -707,6 +713,13 @@ async def export_project(
                 "Content-Length": str(archive_size),
             },
         )
+    except ProjectNotFound as exc:
+        # A missing Project is a client addressing mistake, not a storage
+        # fault: it must stay a 404 instead of the 503 the generic branch
+        # below would report.
+        raise NotFoundError(str(exc)) from exc
+    except InvalidProjectId as exc:
+        raise BadRequestError(str(exc)) from exc
     except Exception as e:
         logger.error(
             f"failed to export project {_log_safe(project_id)}",
