@@ -1,4 +1,4 @@
-import { Button, InputNumber, Input, Popconfirm } from "antd";
+import { AutoComplete, Button, InputNumber, Input, Popconfirm } from "antd";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import type {
@@ -9,6 +9,32 @@ import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
 
 const { TextArea } = Input;
+
+// ShotDocument.camera / framing are free strings in the schema; these are
+// presentation-only presets — any custom text still writes straight back.
+const CAMERA_PRESETS = [
+  "⊙ 静止",
+  "→ 横移跟拍",
+  "← 横移",
+  "↗ 上摇",
+  "↘ 下摇",
+  "⇢ 推近",
+  "⇠ 拉远",
+  "◎ 环绕",
+  "〰 手持晃动",
+];
+const FRAMING_PRESETS = [
+  "远景",
+  "全景",
+  "中景",
+  "近景",
+  "特写",
+  "仰拍近景",
+  "俯拍",
+  "过肩",
+];
+const CAMERA_OPTIONS = CAMERA_PRESETS.map((value) => ({ value }));
+const FRAMING_OPTIONS = FRAMING_PRESETS.map((value) => ({ value }));
 
 type ShotField = "description" | "camera" | "framing" | "duration_seconds";
 
@@ -54,7 +80,8 @@ export default function ShotList({
             data-creator-module="shot-row"
             data-creator-module-id={shotId}
             data-creator-module-ref={`element:${elementId}`}
-            className="flex items-start gap-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-2.5"
+            data-shot-index={index}
+            className="flex items-start gap-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-2.5 transition-colors"
           >
             <span className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-bg-primary)] text-[10px] font-bold text-[var(--color-text-secondary)]">
               {index + 1}
@@ -83,7 +110,7 @@ export default function ShotList({
                   pointer={shotPointer(shotId, "description")}
                 />
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span
                   data-creator-field={`element:${elementId}/shot:${shotId}/camera`}
                   data-creator-path={shotPointer(shotId, "camera")}
@@ -92,17 +119,18 @@ export default function ShotList({
                   })}
                   className="contents"
                 >
-                  <Input
+                  <AutoComplete
                     value={shot.camera ?? ""}
                     disabled={disabled}
-                    onChange={(event) =>
-                      onChangeField(shotId, "camera", event.target.value)
+                    options={CAMERA_OPTIONS}
+                    onChange={(value) =>
+                      onChangeField(shotId, "camera", value ?? "")
                     }
                     onFocus={() => trackShotFocus(shotId, "camera")}
                     onBlur={releaseShotFocus}
                     size="small"
                     placeholder={t("workbench.shotCamera")}
-                    className="!w-28 !rounded-md !text-[11px]"
+                    className="!w-28 !text-[11px]"
                   />
                 </span>
                 <span
@@ -113,17 +141,18 @@ export default function ShotList({
                   })}
                   className="contents"
                 >
-                  <Input
+                  <AutoComplete
                     value={shot.framing ?? ""}
                     disabled={disabled}
-                    onChange={(event) =>
-                      onChangeField(shotId, "framing", event.target.value)
+                    options={FRAMING_OPTIONS}
+                    onChange={(value) =>
+                      onChangeField(shotId, "framing", value ?? "")
                     }
                     onFocus={() => trackShotFocus(shotId, "framing")}
                     onBlur={releaseShotFocus}
                     size="small"
                     placeholder={t("workbench.shotFraming")}
-                    className="!w-20 !rounded-md !text-[11px]"
+                    className="!w-20 !text-[11px]"
                   />
                 </span>
                 <span

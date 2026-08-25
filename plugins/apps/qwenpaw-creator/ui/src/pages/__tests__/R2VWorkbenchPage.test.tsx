@@ -161,21 +161,30 @@ describe("R2V Workbench page", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /进入制作工作台（参考生视频）/ }),
     );
+    // 制作台以方案页原地悬浮窗打开（不再跳转独立路由）。
     await waitFor(() =>
       expect(
         screen.getByText(/视频方案 \/ 午饭名场面 \/ 制作工作台/),
       ).toBeInTheDocument(),
     );
+    expect(
+      document.querySelector("[data-workbench-modal='r2v-window']"),
+    ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "返回视频方案" }));
-    // The creative brief moved to the blueprint page; the plan page now
-    // greets with the episode rail (multi-timeline fixture).
+    // embedded 制作台不渲染路由返回按钮；关闭走悬浮窗自己的关闭控件。
+    fireEvent.click(screen.getByRole("button", { name: "关闭制作台" }));
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "收起节点栏" }),
-      ).toBeInTheDocument(),
+        document.querySelector("[data-workbench-modal='r2v-window']"),
+      ).not.toBeInTheDocument(),
     );
-    expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();
+    // The creative brief moved to the blueprint page; the plan page now
+    // greets with the episode rail (multi-timeline fixture).
+    expect(
+      screen.getByRole("button", { name: "收起节点栏" }),
+    ).toBeInTheDocument();
+    // Prompt 编辑已迁往制作台；详情回落为关键信息总览。
+    expect(screen.getByText("创作意图")).toBeInTheDocument();
   });
 
   it("keeps non-R2V Elements out of the workbench with a way back", () => {
