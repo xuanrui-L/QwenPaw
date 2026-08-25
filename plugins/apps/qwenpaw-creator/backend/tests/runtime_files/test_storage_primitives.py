@@ -275,12 +275,12 @@ def test_same_thread_nested_lock_fails_immediately_with_owner_details(
 ):
     path = tmp_path / "nested.lock"
     with CrossProcessFileLock(path):
-        with pytest.raises(
-            RuntimeError,
-            match="same-thread nested Runtime lock acquisition",
-        ):
+        # Same-thread nesting is transient contention, not a validation
+        # failure: it must surface as the retryable lock timeout.
+        with pytest.raises(LockTimeoutError) as excinfo:
             with CrossProcessFileLock(path):
                 pass
+        assert "same-thread-nested" in str(excinfo.value)
 
 
 def test_cross_thread_release_clears_the_acquiring_threads_owner(tmp_path):

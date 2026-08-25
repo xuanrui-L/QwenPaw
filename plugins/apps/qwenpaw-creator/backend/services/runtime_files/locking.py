@@ -274,12 +274,15 @@ class CrossProcessFileLock:
         with _HELD_LOCKS_GUARD:
             held = _HELD_LOCKS.get(held_key)
             if held is not None:
-                message = (
-                    "same-thread nested Runtime lock acquisition "
-                    + "would deadlock: "
-                )
-                raise RuntimeFileValidationError(
-                    f"{message}path={self.path} held={held!r}",
+                # Waiting here would deadlock the worker thread on itself.
+                # To callers this is transient contention ("busy, retry
+                # shortly"), not a validation failure: raise the retryable
+                # lock timeout so reads surface 503 instead of 500.
+                raise LockTimeoutError(
+                    self.path,
+                    0.0,
+                    phase="same-thread-nested",
+                    holder=held if isinstance(held, dict) else None,
                 )
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
