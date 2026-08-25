@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronUp,
   Clapperboard,
+  Download,
   Play,
   X,
 } from "lucide-react";
@@ -62,6 +63,13 @@ export default function BlueprintRoughCutStrip({
     );
   };
 
+  const finalCutUrlOf = (timelineId: string) => {
+    const slot =
+      project.assets.artifact_slots_by_id[`timeline:${timelineId}:render`];
+    if (slot?.kind !== "final_video" || !slot.selected_version_id) return null;
+    return getArtifactVersionMediaUrl(slot.selected_version_id);
+  };
+
   const togglePlay = (timelineId: string) => {
     setPlayError(false);
     setPlayingId((current) => (current === timelineId ? null : timelineId));
@@ -85,24 +93,46 @@ export default function BlueprintRoughCutStrip({
           })}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          {timelineIds.map((timelineId) => (
-            <button
-              key={timelineId}
-              type="button"
-              data-roughcut-play={timelineId}
-              onClick={() => togglePlay(timelineId)}
-              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
-                playingId === timelineId
-                  ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
-                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-              }`}
-            >
-              <Play className="h-3 w-3" />
-              {multiTimeline
-                ? timelineLabelOf(timelineId)
-                : t("blueprint.playRoughCut")}
-            </button>
-          ))}
+          {timelineIds.map((timelineId) => {
+            const finalUrl = finalCutUrlOf(timelineId);
+            return (
+              <span key={timelineId} className="inline-flex items-center">
+                <button
+                  type="button"
+                  data-roughcut-play={timelineId}
+                  onClick={() => togglePlay(timelineId)}
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                    finalUrl ? "rounded-r-none border-r-0" : ""
+                  } ${
+                    playingId === timelineId
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                      : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  }`}
+                >
+                  <Play className="h-3 w-3" />
+                  {multiTimeline
+                    ? timelineLabelOf(timelineId)
+                    : t("blueprint.playRoughCut")}
+                  {finalUrl && (
+                    <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
+                      {t("blueprint.finalCutBadge")}
+                    </span>
+                  )}
+                </button>
+                {finalUrl && (
+                  <a
+                    href={finalUrl}
+                    download={`${timelineId.replace(/:/g, "_")}-final.mp4`}
+                    data-roughcut-download={timelineId}
+                    title={t("blueprint.downloadFinalCut")}
+                    className="inline-flex items-center rounded-full rounded-l-none border border-[var(--color-border)] px-1.5 py-0.5 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  >
+                    <Download className="h-3 w-3" />
+                  </a>
+                )}
+              </span>
+            );
+          })}
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
@@ -133,7 +163,10 @@ export default function BlueprintRoughCutStrip({
           ) : (
             <video
               key={playingId}
-              src={getTimelineRoughCutUrl(project.project_id, playingId)}
+              src={
+                finalCutUrlOf(playingId) ??
+                getTimelineRoughCutUrl(project.project_id, playingId)
+              }
               controls
               autoPlay
               playsInline
@@ -142,7 +175,10 @@ export default function BlueprintRoughCutStrip({
             />
           )}
           <span className="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-            {timelineLabelOf(playingId)} · {t("blueprint.roughCut")}
+            {timelineLabelOf(playingId)} ·{" "}
+            {finalCutUrlOf(playingId)
+              ? t("blueprint.finalCutBadge")
+              : t("blueprint.roughCut")}
           </span>
           <button
             type="button"

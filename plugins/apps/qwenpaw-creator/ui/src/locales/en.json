@@ -1741,6 +1741,11 @@
     "playRoughCut": "Play rough cut",
     "closeRoughCutPlayer": "Close player",
     "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
+    "finalCutBadge": "Final cut",
+    "downloadFinalCut": "Download final cut",
+    "exportBundle": "Export interactive bundle",
+    "exportBundleFailed": "Bundle not ready: every reachable branch needs its final cut first",
+    "exporting": "Exporting…",
     "frameSource": {
       "final": "Final",
       "storyboard": "Storyboard",
