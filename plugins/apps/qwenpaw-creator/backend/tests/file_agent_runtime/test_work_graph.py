@@ -489,6 +489,29 @@ def test_stale_marks_but_does_not_regenerate() -> None:
     assert node not in graph.ready_media_nodes()
 
 
+def test_stale_manual_storyboard_is_visible_but_not_dispatched() -> None:
+    """The lifecycle flag is authoritative, never automatic spend authority."""
+
+    project = _project()
+    _add_element(project, _element("elem:one"))
+    _select_slot(
+        project,
+        slot_id="element:elem:one:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:one",
+        version_id="art:manual-storyboard",
+    )
+    project.assets.artifact_versions_by_id[
+        "art:manual-storyboard"
+    ].stale = True
+
+    graph = derive_work_graph(project)
+    node = graph.by_id["storyboard:elem:one"]
+
+    assert node.status is WorkNodeStatus.STALE
+    assert node not in graph.ready_media_nodes()
+
+
 @pytest.mark.parametrize("changed_input", ["aspect_ratio", "shot_count"])
 def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
     changed_input,

@@ -1331,6 +1331,86 @@ _POSITIONAL_REFERENCE_TOKEN = re.compile(
 )
 
 
+# Explicit family dispatch keeps incompatible provider grammars separate.
+# pylint: disable-next=too-many-return-statements
+def _image_reference_marker_spec(
+    model_name: str,
+    protocol_backend: str = "",
+    *,
+    language: str = "zh-CN",
+) -> tuple[re.Pattern[str], str] | None:
+    """Return the configured provider's exact numbered-image token syntax."""
+
+    normalized = model_name.strip()
+    backend = video_backend_key(normalized, protocol_backend)
+    is_chinese = language.strip().casefold().startswith("zh")
+    if is_happyhorse_model(normalized):
+        return (re.compile(r"\[Image\s+(\d+)\]"), "[Image 1]")
+    if is_wan3_video_model(normalized) or (
+        backend == "wan" and _WAN_27_MODEL_PATTERN.fullmatch(normalized)
+    ):
+        return (
+            re.compile(r"图\s*(\d+)")
+            if is_chinese
+            else re.compile(r"\bImage\s+(\d+)\b", re.IGNORECASE),
+            "图1" if is_chinese else "Image 1",
+        )
+    if backend == "wan" and _WAN_26_MODEL_PATTERN.fullmatch(normalized):
+        return (
+            re.compile(r"\bcharacter\s*(\d+)\b", re.IGNORECASE),
+            "character1",
+        )
+    if backend == "seedance2":
+        return (
+            re.compile(r"图片\s*(\d+)")
+            if is_chinese
+            else re.compile(r"\bimage\s*(\d+)\b", re.IGNORECASE),
+            "图片1" if is_chinese else "image1",
+        )
+    if backend == "kling":
+        if "/" in normalized:
+            return (
+                re.compile(r"<<<image_(\d+)>>>", re.IGNORECASE),
+                "<<<image_1>>>",
+            )
+        return (
+            re.compile(r"@image_(\d+)\b", re.IGNORECASE),
+            "@image_1",
+        )
+    if backend == "vidu" and "/" in normalized:
+        return (re.compile(r"图\s*(\d+)"), "图1")
+    return None
+
+
+def video_prompt_image_reference_markers(
+    prompt: str,
+    model_name: str,
+    protocol_backend: str = "",
+    *,
+    language: str = "zh-CN",
+) -> tuple[tuple[int, int, str], ...]:
+    """Extract ``(index, offset, literal)`` for official image markers.
+
+    An empty tuple means either the configured model uses structured
+    references or the prompt did not use that model's exact marker syntax.
+    Keeping extraction beside the capability table lets synchronous role
+    review share one provider grammar with first-storyboard validation.
+    """
+
+    spec = _image_reference_marker_spec(
+        model_name,
+        protocol_backend,
+        language=language,
+    )
+    if spec is None:
+        return ()
+    pattern, _literal = spec
+    return tuple(
+        (int(match.group(1)), match.start(), match.group(0))
+        for match in pattern.finditer(prompt or "")
+    )
+
+
 # Provider syntax is deliberately kept in one auditable dispatch table.
 # pylint: disable-next=too-many-branches
 def video_prompt_storyboard_reference_violation(
@@ -1350,54 +1430,17 @@ def video_prompt_storyboard_reference_violation(
     text = prompt or ""
     normalized = model_name.strip()
     backend = video_backend_key(normalized, protocol_backend)
-    is_chinese = language.strip().casefold().startswith("zh")
-
-    expected: tuple[re.Pattern[str], str] | None = None
-    if is_happyhorse_model(normalized):
-        expected = (re.compile(r"\[Image\s+1\]"), "[Image 1]")
-    elif is_wan3_video_model(normalized):
-        expected = (
-            re.compile(r"图\s*1")
-            if is_chinese
-            else re.compile(r"\bImage\s+1\b", re.IGNORECASE),
-            "图1" if is_chinese else "Image 1",
-        )
-    elif backend == "wan" and _WAN_27_MODEL_PATTERN.fullmatch(normalized):
-        expected = (
-            re.compile(r"图\s*1")
-            if is_chinese
-            else re.compile(r"\bImage\s+1\b", re.IGNORECASE),
-            "图1" if is_chinese else "Image 1",
-        )
-    elif backend == "wan" and _WAN_26_MODEL_PATTERN.fullmatch(normalized):
-        expected = (
-            re.compile(r"\bcharacter\s*1\b", re.IGNORECASE),
-            "character1",
-        )
-    elif backend == "seedance2":
-        expected = (
-            re.compile(r"图片\s*1")
-            if is_chinese
-            else re.compile(r"\bimage\s*1\b", re.IGNORECASE),
-            "图片1" if is_chinese else "image1",
-        )
-    elif backend == "kling":
-        if "/" in normalized:
-            expected = (
-                re.compile(r"<<<image_1>>>", re.IGNORECASE),
-                "<<<image_1>>>",
-            )
-        else:
-            expected = (
-                re.compile(r"@image_1\b", re.IGNORECASE),
-                "@image_1",
-            )
-    elif backend == "vidu" and "/" in normalized:
-        expected = (re.compile(r"图\s*1"), "图1")
+    expected = _image_reference_marker_spec(
+        normalized,
+        protocol_backend,
+        language=language,
+    )
 
     if expected is not None:
         pattern, literal = expected
-        if pattern.search(text) is None:
+        if not any(
+            int(match.group(1)) == 1 for match in pattern.finditer(text)
+        ):
             return (
                 f"当前模型 `{normalized or '未配置'}` 的 storyboard 第一参考"
                 f"必须在 video_prompt 中使用 `{literal}` 指代"
@@ -1672,6 +1715,7 @@ __all__ = [
     "video_model_duration_guidance",
     "video_model_prompt_guidance",
     "video_model_supported_modes",
+    "video_prompt_image_reference_markers",
     "video_reference_capability",
     "video_prompt_storyboard_reference_violation",
     "video_reference_violation",

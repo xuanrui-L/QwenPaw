@@ -5930,6 +5930,7 @@ class FileCreatorAgentRuntime:
     # Fuse 1: never chain more unattended resumes than this since the last
     # human message — a stuck project must fall back to a human.
     YOLO_RESUME_MAX_CONSECUTIVE = 5
+    PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE = 5
 
     async def _queue_yolo_completion_resume(  # pylint: disable=too-many-return-statements
         self,
@@ -6031,28 +6032,44 @@ class FileCreatorAgentRuntime:
             after_seq=0,
             limit=None,
         )
+        active_resume_source = (
+            self.YOLO_RESUME_SOURCE
+            if auto_approve
+            else self.PROMPT_CONTRACT_RESUME_SOURCE
+        )
+        resume_limit = (
+            self.YOLO_RESUME_MAX_CONSECUTIVE
+            if auto_approve
+            else self.PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE
+        )
         resume_streak = 0
         last_resume_generation: int | None = None
         for item in reversed(messages):
             if item.role != "user":
                 continue
-            if item.source in {
-                self.YOLO_RESUME_SOURCE,
-                self.PROMPT_CONTRACT_RESUME_SOURCE,
-            }:
+            if item.source == active_resume_source:
                 if resume_streak == 0:
                     generation = item.metadata.get("projectGeneration")
                     if isinstance(generation, int):
                         last_resume_generation = generation
                 resume_streak += 1
                 continue
+            if item.source in {
+                self.YOLO_RESUME_SOURCE,
+                self.PROMPT_CONTRACT_RESUME_SOURCE,
+            }:
+                # A review-mode transition starts a distinct repair streak.
+                # Paid YOLO continuation and free prompt repair must never
+                # consume one another's fuse allowance.
+                break
             if item.source == self.MAINLINE_RESUME_SOURCE:
                 continue
             break
-        if resume_streak >= self.YOLO_RESUME_MAX_CONSECUTIVE:
+        if resume_streak >= resume_limit:
             logger.warning(
-                "YOLO auto-resume stopped for %s: %d consecutive resumes "
-                "without a human message",
+                "%s stopped for %s: %d consecutive resumes without a "
+                "human message",
+                active_resume_source,
                 project_id,
                 resume_streak,
             )

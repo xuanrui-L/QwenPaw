@@ -403,12 +403,14 @@ def _artifact_is_stale(
 ) -> bool:
     """True when provenance or an automatic dispatch input changed since.
 
-    Conservative: only flags when the artifact recorded provenance refs
-    and an upstream node's *current* selection is absent from them. For
-    scheduler-owned artifacts, the durable Task idempotency key also records
-    the work-graph fingerprint; this catches prompt/aspect/panel-count changes
-    that do not appear in media provenance. Agent/manual artifacts without a
-    graph identity remain conservative instead of being invalidated by guess.
+    An explicit lifecycle ``stale`` flag is authoritative for every artifact,
+    including manual ones, but returns the terminal STALE state rather than a
+    scheduler-dispatchable READY state. Otherwise this is conservative: it
+    only flags recorded provenance mismatches. For scheduler-owned artifacts,
+    the durable Task idempotency key also records the work-graph fingerprint;
+    this catches prompt/aspect/panel-count changes that do not appear in media
+    provenance. Agent/manual artifacts without a graph identity remain
+    conservative instead of being invalidated by a guessed fingerprint.
     """
 
     if not version_id:
@@ -417,6 +419,8 @@ def _artifact_is_stale(
     if artifact is None:
         return False
     if artifact.stale:
+        # STALE is intentionally excluded from ready_media_nodes(). This is a
+        # visible review signal, never permission to regenerate manual media.
         return True
     if artifact.provenance_refs:
         provenance = {

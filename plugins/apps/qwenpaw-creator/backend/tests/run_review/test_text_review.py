@@ -119,6 +119,8 @@ def _r2v_contract_project(
     storyboard_prompt: str,
     video_prompt: str,
     dialogues: tuple[str, ...] = ("",),
+    character_refs: tuple[str, ...] = (),
+    scene_ref: str | None = None,
 ) -> dict:
     shot_ids = tuple(f"shot:{index}" for index in range(1, len(dialogues) + 1))
     return {
@@ -130,6 +132,8 @@ def _r2v_contract_project(
                         "e": {
                             "creation": {
                                 "type": "r2v",
+                                "character_refs": list(character_refs),
+                                "scene_ref": scene_ref,
                                 "shots": {
                                     "items": {
                                         shot_id: {"dialogue": dialogue}
@@ -684,5 +688,81 @@ def test_happyhorse_role_scan_uses_the_full_reference_segment(
     )
 
     assert [item["code"] for item in report["findings"]] == [
+        "VIDEO_REFERENCE_ROLE_MISMATCH",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model", "backend", "language", "prompt"),
+    [
+        (
+            "wan3.0-video",
+            "wan",
+            "zh-CN",
+            "图1 为分镜。图2 为场景环境。图3 为角色人物。",
+        ),
+        (
+            "wan2.7-i2v",
+            "wan",
+            "zh-CN",
+            "图1 为分镜。图2 为场景环境。图3 为角色人物。",
+        ),
+        (
+            "wan2.6-r2v",
+            "wan",
+            "en-US",
+            "character1 is storyboard. character2 is scene environment. "
+            "character3 is character reference.",
+        ),
+        (
+            "doubao-seedance-2-0-250428",
+            "seedance2",
+            "zh-CN",
+            "图片1 为分镜。图片2 为场景环境。图片3 为角色人物。",
+        ),
+        (
+            "kling-v3-omni",
+            "kling",
+            "zh-CN",
+            "@image_1 为分镜。@image_2 为场景环境。@image_3 为角色人物。",
+        ),
+        (
+            "kling/kling-v3-omni-video-generation",
+            "kling",
+            "zh-CN",
+            "<<<image_1>>> 为分镜。<<<image_2>>> 为场景环境。" + "<<<image_3>>> 为角色人物。",
+        ),
+        (
+            "vidu/viduq3-mix_reference2video",
+            "vidu",
+            "zh-CN",
+            "图1 为分镜。图2 为场景环境。图3 为角色人物。",
+        ),
+    ],
+)
+def test_positional_provider_reference_roles_follow_runtime_order(
+    monkeypatch,
+    model,
+    backend,
+    language,
+    prompt,
+) -> None:
+    monkeypatch.setattr(model_config, "get_video_model_name", lambda: model)
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: backend)
+    project = _r2v_contract_project(
+        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
+        video_prompt=prompt,
+        character_refs=("char:hero",),
+        scene_ref="scene:room",
+    )
+    project["settings"]["language"] = language
+
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    assert [item["code"] for item in report["findings"]] == [
+        "VIDEO_REFERENCE_ROLE_MISMATCH",
         "VIDEO_REFERENCE_ROLE_MISMATCH",
     ]

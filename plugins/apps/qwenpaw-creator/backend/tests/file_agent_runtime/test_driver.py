@@ -2069,6 +2069,56 @@ def test_prompt_gap_feedback_is_queued_outside_auto_approve(
     assert wakes == [], "non-auto prompt repair must not wake paid scheduling"
 
 
+def test_prompt_repair_fuse_is_independent_from_previous_yolo_mode(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Changing review mode starts a fresh, non-paid repair streak."""
+
+    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    for index in range(driver.YOLO_RESUME_MAX_CONSECUTIVE):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"YOLO resume {index}"}],
+            source=driver.YOLO_RESUME_SOURCE,
+            channel=MessageChannel.RUNTIME,
+            metadata={"projectGeneration": snapshot.generation},
+        )
+    node = WorkNode(
+        node_id="video:ep1",
+        kind="video",
+        label="第一场 · 视频",
+        status=WorkNodeStatus.GATED,
+        missing=("video_prompt 缺失",),
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+    )
+
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-after-review-mode-change",
+        ),
+    )
+
+    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    assert messages[-1].source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+
+
 def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     tmp_path,
     monkeypatch,

@@ -15,7 +15,7 @@ from typing import Any
 
 from models import config as model_config
 from models.video_capabilities import (
-    is_happyhorse_model,
+    video_prompt_image_reference_markers,
     video_prompt_storyboard_reference_violation,
 )
 from services.file_agent_runtime.prompt_text import (
@@ -38,7 +38,6 @@ _BENIGN_BORDER_CONTEXT = re.compile(
     r")",
     re.IGNORECASE,
 )
-_HAPPYHORSE_MARKER = re.compile(r"\[Image\s+(\d+)\]", re.IGNORECASE)
 _REFERENCE_ROLE_PATTERNS: dict[str, re.Pattern[str]] = {
     "storyboard": re.compile(r"storyboard|分镜", re.IGNORECASE),
     "lineup": re.compile(r"cast\s+lineup|lineup|阵容图|群像", re.IGNORECASE),
@@ -110,11 +109,15 @@ def _finding(
     }
 
 
-def _happyhorse_reference_role_mismatches(
+def _reference_role_mismatches(
     prompt: str,
     creation: Mapping[str, Any],
-) -> list[tuple[int, str, str]]:
-    """Find explicit ``[Image N] is <role>`` declarations that are swapped.
+    *,
+    model_name: str,
+    protocol_backend: str,
+    language: str,
+) -> list[tuple[str, str, str]]:
+    """Find explicit numbered-reference role declarations that are swapped.
 
     Natural-language prompts are allowed to omit role labels. When the author
     does label a mapping, however, a declared prop in the Runtime's scene slot
@@ -132,22 +135,28 @@ def _happyhorse_reference_role_mismatches(
         expected_roles.append("scene")
     expected_roles.extend("prop" for _ in (creation.get("prop_refs") or []))
 
-    first_markers: dict[int, re.Match[str]] = {}
-    all_markers = list(_HAPPYHORSE_MARKER.finditer(prompt))
-    for marker in all_markers:
-        first_markers.setdefault(int(marker.group(1)), marker)
-    mismatches: list[tuple[int, str, str]] = []
+    all_markers = video_prompt_image_reference_markers(
+        prompt,
+        model_name,
+        protocol_backend,
+        language=language,
+    )
+    first_markers: dict[int, tuple[int, str]] = {}
+    for index, offset, literal in all_markers:
+        first_markers.setdefault(index, (offset, literal))
+    mismatches: list[tuple[str, str, str]] = []
     for index, expected in enumerate(expected_roles, start=1):
         marker = first_markers.get(index)
         if marker is None:
             continue
+        marker_start, literal = marker
         later = [
-            item.start()
-            for item in all_markers
-            if item.start() > marker.start()
+            offset
+            for _number, offset, _text in all_markers
+            if offset > marker_start
         ]
         end = min(later) if later else len(prompt)
-        segment = prompt[marker.start() : end]
+        segment = prompt[marker_start:end]
         declared = {
             role
             for role, pattern in _REFERENCE_ROLE_PATTERNS.items()
@@ -158,7 +167,7 @@ def _happyhorse_reference_role_mismatches(
         if len(declared) == 1:
             actual = next(iter(declared))
             if actual != expected:
-                mismatches.append((index, expected, actual))
+                mismatches.append((literal, expected, actual))
     return mismatches
 
 
@@ -334,30 +343,28 @@ def check_changed_r2v_prompt_contracts(
                             ),
                         ),
                     )
-                if is_happyhorse_model(video_model):
-                    for (
-                        index,
-                        expected,
-                        actual,
-                    ) in _happyhorse_reference_role_mismatches(
-                        video_prompt,
-                        creation,
-                    ):
-                        findings.append(
-                            _finding(
-                                code="VIDEO_REFERENCE_ROLE_MISMATCH",
-                                pointer=video_pointer,
-                                element_id=str(element_id),
-                                message=(
-                                    f"[Image {index}] 被声明为 {actual}，"
-                                    f"但 Runtime 该位置实际是 {expected}。"
-                                ),
-                                suggestion=(
-                                    "按 storyboard → cast lineup → character → "
-                                    "scene → prop → explicit extra refs 重排职责段。"
-                                ),
+                for literal, expected, actual in _reference_role_mismatches(
+                    video_prompt,
+                    creation,
+                    model_name=video_model,
+                    protocol_backend=video_backend,
+                    language=language,
+                ):
+                    findings.append(
+                        _finding(
+                            code="VIDEO_REFERENCE_ROLE_MISMATCH",
+                            pointer=video_pointer,
+                            element_id=str(element_id),
+                            message=(
+                                f"{literal} 被声明为 {actual}，"
+                                f"但 Runtime 该位置实际是 {expected}。"
                             ),
-                        )
+                            suggestion=(
+                                "按 storyboard → cast lineup → character → "
+                                "scene → prop → explicit extra refs 重排职责段。"
+                            ),
+                        ),
+                    )
                 prompt_key = dialogue_match_key(video_prompt)
                 for shot_id in order:
                     shot = items.get(shot_id)
