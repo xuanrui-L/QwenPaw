@@ -32,6 +32,7 @@ import { useNarrowWorkspace, useDetailRail } from "@/lib/useNarrowWorkspace";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
 import ElementList from "@/components/timeline/ElementList";
 import ElementDetail from "@/components/timeline/ElementDetail";
+import WorkbenchModal from "@/components/workbench/WorkbenchModal";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
 import VisualCoverageCheckpoint from "@/components/creator/VisualCoverageCheckpoint";
@@ -631,10 +632,13 @@ export default function PlanPage() {
     }
   };
   const closeElementDetail = () => leaveDraft(() => navigate(base));
+  // 制作台改为方案页原地悬浮窗打开（毛玻璃 Modal），不再跳转独立页面；
+  // 旧路由 /plan/element/:id 仍然保留用于深链。
+  const [workbenchElementId, setWorkbenchElementId] = useState<string | null>(
+    null,
+  );
   const openElementWorkbench = (element: TimelineElementDocument) =>
-    leaveDraft(() =>
-      navigate(`${base}/element/${encodeURIComponent(element.element_id)}`),
-    );
+    setWorkbenchElementId(element.element_id);
 
   const elementDetailNode = (
     <ElementDetail
@@ -895,6 +899,14 @@ export default function PlanPage() {
           )}
         </main>
       </div>
+
+      {workbenchElementId && timeline.elements_by_id[workbenchElementId] && (
+        <WorkbenchModal
+          projectId={id}
+          element={timeline.elements_by_id[workbenchElementId]}
+          onClose={() => setWorkbenchElementId(null)}
+        />
+      )}
 
       {exportProgress && (
         <ExportProgressCard

@@ -150,8 +150,9 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(screen.getByText("6 项内容")).toBeInTheDocument();
     expect(screen.getByText(/4 轨/)).not.toHaveTextContent("可上下滚动");
     expect(screen.getAllByText("午饭名场面").length).toBeGreaterThan(0);
-    expect(screen.getByText("分镜描述")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();
+    // 总览层：分镜/视频 Prompt 的全量编辑迁往制作台悬浮窗，详情保留创作语境字段。
+    expect(screen.getByText("创作意图")).toBeInTheDocument();
+    expect(screen.queryByText("分镜描述")).not.toBeInTheDocument();
 
     // Detail edits stay local on blur and commit via CAS Patch on Apply.
     const name = screen.getByDisplayValue("午饭名场面");

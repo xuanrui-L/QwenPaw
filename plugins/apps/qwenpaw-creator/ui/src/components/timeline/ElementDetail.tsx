@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Input, InputNumber, Select } from "antd";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
@@ -8,11 +8,14 @@ import {
   Clock3,
   Film,
   Layers3,
+  Music2,
   Sparkles,
+  WandSparkles,
   X,
 } from "lucide-react";
 import type {
   ProjectDocument,
+  R2VReferenceOrderResponse,
   TaskView,
   TimelineDocument,
   TimelineElementDocument,
@@ -20,9 +23,11 @@ import type {
 import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
+  getR2VReferenceOrder,
 } from "@/api/creator";
 import {
   TRANSITION_KIND_LABEL,
+  classifyElementTrack,
   resolveElementOutputs,
   resolveElementVisualMeta,
 } from "@/selectors/timelineElementSelectors";
@@ -136,20 +141,24 @@ function taskStatus(
           ? t("elementDetail.generating")
           : t("elementDetail.waiting"),
       tone: "text-[var(--color-warning)] bg-[var(--color-warning-soft)]",
+      running: true,
     };
   if (task?.status === "FAILED" || task?.status === "QUARANTINED")
     return {
       label: t("elementDetail.genFailed"),
       tone: "text-[var(--color-danger)] bg-[var(--color-danger-soft)]",
+      running: false,
     };
   if (Object.keys(element.outputs).length)
     return {
       label: t("elementDetail.hasProduct"),
       tone: "text-[var(--color-success)] bg-[var(--color-success-soft)]",
+      running: false,
     };
   return {
     label: t("elementDetail.editable"),
     tone: "text-[var(--color-text-secondary)] bg-[var(--color-bg-secondary)]",
+    running: false,
   };
 }
 
@@ -166,6 +175,150 @@ function getLocationFields(t: (key: string) => string) {
     rotation_degrees: t("elementDetail.rotation"),
     opacity: t("elementDetail.opacity"),
   } as const;
+}
+
+// ── 总览层积木（排版驱动：pill / 小节标签 / 主句 / 缩略图） ──
+
+function TypeGlyph({ element }: { element: TimelineElementDocument }) {
+  const track = classifyElementTrack(element);
+  if (element.creation.type === "audio" || track === null)
+    return <Music2 className="h-3.5 w-3.5" />;
+  if (track === "subtitle") return <Layers3 className="h-3.5 w-3.5" />;
+  if (track === "motion") return <Sparkles className="h-3.5 w-3.5" />;
+  if (track === "transition") return <WandSparkles className="h-3.5 w-3.5" />;
+  if (track === "ai") return <Sparkles className="h-3.5 w-3.5" />;
+  return <Film className="h-3.5 w-3.5" />;
+}
+
+function Pill({
+  tone,
+  children,
+}: {
+  tone?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full bg-[var(--color-bg-secondary)] px-2.5 py-[3px] text-[10.5px] font-medium text-[var(--color-text-secondary)]"
+      style={
+        tone
+          ? {
+              background: `color-mix(in srgb, ${tone} 10%, transparent)`,
+              color: `color-mix(in srgb, ${tone} 85%, #000)`,
+            }
+          : undefined
+      }
+    >
+      {children}
+    </span>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="mb-2 mt-1 text-[9.5px] font-bold uppercase tracking-[.09em] text-[var(--color-text-tertiary)]">
+      {children}
+    </p>
+  );
+}
+
+function LeadText({
+  intent,
+  continuity,
+}: {
+  intent?: string;
+  continuity?: string;
+}) {
+  if (!intent && !continuity) return null;
+  return (
+    <p
+      data-element-overview-lead
+      className="text-[13.5px] font-medium leading-[1.75] text-[var(--color-text-primary)]"
+    >
+      {intent}
+      {continuity ? (
+        <span className="mt-1 block text-xs font-normal text-[var(--color-text-secondary)]">
+          ↳ {continuity}
+        </span>
+      ) : null}
+    </p>
+  );
+}
+
+function RefThumb({
+  url,
+  name,
+  index,
+}: {
+  url: string | null;
+  name: string;
+  index?: number;
+}) {
+  return (
+    <span className="relative inline-block" title={name}>
+      {url ? (
+        <img
+          src={url}
+          alt={name}
+          className="h-10 w-[54px] rounded-[10px] border border-[var(--color-border)] object-cover"
+        />
+      ) : (
+        <span className="flex h-10 w-[54px] items-center justify-center rounded-[10px] border border-dashed border-[var(--color-border)] px-1 text-center text-[9px] leading-tight text-[var(--color-text-tertiary)]">
+          {name.slice(0, 6)}
+        </span>
+      )}
+      {index != null && (
+        <i className="absolute left-1 top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-[5px] bg-black/55 px-0.5 font-mono text-[8px] font-bold not-italic text-white">
+          {index}
+        </i>
+      )}
+    </span>
+  );
+}
+
+/** 版本 → 图片缩略 URL（生成产物或上传素材；非图片返回 null）。 */
+function referenceThumbUrl(
+  project: ProjectDocument,
+  versionId: string,
+): string | null {
+  const artifact = project.assets.artifact_versions_by_id[versionId];
+  if (artifact) {
+    const mediaType =
+      (artifact.file_id &&
+        project.assets.files_by_id[artifact.file_id]?.media_type) ||
+      "";
+    return mediaType.startsWith("image/")
+      ? getArtifactVersionMediaUrl(versionId)
+      : null;
+  }
+  const source = project.assets.source_versions_by_id[versionId];
+  return source?.media_kind === "image"
+    ? getAssetVersionMediaUrl(versionId)
+    : null;
+}
+
+/** 视觉实体 → 选中 Variant 产物缩略（与工作台取图逻辑一致的轻量版）。 */
+function entityThumb(
+  project: ProjectDocument,
+  entityRef: string,
+  variantRefs: Record<string, string>,
+): { name: string; url: string | null } {
+  const entityId = entityRef.replace(/^visual-entity:/, "");
+  const entity = project.visual.entities.items[entityId];
+  if (!entity) return { name: entityRef, url: null };
+  const variantId =
+    variantRefs[entityRef] ??
+    variantRefs[entityId] ??
+    (entity.variants.order.length === 1 ? entity.variants.order[0] : null);
+  const versionId = variantId
+    ? entity.variants.items[variantId]?.selected_artifact_version_id ?? null
+    : entity.variants.order.length === 0
+    ? entity.selected_artifact_version_id
+    : null;
+  return {
+    name: entity.name || entityId,
+    url: versionId ? getArtifactVersionMediaUrl(versionId) : null,
+  };
 }
 
 export default function ElementDetail({
@@ -188,6 +341,30 @@ export default function ElementDetail({
     () => (element ? resolveElementOutputs(project, element) : []),
     [element, project],
   );
+  // r2v 总览引用缩略的权威 [Image N] 序号；失败/非 r2v 时回退客户端聚合。
+  const [referenceOrder, setReferenceOrder] =
+    useState<R2VReferenceOrderResponse | null>(null);
+  const overviewElementId = element?.element_id ?? null;
+  const overviewIsR2v = element?.creation.type === "r2v";
+  useEffect(() => {
+    if (!overviewElementId || !overviewIsR2v) {
+      setReferenceOrder(null);
+      return;
+    }
+    let cancelled = false;
+    setReferenceOrder(null);
+    getR2VReferenceOrder(project.project_id, overviewElementId)
+      .then((order) => {
+        if (!cancelled)
+          setReferenceOrder(Array.isArray(order?.references) ? order : null);
+      })
+      .catch(() => {
+        if (!cancelled) setReferenceOrder(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project.project_id, overviewElementId, overviewIsR2v]);
 
   if (!element) {
     return (
@@ -220,6 +397,89 @@ export default function ElementDetail({
   const pointer = (...segments: Array<string | number>) =>
     projectJsonPointer(...baseSegments, ...segments);
   const creation = element.creation;
+  const isVideoMode =
+    creation.type === "r2v" ||
+    creation.type === "t2v" ||
+    creation.type === "i2v" ||
+    creation.type === "s2v";
+  const spanStart = sec(element.span.start_tick, timeline.ticks_per_second);
+  const spanEnd = sec(
+    element.span.start_tick + element.span.duration_tick,
+    timeline.ticks_per_second,
+  );
+  // ── 总览关键信息（按类型组装；只呈现有信息量的内容） ──
+  const lead: { intent?: string; continuity?: string } | null = (() => {
+    if (
+      creation.type === "r2v" ||
+      creation.type === "t2v" ||
+      creation.type === "i2v"
+    )
+      return { intent: creation.intent, continuity: creation.continuity };
+    if (creation.type === "s2v") return { intent: creation.intent };
+    if (creation.type === "edit")
+      return { intent: creation.intent, continuity: creation.reason };
+    if (creation.type === "motion_clip") return { intent: creation.intent };
+    if (creation.type === "overlay")
+      return creation.vibe ? { intent: creation.vibe } : null;
+    return null;
+  })();
+  const r2vShots =
+    creation.type === "r2v"
+      ? creation.shots.order
+          .map((shotId) => creation.shots.items[shotId])
+          .filter((shot): shot is NonNullable<typeof shot> => Boolean(shot))
+      : [];
+  const r2vShotsTotal = r2vShots.reduce(
+    (total, shot) => total + (shot.duration_seconds ?? 0),
+    0,
+  );
+  const r2vRefThumbs = (() => {
+    if (creation.type !== "r2v") return [];
+    if (referenceOrder?.references.length) {
+      return referenceOrder.references.map((item) => ({
+        key: `${item.kind}:${item.versionId}`,
+        index: item.index,
+        name: item.name,
+        url: referenceThumbUrl(project, item.versionId),
+      }));
+    }
+    const entities = [
+      ...(creation.scene_ref ? [creation.scene_ref] : []),
+      ...creation.character_refs,
+      ...creation.prop_refs,
+    ].map((ref) => {
+      const info = entityThumb(project, ref, creation.visual_variant_refs);
+      return {
+        key: ref,
+        index: undefined as number | undefined,
+        name: info.name,
+        url: info.url,
+      };
+    });
+    const materials = [
+      ...new Set([
+        ...creation.storyboard_reference_version_ids,
+        ...creation.video_reference_version_ids,
+      ]),
+    ].map((versionId) => ({
+      key: versionId,
+      index: undefined as number | undefined,
+      name:
+        project.assets.artifact_versions_by_id[versionId]?.name ??
+        project.assets.source_versions_by_id[versionId]?.name ??
+        versionId,
+      url: referenceThumbUrl(project, versionId),
+    }));
+    return [...entities, ...materials];
+  })();
+  const i2vFrameUrl =
+    creation.type === "i2v" && creation.first_frame_version_id
+      ? referenceThumbUrl(project, creation.first_frame_version_id)
+      : null;
+  const s2vPortraitUrl =
+    creation.type === "s2v" && creation.portrait_version_id
+      ? referenceThumbUrl(project, creation.portrait_version_id)
+      : null;
 
   return (
     <section
@@ -227,18 +487,33 @@ export default function ElementDetail({
       data-onboarding-id="element-detail"
       className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-sm"
     >
-      <header className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--color-border)] px-4 py-3">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <span
-              className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold"
-              style={{ color: meta.color, background: meta.soft }}
-            >
-              {meta.label}
-            </span>
-            <h3 className="truncate text-base font-semibold text-[var(--color-text-primary)]">
+      <style>{`@keyframes elementOverviewRunbar { from { transform: translateX(-120%); } to { transform: translateX(400%); } }`}</style>
+      <header className="flex shrink-0 items-start justify-between gap-3 px-4 pb-1 pt-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span
+            className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg"
+            style={{ background: meta.soft, color: meta.color }}
+          >
+            <TypeGlyph element={element} />
+          </span>
+          <div className="flex min-w-0 items-baseline gap-2.5">
+            <h3 className="truncate text-[15px] font-semibold text-[var(--color-text-primary)]">
               {element.label || element.element_id}
             </h3>
+            <span
+              data-element-detail-status
+              className={`inline-flex shrink-0 items-center gap-1.5 text-[11px] font-medium ${status.tone
+                .split(" ")
+                .filter((token) => token.startsWith("text-"))
+                .join(" ")}`}
+            >
+              <i
+                className={`h-1.5 w-1.5 rounded-full bg-current not-italic ${
+                  status.running ? "animate-pulse" : ""
+                }`}
+              />
+              {status.label}
+            </span>
           </div>
         </div>
         <div
@@ -270,12 +545,6 @@ export default function ElementDetail({
               {t("elementDetail.disabled")}
             </span>
           )}
-          <span
-            data-element-detail-status
-            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${status.tone}`}
-          >
-            {status.label}
-          </span>
           <button
             type="button"
             onClick={onClose}
@@ -286,6 +555,36 @@ export default function ElementDetail({
           </button>
         </div>
       </header>
+      {/* 安静 pill 行：类型 / 模式 / 区间 / 层级（location=null 即全画幅） */}
+      <div className="flex shrink-0 flex-wrap gap-1.5 border-b border-[var(--color-border)] px-4 pb-3 pt-1.5">
+        <Pill tone={meta.color}>{meta.label}</Pill>
+        {isVideoMode && <Pill>{t(`r2v.modeLabel.${creation.type}`)}</Pill>}
+        <Pill>
+          {spanStart}s – {spanEnd}s
+        </Pill>
+        <Pill>
+          {element.location
+            ? `z ${element.z_index}`
+            : `全画幅 · z ${element.z_index}`}
+        </Pill>
+        {creation.type === "r2v" && r2vShots.length > 0 && (
+          <Pill>
+            {r2vShots.length} Shot · {r2vShotsTotal}s
+          </Pill>
+        )}
+      </div>
+      {/* 生成中：类型色流光进度带（产物在时间轴实时预览） */}
+      {status.running && (
+        <div className="relative mx-4 mt-2 h-[2px] shrink-0 overflow-hidden rounded-full bg-[var(--color-border)]">
+          <i
+            className="absolute bottom-0 top-0 w-[36%] rounded-full not-italic"
+            style={{
+              background: `linear-gradient(90deg, transparent, ${meta.color}, transparent)`,
+              animation: "elementOverviewRunbar 1.8s linear infinite",
+            }}
+          />
+        </div>
+      )}
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 [scrollbar-gutter:stable]">
         {conflictPaths.length > 0 && (
@@ -303,6 +602,108 @@ export default function ElementDetail({
             }
           />
         )}
+
+        {/* ── 关键信息总览（排版驱动；全量编辑在制作台） ── */}
+        {(lead?.intent || lead?.continuity) && (
+          <LeadText intent={lead.intent} continuity={lead.continuity} />
+        )}
+        {creation.type === "r2v" && r2vShots.length > 0 && (
+          <div data-element-overview-shots>
+            <SectionLabel>
+              Shots · {r2vShots.length} 个 · 合计 {r2vShotsTotal}s
+            </SectionLabel>
+            <div className="flex h-[38px] gap-1">
+              {r2vShots.map((shot, index) => (
+                <span
+                  key={shot.shot_id}
+                  title={shot.description}
+                  className="flex min-w-0 flex-col justify-center rounded-[9px] border px-2.5"
+                  style={{
+                    flex: Math.max(shot.duration_seconds ?? 1, 1),
+                    borderColor: `color-mix(in srgb, ${meta.color} 26%, transparent)`,
+                    background: `color-mix(in srgb, ${meta.color} 8%, transparent)`,
+                  }}
+                >
+                  <b className="truncate text-[10px] font-semibold text-[var(--color-text-primary)]">
+                    {index + 1} · {shot.framing || "景别"}
+                  </b>
+                  <span className="truncate text-[8.5px] text-[var(--color-text-tertiary)]">
+                    {shot.camera || "运镜"} · {shot.duration_seconds ?? "-"}s
+                  </span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {creation.type === "r2v" && r2vRefThumbs.length > 0 && (
+          <div data-element-overview-refs>
+            <SectionLabel>
+              引用素材 · {r2vRefThumbs.length} 项
+              {referenceOrder?.references.length
+                ? " · [Image N] 提交顺序"
+                : ""}
+            </SectionLabel>
+            <div className="flex flex-wrap gap-2">
+              {r2vRefThumbs.map((item) => (
+                <RefThumb
+                  key={item.key}
+                  url={item.url}
+                  name={item.name}
+                  index={item.index}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        {creation.type === "t2v" && creation.video_prompt && (
+          <div>
+            <SectionLabel>
+              视频 Prompt · {creation.video_prompt.length} 字
+            </SectionLabel>
+            <p className="line-clamp-3 border-l-2 border-[var(--color-border-strong)] pl-3 text-xs leading-[1.9] text-[var(--color-text-secondary)]">
+              {creation.video_prompt}
+            </p>
+          </div>
+        )}
+        {creation.type === "i2v" && (
+          <div>
+            <SectionLabel>首帧图</SectionLabel>
+            {i2vFrameUrl ? (
+              <img
+                src={i2vFrameUrl}
+                alt="首帧图"
+                className="h-[88px] w-auto max-w-full rounded-[10px] border border-[var(--color-border)] object-cover"
+              />
+            ) : (
+              <p className="text-xs text-[var(--color-text-tertiary)]">
+                尚未选择首帧图
+              </p>
+            )}
+          </div>
+        )}
+        {creation.type === "s2v" && (
+          <div className="space-y-3">
+            {creation.script && (
+              <div>
+                <SectionLabel>台词</SectionLabel>
+                <p className="line-clamp-3 border-l-2 border-[var(--color-border-strong)] pl-3 text-xs leading-[1.9] text-[var(--color-text-secondary)]">
+                  {creation.script}
+                </p>
+              </div>
+            )}
+            {s2vPortraitUrl && (
+              <div>
+                <SectionLabel>人像</SectionLabel>
+                <img
+                  src={s2vPortraitUrl}
+                  alt="人像"
+                  className="h-[84px] w-auto max-w-full rounded-[10px] border border-[var(--color-border)] object-cover"
+                />
+              </div>
+            )}
+          </div>
+        )}
+
         <section className="rounded-xl border border-[var(--color-border)] p-3">
           <div className="mb-3">
             <h4 className="flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
@@ -509,57 +910,13 @@ export default function ElementDetail({
                   })
                 }
               />
-              <TextField
-                label={t("elementDetail.storyboardDesc")}
-                value={creation.storyboard_prompt}
-                multiline
-                path={pointer("creation", "storyboard_prompt")}
-                field={`element:${element.element_id}/creation/storyboard_prompt`}
-                disabled={applying}
-                onChange={(value) =>
-                  onChange((draft) => {
-                    if (draft.creation.type === "r2v")
-                      draft.creation.storyboard_prompt = value;
-                  })
-                }
-              />
-              <TextField
-                label={t("elementDetail.videoDesc")}
-                value={creation.video_prompt}
-                multiline
-                path={pointer("creation", "video_prompt")}
-                field={`element:${element.element_id}/creation/video_prompt`}
-                disabled={applying}
-                onChange={(value) =>
-                  onChange((draft) => {
-                    if (draft.creation.type === "r2v")
-                      draft.creation.video_prompt = value;
-                  })
-                }
-              />
-              {creation.shots.order.length > 0 && (
-                <div>
-                  <FieldLabel>{t("elementDetail.storyboards")}</FieldLabel>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {creation.shots.order.map((shotId, index) => {
-                      const shot = creation.shots.items[shotId];
-                      if (!shot) return null;
-                      return (
-                        <div
-                          key={shotId}
-                          className="rounded-lg bg-[var(--color-bg-secondary)] p-2.5 text-[11px] leading-5 text-[var(--color-text-secondary)]"
-                        >
-                          <b className="text-[var(--color-text-primary)]">
-                            {String(index + 1).padStart(2, "0")} ·{" "}
-                            {shot.camera || t("lib.camera")}
-                          </b>
-                          <p>{shot.description}</p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
+              <p className="text-[10px] leading-4 text-[var(--color-text-tertiary)]">
+                分镜 Prompt、视频 Prompt、Shot 与引用素材的全量编辑请使用下方「
+                {t("elementDetail.enterWorkbench", {
+                  mode: t("r2v.modeLabel.r2v"),
+                })}
+                」。
+              </p>
             </div>
           )}
           {creation.type === "edit" && (
@@ -945,56 +1302,39 @@ export default function ElementDetail({
                 {t("elementDetail.noResult")}
               </p>
             ) : (
-              <div className="space-y-3">
-                {outputs.map((output) => {
-                  const file = output.selected
-                    ? project.assets.files_by_id[output.selected.file_id]
-                    : null;
-                  const mediaType = file?.media_type || "";
-                  const url = output.selected
-                    ? getArtifactVersionMediaUrl(output.selected.version_id)
-                    : null;
-                  return (
-                    <div
-                      key={output.name}
-                      className="overflow-hidden rounded-lg border border-[var(--color-border)]"
+              <div className="space-y-1.5">
+                {outputs.map((output) => (
+                  <div
+                    key={output.name}
+                    className="flex items-center justify-between gap-2 rounded-lg bg-[var(--color-bg-secondary)]/60 px-3 py-2 text-[11px]"
+                  >
+                    <b className="text-[var(--color-text-primary)]">
+                      {outputLabel(output.name)}
+                    </b>
+                    <span
+                      className={
+                        output.selected?.stale
+                          ? "text-[var(--color-warning)]"
+                          : output.selected
+                          ? "text-[var(--color-success)]"
+                          : "text-[var(--color-text-tertiary)]"
+                      }
                     >
-                      <div className="flex items-center justify-between gap-2 bg-[var(--color-bg-secondary)] px-3 py-2 text-[11px]">
-                        <b>{outputLabel(output.name)}</b>
-                        <span className="text-[var(--color-text-tertiary)]">
-                          {output.selected
-                            ? t("elementDetail.generated")
-                            : t("elementDetail.notGenerated")}
-                        </span>
-                      </div>
-                      {url && mediaType.startsWith("image/") && (
-                        <img
-                          src={url}
-                          alt={`${output.name} ${t("lib.output")}`}
-                          className="max-h-56 w-full bg-black object-contain"
-                        />
-                      )}
-                      {url && mediaType.startsWith("video/") && (
-                        <video
-                          src={url}
-                          controls
-                          preload="metadata"
-                          className="max-h-64 w-full bg-black object-contain"
-                        />
-                      )}
-                      {url && mediaType.startsWith("audio/") && (
-                        <audio src={url} controls className="w-full p-3" />
-                      )}
-                      {output.selected?.stale && (
-                        <p className="px-3 py-2 text-[10px] text-[var(--color-warning)]">
-                          {t("elementDetail.resultStale")}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
+                      {output.selected?.stale
+                        ? `${t("elementDetail.generated")} · ${t(
+                            "elementDetail.resultStale",
+                          )}`
+                        : output.selected
+                        ? t("elementDetail.generated")
+                        : t("elementDetail.notGenerated")}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
+            <p className="mt-2 text-center text-[10px] text-[var(--color-text-tertiary)]">
+              产物请在时间轴实时预览 · 全量编辑请打开制作台
+            </p>
           </section>
         )}
       </div>

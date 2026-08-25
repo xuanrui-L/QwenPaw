@@ -1014,3 +1014,11 @@ a {
     animation: none;
   }
 }
+
+/* Workbench: Shot row highlight driven by hovering a SHOT badge inside
+   PromptRichBlock's reference preview (Shot ↔ Prompt segment linkage). */
+.workbench-shot-hl {
+  border-color: var(--color-accent) !important;
+  background: var(--color-accent-soft) !important;
+  box-shadow: 0 0 0 2px var(--color-accent-soft);
+}
