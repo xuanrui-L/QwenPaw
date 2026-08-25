@@ -354,8 +354,9 @@ _R2V_ARGUMENTS = _arguments_schema(
             "default": True,
             "description": (
                 "默认 true：生成视频原生自带台词与环境音（人声的唯一来源）。"
-                "背景音乐不要写进 prompt，由 Timeline 上 role=bgm 的 audio "
-                "Element 统一提供；仅在明确需要无声画面时传 false"
+                "背景音乐不要写进 prompt（配乐由 Project 中独立的 "
+                "creation.type=audio Element 承载，与本工具无关）；"
+                "仅在明确需要无声画面时传 false"
             ),
         },
     },

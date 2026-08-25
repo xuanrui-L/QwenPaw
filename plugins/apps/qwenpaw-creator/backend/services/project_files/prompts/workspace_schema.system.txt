@@ -53,7 +53,7 @@ Project
 - source、visual、artifact、file 等引用必须指向当前 Project 中已经存在的实体或版本。
 - `assets` 中的文件和版本记录来自素材入库、素材理解或媒体生成结果；未产出的结果保持 `null` 或空集合。
 - 禁止使用 `pending-render`、`todo`、`placeholder` 等虚构 ID。
-- R2V Creation 的 `storyboard_reference_version_ids` 和 `video_reference_version_ids` 属于 `creation.r2v` 层级（与 `storyboard_prompt`、`video_prompt` 同级），不属于 `shots` 层级。`shots` 只包含 Shot 对象（shot_id、description、camera、framing、camera_description、dialogue、duration_seconds、character_refs、scene_ref、prop_refs），不包含 reference_version_ids 字段。
+- R2V Creation 的 `storyboard_reference_version_ids` 和 `video_reference_version_ids` 是 `creation`（type=r2v）顶层字段（与 `storyboard_prompt`、`video_prompt` 同级），不属于 `shots` 层级。`shots` 只包含 Shot 对象（shot_id、description、camera、framing、camera_description、dialogue、duration_seconds、character_refs、scene_ref、prop_refs），不包含 reference_version_ids 字段。
 - 视频生成按 creation 类型区分，每个类型只包含其模型真正消费的字段：
   - `type=r2v`（参考生视频）：完整的 shots/分镜/参考链路。
   - `type=t2v`（纯文本生视频）：只有 intent/narrative/continuity/video_prompt/recipe，无 shots、无分镜、无参考。

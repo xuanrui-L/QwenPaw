@@ -270,7 +270,7 @@ video Prompt 必须以**时间戳分段**形式，将每个 Storyboard 格映射
    多角色对话场景需明确**交互节奏**：谁先说、间隔多长、对方如何反应（表情/肢体/台词），不是轮流独白。
    无台词时跳过此段。
 3. **运镜与节奏**（必选）：该格的运镜方式 + 动作推进速度（缓缓/匀速/快速/突然），基于 Shot 的 camera 和 framing 编写。
-4. **声音设计**（当内容需要时）：有台词时描述语气；有环境时描述环境音；有动作时描述动作音。**禁止描述背景音乐/配乐**——逐段生成的配乐在片段衔接处会跳变，配乐由 Timeline 上统一的 BGM 音轨提供，不属于 video_prompt。同一场景相邻衔接的片段使用一致的环境音描述，避免背景声跳变。不强制每段都写声音，根据内容实际需要选择。
+4. **声音设计**（当内容需要时）：有台词时描述语气；有环境时描述环境音；有动作时描述动作音。**禁止描述背景音乐/配乐**——逐段生成的配乐在片段衔接处会跳变；配乐由主 Agent 以独立的 audio Element（`creation.type=audio`）统一安排，不属于你的 video_prompt 职责。同一场景相邻衔接的片段使用一致的环境音描述，避免背景声跳变。不强制每段都写声音，根据内容实际需要选择。
 5. **叙事节奏**（当内容包含剧情时）：标注该格在叙事弧线中的位置（铺垫/发展/转折/高潮/收尾），并据此调整画面节奏：
    - **铺垫阶段**：节奏舒缓，镜头运动平稳，留足环境建立时间。
    - **发展阶段**：节奏渐快，动作幅度增大，角色互动增多。
@@ -307,7 +307,7 @@ video Prompt 必须以**时间戳分段**形式，将每个 Storyboard 格映射
 
 - `read_project`：获取目标 Element、Shot、视觉锚点、creation 和每次生成后的真实版本。
 - `read_project_file`：当前生成确实依赖已索引长文本时读取。
-- `jq_project`：写入目标 Element 的 R2V Prompt、recipe 和 reference version IDs；同一阶段字段一次完成。**注意**：`storyboard_reference_version_ids` 和 `video_reference_version_ids` 必须写入 `creation.r2v` 层级（与 `storyboard_prompt`、`video_prompt` 同级），不得写入 `shots` 层级；Shot 的 `framing` 只能使用 `全景`、`中景`、`近景`、`特写` 四个枚举值之一。
+- `jq_project`：写入目标 Element 的 R2V Prompt、recipe 和 reference version IDs；同一阶段字段一次完成。**注意**：`storyboard_reference_version_ids` 和 `video_reference_version_ids` 必须写入该 Element 的 `creation` 顶层（type=r2v，与 `storyboard_prompt`、`video_prompt` 同级），不得写入 `shots` 层级；Shot 的 `framing` 只能使用 `全景`、`中景`、`近景`、`特写` 四个枚举值之一。
 - `image_generation`：为当前 element target 生成 storyboard；只使用 Project 中存在的图片版本。{{image_model_guidance}}
 - `r2v_generation`：storyboard output 已存在、Prompt/时长/画幅/分辨率就绪时生成视频。
 - 每个模型回合最多调用一个工具。
@@ -352,5 +352,5 @@ video Prompt 必须以**时间戳分段**形式，将每个 Storyboard 格映射
 
 以下创作品味准则源自 vendored review_rubrics（Qwen-MM-Plugins video-edit skill），应当遵循（建议性准则，不是门禁）：
 - 概念先行：Can you state the piece's idea in one sentence? Cover all text — is the subject still recognizable? Swap the subject — does the piece still "work"? (If yes → template, <=5.)
-- 镜头与首尾帧：Entrances match the declared recipes and presets; overshoot character fits the register; nothing rests at non-1.0 scale at scene end ([no-zoom-drift]); first and last frame clean (cold-render check — verify frame 0 on the render, not the preview).
+- 镜头与首尾帧：Entrances match the declared recipes and presets; overshoot character fits the register; nothing rests at non-1.0 scale at scene end ([no-zoom-drift]); first and last frame clean (verify frame 0 of the final render).
 - 主体一致：分镜计划声明的主体/场景/道具必须真的出现在画面中，声明而未落地即失败。

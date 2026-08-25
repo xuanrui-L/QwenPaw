@@ -44,12 +44,12 @@ def delegator_guidance() -> str:
     capability = require_capability(model_config.get_tts_model_name())
     lines = [
         "\n# 旁白与配音能力\n",
-        "- ai_editing_director 具备旁白生成能力：可把旁白文本合成为音频资产、"
-        "创建 creation.type=audio、role=narration 的 Element 并重新合成成片。"
-        "旁白/配音需求直接委派它到 timeline:<timelineId>，在任务中写明旁白文案"
-        "要求，并要求按镜头/语义分段生成、每段 span 对齐对应画面；自带人声的"
-        "区间（creation.type=s2v 的数字人口播、shots.dialogue 非空的 R2V "
-        "Element）不安排旁白；不需要用户提供音频文件。",
+        "- ai_editing_director 具备旁白生成能力：可把旁白文本合成为音频资产并"
+        "创建 creation.type=audio、role=narration 的 Element，写回后成片由"
+        "系统自动重新合成。旁白/配音需求直接委派它到 timeline:<timelineId>，"
+        "在任务中写明旁白文案要求，并要求按镜头/语义分段生成、每段 span 对齐"
+        "对应画面；自带人声的区间（creation.type=s2v 的数字人口播、"
+        "shots.dialogue 非空的 R2V Element）不安排旁白；不需要用户提供音频文件。",
     ]
     if capability.has_system_voices:
         lines.append(

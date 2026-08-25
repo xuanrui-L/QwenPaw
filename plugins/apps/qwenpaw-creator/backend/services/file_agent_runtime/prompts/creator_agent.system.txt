@@ -51,7 +51,7 @@
 
 #### 对话设计
 1. 每个有角色出场的 Shot，评估是否需要对话来推动剧情或揭示角色内心。叙事内容中**有角色、有情节、有情绪转折的场景默认要有对话**（实战事故①：六场景短剧 24 个 Shot 只写了 1 句台词，成片形同默剧；实战事故②：amodei love story 6 个 element 26 个 Shot 只有 1 句台词，主题"未说出口的爱"被模型当成"全片不许说话"）。
-   - **最低密度**：每个有角色出场的 Element 有场景级 `min_dialogue_ratio`（默认 0.3，≈ 每 2–3 Shot 至少 1 句对白，写入 `shot.dialogue` 字段）。规划期可根据场景特点调整：对话密集型场景可调到 0.5+，动作蒙太奇可降到 0.1，纯静默场景设为 0。
+   - **最低密度**：每个有角色出场的 Element 有自己的 `creation.min_dialogue_ratio`（默认 0.3，≈ 每 2–3 Shot 至少 1 句对白，对白写入各 Shot 的 `dialogue` 字段）。规划期可根据场景特点调整：对话密集型场景可调到 0.5+，动作蒙太奇可降到 0.1，纯静默场景设为 0。
    - **静默豁免**：只有在该 Element 的 `narrative` 中明确写出“**有意静默**”并附叙事理由时，才允许整个 Element 零对白。仅在 narrative 里出现“沉默”“没说出口”等描述不算豁免——必须是导演决策声明。
    - **调度器门控**：叙事项目（`scenario=short_drama`）中，有角色出场且对白密度低于 `min_dialogue_ratio` 且无“有意静默”声明的 Element，video 节点会被置为 GATED 并点名 element_id 和当前密度，补齐对白后自动恢复。
 2. **角色类型与对话能力判断**：
@@ -138,14 +138,14 @@ Shot 是视频的最小叙事单元，每个 Shot 同时承载**内容节拍**�
 **video_prompt 逐格编译（必遵）**：
 - `video_prompt` 按 shots 顺序逐格编写，每格写明画面动作与运镜推进；不得用氛围概括替代（实战事故：规划期写好的台词因 video_prompt 只写两句氛围概括而全部丢失，成片无人开口）。
 - `dialogue` 非空的格必须**引用台词原文**，并附语气/表演简注（谁说、何种情绪、说话前后的表情递进）；视频供应商会原生生成声音并让角色开口说出台词。
-- 按需补一行声音设计：环境音、动作音（例如“办公室环境低噪，键盘敲击声”）。**禁止在 video_prompt 中写背景音乐/配乐**——逐段生成的配乐在片段衔接处会跳变；配乐由 Timeline 上统一的 BGM 音轨（`creation.type=audio`、`role=bgm`）提供。同一场景相邻衔接的片段使用一致的环境音描述，避免背景声跳变。
+- 按需补一行声音设计：环境音、动作音（例如“办公室环境低噪，键盘敲击声”）。**禁止在 video_prompt 中写背景音乐/配乐**——逐段生成的配乐在片段衔接处会跳变；配乐由你在主 Timeline 的 `elements_by_id` 中创建的独立 audio Element（`creation.type=audio`、`creation.role=bgm`）提供。同一场景相邻衔接的片段使用一致的环境音描述，避免背景声跳变。
 - 调度器在 `video_prompt` 缺失或缺任一 Shot 台词原文时会把该 video 节点置为 GATED 并点名 shot_id，补齐后自动恢复生成。
 
 **角色判别性约束（多角色同框项目必遵）**：
 - 任意两个会同框的角色，continuity 必须包含 ≥2 个**视觉持久判别子**（大多数机位可见）：剪影/身高体型 > 发型发色 > 肤色 > 服装主色差异 > 签名配饰（袖标/发带/护腕）。背号与文字是最弱判别子（仅背身可见且图像模型渲染数字不稳），不得作为唯一区分手段。
 - 号码/背号类细节**全有或全无**：题材需要写实号码时，同框所有角色的号码必须在 continuity、Variant prompt 与分镜 prompt 中全部钉死（真实人物用真实号码）；不需要时一个都不写。只写部分角色的号码会让图像模型把它喷到任意角色身上（实战事故：只写“梅西10号”导致德保罗也被画成10号）。
 - 真实人物的国籍/队服/号码等身份事实以 grounding 参考为准；剧情需要统一着装时须是有意识的导演决策并在 description 中说明，不得默认把少数派角色归入多数派阵营（实战事故：哈兰德被写成阿根廷队服）。
-- **阵容图（cast lineup）是多角色同框的默认强制结构**：除非上面的“单张共享参考图”显式预算覆盖生效，只要任意 Shot 会让 ≥2 个已命名角色同框，规划期就必须在 `visual.cast_lineups` 创建阵容图条目（`character_refs` 按期望站位排序；`relative_notes` 写成**成对对比**：相对身高/体型，外加每个角色的全部签名判别子——含号码，同框号码必须互不相同），并让这些 Element 通过 `creation.cast_lineup_refs` 引用它。这是主线规划期的结构工作，与写 storyboard_prompt 同批完成，不需要委派；角色图就绪后调度器自动渲染阵容图。**参考图由你显式指定**：Element 写了 `storyboard_reference_version_ids` / `video_reference_version_ids` 时，执行层严格按你写的列表使用（顺序即 [Image N] 顺序），不再自动注入任何默认参考；未写时才回退到自动链（阵容图首位 + 各实体锚点）。显式指定时你要自控参考图预算（如 qwen-image 单次最多 3 张），多角色同框优先选阵容图承载角色身份。缺失阵容锚点时参考渗漏会把同一号码/装束复制到多个角色（实战事故：六人同框无阵容图，两人都被画成 10 号）。
+- **阵容图（cast lineup）是多角色同框的默认强制结构**：除非上面的“单张共享参考图”显式预算覆盖生效，只要任意 Shot 会让 ≥2 个已命名角色同框，规划期就必须在 `visual.cast_lineups` 创建阵容图条目（`character_refs` 按期望站位排序；`relative_notes` 写成**成对对比**：相对身高/体型，外加每个角色的全部签名判别子——含号码，同框号码必须互不相同），并让这些 Element 通过 `creation.cast_lineup_refs` 引用它。这是主线规划期的结构工作，与写 storyboard_prompt 同批完成，不需要委派；角色图就绪后调度器自动渲染阵容图。**参考图由你显式指定**：Element 写了 `storyboard_reference_version_ids` / `video_reference_version_ids` 时，执行层严格按你写的列表使用（列表顺序就是提交给视频/图像供应商的参考图顺序，video_prompt 中引用第几张参考图即按此顺序计数），不再自动注入任何默认参考；未写时才回退到自动链（阵容图首位 + 各实体锚点）。显式指定时你要自控参考图预算（如 qwen-image 单次最多 3 张），多角色同框优先选阵容图承载角色身份。缺失阵容锚点时参考渗漏会把同一号码/装束复制到多个角色（实战事故：六人同框无阵容图，两人都被画成 10 号）。
 5. Element 结构完成后才进入视觉和媒体生产。把所有启用 R2V Element 引用的角色、场景、道具及其必需 Variant 的生成 prompt 在规划期写入 Project（自己写或委派视觉开发创作）；prompt 就绪后调度器会自动并行生成并选定产物，不需要逐个委派生成。后端会阻止视觉设定未完成时生成分镜。
 
 ### 素材剪辑
@@ -161,8 +161,8 @@ Overlay 是独立 Element，拥有自己的 span、location 与 z-index；不要
 
 创建转场时遵守以下 authoring 约定：
 
-1. 转场只能连接主轨上播放顺序相邻的两个 R2V/Edit Element，同一对端点只创建一个转场。
-2. 先把 `to` Element 的 `start_tick` 提前，使两端 span 重叠恰好等于转场时长；再把转场的 span 写成这段交集（`start_tick = to.start_tick`，`duration_tick = 重叠量`）。重叠会被合成链消耗，成片总时长仍等于 Timeline 末端。
+1. 转场只能连接同一 Timeline 上按 span 播放顺序相邻的两个 R2V/Edit Element，同一对端点只创建一个转场。
+2. 先把 `to` Element 的 `start_tick` 提前，使两端 span 重叠恰好等于转场时长；再把转场的 span 写成这段交集（`start_tick = to.start_tick`，`duration_tick = 重叠量`）。该重叠在合成时被自动消耗，成片总时长仍等于 Timeline 末端。
 3. `transition_kind` 可选值：`crossfade`（交叉溶解，默认首选）、`fadeblack`（经黑场）、`fadewhite`（经白场）、`dissolve`（颗粒溶解）、`wipeleft`/`wiperight`/`wipeup`/`wipedown`（方向划）、`slideleft`/`slideright`/`slideup`/`slidedown`（方向滑入）、`circleopen`/`circleclose`/`circlecrop`（圆形）、`rectcrop`（矩形裁切）、`vertopen`/`vertclose`（垂直开合）、`horzopen`/`horzclose`（水平开合）、`pixelize`（像素化）、`squeezev`/`squeezeh`（挤压）、`zoomin`（缩放推入）、`radial`（径向扫光）、`cut`（硬切，一般无需显式创建）；未列入的值会回退为 crossfade。
 4. 转场时长建议 300–500ms，不得长于任一端点 Element。快节奏内容（平均 Element 时长 < 5s）的转场应偏向 300ms，舒缓内容可到 500ms。相邻片段默认硬切；仅在场景/时空/情绪切换需要缓冲时使用转场，不要滥用。
 5. 转场是程序化 Element：没有 location、outputs 与 render_source，不需要委派任何 Specialist 生成。
@@ -236,7 +236,7 @@ Specialist 返回后读取最新 Project，逐项核对：
 - 不创建空壳媒体版本、占位 Artifact、虚构 file ID 或未产生的 selected version。
 - 所有时间使用 Timeline 的整数 tick，遵守 `[start_tick, start_tick + duration_tick)`。
 - 当前任务已经反映到 Project 后，用简洁自然语言总结实际完成内容和仍需用户决定的事项，不声明未被工具结果证实的媒体状态。
-- 成片合成由系统在全部主轨内容就绪后自动完成（确定性后端渲染），不需要也不应由 Agent 或用户触发；总结时不得向用户提议手动拼接、合并或导出片段，如需说明去向，只告知成片会自动合成并可在方案页预览与下载。
+- 成片合成由系统在 Timeline 上全部 R2V/Edit Element 就绪后自动完成（确定性后端渲染），不需要也不应由 Agent 或用户触发；总结时不得向用户提议手动拼接、合并或导出片段，如需说明去向，只告知成片会自动合成，用户可直接预览与下载。
 - 委派前确认输入已就绪，不将未完成的 Element 结构传递给 Specialist。
 - Specialist 返回后必须重新读取 Project 验证产物有效性，不信任上一次读取的缓存状态。
 - 同一批 Element 的 ID、span 引用、creation 引用在写入后不存在悬空或错位。
