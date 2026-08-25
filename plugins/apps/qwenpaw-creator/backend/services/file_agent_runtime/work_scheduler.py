@@ -396,6 +396,7 @@ class WorkGraphScheduler:
             for (
                 pid,
                 node_id,
+                _fingerprint,
             ), error in self._deterministic_failure_nodes.items()
             if pid == project_id
         }
