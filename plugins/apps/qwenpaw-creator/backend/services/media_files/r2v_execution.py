@@ -5131,22 +5131,40 @@ async def preflight_s2v_face_detect(
     services: CreatorFileServices,
     *,
     project_id: str,
+    target_ref: str = "",
     arguments: Mapping[str, Any],
 ) -> None:
     """Free wan2.2-s2v-detect gate that runs before execution authorization.
 
     A failed portrait check raises a readable ``ValidationError`` so the
     agent can pick another image without any authorization being created.
+    Falls back to creation.portrait_version_id if characterImageRef is
+    not provided in arguments.
     """
 
     from models.s2v_model import detect_face
 
     image_ref = str(arguments.get("characterImageRef") or "").strip()
+    snapshot = None
+    if not image_ref and target_ref:
+        # Fall back to the element's declared portrait
+        snapshot = await asyncio.to_thread(services.projects.read, project_id)
+        element_id = target_ref.removeprefix("element:")
+        _, element = find_timeline_element(snapshot.project, element_id)
+        creation = element.creation
+        if isinstance(creation, S2VCreation):
+            image_ref = str(creation.portrait_version_id or "").strip()
+        else:
+            raise ValidationError(
+                "仅 creation.type=s2v 的 Element 可以生成数字人视频",
+            )
     if not image_ref:
         raise ValidationError(
-            "s2v_generation 需要 characterImageRef（exact 人像图 version id）",
+            "s2v_generation 需要 characterImageRef 或 "
+            "creation.portrait_version_id（exact 人像图 version id）",
         )
-    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    if snapshot is None:
+        snapshot = await asyncio.to_thread(services.projects.read, project_id)
     image_url, _, _, _ = _resolve_single_media_version(
         project=snapshot.project,
         project_root=services.projects.project_root(project_id),

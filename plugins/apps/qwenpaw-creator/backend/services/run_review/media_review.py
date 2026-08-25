@@ -105,6 +105,7 @@ REVIEWED_COMMANDS: dict[str, str] = {
     "GENERATE_ASSET": "image",
     "GENERATE_STORYBOARD_IMAGE": "image",
     "GENERATE_R2V_VIDEO": "element_video",
+    "GENERATE_S2V_VIDEO": "element_video",
 }
 
 

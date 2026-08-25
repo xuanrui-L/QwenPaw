@@ -4896,9 +4896,13 @@ class FileCreatorAgentRuntime:
             )
 
             inner_arguments = arguments.get("arguments")
+            inner_target_ref = str(
+                arguments.get("targetRef") or "",
+            ).strip()
             await preflight_s2v_face_detect(
                 self.services,
                 project_id=project_id,
+                target_ref=inner_target_ref,
                 arguments=(
                     inner_arguments
                     if isinstance(inner_arguments, Mapping)
