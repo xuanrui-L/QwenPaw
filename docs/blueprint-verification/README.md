@@ -101,3 +101,30 @@ Creator Agent 真实规划并逐步建成：
 - 期间 agent 两次因工具误用触发熔断护栏（variants 父级、elements_by_id
   包装结构），均通过真实对话纠正后自行恢复；缺陷 10/11 即在本轮真实运行中
   暴露并修复。视频模型现已切换 `wan2.6-r2v-flash` 快速版。
+
+## 六、第二轮复杂重验《回环 23:59》（指定模型组合 + 全程日志监控）
+
+模型组合按要求切换并全程真实调用：**LLM qwen3.8-max · 图像 qwen-image-3.0-pro ·
+视频 wan3.0-video（wan3 快速档）· TTS cosyvoice-v3.5-plus**（能力表中唯一 plus 档，
+需先设计音色）。时间循环悬疑剧：5 节点 / 2 抉择点（下车吗？接过车票吗？）/ 3 结局
+（无尽隧道 · 破环 · 重启）。
+
+- **结构与剧本**：qwen3.8-max 一次建成 5 时间线 + 4 边 + 双 interaction；期间一次
+  patch 失败后自我纠正（无需人工介入）。
+- **视觉**：7 张 Variant 设定 + 镜像双人阵容图 + 5 张分镜（qwen-image-3.0-pro）。
+- **视频**：10 镜头 → 5 段 8s 竖屏 wan3 视频。
+- **旁白（本轮新覆盖）**：agent 用 cosyvoice-v3.5-plus 先设计「低沉冷静年轻女声」
+  音色，为 5 条 audio 元素真实合成旁白（3.0–4.6s，speech_rate 0.9，gain -2dB）；
+  成片 ffprobe 确认全部含 AAC 音轨，node1 实测 mean -20.2dB（真实语音非静音）。
+- **交付**：5 段成片 + 14,484,357 字节互动包；file:// 三条结局路径 Playwright
+  实点全部 PASS（`loop2359-*.png`、蓝图收官 `loop2359-blueprint.png`）。
+
+### 全程监控发现并当场修复的缺陷
+12. 读轮询偶发 500（`RuntimeFileValidationError`）→ 同线程嵌套锁守卫先改抛可重试
+    LockTimeout（aa3a1aae）；随后监控发现真根因是**持锁跨 await 后执行器线程复用**
+    的假阳性——写高峰下 503 风暴甚至误杀 r2v supervisor → 守卫改为「告警 + 正常
+    限时等待」（c330486d），部署后风暴消失。
+13. qwen-image-3.0-pro 旗舰生图 >240s 超时 → `IMAGE_TIMEOUT=480` 部署。
+14. `IMAGE_REFERENCE_BUDGET_EXCEEDED`（qwen-image 3 图上限，lineup 展开
+    lineup+成员锚共 5 图）→ 按 fail-closed 设计修数据收敛引用；已有分镜在手时
+    stale 不阻塞后续视频（管线行为正确）。
