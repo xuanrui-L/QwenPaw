@@ -356,10 +356,17 @@ async def execute_file_script_command(
 
     fingerprint = _request_fingerprint(project, timeline)
     # Stale re-drafts share the node's dispatch idempotency key but must not
-    # reuse the previous publish transaction: scope the durable ids by the
-    # request fingerprint. Identical inputs never reach publish — the
-    # semantic replay below returns the existing version first.
-    idempotency_key = f"{idempotency_key}:{fingerprint[:16]}"
+    # reuse a previous publish transaction. Staleness triggers on more inputs
+    # than the fingerprint covers (e.g. element edits), so scope the durable
+    # ids by fingerprint AND the slot's existing version count — the N-th
+    # re-draft of identical prompt inputs is still a fresh transaction.
+    # Identical fresh inputs never reach publish: the semantic replay below
+    # returns the existing version first.
+    slot = project.assets.artifact_slots_by_id.get(
+        timeline_script_slot_id(timeline_id),
+    )
+    revision = len(slot.version_ids) if slot is not None else 0
+    idempotency_key = f"{idempotency_key}:{fingerprint[:16]}:r{revision}"
     replay = _existing_replay(
         services,
         project,
