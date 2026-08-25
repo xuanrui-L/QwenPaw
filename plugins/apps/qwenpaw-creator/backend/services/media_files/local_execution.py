@@ -195,6 +195,11 @@ _DEFAULT_FFMPEG_TERMINATION_GRACE_SECONDS = 5.0
 # Original-footage volume while a Timeline audio Element (narration) plays;
 # ~-9dB keeps ambience audible without competing with the voice.
 _DUCK_VOLUME = 0.35
+# BGM plays as one continuous low bed under the whole mix; the fixed bed
+# gain keeps music from competing with native dialogue and ambience.
+_BGM_BED_GAIN_DB = -12.0
+# BGM volume while any speech window (shot dialogue, s2v, narration) plays.
+_BGM_DUCK_VOLUME = 0.4
 # Beat-snapped xfades must keep a perceptible blend; below this the join
 # effectively degrades to a cut and the snap is skipped instead.
 _MIN_SNAPPED_BLEND_SECONDS = 0.05
@@ -250,6 +255,9 @@ class LocalMediaExecutionSpec:
     canvas_size: tuple[int, int]
     on_element_done: Callable[[int, int], None] | None = None
     audio_tracks: tuple[Mapping[str, Any], ...] = ()
+    # [start, end) seconds where clips natively speak (shot dialogue, s2v);
+    # BGM ducks itself inside these windows.
+    speech_windows: tuple[tuple[float, float], ...] = ()
     color_grade: str = ""
 
 
@@ -686,8 +694,10 @@ class FfmpegLocalMediaRunner:
         The video stream is stream-copied; each track is trimmed to its span,
         gain/pan adjusted, delayed to its Timeline offset, then mixed with the
         composed video's own audio (when present) without renormalization.
-        While a narration track plays, the original footage audio is ducked so
-        the two never fight for attention.
+        Roles keep the three sound layers apart: narration ducks the footage
+        audio under it, bgm plays as one continuous low bed that ducks itself
+        under every speech window (native dialogue, s2v, narration), and sfx
+        mixes verbatim.
         """
 
         premix = spec.work_dir / "premix.mp4"
@@ -695,14 +705,29 @@ class FfmpegLocalMediaRunner:
         arguments: list[str] = ["-y", "-i", os.fspath(premix)]
         filters: list[str] = []
         labels: list[str] = []
-        duck_windows: list[tuple[float, float]] = []
+        narration_windows: list[tuple[float, float]] = []
+        for track in spec.audio_tracks:
+            # Tracks predating the role key always ducked the footage audio,
+            # i.e. behaved as narration.
+            if str(track.get("role") or "narration") != "narration":
+                continue
+            duration = float(track.get("max_duration_seconds") or 0.0)
+            offset = float(track.get("offset_seconds") or 0.0)
+            if duration > 0:
+                narration_windows.append((offset, offset + duration))
+        bgm_duck_windows = _merge_windows(
+            [*spec.speech_windows, *narration_windows],
+        )
         for index, track in enumerate(spec.audio_tracks):
             arguments += ["-i", os.fspath(track["path"])]
+            role = str(track.get("role") or "narration")
             chain = [f"[{index + 1}:a]aformat=channel_layouts=stereo"]
             duration = float(track.get("max_duration_seconds") or 0.0)
             if duration > 0:
                 chain.append(f"atrim=0:{duration:.6f}")
             gain = float(track.get("gain_db") or 0.0)
+            if role == "bgm":
+                gain += _BGM_BED_GAIN_DB
             if gain:
                 chain.append(f"volume={gain:.3f}dB")
             pan = float(track.get("pan") or 0.0)
@@ -716,14 +741,20 @@ class FfmpegLocalMediaRunner:
             delay_ms = int(round(offset * 1000))
             if delay_ms > 0:
                 chain.append(f"adelay={delay_ms}:all=1")
-            if duration > 0:
-                duck_windows.append((offset, offset + duration))
+            if role == "bgm":
+                # After adelay, filter time equals absolute timeline time,
+                # matching the speech windows.
+                for start, end in bgm_duck_windows:
+                    chain.append(
+                        f"volume={_BGM_DUCK_VOLUME}:enable="
+                        f"'between(t,{start:.3f},{end:.3f})'",
+                    )
             label = f"[mix{index}]"
             filters.append(",".join(chain) + label)
             labels.append(label)
         if self._probe_has_audio(premix):
             base_chain = ["[0:a]aformat=channel_layouts=stereo"]
-            for start, end in _merge_windows(duck_windows):
+            for start, end in _merge_windows(narration_windows):
                 base_chain.append(
                     f"volume={_DUCK_VOLUME}:enable="
                     f"'between(t,{start:.3f},{end:.3f})'",
@@ -746,6 +777,15 @@ class FfmpegLocalMediaRunner:
                 f"{mixed}atrim=0:{spec.expected_duration_seconds:.6f}[afinal]",
             )
             final_label = "[afinal]"
+        # Delivery loudness: generated clips arrive at uneven levels and the
+        # music bed shifts the average; one-pass loudnorm lands the final mix
+        # on a consistent short-video target instead of whatever the loudest
+        # provider happened to render.
+        filters.append(
+            f"{final_label}loudnorm=I=-16:TP=-1.5:LRA=11,"
+            "aresample=48000[aloud]",
+        )
+        final_label = "[aloud]"
         self._run(
             [
                 *arguments,
@@ -1951,7 +1991,20 @@ class FfmpegLocalMediaRunner:
                 zip(inputs, audio_flags),
             ):
                 if has_audio:
-                    audio_labels.append(f"[{index + 1}:a]")
+                    # Adjacent generated clips carry unrelated ambiences; a
+                    # short edge fade per segment softens the step at every
+                    # hard cut without consuming timeline duration.
+                    duration = self._probe_duration_seconds(path)
+                    fade = min(0.04, max(0.0, duration) / 4)
+                    if fade > 0:
+                        filter_parts.append(
+                            f"[{index + 1}:a]afade=t=in:d={fade:.3f},"
+                            f"afade=t=out:st={max(0.0, duration - fade):.3f}"
+                            f":d={fade:.3f}[fade{index}]",
+                        )
+                        audio_labels.append(f"[fade{index}]")
+                    else:
+                        audio_labels.append(f"[{index + 1}:a]")
                     continue
                 duration = self._probe_duration_seconds(path)
                 filter_parts.append(
@@ -2120,6 +2173,7 @@ class _FrozenAudioTrack:
     max_duration_seconds: float
     gain_db: float
     pan: float
+    role: str = "bgm"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2139,6 +2193,7 @@ class _ResolvedExecution:
     read_set: tuple[dict[str, Any], ...]
     source_selections: tuple[dict[str, Any], ...]
     audio_tracks: tuple[_FrozenAudioTrack, ...] = ()
+    speech_windows: tuple[tuple[float, float], ...] = ()
     color_grade: str = ""
 
 
@@ -2933,6 +2988,7 @@ def _timeline_execution(
                 ),
                 gain_db=creation.gain_db,
                 pan=creation.pan,
+                role=creation.effective_role,
             ),
         )
         read_set.append(
@@ -2943,6 +2999,9 @@ def _timeline_execution(
                 version.checksum,
             ),
         )
+    speech_windows = (
+        _timeline_speech_windows(timeline) if audio_tracks else ()
+    )
     return _ResolvedExecution(
         command=command,
         target_ref=target_ref,
@@ -2970,8 +3029,36 @@ def _timeline_execution(
         read_set=tuple(read_set),
         source_selections=tuple(selections),
         audio_tracks=tuple(audio_tracks),
+        speech_windows=speech_windows,
         color_grade=timeline.color_grade,
     )
+
+
+def _timeline_speech_windows(
+    timeline: Timeline,
+) -> tuple[tuple[float, float], ...]:
+    """[start, end) seconds where clips natively speak: R2V Elements with
+    non-empty shot dialogue and s2v digital-human Elements."""
+
+    windows = [
+        (
+            element.span.start_tick / timeline.ticks_per_second,
+            element.span.end_tick / timeline.ticks_per_second,
+        )
+        for element in timeline.elements_by_id.values()
+        if element.enabled
+        and (
+            isinstance(element.creation, S2VCreation)
+            or (
+                isinstance(element.creation, R2VCreation)
+                and any(
+                    shot.dialogue.strip()
+                    for shot in element.creation.shots.items.values()
+                )
+            )
+        )
+    ]
+    return tuple(sorted(windows))
 
 
 def _resolve_execution(
@@ -3128,8 +3215,12 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
                             "maxDuration": track.max_duration_seconds,
                             "gainDb": track.gain_db,
                             "pan": track.pan,
+                            "role": track.role,
                         }
                         for track in resolved.audio_tracks
+                    ],
+                    "speechWindows": [
+                        list(window) for window in resolved.speech_windows
                     ],
                 }
                 if resolved.audio_tracks
@@ -3923,6 +4014,7 @@ class FileLocalMediaExecutionService:
                     "max_duration_seconds": track.max_duration_seconds,
                     "gain_db": track.gain_db,
                     "pan": track.pan,
+                    "role": track.role,
                 },
             )
 
@@ -3962,6 +4054,7 @@ class FileLocalMediaExecutionService:
             canvas_size=resolved.canvas_size,
             on_element_done=on_element_done,
             audio_tracks=tuple(local_audio_tracks),
+            speech_windows=resolved.speech_windows,
             color_grade=resolved.color_grade,
         )
         AtomicJsonRecordStore(work_dir / "spec.json").write(
@@ -4000,8 +4093,12 @@ class FileLocalMediaExecutionService:
                         "maxDuration": item["max_duration_seconds"],
                         "gainDb": item["gain_db"],
                         "pan": item["pan"],
+                        "role": item["role"],
                     }
                     for item in local_audio_tracks
+                ],
+                "speechWindows": [
+                    list(window) for window in resolved.speech_windows
                 ],
             },
         )

@@ -309,6 +309,8 @@ export interface MotionClipCreationDocument extends ProjectJsonRecord {
 export interface AudioCreationDocument extends ProjectJsonRecord {
   type: "audio";
   source_asset_version_id: string;
+  /** Mixing role: narration ducks footage audio; bgm is a continuous low bed. */
+  role?: "bgm" | "narration" | "sfx";
   /** TTS narration keeps its script here; uploaded audio leaves it empty. */
   script?: string;
   /** Synthesis speed multiplier (0.5–2.0); CosyVoice family only. */

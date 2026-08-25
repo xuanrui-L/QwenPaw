@@ -104,7 +104,11 @@ def test_pet_os_png_uses_the_element_anchor_box(tmp_path) -> None:
     assert 17 <= top < bottom <= 399
 
 
-def _spec(tmp_path: Path, tracks: tuple[dict, ...]) -> LocalMediaExecutionSpec:
+def _spec(
+    tmp_path: Path,
+    tracks: tuple[dict, ...],
+    speech_windows: tuple[tuple[float, float], ...] = (),
+) -> LocalMediaExecutionSpec:
     output = tmp_path / "output.mp4"
     output.write_bytes(b"video")
     return LocalMediaExecutionSpec(
@@ -119,6 +123,7 @@ def _spec(tmp_path: Path, tracks: tuple[dict, ...]) -> LocalMediaExecutionSpec:
         expected_duration_seconds=12.5,
         canvas_size=(1280, 720),
         audio_tracks=tracks,
+        speech_windows=speech_windows,
     )
 
 
@@ -169,6 +174,85 @@ def test_mix_overlapping_tracks_with_base_audio(monkeypatch, tmp_path) -> None:
     assert "pan=stereo|c0=1.000*c0|c1=0.500*c1" in graph
     assert "volume=2.000dB" in graph
     assert "adelay=3000:all=1" in graph
+    # Delivery loudness: the mix always ends on one consistent target.
+    assert "loudnorm=I=-16:TP=-1.5:LRA=11" in graph
+    assert calls[0][calls[0].index("-map") + 3] == "[aloud]"
+
+
+def test_bgm_plays_as_low_bed_and_ducks_under_speech(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    music = tmp_path / "bgm.mp3"
+    music.write_bytes(b"mp3")
+    tracks = (_track(music, role="bgm", max_duration_seconds=12.5),)
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    runner._mix_audio_tracks(
+        _spec(tmp_path, tracks, speech_windows=((2.0, 5.0),)),
+    )
+
+    graph = calls[0][calls[0].index("-filter_complex") + 1]
+    # Fixed music-bed gain keeps bgm under native dialogue and ambience.
+    assert "volume=-12.000dB" in graph
+    # BGM ducks itself inside the dialogue window ...
+    assert "volume=0.4:enable='between(t,2.000,5.000)'" in graph
+    # ... but never ducks the footage audio.
+    assert "[0:a]aformat=channel_layouts=stereo[base]" in graph
+
+
+def test_sfx_neither_ducks_nor_is_ducked(monkeypatch, tmp_path) -> None:
+    hit = tmp_path / "hit.wav"
+    hit.write_bytes(b"wav")
+    tracks = (
+        _track(hit, role="sfx", offset_seconds=1.0, max_duration_seconds=2.0),
+    )
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    runner._mix_audio_tracks(_spec(tmp_path, tracks))
+
+    graph = calls[0][calls[0].index("-filter_complex") + 1]
+    assert "volume=0.35" not in graph
+    assert "volume=0.4" not in graph
+    assert "volume=-12.000dB" not in graph
+
+
+def test_explicit_narration_still_ducks_footage(monkeypatch, tmp_path) -> None:
+    voice = tmp_path / "vo.wav"
+    voice.write_bytes(b"wav")
+    tracks = (
+        _track(
+            voice,
+            role="narration",
+            offset_seconds=2.0,
+            max_duration_seconds=3.0,
+        ),
+    )
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    runner._mix_audio_tracks(_spec(tmp_path, tracks))
+
+    graph = calls[0][calls[0].index("-filter_complex") + 1]
+    assert "volume=0.35:enable='between(t,2.000,5.000)'" in graph
+    assert "volume=-12.000dB" not in graph
+
+
+def test_concat_fades_segment_audio_edges(monkeypatch, tmp_path) -> None:
+    first = tmp_path / "a.mp4"
+    second = tmp_path / "b.mp4"
+    first.write_bytes(b"video")
+    second.write_bytes(b"video")
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    monkeypatch.setattr(runner, "_probe_duration_seconds", lambda path: 4.0)
+    runner._concat([first, second], tmp_path / "out.mp4", work_dir=tmp_path)
+
+    graph = calls[0][calls[0].index("-filter_complex") + 1]
+    # Each voiced segment gets short edge fades so unrelated native
+    # ambiences step smoothly at the hard cut.
+    assert (
+        "[1:a]afade=t=in:d=0.040,afade=t=out:st=3.960:d=0.040[fade0]" in graph
+    )
+    assert (
+        "[2:a]afade=t=in:d=0.040,afade=t=out:st=3.960:d=0.040[fade1]" in graph
+    )
+    assert "[fade0][fade1]concat=n=2:v=0:a=1" in graph
 
 
 def test_wav_duration_ignores_streaming_placeholder_header() -> None:

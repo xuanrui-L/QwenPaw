@@ -1057,6 +1057,10 @@ class AudioCreation(StrictModel):
 
     type: Literal["audio"] = "audio"
     source_asset_version_id: EntityId
+    # Mixing role: "narration" ducks the footage audio under it and must not
+    # overlap natively voiced clips; "bgm" plays as one continuous low bed
+    # that ducks itself under any speech; "sfx" mixes verbatim.
+    role: Literal["bgm", "narration", "sfx"] = "bgm"
     # TTS-produced narration keeps its script here: editing the script and
     # applying the change re-synthesizes the audio. Uploaded/footage audio
     # leaves it empty.
@@ -1066,6 +1070,16 @@ class AudioCreation(StrictModel):
     speech_rate: float = Field(default=1.0, ge=0.5, le=2.0)
     gain_db: float = 0.0
     pan: float = Field(default=0.0, ge=-1, le=1)
+
+    @property
+    def effective_role(self) -> str:
+        """Legacy narration Elements predate ``role`` and are recognised by
+        their TTS script; treat them as narration so their footage-ducking
+        mix behaviour is preserved."""
+
+        if self.role == "bgm" and self.script.strip():
+            return "narration"
+        return self.role
 
     @field_validator("gain_db", "pan")
     @classmethod
@@ -1758,6 +1772,7 @@ class Project(StrictModel):
                     element_timelines[element_id].ticks_per_second,
                 )
 
+        _validate_narration_voiced_overlap(self.timelines)
         _validate_render_source_cycles(elements)
         return self
 
@@ -1887,6 +1902,53 @@ def _require_key(mapping: dict[str, T], key: str, label: str) -> T:
 def _require_all(mapping: dict[str, Any], keys: list[str], label: str) -> None:
     for key in keys:
         _require_key(mapping, key, label)
+
+
+def _validate_narration_voiced_overlap(
+    timelines: EntityCollection[Timeline],
+) -> None:
+    """A narration track must not overlap a natively voiced interval.
+
+    Generated video speaks its shot dialogue itself and s2v clips are driven
+    by their own voice track; layering narration on the same interval would
+    produce two competing voices. Only explicit ``role="narration"`` Elements
+    are gated so pre-``role`` projects keep loading.
+    """
+
+    for timeline in timelines.items.values():
+        voiced_elements = [
+            (element_id, element.span)
+            for element_id, element in timeline.elements_by_id.items()
+            if element.enabled
+            and (
+                isinstance(element.creation, S2VCreation)
+                or (
+                    isinstance(element.creation, R2VCreation)
+                    and any(
+                        shot.dialogue.strip()
+                        for shot in element.creation.shots.items.values()
+                    )
+                )
+            )
+        ]
+        if not voiced_elements:
+            continue
+        for element_id, element in timeline.elements_by_id.items():
+            creation = element.creation
+            if (
+                not element.enabled
+                or not isinstance(creation, AudioCreation)
+                or creation.role != "narration"
+            ):
+                continue
+            for voiced_id, voiced_span in voiced_elements:
+                if element.span.overlaps(voiced_span):
+                    raise ValueError(
+                        f"narration audio {element_id} overlaps voiced "
+                        f"element {voiced_id}: 该区间由生成视频原生发声"
+                        "（台词或数字人口播），旁白不得覆盖；请调整旁白 "
+                        "span，或清空该区间 shots 的 dialogue",
+                    )
 
 
 def _require_all_ids(known: set[str], keys: list[str], label: str) -> None:

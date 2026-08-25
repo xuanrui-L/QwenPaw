@@ -3683,6 +3683,7 @@ class FileR2VExecutionService:
                 "commandType": CreatorCommandType.GENERATE_R2V_VIDEO.value,
                 "targetRef": str(request["targetRef"]),
                 "providerTaskId": state.provider_task_id,
+                "generateAudio": bool(request.get("generateAudio", True)),
                 "provider": {
                     key: value
                     for key, value in state.provider_result.items()
