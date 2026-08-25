@@ -1738,6 +1738,9 @@
     "roughCutHint": "All shots in time order (final frames replace storyboards) · zero extra generation cost · final frames {{ready}}/{{total}}",
     "expandRoughCut": "Expand strip",
     "collapseRoughCut": "Collapse strip",
+    "playRoughCut": "Play rough cut",
+    "closeRoughCutPlayer": "Close player",
+    "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
     "frameSource": {
       "final": "Final",
       "storyboard": "Storyboard",
