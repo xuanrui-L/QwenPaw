@@ -1407,6 +1407,7 @@ class FileCreatorAgentRuntime:
         self._dispatcher: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
         self._stopping = False
+        self._starting = False
         self._active: dict[str, _ProjectTask] = {}
         self._interrupt_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._blocked_heads: dict[str, int] = {}
@@ -1477,44 +1478,62 @@ class FileCreatorAgentRuntime:
         return self._dispatcher is not None and not self._dispatcher.done()
 
     async def start(self) -> None:
-        if self.started:
+        if self.started or self._starting:
             return
         self._loop = asyncio.get_running_loop()
         self._stopping = False
-        self._dispatcher = asyncio.create_task(
-            self._dispatch_loop(),
-            name="creator-file-agent-dispatcher",
-        )
-        self._wake.set()
-        # Startup sweep: the media scheduler is commit-driven, so READY
-        # work-graph nodes that became dispatchable right before a
-        # restart (field run 2026-08-09: all scenes locked, compose
-        # READY, process bounced) would otherwise wait for the next
-        # commit that may never come. One wake per Project re-evaluates
-        # every graph; projects with nothing READY are a cheap no-op.
-        # An unattended run the shutdown cancelled mid-turn additionally
-        # gets one YOLO continuation — nobody is attending to retype
-        # “继续”, and the existing fuses still bound runaway loops.
+        self._starting = True
         try:
-            summaries = await asyncio.to_thread(self.services.projects.list)
-        except Exception:  # noqa: BLE001 - sweep must never block startup
-            summaries = []
-        for summary in summaries:
-            self.work_scheduler.wake(summary.project_id)
+            # Startup sweep: the media scheduler is commit-driven, so READY
+            # work-graph nodes that became dispatchable right before a
+            # restart (field run 2026-08-09: all scenes locked, compose
+            # READY, process bounced) would otherwise wait for the next
+            # commit that may never come. One wake per Project re-evaluates
+            # every graph; projects with nothing READY are a cheap no-op.
+            # An unattended run the shutdown cancelled mid-turn additionally
+            # gets one YOLO continuation — nobody is attending to retype
+            # “继续”, and the existing fuses still bound runaway loops.
+            # The sweep must finish before the dispatcher starts: crash
+            # reclamation treats a persisted QUEUED/RUNNING run as an
+            # ownerless leftover, which only holds while this process has
+            # dispatched nothing yet.
             try:
-                await self._reclaim_startup_orphans(summary.project_id)
-            except Exception:  # pylint: disable=broad-except
-                logger.exception(
-                    "startup orphan reclaim failed for %s",
-                    summary.project_id,
+                summaries = await asyncio.to_thread(
+                    self.services.projects.list,
                 )
-            try:
-                await self._resume_interrupted_run(summary.project_id)
-            except Exception:  # pylint: disable=broad-except
-                logger.exception(
-                    "startup interrupted-run resume failed for %s",
-                    summary.project_id,
-                )
+            except Exception:  # noqa: BLE001 - sweep must never block startup
+                summaries = []
+            for summary in summaries:
+                self.work_scheduler.wake(summary.project_id)
+                try:
+                    await self._resume_interrupted_run(summary.project_id)
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception(
+                        "startup interrupted-run resume failed for %s",
+                        summary.project_id,
+                    )
+                # Safety net after the crash-zombie settlement above:
+                # non-terminal runs it declined (interrupt pending,
+                # terminal goal, lost lease, older records) still must
+                # not survive the restart as phantom activity.
+                try:
+                    await self._reclaim_startup_orphans(summary.project_id)
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception(
+                        "startup orphan reclaim failed for %s",
+                        summary.project_id,
+                    )
+            if self._stopping:
+                # stop() raced the sweep; starting the dispatcher now would
+                # leave an unowned task running after stop() returned.
+                return
+            self._dispatcher = asyncio.create_task(
+                self._dispatch_loop(),
+                name="creator-file-agent-dispatcher",
+            )
+            self._wake.set()
+        finally:
+            self._starting = False
 
     async def _reclaim_startup_orphans(self, project_id: str) -> None:
         """Fail over Agent runs stranded by an unclean previous exit.
@@ -1602,6 +1621,17 @@ class FileCreatorAgentRuntime:
         if not records:
             return
         last = records[-1]
+        if last.status in {AgentRunStatus.QUEUED, AgentRunStatus.RUNNING}:
+            # A hard kill (SIGKILL/crash) skipped the graceful-shutdown
+            # cancellation in _cancel_run, so the run stayed durably
+            # RUNNING/QUEUED with error null while this fresh process
+            # holds no task for it — the Session/Goal would show activity
+            # forever and nothing would ever resume or fail the run.
+            # Write the same SHUTDOWN settlement graceful shutdown would
+            # have written, then fall through to the resume path below.
+            last = await self._reclaim_crashed_run(project_id, last)
+            if last is None:
+                return
         if last.status is AgentRunStatus.CANCELLED:
             code = str((last.error or {}).get("code") or "")
             if code not in {"SHUTDOWN", "ORPHANED_BY_RESTART"}:
@@ -1626,6 +1656,135 @@ class FileCreatorAgentRuntime:
                 run_id=last.run_id,
             )
             self._wake.set()
+
+    async def _reclaim_crashed_run(
+        self,
+        project_id: str,
+        run: CreatorAgentRunRecord,
+    ) -> CreatorAgentRunRecord | None:
+        """Settle a run a hard-killed process left durably RUNNING/QUEUED.
+
+        Only the startup sweep calls this: a fresh single-process runtime
+        provably owns no task for the persisted run, so it can never make
+        progress. SHUTDOWN (not INTERRUPTED) is deliberate — nobody asked
+        for a stop, the process simply died, so the sweep may auto-resume
+        exactly as after a graceful restart. INTERRUPTED and SUPERSEDED
+        runs are already terminal before the sweep and never reach here,
+        preserving the human-stop-is-never-auto-resumed rule.
+
+        A run bound to a Goal that is already terminal (or gone) is a
+        different, pre-existing shape — a QUEUED leftover on a finished
+        Goal — that reconcile heals as ORPHANED_ON_TERMINAL_GOAL while
+        keeping pending user requests intact; reclaiming it here would
+        consume those requests and clobber the finished Goal, so it is
+        declined. Also declined: a Session holding a durable interrupt
+        (the user pressed stop before/while the process died — that stop
+        must be served as INTERRUPTED by _record_idle_interrupt, never
+        softened into a resumable SHUTDOWN), and a run that no longer
+        holds the Session lease (some other cleanup already settled it).
+        The crash zombie this method exists for always keeps its Goal
+        ACTIVE and its lease held.
+
+        Returns the CANCELLED record, or ``None`` when the run was not
+        reclaimed and another recovery path owns it.
+        """
+
+        try:
+            session = await asyncio.to_thread(
+                self.sessions.get_project_session_snapshot,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return None
+        if session.status is CreatorSessionStatus.INTERRUPT_REQUESTED:
+            return None
+        if session.active_run_id != run.run_id:
+            return None
+        try:
+            goal = await asyncio.to_thread(
+                self.sessions.get_goal,
+                project_id,
+                run.goal_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return None
+        if goal.status in _TERMINAL_GOAL_STATUSES:
+            return None
+        try:
+            reclaimed = await asyncio.to_thread(
+                self.runs.transition,
+                project_id,
+                run.run_id,
+                expected_status={
+                    AgentRunStatus.QUEUED,
+                    AgentRunStatus.RUNNING,
+                },
+                status=AgentRunStatus.CANCELLED,
+                updates={
+                    "error": {
+                        "code": "SHUTDOWN",
+                        "message": (
+                            "Run reclaimed at startup: the previous "
+                            "process died (crash/SIGKILL) before graceful "
+                            "shutdown could cancel it"
+                        ),
+                    },
+                },
+            )
+        except AgentRunStateConflict:
+            return None
+        # Same durable settlement as _cancel_run's non-superseded branch:
+        # consume every message that existed at the crash so the dead
+        # request is not relaunched raw, then close the Goal and release
+        # the Session lease. Each step degrades independently — a partial
+        # settlement is still strictly better than a durable zombie.
+        try:
+            await asyncio.to_thread(
+                self.sessions.mark_messages_consumed,
+                project_id,
+                run.session_id,
+                through_seq=session.last_message_seq,
+                goal_id=run.goal_id,
+            )
+        except SessionStateConflict:
+            pass
+        try:
+            await asyncio.to_thread(
+                self.sessions.set_goal_status,
+                project_id,
+                run.goal_id,
+                CreatorGoalStatus.CANCELLED,
+            )
+            await asyncio.to_thread(
+                self.sessions.clear_active_run,
+                project_id,
+                run.session_id,
+                expected_run_id=run.run_id,
+                status=CreatorSessionStatus.CANCELLED,
+            )
+        except SessionStateConflict:
+            pass
+        await asyncio.to_thread(
+            self.sessions.append_event,
+            project_id,
+            run.session_id,
+            event_type="agent.run.cancelled",
+            actor="file_agent_runtime",
+            round_id=f"agent-round-{run.run_id}",
+            payload={
+                "runId": run.run_id,
+                "superseded": False,
+                "reclaimedAfterCrash": True,
+            },
+        )
+        logger.warning(
+            "startup sweep reclaimed hard-killed run: "
+            "project=%s run=%s previous_status=%s",
+            _log_safe(project_id),
+            _log_safe(run.run_id),
+            run.status.value,
+        )
+        return reclaimed
 
     async def stop(self) -> None:
         if self._commit_wake_listener is not None:
