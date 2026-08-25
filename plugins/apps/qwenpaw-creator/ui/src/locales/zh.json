@@ -539,7 +539,8 @@
     "groupResearch": "调研与理解",
     "groupShots": "镜头与成片",
     "groupSources": "来源素材",
-    "groupOther": "其他产物"
+    "groupOther": "其他产物",
+    "versionCount": "{{count}} 个版本"
   },
   "plan": {
     "creativeBrief": "创作总纲",

@@ -539,7 +539,8 @@
     "groupResearch": "Research & Understanding",
     "groupShots": "Shots & Final Cuts",
     "groupSources": "Source Assets",
-    "groupOther": "Other Artifacts"
+    "groupOther": "Other Artifacts",
+    "versionCount": "{{count}} versions"
   },
   "plan": {
     "creativeBrief": "Creative Brief",
