@@ -215,6 +215,66 @@ def test_sfx_neither_ducks_nor_is_ducked(monkeypatch, tmp_path) -> None:
     assert "volume=-12.000dB" not in graph
 
 
+def test_bgm_gets_default_edge_fades_and_segments_crossfade(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    first = tmp_path / "bed-a.mp3"
+    second = tmp_path / "bed-b.mp3"
+    first.write_bytes(b"mp3")
+    second.write_bytes(b"mp3")
+    # Two bgm segments whose spans overlap by 2s: each fades at its edge
+    # while amix sums them, forming the crossfade.
+    tracks = (
+        _track(
+            first,
+            role="bgm",
+            max_duration_seconds=8.0,
+            fade_in_seconds=2.0,
+            fade_out_seconds=2.0,
+        ),
+        _track(
+            second,
+            element_id="el-2",
+            role="bgm",
+            offset_seconds=6.0,
+            max_duration_seconds=6.5,
+            fade_in_seconds=2.0,
+            fade_out_seconds=2.0,
+        ),
+    )
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    runner._mix_audio_tracks(_spec(tmp_path, tracks))
+
+    graph = calls[0][calls[0].index("-filter_complex") + 1]
+    assert "afade=t=in:d=2.000" in graph
+    assert "afade=t=out:st=6.000:d=2.000" in graph
+    assert "afade=t=out:st=4.500:d=2.000" in graph
+    assert "adelay=6000:all=1" in graph
+    assert "amix=inputs=3" in graph
+
+
+def test_audio_fades_are_clamped_to_the_span(monkeypatch, tmp_path) -> None:
+    short = tmp_path / "sting.wav"
+    short.write_bytes(b"wav")
+    tracks = (
+        _track(
+            short,
+            role="bgm",
+            max_duration_seconds=2.0,
+            fade_in_seconds=2.0,
+            fade_out_seconds=2.0,
+        ),
+    )
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    runner._mix_audio_tracks(_spec(tmp_path, tracks))
+
+    graph = calls[0][calls[0].index("-filter_complex") + 1]
+    # 2s+2s does not fit a 2s span: both scale down to 1s.
+    assert "afade=t=in:d=1.000" in graph
+    assert "afade=t=out:st=1.000:d=1.000" in graph
+
+
 def test_explicit_narration_still_ducks_footage(monkeypatch, tmp_path) -> None:
     voice = tmp_path / "vo.wav"
     voice.write_bytes(b"wav")

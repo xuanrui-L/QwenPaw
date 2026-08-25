@@ -200,7 +200,7 @@ Specialist 返回后读取最新 Project，逐项核对：
 - **s2v（数字人口播）**：依次准备 `character_ref`（角色实体）、`portrait_version_id`（单人正脸人物图，可用角色锚点图或委派视觉开发产出）、`script`（台词），然后委派 AI 剪辑把 script 合成为音频得到 `audio_version_id`，最后委派生成数字人视频；没有 shots、分镜 prompt，不要生成分镜图。s2v 视频时长跟随驱动音频：拿到音频后把该 Element 的 span 时长调整为音频实际时长（后续元素相应前移）；若发布的视频更短，系统会自动收缩 span 并前移后续元素。
 - **audio（旁白/BGM/音效，必须声明 `creation.role`）**：成片声音分三层，每层只有一个来源。
   - `role=narration`（旁白）：以需要解说的画面区间为单位分段创建，每段一个独立 Element，span 只覆盖它解说的镜头；旁白音频合成完成后必须把最终文稿写入该 Element 的 `creation.script`，且文稿长度要让合成音频落在本段 span 内（超出会与后续旁白重叠）。**自带人声的区间不得覆盖旁白**：`creation.type=s2v` 的数字人口播、以及任何 `shots.dialogue` 非空的 R2V Element——这些区间由生成视频原生发声，系统会直接拒绝重叠的旁白写入。禁止用一条旁白音频贯穿整条 Timeline。合成时旁白区间的画面原声自动压低。
-  - `role=bgm`（配乐）：禁止把配乐写进任何 video_prompt（逐段生成的配乐在衔接处跳变）；需要配乐时引用一个已入库的音频素材版本，用**一条连续 span** 覆盖需要音乐的整个区间，跨片段连续的音乐同时能掩盖相邻生成片段的环境声差异。合成时 BGM 自动压低为音乐床，并在台词、口播与旁白区间自动闪避，无需手动调音。没有可用音频素材时不要虚构版本 ID：提示用户上传，或不配 BGM。
+  - `role=bgm`（配乐）：禁止把配乐写进任何 video_prompt（逐段生成的配乐在衔接处跳变）；需要配乐时引用一个已入库的音频素材版本，用**一条连续 span** 覆盖需要音乐的整个区间，跨片段连续的音乐同时能掩盖相邻生成片段的环境声差异。合成时 BGM 自动压低为音乐床，并在台词、口播与旁白区间自动闪避，默认带 2 秒淡入淡出（可用 `fade_in_seconds`/`fade_out_seconds` 覆盖），无需手动调音。需要分段换曲时创建多个 role=bgm Element，让相邻段的 span 重叠 1–2 秒：两段各自的边缘淡化叠加即形成交叉过渡。没有可用音频素材时不要虚构版本 ID：提示用户上传，或不配 BGM。
   - `role=sfx`（音效）：按需点缀，原样混入。
 - **edit**：根据素材理解直接创建 Edit Element 结构和 span 映射，再委派 AI 剪辑 Specialist 执行选段编排与动效。
 - **overlay/transition**：在主 Agent 创建 Element 并写入基础属性后，直接在当轮完成写入，不委派外部 Specialist（design_motion_overlays 除外）。

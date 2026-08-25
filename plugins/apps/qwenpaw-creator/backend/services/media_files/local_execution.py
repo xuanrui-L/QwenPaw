@@ -725,6 +725,23 @@ class FfmpegLocalMediaRunner:
             duration = float(track.get("max_duration_seconds") or 0.0)
             if duration > 0:
                 chain.append(f"atrim=0:{duration:.6f}")
+            # Edge fades on the track-local clock (before adelay). A bgm
+            # bed opens/closes musically instead of cutting in, and two
+            # overlapping bgm spans crossfade: both edges fade while amix
+            # sums them.
+            fade_in = max(0.0, float(track.get("fade_in_seconds") or 0.0))
+            fade_out = max(0.0, float(track.get("fade_out_seconds") or 0.0))
+            if duration > 0 and fade_in + fade_out > duration:
+                scale = duration / (fade_in + fade_out)
+                fade_in *= scale
+                fade_out *= scale
+            if fade_in > 0:
+                chain.append(f"afade=t=in:d={fade_in:.3f}")
+            if fade_out > 0 and duration > 0:
+                chain.append(
+                    f"afade=t=out:st={max(0.0, duration - fade_out):.3f}"
+                    f":d={fade_out:.3f}",
+                )
             gain = float(track.get("gain_db") or 0.0)
             if role == "bgm":
                 gain += _BGM_BED_GAIN_DB
@@ -2174,6 +2191,8 @@ class _FrozenAudioTrack:
     gain_db: float
     pan: float
     role: str = "bgm"
+    fade_in_seconds: float = 0.0
+    fade_out_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -2989,6 +3008,8 @@ def _timeline_execution(
                 gain_db=creation.gain_db,
                 pan=creation.pan,
                 role=creation.effective_role,
+                fade_in_seconds=creation.effective_fade_in_seconds,
+                fade_out_seconds=creation.effective_fade_out_seconds,
             ),
         )
         read_set.append(
@@ -3216,6 +3237,8 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
                             "gainDb": track.gain_db,
                             "pan": track.pan,
                             "role": track.role,
+                            "fadeIn": track.fade_in_seconds,
+                            "fadeOut": track.fade_out_seconds,
                         }
                         for track in resolved.audio_tracks
                     ],
@@ -4015,6 +4038,8 @@ class FileLocalMediaExecutionService:
                     "gain_db": track.gain_db,
                     "pan": track.pan,
                     "role": track.role,
+                    "fade_in_seconds": track.fade_in_seconds,
+                    "fade_out_seconds": track.fade_out_seconds,
                 },
             )
 
@@ -4094,6 +4119,8 @@ class FileLocalMediaExecutionService:
                         "gainDb": item["gain_db"],
                         "pan": item["pan"],
                         "role": item["role"],
+                        "fadeIn": item["fade_in_seconds"],
+                        "fadeOut": item["fade_out_seconds"],
                     }
                     for item in local_audio_tracks
                 ],

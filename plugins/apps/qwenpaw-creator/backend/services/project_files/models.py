@@ -18,7 +18,7 @@ import hashlib
 import math
 from pathlib import PurePosixPath
 import re
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, uuid5
 
@@ -1070,6 +1070,13 @@ class AudioCreation(StrictModel):
     speech_rate: float = Field(default=1.0, ge=0.5, le=2.0)
     gain_db: float = 0.0
     pan: float = Field(default=0.0, ge=-1, le=1)
+    # Edge fades in seconds; None selects the role default (bgm: 2s musical
+    # fade in/out, narration/sfx: hard edges). Segmented BGM crossfades by
+    # overlapping adjacent spans: both edges fade while the mixer sums them.
+    fade_in_seconds: float | None = Field(default=None, ge=0, le=10)
+    fade_out_seconds: float | None = Field(default=None, ge=0, le=10)
+
+    _BGM_DEFAULT_FADE_SECONDS: ClassVar[float] = 2.0
 
     @property
     def effective_role(self) -> str:
@@ -1081,10 +1088,26 @@ class AudioCreation(StrictModel):
             return "narration"
         return self.role
 
-    @field_validator("gain_db", "pan")
+    @property
+    def effective_fade_in_seconds(self) -> float:
+        if self.fade_in_seconds is not None:
+            return self.fade_in_seconds
+        if self.effective_role == "bgm":
+            return self._BGM_DEFAULT_FADE_SECONDS
+        return 0.0
+
+    @property
+    def effective_fade_out_seconds(self) -> float:
+        if self.fade_out_seconds is not None:
+            return self.fade_out_seconds
+        if self.effective_role == "bgm":
+            return self._BGM_DEFAULT_FADE_SECONDS
+        return 0.0
+
+    @field_validator("gain_db", "pan", "fade_in_seconds", "fade_out_seconds")
     @classmethod
-    def _validate_finite(cls, value: float) -> float:
-        if not math.isfinite(value):
+    def _validate_finite(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
             raise ValueError("audio values must be finite")
         return value
 
