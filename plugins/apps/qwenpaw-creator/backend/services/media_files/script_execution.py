@@ -207,6 +207,9 @@ def _request_fingerprint(project: Project, timeline: Timeline) -> str:
                 project.strategy.creative_brief,
                 project.strategy.creative_direction,
                 project.strategy.constraints,
+                # The prompt embeds the whole narrative structure (episode
+                # list + branch edges); new episodes/edges must re-draft.
+                _narrative_context(project, timeline.timeline_id),
             ],
         ).encode("utf-8"),
     ).hexdigest()
