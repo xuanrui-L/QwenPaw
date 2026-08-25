@@ -1,8 +1,17 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, Clapperboard } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Clapperboard,
+  Play,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectDocument } from "@/contracts/creator";
-import { getArtifactVersionMediaUrl } from "@/api/creator";
+import {
+  getArtifactVersionMediaUrl,
+  getTimelineRoughCutUrl,
+} from "@/api/creator";
 import {
   selectRoughCutFrames,
   type RoughCutSource,
@@ -32,10 +41,32 @@ export default function BlueprintRoughCutStrip({
 }: BlueprintRoughCutStripProps) {
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [playError, setPlayError] = useState(false);
   const frames = useMemo(() => selectRoughCutFrames(project), [project]);
   const readyCount = frames.filter((frame) => frame.source === "final").length;
-  const multiTimeline = new Set(frames.map((frame) => frame.timelineId)).size > 1;
+  const timelineIds = useMemo(
+    () => [...new Set(frames.map((frame) => frame.timelineId))],
+    [frames],
+  );
+  const multiTimeline = timelineIds.length > 1;
   if (!frames.length) return null;
+
+  const timelineLabelOf = (timelineId: string) => {
+    const timeline = project.timelines.items[timelineId];
+    const index = frames.find(
+      (frame) => frame.timelineId === timelineId,
+    )?.timelineIndex;
+    return (
+      timeline?.title || t("blueprint.episodeN", { n: (index ?? 0) + 1 })
+    );
+  };
+
+  const togglePlay = (timelineId: string) => {
+    setPlayError(false);
+    setPlayingId((current) => (current === timelineId ? null : timelineId));
+    setCollapsed(false);
+  };
 
   return (
     <section
@@ -53,23 +84,76 @@ export default function BlueprintRoughCutStrip({
             total: frames.length,
           })}
         </span>
-        <button
-          type="button"
-          onClick={() => setCollapsed((value) => !value)}
-          className="icon-button ml-auto !h-7 !w-7 shrink-0"
-          title={
-            collapsed
-              ? t("blueprint.expandRoughCut")
-              : t("blueprint.collapseRoughCut")
-          }
-        >
-          {collapsed ? (
-            <ChevronUp className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronDown className="h-3.5 w-3.5" />
-          )}
-        </button>
+        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {timelineIds.map((timelineId) => (
+            <button
+              key={timelineId}
+              type="button"
+              data-roughcut-play={timelineId}
+              onClick={() => togglePlay(timelineId)}
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                playingId === timelineId
+                  ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              }`}
+            >
+              <Play className="h-3 w-3" />
+              {multiTimeline
+                ? timelineLabelOf(timelineId)
+                : t("blueprint.playRoughCut")}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setCollapsed((value) => !value)}
+            className="icon-button !h-7 !w-7 shrink-0"
+            title={
+              collapsed
+                ? t("blueprint.expandRoughCut")
+                : t("blueprint.collapseRoughCut")
+            }
+          >
+            {collapsed ? (
+              <ChevronUp className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </span>
       </div>
+      {!collapsed && playingId && (
+        <div
+          data-roughcut-player
+          className="relative mt-2 overflow-hidden rounded-lg border border-[var(--color-border)] bg-black"
+        >
+          {playError ? (
+            <div className="flex h-40 items-center justify-center px-6 text-center text-xs text-[var(--color-text-tertiary)]">
+              {t("blueprint.roughCutFailed")}
+            </div>
+          ) : (
+            <video
+              key={playingId}
+              src={getTimelineRoughCutUrl(project.project_id, playingId)}
+              controls
+              autoPlay
+              playsInline
+              onError={() => setPlayError(true)}
+              className="mx-auto max-h-72 w-full bg-black object-contain"
+            />
+          )}
+          <span className="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+            {timelineLabelOf(playingId)} · {t("blueprint.roughCut")}
+          </span>
+          <button
+            type="button"
+            onClick={() => setPlayingId(null)}
+            title={t("blueprint.closeRoughCutPlayer")}
+            className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white transition-colors hover:bg-black/80"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       {!collapsed && (
         <div className="mt-2 flex items-stretch gap-1.5 overflow-x-auto pb-1">
           {frames.map((frame, index) => {
