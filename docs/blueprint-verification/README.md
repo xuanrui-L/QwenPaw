@@ -75,3 +75,29 @@ VIDEO 复用 LLM 凭证走 wan），前端 vite 5179，真实项目 `蓝图终�
 5. 被取消的专家运行在活动流里显示为红色「失败」→ 区分 `cancelled` 渲染为中性「已取消」（315fe429）。
 6. 加选项后 interaction 节点恒为 DONE、动效永不重画 → work_graph 复用起草指纹判 stale（df2fd5d4）。
 7. 剧本 prompt 含叙事结构但指纹未覆盖 → 新增分支边不重稿且持久 id 撞旧事务 500 → 指纹并入 narrative context（90669ac8）。
+8. 互动包 file:// 双击打开空白（fetch 被 CORS 拦）→ manifest 内联进 index.html（c5bf46e8）。
+9. 粗剪条把 overlay/audio/transition/interaction 计为「待分镜」→ 仅统计画面元素（c5bf46e8）。
+10. stale 触发面宽于剧本指纹（改元素也标 stale）→ 同指纹重稿仍撞旧事务 → 持久 id 追加 slot 版本数定界（fb90b745）。
+11. agent 规划 3.95s 精确镜头被 R2V 整数秒校验整体拒绝 → 管线取整而非拒绝（7c99f35a）。
+
+## 五、复杂互动短剧全前端真实重验（雾山谜案·互动季）
+
+零 mock、纯前端用户路径：后端**不带任何模型 env** 启动 →
+Playwright 在设置界面真实配置模型（LLM qwen-plus / VLM qwen-vl-max /
+Image qwen-image-3.0-pro / Video wan2.7，DashScope 真 key，持久化到
+`config/model_config.json`）→ 首页 composer 输入完整创作 brief 真实建项 →
+Creator Agent 真实规划并逐步建成：
+
+- **结构**：5 条时间线（雾夜来信 / 旧宅疑云 / 雨夜报警 / 真相大白 / 沉默代价）、
+  4 条分支边、**2 个观众抉择点**（是否进入旧宅？/ 如何处置账册？）、3 个结局
+- **生产**：5 集剧本（qwen 真实起草+元素变更后重稿）、agent 自建视觉实体
+  （角色/场景设计图真实生成）、10 张分镜（qwen-image-3.0-pro）、
+  **10 条镜头视频（wan 真实生成）**、2 个双选项抉择动效、5 段成片合成
+- **导出**：蓝图页互动包导出 **10,729,886 字节**（5 段成片 1.4–3.2MB）
+- **全分支 file:// 回放（Playwright 实点）**：
+  旧宅→揭发→真相大白 ✅ / 旧宅→销毁→沉默代价 ✅ / 报警离开→雨夜报警 ✅
+  —— **三条结局路径全部 PASS**（`complex-blueprint-final.png`、
+  `complex-timeline_ep*.png`）
+- 期间 agent 两次因工具误用触发熔断护栏（variants 父级、elements_by_id
+  包装结构），均通过真实对话纠正后自行恢复；缺陷 10/11 即在本轮真实运行中
+  暴露并修复。视频模型现已切换 `wan2.6-r2v-flash` 快速版。
