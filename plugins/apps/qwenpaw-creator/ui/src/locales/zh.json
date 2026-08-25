@@ -98,6 +98,7 @@
     "copyFailed": "复制项目失败",
     "recreateProject": "重新创作 {{name}}",
     "recreateFailed": "获取重新创作参数失败",
+    "projectGone": "项目已不存在，可能已在别处被删除",
     "loadFailed": "加载项目列表失败",
     "notSet": "未设置",
     "previewFinal": "预览 {{name}} 成片",
@@ -420,7 +421,7 @@
     "needS2v": "口播 / 数字人出镜场景配置，需搭配 TTS 或上传音频作为驱动源。",
     "videoFamilyCaps": "当前精确模型能力",
     "videoFamilyNote": "该模型属于 Wan/HappyHorse 模型簇：提交时会按明确的 Element 类型派生模型后缀；上方模式标签是精确模型的最终能力（happyhorse-1.1 不支持 video_edit）。",
-    "videoAllInOneNote": "wan3.0-video 与 wan3.0-video-prime 都是 All-in-One 模型：t2v、i2v、r2v 均以所选的同一模型 ID 提交。支持 480P/720P/1080P、原生音频与最长 30 秒视频。",
+    "videoAllInOneNote": "wan3.0-video 与 wan3.0-video-prime 都是 All-in-One 模型：t2v、i2v、r2v 均以所选的同一模型 ID 提交。",
     "videoExactModelNote": "该模型是单模型能力声明：提交时保持原模型 ID；执行层会在上传素材和创建任务前拒绝不支持的模式。",
     "videoCapabilitiesLoading": "正在核对能力…",
     "videoCapabilityUnknown": "精确模型 ID 未收录：所有模式都会安全拒绝；旧 Seedance 2.0 pro/lite 别名请改选带日期的官方 ID",
@@ -438,7 +439,7 @@
     "translateModelLabel": "翻译模型（可选）",
     "translateCardNote": "image_generation 的 translate 模式用此模型翻译图内文字并保留排版；留空时使用默认的 qwen-mt-image，与图片生成模型共用同一个 DashScope API Key（仅 DashScope 协议可用）。",
     "imageEndpointNote": "Base URL 填 API 根（https://dashscope.aliyuncs.com/api/v1）即可：百炼 qwen-image / wan-image 全系共用 multimodal-generation 服务路径，由后端自动拼接；图内文字翻译走 image2image 路径，同样自动拼接。",
-    "videoEndpointNote": "百炼默认使用无需 WorkspaceId 的旧根地址 https://dashscope.aliyuncs.com/api/v1；也可填写同地域业务空间根地址 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1。后端会自动拼接官方路径；连通性测试使用只读接口，不会创建付费生成任务。"
+    "videoEndpointNote": "Base URL 填 API 根即可：DashScope 由后端自动拼接 video-generation/video-synthesis 提交路径，火山引擎自动拼接 ark v3 任务路径。"
   },
   "modelBadges": {
     "textModel": "文本模型",
@@ -1245,7 +1246,7 @@
     "modelGuideGoConfigure": "去配置 →",
     "modelGuideWhatModels": "什么场景需要配什么模型？",
     "modelGuideProviders": "当前支持的提供商 / 协议",
-    "modelGuideSetupDesc": "百炼 Wan3 新手可选择 DashScope 协议，保留默认旧地址 https://dashscope.aliyuncs.com/api/v1，填写 Key 并选择 wan3.0-video 或 wan3.0-video-prime；已有业务空间时也可改填同地域 Workspace 根地址。通过只读的「测试连通性」后启用，不会因此创建付费视频任务。VLM 可直接复用支持多模态的 LLM 配置。"
+    "modelGuideSetupDesc": "在「模型配置」中填写 Base URL、API Key 与模型名称，并通过「测试连通性」后启用；VLM 可直接复用支持多模态的 LLM 配置。"
   },
   "tourMocks": {
     "sampleTimeline": "示例：规划完成后的时间轴",

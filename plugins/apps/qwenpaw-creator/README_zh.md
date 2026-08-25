@@ -42,31 +42,13 @@ Creator 通过 QwenPaw 的 **Apps（应用中心）** 安装和打开。启动 Q
 | 素材含人声 / 需要转写 | ASR                       | 将语音识别成文字，用于剪辑与字幕             |
 | 旁白配音 / 数字人口播 | TTS + 数字人              | 合成旁白与台词；由音频驱动数字人口播视频片段 |
 
-#### 百炼 Wan3.0 新手配置
-
-1. 在「视频生成模型」中选择 **DashScope（百炼）** 协议。
-2. Base URL 建议直接保留默认旧地址 `https://dashscope.aliyuncs.com/api/v1`；该地址不需要 WorkspaceId，百炼旧版与新版模型都可以使用。已有业务空间的用户也可以改为同地域的新地址 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1`，API Key、模型与业务空间必须属于同一地域。
-3. 填写 DashScope API Key，并选择 `wan3.0-video` 或 `wan3.0-video-prime`。两者都是 All-in-One 模型，同一个模型 ID 直接支持文生视频、图生视频和参考生视频，不需要手动添加模式后缀。
-4. 点击「测试连通性」，通过后再保存并启用。该测试使用只读接口，不会创建付费视频任务；真正生成前仍会显示模型、参数与预估费用确认卡。
-
-Wan3.0 可生成 2–30 秒视频，支持 480P / 720P / 1080P、`adaptive` 与六种固定画幅以及原生音频。参考生视频最多使用 10 张图片和 5 个视频；参考视频总时长不超过 15 秒，包含输入视频时输入与输出总时长不超过 30 秒。Creator 会把这些限制同时提供给设置页、Agent 和执行层，在上传素材或创建任务前拦截不支持的参数。
-
-官方参考：[Wan3.0 视频生成 API](https://help.aliyun.com/zh/model-studio/wan3-video-generation-api-reference)、[百炼新旧调用地址说明](https://help.aliyun.com/zh/model-studio/qwen-api-via-dashscope)。
-
-#### 从旧版 Creator 升级视频模型配置
-
-- 旧 preset 中的 `doubao-seedance-2.0-pro` / `doubao-seedance-2.0-lite` 是非官方别名，升级后不会再按家族猜测能力。请在模型配置中重新选择带发布日期的官方精确 ID，例如 `doubao-seedance-2-0-260128`、`doubao-seedance-2-0-fast-260128` 或 `doubao-seedance-2-0-mini-260615`；未收录的别名会 fail-closed，且不会发起网络或计费请求。
-- `happyhorse-1.1` 实际只提供 t2v / i2v / r2v，没有 `happyhorse-1.1-video-edit`；需要视频编辑时请使用明确支持该模式的精确模型（百炼当前为 `happyhorse-1.0-video-edit`）。
-- 裸模型名 `wan2.7` 在 r2v 请求中会提交官方模式模型 `wan2.7-r2v`；这是模型 payload 的有意修正。已有完整模型名（如 `wan2.7-i2v`）会按所选 Element 模式替换对应后缀。
-- R2V 图片引用顺序继续保持存量合同：`storyboard → lineup → character → scene → prop`。升级不会把旧 `video_prompt` 中已写好的场景与道具编号静默互换。
-
 当前模型矩阵按能力展示：
 
 - **LLM / VLM**：OpenAI 兼容协议、DashScope / 百炼、Anthropic Claude、DeepSeek、Google Gemini、百度千帆、火山引擎和自定义提供商；
 - **Grounding**：Serper（Google）或 Tavily；验证模型可复用 LLM / VLM，也可单独配置；
 - **图片生成**：OpenAI 兼容协议（`gpt-image-2`）、DashScope / 百炼（`qwen-image-3.0`、`wan2.7-image`、`z-image-turbo`）、Google Gemini（Nano Banana 家族，`gemini-3-pro-image` 最多 14 张参考图）、火山引擎（`doubao-seedream` 5.0/4.5/4.0）、Black Forest Labs（FLUX.2，最多 8 张参考图）、Ideogram（排版与文字渲染专长）；
 - **视频生成**：
-  - DashScope / 百炼：`wan3.0-video` 与 `wan3.0-video-prime` 均以单一 All-in-One 模型统一支持 t2v / i2v / r2v、480P / 720P / 1080P、原生音频与最长 30 秒视频；`wan2.7`、`happyhorse-1.1` 会根据已明确选择的 Element 类型派生模式模型名；百炼同时托管 `kling/kling-v3-*` 与仅支持 r2v 的 `vidu/viduq3-*_reference2video` 模型；
+  - DashScope / 百炼：`wan3.0-video`、`wan3.0-video-prime` 为 All-in-One 模型，同一模型 ID 支持 t2v / i2v / r2v；`wan2.7`、`happyhorse-1.1` 会按元素类型自动选择 t2v / i2v / r2v；百炼同时托管 `kling/kling-v3-*` 与 `vidu/viduq3-*_reference2video` 系列；
   - 火山引擎：`doubao-seedance-2-5-260628`（最长 30 秒，全模态参考最多 30 图 + 10 视频）与文档中明确列出的 `doubao-seedance-2-0-*` ID；
   - Google Gemini：`veo-3.1`（时长 4/6/8 秒，带参考图或 1080p/4k 时固定 8 秒，参考图最多 3 张）；
   - MiniMax 海螺：`MiniMax-Hailuo-2.3` 等（768P 支持 6/10 秒，1080P 仅 6 秒），主体参考仅 `S2V-01`；
@@ -74,6 +56,7 @@ Wan3.0 可生成 2–30 秒视频，支持 480P / 720P / 1080P、`adaptive` 与�
   - Vidu 官方：能力按精确模型区分——`viduq3-turbo` 支持 t2v/i2v/r2v，`viduq3-mix`、`viduq3` 仅 r2v，`viduq2-pro` 支持 i2v/r2v，`viduq2` 支持 t2v/r2v；
   - 可灵与 Vidu 同时提供百炼托管和官方直连两条渠道，**由模型配置中选择的协议决定走哪条**；
   - 每个“协议 + 精确模型 ID”都有独立官方契约：不支持的模式及非法时长、分辨率、画幅、参考素材会在上传/建单前被拒绝，同一能力表同时驱动设置页与 Agent 提示词；
+  - R2V 图片引用顺序保持存量合同：`storyboard → lineup → character → scene → prop`；升级不会把已有 `video_prompt` 中的场景与道具编号静默互换；
 - **ASR**：DashScope Fun-ASR、DashScope Qwen3-ASR 或 OpenAI Whisper；
 - **TTS / 数字人**：DashScope Qwen-TTS、CosyVoice，以及 `wan2.2-s2v`（并提供 `wan2.2-s2v-detect` 免费人脸检测）；
 - **Embedding**：DashScope `qwen3-vl-embedding`，用于资产检索与长素材记忆。
