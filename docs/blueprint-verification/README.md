@@ -46,7 +46,9 @@ VIDEO 复用 LLM 凭证走 wan），前端 vite 5179，真实项目 `蓝图终�
    - `verify-plan.png` 参数化时间线 + 左侧剧集栏（含真实分镜缩略）
    - `verify-branching.png` 分支画布形态
    - `verify-selection.png` 划选文本 → SelectionToolbar → dock 选区附件 chip
-6. **粗剪**：`GET /timelines/{tid}/rough-cut` 返回真实 draft mp4（ffmpeg 拼接分镜/镜头）。
+6. **粗剪**：`GET /timelines/{tid}/rough-cut` 返回真实 draft mp4（ffmpeg 拼接分镜/镜头）；
+   蓝图粗剪条提供逐时间线播放按钮，内联 `<video>` 直接流播 draft（`roughcut-playing.png`，
+   浏览器实测 readyState=4、时间推进、双集可切换）。
 7. **成片合成**：`POST /timelines/{tid}/render` 两条时间线真实合成
    （`timeline:timeline:main:render`、`timeline:tl:ep2:render` 均落盘 final_video）。
 8. **互动包端到端（真实产物 + 浏览器实点）**：`GET /interactive-bundle` 导出 zip
