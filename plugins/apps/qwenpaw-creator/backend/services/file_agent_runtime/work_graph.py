@@ -19,10 +19,7 @@ from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import TaskKind, TaskStatus
-from services.file_agent_runtime.prompt_text import (
-    dialogue_match_key,
-    dialogue_spoken_lines,
-)
+from services.prompt_text import dialogue_match_key, dialogue_spoken_lines
 from services.project_files.models import (
     ArtifactVersionRenderSource,
     ElementOutputRenderSource,

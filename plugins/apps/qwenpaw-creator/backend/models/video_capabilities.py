@@ -818,6 +818,12 @@ def video_reference_capability(  # pylint: disable=too-many-return-statements
         return _HAPPYHORSE_REFERENCE_CAPABILITY
     if _WAN_30_REFERENCE_PATTERN.fullmatch(normalized):
         return _WAN_30_REFERENCE_CAPABILITY
+    # These exact model IDs advertise a family reference contract even when
+    # their suffix names the t2v/i2v entry point. This catalog describes what
+    # the family can accept; submit-time mode validation independently decides
+    # whether the current request may carry references. Keeping the same model
+    # resolver here and in prompt guidance prevents known t2v/i2v IDs from
+    # falling into the false "unknown Wan protocol" blocker.
     if _WAN_27_MODEL_PATTERN.fullmatch(normalized):
         return _WAN_27_REFERENCE_CAPABILITY
     if _WAN_26_MODEL_PATTERN.fullmatch(normalized):

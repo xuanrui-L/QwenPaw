@@ -110,6 +110,13 @@ class SpecialistToolWait(StrEnum):
 _PROJECT_ASSETS_TARGET_REF = "project:assets"
 _ASSET_TARGET_REF_PATTERN = r"^(asset|lineup):.+$"
 _SOURCE_PROJECT_TOOL_NAMES = frozenset({"read_project", "read_project_file"})
+# R2V_GENERATION_DIRECTOR is absent from the active delegation registry. Its
+# direct manifest remains readable only so durable pre-retirement SpecialistRun
+# checkpoints can replay/finish with the exact tool surface they originally
+# recorded. New image/video dispatch is owned exclusively by Work Graph.
+_LEGACY_R2V_REPLAY_ROLES = frozenset(
+    {SpecialistRole.R2V_GENERATION_DIRECTOR},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -848,11 +855,7 @@ _SPECS = (
             "translate）。只传 Project 中已存在的 exact version id；"
             "生成结果由文件媒体服务写入 Asset Index 与 project.json。"
         ),
-        roles=frozenset(
-            {
-                SpecialistRole.R2V_GENERATION_DIRECTOR,
-            },
-        ),
+        roles=_LEGACY_R2V_REPLAY_ROLES,
         parameters=_tool_schema(_IMAGE_ARGUMENTS),
         requires_execution_authorization=True,
         long_running=True,
@@ -866,7 +869,7 @@ _SPECS = (
             "（视当前视频模型能力矩阵而定）。Runtime 文件任务完成后结果自动"
             "写回 Asset Index 与 project.json。"
         ),
-        roles=frozenset({SpecialistRole.R2V_GENERATION_DIRECTOR}),
+        roles=_LEGACY_R2V_REPLAY_ROLES,
         parameters=_tool_schema(_R2V_ARGUMENTS),
         requires_execution_authorization=True,
         long_running=True,
@@ -881,7 +884,7 @@ _SPECS = (
             "人像检测（按成功请求计费，远低于生成费用；检测未通过不会提交"
             "生成）；audioAssetRef 直接消费 tts_generation 产出的 audio version。"
         ),
-        roles=frozenset({SpecialistRole.R2V_GENERATION_DIRECTOR}),
+        roles=_LEGACY_R2V_REPLAY_ROLES,
         parameters=_tool_schema(_S2V_ARGUMENTS),
         requires_execution_authorization=True,
         long_running=True,

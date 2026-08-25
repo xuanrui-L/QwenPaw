@@ -25,7 +25,9 @@ def test_specialist_registry_owns_role_specific_media_tools(tmp_path) -> None:
             admitted_target_refs=["asset:hero"],
         ),
     )
-    r2v = _names(
+    # Direct retired-role manifests are durable checkpoint compatibility only;
+    # subagents.py rejects every new delegation to this role.
+    legacy_r2v = _names(
         registry.manifest_for(
             SpecialistRole.R2V_GENERATION_DIRECTOR,
             admitted_target_refs=["element:r2v-1"],
@@ -45,7 +47,7 @@ def test_specialist_registry_owns_role_specific_media_tools(tmp_path) -> None:
     )
 
     assert "image_generation" not in visual
-    assert {"image_generation", "r2v_generation"} <= r2v
+    assert {"image_generation", "r2v_generation"} <= legacy_r2v
     # The editing director is a pure orchestration role: composition/export
     # is triggered directly by the user via HTTP endpoints.
     assert "ai_edit" not in editing

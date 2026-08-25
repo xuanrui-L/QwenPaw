@@ -18,10 +18,7 @@ from models.video_capabilities import (
     video_prompt_image_reference_markers,
     video_prompt_storyboard_reference_violation,
 )
-from services.file_agent_runtime.prompt_text import (
-    dialogue_match_key,
-    dialogue_spoken_lines,
-)
+from services.prompt_text import dialogue_match_key, dialogue_spoken_lines
 
 _BORDER_CONTRADICTION = re.compile(
     r"(?:\bno\s+(?:panel\s+)?borders?\b|无边框|不要边框|禁止边框|不画边框)",
