@@ -4251,25 +4251,51 @@ class FileR2VExecutionService:
             _, element = find_timeline_element(project, element_id)
         except Exception:
             return False
-        if not isinstance(element.creation, R2VCreation):
-            return False
-        selected = selected_element_output(project, element, "storyboard")
-        storyboard_id = selected[1] if selected is not None else None
-        if not storyboard_id:
-            return False
-        current_refs = list(
-            dict.fromkeys(
-                [
-                    storyboard_id,
-                    *resolve_r2v_visual_reference_version_ids(
-                        project,
-                        element.creation,
-                        element.creation.video_reference_version_ids,
-                    ),
-                ],
-            ),
-        )
-        return current_refs == [str(item) for item in frozen_refs]
+        creation = element.creation
+        creation_type = getattr(creation, "type", "r2v")
+        if creation_type == "r2v":
+            if not isinstance(creation, R2VCreation):
+                return False
+            selected = selected_element_output(project, element, "storyboard")
+            storyboard_id = selected[1] if selected is not None else None
+            if not storyboard_id:
+                return False
+            current_refs = list(
+                dict.fromkeys(
+                    [
+                        storyboard_id,
+                        *resolve_r2v_visual_reference_version_ids(
+                            project,
+                            creation,
+                            creation.video_reference_version_ids,
+                        ),
+                    ],
+                ),
+            )
+            return current_refs == [str(item) for item in frozen_refs]
+        elif creation_type == "t2v":
+            if not isinstance(creation, T2VCreation):
+                return False
+            return True
+        elif creation_type == "i2v":
+            if not isinstance(creation, I2VCreation):
+                return False
+            current_refs = (
+                [creation.first_frame_version_id]
+                if creation.first_frame_version_id
+                else []
+            )
+            return current_refs == [str(item) for item in frozen_refs]
+        elif creation_type == "s2v":
+            if not isinstance(creation, S2VCreation):
+                return False
+            current_refs = []
+            if creation.portrait_version_id:
+                current_refs.append(creation.portrait_version_id)
+            if creation.audio_version_id:
+                current_refs.append(creation.audio_version_id)
+            return current_refs == [str(item) for item in frozen_refs]
+        return False
 
     async def _converge(
         self,
