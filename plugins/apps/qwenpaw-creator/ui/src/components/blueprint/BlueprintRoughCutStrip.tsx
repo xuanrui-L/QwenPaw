@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronUp,
@@ -76,37 +76,47 @@ export default function BlueprintRoughCutStrip({
     setCollapsed(false);
   };
 
+  // Escape closes the inline player.
+  useEffect(() => {
+    if (!playingId) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPlayingId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [playingId]);
+
   return (
     <section
       data-blueprint-roughcut
       className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-primary)]/70 px-5 py-2 backdrop-blur"
     >
       <div className="flex items-center gap-2.5">
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--color-text-primary)]">
+        <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs font-semibold text-[var(--color-text-primary)]">
           <Clapperboard className="h-3.5 w-3.5 text-[var(--color-accent)]" />
           {t("blueprint.roughCut")}
         </span>
-        <span className="min-w-0 truncate text-[11px] text-[var(--color-text-tertiary)]">
+        <span className="hidden min-w-0 truncate text-[11px] text-[var(--color-text-tertiary)] lg:block">
           {t("blueprint.roughCutHint", {
             ready: readyCount,
             total: frames.length,
           })}
         </span>
-        <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        <span className="ml-auto flex min-w-0 shrink items-center gap-1.5 overflow-x-auto py-0.5 [scrollbar-width:none]">
           {timelineIds.map((timelineId) => {
             const finalUrl = finalCutUrlOf(timelineId);
             return (
-              <span key={timelineId} className="inline-flex items-center">
+              <span key={timelineId} className="inline-flex shrink-0 items-center">
                 <button
                   type="button"
                   data-roughcut-play={timelineId}
                   onClick={() => togglePlay(timelineId)}
-                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                  className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold backdrop-blur transition-all ${
                     finalUrl ? "rounded-r-none border-r-0" : ""
                   } ${
                     playingId === timelineId
-                      ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
-                      : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)] shadow-[0_0_0_3px_var(--color-accent-soft)]"
+                      : "border-[var(--color-border)] bg-[var(--color-bg-primary)]/80 text-[var(--color-text-secondary)] hover:-translate-y-px hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] hover:shadow-[var(--shadow-xs)]"
                   }`}
                 >
                   <Play className="h-3 w-3" />
@@ -125,7 +135,7 @@ export default function BlueprintRoughCutStrip({
                     download={`${timelineId.replace(/:/g, "_")}-final.mp4`}
                     data-roughcut-download={timelineId}
                     title={t("blueprint.downloadFinalCut")}
-                    className="inline-flex items-center rounded-full rounded-l-none border border-[var(--color-border)] px-1.5 py-0.5 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                    className="inline-flex items-center rounded-full rounded-l-none border border-[var(--color-border)] bg-[var(--color-bg-primary)]/80 px-1.5 py-0.5 text-[var(--color-text-secondary)] backdrop-blur transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
                   >
                     <Download className="h-3 w-3" />
                   </a>
@@ -154,7 +164,7 @@ export default function BlueprintRoughCutStrip({
       {!collapsed && playingId && (
         <div
           data-roughcut-player
-          className="relative mt-2 overflow-hidden rounded-lg border border-[var(--color-border)] bg-black"
+          className="relative mt-2 overflow-hidden rounded-2xl border border-black/40 bg-black shadow-[0_12px_40px_rgba(0,0,0,.35)]"
         >
           {playError ? (
             <div className="flex h-40 items-center justify-center px-6 text-center text-xs text-[var(--color-text-tertiary)]">
@@ -174,7 +184,7 @@ export default function BlueprintRoughCutStrip({
               className="mx-auto max-h-72 w-full bg-black object-contain"
             />
           )}
-          <span className="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+          <span className="absolute left-3 top-3 rounded-full bg-black/50 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-md">
             {timelineLabelOf(playingId)} ·{" "}
             {finalCutUrlOf(playingId)
               ? t("blueprint.finalCutBadge")
@@ -184,7 +194,7 @@ export default function BlueprintRoughCutStrip({
             type="button"
             onClick={() => setPlayingId(null)}
             title={t("blueprint.closeRoughCutPlayer")}
-            className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white transition-colors hover:bg-black/80"
+            className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75"
           >
             <X className="h-3.5 w-3.5" />
           </button>
@@ -220,7 +230,7 @@ export default function BlueprintRoughCutStrip({
                     `blueprint.frameSource.${frame.source}`,
                   )}`}
                   onClick={() => onSelectTimeline(frame.timelineId)}
-                  className="group relative h-[88px] w-[52px] shrink-0 overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] transition-all hover:-translate-y-0.5 hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-sm)]"
+                  className="group relative h-[88px] w-[52px] shrink-0 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] shadow-[var(--shadow-xs)] transition-all duration-200 hover:-translate-y-1 hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-md)]"
                 >
                   {url &&
                     (frame.mediaKind === "video" ? (

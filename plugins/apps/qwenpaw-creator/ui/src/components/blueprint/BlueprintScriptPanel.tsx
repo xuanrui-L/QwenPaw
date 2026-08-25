@@ -67,21 +67,48 @@ export function parseScriptMarkdown(markdown: string): ScriptBlock[] {
 }
 
 const MD_LINK = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+const MD_BOLD = /\*\*([^*]+)\*\*/g;
+
+function renderInlineBold(text: string, keyBase: number): ReactNode[] {
+  MD_BOLD.lastIndex = 0;
+  if (!MD_BOLD.test(text)) return [text];
+  MD_BOLD.lastIndex = 0;
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  let key = keyBase;
+  let match: RegExpExecArray | null;
+  while ((match = MD_BOLD.exec(text))) {
+    if (match.index > last) nodes.push(text.slice(last, match.index));
+    nodes.push(
+      <b key={`b${key++}`} className="text-[var(--color-text-primary)]">
+        {match[1]}
+      </b>,
+    );
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
 
 /**
  * Scripts are text-first: only real edit-genre source timecode refs render
  * as chips; any other (hallucinated) media link degrades to its label.
+ * Inline **bold** renders as emphasis instead of raw asterisks.
  */
 function renderScriptText(text: string): ReactNode {
   MD_LINK.lastIndex = 0;
-  if (!MD_LINK.test(text)) return text;
+  const hasLink = MD_LINK.test(text);
   MD_LINK.lastIndex = 0;
+  if (!hasLink) return renderInlineBold(text, 0);
   const nodes: ReactNode[] = [];
   let last = 0;
   let key = 0;
   let match: RegExpExecArray | null;
   while ((match = MD_LINK.exec(text))) {
-    if (match.index > last) nodes.push(text.slice(last, match.index));
+    if (match.index > last) {
+      nodes.push(...renderInlineBold(text.slice(last, match.index), key));
+      key += 50;
+    }
     const [, label, url] = match;
     if (url.startsWith("source-version://")) {
       const params = new URLSearchParams(url.split("?")[1] ?? "");
@@ -89,7 +116,7 @@ function renderScriptText(text: string): ReactNode {
       const tout = params.get("out");
       nodes.push(
         <span
-          key={key++}
+          key={`l${key++}`}
           className="mx-0.5 inline-flex items-center gap-1 rounded bg-[var(--color-bg-secondary)] px-1.5 py-px align-baseline text-[11px] font-medium text-[var(--color-text-secondary)]"
           title={url}
         >
@@ -107,7 +134,9 @@ function renderScriptText(text: string): ReactNode {
     }
     last = match.index + match[0].length;
   }
-  if (last < text.length) nodes.push(text.slice(last));
+  if (last < text.length) {
+    nodes.push(...renderInlineBold(text.slice(last), key + 100));
+  }
   return nodes;
 }
 
@@ -320,6 +349,19 @@ export default function BlueprintScriptPanel({
   useEffect(() => {
     setSynopsisDraft(timeline?.synopsis ?? "");
   }, [timeline?.synopsis, timelineId, open]);
+
+  // Real users expect Escape to dismiss the inline panel.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
 
   const blocks = useMemo(
     () => (scriptText ? parseScriptMarkdown(scriptText) : []),

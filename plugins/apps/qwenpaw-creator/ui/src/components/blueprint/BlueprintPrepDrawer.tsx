@@ -399,6 +399,23 @@ export default function BlueprintPrepDrawer({
     setDetail(focus);
   }, [focus, open]);
 
+  // Escape closes the drawer (detail level first, then the drawer itself).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      setDetail((current) => {
+        if (current) return null;
+        onClose();
+        return current;
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   const entities = useMemo(
     () =>
       project.visual.entities.order

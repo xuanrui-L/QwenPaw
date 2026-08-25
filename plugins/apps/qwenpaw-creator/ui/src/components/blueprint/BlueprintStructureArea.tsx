@@ -357,11 +357,11 @@ function SingleBoard({
                     type="button"
                     disabled={!card.onClick}
                     onClick={card.onClick}
-                    className={`w-full rounded-lg border px-2.5 py-2 text-left transition-all ${
+                    className={`w-full rounded-xl border px-2.5 py-2 text-left transition-all duration-200 ${
                       card.emphasized
                         ? "border-[var(--color-warning)] bg-[var(--color-warning-soft)] shadow-[0_0_0_3px_rgba(247,144,9,.08)] hover:-translate-y-px hover:shadow-[var(--shadow-sm)]"
                         : card.onClick
-                        ? "border-[var(--color-border)] bg-[var(--color-bg-card)] hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-sm)]"
+                        ? "border-[var(--color-border)] bg-[var(--color-bg-card)] hover:-translate-y-px hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-md)]"
                         : "cursor-default border-dashed border-[var(--color-border)] bg-[var(--color-bg-primary)]/60"
                     }`}
                   >
@@ -534,7 +534,7 @@ function GraphCanvas({
   return (
     <div
       data-blueprint-shape="branching"
-      className="h-full overflow-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]"
+      className="h-full overflow-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]"
       style={{
         backgroundImage:
           "radial-gradient(circle, var(--color-border) 1px, transparent 1px)",
@@ -572,7 +572,7 @@ function GraphCanvas({
           return (
             <span
               key={`label:${edge.edge_id}`}
-              className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-primary)] px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text-secondary)] shadow-[var(--shadow-xs)]"
+              className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-primary)]/80 px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text-secondary)] shadow-[var(--shadow-sm)] backdrop-blur-md"
               style={{ left: x, top: y }}
               title={edge.prompt}
             >
@@ -592,7 +592,7 @@ function GraphCanvas({
               type="button"
               data-blueprint-node={summary.timelineId}
               onClick={() => onSelectTimeline(summary.timelineId)}
-              className={`group absolute rounded-xl border bg-[var(--color-bg-card)] p-3 text-left shadow-[var(--shadow-xs)] transition-all hover:-translate-y-px hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-md)] ${
+              className={`group absolute rounded-2xl border bg-[var(--color-bg-card)]/85 p-3 text-left shadow-[var(--shadow-sm)] backdrop-blur-md transition-all duration-200 hover:-translate-y-1 hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-lg)] ${
                 selected
                   ? "border-[var(--color-accent)] shadow-[0_0_0_3px_var(--color-accent-soft)]"
                   : "border-[var(--color-border)]"
