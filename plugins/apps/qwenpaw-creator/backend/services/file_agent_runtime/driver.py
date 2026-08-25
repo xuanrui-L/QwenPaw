@@ -5955,9 +5955,7 @@ class FileCreatorAgentRuntime:
         elements yet must still resume.
         """
 
-        auto_approve = (
-            get_media_review_mode() == MEDIA_REVIEW_AUTO_APPROVE
-        )
+        auto_approve = get_media_review_mode() == MEDIA_REVIEW_AUTO_APPROVE
         if after_failure and not auto_approve:
             return
         try:

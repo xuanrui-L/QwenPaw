@@ -493,11 +493,7 @@ async def _run(
             name=(
                 "真实主 Agent Prompt 验收：雨夜灯塔（60 秒·变节奏）"
                 if prompt_only
-                else (
-                    "真实 E2E：雨夜灯塔（60 秒）"
-                    if is_minute
-                    else "真实 E2E：雨夜纸鹤（3 秒）"
-                )
+                else ("真实 E2E：雨夜灯塔（60 秒）" if is_minute else "真实 E2E：雨夜纸鹤（3 秒）")
             ),
             description=(
                 "真实 qwen3.7-plus 主 Agent、无 R2V Specialist、无媒体派发；"
@@ -679,9 +675,7 @@ async def _run(
                     previous_start,
                     previous_duration,
                     previous_shots,
-                ) = minute_element_specs[
-                    minute_element_phases_queued - 1
-                ]
+                ) = minute_element_specs[minute_element_phases_queued - 1]
                 previous = next(
                     (
                         element
@@ -712,7 +706,9 @@ async def _run(
                             {
                                 "type": "text",
                                 "text": (
-                                    ONE_MINUTE_ELEMENT_GOALS[next_index].replace(
+                                    ONE_MINUTE_ELEMENT_GOALS[
+                                        next_index
+                                    ].replace(
                                         "等待当前分镜与 happyhorse1.1 R2V 视频真实生成。",
                                         "本次只验收完整 Prompt，不等待或请求任何媒体生成。",
                                     )

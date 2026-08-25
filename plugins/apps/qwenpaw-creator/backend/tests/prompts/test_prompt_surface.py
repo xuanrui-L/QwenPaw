@@ -274,9 +274,7 @@ def test_ai_editing_director_requires_pet_inner_monologue_not_action_labels() ->
     assert "第一段 `span.start_tick=0`" in prompt
 
 
-_IMAGE_ROLES = (
-    SpecialistRole.VISUAL_DEVELOPMENT,
-)
+_IMAGE_ROLES = (SpecialistRole.VISUAL_DEVELOPMENT,)
 
 
 def _set_image_model(monkeypatch, name: str) -> None:

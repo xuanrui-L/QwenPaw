@@ -2147,8 +2147,7 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     assert specialist.metadata["waitingReview"] is True
     assert specialist.metadata["waitingReviewId"] == "review-ep22-storyboard"
     waiting_summary = (
-        "asset:hero 的产物已生成，后续步骤尚未开始。请先完成审阅；"
-        "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
+        "asset:hero 的产物已生成，后续步骤尚未开始。请先完成审阅；" + "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
     )
     assert specialist.final_summary_text == waiting_summary
     blocked = [

@@ -382,8 +382,7 @@ def test_empty_r2v_prompt_is_reported_without_calling_review_model(
                                     "order": ["shot:1"],
                                 },
                                 "storyboard_prompt": (
-                                    "16:9 故事板，1 个分镜格；"
-                                    "每一个分镜格内部均为 16:9。"
+                                    "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
                                 ),
                                 "video_prompt": "",
                             },
@@ -405,9 +404,9 @@ def test_empty_r2v_prompt_is_reported_without_calling_review_model(
 
     assert result is not None
     assert result["prompt_check"]["passed"] is False
-    assert [
-        item["code"] for item in result["prompt_check"]["findings"]
-    ] == ["VIDEO_PROMPT_EMPTY"]
+    assert [item["code"] for item in result["prompt_check"]["findings"]] == [
+        "VIDEO_PROMPT_EMPTY",
+    ]
     blockers = admission.active_sync_fences(
         tmp_path / "runtime" / "run-review",
     )
@@ -446,12 +445,10 @@ def test_clean_r2v_prompt_repair_releases_contract_blocker(
                                     "order": ["shot:1"],
                                 },
                                 "storyboard_prompt": (
-                                    "16:9 故事板，1 个分镜格；"
-                                    "每一个分镜格内部均为 16:9。"
+                                    "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
                                 ),
                                 "video_prompt": (
-                                    "[Image 1] 仅提供分镜动作顺序。"
-                                    "角色坚定地说：‘我们出发。’"
+                                    "[Image 1] 仅提供分镜动作顺序。" "角色坚定地说：‘我们出发。’"
                                 ),
                             },
                         },
@@ -509,8 +506,7 @@ def test_happyhorse_explicit_reference_roles_follow_runtime_order(
                                     "order": ["s"],
                                 },
                                 "storyboard_prompt": (
-                                    "16:9 故事板，1 个分镜格；"
-                                    "每一个分镜格内部均为 16:9。"
+                                    "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
                                 ),
                                 "video_prompt": (
                                     "[Image 1] is the storyboard. "

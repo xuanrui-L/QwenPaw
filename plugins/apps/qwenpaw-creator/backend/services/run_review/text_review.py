@@ -200,7 +200,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     end = candidate.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("sync review response contains no JSON object")
-    payload = json.loads(candidate[start:end + 1])
+    payload = json.loads(candidate[start : end + 1])
     if not isinstance(payload, dict):
         raise ValueError("sync review response JSON is not an object")
     return payload

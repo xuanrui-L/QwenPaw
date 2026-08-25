@@ -1331,6 +1331,8 @@ _POSITIONAL_REFERENCE_TOKEN = re.compile(
 )
 
 
+# Provider syntax is deliberately kept in one auditable dispatch table.
+# pylint: disable-next=too-many-branches
 def video_prompt_storyboard_reference_violation(
     prompt: str,
     model_name: str,

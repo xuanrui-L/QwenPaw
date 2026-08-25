@@ -143,7 +143,7 @@ def _happyhorse_reference_role_mismatches(
             if item.start() > marker.start()
         ]
         end = min(later) if later else len(prompt)
-        segment = prompt[marker.start():min(end, marker.start() + 800)]
+        segment = prompt[marker.start() : min(end, marker.start() + 800)]
         declared = {
             role
             for role, pattern in _REFERENCE_ROLE_PATTERNS.items()
@@ -158,6 +158,8 @@ def _happyhorse_reference_role_mismatches(
     return mismatches
 
 
+# One pass keeps every finding tied to the same changed-Element snapshot.
+# pylint: disable-next=too-many-branches,too-many-statements
 def check_changed_r2v_prompt_contracts(
     project_json: Mapping[str, Any],
     changed_pointers: Sequence[str],
@@ -329,11 +331,13 @@ def check_changed_r2v_prompt_contracts(
                         ),
                     )
                 if is_happyhorse_model(video_model):
-                    for index, expected, actual in (
-                        _happyhorse_reference_role_mismatches(
-                            video_prompt,
-                            creation,
-                        )
+                    for (
+                        index,
+                        expected,
+                        actual,
+                    ) in _happyhorse_reference_role_mismatches(
+                        video_prompt,
+                        creation,
                     ):
                         findings.append(
                             _finding(
