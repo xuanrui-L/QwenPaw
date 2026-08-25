@@ -2,7 +2,10 @@ import { useMemo } from "react";
 import { PanelLeftClose } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectDocument } from "@/contracts/creator";
-import { getArtifactVersionMediaUrl } from "@/api/creator";
+import {
+  getArtifactVersionFrameUrl,
+  getArtifactVersionMediaUrl,
+} from "@/api/creator";
 import {
   roughCutFrameForElement,
   selectTimelineSummaries,
@@ -27,7 +30,11 @@ function firstFrameUrl(
   );
   if (!element) return null;
   const frame = roughCutFrameForElement(project, element);
-  return frame.versionId ? getArtifactVersionMediaUrl(frame.versionId) : null;
+  if (!frame.versionId) return null;
+  // Video artifacts can't render inside <img>; use the poster-frame endpoint.
+  return frame.mediaKind === "video"
+    ? getArtifactVersionFrameUrl(frame.versionId, 0, 160)
+    : getArtifactVersionMediaUrl(frame.versionId);
 }
 
 interface EpisodeRailProps {

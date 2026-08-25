@@ -38,6 +38,13 @@ export function getTimelineRoughCutUrl(
   );
 }
 
+/** Interactive-bundle zip export (fails 409 until every branch has a final cut). */
+export function getInteractiveBundleUrl(projectId: string): string {
+  return creatorAuthenticatedUrl(
+    `/projects/${encodeURIComponent(projectId)}/interactive-bundle`,
+  );
+}
+
 export function getArtifactVersionFrameUrl(
   versionId: string,
   timestamp = 0,

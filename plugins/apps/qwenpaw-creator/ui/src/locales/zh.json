@@ -1748,6 +1748,11 @@
     "playRoughCut": "播放粗剪",
     "closeRoughCutPlayer": "关闭播放",
     "roughCutFailed": "粗剪拼接失败：该时间线还没有可用的镜头素材",
+    "finalCutBadge": "成片",
+    "downloadFinalCut": "下载成片",
+    "exportBundle": "导出互动包",
+    "exportBundleFailed": "互动包还不能导出：所有可达分支需先完成成片合成",
+    "exporting": "导出中…",
     "frameSource": {
       "final": "成片帧",
       "storyboard": "分镜",
