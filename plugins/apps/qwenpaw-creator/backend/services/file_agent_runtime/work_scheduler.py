@@ -22,6 +22,7 @@ Safety posture:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -236,6 +237,22 @@ class WorkGraphScheduler:
             f"{base}|img:{get_image_model_name().strip()}"
             f"|vid:{get_video_model_name().strip()}"
         )
+
+    @staticmethod
+    def _dispatch_slot(fingerprint: str) -> str:
+        """Safe-segment slot id for one ledger fingerprint.
+
+        The ledger fingerprint embeds the configured media model names
+        ("...|img:<model>|vid:<model>") and "|" is not a safe Runtime
+        path segment character. Media executors persist the dispatch
+        idempotency key verbatim as Task idempotency_key /
+        caused_by_request_id, so the raw fingerprint must never leak
+        into the key — every store write would reject it and no media
+        node could dispatch. Hash it down to a stable hex slot instead
+        (same shape work_graph fingerprints already use).
+        """
+
+        return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
 
     # -- lifecycle -----------------------------------------------------
 
@@ -663,7 +680,7 @@ class WorkGraphScheduler:
             ledger_key = (project_id, node.node_id, fingerprint)
             if ledger_key not in self._dispatched or node.node_id in inflight:
                 continue
-            prefix = f"dag-{node.node_id}-{fingerprint}"
+            prefix = f"dag-{node.node_id}-{self._dispatch_slot(fingerprint)}"
             if any(key.startswith(prefix) for key in recorded_keys):
                 # A durable record exists (running / failed / quarantined):
                 # the record — not this reopen path — owns its lifecycle.
@@ -750,9 +767,12 @@ class WorkGraphScheduler:
 
         if node.command is None or node.target_ref is None:
             raise ValueError(f"node {node.node_id} is not dispatchable")
+        raw_fingerprint = fingerprint or self._ledger_fingerprint(node)
+        # The key becomes a durable record's caused_by_request_id, so the
+        # fingerprint (which carries "|"-separated model names) is hashed
+        # into a safe path segment first.
         idempotency_key = (
-            f"dag-{node.node_id}-"
-            f"{fingerprint or self._ledger_fingerprint(node)}"
+            f"dag-{node.node_id}-{self._dispatch_slot(raw_fingerprint)}"
         )
         if node.command in _COMPOSE_COMMANDS:
             # A failed master render is retried without content changes
@@ -762,7 +782,7 @@ class WorkGraphScheduler:
             ledger_key = (
                 project_id,
                 node.node_id,
-                fingerprint or self._ledger_fingerprint(node),
+                raw_fingerprint,
             )
             generation = self._transient_retries.get(ledger_key, 0)
             if generation:
