@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import TaskKind, TaskStatus
+from services.file_agent_runtime.prompt_text import (
+    dialogue_match_key,
+    dialogue_spoken_lines,
+)
 from services.project_files.models import (
     ArtifactVersionRenderSource,
     ElementOutputRenderSource,
@@ -305,30 +308,6 @@ def _upstream_missing(
     )
 
 
-def _dialogue_match_key(text: str) -> str:
-    return "".join(text.split())
-
-
-# Speaker prefixes ("老板娘：…" / "Regular: …") and stage directions
-# ("（回头）") belong to the shot plan, not to the spoken line itself — the
-# prompt naturally rephrases them ("她温和地说：“…”"), so requiring them
-# verbatim makes the gate unsatisfiable (field run 2026-08-12, project
-# 27dc: three YOLO continuation rounds burned against exactly this).
-_DIALOGUE_SPEAKER_PREFIX = re.compile(r"^[^：:]{1,20}[：:]\s*")
-_DIALOGUE_STAGE_DIRECTION = re.compile(r"[（(][^）)]*[）)]")
-
-
-def _dialogue_spoken_lines(dialogue: str) -> tuple[str, ...]:
-    """The spoken sentences of a shot's dialogue field, one per line."""
-    lines: list[str] = []
-    for raw in dialogue.splitlines():
-        line = _DIALOGUE_SPEAKER_PREFIX.sub("", raw.strip())
-        line = _DIALOGUE_STAGE_DIRECTION.sub("", line).strip()
-        if line:
-            lines.append(line)
-    return tuple(lines)
-
-
 def _video_prompt_dialogue_gaps(creation: R2VCreation) -> tuple[str, ...]:
     """Shots whose spoken lines never reached the committed video prompt.
 
@@ -343,14 +322,14 @@ def _video_prompt_dialogue_gaps(creation: R2VCreation) -> tuple[str, ...]:
     prefixes and stage directions so natural prompt phrasing never causes
     a false gap.
     """
-    prompt = _dialogue_match_key(creation.video_prompt or "")
+    prompt = dialogue_match_key(creation.video_prompt or "")
     gaps: list[str] = []
     for shot_id in creation.shots.order:
         shot = creation.shots.items.get(shot_id)
         if shot is None:
             continue
-        for line in _dialogue_spoken_lines(shot.dialogue or ""):
-            if _dialogue_match_key(line) not in prompt:
+        for line in dialogue_spoken_lines(shot.dialogue or ""):
+            if dialogue_match_key(line) not in prompt:
                 gaps.append(f"video_prompt 缺台词原文：{shot_id}")
                 break
     return tuple(gaps)

@@ -18,6 +18,10 @@ from models.video_capabilities import (
     is_happyhorse_model,
     video_prompt_storyboard_reference_violation,
 )
+from services.file_agent_runtime.prompt_text import (
+    dialogue_match_key,
+    dialogue_spoken_lines,
+)
 
 _BORDER_CONTRADICTION = re.compile(
     r"(?:\bno\s+(?:panel\s+)?borders?\b|无边框|不要边框|禁止边框|不画边框)",
@@ -66,7 +70,7 @@ def _touches_element(
 
 def _declares_panel_count(prompt: str, count: int) -> bool:
     patterns = (
-        rf"(?<!\d){count}\s*(?:个)?\s*(?:分镜格|格|面板)",
+        rf"(?<!\d){count}\s*(?:个\s*)?(?:分镜格|分镜面板|故事板面板|面板)",
         rf"(?<!\d){count}\s*[- ]?\s*panels?\b",
         rf"\bpanels?\s*[:=]?\s*{count}(?!\d)",
     )
@@ -143,7 +147,7 @@ def _happyhorse_reference_role_mismatches(
             if item.start() > marker.start()
         ]
         end = min(later) if later else len(prompt)
-        segment = prompt[marker.start() : min(end, marker.start() + 800)]
+        segment = prompt[marker.start() : end]
         declared = {
             role
             for role, pattern in _REFERENCE_ROLE_PATTERNS.items()
@@ -354,12 +358,21 @@ def check_changed_r2v_prompt_contracts(
                                 ),
                             ),
                         )
+                prompt_key = dialogue_match_key(video_prompt)
                 for shot_id in order:
                     shot = items.get(shot_id)
                     if not isinstance(shot, Mapping):
                         continue
                     dialogue = str(shot.get("dialogue") or "").strip()
-                    if dialogue and dialogue not in video_prompt:
+                    missing_line = next(
+                        (
+                            line
+                            for line in dialogue_spoken_lines(dialogue)
+                            if dialogue_match_key(line) not in prompt_key
+                        ),
+                        None,
+                    )
+                    if missing_line is not None:
                         findings.append(
                             _finding(
                                 code="VIDEO_DIALOGUE_MISSING",
@@ -367,7 +380,7 @@ def check_changed_r2v_prompt_contracts(
                                 element_id=str(element_id),
                                 message=(
                                     f"video_prompt 未逐字包含 Shot {shot_id} 的台词："
-                                    f"{dialogue}"
+                                    f"{missing_line}"
                                 ),
                                 suggestion="补入台词原文、说话者与表演语气。",
                             ),

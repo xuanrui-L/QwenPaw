@@ -114,6 +114,44 @@ def _stub_model(monkeypatch, responses: list[str]) -> list[str]:
     return calls
 
 
+def _r2v_contract_project(
+    *,
+    storyboard_prompt: str,
+    video_prompt: str,
+    dialogues: tuple[str, ...] = ("",),
+) -> dict:
+    shot_ids = tuple(f"shot:{index}" for index in range(1, len(dialogues) + 1))
+    return {
+        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
+        "timelines": {
+            "items": {
+                "t": {
+                    "elements_by_id": {
+                        "e": {
+                            "creation": {
+                                "type": "r2v",
+                                "shots": {
+                                    "items": {
+                                        shot_id: {"dialogue": dialogue}
+                                        for shot_id, dialogue in zip(
+                                            shot_ids,
+                                            dialogues,
+                                            strict=True,
+                                        )
+                                    },
+                                    "order": list(shot_ids),
+                                },
+                                "storyboard_prompt": storyboard_prompt,
+                                "video_prompt": video_prompt,
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
 def test_sync_review_lifecycle_rounds_dedup_cap_and_reset(
     tmp_path: Path,
     monkeypatch,
@@ -576,3 +614,75 @@ def test_borderless_outer_whitespace_is_not_a_panel_border_conflict(
     report = check_changed_r2v_prompt_contracts(project, [base])
 
     assert report["passed"] is True
+
+
+def test_prompt_contract_normalizes_dialogue_plan_annotations(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    project = _r2v_contract_project(
+        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
+        video_prompt=("[Image 1] 仅提供分镜动作顺序。阿穆低声说：“灯塔，亮起来！”"),
+        dialogues=("阿穆：（喘息）灯 塔，亮 起 来！",),
+    )
+
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    assert report["passed"] is True
+
+
+def test_panel_count_requires_an_explicit_panel_noun(monkeypatch) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    project = _r2v_contract_project(
+        storyboard_prompt=("16:9 故事板，3 格角色造型研究；" "每一个分镜格内部均为 16:9。"),
+        video_prompt="[Image 1] 仅提供分镜动作顺序。",
+        dialogues=("", "", ""),
+    )
+
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    assert [item["code"] for item in report["findings"]] == [
+        "STORYBOARD_PANEL_COUNT_MISSING",
+    ]
+
+
+def test_happyhorse_role_scan_uses_the_full_reference_segment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    project = _r2v_contract_project(
+        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
+        video_prompt=(
+            "[Image 1] " + ("中性视觉说明。" * 100) + "This is the scene environment."
+        ),
+    )
+
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    assert [item["code"] for item in report["findings"]] == [
+        "VIDEO_REFERENCE_ROLE_MISMATCH",
+    ]
