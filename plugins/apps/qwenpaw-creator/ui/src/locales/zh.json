@@ -1725,6 +1725,9 @@
     "roughCutHint": "全部镜头按时间序排列（有成片帧则替换为成片帧）· 零额外生成成本 · 成片帧 {{ready}}/{{total}}",
     "expandRoughCut": "展开预览带",
     "collapseRoughCut": "收起预览带",
+    "playRoughCut": "播放粗剪",
+    "closeRoughCutPlayer": "关闭播放",
+    "roughCutFailed": "粗剪拼接失败：该时间线还没有可用的镜头素材",
     "frameSource": {
       "final": "成片帧",
       "storyboard": "分镜",
