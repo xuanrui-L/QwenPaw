@@ -159,7 +159,10 @@ class DashScopeImageModel(BaseImageModel):
             # generous. Field run 2026-08-24: multi-reference qwen-image
             # renders regularly exceed 4 minutes; a 240s deadline
             # abandoned still-running paid tasks and every retry paid
-            # for a fresh render.
+            # for a fresh render. Other image providers keep the 240s
+            # IMAGE_TIMEOUT default on purpose: they hold a synchronous
+            # HTTP connection for the whole render, where a longer
+            # deadline only pins connections on a hung upstream.
             timeout=_configured_int(
                 "timeout",
                 "DASHSCOPE_IMAGE_TIMEOUT",

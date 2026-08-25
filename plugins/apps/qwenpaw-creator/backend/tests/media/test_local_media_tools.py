@@ -215,7 +215,7 @@ def test_sfx_neither_ducks_nor_is_ducked(monkeypatch, tmp_path) -> None:
     assert "volume=-12.000dB" not in graph
 
 
-def test_bgm_gets_default_edge_fades_and_segments_crossfade(
+def test_bgm_segments_crossfade_via_overlapping_explicit_fades(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -273,6 +273,34 @@ def test_audio_fades_are_clamped_to_the_span(monkeypatch, tmp_path) -> None:
     # 2s+2s does not fit a 2s span: both scale down to 1s.
     assert "afade=t=in:d=1.000" in graph
     assert "afade=t=out:st=1.000:d=1.000" in graph
+
+
+def test_unset_fades_resolve_to_a_span_adaptive_bgm_default() -> None:
+    from services.media_files.local_execution import _resolved_fade_seconds
+    from services.project_files.models import AudioCreation
+
+    def creation(**overrides) -> AudioCreation:
+        return AudioCreation(
+            source_asset_version_id="audio-version-1",
+            role="bgm",
+            **overrides,
+        )
+
+    # Long span: the default caps at 2s per edge.
+    assert _resolved_fade_seconds(creation(), 20.0) == (2.0, 2.0)
+    # Short span: min(2, span/4) keeps ramps from swallowing the bed.
+    assert _resolved_fade_seconds(creation(), 3.2) == (0.8, 0.8)
+    # Explicit values are authoritative, including an explicit 0.
+    assert _resolved_fade_seconds(
+        creation(fade_in_seconds=0.0, fade_out_seconds=5.0),
+        20.0,
+    ) == (0.0, 5.0)
+    # Non-bgm roles keep hard edges by default.
+    narration = AudioCreation(
+        source_asset_version_id="audio-version-1",
+        role="narration",
+    )
+    assert _resolved_fade_seconds(narration, 20.0) == (0.0, 0.0)
 
 
 def test_explicit_narration_still_ducks_footage(monkeypatch, tmp_path) -> None:

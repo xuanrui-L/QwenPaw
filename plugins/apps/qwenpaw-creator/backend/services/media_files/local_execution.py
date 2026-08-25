@@ -2925,6 +2925,28 @@ def _append_motion_clip_input(
     durations.append(span_seconds)
 
 
+def _resolved_fade_seconds(
+    creation: AudioCreation,
+    span_seconds: float,
+) -> tuple[float, float]:
+    """Fades are the agent's creative call; an unset value adapts to the
+    span so a short bgm segment is not swallowed by its ramps."""
+
+    default_fade = (
+        min(_BGM_DEFAULT_FADE_SECONDS, span_seconds / 4)
+        if creation.role == "bgm"
+        else 0.0
+    )
+    return (
+        creation.fade_in_seconds
+        if creation.fade_in_seconds is not None
+        else default_fade,
+        creation.fade_out_seconds
+        if creation.fade_out_seconds is not None
+        else default_fade,
+    )
+
+
 def _timeline_execution(
     *,
     project: Project,
@@ -3111,23 +3133,7 @@ def _timeline_execution(
         )
         span_seconds = element.span.duration_tick / timeline.ticks_per_second
         role = creation.role
-        # Fades are the agent's creative call; the unset default adapts to
-        # the span so a short bgm segment is not swallowed by its ramps.
-        default_fade = (
-            min(_BGM_DEFAULT_FADE_SECONDS, span_seconds / 4)
-            if role == "bgm"
-            else 0.0
-        )
-        fade_in = (
-            creation.fade_in_seconds
-            if creation.fade_in_seconds is not None
-            else default_fade
-        )
-        fade_out = (
-            creation.fade_out_seconds
-            if creation.fade_out_seconds is not None
-            else default_fade
-        )
+        fade_in, fade_out = _resolved_fade_seconds(creation, span_seconds)
         audio_tracks.append(
             _FrozenAudioTrack(
                 element_id=element.element_id,
