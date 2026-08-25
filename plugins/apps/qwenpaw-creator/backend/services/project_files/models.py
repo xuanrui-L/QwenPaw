@@ -1912,9 +1912,12 @@ def _validate_narration_voiced_overlap(
     Generated video speaks its shot dialogue itself and s2v clips are driven
     by their own voice track; layering narration on the same interval would
     produce two competing voices. Voiced intervals are shot-granular: only
-    the dialogue-bearing shots of an R2V Element count (placed by cumulative
-    shot durations, whole span as fallback when durations are unusable), so
-    narration may cover the silent shots of the same Element.
+    the dialogue-bearing shots of an R2V Element count, so narration may
+    cover the silent shots of the same Element. Shots are placed by
+    scaling their declared durations onto the Element span (the provider
+    renders the shot list into exactly the span, so relative durations
+    are the trustworthy signal); the whole span is the fallback when any
+    duration is unusable.
     """
 
     for timeline in timelines.items.values():
@@ -1934,24 +1937,30 @@ def _validate_narration_voiced_overlap(
             ]
             if not any(shot.dialogue.strip() for shot in shots):
                 continue
-            ticks_per_second = timeline.ticks_per_second
-            if any(shot.duration_seconds <= 0 for shot in shots):
+            total_seconds = sum(shot.duration_seconds for shot in shots)
+            if (
+                any(shot.duration_seconds <= 0 for shot in shots)
+                or total_seconds <= 0
+            ):
                 voiced_spans.append((element_id, element.span))
                 continue
-            cursor = element.span.start_tick
+            ticks_per_shot_second = element.span.duration_tick / total_seconds
+            cursor = float(element.span.start_tick)
             for shot in shots:
                 shot_start = cursor
                 cursor = min(
-                    cursor + round(shot.duration_seconds * ticks_per_second),
-                    element.span.end_tick,
+                    cursor + shot.duration_seconds * ticks_per_shot_second,
+                    float(element.span.end_tick),
                 )
-                if shot.dialogue.strip() and cursor > shot_start:
+                start_tick = round(shot_start)
+                end_tick = round(cursor)
+                if shot.dialogue.strip() and end_tick > start_tick:
                     voiced_spans.append(
                         (
                             element_id,
                             TimelineSpan(
-                                start_tick=shot_start,
-                                duration_tick=cursor - shot_start,
+                                start_tick=start_tick,
+                                duration_tick=end_tick - start_tick,
                             ),
                         ),
                     )

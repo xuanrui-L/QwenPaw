@@ -60,7 +60,7 @@ Project
   - `type=i2v`（首帧生视频）：在 t2v 字段基础上增加 `first_frame_version_id`（exact 图片 version id）。
   - `type=s2v`（数字人口播）：`character_ref`（角色实体）、`portrait_version_id`（人物图 exact version，s2v 的 reference）、`script`（台词，经 TTS 变成驱动音频）、`audio_version_id`（驱动音频 exact version）、recipe；无 shots、无分镜 prompt。
   类型声明即生成模式：提交工具的 mode 必须与 creation 类型一致，不得在提交时替换。
-- `type=audio`（音频）：`source_asset_version_id`（exact 音频 version）、`script`（合成旁白的文稿；上传素材音频留空）、`speech_rate`（语速倍率 0.5–2.0，默认 1.0，仅 CosyVoice 系列模型生效）、`gain_db`、`pan`。合成的旁白必须把最终文稿写入 `script`，用户编辑 script 后会触发重新合成。
+- `type=audio`（音频）：`source_asset_version_id`（exact 音频 version）、`role`（**必填**，混音角色枚举：`narration` 旁白压低画面原声 / `bgm` 音乐床 -12dB 并在人声区间自动闪避 / `sfx` 音效原样混入；无默认值，缺失会被校验拒绝）、`script`（合成旁白的文稿；上传素材音频留空）、`speech_rate`（语速倍率 0.5–2.0，默认 1.0，仅 CosyVoice 系列模型生效）、`gain_db`、`pan`、`fade_in_seconds`/`fade_out_seconds`（0–10 秒边缘淡化；留空 null 表示自适应默认：bgm 为 min(2s, span/4)，其余角色硬边）。合成的旁白必须把最终文稿写入 `script`，用户编辑 script 后会触发重新合成。
 - Shot 的 `framing` 字段只能使用以下 4 个枚举值之一：`全景`、`中景`、`近景`、`特写`。不得使用其他景别描述（如"中近景"、"大特写"、"远景"等）。
 
 ### jq_project 输出约束

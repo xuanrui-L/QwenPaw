@@ -711,13 +711,13 @@ def test_deterministic_failure_unlocks_when_media_model_changes(
         await scheduler.tick(PROJECT_ID)
         await _drain()
         assert len(calls) == 1
-        # New model → new ledger fingerprint → dispatch reopens.
+        # New model → new ledger fingerprint → dispatch reopens without
+        # anyone touching the ledger or the in-memory dispatch record.
         monkeypatch.setattr(
             scheduler_mod,
             "get_image_model_name",
             lambda: "large-budget-model",
         )
-        scheduler._dispatched.clear()
         await scheduler.tick(PROJECT_ID)
         await _drain()
         assert len(calls) == 2

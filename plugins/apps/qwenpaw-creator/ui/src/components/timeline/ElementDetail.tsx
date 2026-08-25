@@ -879,7 +879,7 @@ export default function ElementDetail({
                     data-creator-path={pointer("creation", "role")}
                     className="block"
                   >
-                    <FieldLabel>混音角色</FieldLabel>
+                    <FieldLabel>{t("elementDetail.audioRole")}</FieldLabel>
                     <Select
                       value={creation.role ?? "narration"}
                       disabled={applying}
@@ -887,13 +887,16 @@ export default function ElementDetail({
                       options={[
                         {
                           value: "narration",
-                          label: "旁白（压低画面原声）",
+                          label: t("elementDetail.audioRoleNarration"),
                         },
                         {
                           value: "bgm",
-                          label: "配乐（音乐床，自动闪避人声）",
+                          label: t("elementDetail.audioRoleBgm"),
                         },
-                        { value: "sfx", label: "音效（原样混入）" },
+                        {
+                          value: "sfx",
+                          label: t("elementDetail.audioRoleSfx"),
+                        },
                       ]}
                       onChange={(value) =>
                         onChange((draft) => {
@@ -913,10 +916,10 @@ export default function ElementDetail({
                       data-creator-path={pointer("creation", "fade_in_seconds")}
                       className="block"
                     >
-                      <FieldLabel>淡入（秒，留空自适应）</FieldLabel>
+                      <FieldLabel>{t("elementDetail.audioFadeIn")}</FieldLabel>
                       <InputNumber
                         value={creation.fade_in_seconds ?? undefined}
-                        placeholder="自适应"
+                        placeholder={t("elementDetail.audioFadeAdaptive")}
                         step={0.5}
                         min={0}
                         max={10}
@@ -944,10 +947,10 @@ export default function ElementDetail({
                       )}
                       className="block"
                     >
-                      <FieldLabel>淡出（秒，留空自适应）</FieldLabel>
+                      <FieldLabel>{t("elementDetail.audioFadeOut")}</FieldLabel>
                       <InputNumber
                         value={creation.fade_out_seconds ?? undefined}
-                        placeholder="自适应"
+                        placeholder={t("elementDetail.audioFadeAdaptive")}
                         step={0.5}
                         min={0}
                         max={10}

@@ -2157,10 +2157,16 @@ class FfmpegLocalMediaRunner:
             measured = json.loads(tail)
         except ValueError:
             return None
-        keys = ("input_i", "input_tp", "input_lra", "input_thresh")
+        keys = (
+            "input_i",
+            "input_tp",
+            "input_lra",
+            "input_thresh",
+            "target_offset",
+        )
         if not all(isinstance(measured.get(key), str) for key in keys):
             return None
-        return {key: measured[key] for key in (*keys, "target_offset")}
+        return {key: measured[key] for key in keys}
 
     def _normalize_delivery_loudness(
         self,
@@ -2184,7 +2190,7 @@ class FfmpegLocalMediaRunner:
         preloud = spec.work_dir / "preloud.mp4"
         os.replace(spec.output_path, preloud)
         try:
-            self._run(
+            stderr = self._run(
                 [
                     "-y",
                     "-i",
@@ -2199,7 +2205,7 @@ class FfmpegLocalMediaRunner:
                         f":measured_LRA={measured['input_lra']}"
                         f":measured_thresh={measured['input_thresh']}"
                         f":offset={measured['target_offset']}"
-                        ":linear=true,aresample=48000"
+                        ":linear=true:print_format=json,aresample=48000"
                     ),
                     "-c:v",
                     "copy",
@@ -2214,9 +2220,25 @@ class FfmpegLocalMediaRunner:
         except Exception:  # pylint: disable=broad-except
             os.replace(preloud, spec.output_path)
             return "交付响度归一失败，保留未归一的成片音频"
+        # linear=true is a request, not a guarantee: ffmpeg silently
+        # falls back to dynamic mode when the constant gain would break
+        # the true-peak ceiling. Make that observable.
+        tail = (stderr or "")[max((stderr or "").rfind("{"), 0) :]
+        try:
+            applied = json.loads(tail)
+        except ValueError:
+            applied = {}
+        if applied.get("normalization_type", "").lower() != "linear":
+            logger.warning(
+                "delivery loudnorm fell back to dynamic mode for %s; "
+                "layer levels may pump",
+                spec.output_path.name,
+            )
         return None
 
-    def _run(self, arguments: Sequence[str], *, cwd: Path) -> None:
+    def _run(self, arguments: Sequence[str], *, cwd: Path) -> str:
+        """Run ffmpeg to completion and return its stderr text."""
+
         try:
             process = subprocess.Popen(
                 [self.executable, *arguments],
@@ -2257,6 +2279,7 @@ class FfmpegLocalMediaRunner:
         if process.returncode != 0:
             detail = (stderr or stdout or "ffmpeg failed")[-4000:]
             raise ConflictError(f"ffmpeg 执行失败: {detail}")
+        return stderr or ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -3205,11 +3228,13 @@ def _timeline_speech_windows(
 ) -> tuple[tuple[float, float], ...]:
     """[start, end) seconds where clips natively speak.
 
-    Shot-granular for R2V: only the dialogue-bearing shots count, placed
-    by cumulative shot durations inside the element span, so BGM keeps
-    its bed level through the silent shots of the same element. When the
-    shot durations are unusable the whole element span is the safe
-    fallback. s2v digital humans speak for their entire span.
+    Shot-granular for R2V: only the dialogue-bearing shots count, so BGM
+    keeps its bed level through the silent shots of the same element.
+    Shots are placed by scaling their declared durations onto the element
+    span (the provider renders the shot list into exactly the span, so
+    relative durations are the trustworthy signal); the whole element
+    span is the safe fallback when any duration is unusable. s2v digital
+    humans speak for their entire span.
     """
 
     windows: list[tuple[float, float]] = []
@@ -3229,13 +3254,21 @@ def _timeline_speech_windows(
         ]
         if not any(shot.dialogue.strip() for shot in shots):
             continue
-        if any(shot.duration_seconds <= 0 for shot in shots):
+        total_seconds = sum(shot.duration_seconds for shot in shots)
+        if (
+            any(shot.duration_seconds <= 0 for shot in shots)
+            or total_seconds <= 0
+        ):
             windows.append((element_start, element_end))
             continue
+        scale = (element_end - element_start) / total_seconds
         cursor = element_start
         for shot in shots:
             shot_start = cursor
-            cursor = min(cursor + shot.duration_seconds, element_end)
+            cursor = min(
+                cursor + shot.duration_seconds * scale,
+                element_end,
+            )
             if shot.dialogue.strip() and cursor > shot_start:
                 windows.append((shot_start, cursor))
     return tuple(sorted(windows))

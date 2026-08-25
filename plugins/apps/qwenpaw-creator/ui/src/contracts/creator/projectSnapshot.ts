@@ -310,8 +310,8 @@ export interface AudioCreationDocument extends ProjectJsonRecord {
   type: "audio";
   source_asset_version_id: string;
   /** Mixing role: narration ducks footage audio; bgm is a continuous low bed. */
-  role?: "bgm" | "narration" | "sfx";
-  /** Edge fades in seconds; null selects the role default (bgm: 2s, else 0). */
+  role: "bgm" | "narration" | "sfx";
+  /** Edge fades in seconds; null selects the adaptive role default. */
   fade_in_seconds?: number | null;
   fade_out_seconds?: number | null;
   /** TTS narration keeps its script here; uploaded audio leaves it empty. */

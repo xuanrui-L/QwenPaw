@@ -401,11 +401,20 @@ def test_delivery_loudness_applies_measured_linear_pass(
     assert calls[0][calls[0].index("-c:v") + 1] == "copy"
 
 
-def test_delivery_loudness_failure_keeps_unnormalized_film(
+def test_delivery_loudness_failures_keep_the_unnormalized_film(
     monkeypatch,
     tmp_path,
 ) -> None:
-    runner, _ = _runner_with_capture(monkeypatch, has_audio=True)
+    # Measurement failure: warn, run nothing, keep the film untouched.
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    monkeypatch.setattr(runner, "_measure_loudness", lambda path: None)
+    spec = _spec(tmp_path, ())
+    warning = runner._normalize_delivery_loudness(spec)
+    assert warning is not None and "响度测量失败" in warning
+    assert calls == []
+    assert spec.output_path.read_bytes() == b"video"
+
+    # Apply failure: restore the pre-loudnorm film and warn.
     monkeypatch.setattr(
         runner,
         "_measure_loudness",
@@ -422,26 +431,8 @@ def test_delivery_loudness_failure_keeps_unnormalized_film(
         raise RuntimeError("ffmpeg exploded")
 
     monkeypatch.setattr(runner, "_run", failing_run)
-    spec = _spec(tmp_path, ())
-
     warning = runner._normalize_delivery_loudness(spec)
-
     assert warning is not None and "保留未归一" in warning
-    assert spec.output_path.read_bytes() == b"video"
-
-
-def test_delivery_loudness_measurement_failure_is_a_warning(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
-    monkeypatch.setattr(runner, "_measure_loudness", lambda path: None)
-    spec = _spec(tmp_path, ())
-
-    warning = runner._normalize_delivery_loudness(spec)
-
-    assert warning is not None and "响度测量失败" in warning
-    assert calls == []
     assert spec.output_path.read_bytes() == b"video"
 
 
