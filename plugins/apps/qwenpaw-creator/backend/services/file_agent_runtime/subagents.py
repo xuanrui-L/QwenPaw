@@ -14,10 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from domain.enums import SpecialistRole
 from models import config as model_config
 from models.image.base import image_model_prompt_guidance
-from models.video_capabilities import (
-    video_model_duration_guidance,
-    video_model_prompt_guidance,
-)
 from services.file_agent_runtime.prompts import render_file_agent_prompt
 from services.file_agent_runtime.prompts import tts_guidance
 from services.project_files.models import Project
@@ -29,7 +25,6 @@ DELEGATE_TOOL_NAME = "delegate_to_agent"
 _DELEGATABLE_ROLES = (
     SpecialistRole.SOURCE_INTELLIGENCE,
     SpecialistRole.VISUAL_DEVELOPMENT,
-    SpecialistRole.R2V_GENERATION_DIRECTOR,
     SpecialistRole.AI_EDITING_DIRECTOR,
 )
 
@@ -42,7 +37,6 @@ _ROLE_TARGETS: dict[SpecialistRole, tuple[set[str], set[str]]] = {
         {"project", "element", "asset", "artifact", "lineup"},
         {"assets"},
     ),
-    SpecialistRole.R2V_GENERATION_DIRECTOR: ({"element"}, set()),
     SpecialistRole.AI_EDITING_DIRECTOR: ({"timeline"}, set()),
 }
 
@@ -53,14 +47,12 @@ _TARGET_GUIDANCE = {
         "asset:<VisualEntity.entity_id>, artifact:<id>, "
         "lineup:<VisualCastLineup.lineup_id>"
     ),
-    SpecialistRole.R2V_GENERATION_DIRECTOR: "an existing r2v element:<id>",
     SpecialistRole.AI_EDITING_DIRECTOR: "an existing timeline:<id>",
 }
 
 _ROLE_PROMPT_IDS = {
     SpecialistRole.SOURCE_INTELLIGENCE: "source_intelligence_agent.system",
     SpecialistRole.VISUAL_DEVELOPMENT: "visual_development_agent.system",
-    SpecialistRole.R2V_GENERATION_DIRECTOR: "r2v_generation_director.system",
     SpecialistRole.AI_EDITING_DIRECTOR: "ai_editing_director.system",
 }
 
@@ -194,13 +186,13 @@ def delegate_tool_manifest() -> dict[str, Any]:
         "function": {
             "name": DELEGATE_TOOL_NAME,
             "description": (
-                "把一个边界明确的素材理解、视觉媒体、R2V 或 AI 剪辑任务委派给"
+                "把一个边界明确的素材理解、视觉开发或 AI 剪辑任务委派给"
                 "对应 Creator Specialist。source_intelligence_agent 使用 asset:<id>；"
                 "visual_development_agent 的整体视觉使用 project:assets，单个视觉实体"
                 "必须使用 asset:<VisualEntity.entity_id>，阵容图使用 "
                 "lineup:<VisualCastLineup.lineup_id>；来源素材 logicalAssetId 只能"
                 "作为 referenceVersionIds，不能作为 Visual Specialist target_ref；"
-                "r2v_generation_director 使用 element:<id>，"
+                "R2V prompt 由 Creator 主 Agent 直接编写，不可委派；"
                 "ai_editing_director 使用 timeline:<id>。"
             ),
             "parameters": deepcopy(
@@ -266,22 +258,7 @@ def specialist_system_prompt(
             project,
             list(target_refs or ()),
         )
-    if role is SpecialistRole.R2V_GENERATION_DIRECTOR:
-        # Model-specific prompt rules (e.g. HappyHorse [Image N] citations)
-        # are injected from the runtime-resolved video model so the static
-        # prompt stays model-agnostic.
-        values["video_model_guidance"] = video_model_prompt_guidance(
-            model_config.get_video_model_name(),
-            model_config.get_video_backend(),
-        )
-        values["video_duration_guidance"] = video_model_duration_guidance(
-            model_config.get_video_model_name(),
-            model_config.get_video_backend(),
-        )
-    if role in {
-        SpecialistRole.VISUAL_DEVELOPMENT,
-        SpecialistRole.R2V_GENERATION_DIRECTOR,
-    }:
+    if role is SpecialistRole.VISUAL_DEVELOPMENT:
         # The image reference budget is a model capability, not a static
         # rule: qwen-image only accepts 0-3 image content items per call
         # while other providers keep the historical budget of 5.

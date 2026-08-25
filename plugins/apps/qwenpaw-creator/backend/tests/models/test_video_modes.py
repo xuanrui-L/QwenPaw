@@ -26,6 +26,7 @@ from models.video_capabilities import (
     video_model_duration_guidance,
     video_model_prompt_guidance,
     video_model_supported_modes,
+    video_prompt_storyboard_reference_violation,
     video_reference_capability,
 )
 from utils.exceptions import ModelError
@@ -543,6 +544,59 @@ def test_duration_guidance_has_no_global_creator_default() -> None:
     vidu = video_model_duration_guidance("VIDUQ2-PRO")
     assert "1–10 秒整数" in vidu
     assert "报告阻塞" not in vidu
+
+
+@pytest.mark.parametrize(
+    ("model", "backend", "language", "prompt", "violates"),
+    [
+        ("happyhorse-1.1", "wan", "zh-CN", "[Image 1] 是分镜。", False),
+        ("happyhorse-1.1", "wan", "zh-CN", "图1是分镜。", True),
+        ("wan2.7-i2v", "wan", "zh-CN", "图1是分镜。", False),
+        ("wan2.6-t2v", "wan", "en-US", "character1 is storyboard.", False),
+        (
+            "doubao-seedance-2-5-260628",
+            "seedance2",
+            "zh-CN",
+            "图片1提供动作链。",
+            False,
+        ),
+        (
+            "kling/kling-v3-omni-video-generation",
+            "kling",
+            "zh-CN",
+            "<<<image_1>>> establishes action.",
+            False,
+        ),
+        (
+            "veo-3.1-generate-preview",
+            "veo",
+            "en-US",
+            "The storyboard establishes action.",
+            False,
+        ),
+        (
+            "veo-3.1-generate-preview",
+            "veo",
+            "en-US",
+            "[Image 1] establishes action.",
+            True,
+        ),
+    ],
+)
+def test_storyboard_reference_authoring_check_is_model_specific(
+    model,
+    backend,
+    language,
+    prompt,
+    violates,
+) -> None:
+    result = video_prompt_storyboard_reference_violation(
+        prompt,
+        model,
+        backend,
+        language=language,
+    )
+    assert (result is not None) is violates
 
 
 # ---------------------------------------------------------------------------

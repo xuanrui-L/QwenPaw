@@ -11,7 +11,11 @@ from pathlib import Path
 import pytest
 
 from models import text_model
+from models import config as model_config
 from services.run_review import admission, text_review
+from services.run_review.prompt_contract import (
+    check_changed_r2v_prompt_contracts,
+)
 from services.run_review.text_review import (
     classify_pointer_groups,
     classify_pointers,
@@ -341,3 +345,238 @@ def test_whole_element_create_expands_nested_generation_text() -> None:
     groups = classify_pointer_groups(expanded)
     assert groups
     assert groups[0][0] == "shots"
+
+
+def test_empty_r2v_prompt_is_reported_without_calling_review_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CREATOR_SYNC_REVIEW_ENABLED", "1")
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    monkeypatch.setattr(text_model, "chat_completion", None)
+    pointer = (
+        "/timelines/items/timeline:main/elements_by_id/elem:one/"
+        "creation/video_prompt"
+    )
+    project = {
+        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
+        "timelines": {
+            "items": {
+                "timeline:main": {
+                    "elements_by_id": {
+                        "elem:one": {
+                            "enabled": True,
+                            "creation": {
+                                "type": "r2v",
+                                "shots": {
+                                    "items": {
+                                        "shot:1": {
+                                            "dialogue": "我们出发。",
+                                        },
+                                    },
+                                    "order": ["shot:1"],
+                                },
+                                "storyboard_prompt": (
+                                    "16:9 故事板，1 个分镜格；"
+                                    "每一个分镜格内部均为 16:9。"
+                                ),
+                                "video_prompt": "",
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+    result = maybe_sync_review(
+        project_id="project-run-review",
+        project_root=tmp_path,
+        project_json=project,
+        changed_pointers=[pointer],
+        transaction_id="txn-empty-video",
+        gate_token="gate-empty-video",
+    )
+
+    assert result is not None
+    assert result["prompt_check"]["passed"] is False
+    assert [
+        item["code"] for item in result["prompt_check"]["findings"]
+    ] == ["VIDEO_PROMPT_EMPTY"]
+    blockers = admission.active_sync_fences(
+        tmp_path / "runtime" / "run-review",
+    )
+    assert [item["pointer_group"] for item in blockers] == ["shots"]
+
+
+def test_clean_r2v_prompt_repair_releases_contract_blocker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CREATOR_SYNC_REVIEW_ENABLED", "1")
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    _stub_model(monkeypatch, [_advisory_payload(weak_concept=False)])
+    base = "/timelines/items/timeline:main/elements_by_id/elem:one"
+    project = {
+        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
+        "timelines": {
+            "items": {
+                "timeline:main": {
+                    "elements_by_id": {
+                        "elem:one": {
+                            "enabled": True,
+                            "creation": {
+                                "type": "r2v",
+                                "shots": {
+                                    "items": {
+                                        "shot:1": {
+                                            "dialogue": "我们出发。",
+                                        },
+                                    },
+                                    "order": ["shot:1"],
+                                },
+                                "storyboard_prompt": (
+                                    "16:9 故事板，1 个分镜格；"
+                                    "每一个分镜格内部均为 16:9。"
+                                ),
+                                "video_prompt": (
+                                    "[Image 1] 仅提供分镜动作顺序。"
+                                    "角色坚定地说：‘我们出发。’"
+                                ),
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+    reports_root = tmp_path / "runtime" / "run-review"
+    admission.hold_sync_blocker(
+        reports_root,
+        project_id="project-run-review",
+        pointer_group="shots",
+        reviewed_pointers=[f"{base}/creation/video_prompt"],
+        round_number=1,
+    )
+
+    result = maybe_sync_review(
+        project_id="project-run-review",
+        project_root=tmp_path,
+        project_json=project,
+        changed_pointers=[f"{base}/creation/video_prompt"],
+        transaction_id="txn-fixed-video",
+        gate_token="gate-fixed-video",
+    )
+
+    assert result is None
+    assert not admission.active_sync_fences(reports_root)
+
+
+def test_happyhorse_explicit_reference_roles_follow_runtime_order(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    base = "/timelines/items/t/elements_by_id/e"
+    project = {
+        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
+        "timelines": {
+            "items": {
+                "t": {
+                    "elements_by_id": {
+                        "e": {
+                            "creation": {
+                                "type": "r2v",
+                                "character_refs": ["char:hero"],
+                                "scene_ref": "scene:room",
+                                "prop_refs": ["prop:lamp"],
+                                "shots": {
+                                    "items": {"s": {"dialogue": ""}},
+                                    "order": ["s"],
+                                },
+                                "storyboard_prompt": (
+                                    "16:9 故事板，1 个分镜格；"
+                                    "每一个分镜格内部均为 16:9。"
+                                ),
+                                "video_prompt": (
+                                    "[Image 1] is the storyboard. "
+                                    "[Image 2] is the character reference. "
+                                    "[Image 3] is the lamp prop study. "
+                                    "[Image 4] is the room environment."
+                                ),
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+    report = check_changed_r2v_prompt_contracts(project, [base])
+
+    assert [item["code"] for item in report["findings"]] == [
+        "VIDEO_REFERENCE_ROLE_MISMATCH",
+        "VIDEO_REFERENCE_ROLE_MISMATCH",
+    ]
+    assert "实际是 scene" in report["findings"][0]["message"]
+    assert "实际是 prop" in report["findings"][1]["message"]
+
+
+def test_borderless_outer_whitespace_is_not_a_panel_border_conflict(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    base = "/timelines/items/t/elements_by_id/e"
+    project = {
+        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
+        "timelines": {
+            "items": {
+                "t": {
+                    "elements_by_id": {
+                        "e": {
+                            "creation": {
+                                "type": "r2v",
+                                "shots": {
+                                    "items": {
+                                        "s1": {"dialogue": ""},
+                                        "s2": {"dialogue": ""},
+                                        "s3": {"dialogue": ""},
+                                    },
+                                    "order": ["s1", "s2", "s3"],
+                                },
+                                "storyboard_prompt": (
+                                    "16:9 故事板，3 个分镜格；每一个分镜格内部均为 "
+                                    "16:9，并有完整清晰边界。末行居中，剩余面积只作"
+                                    "无边框外层留白，不画第 4 个带框空槽。"
+                                ),
+                                "video_prompt": "[Image 1] 仅提供分镜动作顺序。",
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+    report = check_changed_r2v_prompt_contracts(project, [base])
+
+    assert report["passed"] is True

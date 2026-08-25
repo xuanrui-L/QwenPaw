@@ -176,9 +176,16 @@ def render_taste_principles(role: str) -> str:
             "video-edit skill），应当遵循（建议性准则，不是门禁）：",
         ]
     if role in {"creator_agent", "ai_editing_director"}:
+        rhythm_principle = (
+            "开场是否尽快建立关注点？能量是否有快慢变化？需要停留的时刻是否"
+            "真正停住？长镜头只在叙事和可执行动作支持时使用，不设统一的 7 秒 "
+            "Shot 上限。"
+            if role == "creator_agent"
+            else rhythm.anchor_questions
+        )
         lines += [
             f"- 概念先行：{concept.anchor_questions}（素材流水账不是概念）。",
-            f"- 节奏：{rhythm.anchor_questions}",
+            f"- 节奏：{rhythm_principle}",
             f"- 克制：{restraint.anchor_questions}",
             (
                 "- 设计底线：有开场处理、每个场景至少一个设计化节拍、有收束式结尾；"

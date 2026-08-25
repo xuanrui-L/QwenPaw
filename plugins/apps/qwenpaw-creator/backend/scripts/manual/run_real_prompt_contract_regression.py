@@ -38,10 +38,10 @@ preparation → decisive energy transfer → clear illuminated end state.
 Reference responsibilities, in supplied order: the first reference is the only
 identity source for Amu's rounded head, compact three-head-tall body, matte
 off-white worn shell, dark seams, short three-fingered hands, visible old joints
-and single cyan circular chest light. The second is the only identity source for
-the one-palm-size, single-sheet cyan translucent origami crane with sharp classic
-folds. The third supplies the same cold-blue rainy lighthouse world, round stone
-interior, rusted spiral stair and central optical lens. Do not inherit any
+and single cyan circular chest light. The second supplies the same cold-blue
+rainy lighthouse world, round stone interior, rusted spiral stair and central
+optical lens. The third is the only identity source for the one-palm-size,
+single-sheet cyan translucent origami crane with sharp classic folds. Do not inherit any
 identity-board white background, repeated views, atlas divisions, arrows,
 labels or diagrams.
 
@@ -93,14 +93,14 @@ three-fingered hands, old visible joints and one cyan circular chest light. Do
 not inherit the white identity-board background, repeated views, labels,
 silhouettes or detail tiles.
 
-[Image 3] is the origami crane prop identity. Preserve one palm-size cyan
+[Image 3] is the scene identity. Preserve the rain-dark round stone lighthouse
+core, rusted spiral stair, wet materials, dormant optical lens and cold-blue
+ambient palette. Do not inherit atlas divisions, topology arrows or layout.
+
+[Image 4] is the origami crane prop identity. Preserve one palm-size cyan
 translucent crane, a single sheet with sharp classic folds and soft cyan glow.
 Do not inherit multiple study copies, scale diagrams, white background or
 detail tiles.
-
-[Image 4] is the scene identity. Preserve the rain-dark round stone lighthouse
-core, rusted spiral stair, wet materials, dormant optical lens and cold-blue
-ambient palette. Do not inherit atlas divisions, topology arrows or layout.
 
 Opening beat: medium three-quarter rear view, Amu alone at screen-left faces the
 dark lens at screen-right and smoothly raises one open hand; the crane holds
@@ -160,8 +160,8 @@ async def _run(args: argparse.Namespace) -> Path:
     _configure(root)
     references = [
         args.character.expanduser().resolve(),
-        args.prop.expanduser().resolve(),
         args.scene.expanduser().resolve(),
+        args.prop.expanduser().resolve(),
     ]
     for reference in references:
         if not reference.is_file():
@@ -234,8 +234,8 @@ async def _run(args: argparse.Namespace) -> Path:
         "happyhorse_reference_order": [
             "[Image 1]=corrected storyboard",
             "[Image 2]=character identity",
-            "[Image 3]=prop identity",
-            "[Image 4]=scene identity",
+            "[Image 3]=scene identity",
+            "[Image 4]=prop identity",
         ],
         "provider_task_id": provider_task_id,
         "storyboard": str(storyboard_path),

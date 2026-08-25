@@ -25,7 +25,6 @@ def test_only_current_element_specialists_are_delegatable() -> None:
     assert roles == [
         "source_intelligence_agent",
         "visual_development_agent",
-        "r2v_generation_director",
         "ai_editing_director",
     ]
 
@@ -39,7 +38,7 @@ def test_only_current_element_specialists_are_delegatable() -> None:
         )
 
 
-def test_r2v_and_edit_use_element_domain_targets() -> None:
+def test_r2v_is_not_delegatable_and_edit_uses_timeline_targets() -> None:
     r2v = DelegateToAgentInput.model_validate(
         {
             "role": "r2v_generation_director",
@@ -47,7 +46,8 @@ def test_r2v_and_edit_use_element_domain_targets() -> None:
             "task": "生成目标 Element",
         },
     )
-    r2v.validate_contract(project_id="project-1")
+    with pytest.raises(ValueError, match="not delegatable"):
+        r2v.validate_contract(project_id="project-1")
 
     edit = DelegateToAgentInput.model_validate(
         {

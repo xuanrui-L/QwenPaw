@@ -531,16 +531,16 @@ def _specialist_waiting_review_summary(
     role: SpecialistRole,
     target_refs: list[str],
 ) -> str:
-    # The Runtime does not auto-resume a paused specialist: after approval
-    # the mainline must re-delegate the same target. The summary must not
-    # promise an automation that does not exist, or the mainline skips the
-    # re-delegation and falsely reports the video as in progress.
+    # The Runtime does not auto-resume a paused active specialist: after
+    # approval the mainline must re-delegate the same target. R2V is retained
+    # here only to describe historical records created before that Specialist
+    # was retired; current R2V execution belongs to the work scheduler.
     target = "、".join(target_refs) or "当前目标"
     if role is SpecialistRole.R2V_GENERATION_DIRECTOR:
         return (
             f"{target} 的分镜图已生成，视频尚未开始。请先审阅分镜图；"
-            "审阅通过后，主线需对该 Element 重新委派 R2V 生成 Director 以继续生成视频；"
-            "这不算重新生成已通过产物。"
+            "该记录来自已停用的旧版 R2V Specialist。审阅通过后由主 Agent 修复"
+            "必要字段，并让 Runtime 根据 Element 状态继续调度，不要重新委派 R2V Specialist。"
         )
     return f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；" "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
 
@@ -5926,6 +5926,7 @@ class FileCreatorAgentRuntime:
 
     MAINLINE_RESUME_SOURCE = "mainline_resume"
     YOLO_RESUME_SOURCE = "yolo_auto_resume"
+    PROMPT_CONTRACT_RESUME_SOURCE = "prompt_contract_resume"
     # Fuse 1: never chain more unattended resumes than this since the last
     # human message — a stuck project must fall back to a human.
     YOLO_RESUME_MAX_CONSECUTIVE = 5
@@ -5939,15 +5940,14 @@ class FileCreatorAgentRuntime:
         run_id: str,
         after_failure: bool = False,
     ) -> None:
-        """Keep an unattended (YOLO) project moving until it is finished.
+        """Return unfinished scheduler state to the main Agent.
 
         A succeeded mainline run is a model decision to stop narrating, not
-        proof the project reached its goal: models habitually wrap up with a
-        progress report after a batch of work. Under media_review
-        auto_approve the operator asked for zero attendance, so when timeline
-        elements still lack their main video the Runtime injects the same
-        “继续” a supervising user would type. Two fuses stop runaway loops:
-        a consecutive-resume cap and a no-progress breaker.
+        proof the project reached its goal. Deterministic authored-prompt gaps
+        are returned in every review mode because repairing Project text is
+        free and never authorizes a media call. Other unfinished work is
+        resumed only under media_review auto_approve. Two fuses stop runaway
+        loops: a consecutive-resume cap and a no-progress breaker.
 
         ``after_failure`` covers retryable faults (empty model turns,
         transport blips): the failure itself proves the work is unfinished,
@@ -5955,7 +5955,10 @@ class FileCreatorAgentRuntime:
         elements yet must still resume.
         """
 
-        if get_media_review_mode() != MEDIA_REVIEW_AUTO_APPROVE:
+        auto_approve = (
+            get_media_review_mode() == MEDIA_REVIEW_AUTO_APPROVE
+        )
+        if after_failure and not auto_approve:
             return
         try:
             snapshot = await asyncio.to_thread(
@@ -5975,36 +5978,54 @@ class FileCreatorAgentRuntime:
         unfinished_nodes = graph.unfinished()
         if not unfinished_nodes and not after_failure:
             return
+        model_required = graph.model_required_nodes()
+        prompt_required = tuple(
+            node
+            for node in model_required
+            if node.kind in {"visual", "storyboard", "video"}
+            and any(
+                "prompt" in reason.casefold()
+                or "台词" in reason
+                or "对话密度" in reason
+                for reason in node.missing
+            )
+        )
+        if not auto_approve and not prompt_required:
+            return
         # Let the machine take every dispatchable gap before deciding to
         # spend a model turn: the scheduler fans out READY media nodes.
-        self.work_scheduler.wake(project_id)
-        try:
-            await asyncio.to_thread(
-                ensure_media_call_budget,
-                self.services,
-                project_id,
-            )
-        except MediaCallBudgetExhausted as exc:
-            # A spent wallet fuse paralyzes every media path — a resume
-            # would only make the model walk into the same wall.
-            logger.warning(
-                "YOLO auto-resume stopped for %s: %s",
-                project_id,
-                exc,
-            )
-            return
-        model_required = graph.model_required_nodes()
+        if auto_approve:
+            self.work_scheduler.wake(project_id)
+            try:
+                await asyncio.to_thread(
+                    ensure_media_call_budget,
+                    self.services,
+                    project_id,
+                )
+            except MediaCallBudgetExhausted as exc:
+                # A spent wallet fuse paralyzes every media path — a resume
+                # would only make the model walk into the same wall.
+                logger.warning(
+                    "YOLO auto-resume stopped for %s: %s",
+                    project_id,
+                    exc,
+                )
+                return
         if (
             not after_failure
+            and auto_approve
             and self.work_scheduler.enabled()
             and not model_required
         ):
             # Every remaining gap is machine-dispatchable (READY/RUNNING):
             # the scheduler owns it; a resume would only burn model turns.
             return
-        unfinished = [
-            node.label for node in (model_required or unfinished_nodes)
-        ]
+        feedback_nodes = (
+            model_required or unfinished_nodes
+            if auto_approve
+            else prompt_required
+        )
+        unfinished = [node.label for node in feedback_nodes]
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
             project_id,
@@ -6017,7 +6038,10 @@ class FileCreatorAgentRuntime:
         for item in reversed(messages):
             if item.role != "user":
                 continue
-            if item.source == self.YOLO_RESUME_SOURCE:
+            if item.source in {
+                self.YOLO_RESUME_SOURCE,
+                self.PROMPT_CONTRACT_RESUME_SOURCE,
+            }:
                 if resume_streak == 0:
                     generation = item.metadata.get("projectGeneration")
                     if isinstance(generation, int):
@@ -6059,15 +6083,29 @@ class FileCreatorAgentRuntime:
                 )
         else:
             reasons = []
-            for node in model_required[:8]:
+            for node in feedback_nodes[:8]:
                 why = node.error or "、".join(node.missing[:3]) or "待处理"
                 reasons.append(f"{node.label}（{why}）")
-            text = (
-                "【系统自动消息 · YOLO 持续执行】主线回合已结束，但以下环节需要"
-                "你处理（可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派）：\n"
-                + "\n".join(f"- {reason}" for reason in reasons)
-                + "\n请针对上述环节修复结构、补全 prompt 或调整参数；不要重复已完成的工作。"
-            )
+            if auto_approve:
+                text = (
+                    "【系统自动消息 · YOLO 持续执行】主线回合已结束，但以下环节需要"
+                    "你处理（可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派）：\n"
+                    + "\n".join(f"- {reason}" for reason in reasons)
+                    + "\n请针对上述环节修复结构、补全 prompt 或调整参数；不要重复已完成的工作。"
+                )
+            else:
+                text = (
+                    "【系统自动消息 · Prompt 合同修复】主线回合已结束，但调度器"
+                    "发现以下非空/台词合同缺口，因此没有提交任何对应的付费媒体任务：\n"
+                    + "\n".join(f"- {reason}" for reason in reasons)
+                    + "\nR2V prompt 由你直接负责，不要委派 Specialist；请只修复上述"
+                    " Project 字段并重新核对，保留已经完成的工作。"
+                )
+        message_source = (
+            self.YOLO_RESUME_SOURCE
+            if auto_approve
+            else self.PROMPT_CONTRACT_RESUME_SOURCE
+        )
         appended = await asyncio.to_thread(
             self.sessions.append_message,
             project_id,
@@ -6075,21 +6113,25 @@ class FileCreatorAgentRuntime:
             conversation_id,
             role="user",
             content_parts=[{"type": "text", "text": text}],
-            source=self.YOLO_RESUME_SOURCE,
+            source=message_source,
             channel=MessageChannel.RUNTIME,
             metadata={
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
                 "unfinishedElements": unfinished,
                 "modelRequiredNodes": [
-                    node.node_id for node in model_required[:12]
+                    node.node_id for node in feedback_nodes[:12]
                 ],
             },
         )
         await self._event(
             project_id,
             session_id,
-            "agent.yolo.resumed",
+            (
+                "agent.yolo.resumed"
+                if auto_approve
+                else "agent.prompt_contract.resumed"
+            ),
             run_id,
             appended.message,
             {

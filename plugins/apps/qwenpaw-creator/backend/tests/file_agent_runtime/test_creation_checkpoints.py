@@ -96,7 +96,7 @@ def test_design_images_only_need_the_plan_checkpoint() -> None:
     )
 
 
-def _r2v_delegation_client():
+def _legacy_r2v_checkpoint_client():
     parent_turn = 0
     specialist_turn = 0
 
@@ -143,7 +143,7 @@ def _r2v_delegation_client():
 def _driver_with_recorded_media(services, invocations: list[str]):
     driver = FileCreatorAgentRuntime(
         services,
-        model_client=_r2v_delegation_client(),
+        model_client=_legacy_r2v_checkpoint_client(),
         poll_interval_seconds=0.01,
     )
 
@@ -159,6 +159,29 @@ def _driver_with_recorded_media(services, invocations: list[str]):
 
     driver.specialist_tools.invoke = fake_invoke  # type: ignore[method-assign]
     return driver
+
+
+def _admit_legacy_r2v_checkpoint_harness(monkeypatch) -> None:
+    """Exercise the durable checkpoint ladder without re-enabling R2V.
+
+    New main-Agent manifests reject R2V delegation.  The enum and media tool
+    remain readable for historical runs, and this narrow test harness admits
+    one such record so the pre-existing checkpoint state machine still has
+    end-to-end coverage.
+    """
+
+    import services.file_agent_runtime.driver as driver_module
+
+    monkeypatch.setattr(
+        driver_module.DelegateToAgentInput,
+        "validate_contract",
+        lambda self, *, project_id: None,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "specialist_system_prompt",
+        lambda *args, **kwargs: "Legacy R2V checkpoint test prompt.",
+    )
 
 
 def test_plan_checkpoint_blocks_generation_until_the_user_approves(
@@ -179,6 +202,7 @@ def test_plan_checkpoint_blocks_generation_until_the_user_approves(
         "get_creation_checkpoint_mode",
         lambda: "required",
     )
+    _admit_legacy_r2v_checkpoint_harness(monkeypatch)
     invocations: list[str] = []
 
     async def scenario():
@@ -284,6 +308,7 @@ def test_declined_plan_checkpoint_refuses_without_generating(
         "get_creation_checkpoint_mode",
         lambda: "required",
     )
+    _admit_legacy_r2v_checkpoint_harness(monkeypatch)
     invocations: list[str] = []
 
     async def scenario():
@@ -353,6 +378,7 @@ def test_skip_mode_runs_unattended(tmp_path, monkeypatch) -> None:
         "get_creation_checkpoint_mode",
         lambda: "skip",
     )
+    _admit_legacy_r2v_checkpoint_harness(monkeypatch)
     invocations: list[str] = []
 
     async def scenario():

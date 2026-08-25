@@ -3,9 +3,12 @@
 """Run a billed Creator short-drama acceptance flow with real providers.
 
 The runner owns an isolated Creator data root and never persists an API key.
-The default asks for a three-second R2V element.  ``--profile minute60`` asks
-for four continuous fifteen-second elements and validates a one-minute arc
-without exceeding HappyHorse's per-task duration contract.
+The default asks for a three-second R2V element. ``--profile minute60`` asks
+for five continuous elements with deliberately varied legal durations and
+shot densities, validating a one-minute arc without turning HappyHorse's
+fifteen-second maximum into a per-segment default. ``--prompt-only`` keeps the
+real text-model run but disables every media submission, which isolates main
+Agent prompt authorship and deterministic pre-generation review.
 
 Run from the repository root::
 
@@ -60,55 +63,20 @@ min_dialogue_ratio 设为 0，并在 narrative 明写“有意静默”。
 
 
 ONE_MINUTE_GOAL = """\
-请完成一个真实、可播放、总时长严格为 60 秒的 16:9 无对白动画短剧《雨夜灯塔》。必须使用
-4 个首尾连续的 R2V Element，不要改成 T2V、I2V，也不要增加第五个视频单元。Timeline 为
-24 ticks/s：4 个 Element 的 start_tick 依次为 0、360、720、1080，每个 duration_tick=360，
-也就是每段严格 15 秒、总计 1440 tick。HappyHorse 单次最多 15 秒，因此不得规划 30 秒单段。
+请完成真实、可播放、总时长严格 60 秒的 16:9 无对白动画短剧《雨夜灯塔》。使用 HappyHorse
+能力范围内的 5 个首尾连续 R2V Element，时长依次为 8、13、10、15、14 秒；Shot 数依次为
+3、5、4、6、4。这个分布来自各段动作密度，禁止改成统一 15 秒或统一 5 Shot。
 
-故事：旧式小机器人“阿沐”在暴雨夜发现一只失去光芒的青蓝色折纸鹤。纸鹤以微光指引它穿过
-积水老城，跨过风雨中的断桥，到达熄灭的海边灯塔。阿沐把胸前最后一束青蓝能量传给灯塔，灯塔
-重新点亮海面；纸鹤恢复明亮，黎明出现。全片有意静默，用雨、机械声、风、海浪和音乐表达情绪，
-无对白、旁白、TTS、字幕、Logo、水印或额外人物。每个 Element 的 min_dialogue_ratio=0，并在
-narrative 明写“有意静默”及原因。
+故事是旧式小机器人阿沐在暴雨夜跟随失去光芒的青蓝折纸鹤，穿过积水老城和断桥，到达熄灭的
+海边灯塔，献出胸前能量让灯塔在黎明前重亮。全片有意静默。只使用 `char:amu`、`prop:crane`、
+`scene:rain-city-lighthouse` 三个 canonical 视觉资产。每个 storyboard 的面板数等于对应 Shot 数，
+每格内部与最终视频同为 16:9；使用等尺寸紧凑布局、末行居中和外侧留白，禁止空槽、重复占位、
+拉伸、裁切、混合尺寸、编号、箭头、色标、说明文字、字幕、时间戳和 UI。
 
-四个 15 秒段落必须形成清楚的连续叙事和升级动作：
-1. `elem:signal`（0–15s，发现与决定）：屋檐下的阿沐发现暗淡纸鹤；纸鹤微亮并指向远方熄灭灯塔；
-   阿沐从孤独转为决定出发。结尾：阿沐面向画面左侧出口，纸鹤在其左前方悬停，胸灯低亮。
-2. `elem:alley`（15–30s，追随与第一次风险）：承接相同朝向，阿沐跟随纸鹤穿过积水老街；一次浪涌
-   几乎卷走纸鹤，阿沐伸手护住它并继续。结尾：两者到达断桥右端，纸鹤在手边，远方灯塔可见。
-3. `elem:bridge`（30–45s，危机与突破）：阿沐沿湿滑断桥前进，桥板崩落造成一次明确失足；它抓住
-   缆索重新爬起并护住纸鹤，到达灯塔入口。结尾：阿沐跪在入口平台，右手撑地，纸鹤稳定悬停。
-4. `elem:lighthouse`（45–60s，牺牲与希望）：阿沐进入灯塔核心，将胸灯能量传入熄灭装置；灯塔逐级
-   点亮、光束扫过海面，纸鹤恢复明亮。结尾突然打开空间：黎明大远景，阿沐与纸鹤成为小剪影。
-
-只创建并生成三个 VisualEntity，每个实体只有一个 canonical/default Variant 和一张视觉产物：
-- `char:amu`：电影感角色身份板；圆头略宽于紧凑箱形躯干，磨砂米白外壳、深灰接缝、唯一一颗青蓝
-  圆形胸灯、短小三指手、旧式关节和轻微磨损。Prompt 必须包含严格身份锁定、非对称留白、英雄全身
-  视角、辅助正侧背/姿态、轮廓/表情/细节研究，以及不重叠、不裁脸、不隐藏肢体和身份漂移禁止项。
-- `prop:crane`：青蓝色经典折纸鹤的电影感道具身份板；一个英雄视图、多个独立角度、折痕/纸张半透明
-  材质/熄灭与发光状态细节、尺度参照；无人物、无场景、无重复堆叠。
-- `scene:rain-city-lighthouse`：无人物的场景连续性图集；同一雨夜世界中的木屋檐、积水老街、断桥、
-  海边灯塔入口与灯塔核心，保持建筑材料、冷蓝天气、远处暖光和空间方向一致。各区域独立且不重叠，
-  明确从城内到海边的拓扑；不出现阿沐、纸鹤、路人、文字或水印。
-
-每个 R2V Element 恰好创建 5 个 Shot，5 个 Shot 是该 15 秒段落中的动作/镜头节点，不平均分配时长，
-但必须覆盖准备、推进、转折/风险、反应/突破和清楚末态。每个 Element 生成一张恰好 5 格的纯净生成
-参考分镜。最重要的画幅硬规则：Project 与最终视频为 16:9，**每一个独立分镜格的内部画框也必须严格
-为 16:9**。整张分镜图仍按 16:9 输出；5 个面板使用紧凑的 3 列×2 行等尺寸布局并按行优先排列，
-末行两格居中，剩余面积只作无边框外层留白，不画空槽或占位内容；绝不能把格子拉伸、压扁、裁边、
-合并或改成另一宽高比。禁止 masonry、英雄大格或混合尺寸布局；同一格只能出现一个阿沐。禁止分镜编号、箭头、色标、说明文字、字幕、
-时间戳、UI。
-
-每个 video_prompt 必须使用当前 HappyHorse 官方语法，按 Runtime 实际图片顺序写 `[Image 1]`、
-`[Image 2]` 等并说明具体对象；storyboard 固定为 `[Image 1]`，其后参考顺序与 Project exact refs 一致。
-不要使用“图1”、`image1`、`character1` 或虚构视频标记。逐参考写清采用项与排除项，尤其禁止把视觉
-身份板的白底、多视图、标签，场景图集的分区布局，以及分镜宫格/边框带进最终视频。每段 Prompt 必须
-包含：一句话 15 秒生成目标、首帧承接、一个可执行主动作链、摄影机、光线/天气、声音、身份/空间不变量、
-明确末帧状态和最小禁止项。段落间 continuity 与上段末态逐项一致。
-
-使用 professional-media-prompts skill。先完整写入 Project 结构、三个专业视觉 Prompt、四份专业
-storyboard_prompt 和四份 HappyHorse video_prompt，再让无人值守工作图生成 3 张视觉资产、4 张分镜、
-4 段 15 秒 R2V 视频和最终 60 秒合成。必须等全部真实媒体写回 Project 后才算完成，不要只给方案。
+每个 video_prompt 遵守 HappyHorse `[Image N]` 协议和 Runtime 的真实顺序：storyboard →
+cast lineup → character → scene → prop → explicit extra refs。写清每项采用/排除职责、首帧承接、
+可执行主动作链、摄影机、光线/天气、声音、身份/空间不变量与明确末帧。使用
+professional-media-prompts skill；完成 3 张视觉资产、5 张分镜、5 段视频和最终 60 秒合成。
 """
 
 
@@ -148,50 +116,57 @@ ONE_MINUTE_ELEMENT_COMMON = """\
 现有 `char:amu`、`prop:crane`、`scene:rain-city-lighthouse` 的 canonical/default 选中产物，
 在 creation 顶层写全 character_refs、prop_refs、scene_ref 和 visual_variant_refs。
 
-当前 Element 恰好 5 个 Shot；它们是 15 秒连续段落的准备、推进、转折/风险、反应/突破、
-清楚末态，不平均分配时长。min_dialogue_ratio=0，narrative 必须明写“有意静默”及原因；
+当前 Element 的时长与 Shot 数已经在上方按动作密度给出；不得改成统一 15 秒或统一 5 Shot，
+也不得平均分配 Shot 时长。min_dialogue_ratio=0，narrative 必须明写“有意静默”及原因；
 无对白、旁白、TTS、字幕、Logo、水印或额外人物，以雨、机械、风、海浪和音乐表达。
 
-使用 professional-media-prompts skill 编写一张恰好 5 格的纯净生成参考分镜 Prompt。
-硬规则：每一个独立分镜格的内部画框都严格为 16:9，整张输出也为 16:9；五格使用紧凑的
-3 列×2 行等尺寸布局，按行优先排列并把末行两格居中，剩余面积只作无边框外层留白，不画空槽；
+使用 professional-media-prompts skill 编写一张面板数严格等于当前 Shot 数的纯净生成参考分镜 Prompt。
+硬规则：每一个独立分镜格的内部画框都严格为 16:9，整张输出也为 16:9；使用接近方形的紧凑
+等尺寸布局，按行优先排列并把不足的末行居中，剩余面积只作无边框外层留白，不画空槽；
 不拉伸、不压扁、不裁边、不合并、不改成另一宽高比，不使用 masonry、英雄大格或混合尺寸布局。同一格
 只能出现一个阿沐。按 Shot 顺序逐格写动作相位与末态、景别/机位/构图、主体/道具/环境空间关系、
 主体和摄影机运动、光线与衔接；禁止分镜编号、箭头、色标、说明文字、字幕、时间戳、UI。
 
 video_prompt 使用 HappyHorse 当前官方引用语法并服从 Runtime 实际图片顺序：storyboard 固定
-为 `[Image 1]`，其后逐一映射真实参考并写采用项/排除项；不得使用“图1”、`image1`、
+为 `[Image 1]`，随后依次是 cast lineup、character、scene、prop、explicit extra refs；逐一映射
+真实参考并写采用项/排除项；不得使用“图1”、`image1`、
 `character1`。明确排除身份板白底、多视图/标签、场景图集分区，以及分镜宫格/边框进入成片。
-Prompt 必须包含一句话 15 秒目标、首帧承接、可执行动作链、摄影机、光线/天气、声音、身份/
-空间不变量、明确末帧状态和最小禁止项。等待当前分镜、15 秒 happyhorse1.1 R2V 视频真实生成。
+Prompt 必须包含当前实际时长的一句话目标、首帧承接、可执行动作链、摄影机、光线/天气、声音、
+身份/空间不变量、明确末帧状态和最小禁止项。等待当前分镜与 happyhorse1.1 R2V 视频真实生成。
 """
 
 
 ONE_MINUTE_ELEMENT_GOALS = (
     """\
-为《雨夜灯塔》新增且只新增 `elem:signal`：start_tick=0、duration_tick=15000、全画幅。
-0–15 秒“发现与决定”：屋檐下的阿沐发现暗淡纸鹤；纸鹤微亮，远方熄灭灯塔成为视线目标；
+为《雨夜灯塔》新增且只新增 `elem:signal`：start_tick=0、duration_tick=8000、全画幅，恰好 3 个 Shot。
+0–8 秒“发现与决定”：屋檐下的阿沐发现暗淡纸鹤；纸鹤微亮，远方熄灭灯塔成为视线目标；
 阿沐从孤独、试探转为决定出发。末帧必须是阿沐面向画面左侧出口，纸鹤在其左前方悬停，
 胸灯低亮，能直接接下段同方向运动。
 """
     + ONE_MINUTE_ELEMENT_COMMON,
     """\
-为《雨夜灯塔》新增且只新增 `elem:alley`：start_tick=15000、duration_tick=15000、全画幅。
-15–30 秒“追随与第一次风险”：首帧逐项承接 `elem:signal` 末态与向左运动，阿沐跟随纸鹤
+为《雨夜灯塔》新增且只新增 `elem:alley`：start_tick=8000、duration_tick=13000、全画幅，恰好 5 个 Shot。
+8–21 秒“追随与第一次风险”：首帧逐项承接 `elem:signal` 末态与向左运动，阿沐跟随纸鹤
 穿过积水老街；浪涌几乎卷走纸鹤，阿沐伸手护住它并继续。末帧两者到达断桥右端，阿沐仍
 朝左前方，纸鹤在手边，远方灯塔可见。
 """
     + ONE_MINUTE_ELEMENT_COMMON,
     """\
-为《雨夜灯塔》新增且只新增 `elem:bridge`：start_tick=30000、duration_tick=15000、全画幅。
-30–45 秒“危机与突破”：首帧逐项承接 `elem:alley` 断桥右端状态；阿沐沿湿滑断桥前进，
+为《雨夜灯塔》新增且只新增 `elem:approach`：start_tick=21000、duration_tick=10000、全画幅，恰好 4 个 Shot。
+21–31 秒“风暴逼近”：首帧承接断桥右端；阿沐与纸鹤沿第一段桥面前进，风势升级，远处灯塔
+在闪电中短暂显形，松动的桥板预示危险。末帧阿沐抓住右侧缆索，重心降低，纸鹤贴近胸灯避风。
+"""
+    + ONE_MINUTE_ELEMENT_COMMON,
+    """\
+为《雨夜灯塔》新增且只新增 `elem:bridge`：start_tick=31000、duration_tick=15000、全画幅，恰好 6 个 Shot。
+31–46 秒“危机与突破”：首帧逐项承接 `elem:approach` 的抓索姿态；阿沐沿湿滑断桥前进，
 桥板崩落造成一次清楚失足，它抓住缆索重新爬起并护住纸鹤，到达灯塔入口。末帧阿沐跪在
 入口平台，右手撑地，纸鹤稳定悬停，胸灯更暗，铁门在前方。
 """
     + ONE_MINUTE_ELEMENT_COMMON,
     """\
-为《雨夜灯塔》新增且只新增 `elem:lighthouse`：start_tick=45000、duration_tick=15000、全画幅。
-45–60 秒“牺牲与希望”：首帧逐项承接 `elem:bridge` 入口平台状态；阿沐进入灯塔核心，把
+为《雨夜灯塔》新增且只新增 `elem:lighthouse`：start_tick=46000、duration_tick=14000、全画幅，恰好 4 个 Shot。
+46–60 秒“牺牲与希望”：首帧逐项承接 `elem:bridge` 入口平台状态；阿沐进入灯塔核心，把
 胸灯最后能量传入熄灭装置，灯塔逐级点亮、光束扫过海面，纸鹤恢复明亮。最后突然打开空间：
 暖金黎明大远景，灯塔光照亮海面，阿沐与纸鹤是安静、清楚的小剪影。
 """
@@ -230,10 +205,22 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="resume the single existing project below --output-root",
     )
+    parser.add_argument(
+        "--prompt-only",
+        action="store_true",
+        help=(
+            "use the real text model but disable image/video/compose calls; "
+            "supported by the minute60 profile"
+        ),
+    )
     return parser.parse_args()
 
 
-def _configure_environment(run_root: Path) -> Path:
+def _configure_environment(
+    run_root: Path,
+    *,
+    prompt_only: bool,
+) -> Path:
     shared_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not shared_key:
         raise RuntimeError(
@@ -246,12 +233,16 @@ def _configure_environment(run_root: Path) -> Path:
     config_path.write_text(
         json.dumps(
             {
-                "execution_authorization": {"mode": "allow_all"},
+                "execution_authorization": {
+                    "mode": "required" if prompt_only else "allow_all",
+                },
                 "creation_checkpoints": {
                     "mode": "skip",
                     "execution_mode": "delegated",
                 },
-                "media_review": {"mode": "auto_approve"},
+                "media_review": {
+                    "mode": "required" if prompt_only else "auto_approve",
+                },
                 "self_review": {
                     "sync_enabled": False,
                     "media_enabled": False,
@@ -430,10 +421,18 @@ async def _run(
     poll_seconds: float,
     profile: str,
     resume: bool,
+    prompt_only: bool,
 ) -> Path:
-    data_root = _configure_environment(run_root)
+    if prompt_only and profile != "minute60":
+        raise ValueError("--prompt-only currently requires --profile minute60")
+    data_root = _configure_environment(run_root, prompt_only=prompt_only)
     is_minute = profile == "minute60"
     goal = ONE_MINUTE_VISUAL_GOAL if is_minute else GOAL
+    if prompt_only:
+        goal = goal.replace(
+            "先持久化完整 Prompt，真实图片生成并选中后才完成。",
+            "先持久化完整 Prompt；本次只验收 Prompt，不等待或请求任何媒体生成。",
+        )
     target_duration = 60 if is_minute else 3
 
     # Import only after the isolated model environment has been bound: several
@@ -491,9 +490,20 @@ async def _run(
 
         project = Project.new(
             project_id=project_id,
-            name=("真实 E2E：雨夜灯塔（60 秒）" if is_minute else "真实 E2E：雨夜纸鹤（3 秒）"),
+            name=(
+                "真实主 Agent Prompt 验收：雨夜灯塔（60 秒·变节奏）"
+                if prompt_only
+                else (
+                    "真实 E2E：雨夜灯塔（60 秒）"
+                    if is_minute
+                    else "真实 E2E：雨夜纸鹤（3 秒）"
+                )
+            ),
             description=(
-                "qwen-image3 + happyhorse1.1 的 Creator 一分钟真实端到端验收"
+                "真实 qwen3.7-plus 主 Agent、无 R2V Specialist、无媒体派发；"
+                "用于审阅非机械时长/Shot 分布与生产级 Prompt 合同"
+                if prompt_only
+                else "qwen-image3 + happyhorse1.1 的 Creator 一分钟真实端到端验收"
                 if is_minute
                 else "qwen-image3 + happyhorse1.1 的 Creator 真实端到端验收"
             ),
@@ -519,10 +529,11 @@ async def _run(
         specialist_max_model_turns=20 if is_minute else 16,
         model_turn_timeout_seconds=300,
     )
-    await start_file_media_execution_services(
-        services,
-        poll_interval_seconds=1.0,
-    )
+    if not prompt_only:
+        await start_file_media_execution_services(
+            services,
+            poll_interval_seconds=1.0,
+        )
     await runtime.start()
     runtime.notify(project_id)
 
@@ -530,10 +541,11 @@ async def _run(
     last_summary: str | None = None
     success = False
     minute_element_specs = (
-        ("elem:signal", 0),
-        ("elem:alley", 15000),
-        ("elem:bridge", 30000),
-        ("elem:lighthouse", 45000),
+        ("elem:signal", 0, 8000, 3),
+        ("elem:alley", 8000, 13000, 5),
+        ("elem:approach", 21000, 10000, 4),
+        ("elem:bridge", 31000, 15000, 6),
+        ("elem:lighthouse", 46000, 14000, 4),
     )
     existing_element_ids = {
         element.element_id
@@ -542,12 +554,12 @@ async def _run(
     }
     minute_element_phases_queued = 0
     if is_minute:
-        for element_id, _start in minute_element_specs:
+        for element_id, _start, _duration, _shots in minute_element_specs:
             if element_id not in existing_element_ids:
                 break
             minute_element_phases_queued += 1
     expected_counts = (
-        {"visual": 3, "storyboard": 4, "video": 4, "compose": 1}
+        {"visual": 3, "storyboard": 5, "video": 5, "compose": 1}
         if is_minute
         else {"visual": 2, "storyboard": 1, "video": 1, "compose": 1}
     )
@@ -604,9 +616,24 @@ async def _run(
                 visual_nodes = [
                     node for node in graph.nodes if node.kind == "visual"
                 ]
-                if len(visual_nodes) == 3 and all(
-                    node.status.value == "done" for node in visual_nodes
-                ):
+                visual_prompts_ready = all(
+                    entity.variants.order
+                    and all(
+                        entity.variants.items[variant_id].prompt.strip()
+                        for variant_id in entity.variants.order
+                    )
+                    for entity in snapshot.project.visual.entities.items.values()
+                )
+                visual_phase_ready = (
+                    len(snapshot.project.visual.entities.items) == 3
+                    and visual_prompts_ready
+                    if prompt_only
+                    else len(visual_nodes) == 3
+                    and all(
+                        node.status.value == "done" for node in visual_nodes
+                    )
+                )
+                if visual_phase_ready:
                     services.sessions.append_message(
                         project_id,
                         session_id,
@@ -615,7 +642,14 @@ async def _run(
                         content_parts=[
                             {
                                 "type": "text",
-                                "text": ONE_MINUTE_ELEMENT_GOALS[0],
+                                "text": (
+                                    ONE_MINUTE_ELEMENT_GOALS[0].replace(
+                                        "等待当前分镜与 happyhorse1.1 R2V 视频真实生成。",
+                                        "本次只验收完整 Prompt，不等待或请求任何媒体生成。",
+                                    )
+                                    if prompt_only
+                                    else ONE_MINUTE_ELEMENT_GOALS[0]
+                                ),
                             },
                         ],
                         message_id=f"message-{stamp.lower()}-element-1",
@@ -640,7 +674,12 @@ async def _run(
             if is_minute and 0 < minute_element_phases_queued < len(
                 ONE_MINUTE_ELEMENT_GOALS,
             ):
-                previous_id, previous_start = minute_element_specs[
+                (
+                    previous_id,
+                    previous_start,
+                    previous_duration,
+                    previous_shots,
+                ) = minute_element_specs[
                     minute_element_phases_queued - 1
                 ]
                 previous = next(
@@ -655,9 +694,9 @@ async def _run(
                 previous_ready = (
                     previous is not None
                     and previous.span.start_tick == previous_start
-                    and previous.span.duration_tick == 15000
+                    and previous.span.duration_tick == previous_duration
                     and getattr(previous.creation, "type", "") == "r2v"
-                    and len(previous.creation.shots.order) == 5
+                    and len(previous.creation.shots.order) == previous_shots
                     and bool(previous.creation.storyboard_prompt.strip())
                     and bool(previous.creation.video_prompt.strip())
                 )
@@ -672,7 +711,14 @@ async def _run(
                         content_parts=[
                             {
                                 "type": "text",
-                                "text": ONE_MINUTE_ELEMENT_GOALS[next_index],
+                                "text": (
+                                    ONE_MINUTE_ELEMENT_GOALS[next_index].replace(
+                                        "等待当前分镜与 happyhorse1.1 R2V 视频真实生成。",
+                                        "本次只验收完整 Prompt，不等待或请求任何媒体生成。",
+                                    )
+                                    if prompt_only
+                                    else ONE_MINUTE_ELEMENT_GOALS[next_index]
+                                ),
                             },
                         ],
                         message_id=(
@@ -693,20 +739,51 @@ async def _run(
                         flush=True,
                     )
 
-            success = (
-                actual_counts == expected_counts
-                and (
-                    not is_minute
-                    or minute_element_phases_queued
-                    == len(ONE_MINUTE_ELEMENT_GOALS)
+            element_by_id = {
+                element.element_id: element
+                for timeline in snapshot.project.timelines.items.values()
+                for element in timeline.elements_by_id.values()
+            }
+            prompt_only_ready = prompt_only and all(
+                (
+                    (element := element_by_id.get(element_id)) is not None
+                    and element.span.start_tick == start_tick
+                    and element.span.duration_tick == duration_tick
+                    and getattr(element.creation, "type", "") == "r2v"
+                    and len(element.creation.shots.order) == shot_count
+                    and bool(element.creation.storyboard_prompt.strip())
+                    and bool(element.creation.video_prompt.strip())
                 )
-                and all(node.status.value == "done" for node in graph.nodes)
+                for element_id, start_tick, duration_tick, shot_count in (
+                    minute_element_specs
+                )
+            )
+            success = (
+                prompt_only_ready
+                if prompt_only
+                else (
+                    actual_counts == expected_counts
+                    and (
+                        not is_minute
+                        or minute_element_phases_queued
+                        == len(ONE_MINUTE_ELEMENT_GOALS)
+                    )
+                    and all(
+                        node.status.value == "done" for node in graph.nodes
+                    )
+                )
             )
             if success:
+                # A final prompt commit can make the acceptance predicate true
+                # while the main Agent is still emitting its closing summary.
+                # Let that run reach its durable terminal state before stop()
+                # revokes the epoch and produces a misleading StaleAgentRun.
+                await runtime.wait_until_idle(project_id)
                 break
     finally:
         await runtime.stop()
-        await shutdown_file_media_execution_services()
+        if not prompt_only:
+            await shutdown_file_media_execution_services()
 
     snapshot = services.projects.read(project_id)
     project_root = services.projects.project_root(project_id)
@@ -717,9 +794,20 @@ async def _run(
     )
     facts = _project_prompt_facts(snapshot.project)
     paths = _artifact_paths(snapshot.project, project_root)
+    from services.run_review.prompt_contract import (
+        check_changed_r2v_prompt_contracts,
+    )
+
+    prompt_contract = check_changed_r2v_prompt_contracts(
+        snapshot.project.model_dump(mode="json"),
+        ["/timelines"],
+    )
+    success = success and bool(prompt_contract.get("passed"))
+    specialist_runs = runtime.executions.list_specialist_runs(project_id)
     report = {
         "ok": success,
         "profile": profile,
+        "prompt_only": prompt_only,
         "resumed": resume,
         "project_id": project_id,
         "models": {
@@ -741,6 +829,15 @@ async def _run(
         },
         "expected_graph_counts": expected_counts,
         "prompt_facts": facts,
+        "prompt_contract": prompt_contract,
+        "specialist_runs": [
+            {
+                "run_id": run.run_id,
+                "role": run.role.value,
+                "status": run.status.value,
+            }
+            for run in specialist_runs
+        ],
         "artifacts": paths,
         "tasks": tasks,
         "project_json": str((project_root / "project.json").resolve()),
@@ -792,6 +889,7 @@ def main() -> int:
             poll_seconds=args.poll_seconds,
             profile=args.profile,
             resume=args.resume,
+            prompt_only=args.prompt_only,
         ),
     )
     print(f"acceptance report: {report}")

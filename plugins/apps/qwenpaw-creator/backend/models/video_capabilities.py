@@ -1323,6 +1323,97 @@ def _model_reference_syntax_guidance(
     return "- 当前模型没有已知的 Prompt 引用标记协议；不得套用任何其他模型的" "编号语法，必须在付费 R2V 提交前报告阻塞。"
 
 
+_POSITIONAL_REFERENCE_TOKEN = re.compile(
+    r"(?:\[Image\s*\d+\]|(?:图片|图)\s*\d+|Image\s+\d+|"
+    r"image\s*_?\d+|character\s*\d+|<<<(?:image|video)_\d+>>>|"
+    r"@(?:image|video)_\d+)",
+    re.IGNORECASE,
+)
+
+
+def video_prompt_storyboard_reference_violation(
+    prompt: str,
+    model_name: str,
+    protocol_backend: str = "",
+    *,
+    language: str = "zh-CN",
+) -> str | None:
+    """Validate the provider literal for the first storyboard reference.
+
+    The exact payload is still assembled and checked at submit time. Keeping
+    this narrow authoring check beside the capability catalog prevents sync
+    review from growing a second, drifting provider-syntax table.
+    """
+
+    text = prompt or ""
+    normalized = model_name.strip()
+    backend = video_backend_key(normalized, protocol_backend)
+    is_chinese = language.strip().casefold().startswith("zh")
+
+    expected: tuple[re.Pattern[str], str] | None = None
+    if is_happyhorse_model(normalized):
+        expected = (re.compile(r"\[Image\s+1\]"), "[Image 1]")
+    elif is_wan3_video_model(normalized):
+        expected = (
+            re.compile(r"图\s*1")
+            if is_chinese
+            else re.compile(r"\bImage\s+1\b", re.IGNORECASE),
+            "图1" if is_chinese else "Image 1",
+        )
+    elif backend == "wan" and _WAN_27_MODEL_PATTERN.fullmatch(normalized):
+        expected = (
+            re.compile(r"图\s*1")
+            if is_chinese
+            else re.compile(r"\bImage\s+1\b", re.IGNORECASE),
+            "图1" if is_chinese else "Image 1",
+        )
+    elif backend == "wan" and _WAN_26_MODEL_PATTERN.fullmatch(normalized):
+        expected = (
+            re.compile(r"\bcharacter\s*1\b", re.IGNORECASE),
+            "character1",
+        )
+    elif backend == "seedance2":
+        expected = (
+            re.compile(r"图片\s*1")
+            if is_chinese
+            else re.compile(r"\bimage\s*1\b", re.IGNORECASE),
+            "图片1" if is_chinese else "image1",
+        )
+    elif backend == "kling":
+        if "/" in normalized:
+            expected = (
+                re.compile(r"<<<image_1>>>", re.IGNORECASE),
+                "<<<image_1>>>",
+            )
+        else:
+            expected = (
+                re.compile(r"@image_1\b", re.IGNORECASE),
+                "@image_1",
+            )
+    elif backend == "vidu" and "/" in normalized:
+        expected = (re.compile(r"图\s*1"), "图1")
+
+    if expected is not None:
+        pattern, literal = expected
+        if pattern.search(text) is None:
+            return (
+                f"当前模型 `{normalized or '未配置'}` 的 storyboard 第一参考"
+                f"必须在 video_prompt 中使用 `{literal}` 指代"
+            )
+        return None
+
+    if backend in {"veo", "minimax"} or (
+        backend == "vidu" and "/" not in normalized
+    ):
+        invented = _POSITIONAL_REFERENCE_TOKEN.search(text)
+        if invented is not None:
+            return (
+                f"当前模型 `{normalized or '未配置'}` 使用结构化参考，"
+                f"video_prompt 不得发明位置标记 `{invented.group(0)}`"
+            )
+    return None
+
+
 def video_model_prompt_guidance(
     model_name: str,
     protocol_backend: str = "",
@@ -1580,5 +1671,6 @@ __all__ = [
     "video_model_prompt_guidance",
     "video_model_supported_modes",
     "video_reference_capability",
+    "video_prompt_storyboard_reference_violation",
     "video_reference_violation",
 ]

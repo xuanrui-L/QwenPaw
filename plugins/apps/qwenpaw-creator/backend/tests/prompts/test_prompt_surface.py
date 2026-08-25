@@ -38,7 +38,6 @@ def _active_prompt_texts() -> list[str]:
         for role in (
             SpecialistRole.SOURCE_INTELLIGENCE,
             SpecialistRole.VISUAL_DEVELOPMENT,
-            SpecialistRole.R2V_GENERATION_DIRECTOR,
             SpecialistRole.AI_EDITING_DIRECTOR,
         )
     )
@@ -165,7 +164,10 @@ def test_creator_duration_is_injected_from_the_active_video_model(
     assert "不设置统一的 8–10 秒、10 秒或 15 秒默认值" in prompt
     assert "`[Image 1]`、`[Image 2]`" in prompt
     assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
-    assert "主 Agent 自己编写 `video_prompt` 时也必须逐条遵守" in prompt
+    assert "你是 `video_prompt` 的唯一作者" in prompt
+    assert "不存在可委派的 R2V Specialist" in prompt
+    assert "禁止套用“每段固定 5 Shot”" in prompt
+    assert "不设统一的 7 秒 Shot 上限" in prompt
     assert "`ops` 必须直接传原生 JSON 数组" in prompt
 
     monkeypatch.setattr(
@@ -274,7 +276,6 @@ def test_ai_editing_director_requires_pet_inner_monologue_not_action_labels() ->
 
 _IMAGE_ROLES = (
     SpecialistRole.VISUAL_DEVELOPMENT,
-    SpecialistRole.R2V_GENERATION_DIRECTOR,
 )
 
 
@@ -317,7 +318,7 @@ def test_video_model_guidance_switches_on_configured_model(
     monkeypatch,
 ) -> None:
     _set_video_model(monkeypatch, "happyhorse-1.1-r2v")
-    prompt = _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
+    prompt = render_creator_system_prompt(project_id="project-guidance-test")
     assert "happyhorse-1.1-r2v" in prompt
     assert "`[Image 1]`、`[Image 2]`" in prompt
     assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
@@ -327,7 +328,7 @@ def test_video_model_guidance_switches_on_configured_model(
     assert "{{video_model_guidance}}" not in prompt
     assert "{{video_duration_guidance}}" not in prompt
     _set_video_model(monkeypatch, "wan2.7-r2v")
-    prompt = _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
+    prompt = render_creator_system_prompt(project_id="project-guidance-test")
     assert "图片最多 5 张" in prompt
     assert "视频最多 5 个" in prompt
     assert "合计最多 5 个" in prompt
@@ -336,13 +337,16 @@ def test_video_model_guidance_switches_on_configured_model(
     assert "中文 Prompt 用“图1、图2" in prompt
     _set_video_model(monkeypatch, "wan3.0-video")
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
-    specialist = _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
     delegator = render_creator_system_prompt(
         project_id="project-guidance-test",
     )
-    for rendered in (specialist, delegator):
-        assert "Wan3.0" in rendered
-        assert "2–30 秒" in rendered
+    assert "Wan3.0" in delegator
+    assert "2–30 秒" in delegator
+
+
+def test_r2v_specialist_is_not_an_active_delegation_surface() -> None:
+    with pytest.raises(ValueError, match="no active prompt"):
+        _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
 
 
 def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:

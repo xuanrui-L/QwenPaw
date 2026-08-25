@@ -32,6 +32,11 @@ from services.file_agent_runtime.driver import (
 )
 from services.file_agent_runtime import driver as driver_module
 from services.file_agent_runtime.prompts import render_creator_system_prompt
+from services.file_agent_runtime.work_graph import (
+    WorkGraph,
+    WorkNode,
+    WorkNodeStatus,
+)
 from services.media_files.live_operation import (
     LiveOperationError,
     LiveOperationRun,
@@ -1716,18 +1721,18 @@ def test_specialist_cancel_emits_terminal_event(
             names = {item["function"]["name"] for item in tools}
             if "delegate_to_agent" in names:
                 return _delegate_call(
-                    "delegate-r2v",
-                    role="r2v_generation_director",
-                    target_refs=["element:ep1"],
-                    task="分镜生成",
+                    "delegate-visual",
+                    role="visual_development_agent",
+                    target_refs=["asset:hero"],
+                    task="角色声音设计",
                 )
             if cancel_phase == "waiting_runtime":
                 # Specialist turn: park the run in a long-running tool.
                 return _media_call(
                     "gen-1",
-                    name="image_generation",
-                    target_ref="element:ep1",
-                    arguments={"prompt": "storyboard"},
+                    name="tts_generation",
+                    target_ref="asset:hero",
+                    arguments={"text": "测试取消中的长任务。"},
                 )
             # Specialist turn: block forever until the parent is interrupted.
             await _block_until_cancelled()
@@ -1916,31 +1921,32 @@ def test_costly_specialist_tool_waits_for_file_authorization(
     monkeypatch,
 ) -> None:
     _authorization_gate_modes(monkeypatch, authorization="required")
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
     parent_turn = 0
     specialist_turn = 0
 
     async def callback(_messages, tools):
         nonlocal parent_turn, specialist_turn
         names = {item["function"]["name"] for item in tools}
-        if "image_generation" in names:
+        if "tts_generation" in names:
             specialist_turn += 1
             if specialist_turn == 1:
                 return _media_call(
-                    "generate-image-1",
-                    name="image_generation",
-                    target_ref="element:ep1",
-                    arguments={"prompt": "ep1 storyboard"},
+                    "generate-voice-1",
+                    name="tts_generation",
+                    target_ref="asset:hero",
+                    arguments={"text": "这是一段角色试音。"},
                 )
-            return AgentModelTurn(content="[SUCCESS]\n分镜图已生成。")
+            return AgentModelTurn(content="[SUCCESS]\n角色试音已生成。")
         parent_turn += 1
         if parent_turn == 1:
             return _delegate_call(
-                "delegate-r2v-storyboard-1",
-                role="r2v_generation_director",
-                target_refs=["element:ep1"],
-                task="生成 ep1 分镜图",
+                "delegate-visual-voice-1",
+                role="visual_development_agent",
+                target_refs=["asset:hero"],
+                task="为 hero 生成角色试音",
             )
-        return AgentModelTurn(content="R2V Specialist 已完成。")
+        return AgentModelTurn(content="视觉开发 Specialist 已完成。")
 
     async def scenario():
         services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
@@ -1972,46 +1978,24 @@ def test_costly_specialist_tool_waits_for_file_authorization(
 
     authorization, completed_run, events = asyncio.run(scenario())
     assert completed_run.status.value == "SUCCEEDED"
-    assert authorization.operation == "image_generation"
+    assert authorization.operation == "tts_generation"
     event_types = {item.event_type for item in events}
     assert "execution.authorization_required" in event_types
     assert "execution.authorization_decided" in event_types
 
 
-def test_approved_billing_arguments_do_not_trip_the_drift_guard(
+def test_retired_r2v_specialist_cannot_request_paid_authorization(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """An unchanged authorized r2v call must run (review M1 regression).
-
-    The drift guard compares billing-sensitive arguments (durationSeconds /
-    resolution / mode) against ``authorization.scope["parameters"]``; the
-    scope stores the full billing arguments, so a request whose terms did
-    not change between approval and invocation must never be rejected.
-    """
-
+    """The removed R2V delegation surface cannot reach a paid tool."""
     _authorization_gate_modes(monkeypatch, authorization="required")
     parent_turn = 0
-    specialist_turn = 0
 
     async def callback(_messages, tools):
-        nonlocal parent_turn, specialist_turn
+        nonlocal parent_turn
         names = {item["function"]["name"] for item in tools}
-        if "r2v_generation" in names:
-            specialist_turn += 1
-            if specialist_turn == 1:
-                return _media_call(
-                    "generate-ep1-video",
-                    name="r2v_generation",
-                    target_ref="element:ep1",
-                    arguments={
-                        "prompt": "ep1 video",
-                        "durationSeconds": 5,
-                        "resolution": "720P",
-                        "mode": "r2v",
-                    },
-                )
-            return AgentModelTurn(content="[SUCCESS]\n视频已生成。")
+        assert "r2v_generation" not in names
         parent_turn += 1
         if parent_turn == 1:
             return _delegate_call(
@@ -2020,33 +2004,69 @@ def test_approved_billing_arguments_do_not_trip_the_drift_guard(
                 target_refs=["element:ep1"],
                 task="生成 ep1 视频",
             )
-        return AgentModelTurn(content="R2V Specialist 已完成。")
+        return AgentModelTurn(content="R2V prompt 改由主 Agent 直接负责。")
 
     async def scenario():
         services, _snapshot = _create_project(tmp_path, initial_goal="生成视频")
         driver = _driver(services, callback)
 
-        driver.specialist_tools.invoke = _succeeded_invoke  # type: ignore[method-assign]
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        authorization = await _wait_first_authorization(driver)
-        _approve(driver, authorization)
-        await driver.wait_until_idle(PROJECT_ID)
-        completed_run = driver.executions.get_specialist_run(
+        await _run_to_idle(driver, services)
+        authorizations = driver.executions.list_execution_authorizations(
             PROJECT_ID,
-            authorization.run_id,
         )
+        specialists = driver.executions.list_specialist_runs(PROJECT_ID)
         await driver.stop()
-        return authorization, completed_run
+        return authorizations, specialists
 
-    authorization, completed_run = asyncio.run(scenario())
-    # The billed terms were recorded in full on the approval scope…
-    approved = authorization.scope["parameters"]
-    assert approved["durationSeconds"] == 5
-    assert approved["resolution"] == "720P"
-    assert approved["mode"] == "r2v"
-    # …so the unchanged invocation passes the drift guard and completes.
-    assert completed_run.status.value == "SUCCEEDED"
+    authorizations, specialists = asyncio.run(scenario())
+    assert authorizations == []
+    assert specialists == []
+
+
+def test_prompt_gap_feedback_is_queued_outside_auto_approve(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A false completion gets a free repair turn, never a media dispatch."""
+
+    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    node = WorkNode(
+        node_id="video:ep1",
+        kind="video",
+        label="第一场 · 视频",
+        status=WorkNodeStatus.GATED,
+        missing=("video_prompt 缺失",),
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+    )
+    wakes: list[str] = []
+    monkeypatch.setattr(driver.work_scheduler, "wake", wakes.append)
+
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-false-complete",
+        ),
+    )
+
+    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    feedback = messages[-1]
+    assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert "video_prompt 缺失" in feedback.content_parts[0].text
+    assert "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
+    assert feedback.metadata["modelRequiredNodes"] == ["video:ep1"]
+    assert wakes == [], "non-auto prompt repair must not wake paid scheduling"
 
 
 def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
@@ -2055,27 +2075,29 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
 ) -> None:
     """A specialist may stop after creating a review without calling downstream."""
 
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+
     parent_turn = 0
     specialist_turn = 0
 
     async def callback(messages, tools):
         nonlocal parent_turn, specialist_turn
         names = {item["function"]["name"] for item in tools}
-        if "image_generation" in names:
+        if "tts_generation" in names:
             specialist_turn += 1
             if specialist_turn == 1:
                 return _read_call("read-after-storyboard")
             return AgentModelTurn(
-                content="[BLOCKED] element:ep22 分镜图已生成，等待用户审阅后生成视频。",
+                content="[BLOCKED] hero 角色试音已生成，等待用户审阅。",
             )
 
         parent_turn += 1
         if parent_turn == 1:
             return _delegate_call(
-                "delegate-ep22-storyboard",
-                role="r2v_generation_director",
-                target_refs=["element:ep22"],
-                task="生成 ep22 分镜图，等待审阅后再生成视频",
+                "delegate-hero-voice",
+                role="visual_development_agent",
+                target_refs=["asset:hero"],
+                task="生成 hero 角色试音并等待审阅",
             )
         delegated = json.loads(messages[-1]["content"])
         assert delegated["status"] == "WAITING_REVIEW"
@@ -2125,9 +2147,8 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     assert specialist.metadata["waitingReview"] is True
     assert specialist.metadata["waitingReviewId"] == "review-ep22-storyboard"
     waiting_summary = (
-        "element:ep22 的分镜图已生成，视频尚未开始。请先审阅分镜图；"
-        "审阅通过后，主线需对该 Element 重新委派 R2V 生成 Director 以继续生成视频；"
-        "这不算重新生成已通过产物。"
+        "asset:hero 的产物已生成，后续步骤尚未开始。请先完成审阅；"
+        "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
     )
     assert specialist.final_summary_text == waiting_summary
     blocked = [
