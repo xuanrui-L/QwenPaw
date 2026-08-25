@@ -734,7 +734,7 @@ class FfmpegLocalMediaRunner:
             # sums them.
             fade_in = max(0.0, float(track.get("fade_in_seconds") or 0.0))
             fade_out = max(0.0, float(track.get("fade_out_seconds") or 0.0))
-            if duration > 0 and fade_in + fade_out > duration:
+            if 0 < duration < fade_in + fade_out:
                 scale = duration / (fade_in + fade_out)
                 fade_in *= scale
                 fade_out *= scale
@@ -3040,9 +3040,7 @@ def _timeline_execution(
                 version.checksum,
             ),
         )
-    speech_windows = (
-        _timeline_speech_windows(timeline) if audio_tracks else ()
-    )
+    speech_windows = _timeline_speech_windows(timeline) if audio_tracks else ()
     return _ResolvedExecution(
         command=command,
         target_ref=target_ref,
