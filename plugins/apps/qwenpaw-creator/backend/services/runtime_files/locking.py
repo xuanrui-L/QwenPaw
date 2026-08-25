@@ -274,15 +274,20 @@ class CrossProcessFileLock:
         with _HELD_LOCKS_GUARD:
             held = _HELD_LOCKS.get(held_key)
             if held is not None:
-                # Waiting here would deadlock the worker thread on itself.
-                # To callers this is transient contention ("busy, retry
-                # shortly"), not a validation failure: raise the retryable
-                # lock timeout so reads surface 503 instead of 500.
-                raise LockTimeoutError(
+                # The same pool thread already appears as a holder. This is
+                # usually NOT a nested call stack: holds that span an await
+                # return their thread to the executor pool, and the next
+                # request reused it. Waiting is safe — flock release happens
+                # on whichever thread resumes the holder — so fall through
+                # to the normal timeout-bounded wait instead of failing the
+                # innocent request. A genuine nested acquisition surfaces as
+                # a retryable LockTimeoutError after the deadline.
+                logger.warning(
+                    "same-thread lock reuse detected for %s "
+                    "(likely executor thread reuse); waiting with timeout. "
+                    "holder=%r",
                     self.path,
-                    0.0,
-                    phase="same-thread-nested",
-                    holder=held if isinstance(held, dict) else None,
+                    held,
                 )
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
