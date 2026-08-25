@@ -213,9 +213,14 @@ PLAYER_HTML = """<!DOCTYPE html>
   </div>
   <div id="countdown"></div>
 </div>
+<script id="if-manifest" type="application/json">__MANIFEST_JSON__</script>
 <script>
-(async function () {
-  const manifest = await (await fetch("manifest.json")).json();
+(function () {
+  // Manifest is inlined so the bundle works when index.html is opened
+  // directly from disk (file:// blocks fetch of sibling files).
+  const manifest = JSON.parse(
+    document.getElementById("if-manifest").textContent,
+  );
   const video = document.getElementById("video");
   const overlay = document.getElementById("overlay");
   const questionEl = document.getElementById("question");
@@ -297,7 +302,14 @@ def assemble_interactive_bundle(
     payload = _player_manifest(project, manifest)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
-        bundle.writestr("index.html", PLAYER_HTML)
+        bundle.writestr(
+            "index.html",
+            PLAYER_HTML.replace(
+                "__MANIFEST_JSON__",
+                # </script> inside a JSON string would close the tag early.
+                json.dumps(payload, ensure_ascii=False).replace("</", "<\\/"),
+            ),
+        )
         bundle.writestr(
             "manifest.json",
             json.dumps(payload, ensure_ascii=False, indent=2),

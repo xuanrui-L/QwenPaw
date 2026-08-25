@@ -185,7 +185,16 @@ export function selectRoughCutFrames(
     const timeline = project.timelines.items[timelineId];
     if (!timeline) return [];
     return orderedTimelineElements(timeline)
-      .filter((element) => element.enabled)
+      .filter(
+        (element) =>
+          element.enabled &&
+          // Only picture-carrying scene elements; overlays / motion clips /
+          // transitions / audio / interaction points never have storyboards
+          // or base frames to wait for.
+          ["r2v", "t2v", "i2v", "s2v", "edit"].includes(
+            element.creation.type,
+          ),
+      )
       .map((element) => ({
         key: `${timelineId}:${element.element_id}`,
         timelineId,
