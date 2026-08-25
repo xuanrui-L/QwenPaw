@@ -202,16 +202,34 @@ PLAYER_HTML = """<!DOCTYPE html>
   #countdown{position:absolute;top:16px;right:16px;width:44px;height:44px;
     border:2px solid #f79009;border-radius:50%;display:none;align-items:center;
     justify-content:center;font-weight:700;background:rgba(0,0,0,.4)}
+  .gate{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:14px;
+    background:rgba(13,11,10,.82)}
+  .gate[hidden]{display:none}
+  .gate button{width:84px;height:84px;border-radius:50%;cursor:pointer;
+    border:2px solid #ff7f16;background:rgba(255,127,22,.25);color:#fff;
+    font-size:30px;line-height:1;transition:all .15s}
+  .gate button:hover{background:rgba(255,127,22,.6);transform:scale(1.06)}
+  .gate p{font-size:14px;color:rgba(255,255,255,.85);padding:0 24px;
+    text-align:center}
 </style>
 </head>
 <body>
 <div id="stage">
-  <video id="video" playsinline></video>
+  <video id="video" controls playsinline></video>
   <div id="overlay">
     <div id="question"></div>
     <div id="options"></div>
   </div>
   <div id="countdown"></div>
+  <div id="start" class="gate">
+    <button type="button" aria-label="play">▶</button>
+    <p id="start-title"></p>
+  </div>
+  <div id="restart" class="gate" hidden>
+    <button type="button" aria-label="replay">↺</button>
+    <p id="restart-title"></p>
+  </div>
 </div>
 <script id="if-manifest" type="application/json">__MANIFEST_JSON__</script>
 <script>
@@ -226,7 +244,13 @@ PLAYER_HTML = """<!DOCTYPE html>
   const questionEl = document.getElementById("question");
   const optionsEl = document.getElementById("options");
   const countdownEl = document.getElementById("countdown");
+  const startGate = document.getElementById("start");
+  const restartGate = document.getElementById("restart");
   let timer = null;
+
+  const entryTitle =
+    (manifest.titles || {})[manifest.entry_timeline_id] || "";
+  document.getElementById("start-title").textContent = entryTitle;
 
   function interactionsFor(timelineId) {
     return manifest.interactions.filter(
@@ -242,15 +266,33 @@ PLAYER_HTML = """<!DOCTYPE html>
   function playSegment(timelineId) {
     clearTimer();
     overlay.classList.remove("open");
+    restartGate.hidden = true;
     const src = manifest.segments[timelineId];
     if (!src) return;
     video.src = src;
     video.play().catch(() => {});
     video.onended = () => {
       const points = interactionsFor(timelineId);
-      if (points.length) showChoice(points[points.length - 1]);
+      if (points.length) {
+        showChoice(points[points.length - 1]);
+      } else {
+        // An ending segment: offer replay instead of a dead frame.
+        document.getElementById("restart-title").textContent =
+          (manifest.titles || {})[timelineId] || "";
+        restartGate.hidden = false;
+      }
     };
   }
+
+  // Browsers block autoplay without a user gesture: playback starts from
+  // the tap on the start gate (and later from option taps).
+  startGate.querySelector("button").onclick = () => {
+    startGate.hidden = true;
+    playSegment(manifest.entry_timeline_id);
+  };
+  restartGate.querySelector("button").onclick = () => {
+    playSegment(manifest.entry_timeline_id);
+  };
 
   function showChoice(point) {
     questionEl.textContent = point.question;
@@ -278,8 +320,6 @@ PLAYER_HTML = """<!DOCTYPE html>
       }, 1000);
     }
   }
-
-  playSegment(manifest.entry_timeline_id);
 })();
 </script>
 </body>
