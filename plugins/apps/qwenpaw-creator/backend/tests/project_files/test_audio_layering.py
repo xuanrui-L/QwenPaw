@@ -251,28 +251,18 @@ def test_disabled_dialogue_element_does_not_block_narration() -> None:
     Project.model_validate(raw)
 
 
-def test_bgm_defaults_to_musical_edge_fades() -> None:
+def test_fades_are_agent_owned_and_default_unset() -> None:
+    # Fades are a creative parameter: the model stores only the agent's
+    # explicit choice; None means "adaptive role default at render time"
+    # (bgm: min(2s, span/4), narration/sfx: hard edges).
     creation = AudioCreation(source_asset_version_id="audio-version-1")
     assert creation.fade_in_seconds is None
-    assert creation.effective_fade_in_seconds == 2.0
-    assert creation.effective_fade_out_seconds == 2.0
-
-
-def test_narration_defaults_to_hard_edges() -> None:
-    creation = AudioCreation(
-        source_asset_version_id="audio-version-1",
-        role="narration",
-    )
-    assert creation.effective_fade_in_seconds == 0.0
-    assert creation.effective_fade_out_seconds == 0.0
-
-
-def test_explicit_fades_override_role_defaults() -> None:
-    creation = AudioCreation(
+    assert creation.fade_out_seconds is None
+    explicit = AudioCreation(
         source_asset_version_id="audio-version-1",
         role="bgm",
         fade_in_seconds=0.0,
         fade_out_seconds=5.0,
     )
-    assert creation.effective_fade_in_seconds == 0.0
-    assert creation.effective_fade_out_seconds == 5.0
+    assert explicit.fade_in_seconds == 0.0
+    assert explicit.fade_out_seconds == 5.0

@@ -200,6 +200,9 @@ _DUCK_VOLUME = 0.35
 _BGM_BED_GAIN_DB = -12.0
 # BGM volume while any speech window (shot dialogue, s2v, narration) plays.
 _BGM_DUCK_VOLUME = 0.4
+# Unset bgm fades default to min(this, span/4): musical edges for a long
+# bed without swallowing a short segment. Explicit creation fades win.
+_BGM_DEFAULT_FADE_SECONDS = 2.0
 # Beat-snapped xfades must keep a perceptible blend; below this the join
 # effectively degrades to a cut and the snap is skipped instead.
 _MIN_SNAPPED_BLEND_SECONDS = 0.05
@@ -2985,6 +2988,25 @@ def _timeline_execution(
             if version.file_id is not None
             else None
         )
+        span_seconds = element.span.duration_tick / timeline.ticks_per_second
+        role = creation.effective_role
+        # Fades are the agent's creative call; the unset default adapts to
+        # the span so a short bgm segment is not swallowed by its ramps.
+        default_fade = (
+            min(_BGM_DEFAULT_FADE_SECONDS, span_seconds / 4)
+            if role == "bgm"
+            else 0.0
+        )
+        fade_in = (
+            creation.fade_in_seconds
+            if creation.fade_in_seconds is not None
+            else default_fade
+        )
+        fade_out = (
+            creation.fade_out_seconds
+            if creation.fade_out_seconds is not None
+            else default_fade
+        )
         audio_tracks.append(
             _FrozenAudioTrack(
                 element_id=element.element_id,
@@ -3002,14 +3024,12 @@ def _timeline_execution(
                 offset_seconds=(
                     element.span.start_tick / timeline.ticks_per_second
                 ),
-                max_duration_seconds=(
-                    element.span.duration_tick / timeline.ticks_per_second
-                ),
+                max_duration_seconds=span_seconds,
                 gain_db=creation.gain_db,
                 pan=creation.pan,
-                role=creation.effective_role,
-                fade_in_seconds=creation.effective_fade_in_seconds,
-                fade_out_seconds=creation.effective_fade_out_seconds,
+                role=role,
+                fade_in_seconds=fade_in,
+                fade_out_seconds=fade_out,
             ),
         )
         read_set.append(
