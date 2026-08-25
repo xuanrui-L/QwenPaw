@@ -128,24 +128,30 @@ def render_rough_cut(
         segment_paths: list[Path] = []
         for index, clip in enumerate(clips):
             segment = workdir / f"seg-{index:03d}.mp4"
+            duration = f"{clip.duration_seconds:.3f}"
             if clip.kind == "video":
                 command = [
                     ffmpeg_binary, "-y", "-i", str(clip.path),
                 ]
+                # Honor the planned span: freeze the last frame when the
+                # generated clip runs short, hard-cap when it runs long.
+                pad = f"tpad=stop_mode=clone:stop_duration={duration},"
             else:
                 command = [
                     ffmpeg_binary, "-y",
                     "-loop", "1",
-                    "-t", f"{clip.duration_seconds:.3f}",
+                    "-t", duration,
                     "-i", str(clip.path),
                 ]
+                pad = ""
             command += [
                 "-an",
                 "-vf",
                 (
                     f"scale=-2:{_DRAFT_HEIGHT},fps={_DRAFT_FPS},"
-                    "format=yuv420p"
+                    f"{pad}format=yuv420p"
                 ),
+                "-t", duration,
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
                 str(segment),
             ]

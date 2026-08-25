@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, FolderSearch, LayoutList, Palette } from "lucide-react";
+import {
+  Activity,
+  FolderSearch,
+  LayoutList,
+  Package,
+  Palette,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
+import { getInteractiveBundleUrl } from "@/api/creator";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useWorkGraphStore } from "@/store/workGraphStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -61,6 +68,28 @@ export default function BlueprintPage() {
   const [prepOpen, setPrepOpen] = useState(false);
   const [prepTab, setPrepTab] = useState<PreproductionTab>("visual");
   const [prepFocus, setPrepFocus] = useState<PrepFocus | null>(null);
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [bundleError, setBundleError] = useState(false);
+
+  const exportBundle = async () => {
+    setBundleBusy(true);
+    setBundleError(false);
+    try {
+      const response = await fetch(getInteractiveBundleUrl(id));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${id}-interactive.zip`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setBundleError(true);
+    } finally {
+      setBundleBusy(false);
+    }
+  };
 
   // Deep link from a Review locator (?timeline=…): select + open the node.
   const timelineFromQuery = query.get("timeline");
@@ -197,6 +226,27 @@ export default function BlueprintPage() {
             </span>
           ))}
         </div>
+        {shape === "branching" && (
+          <span className="flex items-center gap-2">
+            {bundleError && (
+              <span className="max-w-72 truncate text-[11px] font-medium text-[var(--color-warning)]">
+                {t("blueprint.exportBundleFailed")}
+              </span>
+            )}
+            <button
+              type="button"
+              data-blueprint-export-bundle
+              onClick={() => void exportBundle()}
+              disabled={bundleBusy}
+              className="inline-flex items-center gap-2 rounded-[10px] bg-[var(--color-accent)] px-4 py-2 text-sm font-bold leading-none text-white shadow-[0_2px_8px_rgba(255,127,22,.35)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)] disabled:cursor-wait disabled:opacity-60"
+            >
+              <Package className="h-4 w-4" />
+              {bundleBusy
+                ? t("blueprint.exporting")
+                : t("blueprint.exportBundle")}
+            </button>
+          </span>
+        )}
         {shape === "single" && primary && (
           <button
             type="button"
