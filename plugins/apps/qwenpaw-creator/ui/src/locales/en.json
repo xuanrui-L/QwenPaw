@@ -1706,7 +1706,7 @@
     "timelineQuick": "Timeline",
     "endingNode": "Ending",
     "nodeMeta": "Shots {{ready}}/{{total}}",
-    "branchHint": "Option copy derives from narrative_edges; edit the edge to edit the option",
+    "branchHint": "Choice labels come from the branch connections — edit a connection to update its option",
     "chips": {
       "branching": "{{count}} nodes",
       "endings": "{{count}} ending paths",

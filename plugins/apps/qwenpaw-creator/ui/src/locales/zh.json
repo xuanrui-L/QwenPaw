@@ -1706,7 +1706,7 @@
     "timelineQuick": "时间线",
     "endingNode": "结局",
     "nodeMeta": "镜头 {{ready}}/{{total}}",
-    "branchHint": "选项文案派生自 narrative_edges，改边即改选项",
+    "branchHint": "抉择选项的文案就是分支连线上的标签，修改连线即可同步更新选项",
     "chips": {
       "branching": "{{count}} 个节点",
       "endings": "{{count}} 条结局线",
