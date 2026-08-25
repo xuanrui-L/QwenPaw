@@ -6007,6 +6007,9 @@ class FileCreatorAgentRuntime:
             not after_failure
             and self.work_scheduler.enabled()
             and not model_required
+            and not self.work_scheduler.deterministic_failure_nodes_for_project(
+                project_id,
+            )
         ):
             # Every remaining gap is machine-dispatchable (READY/RUNNING):
             # the scheduler owns it; a resume would only burn model turns.

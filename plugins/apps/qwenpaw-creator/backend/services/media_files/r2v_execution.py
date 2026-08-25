@@ -4276,24 +4276,25 @@ class FileR2VExecutionService:
         elif creation_type == "t2v":
             if not isinstance(creation, T2VCreation):
                 return False
-            return True
+            return not frozen_refs
         elif creation_type == "i2v":
             if not isinstance(creation, I2VCreation):
                 return False
+            resolved_first_frame = raw.get("firstFrameVersionId") or ""
             current_refs = (
-                [creation.first_frame_version_id]
-                if creation.first_frame_version_id
-                else []
+                [resolved_first_frame] if resolved_first_frame else []
             )
             return current_refs == [str(item) for item in frozen_refs]
         elif creation_type == "s2v":
             if not isinstance(creation, S2VCreation):
                 return False
             current_refs = []
-            if creation.portrait_version_id:
-                current_refs.append(creation.portrait_version_id)
-            if creation.audio_version_id:
-                current_refs.append(creation.audio_version_id)
+            s2v_image = raw.get("s2vImageVersionId") or ""
+            s2v_audio = raw.get("s2vAudioVersionId") or ""
+            if s2v_image:
+                current_refs.append(s2v_image)
+            if s2v_audio:
+                current_refs.append(s2v_audio)
             return current_refs == [str(item) for item in frozen_refs]
         return False
 

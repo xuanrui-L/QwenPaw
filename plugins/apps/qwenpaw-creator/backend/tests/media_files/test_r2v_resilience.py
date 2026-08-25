@@ -472,6 +472,7 @@ def test_frozen_inputs_still_current_i2v(tmp_path, monkeypatch) -> None:
             "requestSnapshot": {
                 "elementId": "i2v-1",
                 "referenceVersionIds": ["img:first-frame"],
+                "firstFrameVersionId": "img:first-frame",
             },
         },
     )
@@ -520,6 +521,8 @@ def test_frozen_inputs_still_current_s2v(tmp_path, monkeypatch) -> None:
             "requestSnapshot": {
                 "elementId": "s2v-1",
                 "referenceVersionIds": ["img:portrait", "aud:voice"],
+                "s2vImageVersionId": "img:portrait",
+                "s2vAudioVersionId": "aud:voice",
             },
         },
     )

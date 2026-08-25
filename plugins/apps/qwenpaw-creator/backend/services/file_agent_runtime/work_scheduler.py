@@ -88,6 +88,7 @@ _DETERMINISTIC_ERROR_CODES = frozenset(
         "VIDEO_REFERENCE_BUDGET_EXCEEDED",
         "IMAGE_MODEL_CAPABILITY_UNKNOWN",
         "VIDEO_MODEL_CAPABILITY_UNKNOWN",
+        "VALIDATION_ERROR",
     },
 )
 
@@ -346,6 +347,25 @@ class WorkGraphScheduler:
             get_execution_authorization_mode()
             == EXECUTION_AUTHORIZATION_ALLOW_ALL
         )
+
+    def deterministic_failure_nodes_for_project(
+        self,
+        project_id: str,
+    ) -> dict[str, str]:
+        """Nodes whose dispatch failed with a deterministic error.
+
+        These nodes are stuck READY but cannot be re-dispatched until the
+        agent modifies the project.  The driver uses this to decide whether
+        a model turn is needed.
+        """
+        return {
+            node_id: error
+            for (
+                pid,
+                node_id,
+            ), error in self._deterministic_failure_nodes.items()
+            if pid == project_id
+        }
 
     # pylint: disable=too-many-statements
     async def tick(self, project_id: str) -> WorkGraph | None:

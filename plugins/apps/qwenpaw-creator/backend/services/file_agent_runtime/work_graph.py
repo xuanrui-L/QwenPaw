@@ -764,6 +764,10 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             if task is not None:
                 status = WorkNodeStatus.RUNNING
             elif video_slot:
+                # T2V has no upstream references (upstream_selected is []),
+                # so _artifact_is_stale always returns False for T2V.
+                # Prompt-only changes are caught by the dispatch fingerprint
+                # for failure-parking, but do NOT trigger STALE re-generation.
                 upstream_for_stale = (
                     [storyboard_slot]
                     if creation_type == "r2v"
