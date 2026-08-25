@@ -67,9 +67,10 @@ describe("BlueprintPage narrative shapes", () => {
     ).toBeInTheDocument();
     // Visual design column carries the real entity.
     expect(screen.getByText("圆润大橘猫")).toBeInTheDocument();
-    // Rough-cut strip: one frame per enabled element of every timeline.
+    // Rough-cut strip: one frame per picture-carrying element (edit + r2v);
+    // overlays / audio / transitions are not shots and stay out.
     expect(container.querySelectorAll("[data-roughcut-frame]")).toHaveLength(
-      6,
+      2,
     );
 
     // Clicking the script card opens the inline review panel with the legacy
