@@ -1733,6 +1733,8 @@
     "exportBundle": "Export interactive bundle",
     "exportBundleFailed": "Bundle not ready: every reachable branch needs its final cut first",
     "exporting": "Exporting…",
+    "downloadOrExport": "Download / Export",
+    "episodeFinalCut": "{{title}} · final cut",
     "frameSource": {
       "final": "Final",
       "storyboard": "Storyboard",

@@ -1733,6 +1733,8 @@
     "exportBundle": "导出互动包",
     "exportBundleFailed": "互动包还不能导出：所有可达分支需先完成成片合成",
     "exporting": "导出中…",
+    "downloadOrExport": "下载 / 导出",
+    "episodeFinalCut": "{{title}} · 成片下载",
     "frameSource": {
       "final": "成片帧",
       "storyboard": "分镜",

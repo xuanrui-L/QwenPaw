@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { Dropdown, message } from "antd";
 import {
   Activity,
+  ChevronDown,
+  Download,
+  FileOutput,
   FolderSearch,
   LayoutList,
   Package,
@@ -8,7 +12,15 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
-import { getInteractiveBundleUrl } from "@/api/creator";
+import {
+  getArtifactVersionMediaUrl,
+  getInteractiveBundleUrl,
+} from "@/api/creator";
+import {
+  ExportProgressCard,
+  saveExportFile,
+  type ExportProgressState,
+} from "@/components/creator/ProjectImportExport";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useWorkGraphStore } from "@/store/workGraphStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -69,11 +81,12 @@ export default function BlueprintPage() {
   const [prepTab, setPrepTab] = useState<PreproductionTab>("visual");
   const [prepFocus, setPrepFocus] = useState<PrepFocus | null>(null);
   const [bundleBusy, setBundleBusy] = useState(false);
-  const [bundleError, setBundleError] = useState(false);
+  const [exportProgress, setExportProgress] =
+    useState<ExportProgressState | null>(null);
+  const exporting = exportProgress?.status === "running";
 
   const exportBundle = async () => {
     setBundleBusy(true);
-    setBundleError(false);
     try {
       const response = await fetch(getInteractiveBundleUrl(id));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -85,9 +98,63 @@ export default function BlueprintPage() {
       anchor.click();
       URL.revokeObjectURL(url);
     } catch {
-      setBundleError(true);
+      message.warning(t("blueprint.exportBundleFailed"));
     } finally {
       setBundleBusy(false);
+    }
+  };
+
+  const exportProject = async () => {
+    if (exporting) return;
+    setExportProgress({
+      receivedBytes: 0,
+      totalBytes: null,
+      status: "running",
+    });
+    try {
+      await saveExportFile(id, (receivedBytes, totalBytes) =>
+        setExportProgress({ receivedBytes, totalBytes, status: "running" }),
+      );
+      setExportProgress((state) =>
+        state ? { ...state, status: "done" } : state,
+      );
+    } catch (error) {
+      setExportProgress(null);
+      message.error(
+        t("plan.exportFailed", { detail: (error as Error).message }),
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (exportProgress?.status !== "done") return;
+    const timer = window.setTimeout(() => setExportProgress(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [exportProgress]);
+
+  const downloadFinalCut = async (timelineId: string, title: string) => {
+    // Slot naming is shared by v9 and migrated legacy projects.
+    const slot =
+      project?.assets.artifact_slots_by_id[`timeline:${timelineId}:render`];
+    const versionId = slot?.selected_version_id;
+    if (!versionId) return;
+    const url = getArtifactVersionMediaUrl(versionId);
+    const filename = `${title || timelineId}.mp4`;
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(blobUrl);
+    } catch {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
     }
   };
 
@@ -226,37 +293,84 @@ export default function BlueprintPage() {
             </span>
           ))}
         </div>
-        {shape === "branching" && (
-          <span className="flex items-center gap-2">
-            {bundleError && (
-              <span className="max-w-72 truncate text-[11px] font-medium text-[var(--color-warning)]">
-                {t("blueprint.exportBundleFailed")}
-              </span>
-            )}
+        <span className="flex items-center gap-2">
+          {/* Project-level export lives on the blueprint (plan §4.2), not the
+              timeline editor; works for migrated legacy projects too. */}
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: [
+                ...summaries.map((summary) => {
+                  const title =
+                    summary.title ||
+                    t("blueprint.episodeN", { n: summary.index + 1 });
+                  // A stale final cut is still downloadable — staleness only
+                  // means newer edits have not been re-composed yet.
+                  const hasFinal = Boolean(
+                    project.assets.artifact_slots_by_id[
+                      `timeline:${summary.timelineId}:render`
+                    ]?.selected_version_id,
+                  );
+                  return {
+                    key: `final-${summary.timelineId}`,
+                    label: t("blueprint.episodeFinalCut", { title }),
+                    icon: <Download className="h-3.5 w-3.5" />,
+                    disabled: !hasFinal,
+                    onClick: () =>
+                      void downloadFinalCut(summary.timelineId, title),
+                  };
+                }),
+                { type: "divider" as const },
+                ...(edges.length > 0
+                  ? [
+                      {
+                        key: "bundle",
+                        label: (
+                          <span data-blueprint-export-bundle>
+                            {bundleBusy
+                              ? t("blueprint.exporting")
+                              : t("blueprint.exportBundle")}
+                          </span>
+                        ),
+                        icon: <Package className="h-3.5 w-3.5" />,
+                        disabled: bundleBusy,
+                        onClick: () => void exportBundle(),
+                      },
+                    ]
+                  : []),
+                {
+                  key: "project",
+                  label: exporting
+                    ? t("plan.exporting")
+                    : t("plan.exportProject"),
+                  icon: <FileOutput className="h-3.5 w-3.5" />,
+                  disabled: exporting,
+                  onClick: () => void exportProject(),
+                },
+              ],
+            }}
+          >
             <button
               type="button"
-              data-blueprint-export-bundle
-              onClick={() => void exportBundle()}
-              disabled={bundleBusy}
-              className="inline-flex items-center gap-2 rounded-[10px] bg-[var(--color-accent)] px-4 py-2 text-sm font-bold leading-none text-white shadow-[0_2px_8px_rgba(255,127,22,.35)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)] disabled:cursor-wait disabled:opacity-60"
+              data-blueprint-export
+              className="inline-flex items-center gap-2 rounded-[10px] bg-[var(--color-accent)] px-4 py-2 text-sm font-bold leading-none text-white shadow-[0_2px_8px_rgba(255,127,22,.35)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)]"
             >
-              <Package className="h-4 w-4" />
-              {bundleBusy
-                ? t("blueprint.exporting")
-                : t("blueprint.exportBundle")}
+              <Download className="h-4 w-4" />
+              {t("blueprint.downloadOrExport")}
+              <ChevronDown className="h-3.5 w-3.5" />
             </button>
-          </span>
-        )}
-        {shape === "single" && primary && (
-          <button
-            type="button"
-            onClick={() => openTimeline(primary.timelineId)}
-            className="inline-flex items-center gap-2 rounded-[10px] bg-[var(--color-accent)] px-5 py-2.5 text-sm font-bold leading-none text-white shadow-[0_2px_8px_rgba(255,127,22,.35)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)] hover:shadow-[0_4px_14px_rgba(255,127,22,.4)]"
-          >
-            <LayoutList className="h-4 w-4" />
-            {t("blueprint.enterTimeline")}
-          </button>
-        )}
+          </Dropdown>
+          {shape === "single" && primary && (
+            <button
+              type="button"
+              onClick={() => openTimeline(primary.timelineId)}
+              className="inline-flex items-center gap-2 rounded-[10px] bg-[var(--color-accent)] px-5 py-2.5 text-sm font-bold leading-none text-white shadow-[0_2px_8px_rgba(255,127,22,.35)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)] hover:shadow-[0_4px_14px_rgba(255,127,22,.4)]"
+            >
+              <LayoutList className="h-4 w-4" />
+              {t("blueprint.enterTimeline")}
+            </button>
+          )}
+        </span>
       </header>
 
       {/* First screen = the narrative structure itself. */}
@@ -376,6 +490,14 @@ export default function BlueprintPage() {
         }}
         onTabChange={setPrepTab}
       />
+
+      {exportProgress && (
+        <ExportProgressCard
+          projectName={project.name}
+          progress={exportProgress}
+          onDismiss={() => setExportProgress(null)}
+        />
+      )}
     </div>
   );
 }

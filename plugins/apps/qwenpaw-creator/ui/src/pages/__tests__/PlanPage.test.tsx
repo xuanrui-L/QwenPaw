@@ -263,15 +263,12 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(chip?.tagName).not.toBe("BUTTON");
 
     // The fresh render also downloads directly — no re-compose command fires.
-    fireEvent.click(screen.getByRole("button", { name: "下载 / 导出" }));
-    const downloadItem = await screen.findByRole("menuitem", {
-      name: /下载成片/,
-    });
-    expect(downloadItem).not.toHaveAttribute("aria-disabled", "true");
+    const downloadButton = screen.getByRole("button", { name: /下载成片/ });
+    expect(downloadButton).not.toBeDisabled();
     const clickSpy = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
       .mockImplementation(() => undefined);
-    fireEvent.click(downloadItem);
+    fireEvent.click(downloadButton);
     await waitFor(() => expect(clickSpy).toHaveBeenCalledTimes(1));
     clickSpy.mockRestore();
     expect(calls.some((call) => call.url.includes("/render"))).toBe(false);
@@ -330,7 +327,7 @@ describe("PlanPage Timeline/Element frontend", () => {
 
       // All main-track elements ready and no final render → auto-compose.
       expect(
-        screen.getByRole("button", { name: "下载 / 导出" }),
+        screen.getByRole("button", { name: /下载成片/ }),
       ).toHaveAttribute("title", "等待成片合成");
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1600);
@@ -406,20 +403,14 @@ describe("PlanPage Timeline/Element frontend", () => {
       block.querySelector(".element-generating-stripes"),
     ).toBeInTheDocument();
 
-    const trigger = screen.getByRole("button", { name: "下载 / 导出" });
+    const trigger = screen.getByRole("button", { name: /下载成片/ });
     expect(trigger).toHaveAttribute(
       "title",
       expect.stringContaining("项内容生成中"),
     );
-    // Only the download menu item is gated; export stays available.
-    fireEvent.click(trigger);
-    const downloadItem = await screen.findByRole("menuitem", {
-      name: /下载成片/,
-    });
-    expect(downloadItem).toHaveAttribute("aria-disabled", "true");
-    expect(
-      screen.getByRole("menuitem", { name: /导出项目/ }),
-    ).not.toHaveAttribute("aria-disabled", "true");
+    // The timeline download stays gated; project export lives on the
+    // blueprint page now.
+    expect(trigger).toBeDisabled();
     expect(calls.some((call) => call.url.includes("/render"))).toBe(false);
   });
 
