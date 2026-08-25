@@ -1683,10 +1683,10 @@
   },
   "blueprint": {
     "timelineEdit": "时间线编辑",
-    "episodeN": "第{{n}}集",
-    "episodesCount": "剧集 · {{count}}",
-    "collapseEpisodeRail": "收起剧集栏",
-    "expandEpisodeRail": "展开剧集栏",
+    "episodeN": "节点 {{n}}",
+    "episodesCount": "叙事节点 · {{count}}",
+    "collapseEpisodeRail": "收起节点栏",
+    "expandEpisodeRail": "展开节点栏",
     "episodeState": {
       "done": "已成片",
       "run": "生成中",
@@ -1709,7 +1709,7 @@
     "chips": {
       "branching": "{{count}} 个节点",
       "endings": "{{count}} 条结局线",
-      "linear": "线性 {{count}} 集",
+      "linear": "线性 {{count}} 节点",
       "single": "单集生成",
       "videoEdit": "素材剪辑",
       "duration": "时长 {{seconds}}s"

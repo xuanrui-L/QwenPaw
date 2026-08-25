@@ -1683,10 +1683,10 @@
   },
   "blueprint": {
     "timelineEdit": "Timeline Editing",
-    "episodeN": "Episode {{n}}",
-    "episodesCount": "Episodes · {{count}}",
-    "collapseEpisodeRail": "Collapse episode rail",
-    "expandEpisodeRail": "Expand episode rail",
+    "episodeN": "Node {{n}}",
+    "episodesCount": "Nodes · {{count}}",
+    "collapseEpisodeRail": "Collapse node rail",
+    "expandEpisodeRail": "Expand node rail",
     "episodeState": {
       "done": "Final cut ready",
       "run": "Generating",
@@ -1709,7 +1709,7 @@
     "chips": {
       "branching": "{{count}} nodes",
       "endings": "{{count}} ending paths",
-      "linear": "Linear {{count}} episodes",
+      "linear": "Linear · {{count}} nodes",
       "single": "Single video",
       "videoEdit": "Footage edit",
       "duration": "Duration {{seconds}}s"
