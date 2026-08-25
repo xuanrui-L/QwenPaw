@@ -57,9 +57,21 @@ VIDEO 复用 LLM 凭证走 wan），前端 vite 5179，真实项目 `蓝图终�
    实际播放：入口段播完弹出选择层（问题「是否进入旧宅？」，选项「选择 · 进入旧宅」，
    来自 `edge_index`），点击后 `video.src` 切换到 `segments/tl_ep2.mp4` 且分支段可解码
    播放，覆盖层关闭 —— 判定 **PASS**（截图 `bundle-choice.png`、`bundle-branch.png`）。
+9. **完整互动短剧（双选项/转折）二次终验**：真实扩展为 3 节点 2 结局 —— 新增
+   `tl:ep3`「第3集 · 雨夜转身」与 `edge:2`「选择 · 报警离开」，抉择点变为双选项。
+   全链真实重跑：主线剧本重稿（结构变更被指纹捕获）→ SC-03 分镜（qwen-image，
+   人工 Keep）→ wan 镜头视频 → 双选项动效重画（html 含双 `data-edge-ref`）→
+   ep3 成片合成 → v2 互动包导出 **4,121,941 字节**（3 段成片：main 1,644,142 B /
+   ep2 1,104,453 B / ep3 1,379,174 B）。Playwright 回放：两个选项分别点击 →
+   分别切到 `tl_ep2.mp4` / `tl_ep3.mp4`，**双分支 PASS**（`bundle-v2-choice.png`、
+   `bundle-v2-branch-*.png`、蓝图三节点画布 `blueprint-3branch.png`）。
 
 ## 四、实施中发现并修复的真实集成缺陷
 
 1. Tour 首步锚定已移除的创作总纲块 → 文案改为指向蓝图（2dbbc80a）。
 2. E2E 曾预声明 element outputs → 校验揭示 slot 是管线写回记录，回退（b58b18c2）。
 3. stale 重派撞旧发布事务（script/interaction 执行服务）→ 持久 id 以请求指纹定界（5b0b9f2c）。
+4. 剧集栏把 element_video 塞进 `<img>` 渲染失败 → 视频 artifact 改走海报帧端点（315fe429）。
+5. 被取消的专家运行在活动流里显示为红色「失败」→ 区分 `cancelled` 渲染为中性「已取消」（315fe429）。
+6. 加选项后 interaction 节点恒为 DONE、动效永不重画 → work_graph 复用起草指纹判 stale（df2fd5d4）。
+7. 剧本 prompt 含叙事结构但指纹未覆盖 → 新增分支边不重稿且持久 id 撞旧事务 500 → 指纹并入 narrative context（90669ac8）。
