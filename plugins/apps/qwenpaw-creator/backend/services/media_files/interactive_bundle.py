@@ -206,12 +206,41 @@ PLAYER_HTML = """<!DOCTYPE html>
     align-items:center;justify-content:center;gap:14px;
     background:rgba(13,11,10,.82)}
   .gate[hidden]{display:none}
-  .gate button{width:84px;height:84px;border-radius:50%;cursor:pointer;
+  .gate .gate-play{width:84px;height:84px;border-radius:50%;cursor:pointer;
     border:2px solid #ff7f16;background:rgba(255,127,22,.25);color:#fff;
     font-size:30px;line-height:1;transition:all .15s}
-  .gate button:hover{background:rgba(255,127,22,.6);transform:scale(1.06)}
+  .gate .gate-play:hover{background:rgba(255,127,22,.6);transform:scale(1.06)}
   .gate p{font-size:14px;color:rgba(255,255,255,.85);padding:0 24px;
     text-align:center}
+  .corner{position:absolute;top:14px;width:38px;height:38px;z-index:6;
+    border-radius:50%;border:1px solid rgba(255,255,255,.35);cursor:pointer;
+    background:rgba(0,0,0,.45);color:#fff;font-size:16px;line-height:1;
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    transition:all .15s;display:none;align-items:center;justify-content:center}
+  .corner:hover{background:rgba(255,127,22,.55);transform:scale(1.06)}
+  #map-btn{left:14px}
+  #map{background:rgba(13,11,10,.92)}
+  #map h2{font-size:17px;font-weight:800;letter-spacing:.08em;
+    margin-bottom:4px}
+  #map .hint{font-size:11px;color:rgba(255,255,255,.55);margin-bottom:14px}
+  #map-grid{display:flex;flex-direction:column;gap:10px;
+    width:min(80%,340px);max-height:56vh;overflow-y:auto}
+  .map-node{display:flex;align-items:center;gap:12px;padding:12px 16px;
+    border:1px solid rgba(255,255,255,.3);border-radius:14px;cursor:pointer;
+    background:rgba(255,255,255,.07);color:#fff;text-align:left;
+    -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+    transition:all .15s}
+  .map-node:hover{border-color:#ff7f16;background:rgba(255,127,22,.35);
+    transform:scale(1.02)}
+  .map-node .idx{width:26px;height:26px;border-radius:50%;flex-shrink:0;
+    display:inline-flex;align-items:center;justify-content:center;
+    background:rgba(255,127,22,.3);border:1px solid rgba(255,127,22,.7);
+    font-size:12px;font-weight:800}
+  .map-node .title{font-size:13px;font-weight:700;flex:1}
+  .map-node .replay{font-size:10px;color:rgba(255,255,255,.6)}
+  #map .close{position:absolute;top:14px;right:14px;width:34px;height:34px;
+    border-radius:50%;border:1px solid rgba(255,255,255,.35);cursor:pointer;
+    background:rgba(0,0,0,.45);color:#fff;font-size:15px}
 </style>
 </head>
 <body>
@@ -223,12 +252,20 @@ PLAYER_HTML = """<!DOCTYPE html>
   </div>
   <div id="countdown"></div>
   <div id="start" class="gate">
-    <button type="button" aria-label="play">▶</button>
+    <button type="button" class="gate-play" aria-label="play">▶</button>
     <p id="start-title"></p>
   </div>
   <div id="restart" class="gate" hidden>
-    <button type="button" aria-label="replay">↺</button>
+    <button type="button" class="gate-play" aria-label="replay">↺</button>
     <p id="restart-title"></p>
+  </div>
+  <button id="map-btn" type="button" class="corner" aria-label="story map"
+    title="故事地图">▦</button>
+  <div id="map" class="gate" hidden>
+    <h2>故事地图</h2>
+    <p class="hint">走过的节点会亮起，可随时重看；未探索的路径保持隐藏</p>
+    <div id="map-grid"></div>
+    <button type="button" class="close" aria-label="close">×</button>
   </div>
 </div>
 <script id="if-manifest" type="application/json">__MANIFEST_JSON__</script>
@@ -246,7 +283,68 @@ PLAYER_HTML = """<!DOCTYPE html>
   const countdownEl = document.getElementById("countdown");
   const startGate = document.getElementById("start");
   const restartGate = document.getElementById("restart");
+  const mapBtn = document.getElementById("map-btn");
+  const mapGate = document.getElementById("map");
+  const mapGrid = document.getElementById("map-grid");
   let timer = null;
+
+  // Exploration progress: nodes the viewer has actually seen. Persisted so
+  // reopening the bundle keeps the map; unseen branches stay hidden.
+  const segmentOrder = Object.keys(manifest.segments);
+  const storageKey =
+    "if-visited:" + manifest.entry_timeline_id + ":" + segmentOrder.length;
+  let visited;
+  try {
+    visited = new Set(JSON.parse(localStorage.getItem(storageKey) || "[]"));
+  } catch (e) {
+    visited = new Set();
+  }
+
+  function saveVisited() {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify([...visited]));
+    } catch (e) { /* file:// storage may be unavailable; map stays session-local */ }
+  }
+
+  function markVisited(timelineId) {
+    if (!visited.has(timelineId)) {
+      visited.add(timelineId);
+      saveVisited();
+    }
+  }
+
+  function renderMap() {
+    mapGrid.innerHTML = "";
+    segmentOrder.forEach((timelineId, index) => {
+      if (!visited.has(timelineId)) return;
+      const node = document.createElement("button");
+      node.type = "button";
+      node.className = "map-node";
+      node.innerHTML =
+        '<span class="idx">' + (index + 1) + "</span>" +
+        '<span class="title"></span>' +
+        '<span class="replay">重看 ▶</span>';
+      node.querySelector(".title").textContent =
+        (manifest.titles || {})[timelineId] || timelineId;
+      node.onclick = () => {
+        mapGate.hidden = true;
+        playSegment(timelineId);
+      };
+      mapGrid.appendChild(node);
+    });
+  }
+
+  mapBtn.onclick = () => {
+    renderMap();
+    mapGate.hidden = false;
+    video.pause();
+  };
+  mapGate.querySelector(".close").onclick = () => {
+    mapGate.hidden = true;
+    if (!overlay.classList.contains("open") && restartGate.hidden) {
+      video.play().catch(() => {});
+    }
+  };
 
   const entryTitle =
     (manifest.titles || {})[manifest.entry_timeline_id] || "";
@@ -267,8 +365,11 @@ PLAYER_HTML = """<!DOCTYPE html>
     clearTimer();
     overlay.classList.remove("open");
     restartGate.hidden = true;
+    mapGate.hidden = true;
     const src = manifest.segments[timelineId];
     if (!src) return;
+    markVisited(timelineId);
+    mapBtn.style.display = "inline-flex";
     video.src = src;
     video.play().catch(() => {});
     video.onended = () => {
