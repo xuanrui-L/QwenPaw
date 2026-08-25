@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from services.project_files.migrations import migrate_project_document
 from services.project_files.models import AudioCreation, Project
 
 
@@ -121,8 +122,15 @@ def _with_elements(*elements: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
-def test_audio_creation_role_defaults_to_bgm() -> None:
-    creation = AudioCreation(source_asset_version_id="audio-version-1")
+def test_audio_creation_requires_explicit_role() -> None:
+    # The mixing role is a stored fact, never a guessed default: omitting
+    # it must fail validation instead of silently becoming a music bed.
+    with pytest.raises(ValidationError):
+        AudioCreation(source_asset_version_id="audio-version-1")
+    creation = AudioCreation(
+        source_asset_version_id="audio-version-1",
+        role="bgm",
+    )
     assert creation.role == "bgm"
 
 
@@ -134,22 +142,49 @@ def test_audio_creation_rejects_unknown_role() -> None:
         )
 
 
-def test_legacy_script_audio_mixes_as_narration() -> None:
-    creation = AudioCreation(
-        source_asset_version_id="audio-version-1",
-        script="这是一段旁白",
-    )
-    assert creation.role == "bgm"
-    assert creation.effective_role == "narration"
-
-
-def test_explicit_roles_are_not_overridden_by_script() -> None:
-    creation = AudioCreation(
-        source_asset_version_id="audio-version-1",
-        role="sfx",
-        script="备注",
-    )
-    assert creation.effective_role == "sfx"
+def test_v8_documents_stamp_legacy_audio_as_narration() -> None:
+    # Pre-role mixing ducked footage under every audio track, so the
+    # migration stamps role=narration to preserve that behaviour exactly.
+    document = {
+        "schema_version": 8,
+        "project_id": "project-legacy",
+        "timelines": {
+            "items": {
+                "timeline:main": {
+                    "elements_by_id": {
+                        "audio-1": {
+                            "element_id": "audio-1",
+                            "creation": {
+                                "type": "audio",
+                                "source_asset_version_id": "audio-version-1",
+                            },
+                        },
+                        "audio-2": {
+                            "element_id": "audio-2",
+                            "creation": {
+                                "type": "audio",
+                                "source_asset_version_id": "audio-version-1",
+                                "role": "bgm",
+                            },
+                        },
+                        "clip-1": {
+                            "element_id": "clip-1",
+                            "creation": {"type": "r2v"},
+                        },
+                    },
+                },
+            },
+        },
+    }
+    migrated = migrate_project_document(document)
+    elements = migrated["timelines"]["items"]["timeline:main"][
+        "elements_by_id"
+    ]
+    assert elements["audio-1"]["creation"]["role"] == "narration"
+    # An explicit role is authoritative and survives the migration.
+    assert elements["audio-2"]["creation"]["role"] == "bgm"
+    assert "role" not in elements["clip-1"]["creation"]
+    assert migrated["schema_version"] == 9
 
 
 def test_narration_overlapping_dialogue_element_is_rejected() -> None:
@@ -167,7 +202,7 @@ def test_narration_overlapping_dialogue_element_is_rejected() -> None:
             role="narration",
         ),
     )
-    with pytest.raises(ValidationError, match="overlaps voiced"):
+    with pytest.raises(ValidationError, match="overlaps the voiced"):
         Project.model_validate(raw)
 
 
@@ -214,6 +249,89 @@ def test_narration_over_dialogue_free_clip_is_accepted() -> None:
     Project.model_validate(raw)
 
 
+def _two_shot_r2v_element() -> dict[str, Any]:
+    # Shot 1 (0-3s) speaks, shot 2 (3-6s) is silent.
+    element = _r2v_element(
+        "r2v-1",
+        start_tick=0,
+        duration_tick=6_000,
+        dialogue="第一镜有台词",
+    )
+    shots = element["creation"]["shots"]
+    shots["items"]["shot-1"]["duration_seconds"] = 3.0
+    shots["items"]["shot-2"] = {
+        "shot_id": "shot-2",
+        "description": "无台词空镜",
+        "camera": "⊙ 静止",
+        "framing": "全景",
+        "dialogue": "",
+        "duration_seconds": 3.0,
+    }
+    shots["order"] = ["shot-1", "shot-2"]
+    return element
+
+
+def test_narration_may_cover_the_silent_shots_of_an_element() -> None:
+    raw = _with_elements(
+        _two_shot_r2v_element(),
+        _audio_element(
+            "narration-1",
+            start_tick=3_000,
+            duration_tick=3_000,
+            role="narration",
+        ),
+    )
+    Project.model_validate(raw)
+
+
+def test_narration_over_the_voiced_shot_interval_is_rejected() -> None:
+    raw = _with_elements(
+        _two_shot_r2v_element(),
+        _audio_element(
+            "narration-1",
+            start_tick=2_000,
+            duration_tick=2_000,
+            role="narration",
+        ),
+    )
+    with pytest.raises(ValidationError, match="overlaps the voiced"):
+        Project.model_validate(raw)
+
+
+def _s2v_element(
+    element_id: str,
+    *,
+    start_tick: int,
+    duration_tick: int,
+) -> dict[str, Any]:
+    element = _r2v_element(
+        element_id,
+        start_tick=start_tick,
+        duration_tick=duration_tick,
+        dialogue="",
+    )
+    element["creation"] = {
+        "type": "s2v",
+        "intent": "口播",
+        "script": "大家好，欢迎收看",
+    }
+    return element
+
+
+def test_s2v_element_gates_narration_over_its_whole_span() -> None:
+    raw = _with_elements(
+        _s2v_element("s2v-1", start_tick=0, duration_tick=5_000),
+        _audio_element(
+            "narration-1",
+            start_tick=4_000,
+            duration_tick=3_000,
+            role="narration",
+        ),
+    )
+    with pytest.raises(ValidationError, match="overlaps the voiced"):
+        Project.model_validate(raw)
+
+
 def test_bgm_may_overlap_dialogue_elements() -> None:
     raw = _with_elements(
         _r2v_element(
@@ -255,7 +373,10 @@ def test_fades_are_agent_owned_and_default_unset() -> None:
     # Fades are a creative parameter: the model stores only the agent's
     # explicit choice; None means "adaptive role default at render time"
     # (bgm: min(2s, span/4), narration/sfx: hard edges).
-    creation = AudioCreation(source_asset_version_id="audio-version-1")
+    creation = AudioCreation(
+        source_asset_version_id="audio-version-1",
+        role="bgm",
+    )
     assert creation.fade_in_seconds is None
     assert creation.fade_out_seconds is None
     explicit = AudioCreation(

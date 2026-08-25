@@ -158,3 +158,46 @@ def test_preview_mirrors_submit_order_and_shifts_without_storyboard() -> None:
     ] == [
         (1, "art:a-main"),
     ]
+
+
+def test_explicit_reference_from_another_variant_is_rejected() -> None:
+    """A bound entity never consumes an ArtifactVersion owned by another
+    Variant: instead of silently dropping the conflicting reference, the
+    resolver fails loudly so the agent fixes the list or the binding."""
+    from domain.errors import ValidationError
+    from services.media_files.visual_reference_resolution import (
+        resolve_r2v_visual_reference_version_ids,
+    )
+
+    project = _project()
+    entity = project.visual.entities.items["char:a"]
+    entity.variants.items["var:z"] = VisualVariant(
+        variant_id="var:z",
+        generated_artifact_version_ids=["art:a-alt"],
+        selected_artifact_version_id="art:a-alt",
+    )
+    entity.variants.order.append("var:z")
+    project.assets.artifact_versions_by_id["art:a-alt"] = _artifact(
+        "art:a-alt",
+        slot_id="slot:char-a-alt",
+        name="阿珍 战损造型",
+    )
+    creation = R2VCreation(
+        character_refs=["char:a"],
+        visual_variant_refs={"char:a": "var:x"},
+    )
+
+    with pytest.raises(ValidationError, match="var:z"):
+        resolve_r2v_visual_reference_version_ids(
+            project,
+            creation,
+            ["art:a-alt"],
+        )
+
+    # A reference from the bound Variant itself stays authoritative.
+    resolved = resolve_r2v_visual_reference_version_ids(
+        project,
+        creation,
+        ["art:a-main", "art:extra"],
+    )
+    assert resolved == ("art:a-main", "art:extra")

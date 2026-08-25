@@ -33,7 +33,11 @@ from services.project_files.assets import AssetFileError, AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import IndexedFile
 from services.project_files.remote_cache import resolve_remote_cache
-from services.project_files.store import ProjectNotFound, ProjectStoreError
+from services.project_files.store import (
+    ProjectIntegrityError,
+    ProjectNotFound,
+    ProjectStoreError,
+)
 from services.runtime_files.execution_store import ProjectExecutionStore
 from utils.logger import setup_logger
 from utils.paths import media_path_from_url
@@ -222,7 +226,10 @@ def _version_in_project(
         snapshot = services.projects.read(project_id)
     except ProjectNotFound:
         return None
-    except ProjectStoreError as error:
+    except ProjectIntegrityError as error:
+        # Only corruption counts as "no match here": transient I/O or
+        # permission failures must propagate, or a healthy project's real
+        # fault would masquerade as a 404 and get cached as missing.
         logger.warning(
             "media scan: skipping unloadable project %s: %s",
             project_id,

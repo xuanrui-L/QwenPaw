@@ -998,7 +998,12 @@
     "creationTypeTransition": "Transition",
     "creationTypeAudio": "Audio",
     "audioGain": "Gain {{gain}}dB",
-    "audioPan": "Pan {{pan}}"
+    "audioPan": "Pan {{pan}}",
+    "audioRole": {
+      "narration": "Narration",
+      "bgm": "BGM",
+      "sfx": "SFX"
+    }
   },
   "rejectionFeedback": {
     "undoContent": "Undo content",

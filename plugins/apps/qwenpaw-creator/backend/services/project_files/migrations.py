@@ -502,6 +502,60 @@ def _migrate_v7_to_v8(document: dict[str, Any]) -> dict[str, Any]:
 PROJECT_MIGRATIONS[7] = _migrate_v7_to_v8
 
 
+def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
+    """Make the audio mixing ``role`` an explicit stored fact.
+
+    v9 requires ``creation.role`` on audio Elements so the
+    narration-overlap gate cannot be bypassed by omitting the field.
+    Pre-role documents are stamped ``"narration"``: the pre-role mixer
+    ducked the footage audio under *every* audio track (TTS narration and
+    uploaded audio alike), and narration is the role that preserves that
+    behaviour exactly — nothing silently becomes a -12dB music bed.
+    """
+
+    migrated = dict(document)
+    timelines = dict(migrated.get("timelines") or {})
+    items = dict(timelines.get("items") or {})
+    for timeline_id, timeline in list(items.items()):
+        if not isinstance(timeline, Mapping):
+            continue
+        elements = dict(timeline.get("elements_by_id") or {})
+        changed = False
+        for element_id, element in list(elements.items()):
+            if not isinstance(element, Mapping):
+                continue
+            creation = element.get("creation")
+            if (
+                not isinstance(creation, Mapping)
+                or creation.get("type") != "audio"
+                or "role" in creation
+            ):
+                continue
+            updated_creation = dict(creation)
+            updated_creation["role"] = "narration"
+            updated_element = dict(element)
+            updated_element["creation"] = updated_creation
+            elements[element_id] = updated_element
+            changed = True
+            logger.info(
+                "v8->v9: audio element %s/%s stamped role=narration "
+                "(pre-role mixing behaviour)",
+                timeline_id,
+                element_id,
+            )
+        if changed:
+            updated_timeline = dict(timeline)
+            updated_timeline["elements_by_id"] = elements
+            items[timeline_id] = updated_timeline
+    timelines["items"] = items
+    migrated["timelines"] = timelines
+    migrated["schema_version"] = 9
+    return migrated
+
+
+PROJECT_MIGRATIONS[8] = _migrate_v8_to_v9
+
+
 def migrate_project_document(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Return a detached document at the current Project schema version.
 

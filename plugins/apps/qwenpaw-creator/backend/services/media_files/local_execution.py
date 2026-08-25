@@ -203,6 +203,12 @@ _BGM_DUCK_VOLUME = 0.4
 # Unset bgm fades default to min(this, span/4): musical edges for a long
 # bed without swallowing a short segment. Explicit creation fades win.
 _BGM_DEFAULT_FADE_SECONDS = 2.0
+# Delivery loudness target for the finished film (short-form video norm).
+# Applied as a two-pass *linear* loudnorm so layer level relationships
+# (music bed vs. ducked speech windows) survive normalization.
+_LOUDNORM_TARGET_I = -16.0
+_LOUDNORM_TARGET_TP = -1.5
+_LOUDNORM_TARGET_LRA = 11.0
 # Beat-snapped xfades must keep a perceptible blend; below this the join
 # effectively degrades to a cut and the snap is skipped instead.
 _MIN_SNAPPED_BLEND_SECONDS = 0.05
@@ -503,6 +509,9 @@ class FfmpegLocalMediaRunner:
         grade_warning = self._apply_color_grade(spec)
         if grade_warning:
             overlay_warnings.append(grade_warning)
+        loudness_warning = self._normalize_delivery_loudness(spec)
+        if loudness_warning:
+            overlay_warnings.append(loudness_warning)
         return overlay_warnings
 
     @staticmethod
@@ -797,15 +806,6 @@ class FfmpegLocalMediaRunner:
                 f"{mixed}atrim=0:{spec.expected_duration_seconds:.6f}[afinal]",
             )
             final_label = "[afinal]"
-        # Delivery loudness: generated clips arrive at uneven levels and the
-        # music bed shifts the average; one-pass loudnorm lands the final mix
-        # on a consistent short-video target instead of whatever the loudest
-        # provider happened to render.
-        filters.append(
-            f"{final_label}loudnorm=I=-16:TP=-1.5:LRA=11,"
-            "aresample=48000[aloud]",
-        )
-        final_label = "[aloud]"
         self._run(
             [
                 *arguments,
@@ -2013,10 +2013,15 @@ class FfmpegLocalMediaRunner:
                 if has_audio:
                     # Adjacent generated clips carry unrelated ambiences; a
                     # short edge fade per segment softens the step at every
-                    # hard cut without consuming timeline duration.
-                    duration = self._probe_duration_seconds(path)
-                    fade = min(0.04, max(0.0, duration) / 4)
-                    if fade > 0:
+                    # hard cut without consuming timeline duration. The fade
+                    # needs the real duration: afade t=out holds zero gain
+                    # after its window, so a wrong (sentinel) duration would
+                    # mute the rest of the segment. Unknown duration or a
+                    # micro-clip (where the ramps would eat the audio)
+                    # passes through unfaded instead.
+                    duration = self._probe_duration_seconds_or_none(path)
+                    if duration is not None and duration >= 0.3:
+                        fade = min(0.04, duration / 4)
                         filter_parts.append(
                             f"[{index + 1}:a]afade=t=in:d={fade:.3f},"
                             f"afade=t=out:st={max(0.0, duration - fade):.3f}"
@@ -2096,6 +2101,120 @@ class FfmpegLocalMediaRunner:
         except MediaProbeError:
             duration = None
         return duration if duration and duration > 0 else 1 / 30
+
+    def _probe_duration_seconds_or_none(self, path: Path) -> float | None:
+        """Like ``_probe_duration_seconds`` but with a distinguishable
+        failure. The 1/30 sentinel is harmless when padding silence; a
+        caller that derives fades from it would mute everything after the
+        33ms fade-out window."""
+
+        try:
+            duration = probe_media(
+                os.fspath(path),
+                ffmpeg_path=self.executable,
+                timeout=min(self.timeout_seconds, 30.0),
+            ).duration_seconds
+        except MediaProbeError:
+            return None
+        return duration if duration and duration > 0 else None
+
+    def _measure_loudness(self, path: Path) -> dict[str, str] | None:
+        """First loudnorm pass: measure integrated stats as strings.
+
+        Returns ``None`` when the file has no audio or the measurement
+        cannot be parsed; the caller then skips normalization.
+        """
+
+        try:
+            process = subprocess.run(
+                [
+                    self.executable,
+                    "-hide_banner",
+                    "-i",
+                    os.fspath(path),
+                    "-af",
+                    (
+                        f"loudnorm=I={_LOUDNORM_TARGET_I}"
+                        f":TP={_LOUDNORM_TARGET_TP}"
+                        f":LRA={_LOUDNORM_TARGET_LRA}:print_format=json"
+                    ),
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if process.returncode != 0:
+            return None
+        tail = process.stderr[process.stderr.rfind("{") :]
+        try:
+            measured = json.loads(tail)
+        except ValueError:
+            return None
+        keys = ("input_i", "input_tp", "input_lra", "input_thresh")
+        if not all(isinstance(measured.get(key), str) for key in keys):
+            return None
+        return {key: measured[key] for key in (*keys, "target_offset")}
+
+    def _normalize_delivery_loudness(
+        self,
+        spec: LocalMediaExecutionSpec,
+    ) -> str | None:
+        """Land the finished film on the delivery loudness target.
+
+        Two-pass linear loudnorm: pass 1 measures, pass 2 applies one
+        constant gain. Single-pass loudnorm rides a sliding window and
+        would pump the deliberately quiet music bed back up between
+        speech windows, undoing the layer levels the mixer just set.
+        Every composed film is normalized, with or without audio
+        Elements. Failure keeps the un-normalized film.
+        """
+
+        if not self._probe_has_audio(spec.output_path):
+            return None
+        measured = self._measure_loudness(spec.output_path)
+        if measured is None:
+            return "交付响度测量失败，保留未归一的成片音频"
+        preloud = spec.work_dir / "preloud.mp4"
+        os.replace(spec.output_path, preloud)
+        try:
+            self._run(
+                [
+                    "-y",
+                    "-i",
+                    os.fspath(preloud),
+                    "-af",
+                    (
+                        f"loudnorm=I={_LOUDNORM_TARGET_I}"
+                        f":TP={_LOUDNORM_TARGET_TP}"
+                        f":LRA={_LOUDNORM_TARGET_LRA}"
+                        f":measured_I={measured['input_i']}"
+                        f":measured_TP={measured['input_tp']}"
+                        f":measured_LRA={measured['input_lra']}"
+                        f":measured_thresh={measured['input_thresh']}"
+                        f":offset={measured['target_offset']}"
+                        ":linear=true,aresample=48000"
+                    ),
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-movflags",
+                    "+faststart",
+                    os.fspath(spec.output_path),
+                ],
+                cwd=spec.work_dir,
+            )
+        except Exception:  # pylint: disable=broad-except
+            os.replace(preloud, spec.output_path)
+            return "交付响度归一失败，保留未归一的成片音频"
+        return None
 
     def _run(self, arguments: Sequence[str], *, cwd: Path) -> None:
         try:
@@ -2193,7 +2312,9 @@ class _FrozenAudioTrack:
     max_duration_seconds: float
     gain_db: float
     pan: float
-    role: str = "bgm"
+    # Always taken from creation.role (required in the model); no default
+    # so this cannot drift from the mixer's legacy-dict narration fallback.
+    role: str
     fade_in_seconds: float = 0.0
     fade_out_seconds: float = 0.0
 
@@ -2989,7 +3110,7 @@ def _timeline_execution(
             else None
         )
         span_seconds = element.span.duration_tick / timeline.ticks_per_second
-        role = creation.effective_role
+        role = creation.role
         # Fades are the agent's creative call; the unset default adapts to
         # the span so a short bgm segment is not swallowed by its ramps.
         default_fade = (
@@ -3076,27 +3197,41 @@ def _timeline_execution(
 def _timeline_speech_windows(
     timeline: Timeline,
 ) -> tuple[tuple[float, float], ...]:
-    """[start, end) seconds where clips natively speak: R2V Elements with
-    non-empty shot dialogue and s2v digital-human Elements."""
+    """[start, end) seconds where clips natively speak.
 
-    windows = [
-        (
-            element.span.start_tick / timeline.ticks_per_second,
-            element.span.end_tick / timeline.ticks_per_second,
-        )
-        for element in timeline.elements_by_id.values()
-        if element.enabled
-        and (
-            isinstance(element.creation, S2VCreation)
-            or (
-                isinstance(element.creation, R2VCreation)
-                and any(
-                    shot.dialogue.strip()
-                    for shot in element.creation.shots.items.values()
-                )
-            )
-        )
-    ]
+    Shot-granular for R2V: only the dialogue-bearing shots count, placed
+    by cumulative shot durations inside the element span, so BGM keeps
+    its bed level through the silent shots of the same element. When the
+    shot durations are unusable the whole element span is the safe
+    fallback. s2v digital humans speak for their entire span.
+    """
+
+    windows: list[tuple[float, float]] = []
+    for element in timeline.elements_by_id.values():
+        if not element.enabled:
+            continue
+        creation = element.creation
+        element_start = element.span.start_tick / timeline.ticks_per_second
+        element_end = element.span.end_tick / timeline.ticks_per_second
+        if isinstance(creation, S2VCreation):
+            windows.append((element_start, element_end))
+            continue
+        if not isinstance(creation, R2VCreation):
+            continue
+        shots = [
+            creation.shots.items[shot_id] for shot_id in creation.shots.order
+        ]
+        if not any(shot.dialogue.strip() for shot in shots):
+            continue
+        if any(shot.duration_seconds <= 0 for shot in shots):
+            windows.append((element_start, element_end))
+            continue
+        cursor = element_start
+        for shot in shots:
+            shot_start = cursor
+            cursor = min(cursor + shot.duration_seconds, element_end)
+            if shot.dialogue.strip() and cursor > shot_start:
+                windows.append((shot_start, cursor))
     return tuple(sorted(windows))
 
 

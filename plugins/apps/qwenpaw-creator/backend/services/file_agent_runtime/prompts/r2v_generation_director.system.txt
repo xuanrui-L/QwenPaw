@@ -352,5 +352,5 @@ video Prompt 必须以**时间戳分段**形式，将每个 Storyboard 格映射
 
 以下创作品味准则源自 vendored review_rubrics（Qwen-MM-Plugins video-edit skill），应当遵循（建议性准则，不是门禁）：
 - 概念先行：Can you state the piece's idea in one sentence? Cover all text — is the subject still recognizable? Swap the subject — does the piece still "work"? (If yes → template, <=5.)
-- 镜头与首尾帧：Entrances match the declared recipes and presets; overshoot character fits the register; nothing rests at non-1.0 scale at scene end ([no-zoom-drift]); first and last frame clean (verify frame 0 of the final render).
+- 镜头与首尾帧：Entrances match the declared recipes and presets; overshoot character fits the register; nothing rests at non-1.0 scale at scene end ([no-zoom-drift]); first and last frame clean (cold-render check — verify frame 0 on the render, not the preview).
 - 主体一致：分镜计划声明的主体/场景/道具必须真的出现在画面中，声明而未落地即失败。

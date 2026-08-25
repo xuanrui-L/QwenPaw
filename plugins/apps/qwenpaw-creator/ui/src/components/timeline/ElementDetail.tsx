@@ -874,6 +874,100 @@ export default function ElementDetail({
                       />
                     )}
                   </div>
+                  <label
+                    data-creator-field={`element:${element.element_id}/creation/role`}
+                    data-creator-path={pointer("creation", "role")}
+                    className="block"
+                  >
+                    <FieldLabel>混音角色</FieldLabel>
+                    <Select
+                      value={creation.role ?? "narration"}
+                      disabled={applying}
+                      className="w-full"
+                      options={[
+                        {
+                          value: "narration",
+                          label: "旁白（压低画面原声）",
+                        },
+                        {
+                          value: "bgm",
+                          label: "配乐（音乐床，自动闪避人声）",
+                        },
+                        { value: "sfx", label: "音效（原样混入）" },
+                      ]}
+                      onChange={(value) =>
+                        onChange((draft) => {
+                          if (draft.creation.type === "audio")
+                            draft.creation.role = value as
+                              | "bgm"
+                              | "narration"
+                              | "sfx";
+                        })
+                      }
+                    />
+                    <InlineReviewDiff pointer={pointer("creation", "role")} />
+                  </label>
+                  <div className="grid grid-cols-2 gap-3">
+                    <label
+                      data-creator-field={`element:${element.element_id}/creation/fade_in_seconds`}
+                      data-creator-path={pointer("creation", "fade_in_seconds")}
+                      className="block"
+                    >
+                      <FieldLabel>淡入（秒，留空自适应）</FieldLabel>
+                      <InputNumber
+                        value={creation.fade_in_seconds ?? undefined}
+                        placeholder="自适应"
+                        step={0.5}
+                        min={0}
+                        max={10}
+                        disabled={applying}
+                        className="w-full"
+                        onChange={(value) =>
+                          onChange((draft) => {
+                            if (draft.creation.type === "audio")
+                              draft.creation.fade_in_seconds =
+                                value === null || value === undefined
+                                  ? null
+                                  : Number(value);
+                          })
+                        }
+                      />
+                      <InlineReviewDiff
+                        pointer={pointer("creation", "fade_in_seconds")}
+                      />
+                    </label>
+                    <label
+                      data-creator-field={`element:${element.element_id}/creation/fade_out_seconds`}
+                      data-creator-path={pointer(
+                        "creation",
+                        "fade_out_seconds",
+                      )}
+                      className="block"
+                    >
+                      <FieldLabel>淡出（秒，留空自适应）</FieldLabel>
+                      <InputNumber
+                        value={creation.fade_out_seconds ?? undefined}
+                        placeholder="自适应"
+                        step={0.5}
+                        min={0}
+                        max={10}
+                        disabled={applying}
+                        className="w-full"
+                        onChange={(value) =>
+                          onChange((draft) => {
+                            if (draft.creation.type === "audio")
+                              draft.creation.fade_out_seconds =
+                                value === null || value === undefined
+                                  ? null
+                                  : Number(value);
+                          })
+                        }
+                      />
+                      <InlineReviewDiff
+                        pointer={pointer("creation", "fade_out_seconds")}
+                      />
+                    </label>
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     <label
                       data-creator-field={`element:${element.element_id}/creation/gain_db`}

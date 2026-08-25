@@ -143,8 +143,29 @@ def resolve_r2v_visual_reference_version_ids(
 
     explicit = list(dict.fromkeys(explicit_version_ids))
     if explicit:
+        for version_id in explicit:
+            for entity_id in _entity_ids(creation):
+                entity = project.visual.entities.items.get(entity_id)
+                if entity is None:
+                    raise ValidationError(
+                        f"R2V 视觉引用实体不存在: {entity_id}",
+                    )
+                bound = creation.visual_variant_refs.get(entity_id)
+                if bound is None:
+                    continue
+                owned_variant = _artifact_variant_id(
+                    project,
+                    entity,
+                    version_id,
+                )
+                if owned_variant is not None and owned_variant != bound:
+                    raise ValidationError(
+                        f"显式参考 {version_id} 属于实体 {entity_id} 的 "
+                        f"Variant {owned_variant}，与该 Element 绑定的 "
+                        f"Variant {bound} 冲突；请改用绑定 Variant 的版本"
+                        "或调整 visual_variant_refs",
+                    )
         return tuple(explicit)
-    entities: list[tuple[VisualEntity, str | None]] = []
     selected: list[str] = []
     for entity_id in _entity_ids(creation):
         entity = project.visual.entities.items.get(entity_id)
@@ -159,9 +180,8 @@ def resolve_r2v_visual_reference_version_ids(
             project,
             creation,
             entity,
-            explicit,
+            (),
         )
-        entities.append((entity, variant_id))
         if variant_id is not None:
             version_id = entity.variants.items[
                 variant_id
@@ -175,26 +195,8 @@ def resolve_r2v_visual_reference_version_ids(
         if version_id is not None:
             selected.append(version_id)
 
-    compatible_explicit: list[str] = []
-    for version_id in explicit:
-        keep = True
-        for entity, variant_id in entities:
-            if variant_id is None:
-                continue
-            owned_variant = _artifact_variant_id(
-                project,
-                entity,
-                version_id,
-            )
-            if owned_variant is not None and owned_variant != variant_id:
-                keep = False
-                break
-        if keep:
-            compatible_explicit.append(version_id)
     lineup_anchors = _lineup_anchor_version_ids(project, creation)
-    return tuple(
-        dict.fromkeys([*lineup_anchors, *selected, *compatible_explicit]),
-    )
+    return tuple(dict.fromkeys([*lineup_anchors, *selected]))
 
 
 def preview_r2v_reference_order(

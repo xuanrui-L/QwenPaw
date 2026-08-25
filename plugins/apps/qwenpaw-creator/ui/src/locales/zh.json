@@ -998,7 +998,12 @@
     "creationTypeTransition": "转场",
     "creationTypeAudio": "音频",
     "audioGain": "音量 {{gain}}dB",
-    "audioPan": "声像 {{pan}}"
+    "audioPan": "声像 {{pan}}",
+    "audioRole": {
+      "narration": "旁白",
+      "bgm": "配乐",
+      "sfx": "音效"
+    }
   },
   "rejectionFeedback": {
     "undoContent": "撤销内容",

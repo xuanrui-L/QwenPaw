@@ -670,3 +670,57 @@ def test_deterministic_failure_unlocks_when_inputs_change(
         await scheduler.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_deterministic_failure_unlocks_when_media_model_changes(
+    tmp_path,
+    monkeypatch,
+):
+    """Switching the configured media model is an input change too: a
+    reference-budget rejection under a small-budget model must not keep
+    the node locked after the operator configures a roomier model."""
+    from domain.errors import ValidationError
+    from services.file_agent_runtime import work_scheduler as scheduler_mod
+
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+
+    calls: list[dict] = []
+
+    class BudgetExceededError(ValidationError):
+        code = "IMAGE_REFERENCE_BUDGET_EXCEEDED"
+
+    async def rejecting_dispatch(inner_services, **kwargs):  # noqa: ARG001
+        del inner_services
+        calls.append(kwargs)
+        raise BudgetExceededError("4 张参考图超过模型限制 3 张")
+
+    monkeypatch.setattr(
+        scheduler_mod,
+        "get_image_model_name",
+        lambda: "small-budget-model",
+    )
+    scheduler = WorkGraphScheduler(services, image_dispatch=rejecting_dispatch)
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
+
+    async def scenario():
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+        assert len(calls) == 1
+        # Same model, same inputs: locked.
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+        assert len(calls) == 1
+        # New model → new ledger fingerprint → dispatch reopens.
+        monkeypatch.setattr(
+            scheduler_mod,
+            "get_image_model_name",
+            lambda: "large-budget-model",
+        )
+        scheduler._dispatched.clear()
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+        assert len(calls) == 2
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())

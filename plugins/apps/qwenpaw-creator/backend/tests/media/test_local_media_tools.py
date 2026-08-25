@@ -174,9 +174,9 @@ def test_mix_overlapping_tracks_with_base_audio(monkeypatch, tmp_path) -> None:
     assert "pan=stereo|c0=1.000*c0|c1=0.500*c1" in graph
     assert "volume=2.000dB" in graph
     assert "adelay=3000:all=1" in graph
-    # Delivery loudness: the mix always ends on one consistent target.
-    assert "loudnorm=I=-16:TP=-1.5:LRA=11" in graph
-    assert calls[0][calls[0].index("-map") + 3] == "[aloud]"
+    # Delivery loudness now runs as a separate final pass, not in the mix.
+    assert "loudnorm" not in graph
+    assert calls[0][calls[0].index("-map") + 3] == "[afinal]"
 
 
 def test_bgm_plays_as_low_bed_and_ducks_under_speech(
@@ -300,7 +300,11 @@ def test_concat_fades_segment_audio_edges(monkeypatch, tmp_path) -> None:
     first.write_bytes(b"video")
     second.write_bytes(b"video")
     runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
-    monkeypatch.setattr(runner, "_probe_duration_seconds", lambda path: 4.0)
+    monkeypatch.setattr(
+        runner,
+        "_probe_duration_seconds_or_none",
+        lambda path: 4.0,
+    )
     runner._concat([first, second], tmp_path / "out.mp4", work_dir=tmp_path)
 
     graph = calls[0][calls[0].index("-filter_complex") + 1]
@@ -313,6 +317,145 @@ def test_concat_fades_segment_audio_edges(monkeypatch, tmp_path) -> None:
         "[2:a]afade=t=in:d=0.040,afade=t=out:st=3.960:d=0.040[fade1]" in graph
     )
     assert "[fade0][fade1]concat=n=2:v=0:a=1" in graph
+
+
+def test_concat_skips_edge_fades_when_duration_is_unknown(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    first = tmp_path / "a.mp4"
+    second = tmp_path / "b.mp4"
+    first.write_bytes(b"video")
+    second.write_bytes(b"video")
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    # Probe failure: better a hard cut than a fade landing mid-clip.
+    monkeypatch.setattr(
+        runner,
+        "_probe_duration_seconds_or_none",
+        lambda path: None,
+    )
+    runner._concat([first, second], tmp_path / "out.mp4", work_dir=tmp_path)
+
+    graph = calls[0][calls[0].index("-filter_complex") + 1]
+    assert "afade" not in graph
+    assert "[1:a][2:a]concat=n=2:v=0:a=1" in graph
+
+
+def test_delivery_loudness_applies_measured_linear_pass(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    measured = {
+        "input_i": "-23.1",
+        "input_tp": "-5.2",
+        "input_lra": "6.8",
+        "input_thresh": "-33.5",
+        "target_offset": "0.3",
+    }
+    monkeypatch.setattr(runner, "_measure_loudness", lambda path: measured)
+    spec = _spec(tmp_path, ())
+
+    warning = runner._normalize_delivery_loudness(spec)
+
+    assert warning is None
+    graph = calls[0][calls[0].index("-af") + 1]
+    # Two-pass linear loudnorm: one constant gain, no sliding-window
+    # pumping of the deliberately quiet music bed.
+    assert "loudnorm=I=-16.0:TP=-1.5:LRA=11.0" in graph
+    assert "measured_I=-23.1" in graph
+    assert "measured_TP=-5.2" in graph
+    assert "measured_LRA=6.8" in graph
+    assert "measured_thresh=-33.5" in graph
+    assert "offset=0.3" in graph
+    assert "linear=true" in graph
+    assert "aresample=48000" in graph
+    assert calls[0][calls[0].index("-c:v") + 1] == "copy"
+
+
+def test_delivery_loudness_failure_keeps_unnormalized_film(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner, _ = _runner_with_capture(monkeypatch, has_audio=True)
+    monkeypatch.setattr(
+        runner,
+        "_measure_loudness",
+        lambda path: {
+            "input_i": "-23.1",
+            "input_tp": "-5.2",
+            "input_lra": "6.8",
+            "input_thresh": "-33.5",
+            "target_offset": "0.3",
+        },
+    )
+
+    def failing_run(arguments, *, cwd):
+        raise RuntimeError("ffmpeg exploded")
+
+    monkeypatch.setattr(runner, "_run", failing_run)
+    spec = _spec(tmp_path, ())
+
+    warning = runner._normalize_delivery_loudness(spec)
+
+    assert warning is not None and "保留未归一" in warning
+    assert spec.output_path.read_bytes() == b"video"
+
+
+def test_delivery_loudness_measurement_failure_is_a_warning(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner, calls = _runner_with_capture(monkeypatch, has_audio=True)
+    monkeypatch.setattr(runner, "_measure_loudness", lambda path: None)
+    spec = _spec(tmp_path, ())
+
+    warning = runner._normalize_delivery_loudness(spec)
+
+    assert warning is not None and "响度测量失败" in warning
+    assert calls == []
+    assert spec.output_path.read_bytes() == b"video"
+
+
+def test_measure_loudness_parses_the_loudnorm_json_tail(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from services.media_files import local_execution as local_execution_mod
+
+    stderr = (
+        "size=N/A time=00:00:12.50 bitrate=N/A speed=25x\n"
+        "[Parsed_loudnorm_0 @ 0x600] \n"
+        "{\n"
+        '    "input_i" : "-23.10",\n'
+        '    "input_tp" : "-5.20",\n'
+        '    "input_lra" : "6.80",\n'
+        '    "input_thresh" : "-33.50",\n'
+        '    "output_i" : "-16.00",\n'
+        '    "target_offset" : "0.30"\n'
+        "}\n"
+    )
+
+    class _Measured:
+        returncode = 0
+        stdout = ""
+
+    _Measured.stderr = stderr
+
+    monkeypatch.setattr(
+        local_execution_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: _Measured(),
+    )
+    runner = FfmpegLocalMediaRunner(executable="ffmpeg-test")
+    measured = runner._measure_loudness(tmp_path / "film.mp4")
+    assert measured == {
+        "input_i": "-23.10",
+        "input_tp": "-5.20",
+        "input_lra": "6.80",
+        "input_thresh": "-33.50",
+        "target_offset": "0.30",
+    }
 
 
 def test_wav_duration_ignores_streaming_placeholder_header() -> None:
