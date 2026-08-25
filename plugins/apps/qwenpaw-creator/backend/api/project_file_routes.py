@@ -439,7 +439,12 @@ async def _acquire_existing_project_lifecycle(
     """
 
     lifecycle_lock = services.projects.lifecycle_lock(project_id)
-    await asyncio.to_thread(lifecycle_lock.acquire)
+    # ``acquire_detached``: the coroutine, not the pooled ``to_thread``
+    # worker, owns this lock across await boundaries. A plain ``acquire``
+    # would leave the reused executor thread registered as holder and any
+    # unrelated Runtime read scheduled onto it would falsely trip the
+    # same-thread nested-lock guard.
+    await asyncio.to_thread(lifecycle_lock.acquire_detached)
     try:
         await _require_existing_project(services, project_id)
     except BaseException:
@@ -651,7 +656,9 @@ async def patch_project(
     )
     lifecycle_lock = services.projects.lifecycle_lock(project_id)
     try:
-        await asyncio.to_thread(lifecycle_lock.acquire)
+        # Detached: the coroutine owns the lock across awaits; the pooled
+        # ``to_thread`` worker must not stay registered as the holder.
+        await asyncio.to_thread(lifecycle_lock.acquire_detached)
         # Close the read/delete window before any idempotency or operation lock
         # is allowed to materialize a path below the Project directory.
         await _require_existing_project(services, project_id)
@@ -679,7 +686,9 @@ async def patch_project(
         idempotency_key=key,
     )
     try:
-        await asyncio.to_thread(operation_lock.acquire)
+        # Detached for the same reason as the lifecycle lock above: the
+        # coroutine holds it across awaits, not the pooled worker thread.
+        await asyncio.to_thread(operation_lock.acquire_detached)
     except Exception as exc:
         lifecycle_lock.release()
         _translate_storage_error(exc)
@@ -1036,7 +1045,9 @@ async def decide_project_review(
         idempotency_key=key,
     )
     try:
-        await asyncio.to_thread(operation_lock.acquire)
+        # Detached for the same reason as the lifecycle lock above: the
+        # coroutine holds it across awaits, not the pooled worker thread.
+        await asyncio.to_thread(operation_lock.acquire_detached)
     except Exception as exc:
         lifecycle_lock.release()
         _translate_storage_error(exc)

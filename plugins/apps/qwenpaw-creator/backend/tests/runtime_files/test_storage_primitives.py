@@ -310,6 +310,73 @@ def test_cross_thread_release_clears_the_acquiring_threads_owner(tmp_path):
     assert not errors
 
 
+def test_detached_acquire_does_not_poison_the_reused_executor_thread(
+    tmp_path,
+):
+    """Regression: exclusive lock acquired via ``asyncio.to_thread``.
+
+    A coroutine that acquires the Project lifecycle lock with
+    ``await asyncio.to_thread(lock.acquire_detached)`` keeps holding it
+    across awaits while the worker thread returns to the pool.  A shared
+    poll read (for example SSE ``list_events``) scheduled onto that reused
+    thread must wait on the lock like any other reader — not explode with
+    the same-thread nested-acquisition guard.
+    """
+
+    path = tmp_path / "detached.lock"
+    owner = CrossProcessFileLock(path)
+    outcomes: list[object] = []
+    held = threading.Event()
+    released = threading.Event()
+
+    def executor_thread() -> None:
+        try:
+            # Simulates ``await asyncio.to_thread(lock.acquire_detached)``:
+            # the acquiring pooled thread immediately moves on to other work.
+            owner.acquire_detached()
+            held.set()
+            # The reused thread now runs an unrelated shared read while the
+            # coroutine still holds the exclusive lock: it must block and
+            # time out on the file lock, not trip the nesting guard.
+            try:
+                with CrossProcessFileLock(
+                    path,
+                    timeout_seconds=0.05,
+                    poll_interval_seconds=0.005,
+                    shared=True,
+                ):
+                    outcomes.append("read-acquired-while-exclusive-held")
+            except LockTimeoutError:
+                outcomes.append("read-timed-out-while-exclusive-held")
+            assert released.wait(timeout=2)
+            with CrossProcessFileLock(
+                path,
+                timeout_seconds=1,
+                poll_interval_seconds=0.005,
+                shared=True,
+            ):
+                outcomes.append("read-acquired-after-release")
+        except BaseException as error:  # pragma: no cover - asserted below
+            outcomes.append(error)
+
+    thread = threading.Thread(target=executor_thread)
+    thread.start()
+    assert held.wait(timeout=2)
+    deadline = time.monotonic() + 2
+    while not outcomes and time.monotonic() < deadline:
+        time.sleep(0.005)
+    # Release from a different thread, like the event-loop coroutine does.
+    owner.release()
+    released.set()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert outcomes == [
+        "read-timed-out-while-exclusive-held",
+        "read-acquired-after-release",
+    ]
+
+
 def test_store_operations_create_no_lock_artifacts_on_disk(tmp_path):
     record_path = tmp_path / "record.json"
     store = AtomicJsonRecordStore(record_path)

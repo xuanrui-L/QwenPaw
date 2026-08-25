@@ -316,6 +316,29 @@ class CrossProcessFileLock:
             raise self._timeout_error(state, waiter)
         state.condition.wait(remaining)
 
+    def acquire_detached(self) -> CrossProcessFileLock:
+        """Acquire for a holder that outlives the acquiring thread.
+
+        ``await asyncio.to_thread(lock.acquire)`` acquires on a pooled
+        executor thread that returns to the pool immediately, while the
+        coroutine keeps holding the lock across ``await`` boundaries.
+        Keeping the thread-based holder registration would falsely flag
+        unrelated work later scheduled onto that reused thread (for example
+        a shared poll read of the same Project lock) as a same-thread nested
+        acquisition.  Dropping the thread association here, before the
+        worker thread can pick up other work, keeps the nesting guard for
+        true same-stack nesting; a cross-owner wait stays bounded by the
+        lock timeout fuse.  ``release`` keeps working from any thread.
+        """
+
+        self.acquire()
+        held_key = self._held_key
+        self._held_key = None
+        if held_key is not None:
+            with _HELD_LOCKS_GUARD:
+                _HELD_LOCKS.pop(held_key, None)
+        return self
+
     def release(self) -> None:
         state = self._state
         if state is None:
