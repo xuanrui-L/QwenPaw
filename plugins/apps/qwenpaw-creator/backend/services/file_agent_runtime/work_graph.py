@@ -614,11 +614,10 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
             storyboard_id: str | None = None
             storyboard_slot: str | None = None
-            deps: list[str] = []
-            gate_missing: list[str] = []
 
             if creation_type == "r2v":
                 # R2V: storyboard + video dual-node structure
+                deps: list[str] = []
                 for ref in creation.cast_lineup_refs:
                     deps.append(f"lineup:{ref}")
                 for entity_id, variant_id in sorted(
@@ -722,52 +721,27 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             # Determine storyboard dependency and upstream refs
             storyboard_done = True
             storyboard_dep: tuple[str, ...] = ()
-            upstream_selected: list[str | None] = []
             if creation_type == "r2v" and storyboard_id is not None:
                 storyboard_done = statuses[storyboard_id] in (
                     WorkNodeStatus.DONE,
                     WorkNodeStatus.STALE,
                 )
                 storyboard_dep = (storyboard_id,)
-                upstream_selected = _element_upstream_selected(
-                    project,
-                    creation,
-                )
-            elif creation_type == "i2v":
-                # I2V: depend on first_frame_version_id
-                if creation.first_frame_version_id:
-                    upstream_selected.append(creation.first_frame_version_id)
-            elif creation_type == "s2v":
-                # S2V: depend on portrait + audio
-                if creation.portrait_version_id:
-                    upstream_selected.append(creation.portrait_version_id)
-                if creation.audio_version_id:
-                    upstream_selected.append(creation.audio_version_id)
+            upstream_selected = _video_upstream_refs(
+                creation_type,
+                creation,
+                project,
+            )
 
             # Fingerprint based on creation type
-            if creation_type == "t2v":
-                fingerprint = _fingerprint(video_id, creation.video_prompt)
-            elif creation_type == "i2v":
-                fingerprint = _fingerprint(
+            fingerprint = _fingerprint(
+                *_video_fingerprint_parts(
+                    creation_type,
+                    creation,
                     video_id,
-                    creation.video_prompt,
-                    creation.first_frame_version_id,
-                )
-            elif creation_type == "s2v":
-                fingerprint = _fingerprint(
-                    video_id,
-                    creation.script,
-                    creation.portrait_version_id,
-                    creation.audio_version_id,
-                )
-            else:
-                # R2V: existing fingerprint
-                fingerprint = _fingerprint(
-                    video_id,
-                    creation.video_prompt,
                     storyboard_slot,
-                    sorted(creation.video_reference_version_ids),
-                )
+                ),
+            )
 
             video_missing: tuple[str, ...] = ()
             if task is not None:
@@ -800,56 +774,29 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 fingerprint,
             ):
                 status = WorkNodeStatus.FAILED
-            elif creation_type == "s2v":
-                # S2V: check portrait + audio (no video_prompt)
-                s2v_gaps: list[str] = []
-                if not creation.portrait_version_id:
-                    s2v_gaps.append("portrait_version_id 缺失")
-                if not creation.audio_version_id:
-                    s2v_gaps.append("audio_version_id 缺失")
-                if s2v_gaps:
-                    status = WorkNodeStatus.GATED
-                    video_missing = tuple(s2v_gaps)
-                else:
-                    status = WorkNodeStatus.READY
-            elif not (creation.video_prompt or "").strip():
+            elif (
+                creation_type != "s2v"
+                and not (creation.video_prompt or "").strip()
+            ):
+                # S2V uses script, not video_prompt
                 status = WorkNodeStatus.GATED
                 video_missing = ("video_prompt 缺失",)
-            elif creation_type == "r2v":
-                # R2V-specific gates (dialogue coverage and density)
-                assert isinstance(creation, R2VCreation)
-                if dialogue_gaps := _video_prompt_dialogue_gaps(creation):
-                    status = WorkNodeStatus.GATED
-                    video_missing = dialogue_gaps
-                elif absence_gap := _element_dialogue_density_gap(
+            else:
+                gates = _video_readiness_gates(
+                    creation_type,
                     creation,
-                    project.scenario,
-                ):
+                    project,
+                )
+                if gates is not None:
                     status = WorkNodeStatus.GATED
-                    video_missing = (absence_gap,)
+                    video_missing = gates
                 else:
                     status = WorkNodeStatus.READY
-            elif (
-                creation_type == "i2v" and not creation.first_frame_version_id
-            ):
-                status = WorkNodeStatus.GATED
-                video_missing = ("first_frame_version_id 缺失",)
-            else:
-                status = WorkNodeStatus.READY
 
             # Command and dispatch arguments based on creation type
-            if creation_type == "s2v":
-                command = CreatorCommandType.GENERATE_S2V_VIDEO.value
-                dispatch_arguments: dict[str, Any] = {}
-            elif creation_type == "t2v":
-                command = CreatorCommandType.GENERATE_R2V_VIDEO.value
-                dispatch_arguments = {"mode": "t2v"}
-            elif creation_type == "i2v":
-                command = CreatorCommandType.GENERATE_R2V_VIDEO.value
-                dispatch_arguments = {"mode": "i2v"}
-            else:
-                command = CreatorCommandType.GENERATE_R2V_VIDEO.value
-                dispatch_arguments = {}
+            command, dispatch_arguments = _video_dispatch_command(
+                creation_type,
+            )
 
             add(
                 WorkNode(
@@ -1173,6 +1120,110 @@ def _entity_selected_any(entity: Any) -> str | None:
         if variant.selected_artifact_version_id:
             return variant.selected_artifact_version_id
     return entity.selected_artifact_version_id
+
+
+def _video_fingerprint_parts(
+    creation_type: str,
+    creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
+    video_id: str,
+    storyboard_slot: str | None,
+) -> tuple:
+    """Return the fingerprint components for a video node by creation type."""
+    if creation_type == "t2v":
+        return (video_id, creation.video_prompt)
+    if creation_type == "i2v":
+        return (
+            video_id,
+            creation.video_prompt,
+            creation.first_frame_version_id,
+        )
+    if creation_type == "s2v":
+        return (
+            video_id,
+            creation.script,
+            creation.portrait_version_id,
+            creation.audio_version_id,
+        )
+    # R2V
+    assert isinstance(creation, R2VCreation)
+    return (
+        video_id,
+        creation.video_prompt,
+        storyboard_slot,
+        sorted(creation.video_reference_version_ids),
+    )
+
+
+def _video_upstream_refs(
+    creation_type: str,
+    creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
+    project: Project,
+) -> list[str | None]:
+    """Return upstream version ids for staleness check by creation type."""
+    if creation_type == "r2v":
+        assert isinstance(creation, R2VCreation)
+        return _element_upstream_selected(project, creation)
+    if creation_type == "i2v":
+        assert isinstance(creation, I2VCreation)
+        return (
+            [creation.first_frame_version_id]
+            if creation.first_frame_version_id
+            else []
+        )
+    if creation_type == "s2v":
+        assert isinstance(creation, S2VCreation)
+        refs: list[str | None] = []
+        if creation.portrait_version_id:
+            refs.append(creation.portrait_version_id)
+        if creation.audio_version_id:
+            refs.append(creation.audio_version_id)
+        return refs
+    return []
+
+
+def _video_readiness_gates(
+    creation_type: str,
+    creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
+    project: Project,
+) -> tuple[str, ...] | None:
+    """Return missing reasons if the video node is gated, else None."""
+    if creation_type == "s2v":
+        assert isinstance(creation, S2VCreation)
+        gaps: list[str] = []
+        if not creation.portrait_version_id:
+            gaps.append("portrait_version_id 缺失")
+        if not creation.audio_version_id:
+            gaps.append("audio_version_id 缺失")
+        return tuple(gaps) if gaps else None
+    if creation_type == "r2v":
+        assert isinstance(creation, R2VCreation)
+        if dialogue_gaps := _video_prompt_dialogue_gaps(creation):
+            return dialogue_gaps
+        if absence_gap := _element_dialogue_density_gap(
+            creation,
+            project.scenario,
+        ):
+            return (absence_gap,)
+        return None
+    if creation_type == "i2v":
+        assert isinstance(creation, I2VCreation)
+        if not creation.first_frame_version_id:
+            return ("first_frame_version_id 缺失",)
+    # t2v: no extra gates beyond video_prompt (checked by caller)
+    return None
+
+
+def _video_dispatch_command(
+    creation_type: str,
+) -> tuple[str, dict[str, Any]]:
+    """Return (command, dispatch_arguments) for a video node."""
+    if creation_type == "s2v":
+        return CreatorCommandType.GENERATE_S2V_VIDEO.value, {}
+    if creation_type == "t2v":
+        return CreatorCommandType.GENERATE_R2V_VIDEO.value, {"mode": "t2v"}
+    if creation_type == "i2v":
+        return CreatorCommandType.GENERATE_R2V_VIDEO.value, {"mode": "i2v"}
+    return CreatorCommandType.GENERATE_R2V_VIDEO.value, {}
 
 
 def _element_upstream_selected(

@@ -517,8 +517,11 @@ def _json_mapping(value: Any, *, label: str) -> dict[str, Any]:
     return decoded
 
 
-def _target_element_id(target_ref: str) -> str:
-    return target_element_id(target_ref, command="GENERATE_R2V_VIDEO")
+def _target_element_id(
+    target_ref: str,
+    command: str = "GENERATE_R2V_VIDEO",
+) -> str:
+    return target_element_id(target_ref, command=command)
 
 
 def _duration(value: Any) -> int:
@@ -5143,7 +5146,7 @@ async def execute_file_s2v_command(
     expected_object_versions: Sequence[str] = (),
 ) -> FileR2VDispatch:
     """Digital-human (wan2.2-s2v) dispatch through the R2V durable poller."""
-
+    ensure_media_call_budget(services, project_id)
     return await file_r2v_execution_service(services).dispatch(
         project_id=project_id,
         target_ref=target_ref,
@@ -5176,7 +5179,10 @@ async def preflight_s2v_face_detect(
     if not image_ref and target_ref:
         # Fall back to the element's declared portrait
         snapshot = await asyncio.to_thread(services.projects.read, project_id)
-        element_id = target_ref.removeprefix("element:")
+        element_id = _target_element_id(
+            target_ref,
+            command="GENERATE_S2V_VIDEO",
+        )
         _, element = find_timeline_element(snapshot.project, element_id)
         creation = element.creation
         if isinstance(creation, S2VCreation):
