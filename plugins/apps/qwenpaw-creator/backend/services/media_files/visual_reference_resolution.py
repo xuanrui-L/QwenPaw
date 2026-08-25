@@ -129,7 +129,12 @@ def resolve_r2v_visual_reference_version_ids(
 ) -> tuple[str, ...]:
     """Return exact references with bound Variant selections first.
 
-    Cast-lineup group anchors lead the chain, then per-entity identity
+    Agent-specified references are authoritative: a non-empty explicit
+    list is used exactly as written (deduplicated, order preserved) so
+    the planning agent — not a default chain — decides which images
+    constrain generation and owns the provider's reference budget. Only
+    an element with no explicit references falls back to the automatic
+    chain: cast-lineup group anchors lead, then per-entity identity
     anchors. A bound entity never consumes an ArtifactVersion owned by
     another Variant. Ambiguous legacy Elements are left unchanged rather
     than guessed; the Plan coverage checkpoint exposes those missing
@@ -137,6 +142,8 @@ def resolve_r2v_visual_reference_version_ids(
     """
 
     explicit = list(dict.fromkeys(explicit_version_ids))
+    if explicit:
+        return tuple(explicit)
     entities: list[tuple[VisualEntity, str | None]] = []
     selected: list[str] = []
     for entity_id in _entity_ids(creation):

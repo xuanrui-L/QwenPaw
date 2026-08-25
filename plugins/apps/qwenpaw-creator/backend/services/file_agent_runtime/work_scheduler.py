@@ -187,7 +187,12 @@ class WorkGraphScheduler:
         self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
         self._sync_gate_rechecks: dict[str, asyncio.TimerHandle] = {}
         self._cancelled_projects: set[str] = set()
-        self._deterministic_failure_nodes: dict[tuple[str, str], str] = {}
+        # Keyed by (project, node, fingerprint): a deterministic failure
+        # locks exactly the inputs that produced it. Fixing the inputs
+        # changes the fingerprint and unlocks dispatch; a (project, node)
+        # key would deadlock the node forever, because the entry is only
+        # popped after a successful dispatch that the entry itself blocks.
+        self._deterministic_failure_nodes: dict[tuple[str, str, str], str] = {}
 
     def _transient_budget_available(
         self,
@@ -626,9 +631,13 @@ class WorkGraphScheduler:
         """
 
         for node in candidates:
-            if (project_id, node.node_id) in self._deterministic_failure_nodes:
-                continue
             fingerprint = node.dispatch_fingerprint or node.node_id
+            if (
+                project_id,
+                node.node_id,
+                fingerprint,
+            ) in self._deterministic_failure_nodes:
+                continue
             ledger_key = (project_id, node.node_id, fingerprint)
             if ledger_key not in self._dispatched or node.node_id in inflight:
                 continue
@@ -657,7 +666,7 @@ class WorkGraphScheduler:
         try:
             await self.dispatch_node(project_id, node, fingerprint)
             self._deterministic_failure_nodes.pop(
-                (project_id, node.node_id),
+                (project_id, node.node_id, fingerprint),
                 None,
             )
         except Exception as exc:  # pylint: disable=broad-except
@@ -696,7 +705,7 @@ class WorkGraphScheduler:
                 error_code = getattr(exc, "code", None)
                 if error_code in _DETERMINISTIC_ERROR_CODES:
                     self._deterministic_failure_nodes[
-                        (project_id, node.node_id)
+                        (project_id, node.node_id, fingerprint)
                     ] = str(exc)[:200]
                 logger.warning(
                     "work-graph dispatch failed project=%s node=%s: %s",

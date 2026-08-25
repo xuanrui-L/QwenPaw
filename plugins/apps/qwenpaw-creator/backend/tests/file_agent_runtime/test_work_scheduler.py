@@ -468,6 +468,15 @@ def test_cancel_project_does_not_resurrect_dispatch_and_wake_rearms(
     asyncio.run(scenario())
 
 
+def _node_ledger_keys(scheduler, node_id):
+    """Deterministic-ledger keys for one node (ledger is fingerprint-keyed)."""
+    return [
+        key
+        for key in scheduler._deterministic_failure_nodes
+        if key[0] == PROJECT_ID and key[1] == node_id
+    ]
+
+
 @pytest.mark.parametrize(
     "error_code",
     [
@@ -511,10 +520,9 @@ def test_deterministic_error_blocks_retries(
 
     # Only 1 dispatch — the deterministic error blocks all retries.
     assert len(calls) == 1
-    # The node is recorded as deterministically failed.
-    assert (PROJECT_ID, "visual:char:a:var:0") in (
-        scheduler._deterministic_failure_nodes
-    )
+    # The node is recorded as deterministically failed (keyed by the
+    # inputs fingerprint, so an unchanged project keeps it locked).
+    assert _node_ledger_keys(scheduler, "visual:char:a:var:0")
 
 
 def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
@@ -574,9 +582,7 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
         await scheduler.tick(PROJECT_ID)
         await _drain()
         assert len(calls) == 1
-        assert (PROJECT_ID, "visual:char:a:var:0") in (
-            scheduler._deterministic_failure_nodes
-        )
+        assert _node_ledger_keys(scheduler, "visual:char:a:var:0")
 
         # More ticks should NOT dispatch again (blocked by deterministic).
         for _ in range(5):
@@ -585,19 +591,15 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
         assert len(calls) == 1
 
         # Manually clear the deterministic failure to simulate project fix.
-        scheduler._deterministic_failure_nodes.pop(
-            (PROJECT_ID, "visual:char:a:var:0"),
-            None,
-        )
+        for key in _node_ledger_keys(scheduler, "visual:char:a:var:0"):
+            scheduler._deterministic_failure_nodes.pop(key, None)
         scheduler._dispatched.clear()
 
         # Next tick: succeeds and clears the record.
         await scheduler.tick(PROJECT_ID)
         await _drain()
         assert len(calls) == 2
-        assert (PROJECT_ID, "visual:char:a:var:0") not in (
-            scheduler._deterministic_failure_nodes
-        )
+        assert not _node_ledger_keys(scheduler, "visual:char:a:var:0")
 
         # Later ticks must not pay for the node twice: the durable record
         # left by the successful dispatch keeps the recordless reopen from
@@ -607,6 +609,64 @@ def test_deterministic_failure_cleared_on_success(tmp_path, monkeypatch):
             await _drain()
         assert len(calls) == 2
 
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_deterministic_failure_unlocks_when_inputs_change(
+    tmp_path,
+    monkeypatch,
+):
+    """Fixing the node's inputs must re-enable dispatch without manual
+    ledger surgery: the deterministic ledger is fingerprint-keyed, so a
+    prompt rewrite (new fingerprint) escapes the lock. Field run
+    2026-08-24, project db7d: four storyboards stayed undispatchable for
+    20+ minutes after the agent had already fixed the reference budget,
+    because the ledger ignored the changed inputs."""
+    from domain.errors import ValidationError
+
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+
+    calls: list[dict] = []
+
+    class BudgetExceededError(ValidationError):
+        code = "IMAGE_REFERENCE_BUDGET_EXCEEDED"
+
+    async def rejecting_dispatch(inner_services, **kwargs):  # noqa: ARG001
+        del inner_services
+        calls.append(kwargs)
+        raise BudgetExceededError("4 张参考图超过模型限制 3 张")
+
+    scheduler = WorkGraphScheduler(services, image_dispatch=rejecting_dispatch)
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
+
+    async def scenario():
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+        assert len(calls) == 1
+        # Unchanged inputs stay locked.
+        for _ in range(3):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        assert len(calls) == 1
+        # The agent fixes the inputs: fingerprint moves, dispatch reopens
+        # without anyone touching the ledger.
+        snapshot = services.projects.read(PROJECT_ID)
+        candidate = snapshot.project.model_dump(mode="json")
+        candidate["visual"]["entities"]["items"]["char:a"]["variants"][
+            "items"
+        ]["var:0"]["prompt"] = "trimmed references prompt"
+        candidate["generation"] = snapshot.project.generation + 1
+        services.projects.replace(
+            PROJECT_ID,
+            Project.model_validate(candidate),
+            expected_etag=snapshot.etag,
+        )
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+        assert len(calls) == 2
         await scheduler.shutdown()
 
     asyncio.run(scenario())

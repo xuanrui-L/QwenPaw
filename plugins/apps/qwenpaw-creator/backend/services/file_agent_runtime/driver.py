@@ -273,7 +273,12 @@ COMPUTER_USE_TOOL_NAME = "computer_use"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
-DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 300.0
+# Planning turns that emit a full Element structure in one response can
+# legitimately run past 300s on slower endpoints; failing the goal there
+# just burns an auto-resume round-trip that redoes the same turn (field
+# run 2026-08-25: a 5-minute planning turn failed the goal and cost ~14
+# minutes before resume). Keep a hard bound, but a generous one.
+DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 600.0
 _LIVE_EDIT_CONTEXT_MAX_TAKES = 12
 _LIVE_EDIT_CONTEXT_MAX_FACTS = 80
 _LIVE_EDIT_CONTEXT_MAX_RAW_FACTS = 320

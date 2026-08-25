@@ -160,9 +160,15 @@ class DashScopeImageModel(BaseImageModel):
                 int(
                     os.environ.get(
                         "DASHSCOPE_IMAGE_TIMEOUT",
-                        os.environ.get("IMAGE_TIMEOUT", "240"),
+                        os.environ.get("IMAGE_TIMEOUT", "480"),
                     )
-                    or 240,
+                    # Async-task transport: the submit returns immediately
+                    # and polling holds no connection, so the deadline can
+                    # be generous. Field run 2026-08-24: multi-reference
+                    # qwen-image renders regularly exceed 4 minutes; a 240s
+                    # deadline abandoned still-running paid tasks and every
+                    # retry paid for a fresh render.
+                    or 480,
                 ),
             ),
             concurrency=_configured_int(
