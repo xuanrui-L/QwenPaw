@@ -89,7 +89,7 @@ export default function BlueprintRoughCutStrip({
   return (
     <section
       data-blueprint-roughcut
-      className="shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-primary)]/70 px-5 py-2 backdrop-blur"
+      className="relative shrink-0 border-t border-[var(--color-border)] bg-[var(--color-bg-primary)]/70 px-5 py-2 backdrop-blur"
     >
       <div className="flex items-center gap-2.5">
         <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs font-semibold text-[var(--color-text-primary)]">
@@ -161,16 +161,18 @@ export default function BlueprintRoughCutStrip({
           </button>
         </span>
       </div>
-      {!collapsed && playingId && (
+      {playingId && (
         <div
           data-roughcut-player
-          className="relative mt-2 overflow-hidden rounded-2xl border border-black/40 bg-black shadow-[0_12px_40px_rgba(0,0,0,.35)]"
+          className="absolute bottom-[calc(100%+10px)] right-5 z-30 w-fit max-w-[min(76vw,900px)] overflow-hidden rounded-2xl border border-white/10 bg-black/90 shadow-[0_24px_64px_rgba(0,0,0,.45)] backdrop-blur-xl"
         >
           {playError ? (
-            <div className="flex h-40 items-center justify-center px-6 text-center text-xs text-[var(--color-text-tertiary)]">
+            <div className="flex h-32 w-72 items-center justify-center px-6 text-center text-xs text-white/70">
               {t("blueprint.roughCutFailed")}
             </div>
           ) : (
+            // w-fit container + auto width: the frame hugs the video's own
+            // aspect ratio, so portrait cuts show no pillar-box bars.
             <video
               key={playingId}
               src={
@@ -181,10 +183,10 @@ export default function BlueprintRoughCutStrip({
               autoPlay
               playsInline
               onError={() => setPlayError(true)}
-              className="mx-auto max-h-72 w-full bg-black object-contain"
+              className="block h-[min(52vh,440px)] w-auto max-w-full bg-black"
             />
           )}
-          <span className="absolute left-3 top-3 rounded-full bg-black/50 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-md">
+          <span className="absolute left-2.5 top-2.5 rounded-full bg-black/45 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-md">
             {timelineLabelOf(playingId)} ·{" "}
             {finalCutUrlOf(playingId)
               ? t("blueprint.finalCutBadge")
@@ -194,7 +196,7 @@ export default function BlueprintRoughCutStrip({
             type="button"
             onClick={() => setPlayingId(null)}
             title={t("blueprint.closeRoughCutPlayer")}
-            className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75"
+            className="absolute right-2.5 top-2.5 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-md transition-all hover:scale-105 hover:bg-black/75"
           >
             <X className="h-3.5 w-3.5" />
           </button>
