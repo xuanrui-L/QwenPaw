@@ -863,6 +863,56 @@ def test_interaction_node_done_when_motion_is_drafted() -> None:
     )
 
 
+def test_interaction_node_reopens_when_options_change_after_draft() -> None:
+    """加选项/改边文案后旧动效必须失效（stale 收窄，方案 2.7a）。"""
+
+    from services.media_files.interaction_fingerprint import (
+        FINGERPRINT_MARKER,
+        interaction_request_fingerprint,
+    )
+    from services.project_files.models import InteractionOption, NarrativeEdge
+
+    project = _project()
+    _make_branching(project)
+    _draft_choice_motion(project)
+    _select_slot(
+        project,
+        slot_id="script:timeline:main",
+        kind="timeline_script",
+        owner_ref="timeline:timeline:main",
+        version_id="art:script-main",
+    )
+    element = project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ]
+    edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
+    fingerprint = interaction_request_fingerprint(
+        element.creation,
+        edges_by_id,
+    )
+    element.creation.motion.design_notes = (
+        f"抉择动效\n{FINGERPRINT_MARKER}{fingerprint}"
+    )
+    graph = derive_work_graph(project)
+    assert (
+        graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
+    )
+
+    project.narrative_edges.append(
+        NarrativeEdge(
+            edge_id="edge:c",
+            source_timeline_id="timeline:main",
+            target_timeline_id="timeline:ep4a",
+            label="选择C · 报警",
+        ),
+    )
+    element.creation.options.append(InteractionOption(edge_ref="edge:c"))
+    graph = derive_work_graph(project)
+    assert (
+        graph.by_id["interaction:el:choice"].status is WorkNodeStatus.READY
+    )
+
+
 def test_running_interaction_task_projects_running_status() -> None:
     project = _project()
     _make_branching(project)

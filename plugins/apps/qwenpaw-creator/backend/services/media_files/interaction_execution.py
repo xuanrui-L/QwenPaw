@@ -30,6 +30,10 @@ from services.project_files.models import (
     TimelineElement,
 )
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
+from .interaction_fingerprint import (
+    FINGERPRINT_MARKER as _FINGERPRINT_MARKER,
+    interaction_request_fingerprint as _request_fingerprint,
+)
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
 
@@ -42,8 +46,6 @@ _MAX_MODEL_ATTEMPTS = 2
 # MotionGraphic.html 的模型约束（min_length=32 / max_length=200_000）。
 _MIN_HTML_CHARS = 32
 _MAX_HTML_CHARS = 200_000
-
-_FINGERPRINT_MARKER = "input_fingerprint="
 
 _EDGE_REF_ATTR = re.compile(r"data-edge-ref\s*=\s*[\"']([^\"']+)[\"']")
 
@@ -102,29 +104,6 @@ def _locate_interaction(
             )
         return timeline_id, element
     raise ValidationError(f"element 不存在: {element_id}")
-
-
-def _request_fingerprint(
-    creation: InteractionCreation,
-    edges_by_id: Mapping[str, NarrativeEdge],
-) -> str:
-    parts = [
-        creation.question,
-        str(creation.countdown_seconds or ""),
-        creation.default_edge_ref or "",
-    ]
-    for option in creation.options:
-        edge = edges_by_id.get(option.edge_ref)
-        parts.extend(
-            [
-                option.edge_ref,
-                edge.label if edge is not None else "",
-                edge.prompt if edge is not None else "",
-                edge.target_timeline_id if edge is not None else "",
-            ],
-        )
-    digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
 
 
 def _build_interaction_prompt(

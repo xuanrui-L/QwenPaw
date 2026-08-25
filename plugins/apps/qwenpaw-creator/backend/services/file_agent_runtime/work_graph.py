@@ -20,6 +20,9 @@ from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import TaskKind, TaskStatus
+from services.media_files.interaction_fingerprint import (
+    motion_matches_request,
+)
 from services.project_files.models import (
     ArtifactVersionRenderSource,
     ElementOutputRenderSource,
@@ -902,9 +905,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 ),
             )
             motion = creation.motion
-            drafted = motion is not None and bool(
-                motion.html or motion.html_file_id,
-            )
+            # DONE only while the draft still covers the CURRENT
+            # question/options/edges; an edited choice point re-opens.
+            drafted = motion_matches_request(motion, creation, edges_by_id)
             missing = _upstream_missing(deps, statuses)
             if task is not None:
                 status = WorkNodeStatus.RUNNING
