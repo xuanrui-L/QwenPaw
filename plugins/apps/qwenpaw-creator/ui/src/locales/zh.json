@@ -1728,6 +1728,7 @@
     "collapseRoughCut": "收起预览带",
     "playRoughCut": "播放粗剪",
     "playFullFilm": "播放整个成片",
+    "playFullInteractive": "播放整个互动包",
     "closeRoughCutPlayer": "关闭播放",
     "roughCutFailed": "粗剪拼接失败：该时间线还没有可用的镜头素材",
     "finalCutBadge": "成片",
@@ -1739,6 +1740,7 @@
     "exportProject": "导出项目",
     "downloadOrExport": "下载 / 导出",
     "downloadFinalTitle": "下载成片视频文件或导出项目",
+    "downloadBundleTitle": "导出互动包或导出项目",
     "waitingForFinalCut": "等待成片合成",
     "exportProjectFailed": "导出项目失败：{{detail}}",
     "frameSource": {

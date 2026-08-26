@@ -1728,6 +1728,7 @@
     "collapseRoughCut": "Collapse strip",
     "playRoughCut": "Play rough cut",
     "playFullFilm": "Play full film",
+    "playFullInteractive": "Play full interactive story",
     "closeRoughCutPlayer": "Close player",
     "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
     "finalCutBadge": "Final cut",
@@ -1739,6 +1740,7 @@
     "exportProject": "Export Project",
     "downloadOrExport": "Download / Export",
     "downloadFinalTitle": "Download final cut video or export project",
+    "downloadBundleTitle": "Export interactive bundle or project",
     "waitingForFinalCut": "Waiting for final cut compose",
     "exportProjectFailed": "Export failed: {{detail}}",
     "frameSource": {
