@@ -22,6 +22,7 @@ Safety posture:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -230,10 +231,20 @@ class WorkGraphScheduler:
         """
 
         base = node.dispatch_fingerprint or node.node_id
-        return (
-            f"{base}|img:{get_image_model_name().strip()}"
-            f"|vid:{get_video_model_name().strip()}"
-        )
+        # This value is interpolated into the dispatch idempotency key, which
+        # becomes a Task's caused_by_request_id and must stay inside the
+        # [A-Za-z0-9._:-] segment alphabet. Model names are opaque and may
+        # carry "/" or other unsafe characters, so digest them rather than
+        # interpolating them.
+        models = hashlib.sha256(
+            "\x1f".join(
+                (
+                    get_image_model_name().strip(),
+                    get_video_model_name().strip(),
+                ),
+            ).encode("utf-8"),
+        ).hexdigest()[:16]
+        return f"{base}-m{models}"
 
     # -- lifecycle -----------------------------------------------------
 
