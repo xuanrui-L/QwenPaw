@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, memo, useRef } from "react";
-import { Modal, message, Tooltip } from "antd";
+import { Modal, message, Tooltip, Button, Space } from "antd";
 import {
   Film,
   ArrowUp,
@@ -288,21 +288,58 @@ export default function HomePage() {
 
   const handleDelete = useCallback(
     (project: ProjectSummary) => {
-      Modal.confirm({
+      const modal = Modal.confirm({
         title: t("home.deleteConfirm"),
         content: t("home.deleteConfirmContent", { name: project.name }),
-        okText: t("common.delete"),
-        cancelText: t("common.cancel"),
-        okButtonProps: { danger: true },
-        onOk: async () => {
-          try {
-            await deleteProject(project.projectId);
-            message.success(t("home.deleteSuccess"));
-            fetchProjects();
-          } catch {
-            message.error(t("home.deleteFailed"));
-          }
-        },
+        footer: (
+          <Space style={{ display: "flex", justifyContent: "flex-end" }}>
+            <Button onClick={() => modal.destroy()}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              danger
+              onClick={async () => {
+                try {
+                  await deleteProject(project.projectId, false);
+                  message.success(t("home.deleteSuccess"));
+                  fetchProjects();
+                  modal.destroy();
+                } catch {
+                  message.error(t("home.deleteFailed"));
+                }
+              }}
+            >
+              {t("common.delete")}
+            </Button>
+            <Button
+              danger
+              type="primary"
+              onClick={() => {
+                modal.destroy();
+                Modal.confirm({
+                  title: t("home.deleteAllData"),
+                  content: t("home.deleteAllDataConfirmContent", {
+                    name: project.name,
+                  }),
+                  okText: t("home.deleteAllData"),
+                  cancelText: t("common.cancel"),
+                  okButtonProps: { danger: true },
+                  onOk: async () => {
+                    try {
+                      await deleteProject(project.projectId, true);
+                      message.success(t("home.deleteAllDataSuccess"));
+                      fetchProjects();
+                    } catch {
+                      message.error(t("home.deleteAllDataFailed"));
+                    }
+                  },
+                });
+              }}
+            >
+              {t("home.deleteAllData")}
+            </Button>
+          </Space>
+        ),
       });
     },
     [fetchProjects],

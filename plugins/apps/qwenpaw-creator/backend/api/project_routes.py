@@ -484,6 +484,11 @@ async def create_project(
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
     project_id: str,
+    cascade: bool = Query(
+        True,
+        description="When false, only the project manifest is removed; "
+        "assets and runtime data are preserved on disk.",
+    ),
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> Response:
@@ -503,7 +508,11 @@ async def delete_project(
 
     _cancel_detached_project_tasks(services, project_id)
     try:
-        await asyncio.to_thread(services.projects.delete, project_id)
+        await asyncio.to_thread(
+            services.projects.delete,
+            project_id,
+            cascade=cascade,
+        )
     except ProjectNotFound:
         pass
     except (ProjectIntegrityError, ProjectStoreError) as exc:

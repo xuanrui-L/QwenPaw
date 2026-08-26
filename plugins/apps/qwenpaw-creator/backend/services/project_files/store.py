@@ -512,8 +512,15 @@ class ProjectStore:
         project_id: str,
         *,
         expected_etag: str | None = None,
+        cascade: bool = True,
     ) -> None:
-        """Atomically remove a Project from discovery, then delete its tree."""
+        """Atomically remove a Project from discovery, then delete its tree.
+
+        When *cascade* is ``False`` only ``project.json`` is removed so the
+        project vanishes from listings but assets, sessions and observability
+        data remain on disk.  When ``True`` (default) the entire directory
+        tree is deleted.
+        """
 
         safe_id = _safe_project_id(project_id)
         tombstone: Path | None = None
@@ -524,6 +531,19 @@ class ProjectStore:
                     f"Project ETag conflict: expected={expected_etag}, actual={current.etag}",
                 )
             project_root = self.project_root(safe_id)
+
+            if not cascade:
+                manifest = project_root / "project.json"
+                try:
+                    manifest.unlink()
+                except FileNotFoundError:
+                    pass
+                logger.info(
+                    "project manifest deleted (data retained): %s",
+                    safe_id,
+                )
+                return
+
             tombstone = self.root / f".deleted-{safe_id}-{uuid4().hex}"
             try:
                 os.replace(project_root, tombstone)
