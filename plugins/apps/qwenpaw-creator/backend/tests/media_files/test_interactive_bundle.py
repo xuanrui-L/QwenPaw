@@ -72,6 +72,7 @@ def _branching_project() -> tuple[Project, dict[str, bytes]]:
     source = Timeline(
         timeline_id="tl:ep3",
         title="第3集 · 双重身份",
+        synopsis="沈修的双重身份被当众戳穿。",
         elements_by_id={
             "el:choice": TimelineElement(
                 element_id="el:choice",
@@ -90,13 +91,19 @@ def _branching_project() -> tuple[Project, dict[str, bytes]]:
             ),
         },
     )
-    branch_a = Timeline(timeline_id="tl:ep4a", title="第4集A · 真相大白")
+    branch_a = Timeline(
+        timeline_id="tl:ep4a",
+        title="第4集A · 真相大白",
+        synopsis="真相大白，正义得到伸张。",
+    )
     branch_b = Timeline(timeline_id="tl:ep4b", title="第4集B · 沉默代价")
     project = Project(
         project_id="project-branching",
         created_at=NOW,
         updated_at=NOW,
         name="雾山谜案",
+        description="雾山深处的双重身份悬疑剧。\n第二行不进 tagline。",
+        strategy={"creative_brief": "互动悬疑短剧《雾山谜案》创意简报。"},
         timelines={
             "items": {
                 "tl:ep3": source,
@@ -182,24 +189,108 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
             "prompt": "",
             "target_timeline_id": "tl:ep4a",
         }
+        # Legacy field kept for backward compatibility with old players.
         assert manifest["titles"]["tl:ep3"] == "第3集 · 双重身份"
+        # Game-shell additions: title-screen meta + story-map node index.
+        assert manifest["meta"]["bundle_id"] == "project-branching"
+        assert manifest["meta"]["title"] == "雾山谜案"
+        assert manifest["meta"]["tagline"] == "雾山深处的双重身份悬疑剧。"
+        assert manifest["meta"]["synopsis"] == (
+            "互动悬疑短剧《雾山谜案》创意简报。"
+        )
+        assert manifest["meta"]["accent"] == "#b8ff2e"
+        assert manifest["nodes"]["tl:ep3"] == {
+            "title": "第3集 · 双重身份",
+            "synopsis": "沈修的双重身份被当众戳穿。",
+            "children": ["tl:ep4a", "tl:ep4b"],
+            "is_ending": False,
+        }
+        assert manifest["nodes"]["tl:ep4a"]["is_ending"] is True
+        assert manifest["nodes"]["tl:ep4a"]["synopsis"] == (
+            "真相大白，正义得到伸张。"
+        )
         assert (
             archive.read("segments/tl_ep3.mp4") == b"video-bytes-tl:ep3"
         )
         player = archive.read("index.html").decode()
         assert "edge_index" in player and "countdown" in player
-        # Playback must start behind a user-gesture gate: browsers reject
-        # unmuted play() without a gesture (file:// included), which used
-        # to leave the exported bundle as a dead page.
-        assert "开始播放" in player
+        # Playback must start behind a user gesture: the game shell only
+        # ever starts a segment from a click (title menu / map node /
+        # choice card), so the exported bundle can never be a dead page.
+        assert "开始故事" in player
         assert "showGate(" in player
-        assert "playSegment(manifest.entry_timeline_id)" in player
-        # The old bare `playSegment(...)` bootstrap (auto-play on load)
-        # must be gone.
+        assert "playSegment(entryId)" in player
+        # No bare auto-play bootstrap may come back.
+        assert "\n  playSegment(entryId);" not in player
         assert "\n  playSegment(manifest.entry_timeline_id);" not in player
         # A missing / unrenderable branch must surface a visible notice.
         assert "素材未就绪" in player
         assert "video.onerror" in player
+
+
+def test_player_game_shell_contract() -> None:
+    """The game-shell player: 3 screens, fog-of-war story map, persisted
+    progress, and graceful degradation (reduced motion, old manifests)."""
+
+    project, payloads = _branching_project()
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        player = archive.read("index.html").decode()
+    # Three screens + title menu (copy is data-driven via manifest.meta).
+    for marker in (
+        'id="scr-title"',
+        'id="scr-map"',
+        'id="scr-play"',
+        "继续上次",
+        "重新开始",
+        "剧情地图",
+        "结局图鉴",
+    ):
+        assert marker in player, marker
+    # Progress persists per bundle in localStorage; 重新开始 must confirm.
+    assert '"qwenpaw-if:" + (meta.bundle_id || entryId)' in player
+    assert "localStorage.setItem" in player
+    assert "localStorage.removeItem" in player
+    assert "window.confirm" in player
+    # Fog of war: only visited nodes + their direct "?" children render.
+    assert "revealMap" in player
+    assert "？？？" in player
+    # CSS-only atmosphere must respect prefers-reduced-motion.
+    assert "prefers-reduced-motion" in player
+    # Old manifests without meta/nodes must keep working.
+    assert "fallbackNodes" in player
+    assert "manifest.nodes || fallbackNodes()" in player
+    assert "manifest.meta ||" in player
+    # The manifest stays inlined: file:// blocks fetch of sibling files.
+    assert 'type="application/json"' in player
+    assert "fetch(" not in player
+
+
+def test_linear_project_nodes_chain_in_order() -> None:
+    """Without narrative edges the node index chains ordered timelines so
+    the story map stays a path and only the last node is the ending."""
+
+    project, payloads = _branching_project()
+    project.narrative_edges = []
+    project.timelines.items["tl:ep3"].elements_by_id.clear()
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    nodes = manifest["nodes"]
+    assert nodes["tl:ep3"]["children"] == ["tl:ep4a"]
+    assert nodes["tl:ep4a"]["children"] == ["tl:ep4b"]
+    assert nodes["tl:ep3"]["is_ending"] is False
+    assert nodes["tl:ep4b"]["is_ending"] is True
 
 
 def test_linear_project_bundles_every_ordered_timeline() -> None:
