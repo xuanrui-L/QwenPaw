@@ -202,6 +202,18 @@ PLAYER_HTML = """<!DOCTYPE html>
   #countdown{position:absolute;top:16px;right:16px;width:44px;height:44px;
     border:2px solid #f79009;border-radius:50%;display:none;align-items:center;
     justify-content:center;font-weight:700;background:rgba(0,0,0,.4)}
+  #gate{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:18px;
+    background:rgba(0,0,0,.72);text-align:center;padding:0 24px}
+  #gate.hidden{display:none}
+  #gate-title{font-size:20px;font-weight:700}
+  #gate-message{font-size:14px;color:rgba(255,255,255,.75);max-width:420px;
+    line-height:1.6}
+  #gate-button{padding:14px 34px;border:1px solid #f79009;border-radius:999px;
+    background:rgba(247,144,9,.2);color:#fff;font-size:16px;font-weight:700;
+    cursor:pointer;transition:all .15s}
+  #gate-button:hover{background:rgba(247,144,9,.55);transform:scale(1.04)}
+  #gate-button.hidden{display:none}
 </style>
 </head>
 <body>
@@ -212,6 +224,11 @@ PLAYER_HTML = """<!DOCTYPE html>
     <div id="options"></div>
   </div>
   <div id="countdown"></div>
+  <div id="gate">
+    <div id="gate-title"></div>
+    <div id="gate-message"></div>
+    <button id="gate-button" type="button"></button>
+  </div>
 </div>
 <script id="if-manifest" type="application/json">__MANIFEST_JSON__</script>
 <script>
@@ -226,6 +243,10 @@ PLAYER_HTML = """<!DOCTYPE html>
   const questionEl = document.getElementById("question");
   const optionsEl = document.getElementById("options");
   const countdownEl = document.getElementById("countdown");
+  const gate = document.getElementById("gate");
+  const gateTitle = document.getElementById("gate-title");
+  const gateMessage = document.getElementById("gate-message");
+  const gateButton = document.getElementById("gate-button");
   let timer = null;
 
   function interactionsFor(timelineId) {
@@ -239,17 +260,74 @@ PLAYER_HTML = """<!DOCTYPE html>
     countdownEl.style.display = "none";
   }
 
+  function showGate(title, message, buttonLabel, onClick) {
+    gateTitle.textContent = title;
+    gateMessage.textContent = message;
+    if (onClick) {
+      gateButton.textContent = buttonLabel;
+      gateButton.classList.remove("hidden");
+      gateButton.onclick = () => { hideGate(); onClick(); };
+    } else {
+      gateButton.classList.add("hidden");
+      gateButton.onclick = null;
+    }
+    gate.classList.remove("hidden");
+  }
+
+  function hideGate() {
+    gate.classList.add("hidden");
+  }
+
+  function segmentTitle(timelineId) {
+    return (manifest.titles || {})[timelineId] || timelineId;
+  }
+
+  function showMissingSegment(timelineId) {
+    clearTimer();
+    overlay.classList.remove("open");
+    showGate(
+      "素材未就绪",
+      "分支「" + segmentTitle(timelineId) + "」的视频缺失或无法加载，" +
+        "请回到创作工具重新渲染后再导出互动包。",
+      "从头重新播放",
+      () => playSegment(manifest.entry_timeline_id),
+    );
+  }
+
   function playSegment(timelineId) {
     clearTimer();
     overlay.classList.remove("open");
+    hideGate();
     const src = manifest.segments[timelineId];
-    if (!src) return;
+    if (!src) {
+      showMissingSegment(timelineId);
+      return;
+    }
+    video.onerror = () => showMissingSegment(timelineId);
     video.src = src;
-    video.play().catch(() => {});
     video.onended = () => {
       const points = interactionsFor(timelineId);
-      if (points.length) showChoice(points[points.length - 1]);
+      if (points.length) {
+        showChoice(points[points.length - 1]);
+      } else {
+        showGate(
+          "播完啦 · " + segmentTitle(timelineId),
+          "这条支线已经走到结局，换个选择再看一遍？",
+          "重新播放",
+          () => playSegment(manifest.entry_timeline_id),
+        );
+      }
     };
+    video.play().catch(() => {
+      // Autoplay without a user gesture is blocked (NotAllowedError);
+      // surface a tap-to-play gate instead of a dead page.
+      showGate(
+        segmentTitle(timelineId),
+        "浏览器阻止了自动播放，点击下方按钮开始。",
+        "▶ 点击播放",
+        () => { video.play().catch(() => {}); },
+      );
+    });
   }
 
   function showChoice(point) {
@@ -279,7 +357,15 @@ PLAYER_HTML = """<!DOCTYPE html>
     }
   }
 
-  playSegment(manifest.entry_timeline_id);
+  // Browsers (Chrome/Safari, including file://) refuse unmuted play()
+  // before the first user gesture, so the story starts behind an
+  // explicit tap-to-start gate; every later transition is click-driven.
+  showGate(
+    segmentTitle(manifest.entry_timeline_id),
+    "互动故事 · 播放途中会出现选项，点选决定剧情走向。",
+    "▶ 开始播放",
+    () => playSegment(manifest.entry_timeline_id),
+  );
 })();
 </script>
 </body>
