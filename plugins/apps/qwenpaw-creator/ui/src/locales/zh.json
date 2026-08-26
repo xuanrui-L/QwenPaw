@@ -139,7 +139,10 @@
     "heroTitleDirector": "导演",
     "heroTitleWriter": "编剧",
     "heroTitleEffects": "动效师",
-    "heroTitleEditor": "剪辑"
+    "heroTitleEditor": "剪辑",
+    "videoTemplate": "视频模板",
+    "videoTemplateNone": "不使用模板",
+    "videoTemplateHint": "选择预设模板快速开始"
   },
   "nav": {
     "videoPlan": "视频方案",

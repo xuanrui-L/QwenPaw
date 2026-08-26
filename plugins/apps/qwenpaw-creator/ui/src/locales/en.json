@@ -139,7 +139,10 @@
     "heroTitleDirector": "Director",
     "heroTitleWriter": "Writer",
     "heroTitleEffects": "Effects",
-    "heroTitleEditor": "Editor"
+    "heroTitleEditor": "Editor",
+    "videoTemplate": "Video Template",
+    "videoTemplateNone": "No Template",
+    "videoTemplateHint": "Choose a preset to get started quickly"
   },
   "nav": {
     "videoPlan": "Video Plan",

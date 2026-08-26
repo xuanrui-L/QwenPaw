@@ -21,6 +21,7 @@ import {
   useProjectLaunch,
 } from "./useProjectLaunch";
 import ModelConfigModal from "./ModelConfigModal";
+import VideoTemplatePicker from "./VideoTemplatePicker";
 import { useRecreateStore } from "@/store/recreateStore";
 
 const { TextArea } = Input;
@@ -59,6 +60,8 @@ export default function HeroComposerCard() {
     setResolution,
     aspectRatio,
     setAspectRatio,
+    selectedTemplateId,
+    setSelectedTemplateId,
     attachments,
     addFiles,
     addUrl,
@@ -147,6 +150,12 @@ export default function HeroComposerCard() {
             autoSize={{ minRows: 2, maxRows: 10 }}
             placeholder={t(SCENARIO_TERMS[scenario].descriptionKey)}
             className="!border-none !bg-transparent !px-4 !pb-2 !pt-3 !text-sm !leading-6 !shadow-none focus:!shadow-none"
+          />
+
+          <VideoTemplatePicker
+            selectedTemplateId={selectedTemplateId}
+            onTemplateSelect={setSelectedTemplateId}
+            scenario={scenario}
           />
 
           {attachments.length > 0 && (

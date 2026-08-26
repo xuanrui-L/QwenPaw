@@ -372,6 +372,18 @@ async def create_project(
         scenario=request.scenario,
         settings=_settings(request),
     )
+    if request.template_id:
+        from services.media_files.video_templates import (
+            apply_video_template_to_project,
+            get_video_template,
+        )
+
+        template = get_video_template(request.template_id)
+        if template is None:
+            raise ValidationError(
+                f"未知的视频模板: {request.template_id}",
+            )
+        project = apply_video_template_to_project(project, template)
     initial_response = ProjectCreateResponse(
         projectId=project_id,
         creatorSessionId=session_id,
