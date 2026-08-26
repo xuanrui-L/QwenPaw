@@ -583,6 +583,39 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
 .hud .corner.tr{top:14px;right:14px;border-left:0;border-bottom:0}
 .hud .corner.bl{bottom:14px;left:14px;border-right:0;border-top:0}
 .hud .corner.br{bottom:14px;right:14px;border-left:0;border-top:0}
+/* ---------- playback control bar (speed + in-segment seek) ---------- */
+.ctrl{position:absolute;left:0;right:0;bottom:0;z-index:5;display:flex;
+  align-items:center;gap:14px;padding:14px 22px 16px;
+  background:linear-gradient(180deg,transparent,rgba(2,3,5,.85));
+  opacity:0;pointer-events:none;transition:opacity .25s}
+.ctrl.is-on{opacity:1;pointer-events:auto}
+.ctrl.is-locked{opacity:0!important;pointer-events:none!important}
+.ctrl-btn{font-family:var(--mono);font-size:12px;letter-spacing:.12em;
+  color:var(--fog);background:rgba(8,11,14,.72);
+  border:1px solid var(--ink-3);border-radius:4px;padding:6px 12px;
+  cursor:pointer;transition:color .2s,border-color .2s}
+.ctrl-btn:hover{color:var(--fluor);
+  border-color:rgba(var(--accent-rgb),.55)}
+.ctrl-seek{flex:1;appearance:none;-webkit-appearance:none;height:5px;
+  border-radius:3px;background:var(--ink-3);cursor:pointer;outline:none}
+.ctrl-seek::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;
+  width:14px;height:14px;border-radius:50%;background:var(--fluor);
+  box-shadow:0 0 10px rgba(var(--accent-rgb),.6);cursor:pointer}
+.ctrl-seek::-moz-range-thumb{width:14px;height:14px;border:0;
+  border-radius:50%;background:var(--fluor);
+  box-shadow:0 0 10px rgba(var(--accent-rgb),.6);cursor:pointer}
+.ctrl-time{font-family:var(--mono);font-size:11px;letter-spacing:.15em;
+  color:var(--fog);white-space:nowrap}
+.ctrl-rate{position:relative}
+.rate-menu{position:absolute;bottom:calc(100% + 8px);right:0;
+  display:none;flex-direction:column;gap:4px;padding:6px;
+  border:1px solid var(--ink-3);border-radius:4px;
+  background:rgba(8,11,14,.96)}
+.rate-menu.is-on{display:flex}
+.rate-menu .ctrl-btn.is-cur{color:var(--fluor);
+  border-color:rgba(var(--accent-rgb),.6)}
+.play-stage.ctrl-on .hud .tc,
+.play-stage.ctrl-on .hud .chapter{opacity:0;transition:opacity .25s}
 .choice-layer{position:absolute;inset:0;z-index:6;display:flex;
   flex-direction:column;align-items:center;justify-content:flex-end;
   padding-bottom:7vh;gap:26px;background:
@@ -846,6 +879,18 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       <span class="corner tl"></span><span class="corner tr"></span>
       <span class="corner bl"></span><span class="corner br"></span>
     </div>
+    <div class="ctrl" id="ctrlBar" aria-label="播放控制">
+      <button class="ctrl-btn" id="ctrlPlay" aria-label="播放 / 暂停">❚❚
+      </button>
+      <input class="ctrl-seek" id="seekBar" type="range" min="0"
+        max="1000" value="0" step="1" aria-label="进度条">
+      <span class="ctrl-time" id="ctrlTime">00:00 / 00:00</span>
+      <div class="ctrl-rate">
+        <button class="ctrl-btn" id="rateBtn" aria-label="播放倍速">1×
+        </button>
+        <div class="rate-menu" id="rateMenu" role="menu"></div>
+      </div>
+    </div>
     <div class="choice-layer" id="choiceLayer">
       <div class="choice-head">
         <h2 class="choice-title" id="question"></h2>
@@ -1013,6 +1058,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       video.pause();
       overlayOff();
       hideGate();
+      byId("ctrlBar").classList.remove("is-on");
     }
     if (name === "map") { renderMap(); }
     if (name === "title") { refreshTitle(); }
@@ -1036,6 +1082,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
   const gateMessage = byId("gate-message");
   const gateActions = byId("gate-actions");
   function showGate(title, message, actions, isEnding) {
+    setCtrlLocked(true);
     gateTitle.textContent = title;
     gateMessage.textContent = message;
     gate.classList.toggle("gate--end", Boolean(isEnding));
@@ -1374,6 +1421,102 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       pad(Math.floor((t % 1) * 25));
   });
 
+  // ---------- playback control bar (speed + in-segment seek) ----------
+  const ctrlBar = byId("ctrlBar");
+  const ctrlPlay = byId("ctrlPlay");
+  const seekBar = byId("seekBar");
+  const ctrlTime = byId("ctrlTime");
+  const rateBtn = byId("rateBtn");
+  const rateMenu = byId("rateMenu");
+  const playStage = document.querySelector(".play-stage");
+  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  let playbackRateValue = 1;
+  let seeking = false;
+  let ctrlHideTimer = null;
+
+  function fmtClock(seconds) {
+    const whole = Math.max(0, Math.floor(seconds || 0));
+    const pad = (value) => (value < 10 ? "0" : "") + value;
+    return pad(Math.floor(whole / 60)) + ":" + pad(whole % 60);
+  }
+  function setCtrlLocked(on) {
+    ctrlBar.classList.toggle("is-locked", on);
+    if (on) { rateMenu.classList.remove("is-on"); }
+  }
+  function hideCtrlSoon() {
+    if (ctrlHideTimer) { clearTimeout(ctrlHideTimer); }
+    ctrlHideTimer = setTimeout(() => {
+      if (video.paused || rateMenu.classList.contains("is-on")) { return; }
+      ctrlBar.classList.remove("is-on");
+      playStage.classList.remove("ctrl-on");
+    }, 2600);
+  }
+  function showCtrl() {
+    if (current !== "play") { return; }
+    ctrlBar.classList.add("is-on");
+    playStage.classList.add("ctrl-on");
+    hideCtrlSoon();
+  }
+  playStage.addEventListener("pointermove", showCtrl);
+  playStage.addEventListener("pointerdown", showCtrl);
+  ctrlPlay.addEventListener("click", () => {
+    if (video.paused) { video.play().catch(() => {}); }
+    else { video.pause(); }
+  });
+  video.addEventListener("play", () => {
+    ctrlPlay.textContent = "❚❚";
+    hideCtrlSoon();
+  });
+  video.addEventListener("pause", () => { ctrlPlay.textContent = "▶"; });
+  RATES.forEach((r) => {
+    const button = document.createElement("button");
+    button.className = "ctrl-btn" + (r === 1 ? " is-cur" : "");
+    button.textContent = r + "×";
+    button.addEventListener("click", () => {
+      playbackRateValue = r;
+      video.playbackRate = r;
+      video.defaultPlaybackRate = r;
+      rateBtn.textContent = r + "×";
+      rateMenu.querySelectorAll(".ctrl-btn").forEach((item) => {
+        item.classList.toggle("is-cur", item === button);
+      });
+      rateMenu.classList.remove("is-on");
+    });
+    rateMenu.appendChild(button);
+  });
+  rateBtn.addEventListener("click", () => {
+    rateMenu.classList.toggle("is-on");
+  });
+  video.addEventListener("loadedmetadata", () => {
+    // Some browsers reset playbackRate on a src swap: re-apply the pick
+    // so the chosen speed survives crossing into the next segment.
+    video.playbackRate = playbackRateValue;
+  });
+  function seekFromBar() {
+    // Locked while a choice layer / gate owns the flow: a seek back
+    // after "ended" would re-enter segmentEnded.
+    if (ctrlBar.classList.contains("is-locked") || current !== "play") {
+      return;
+    }
+    if (!video.duration) { return; }
+    video.currentTime = (seekBar.value / 1000) * video.duration;
+  }
+  seekBar.addEventListener("pointerdown", () => { seeking = true; });
+  seekBar.addEventListener("input", seekFromBar);
+  seekBar.addEventListener("change", () => {
+    seekFromBar();
+    seeking = false;
+  });
+  seekBar.addEventListener("pointerup", () => { seeking = false; });
+  video.addEventListener("timeupdate", () => {
+    if (!seeking && video.duration) {
+      seekBar.value =
+        Math.round((video.currentTime / video.duration) * 1000);
+    }
+    ctrlTime.textContent =
+      fmtClock(video.currentTime) + " / " + fmtClock(video.duration);
+  });
+
   function segmentEnded(timelineId) {
     const points = interactionsFor(timelineId);
     if (points.length) {
@@ -1406,6 +1549,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
     clearTimer();
     overlayOff();
     hideGate();
+    setCtrlLocked(false);
     const src = segments[timelineId];
     if (!src) {
       go("play");
@@ -1512,6 +1656,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
   const TONE_LABELS = { risky: "△ 冒险", danger: "▲ 危险", safe: "○ 稳妥" };
 
   function showChoice(point) {
+    setCtrlLocked(true);
     questionEl.textContent = point.question || "此刻，你决定——";
     optionsEl.innerHTML = "";
     point.options.forEach((option, index) => {
