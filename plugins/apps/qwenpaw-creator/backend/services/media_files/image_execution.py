@@ -258,6 +258,10 @@ class _ResolvedRequest:
     target_id: str
     variant_id: str | None = None
     mode: str = "generate"
+    # References the model budget forced out of the automatic chain.
+    # Recorded so staleness can tell a deliberate exclusion apart from
+    # an input that changed after the render.
+    budget_dropped_version_ids: tuple[str, ...] = ()
     source_lang: str = ""
     target_lang: str = ""
 
@@ -905,6 +909,7 @@ def _resolve_request(
         if mode == "translate"
         else ("qwen-image-2.0-pro" if mode == "edit" else "")
     )
+    budget_dropped_version_ids: tuple[str, ...] = ()
     capability = image_reference_capability(capability_model_name)
     reference_limit = (
         image_reference_limit(capability_model_name)
@@ -942,6 +947,7 @@ def _resolve_request(
         # the tail dropped here is the least identity-critical (props, then
         # scene). Loud, recorded, and deterministic — not a silent truncation.
         dropped_version_ids = list(active_version_ids[reference_limit:])
+        budget_dropped_version_ids = tuple(dropped_version_ids)
         active_version_ids = tuple(active_version_ids[:reference_limit])
         local_urls, checksums, read_set = _resolve_version_references(
             project=project,
@@ -1006,6 +1012,7 @@ def _resolve_request(
         aspect_ratio=resolved.aspect_ratio,
         reference_image_urls=urls,
         reference_version_ids=active_version_ids,
+        budget_dropped_version_ids=budget_dropped_version_ids,
         reference_checksums=tuple(checksums),
         read_set=tuple(read_set),
         slot_id=resolved.slot_id,
@@ -2211,6 +2218,9 @@ class FileImageExecutionService:
                 "commandType": resolved.command.value,
                 "targetRef": resolved.target_ref,
                 "variantId": resolved.variant_id,
+                "budgetDroppedReferenceVersionIds": list(
+                    resolved.budget_dropped_version_ids,
+                ),
                 "provider": _json_mapping(output.get("metadata")),
             },
         )

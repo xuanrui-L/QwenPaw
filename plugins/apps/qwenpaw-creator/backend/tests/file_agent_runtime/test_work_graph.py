@@ -720,3 +720,37 @@ def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
     compose = graph.by_id["compose:final"]
     assert compose.status is WorkNodeStatus.READY
     assert compose in graph.ready_media_nodes()
+
+
+def test_budget_dropped_reference_does_not_stale_the_artifact() -> None:
+    """A reference the model budget forced out of the automatic chain is
+    absent from provenance by design. Field run 2026-08-26: reading that as
+    drift marked all four truncated portrait storyboards permanently stale,
+    a false "needs review" on artifacts that were correct.
+    """
+    from services.file_agent_runtime.work_graph import _artifact_is_stale
+    from services.project_files.models import ArtifactVersion, Project
+
+    project = Project.new(project_id="p-stale", name="Stale")
+    project.assets.artifact_versions_by_id["art:sb"] = ArtifactVersion(
+        version_id="art:sb",
+        slot_id="element:elem:1:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:1",
+        name="分镜图",
+        file_id="file-sb",
+        checksum="0" * 64,
+        based_on_generation=1,
+        created_at="2026-08-26T00:00:00Z",
+        provenance_refs=["artifact-version:art:kept"],
+        metadata={"budgetDroppedReferenceVersionIds": ["art:dropped"]},
+    )
+
+    # The dropped reference must not count as drift...
+    assert not _artifact_is_stale(
+        project, "art:sb", ["art:kept", "art:dropped"],
+    )
+    # ...while a genuinely new upstream selection still does.
+    assert _artifact_is_stale(
+        project, "art:sb", ["art:kept", "art:something-new"],
+    )

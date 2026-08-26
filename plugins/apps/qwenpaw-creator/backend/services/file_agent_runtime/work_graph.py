@@ -426,8 +426,21 @@ def _artifact_is_stale(
             )
             for ref in artifact.provenance_refs
         }
+        # The model's reference budget can force a reference out of the
+        # automatic chain. It is absent from provenance by design, so treating
+        # it as drift would mark the artifact stale for good.
+        budget_dropped = {
+            str(item)
+            for item in (
+                artifact.metadata.get("budgetDroppedReferenceVersionIds") or ()
+            )
+        }
         for selected in upstream_selected:
-            if selected and selected not in provenance:
+            if (
+                selected
+                and selected not in provenance
+                and selected not in budget_dropped
+            ):
                 return True
     if node_id and dispatch_fingerprint:
         task_id = str(artifact.metadata.get("taskId") or "")
