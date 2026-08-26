@@ -400,3 +400,39 @@ def test_linear_project_bundles_every_ordered_timeline() -> None:
 
     assert list(manifest.segments) == ["tl:ep3", "tl:ep4a", "tl:ep4b"]
     assert manifest.interactions == []
+
+
+def test_player_playback_controls_contract() -> None:
+    """Bottom control bar: play/pause, in-segment seek, playback speed.
+
+    The speed pick must survive segment swaps (defaultPlaybackRate +
+    loadedmetadata re-apply) and the bar must lock while a choice layer
+    or gate owns the flow so a seek cannot re-enter segmentEnded.
+    """
+
+    project, payloads = _branching_project()
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        player = archive.read("index.html").decode()
+
+    assert 'id="ctrlBar"' in player
+    assert 'id="seekBar"' in player
+    assert 'type="range"' in player
+    assert "playbackRate" in player
+    assert "defaultPlaybackRate" in player
+    for rate in ("0.5", "0.75", "1.25", "1.5", "2"):
+        assert rate in player
+    # Choice/gate lock discipline.
+    assert "is-locked" in player
+    assert "setCtrlLocked(true)" in player
+    assert "setCtrlLocked(false)" in player
+    # The bar replaces native controls; the video element stays bare.
+    assert '<video id="video" playsinline></video>' in player
+    # The control-bar CSS must sit before the themed choice slice so the
+    # .cd-ring -> gate contract window stays untouched.
+    assert player.index(".ctrl{") < player.index(".cd-ring")
