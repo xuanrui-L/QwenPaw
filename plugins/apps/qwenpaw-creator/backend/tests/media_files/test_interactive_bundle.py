@@ -271,6 +271,103 @@ def test_player_game_shell_contract() -> None:
     assert "fetch(" not in player
 
 
+def test_player_uniform_fog_hides_ending_identity() -> None:
+    """彻底迷雾: every unvisited frontier node is the SAME anonymous "?"
+    silhouette. Ending identity (★ / red pill / ENDING tag / title) may
+    only appear after the node was reached, and the map layout must not
+    reserve slots that hint at structure beyond the frontier."""
+
+    project, payloads = _branching_project()
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        player = archive.read("index.html").decode()
+    # The ending pill class is applied only inside the visited branch;
+    # the old unconditional `cls += " node--end"` must not come back.
+    assert 'if (info.is_ending) { el.classList.add("node--end"); }' in player
+    assert 'cls += " node--end"' not in player
+    # Pre-visit defaults: same tag / icon / name for every fogged node.
+    assert 'let tag = "?";' in player
+    assert 'let icon = "?";' in player
+    assert 'let name = "？？？";' in player
+    # No pre-visit ★ leak for locked endings (old branch removed).
+    assert "} else if (info.is_ending)" not in player
+    assert ".node--end.node--locked" not in player
+    # One shared tooltip for all fogged nodes — the per-node ternary that
+    # showed "未达成的结局" for ending frontiers must be gone (the
+    # aggregate 结局图鉴 toast copy is allowed: it leaks nothing per-node).
+    assert 'info.is_ending ? "未达成的结局"' not in player
+    assert "未探索的剧情点" in player
+    # Layout is computed over the revealed subgraph only: no reserved
+    # empty slots / x-scale leaking depth beyond the frontier.
+    assert "function layoutPositions(reveal)" in player
+    assert "positions = layoutPositions(reveal);" in player
+    # The aggregate endings counter (已解锁 X/Y) stays — aggregate-only.
+    assert "endingIds.length" in player
+
+
+def test_player_themed_choice_cards_contract() -> None:
+    """主题化选项卡: accent-derived palette, runtime first-frame faces with
+    graceful canvas-taint fallback, fog-blur for unvisited targets, and
+    optional tone passthrough."""
+
+    project, payloads = _branching_project()
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        player = archive.read("index.html").decode()
+    # Palette derives from meta.accent: rgb triplet feeds hover glow,
+    # borders and the countdown ring via rgba(var(--accent-rgb),X).
+    assert "--accent-rgb" in player
+    assert 'style.setProperty("--accent-rgb", rgb.join(","));' in player
+    assert "rgba(var(--accent-rgb),.7)" in player  # card hover border
+    # Choice-area CSS (countdown ring + cards) no longer hardcodes the
+    # default green — it must follow the derived accent palette.
+    choice_css = player[
+        player.index(".cd-ring"):player.index("gate (tap-to-start")
+    ]
+    assert "rgba(184,255,46" not in choice_css
+    # Face capture: offscreen <video> + <canvas>, taint-safe.
+    assert "captureFrame" in player
+    assert "toDataURL" in player
+    assert "drawImage" in player
+    # Fog interaction: unvisited targets are blurred silhouettes.
+    assert "is-fogged" in player
+    assert "blur(16px) brightness(.3)" in player
+    # Gradient fallback face exists even when capture fails (c-face
+    # keeps its accent-tinted gradient background).
+    assert "c-face" in player
+    # Optional tone: option-level wins over edge-level; absent = neutral.
+    assert "option.tone || edge.tone" in player
+    assert "data-tone" in player
+
+
+def test_edge_index_tone_is_absent_today() -> None:
+    """No v9 field carries tone yet: edge_index entries must not grow a
+    tone key (backward-compatible passthrough only)."""
+
+    project, payloads = _branching_project()
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    for entry in manifest["edge_index"].values():
+        assert "tone" not in entry
+        assert set(entry) == {"label", "prompt", "target_timeline_id"}
+
+
 def test_linear_project_nodes_chain_in_order() -> None:
     """Without narrative edges the node index chains ordered timelines so
     the story map stays a path and only the last node is the ending."""

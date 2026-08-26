@@ -144,14 +144,22 @@ def derive_interactive_manifest(project: Project) -> InteractiveManifest:
 
 
 def _edge_index(project: Project) -> dict[str, dict[str, str]]:
-    return {
-        edge.edge_id: {
+    index: dict[str, dict[str, str]] = {}
+    for edge in project.narrative_edges:
+        entry = {
             "label": edge.label,
             "prompt": edge.prompt,
             "target_timeline_id": edge.target_timeline_id,
         }
-        for edge in project.narrative_edges
-    }
+        # Optional per-choice tone ("risky" / "safe" / "danger"). No v9
+        # schema field carries it today (NarrativeEdge is strict), but a
+        # future field — or a hand-edited manifest — flows straight through
+        # to the player's card treatment; absent tone = neutral card.
+        tone = getattr(edge, "tone", "") or ""
+        if tone:
+            entry["tone"] = tone
+        index[edge.edge_id] = entry
+    return index
 
 
 # The approved game-shell design accent (sickly fluorescent green). A project
@@ -258,6 +266,7 @@ PLAYER_HTML = """<!DOCTYPE html>
 :root{
   --ink-0:#05070a; --ink-1:#0a0d11; --ink-2:#11161c; --ink-3:#1a222b;
   --fluor:#b8ff2e; --fluor-dim:#5f8a1a; --neon-red:#ff3355;
+  --accent-rgb:184,255,46; /* JS re-derives from meta.accent at boot */
   --fog:#8fa3b0; --fog-dim:#4d5c66; --paper:#dfe8ec;
   --serif-cjk:"Songti SC","Noto Serif CJK SC","Source Han Serif SC",
     "SimSun",serif;
@@ -465,7 +474,8 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
 .node{position:absolute;transform:translate(-50%,-50%);width:78px;
   height:78px;border-radius:50%;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:2px;border:2px solid;
-  background:var(--ink-1);transition:transform .2s,box-shadow .25s;z-index:3}
+  background:var(--ink-1);z-index:3;
+  transition:transform .2s,box-shadow .25s,left .5s ease,top .5s ease}
 .node .n-ico{font-size:19px;line-height:1}
 .node .n-name{font-size:11px;letter-spacing:.08em;font-weight:600;
   max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -491,13 +501,14 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
 .node--locked{border-color:var(--ink-3);color:var(--fog-dim);
   background:rgba(10,13,17,.9);cursor:not-allowed;opacity:.85}
 .node--locked:hover{transform:translate(-50%,-50%) scale(1.04)}
+/* node--end is applied ONLY after the node was visited: pre-visit every
+   frontier node keeps the identical anonymous circle silhouette. */
 .node--end{border-radius:14px;width:84px}
 .node--end.node--seen{border-color:var(--neon-red);color:#ffb3c0;
   box-shadow:0 0 20px rgba(255,51,85,.25)}
 .node--end.node--seen:hover{box-shadow:0 0 32px rgba(255,51,85,.45)}
 .node--end.node--seen .n-ico{color:var(--neon-red);
   text-shadow:0 0 10px rgba(255,51,85,.8)}
-.node--end.node--locked .n-ico{color:var(--fog-dim);text-shadow:none}
 .tip{position:absolute;z-index:20;width:230px;padding:13px 15px;
   border:1px solid rgba(184,255,46,.35);border-radius:6px;
   background:rgba(8,11,14,.96);
@@ -589,7 +600,8 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
 .cd-ring svg{width:100%;height:100%;transform:rotate(-90deg)}
 .cd-ring .track{fill:none;stroke:var(--ink-3);stroke-width:4}
 .cd-ring .prog{fill:none;stroke:var(--fluor);stroke-width:4;
-  stroke-linecap:round;filter:drop-shadow(0 0 5px rgba(184,255,46,.7));
+  stroke-linecap:round;
+  filter:drop-shadow(0 0 5px rgba(var(--accent-rgb),.7));
   transition:stroke-dashoffset .95s linear,stroke .3s}
 .cd-ring.is-urgent .prog{stroke:var(--neon-red);
   filter:drop-shadow(0 0 6px rgba(255,51,85,.8))}
@@ -614,7 +626,26 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
 .choice-layer.is-on .choice-card:nth-child(4){animation-delay:.56s}
 @keyframes cardIn{from{opacity:0;transform:translateY(46px)}
   to{opacity:1;transform:none}}
-.choice-card .c-key{position:absolute;top:-11px;left:16px;
+/* Card face: first frame of the target segment, captured at runtime.
+   Fallback = accent-tinted gradient. Unvisited targets stay an
+   unrecognizable silhouette (blur + darkening) so nothing leaks. */
+.choice-card .c-face{position:relative;display:block;height:92px;
+  margin:-20px -20px 14px;border-radius:6px 6px 0 0;overflow:hidden;
+  border-bottom:1px solid rgba(var(--accent-rgb),.18);background:
+  linear-gradient(135deg,rgba(var(--accent-rgb),.2),
+    rgba(var(--accent-rgb),.04) 52%,rgba(255,51,85,.1)),var(--ink-2)}
+.choice-card .c-face .f-shot{position:absolute;inset:0;width:100%;
+  height:100%;object-fit:cover}
+.choice-card .c-face.is-fogged .f-shot{
+  filter:blur(16px) brightness(.3) saturate(.3);transform:scale(1.18)}
+.choice-card .c-face.is-fogged::after{content:"";position:absolute;
+  inset:0;background:
+  radial-gradient(60% 80% at 50% 50%,rgba(2,3,5,.35),rgba(2,3,5,.78))}
+.choice-card .c-face .f-mark{position:absolute;inset:0;z-index:1;
+  display:flex;align-items:center;justify-content:center;
+  font-style:normal;font-family:var(--mono);font-size:30px;
+  color:var(--fog-dim);text-shadow:0 0 14px rgba(0,0,0,.9)}
+.choice-card .c-key{position:absolute;top:-11px;left:16px;z-index:2;
   font-family:var(--mono);font-size:10px;letter-spacing:.2em;
   padding:3px 9px;border-radius:3px;background:var(--ink-2);
   border:1px solid var(--ink-3);color:var(--fog-dim);transition:all .2s}
@@ -628,20 +659,36 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
   background:var(--fluor-dim)}
 .choice-card .c-risk.is-hi i{background:var(--neon-red);
   box-shadow:0 0 8px rgba(255,51,85,.6)}
+.choice-card .c-tone{margin-left:auto;font-style:normal;
+  letter-spacing:.18em;color:var(--fog-dim)}
 .choice-card:hover,.choice-card:focus-visible{transform:translateY(-8px);
-  border-color:rgba(184,255,46,.7);outline:none;
-  box-shadow:0 18px 44px rgba(0,0,0,.6),0 0 30px rgba(184,255,46,.16)}
+  border-color:rgba(var(--accent-rgb),.7);outline:none;
+  box-shadow:0 18px 44px rgba(0,0,0,.6),
+    0 0 30px rgba(var(--accent-rgb),.16)}
 .choice-card:hover .c-key{border-color:var(--fluor);color:var(--fluor)}
 .choice-card:active{transform:translateY(-4px) scale(.98)}
-.choice-card.is-default{border-color:rgba(184,255,46,.45);
-  box-shadow:0 0 22px rgba(184,255,46,.1)}
+/* Optional manifest `tone`: subtle border/icon shade, neutral when
+   absent (backward compatible). */
+.choice-card[data-tone="risky"],.choice-card[data-tone="danger"]{
+  border-color:rgba(255,51,85,.4)}
+.choice-card[data-tone="risky"]:hover,
+.choice-card[data-tone="danger"]:hover{
+  border-color:rgba(255,51,85,.8);
+  box-shadow:0 18px 44px rgba(0,0,0,.6),0 0 30px rgba(255,51,85,.2)}
+.choice-card[data-tone="risky"] .c-tone,
+.choice-card[data-tone="danger"] .c-tone{color:var(--neon-red)}
+.choice-card[data-tone="safe"]{
+  border-color:rgba(var(--accent-rgb),.35)}
+.choice-card[data-tone="safe"] .c-tone{color:var(--fluor)}
+.choice-card.is-default{border-color:rgba(var(--accent-rgb),.45);
+  box-shadow:0 0 22px rgba(var(--accent-rgb),.1)}
 .choice-card.is-default::after{content:"倒计时默认";position:absolute;
-  top:-11px;right:14px;font-family:var(--mono);font-size:10px;
+  top:-11px;right:14px;z-index:2;font-family:var(--mono);font-size:10px;
   letter-spacing:.2em;padding:3px 9px;border-radius:3px;
-  background:rgba(184,255,46,.12);border:1px solid rgba(184,255,46,.5);
-  color:var(--fluor)}
+  background:rgba(var(--accent-rgb),.12);
+  border:1px solid rgba(var(--accent-rgb),.5);color:var(--fluor)}
 .choice-card.is-picked{border-color:var(--fluor);
-  box-shadow:0 0 0 1px var(--fluor),0 0 44px rgba(184,255,46,.35);
+  box-shadow:0 0 0 1px var(--fluor),0 0 44px rgba(var(--accent-rgb),.35);
   transform:translateY(-8px) scale(1.03)}
 .choice-card.is-faded{opacity:.25;filter:saturate(.3);
   pointer-events:none;transform:translateY(6px)}
@@ -761,7 +808,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
         <div class="lg-row"><span class="lg-dot lg-dot--lock"></span>
           未探索（?）</div>
         <div class="lg-row"><span class="lg-dot lg-dot--end"></span>
-          ★ 结局节点</div>
+          ★ 已达成的结局</div>
       </div>
       <div class="side-card">
         <h3>剧情覆盖率</h3>
@@ -878,9 +925,24 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
     synopsis: "",
     accent: "",
   };
-  if (meta.accent) {
-    document.documentElement.style.setProperty("--fluor", meta.accent);
-  }
+  // Theme: derive a small palette from meta.accent (base, dimmed shade,
+  // and an rgb triplet for glow / border / countdown-ring alphas) so
+  // different projects get visibly different cards.
+  (function applyAccent() {
+    const match = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(meta.accent || "");
+    if (!match) { return; }
+    let hex = match[1];
+    if (hex.length === 3) {
+      hex = hex.replace(/./g, (glyph) => glyph + glyph);
+    }
+    const value = parseInt(hex, 16);
+    const rgb = [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+    const style = document.documentElement.style;
+    style.setProperty("--fluor", "rgb(" + rgb.join(",") + ")");
+    style.setProperty("--accent-rgb", rgb.join(","));
+    style.setProperty("--fluor-dim", "rgb(" +
+      rgb.map((channel) => Math.round(channel * 0.55)).join(",") + ")");
+  })();
   document.title = meta.title || "互动故事";
 
   const allIds = Object.keys(nodes);
@@ -1051,8 +1113,10 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
   };
 
   // ---------- story map (progressive reveal / fog of war) ----------
-  // Layout: BFS depth from the entry over the FULL graph so revealed
-  // nodes keep stable positions as the fog lifts.
+  // BFS depth from the entry over the FULL graph gives each node a stable
+  // relative order; on-screen positions are computed per render over the
+  // REVEALED subgraph only (no reserved empty slots, no x-scale leaking
+  // depth beyond the frontier).
   const depths = {};
   (function computeDepths() {
     depths[entryId] = 0;
@@ -1073,21 +1137,26 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       if (depths[id] === undefined) { depths[id] = 0; }
     });
   })();
-  const maxDepth = allIds.reduce(
-    (acc, id) => Math.max(acc, depths[id]), 0);
-  const columns = {};
-  allIds.forEach((id) => {
-    (columns[depths[id]] = columns[depths[id]] || []).push(id);
-  });
-  const positions = {};
-  allIds.forEach((id) => {
-    const column = columns[depths[id]];
-    const index = column.indexOf(id);
-    positions[id] = {
-      x: maxDepth ? 12 + depths[id] * (76 / maxDepth) : 50,
-      y: 14 + (index + 0.5) * (72 / column.length),
-    };
-  });
+  let positions = {};
+  function layoutPositions(reveal) {
+    const shown = allIds.filter((id) => reveal[id]);
+    const maxDepth = shown.reduce(
+      (acc, id) => Math.max(acc, depths[id]), 0);
+    const columns = {};
+    shown.forEach((id) => {
+      (columns[depths[id]] = columns[depths[id]] || []).push(id);
+    });
+    const out = {};
+    shown.forEach((id) => {
+      const column = columns[depths[id]];
+      const index = column.indexOf(id);
+      out[id] = {
+        x: maxDepth ? 12 + depths[id] * (76 / maxDepth) : 50,
+        y: 14 + (index + 0.5) * (72 / column.length),
+      };
+    });
+    return out;
+  }
 
   // Fog-of-war rule: render ONLY visited nodes (entry always counts as
   // discovered) plus the direct children of visited nodes as "?"
@@ -1132,6 +1201,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
 
   function renderMap() {
     const reveal = revealMap();
+    positions = layoutPositions(reveal);
     mapStage.querySelectorAll(".node").forEach((el) => el.remove());
     mapSvg.innerHTML = "";
     // Edges first: only from visited sources to rendered targets.
@@ -1151,7 +1221,10 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
         mapSvg.appendChild(path);
       });
     });
-    // Nodes.
+    // Nodes. Uniform fog: EVERY unvisited frontier node renders as the
+    // same anonymous "?" circle — identical shape / color / tag / name —
+    // whether or not it is an ending. Ending identity (★, red pill,
+    // title) appears only after the node was actually reached.
     allIds.forEach((id) => {
       if (!reveal[id]) { return; }
       const info = nodes[id];
@@ -1159,23 +1232,20 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       const visited = reveal[id] === "visited";
       const isCurrent = visited && id === state.last;
       const el = document.createElement("button");
-      let cls = "node ";
-      cls += isCurrent ? "node--current" :
-        (visited ? "node--seen" : "node--locked");
-      if (info.is_ending) { cls += " node--end"; }
-      el.className = cls;
+      el.className = "node " + (isCurrent ? "node--current" :
+        (visited ? "node--seen" : "node--locked"));
       el.style.left = point.x + "%";
       el.style.top = point.y + "%";
-      const tag = id === entryId ? "START" :
-        (info.is_ending ? "ENDING" : "NODE " + (depths[id] + 1));
+      let tag = "?";
       let icon = "?";
       let name = "？？？";
       if (visited) {
+        if (info.is_ending) { el.classList.add("node--end"); }
+        tag = id === entryId ? "START" :
+          (info.is_ending ? "ENDING" : "NODE " + (depths[id] + 1));
         icon = info.is_ending ? "★" : (id === entryId ? "⛯" : "●");
         if (isCurrent) { icon = "▶"; }
         name = info.title;
-      } else if (info.is_ending) {
-        icon = "★";
       }
       const tagEl = document.createElement("span");
       tagEl.className = "n-tag";
@@ -1197,7 +1267,9 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
             info.synopsis || "（暂无本节点提要）",
             isCurrent ? "▶ 回到播放" : "▶ 从此处重看", false);
         } else {
-          showTip(point, info.is_ending ? "未达成的结局" : "未探索的剧情点",
+          // One shared tooltip for every fogged node: it must not hint
+          // whether this branch is an ending.
+          showTip(point, "未探索的剧情点",
             "继续做出不同的选择即可解锁。", "🔒 尚未解锁", true);
         }
       });
@@ -1366,6 +1438,79 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
     });
   }
 
+  // ---------- choice-card faces (first frame of the target segment) ----
+  // Captured at runtime through an offscreen <video> + <canvas>. Under
+  // file:// the canvas is usually tainted (file media count as
+  // cross-origin), so toDataURL() may throw SecurityError: we then keep
+  // the drawn canvas itself as the face, and fall back to the stylized
+  // accent-gradient face when even loading/drawing fails. Unvisited
+  // targets stay fogged by CSS (blur + darkening) so the captured frame
+  // leaks no plot or visuals before the branch is reached.
+  const faceCache = {};
+  function captureFrame(target, done) {
+    if (Object.prototype.hasOwnProperty.call(faceCache, target)) {
+      done(faceCache[target]);
+      return;
+    }
+    const src = segments[target];
+    if (!src) { faceCache[target] = null; done(null); return; }
+    const probe = document.createElement("video");
+    probe.muted = true;
+    probe.playsInline = true;
+    probe.preload = "auto";
+    let settled = false;
+    const finish = (frame) => {
+      if (settled) { return; }
+      settled = true;
+      faceCache[target] = frame;
+      probe.removeAttribute("src");
+      try { probe.load(); } catch (error) { /* release best-effort */ }
+      done(frame);
+    };
+    probe.onerror = () => finish(null);
+    probe.onloadeddata = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = probe.videoWidth || 320;
+      canvas.height = probe.videoHeight || 180;
+      try {
+        canvas.getContext("2d").drawImage(
+          probe, 0, 0, canvas.width, canvas.height);
+      } catch (error) { finish(null); return; }
+      let url = null;
+      try {
+        url = canvas.toDataURL("image/jpeg", 0.72);
+      } catch (error) { url = null; /* tainted: keep the canvas */ }
+      finish({ url: url, canvas: canvas });
+    };
+    probe.src = src;
+  }
+  function faceInto(faceEl, target) {
+    captureFrame(target, (frame) => {
+      if (!frame || !faceEl.isConnected) { return; }
+      let shot;
+      if (frame.url) {
+        shot = document.createElement("img");
+        shot.src = frame.url;
+        shot.alt = "";
+      } else {
+        // Copy the cached (possibly tainted) master canvas so the same
+        // frame can back several cards; taint only blocks readback,
+        // never display.
+        shot = document.createElement("canvas");
+        shot.width = frame.canvas.width;
+        shot.height = frame.canvas.height;
+        shot.getContext("2d").drawImage(frame.canvas, 0, 0);
+      }
+      shot.className = "f-shot";
+      faceEl.insertBefore(shot, faceEl.firstChild);
+    });
+  }
+
+  // Optional manifest `tone` (per option, else per edge): subtle card
+  // treatment. Unknown / absent tones = neutral card, fully backward
+  // compatible with manifests that never carry the field.
+  const TONE_LABELS = { risky: "△ 冒险", danger: "▲ 危险", safe: "○ 稳妥" };
+
   function showChoice(point) {
     questionEl.textContent = point.question || "此刻，你决定——";
     optionsEl.innerHTML = "";
@@ -1374,8 +1519,22 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       const target = edge.target_timeline_id;
       const isDefault = point.default_edge_ref &&
         option.edge_ref === point.default_edge_ref;
+      const visitedTarget =
+        target && state.visited.indexOf(target) >= 0;
       const card = document.createElement("button");
       card.className = "choice-card" + (isDefault ? " is-default" : "");
+      const tone = String(option.tone || edge.tone || "").toLowerCase();
+      if (TONE_LABELS[tone]) { card.setAttribute("data-tone", tone); }
+      // Face: fog-of-war applies to the thumbnail too — an unvisited
+      // target is blurred into an unrecognizable silhouette.
+      const face = document.createElement("span");
+      face.className = "c-face" + (visitedTarget ? "" : " is-fogged");
+      if (!visitedTarget) {
+        const mark = document.createElement("i");
+        mark.className = "f-mark";
+        mark.textContent = "?";
+        face.appendChild(mark);
+      }
       const key = document.createElement("span");
       key.className = "c-key";
       key.textContent = String.fromCharCode(65 + index) +
@@ -1385,8 +1544,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       name.textContent = edge.label || option.edge_ref;
       const desc = document.createElement("p");
       desc.className = "c-desc";
-      const visitedTarget =
-        target && state.visited.indexOf(target) >= 0;
       desc.textContent = visitedTarget
         ? ((nodes[target] || {}).synopsis || nodeTitle(target))
         : "未知走向 · 由你的选择揭晓。";
@@ -1397,12 +1554,22 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
       risk.appendChild(document.createTextNode(
         visitedTarget ? "已探索 ·「" + nodeTitle(target) + "」"
           : "未探索分支"));
+      if (TONE_LABELS[tone]) {
+        const toneEl = document.createElement("i");
+        toneEl.className = "c-tone";
+        toneEl.textContent = TONE_LABELS[tone];
+        risk.appendChild(toneEl);
+      }
+      card.appendChild(face);
       card.appendChild(key);
       card.appendChild(name);
       card.appendChild(desc);
       card.appendChild(risk);
       card.onclick = () => pickCard(card, target, false);
       optionsEl.appendChild(card);
+      // After DOM attachment: cached captures call back synchronously
+      // and must pass the isConnected guard.
+      if (target) { faceInto(face, target); }
     });
     choiceLayer.classList.add("is-on");
     if (point.countdown_seconds && point.default_edge_ref) {
