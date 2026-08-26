@@ -2,9 +2,30 @@
 # pylint: disable=unused-argument,use-implicit-booleaness-not-comparison
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from services.project_files.models import Project
 from services.runtime_files import ProjectRuntimeSessionStore
 from services.runtime_files.errors import RuntimeFileValidationError
+
+
+def _sqlite_files(root: Path) -> list[str]:
+    """Return leaked sqlite files without racing deletion cleanup.
+
+    Deleting a Project stages its tree as ``.deleted-<id>-<uuid>`` and removes
+    it in the background, so a plain ``rglob`` can descend into that tree and
+    fail when it disappears mid-walk. Prune the staging dirs and ignore walk
+    errors: the assertion only cares that the store leaks no sqlite file.
+    """
+
+    found: list[str] = []
+    for current, dirs, files in os.walk(root, onerror=lambda _error: None):
+        dirs[:] = [name for name in dirs if not name.startswith(".deleted-")]
+        found.extend(
+            os.path.join(current, name) for name in files if ".sqlite" in name
+        )
+    return found
 
 
 def _create_payload(request_id: str, name: str, **overrides) -> dict:
@@ -57,7 +78,7 @@ def test_project_create_is_atomic_file_native_and_has_no_goal(
     session = runtime.get_project_session(project_id)
     assert session.session_id == body["creatorSessionId"]
     assert session.active_goal_id is None
-    assert not list(api_runtime_root.rglob("*.sqlite*"))
+    assert not _sqlite_files(api_runtime_root)
 
 
 def test_project_create_rejects_payload_drift_and_delete_is_idempotent(
@@ -88,7 +109,7 @@ def test_project_create_rejects_payload_drift_and_delete_is_idempotent(
     assert deleted.status_code == 204
     assert replay.status_code == 204
     assert listed.json()["items"] == []
-    assert not list(api_runtime_root.rglob("*.sqlite*"))
+    assert not _sqlite_files(api_runtime_root)
 
 
 def test_project_runtime_bootstrap_failure_never_publishes_half_project(
