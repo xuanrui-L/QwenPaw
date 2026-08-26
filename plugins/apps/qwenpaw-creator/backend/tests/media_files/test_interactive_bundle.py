@@ -188,6 +188,18 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         )
         player = archive.read("index.html").decode()
         assert "edge_index" in player and "countdown" in player
+        # Playback must start behind a user-gesture gate: browsers reject
+        # unmuted play() without a gesture (file:// included), which used
+        # to leave the exported bundle as a dead page.
+        assert "开始播放" in player
+        assert "showGate(" in player
+        assert "playSegment(manifest.entry_timeline_id)" in player
+        # The old bare `playSegment(...)` bootstrap (auto-play on load)
+        # must be gone.
+        assert "\n  playSegment(manifest.entry_timeline_id);" not in player
+        # A missing / unrenderable branch must surface a visible notice.
+        assert "素材未就绪" in player
+        assert "video.onerror" in player
 
 
 def test_linear_project_bundles_every_ordered_timeline() -> None:
