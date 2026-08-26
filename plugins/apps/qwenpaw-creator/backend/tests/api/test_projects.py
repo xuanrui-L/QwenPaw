@@ -236,3 +236,50 @@ def test_project_routes_translate_store_addressing_failures(
         status_code, code = expected[project_id]
         assert response.status_code == status_code
         assert response.json()["code"] == code
+
+
+def test_project_list_degrades_corrupt_session_instead_of_500(
+    app,
+    api_runtime_root,
+    run_scenario,
+):
+    """A single Project whose Session record fails the integrity check must
+    surface as ``status: null`` in the listing instead of turning the whole
+    ``GET /projects`` into a 500 (field incident: one stale test Project hid
+    every other Project from the UI).
+    """
+    import json
+
+    async def scenario(client):
+        healthy = await client.post(
+            "/projects",
+            json=_create_payload("list-degrade-request-1", "健康项目"),
+        )
+        corrupt = await client.post(
+            "/projects",
+            json=_create_payload("list-degrade-request-2", "损坏项目"),
+        )
+        healthy_id = healthy.json()["projectId"]
+        corrupt_id = corrupt.json()["projectId"]
+
+        session_file = next(
+            (api_runtime_root / corrupt_id / "runtime" / "sessions").glob(
+                "*/session.json",
+            ),
+        )
+        record = json.loads(session_file.read_text(encoding="utf-8"))
+        record["project_id"] = healthy_id
+        session_file.write_text(
+            json.dumps(record, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        listed = await client.get("/projects")
+        return healthy_id, corrupt_id, listed
+
+    healthy_id, corrupt_id, listed = run_scenario(app, scenario)
+    assert listed.status_code == 200
+    by_id = {item["projectId"]: item for item in listed.json()["items"]}
+    assert set(by_id) == {healthy_id, corrupt_id}
+    assert by_id[corrupt_id]["status"] is None
+    assert by_id[healthy_id]["status"] is not None

@@ -94,6 +94,7 @@ from services.project_files.models import (
     SourceAssetVersion,
 )
 from services.project_files.remote_cache import public_source_url
+from services.runtime_files.errors import LockTimeoutError
 from services.runtime_files.models import (
     ChangeOrigin,
     CreatorMessageRecord,
@@ -177,6 +178,7 @@ from .model_client import (
     AgentStreamCallbackError,
     AgentStreamCallbackPassthrough,
     AgentModelTurn,
+    DEFAULT_MODEL_TURN_TIMEOUT_SECONDS as _DEFAULT_MODEL_TURN_TIMEOUT_SECONDS,
     RateLimitExhaustedError,
     RateLimitRetryNotice,
     AgentScopeAgentChatClient,
@@ -273,7 +275,9 @@ COMPUTER_USE_TOOL_NAME = "computer_use"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
-DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = 300.0
+# Shared with the model-client transport timeout; override with
+# CREATOR_MODEL_TURN_TIMEOUT_SECONDS (default 300).
+DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = _DEFAULT_MODEL_TURN_TIMEOUT_SECONDS
 _LIVE_EDIT_CONTEXT_MAX_TAKES = 12
 _LIVE_EDIT_CONTEXT_MAX_FACTS = 80
 _LIVE_EDIT_CONTEXT_MAX_RAW_FACTS = 320
@@ -6851,16 +6855,36 @@ class FileCreatorAgentRuntime:
         request: CreatorMessageRecord,
         payload: Mapping[str, Any],
     ) -> None:
-        await asyncio.to_thread(
-            self.sessions.append_event,
-            project_id,
-            session_id,
-            event_type=event_type,
-            actor="file_agent_runtime",
-            round_id=f"agent-round-{run_id}",
-            message_id=request.message_id,
-            payload=dict(payload),
-        )
+        # A lock timeout means the append never started (the exclusive
+        # project lock was never acquired), so retrying is safe. Bursts of
+        # serial Project commits (e.g. scene auto-rereview) can hold the
+        # lock beyond one wait and must not kill the whole agent run.
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                await asyncio.to_thread(
+                    self.sessions.append_event,
+                    project_id,
+                    session_id,
+                    event_type=event_type,
+                    actor="file_agent_runtime",
+                    round_id=f"agent-round-{run_id}",
+                    message_id=request.message_id,
+                    payload=dict(payload),
+                )
+                break
+            except LockTimeoutError:
+                if attempt == attempts:
+                    raise
+                logger.warning(
+                    "event append lock contention (attempt %d/%d) "
+                    "project=%s type=%s; retrying",
+                    attempt,
+                    attempts,
+                    project_id,
+                    event_type,
+                )
+                await asyncio.sleep(attempt)
         if not event_type.endswith("_delta"):
             trace_event(
                 f"creator.{event_type}",

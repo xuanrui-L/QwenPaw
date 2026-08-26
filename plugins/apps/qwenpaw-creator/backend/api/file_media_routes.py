@@ -208,11 +208,12 @@ def _version_in_project(
     version_id: str,
     kind: Literal["source", "artifact"],
 ) -> tuple[Path, IndexedFile | None, Any, str] | None:
-    # Only a genuinely missing Project means "no match here"; integrity,
-    # permission and I/O failures must propagate instead of becoming 404.
+    # This runs once per discovered Project, so a Project that cannot be read
+    # is simply not a match: letting its failure propagate would take media
+    # serving down for every healthy Project alongside it.
     try:
         snapshot = services.projects.read(project_id)
-    except ProjectNotFound:
+    except ProjectStoreError:
         return None
     if kind == "source":
         version: Any = snapshot.project.assets.source_versions_by_id.get(
