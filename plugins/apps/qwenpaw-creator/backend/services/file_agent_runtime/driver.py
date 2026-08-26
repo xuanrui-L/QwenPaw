@@ -7562,6 +7562,8 @@ def _specialist_tool_recovery(
             "rejected by the safety system",
             "content policy",
             "content_policy_violation",
+            "green net check failed",
+            "may contain inappropriate content",
         )
     ):
         # The image provider's safety system deterministically rejects the
@@ -7578,7 +7580,13 @@ def _specialist_tool_recovery(
             "(asset-version IDs of downloaded or uploaded images) and use "
             "already generated stylized artifact-version references — or a "
             "text-only prompt — instead, then call image_generation again "
-            "with the adjusted references or a rephrased prompt."
+            "with the adjusted references or a rephrased prompt. If the "
+            "message names the *output* or a green-net check, the moderator "
+            "refused the rendered image rather than the request, so changing "
+            "references alone cannot help: rewrite the prompt itself, "
+            "softening the wording most likely to have been flagged (injury, "
+            "blood, nudity, minors, distress, real public figures) while "
+            "keeping the shot's narrative intent."
         )
     if name == "jq_project":
         return _jq_project_recovery(code)

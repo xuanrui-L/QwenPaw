@@ -344,6 +344,11 @@ _SAFETY_REJECTION_MARKERS = (
     "rejected by the safety system",
     "content policy",
     "content_policy",
+    # DashScope refuses the generated output, not the request, and words it
+    # entirely differently (field run 2026-08-26). Same determinism: the same
+    # prompt renders the same rejected image every time.
+    "green net check failed",
+    "may contain inappropriate content",
 )
 
 

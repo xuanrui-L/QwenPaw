@@ -520,3 +520,29 @@ def test_resolved_reference_budget_reports_automatic_and_explicit_refs(
     with pytest.raises(ImageModelCapabilityError) as empty_model:
         resolve("", {"variantId": "var:budget"})
     assert empty_model.value.details["modelName"] == "未配置"
+
+
+def test_output_moderation_refusal_is_treated_as_deterministic() -> None:
+    """Field run 2026-08-26: DashScope refused a rendered character sheet with
+    its own wording, which matched none of the request-level markers. The
+    refusal was therefore retried against provider quota and the node stalled
+    with six dependents gated behind it.
+    """
+    from services.media_files.image_execution import (
+        _is_safety_rejection_message,
+    )
+
+    green_net = (
+        "Image generation failed with status 400: Green net check failed "
+        "for image (output): Output data may contain inappropriate content"
+    )
+    assert _is_safety_rejection_message(green_net)
+    # The request-level variants must keep working.
+    assert _is_safety_rejection_message(
+        "Image generation failed with status 400: Your request was rejected "
+        "by the safety system",
+    )
+    # A genuinely transient fault must not be misread as a content refusal.
+    assert not _is_safety_rejection_message(
+        "Image generation failed: rate limited after all retries",
+    )
