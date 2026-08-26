@@ -23,7 +23,7 @@ export default function VideoTemplatePicker({
 
   useEffect(() => {
     listVideoTemplates()
-      .then((res) => setTemplates(res.items))
+      .then((res) => setTemplates(res.items ?? []))
       .catch(() => setTemplates([]));
   }, []);
 
