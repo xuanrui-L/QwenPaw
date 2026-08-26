@@ -749,7 +749,14 @@
     "audioBudget": "当前 {{actual}}s / 本段 {{budget}}s",
     "audioOverBudget": "音频超出本段时长，会与后续内容重叠；请精简文稿后点「应用修改」重新合成",
     "ttsScriptHint": "修改文稿后点右上「应用修改」，创作助手将自动重新合成这段语音",
-    "speechRate": "语速"
+    "speechRate": "语速",
+    "audioRole": "混音角色",
+    "audioRoleNarration": "旁白（压低画面原声）",
+    "audioRoleBgm": "配乐（音乐床，自动闪避人声）",
+    "audioRoleSfx": "音效（原样混入）",
+    "audioFadeIn": "淡入（秒，留空自适应）",
+    "audioFadeOut": "淡出（秒，留空自适应）",
+    "audioFadeAdaptive": "自适应"
   },
   "agent": {
     "assistant": "创作助手",
@@ -999,7 +1006,12 @@
     "creationTypeTransition": "转场",
     "creationTypeAudio": "音频",
     "audioGain": "音量 {{gain}}dB",
-    "audioPan": "声像 {{pan}}"
+    "audioPan": "声像 {{pan}}",
+    "audioRole": {
+      "narration": "旁白",
+      "bgm": "配乐",
+      "sfx": "音效"
+    }
   },
   "rejectionFeedback": {
     "undoContent": "撤销内容",

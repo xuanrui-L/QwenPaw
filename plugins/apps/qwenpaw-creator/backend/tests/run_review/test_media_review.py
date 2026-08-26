@@ -488,3 +488,43 @@ def test_element_video_loop_embeds_gate_block(
     assert report.gate_block["passed"] is False
     assert "门禁证据块" in calls[0]["content"][0]["text"]
     assert "分镜视频" in _feedback_messages(services)[0].content_parts[0].text
+
+
+def test_gather_or_cancel_joins_thread_workers_before_raising() -> None:
+    """A failed leg must not leave decode threads running unattended.
+
+    asyncio.to_thread detaches on cancellation, so _gather_or_cancel could
+    return (and the review loop release its media claim) while an ffmpeg
+    or decode worker still reads the file. The thread legs are joined:
+    the error propagates only after the worker has actually finished.
+    """
+    import threading
+
+    release = threading.Event()
+    finished = threading.Event()
+
+    def slow_worker() -> str:
+        release.wait(timeout=10)
+        finished.set()
+        return "done"
+
+    async def failing_leg() -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("probe failed")
+
+    async def scenario() -> None:
+        # The happy path still returns results and surfaces worker errors.
+        assert await media_module._to_thread_or_join(lambda: 41 + 1) == 42
+
+        loop = asyncio.get_running_loop()
+        loop.call_later(0.1, release.set)
+        with pytest.raises(RuntimeError, match="probe failed"):
+            await media_module._gather_or_cancel(
+                media_module._to_thread_or_join(slow_worker),
+                failing_leg(),
+            )
+        assert (
+            finished.is_set()
+        ), "the error propagated before the thread worker finished"
+
+    asyncio.run(scenario())

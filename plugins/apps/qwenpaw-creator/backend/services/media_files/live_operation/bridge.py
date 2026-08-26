@@ -19,7 +19,10 @@ import builtins
 import contextlib
 import io
 import logging
+import sys
+import threading
 import time
+import types
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -33,6 +36,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT_CHARS = 12_000
 _MAX_RANGE_ITEMS = 1_000
+_MAX_AST_NODES = 2_000
+_MAX_LITERAL_ELEMENTS = 500
+_MAX_STRING_CONSTANT_CHARS = 10_000
+_MAX_NUMERIC_CONSTANT = 1_000_000
+_MAX_LOOP_DEPTH = 2
 _SOURCE_NAME = "browser_use_code"
 _ALLOWED_BROWSER_DELEGATIONS = frozenset(
     {
@@ -150,6 +158,136 @@ _SAFE_BUILTINS["range"] = _bounded_range
 
 class LiveOperationError(RuntimeError):
     """The submitted browser code could not be run."""
+
+
+class _SyncDeadlineExceeded(BaseException):
+    """Raised inside model code once its execution deadline has passed.
+
+    Derives from BaseException so model-level ``except Exception`` handlers
+    cannot swallow the pre-emption; bare ``except:`` is rejected by the AST
+    validator for the same reason.
+    """
+
+
+def _code_objects(code: Any) -> list[Any]:
+    stack = [code]
+    collected = []
+    while stack:
+        current = stack.pop()
+        collected.append(current)
+        for const in current.co_consts:
+            if isinstance(const, types.CodeType):
+                stack.append(const)
+    return collected
+
+
+class _MonitoringDeadline:
+    """Pre-empt synchronous model code via per-code-object line events.
+
+    ``asyncio.wait_for`` fires only when the event loop regains control, so a
+    synchronous loop written by the model would otherwise run to completion
+    regardless of the timeout. Line-level monitoring scoped to exactly the
+    model's own code objects raises inside that code the moment the deadline
+    passes, keeping the rest of the process untraced.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._deadlines: dict[Any, float] = {}
+        self._tool_id: int | None = None
+
+    def activate(self, codes: list[Any], deadline: float) -> None:
+        monitoring = sys.monitoring
+        with self._lock:
+            tool = self._acquire_tool()
+            for code in codes:
+                self._deadlines[code] = deadline
+                monitoring.set_local_events(
+                    tool,
+                    code,
+                    monitoring.events.LINE,
+                )
+
+    def deactivate(self, codes: list[Any]) -> None:
+        monitoring = sys.monitoring
+        with self._lock:
+            for code in codes:
+                self._deadlines.pop(code, None)
+                if self._tool_id is not None:
+                    monitoring.set_local_events(self._tool_id, code, 0)
+
+    def _acquire_tool(self) -> int:
+        if self._tool_id is not None:
+            return self._tool_id
+        monitoring = sys.monitoring
+        for candidate in range(6):
+            try:
+                monitoring.use_tool_id(candidate, "creator-live-operation")
+            except ValueError:
+                continue
+            monitoring.register_callback(
+                candidate,
+                monitoring.events.LINE,
+                self._on_line,
+            )
+            self._tool_id = candidate
+            return candidate
+        raise LiveOperationError(
+            "no monitoring slot is available to enforce the live-operation "
+            "deadline",
+        )
+
+    def _on_line(self, code: Any, line_number: int) -> Any:
+        del line_number
+        deadline = self._deadlines.get(code)
+        if deadline is None:
+            return sys.monitoring.DISABLE
+        if time.monotonic() >= deadline:
+            raise _SyncDeadlineExceeded()
+        return None
+
+
+class _SettraceDeadline:
+    """Fallback pre-emption for interpreters without ``sys.monitoring``."""
+
+    def __init__(self) -> None:
+        self._deadlines: dict[Any, float] = {}
+        self._installed = False
+
+    def activate(self, codes: list[Any], deadline: float) -> None:
+        for code in codes:
+            self._deadlines[code] = deadline
+        if not self._installed:
+            sys.settrace(self._global_trace)
+            self._installed = True
+
+    def deactivate(self, codes: list[Any]) -> None:
+        for code in codes:
+            self._deadlines.pop(code, None)
+        if not self._deadlines and self._installed:
+            sys.settrace(None)
+            self._installed = False
+
+    def _global_trace(self, frame: Any, event: str, arg: Any) -> Any:
+        del event, arg
+        if frame.f_code in self._deadlines:
+            return self._local_trace
+        return None
+
+    def _local_trace(self, frame: Any, event: str, arg: Any) -> Any:
+        del arg
+        if event == "line":
+            deadline = self._deadlines.get(frame.f_code)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise _SyncDeadlineExceeded()
+        return self._local_trace
+
+
+_SYNC_DEADLINE = (
+    _MonitoringDeadline()
+    if hasattr(sys, "monitoring")
+    else _SettraceDeadline()
+)
 
 
 class _ActivePage:
@@ -336,7 +474,12 @@ async def _run_browser_code_isolated(
                 "recorder": AgentRecorder(session, recorder, active_page),
             }
             value = await asyncio.wait_for(
-                _execute(compiled, namespace, output=stdout),
+                _execute(
+                    compiled,
+                    namespace,
+                    output=stdout,
+                    deadline_seconds=timeout_seconds,
+                ),
                 timeout=timeout_seconds,
             )
             if value is not None:
@@ -463,7 +606,25 @@ class _ModelCodeValidator(ast.NodeVisitor):
     beside API keys and Project state. Imports and private-object traversal
     would turn a website prompt injection into backend code execution, so this
     bridge exposes ordinary Python control flow but no process escape surface.
+
+    Amplifying operators, oversized literals and deep loop nesting are also
+    rejected so a single statement cannot allocate unbounded memory before
+    the line-level deadline can pre-empt it. These caps reduce risk; the
+    deadline in ``_execute`` is what bounds total synchronous work.
     """
+
+    def __init__(self) -> None:
+        self._node_count = 0
+        self._loop_depth = 0
+
+    def visit(self, node: ast.AST) -> None:
+        self._node_count += 1
+        if self._node_count > _MAX_AST_NODES:
+            raise LiveOperationError(
+                f"code is limited to {_MAX_AST_NODES} syntax nodes in "
+                "live-operation code",
+            )
+        super().visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
         del node
@@ -507,6 +668,123 @@ class _ModelCodeValidator(ast.NodeVisitor):
             "bounded for loop or the Browser SDK's wait methods",
         )
 
+    def _enter_loops(self, count: int, node: ast.AST) -> None:
+        self._loop_depth += count
+        if self._loop_depth > _MAX_LOOP_DEPTH:
+            raise LiveOperationError(
+                f"loops nest deeper than {_MAX_LOOP_DEPTH} levels in "
+                "live-operation code; flatten the iteration",
+            )
+        self.generic_visit(node)
+        self._loop_depth -= count
+
+    def visit_For(self, node: ast.For) -> None:  # noqa: N802
+        self._enter_loops(1, node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:  # noqa: N802
+        self._enter_loops(1, node)
+
+    def _visit_comprehension(self, node: Any) -> None:
+        self._enter_loops(len(node.generators), node)
+
+    visit_ListComp = _visit_comprehension  # noqa: N815
+    visit_SetComp = _visit_comprehension  # noqa: N815
+    visit_DictComp = _visit_comprehension  # noqa: N815
+    visit_GeneratorExp = _visit_comprehension  # noqa: N815
+
+    def visit_ExceptHandler(  # noqa: N802
+        self,
+        node: ast.ExceptHandler,
+    ) -> None:
+        if node.type is None:
+            raise LiveOperationError(
+                "bare except clauses are unavailable in live-operation "
+                "code; catch a specific exception type",
+            )
+        self.generic_visit(node)
+
+    @staticmethod
+    def _is_sequence_literal(node: ast.AST) -> bool:
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+            return True
+        if isinstance(node, ast.JoinedStr):
+            return True
+        return isinstance(node, ast.Constant) and isinstance(
+            node.value,
+            (str, bytes),
+        )
+
+    def _reject_amplifying_operator(
+        self,
+        op: ast.operator,
+        *operands: ast.AST,
+    ) -> None:
+        if isinstance(op, (ast.Pow, ast.LShift)):
+            raise LiveOperationError(
+                "power and left-shift operators are unavailable in "
+                "live-operation code",
+            )
+        if isinstance(op, ast.Mult) and any(
+            self._is_sequence_literal(operand) for operand in operands
+        ):
+            raise LiveOperationError(
+                "sequence repetition is unavailable in live-operation code",
+            )
+
+    def visit_BinOp(self, node: ast.BinOp) -> None:  # noqa: N802
+        self._reject_amplifying_operator(node.op, node.left, node.right)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:  # noqa: N802
+        if isinstance(node.op, ast.Mult):
+            # `x *= n` cannot be typed statically, so a str/list target
+            # would amplify memory in one bytecode op; reject the form.
+            raise LiveOperationError(
+                "augmented multiplication is unavailable in live-operation "
+                "code",
+            )
+        self._reject_amplifying_operator(node.op, node.target, node.value)
+        self.generic_visit(node)
+
+    def _reject_oversized_literal(self, count: int) -> None:
+        if count > _MAX_LITERAL_ELEMENTS:
+            raise LiveOperationError(
+                "container literals are limited to "
+                f"{_MAX_LITERAL_ELEMENTS} elements in live-operation code",
+            )
+
+    def visit_List(self, node: ast.List) -> None:  # noqa: N802
+        self._reject_oversized_literal(len(node.elts))
+        self.generic_visit(node)
+
+    visit_Tuple = visit_List  # noqa: N815
+    visit_Set = visit_List  # noqa: N815
+
+    def visit_Dict(self, node: ast.Dict) -> None:  # noqa: N802
+        self._reject_oversized_literal(len(node.keys))
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:  # noqa: N802
+        value = node.value
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and abs(value) > _MAX_NUMERIC_CONSTANT
+        ):
+            raise LiveOperationError(
+                "numeric constants are limited to "
+                f"{_MAX_NUMERIC_CONSTANT} in live-operation code",
+            )
+        if (
+            isinstance(value, (str, bytes))
+            and len(value) > _MAX_STRING_CONSTANT_CHARS
+        ):
+            raise LiveOperationError(
+                "string constants are limited to "
+                f"{_MAX_STRING_CONSTANT_CHARS} characters in "
+                "live-operation code",
+            )
+
     def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
         if node.attr.startswith("_"):
             raise LiveOperationError(
@@ -527,6 +805,7 @@ async def _execute(
     namespace: dict[str, Any],
     *,
     output: io.StringIO | None = None,
+    deadline_seconds: float | None = None,
 ) -> Any:
     started = time.monotonic()
     safe_builtins = dict(_SAFE_BUILTINS)
@@ -544,9 +823,25 @@ async def _execute(
 
         safe_builtins["print"] = captured_print
     namespace.setdefault("__builtins__", safe_builtins)
-    outcome = eval(compiled, namespace)  # noqa: S307 - the model's own code
-    if asyncio.iscoroutine(outcome):
-        outcome = await outcome
+    codes: list[Any] = []
+    if deadline_seconds is not None:
+        codes = _code_objects(compiled)
+        _SYNC_DEADLINE.activate(codes, started + deadline_seconds)
+    try:
+        outcome = eval(
+            compiled,
+            namespace,
+        )  # noqa: S307 - the model's own code
+        if asyncio.iscoroutine(outcome):
+            outcome = await outcome
+    except _SyncDeadlineExceeded as exc:
+        raise LiveOperationError(
+            f"browser code exceeded {deadline_seconds:g} seconds of "
+            "execution and was pre-empted",
+        ) from exc
+    finally:
+        if codes:
+            _SYNC_DEADLINE.deactivate(codes)
     logger.info(
         "live operation code finished in %.1fs",
         time.monotonic() - started,

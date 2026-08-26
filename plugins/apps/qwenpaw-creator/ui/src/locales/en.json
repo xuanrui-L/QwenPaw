@@ -749,7 +749,14 @@
     "audioBudget": "{{actual}}s of {{budget}}s budget",
     "audioOverBudget": "Audio exceeds this segment and will overlap what follows; trim the script and apply to re-synthesize",
     "ttsScriptHint": "Edit the script and hit Apply Changes; the assistant re-synthesizes this narration",
-    "speechRate": "Speed"
+    "speechRate": "Speed",
+    "audioRole": "Mixing role",
+    "audioRoleNarration": "Narration (ducks footage audio)",
+    "audioRoleBgm": "BGM (music bed, auto-ducks under speech)",
+    "audioRoleSfx": "SFX (mixed verbatim)",
+    "audioFadeIn": "Fade in (s, blank = adaptive)",
+    "audioFadeOut": "Fade out (s, blank = adaptive)",
+    "audioFadeAdaptive": "adaptive"
   },
   "agent": {
     "assistant": "Creative Assistant",
@@ -999,7 +1006,12 @@
     "creationTypeTransition": "Transition",
     "creationTypeAudio": "Audio",
     "audioGain": "Gain {{gain}}dB",
-    "audioPan": "Pan {{pan}}"
+    "audioPan": "Pan {{pan}}",
+    "audioRole": {
+      "narration": "Narration",
+      "bgm": "BGM",
+      "sfx": "SFX"
+    }
   },
   "rejectionFeedback": {
     "undoContent": "Undo content",

@@ -501,7 +501,12 @@ async def run_computer_use_code(
                 "recorder": DesktopRecorderHandle(recorder, controller),
             }
             value = await asyncio.wait_for(
-                _execute(compiled, namespace, output=stdout),
+                _execute(
+                    compiled,
+                    namespace,
+                    output=stdout,
+                    deadline_seconds=timeout_seconds,
+                ),
                 timeout=timeout_seconds,
             )
             if value is not None:

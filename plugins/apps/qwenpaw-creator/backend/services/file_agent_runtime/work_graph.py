@@ -649,12 +649,20 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             failure = failed.get(key)
             missing = (*_upstream_missing(deps, statuses), *gate_missing)
             upstream_selected = _element_upstream_selected(project, creation)
+            # Mirrors the submit path: agent-specified references are
+            # authoritative, so they (not the auto chain) must drive the
+            # fingerprint and staleness — editing the explicit list has to
+            # reopen dispatch and flag a stale artifact.
+            storyboard_refs: list[str | None] = (
+                list(creation.storyboard_reference_version_ids)
+                or upstream_selected
+            )
             fingerprint = _fingerprint(
                 storyboard_id,
                 creation.storyboard_prompt,
                 project.settings.aspect_ratio,
                 len(creation.shots.order),
-                sorted(selected for selected in upstream_selected if selected),
+                sorted(selected for selected in storyboard_refs if selected),
             )
             if task is not None:
                 status = WorkNodeStatus.RUNNING
@@ -664,7 +672,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     if _artifact_is_stale(
                         project,
                         storyboard_slot,
-                        upstream_selected,
+                        storyboard_refs,
                         node_id=storyboard_id,
                         dispatch_fingerprint=fingerprint,
                         tasks=tasks,
@@ -722,6 +730,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 video_id,
                 creation.video_prompt,
                 storyboard_slot,
+                sorted(creation.video_reference_version_ids),
             )
             video_missing: tuple[str, ...] = ()
             if task is not None:
@@ -732,7 +741,10 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     if _artifact_is_stale(
                         project,
                         video_slot,
-                        [storyboard_slot],
+                        [
+                            storyboard_slot,
+                            *creation.video_reference_version_ids,
+                        ],
                     )
                     else WorkNodeStatus.DONE
                 )

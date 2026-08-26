@@ -146,7 +146,8 @@ def test_qwen_image3_uses_long_multireference_timeout_by_default(
 
     monkeypatch.setenv("DASHSCOPE_IMAGE_MODEL_NAME", "qwen-image-2.0-pro")
     with _tool_configs():
-        assert DashScopeImageModel.from_config().timeout == 240
+        # Other DashScope families stay on the shared 480s baseline.
+        assert DashScopeImageModel.from_config().timeout == 480
 
 
 # ---------------------------------------------------------------------------

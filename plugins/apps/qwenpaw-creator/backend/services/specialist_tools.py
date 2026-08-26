@@ -355,7 +355,16 @@ _R2V_ARGUMENTS = _arguments_schema(
             "default": False,
             "description": "默认 false（无水印）；仅在用户明确要求时传 true",
         },
-        "generateAudio": {"type": "boolean"},
+        "generateAudio": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "默认 true：生成视频原生自带台词与环境音（人声的唯一来源）。"
+                "背景音乐不要写进 prompt（配乐由 Project 中独立的 "
+                "creation.type=audio Element 承载，与本工具无关）；"
+                "仅在明确需要无声画面时传 false"
+            ),
+        },
     },
     ("prompt", "durationSeconds", "ratio", "resolution"),
 )
@@ -1113,7 +1122,9 @@ class FileSpecialistToolRegistry:
                     f"当前图片模型 {model_name or '未配置'} 的输入参考图，"
                     f"官方上限为 {reference_limit or 0} 张；只传 Project 中"
                     "已存在的 exact version id。未知模型别名按 0 张处理，"
-                    "不会套用通用猜测上限。"
+                    "不会套用通用猜测上限。显式传入即为最终参考列表（执行层"
+                    "不再自动注入阵容图或实体锚点），由你自控张数与顺序；"
+                    "不传时才使用自动引用链。"
                 )
             business_tools.append(manifest)
         names = [

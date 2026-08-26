@@ -29,7 +29,9 @@ from domain.enums import CreatorCommandType
 from models.config import (
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
     get_execution_authorization_mode,
+    get_image_model_name,
     get_media_parallelism,
+    get_video_model_name,
     get_vlm_timeout_seconds,
 )
 from services.media_files.call_budget import (
@@ -187,7 +189,12 @@ class WorkGraphScheduler:
         self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
         self._sync_gate_rechecks: dict[str, asyncio.TimerHandle] = {}
         self._cancelled_projects: set[str] = set()
-        self._deterministic_failure_nodes: dict[tuple[str, str], str] = {}
+        # Keyed by (project, node, fingerprint): a deterministic failure
+        # locks exactly the inputs that produced it. Fixing the inputs
+        # changes the fingerprint and unlocks dispatch; a (project, node)
+        # key would deadlock the node forever, because the entry is only
+        # popped after a successful dispatch that the entry itself blocks.
+        self._deterministic_failure_nodes: dict[tuple[str, str, str], str] = {}
 
     def _transient_budget_available(
         self,
@@ -209,6 +216,24 @@ class WorkGraphScheduler:
             self._transient_retries.get(ledger_key, 0) + 1
         )
         self._transient_last[ledger_key] = time.monotonic()
+
+    @staticmethod
+    def _ledger_fingerprint(node: WorkNode) -> str:
+        """Ledger identity of one dispatch: node inputs + media models.
+
+        The graph fingerprint covers the node's own inputs (prompt,
+        references); the configured media models are equally part of what
+        a dispatch means. Without them, switching to a model with a
+        larger reference budget after IMAGE_REFERENCE_BUDGET_EXCEEDED
+        left the node deterministically locked forever (same inputs,
+        same fingerprint, no unlock path).
+        """
+
+        base = node.dispatch_fingerprint or node.node_id
+        return (
+            f"{base}|img:{get_image_model_name().strip()}"
+            f"|vid:{get_video_model_name().strip()}"
+        )
 
     # -- lifecycle -----------------------------------------------------
 
@@ -411,7 +436,7 @@ class WorkGraphScheduler:
                     sorted(reviewing_slots),
                 )
                 continue
-            fingerprint = node.dispatch_fingerprint or node.node_id
+            fingerprint = self._ledger_fingerprint(node)
             ledger_key = (project_id, node.node_id, fingerprint)
             if ledger_key in self._dispatched or node.node_id in inflight:
                 continue
@@ -560,7 +585,7 @@ class WorkGraphScheduler:
                 # the stored result instead of paying a second render.
                 if node.target_ref not in rescuable:
                     continue
-                fingerprint = node.dispatch_fingerprint or node.node_id
+                fingerprint = self._ledger_fingerprint(node)
                 ledger_key = (project_id, node.node_id, fingerprint)
                 if (
                     ledger_key not in self._dispatched
@@ -595,7 +620,7 @@ class WorkGraphScheduler:
                 RuntimeError(node.error),
             ):
                 continue
-            fingerprint = node.dispatch_fingerprint or node.node_id
+            fingerprint = self._ledger_fingerprint(node)
             ledger_key = (project_id, node.node_id, fingerprint)
             if not self._transient_budget_available(ledger_key):
                 continue
@@ -626,9 +651,13 @@ class WorkGraphScheduler:
         """
 
         for node in candidates:
-            if (project_id, node.node_id) in self._deterministic_failure_nodes:
+            fingerprint = self._ledger_fingerprint(node)
+            if (
+                project_id,
+                node.node_id,
+                fingerprint,
+            ) in self._deterministic_failure_nodes:
                 continue
-            fingerprint = node.dispatch_fingerprint or node.node_id
             ledger_key = (project_id, node.node_id, fingerprint)
             if ledger_key not in self._dispatched or node.node_id in inflight:
                 continue
@@ -657,7 +686,7 @@ class WorkGraphScheduler:
         try:
             await self.dispatch_node(project_id, node, fingerprint)
             self._deterministic_failure_nodes.pop(
-                (project_id, node.node_id),
+                (project_id, node.node_id, fingerprint),
                 None,
             )
         except Exception as exc:  # pylint: disable=broad-except
@@ -696,7 +725,7 @@ class WorkGraphScheduler:
                 error_code = getattr(exc, "code", None)
                 if error_code in _DETERMINISTIC_ERROR_CODES:
                     self._deterministic_failure_nodes[
-                        (project_id, node.node_id)
+                        (project_id, node.node_id, fingerprint)
                     ] = str(exc)[:200]
                 logger.warning(
                     "work-graph dispatch failed project=%s node=%s: %s",
@@ -720,7 +749,8 @@ class WorkGraphScheduler:
         if node.command is None or node.target_ref is None:
             raise ValueError(f"node {node.node_id} is not dispatchable")
         idempotency_key = (
-            f"dag-{node.node_id}-{fingerprint or node.dispatch_fingerprint}"
+            f"dag-{node.node_id}-"
+            f"{fingerprint or self._ledger_fingerprint(node)}"
         )
         if node.command in _COMPOSE_COMMANDS:
             # A failed master render is retried without content changes
@@ -730,7 +760,7 @@ class WorkGraphScheduler:
             ledger_key = (
                 project_id,
                 node.node_id,
-                fingerprint or node.dispatch_fingerprint or node.node_id,
+                fingerprint or self._ledger_fingerprint(node),
             )
             generation = self._transient_retries.get(ledger_key, 0)
             if generation:

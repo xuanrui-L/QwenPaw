@@ -69,7 +69,7 @@ from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.session_store import (
     ProjectRuntimeBootstrap,
     RuntimeSessionNotFound,
-    SessionStoreIntegrityError,
+    SessionStoreError,
 )
 from services.storage_root import require_creator_data_root
 from services.project_files.serialization import load_project_json
@@ -306,11 +306,13 @@ async def list_projects(
                 session_status: str | None = session.status.value
             except RuntimeSessionNotFound:
                 session_status = None
-            except SessionStoreIntegrityError as exc:
-                # A single Project with a corrupt Session record must degrade
-                # to a null status instead of failing the whole listing.
+            except SessionStoreError as exc:
+                # One project's corrupt session record (field run
+                # 2026-08-25: a session claiming another project) must not
+                # take the whole listing down; surface the project without
+                # a status and leave the repair to its own detail view.
                 logger.warning(
-                    "Skipping corrupt Session for Project %s: %s",
+                    "project list: session snapshot failed for %s: %s",
                     item.project_id,
                     exc,
                 )

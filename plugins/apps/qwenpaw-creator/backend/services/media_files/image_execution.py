@@ -949,12 +949,13 @@ def _resolve_request(
         ]
         model_label = image_model_name.strip() or "当前图片模型"
         raise ImageReferenceBudgetError(
-            "IMAGE_REFERENCE_BUDGET_EXCEEDED: 执行层解析 Project 自动引用与"
-            f"本次显式引用后，共得到 {len(urls)} 张参考图，但模型 "
-            f"{model_label} 单次最多接受 {reference_limit} 张。执行层没有静默"
-            "截断，也没有调用 provider。请先 read_project，删除不必要的 Project "
-            "引用字段或缩减 referenceVersionIds/referenceImageUrls，再用已变更的"
-            "参数重试。",
+            f"IMAGE_REFERENCE_BUDGET_EXCEEDED: 本次解析后共 {len(urls)} 张"
+            f"参考图，但模型 {model_label} 单次最多接受 {reference_limit} 张。"
+            "执行层没有静默截断，也没有调用 provider。参考图由你显式指定时"
+            "（referenceVersionIds / storyboard_reference_version_ids），"
+            "请直接把显式列表缩减到上限内（多角色同框优先保留阵容图）；"
+            "未显式指定时是自动引用链超限，请显式写一份不超过上限的参考"
+            "列表，或精简 Element 的引用字段后重试。",
             details={
                 "modelName": model_label,
                 "limit": reference_limit,

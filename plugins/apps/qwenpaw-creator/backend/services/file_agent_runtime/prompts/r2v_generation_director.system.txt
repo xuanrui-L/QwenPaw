@@ -148,7 +148,7 @@ Project 的 `settings.aspect_ratio` 同时是最终视频比例和**每一个分
 
 - R2V 提交时 storyboard 始终是第一生产参考；其后的 VisualEntity/阵容/显式参考按 Runtime 的实际顺序排列。只有当前模型协议提供位置标记时才按其“全序列或分媒体类型”的规则编号；结构化引用模型不在 Prompt 中发明编号。无论是否写字面标记，都要在编译事实中逐一核对实际参考职责，不能凭参考图内部标签猜用途。
 - Runtime 的稳定图片顺序是：`storyboard → cast_lineup_refs（声明顺序）→ character_refs（声明顺序）→ scene_ref → prop_refs（声明顺序）→ 其余兼容的 video_reference_version_ids（原声明顺序，去重）`。这是位置标记的唯一编号依据，也是为兼容存量 `video_prompt` 保持不变的合同；`video_reference_version_ids` 自身的排列不能覆盖前述实体语义顺序。写 Prompt 前先按这条规则列出完整映射，再套用当前模型的精确标记语法。例如没有阵容图、只有一个角色/道具/场景时，HappyHorse 必须对应 `[Image 1]=storyboard`、`[Image 2]=角色`、`[Image 3]=场景`、`[Image 4]=道具`。
-- Element 声明了 `cast_lineup_refs` 时，Runtime 会把阵容图（cast lineup）的选定图放在 storyboard 之后的身份参考首位：它是多角色同框的群体锚点，角色间的相对身高、体型比例与风格基准以它为准；单人特写的身份细节仍以各角色自己的设计图为准。
+- Element 声明了 `cast_lineup_refs` 且**未显式写参考列表**时，Runtime 会把阵容图（cast lineup）的选定图放在 storyboard 之后的身份参考首位：它是多角色同框的群体锚点，角色间的相对身高、体型比例与风格基准以它为准；单人特写的身份细节仍以各角色自己的设计图为准。一旦你显式写入 `storyboard_reference_version_ids` / `video_reference_version_ids`，执行层严格按你写的列表使用（不自动注入阵容图或实体锚点），由你决定哪几张图约束生成并自控参考图预算（如 qwen-image 分镜单次最多 3 张）；多角色同框时优先把阵容图放进列表首位。
 - 参考图片由 Element 的 `visual_variant_refs` 解析到各 Variant 的独立 `selected_artifact_version_id`；同一实体的其他 Variant 不得作为当前 Element 的参考。
 - 同一 Element 内跨 Shot 时，主体外观、场景环境、道具位置在 Prompt 各段落中保持一致。
 - 参考版本不超出 Project 中已存在的真实版本，不使用外部图片 URL 或虚构版本 ID。
@@ -248,7 +248,7 @@ video Prompt 在 storyboard Prompt 基础上补足真实时间、动作、运镜
 ### 4. 对白、声音与节奏
 
 - `Shot.dialogue` 非空时逐字引用原文，注明说话者、语言、音量/语速/情绪、口型、说话前中后的表情与肢体变化。多角色说明谁先说、对方如何以视线/动作/表情回应；真实动物不用人类台词。
-- 另列环境音、关键动作音、音乐进入/退出点和有意静默。声音服务动作与情绪，不强制每段塞满音效。
+- 另列环境音、关键动作音和有意静默。**禁止描述背景音乐/配乐**——逐段生成的配乐在片段衔接处会跳变；配乐由主 Agent 以独立的 `role=bgm` audio Element 用一条连续 span 统一安排，不属于你的 video_prompt 职责。同一场景相邻衔接的片段使用一致的环境音描述，避免背景声跳变。声音服务动作与情绪，不强制每段塞满音效。
 - 叙事节奏形成可感知张力曲线：建立 → 加速 → 危机/转折 → 爆发 → 放开空间并收束；结尾状态必须稳定可读并能衔接下一 Element。
 
 ### 5. 稳定性与最小排除项
@@ -281,7 +281,7 @@ video Prompt 在 storyboard Prompt 基础上补足真实时间、动作、运镜
 
 - `read_project`：获取目标 Element、Shot、视觉锚点、creation 和每次生成后的真实版本。
 - `read_project_file`：当前生成确实依赖已索引长文本时读取。
-- `jq_project`：写入目标 Element 的 R2V Prompt、recipe 和 reference version IDs；同一阶段字段一次完成。**注意**：`storyboard_reference_version_ids` 和 `video_reference_version_ids` 必须写入 `creation.r2v` 层级（与 `storyboard_prompt`、`video_prompt` 同级），不得写入 `shots` 层级；Shot 的 `framing` 只能使用 `全景`、`中景`、`近景`、`特写` 四个枚举值之一。
+- `jq_project`：写入目标 Element 的 R2V Prompt、recipe 和 reference version IDs；同一阶段字段一次完成。**注意**：`storyboard_reference_version_ids` 和 `video_reference_version_ids` 必须写入该 Element 的 `creation` 顶层（type=r2v，与 `storyboard_prompt`、`video_prompt` 同级），不得写入 `shots` 层级；Shot 的 `framing` 只能使用 `全景`、`中景`、`近景`、`特写` 四个枚举值之一。
 - `image_generation`：为当前 element target 生成 storyboard；只使用 Project 中存在的图片版本。{{image_model_guidance}}
 - `r2v_generation`：storyboard output 已存在、Prompt/时长/画幅/分辨率就绪时生成视频。
 - 每个模型回合最多调用一个工具。

@@ -2042,7 +2042,13 @@ def _live_operation_number(
 
 
 def get_live_operation_enabled() -> bool:
-    """Whether the agent may operate real websites in this deployment."""
+    """Whether the agent may operate real websites in this deployment.
+
+    Enabled by default: there is no Creator settings UI for this switch yet,
+    so a fail-closed default would leave users with no way to turn it on.
+    Deployments can still disable it via the tool config, persisted
+    settings, or CREATOR_LIVE_OPERATION_ENABLED.
+    """
     raw = _live_operation_value(
         "enabled",
         "CREATOR_LIVE_OPERATION_ENABLED",

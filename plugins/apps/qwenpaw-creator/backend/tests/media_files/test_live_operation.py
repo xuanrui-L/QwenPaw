@@ -879,6 +879,80 @@ def test_model_code_bounds_range_before_it_can_block_the_event_loop():
     )
 
 
+@pytest.mark.parametrize(
+    ("code", "message"),
+    (
+        ("x = 2 ** 30", "power and left-shift"),
+        ("payload = [0] * 1000", "sequence repetition"),
+        ('x = "a"\nx *= 1000', "augmented multiplication"),
+        ("n = 1_000_000_000", "numeric constants are limited"),
+        (
+            "for i in range(10):\n"
+            "    for j in range(10):\n"
+            "        for k in range(10):\n"
+            "            v = i\n",
+            "nest deeper",
+        ),
+        (
+            "try:\n    v = 1\nexcept:\n    pass\n",
+            "bare except",
+        ),
+    ),
+)
+def test_model_code_rejects_memory_and_cpu_amplifiers(
+    code: str,
+    message: str,
+):
+    """Single statements must not allocate unbounded memory or nest loops
+    beyond what the execution deadline can bound."""
+    with pytest.raises(LiveOperationError, match=message):
+        _compile(code)
+
+
+def test_oversized_literals_and_huge_programs_are_rejected():
+    elements = ", ".join("0" for _ in range(501))
+    with pytest.raises(LiveOperationError, match="container literals"):
+        _compile(f"payload = [{elements}]")
+    with pytest.raises(LiveOperationError, match="string constants"):
+        _compile(f's = "{"a" * 10_001}"')
+    huge_program = "\n".join(f"v{i} = {i % 9}" for i in range(1_001))
+    with pytest.raises(LiveOperationError, match="syntax nodes"):
+        _compile(huge_program)
+
+
+def test_synchronous_loops_are_preempted_at_the_deadline():
+    """asyncio.wait_for cannot interrupt synchronous Python; the line-level
+    deadline must pre-empt model code that never yields, and the model's own
+    exception handlers must not be able to swallow the pre-emption."""
+    import time as _time
+
+    from services.media_files.live_operation.bridge import _execute
+
+    code = (
+        "for i in range(1000):\n"
+        "    try:\n"
+        "        for j in range(1000):\n"
+        "            values = sorted(range(1000))\n"
+        "    except Exception:\n"
+        "        pass\n"
+    )
+    started = _time.monotonic()
+    with pytest.raises(LiveOperationError, match="pre-empted"):
+        asyncio.run(_execute(_compile(code), {}, deadline_seconds=0.2))
+    assert _time.monotonic() - started < 5.0
+
+    # Well-behaved code runs to completion under the same machinery.
+    namespace: dict = {}
+    asyncio.run(
+        _execute(
+            _compile("result = sum(range(100))"),
+            namespace,
+            deadline_seconds=30.0,
+        ),
+    )
+    assert namespace["result"] == sum(range(100))
+
+
 def test_model_print_is_captured_without_process_global_stdout():
     import io
 

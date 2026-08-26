@@ -15,6 +15,8 @@ the VLM pass follows the vendored scene-review checks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import json
 import re
 from datetime import UTC, datetime
@@ -409,12 +411,33 @@ def parse_media_report(
     )
 
 
+async def _to_thread_or_join(fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Run ``fn`` in a worker thread; cancellation waits for a live worker.
+
+    ``asyncio.to_thread`` detaches on cancellation: the awaiting task stops
+    but the thread keeps decoding media or writing frames. A running thread
+    cannot be interrupted, so the honest contract is to join it — the caller
+    only regains control (and releases claims or frame directories) once the
+    worker has actually finished.
+    """
+    loop = asyncio.get_running_loop()
+    inner = loop.run_in_executor(None, functools.partial(fn, *args, **kwargs))
+    try:
+        return await asyncio.shield(inner)
+    except asyncio.CancelledError:
+        with contextlib.suppress(BaseException):
+            await inner
+        raise
+
+
 async def _gather_or_cancel(*awaitables: Any) -> list[Any]:
-    """gather() that cancels the remaining legs when one raises.
+    """gather() that stops the remaining legs when one raises.
 
     Plain ``asyncio.gather`` leaves siblings running after the first
-    failure; here those siblings are ffmpeg passes and a paid ASR call,
-    so they are cancelled before the error propagates.
+    failure. Async legs (for example a paid ASR call) are cancelled;
+    thread legs submitted via :func:`_to_thread_or_join` cannot be
+    interrupted and are joined instead, so no decode/ffmpeg worker is
+    still running when the error propagates to the caller.
     """
     tasks = [asyncio.ensure_future(item) for item in awaitables]
     try:
@@ -447,13 +470,13 @@ async def _video_objective_facts(
         if is_operator_enabled("av_sync"):
             multi_shot = len(shots) >= 2
             if not multi_shot:
-                predecoded_gray_samples, multi_shot = await asyncio.to_thread(
+                predecoded_gray_samples, multi_shot = await _to_thread_or_join(
                     _gray_samples_and_has_cuts,
                     media_path,
                 )
             if multi_shot:
                 transcript = await transcript_sentences(media_path)
-        return await asyncio.to_thread(
+        return await _to_thread_or_join(
             collect_video_facts,
             media_path,
             expected_duration_seconds=planned_duration or None,
@@ -493,7 +516,7 @@ async def _image_objective_facts(
 ) -> dict[str, Any] | None:
     """Tier-0 objective facts for one still image (fail-open)."""
     try:
-        return await asyncio.to_thread(collect_image_facts, media_path)
+        return await _to_thread_or_join(collect_image_facts, media_path)
     except Exception:  # noqa: BLE001 - facts are advisory-only
         logger.exception("image objective facts failed")
         return None
@@ -657,13 +680,15 @@ async def review_media_artifact(
     if kind == "element_video":
         # Gates, frame stats, evidence frames and the objective facts are
         # four independent passes over the same file; the focused frames
-        # below are the only step that needs their results. A failing
-        # leg cancels the rest so a paid ASR call cannot outlive the
-        # round it was started for.
+        # below are the only step that needs their results. A failing leg
+        # cancels the async facts pass (so a paid ASR call cannot outlive
+        # the round) and joins the decode threads before the error
+        # propagates, so no worker still reads this media or writes
+        # frames_dir after this call returns.
         block, sampled, frames, objective_facts = await _gather_or_cancel(
-            asyncio.to_thread(review_gates.run_review_gates, media_path),
-            asyncio.to_thread(frame_stats.sample_stats, media_path),
-            asyncio.to_thread(
+            _to_thread_or_join(review_gates.run_review_gates, media_path),
+            _to_thread_or_join(frame_stats.sample_stats, media_path),
+            _to_thread_or_join(
                 extract_review_frames,
                 media_path,
                 max_frames=_VIDEO_REVIEW_FRAMES,
@@ -741,7 +766,7 @@ async def review_media_artifact(
         ]
     else:
         sampled, objective_facts = await _gather_or_cancel(
-            asyncio.to_thread(frame_stats.image_stats, media_path),
+            _to_thread_or_join(frame_stats.image_stats, media_path),
             _image_objective_facts(media_path),
         )
         stats = {**sampled, "judgment": frame_stats.judge_stats(sampled)}

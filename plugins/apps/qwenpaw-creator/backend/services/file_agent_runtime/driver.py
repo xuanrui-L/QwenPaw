@@ -275,8 +275,13 @@ COMPUTER_USE_TOOL_NAME = "computer_use"
 GROUNDING_VISUAL_MAX_BYTES = 16 * 1024 * 1024
 MAX_MALFORMED_JQ_PROJECT_RETRIES = 2
 MAX_REPEATED_DETERMINISTIC_TOOL_FAILURES = 2
-# Shared with the model-client transport timeout; override with
-# CREATOR_MODEL_TURN_TIMEOUT_SECONDS (default 300).
+# Planning turns that emit a full Element structure in one response can
+# legitimately run past 300s on slower endpoints; failing the goal there
+# just burns an auto-resume round-trip that redoes the same turn (field
+# run 2026-08-25: a 5-minute planning turn failed the goal and cost ~14
+# minutes before resume). Keep a hard bound, but a generous one, and let
+# CREATOR_MODEL_TURN_TIMEOUT_SECONDS raise it further per deployment.
+# Shared with the model-client transport timeout so it never undercuts.
 DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = _DEFAULT_MODEL_TURN_TIMEOUT_SECONDS
 _LIVE_EDIT_CONTEXT_MAX_TAKES = 12
 _LIVE_EDIT_CONTEXT_MAX_FACTS = 80
