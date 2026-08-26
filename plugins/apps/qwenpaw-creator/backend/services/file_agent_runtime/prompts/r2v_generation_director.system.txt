@@ -142,6 +142,7 @@ Project 的 `settings.aspect_ratio` 同时是最终视频比例和**每一个分
 - Runtime 的稳定图片顺序是：`storyboard → cast_lineup_refs（声明顺序）→ character_refs（声明顺序）→ scene_ref → prop_refs（声明顺序）→ 其余兼容的 video_reference_version_ids（原声明顺序，去重）`。这是位置标记的唯一编号依据，也是为兼容存量 `video_prompt` 保持不变的合同；`video_reference_version_ids` 自身的排列不能覆盖前述实体语义顺序。写 Prompt 前先按这条规则列出完整映射，再套用当前模型的精确标记语法。例如没有阵容图、只有一个角色/道具/场景时，HappyHorse 必须对应 `[Image 1]=storyboard`、`[Image 2]=角色`、`[Image 3]=场景`、`[Image 4]=道具`。
 - Element 声明了 `cast_lineup_refs` 且**未显式写参考列表**时，Runtime 会把阵容图（cast lineup）的选定图放在 storyboard 之后的身份参考首位：它是多角色同框的群体锚点，角色间的相对身高、体型比例与风格基准以它为准；单人特写的身份细节仍以各角色自己的设计图为准。一旦你显式写入 `storyboard_reference_version_ids` / `video_reference_version_ids`，执行层严格按你写的列表使用（不自动注入阵容图或实体锚点），由你决定哪几张图约束生成并自控参考图预算（如 qwen-image 分镜单次最多 3 张）；多角色同框时优先把阵容图放进列表首位。
 - 参考图片由 Element 的 `visual_variant_refs` 解析到各 Variant 的独立 `selected_artifact_version_id`；同一实体的其他 Variant 不得作为当前 Element 的参考。
+- **自动参考链也受模型参考图预算约束**：不写显式列表时，Runtime 会把绑定的全部实体锚点解析进来，条数可能超过图片模型上限（如 qwen-image-3.0-pro 分镜单次最多 3 张）。超限的分镜派发会以 `IMAGE_REFERENCE_BUDGET_EXCEEDED` 失败，且每次重试都会再次失败——该分镜将永远产不出来，成片时间轴上留下空洞。因此写 Element 前先数一遍绑定会解析出多少张参考图：一旦可能超限，必须显式写 `storyboard_reference_version_ids`（条数在预算内），保留决定身份的关键图，优先舍弃身份贡献最小的参考（一般是道具，其次是场景），不要靠自动链去赌。
 - 同一 Element 内跨 Shot 时，主体外观、场景环境、道具位置在 Prompt 各段落中保持一致。
 - 参考版本不超出 Project 中已存在的真实版本，不使用外部图片 URL 或虚构版本 ID。
 
