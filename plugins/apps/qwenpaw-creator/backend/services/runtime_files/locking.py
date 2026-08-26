@@ -9,6 +9,7 @@ one process still has the old inode open.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import json
 import logging
@@ -266,21 +267,48 @@ class CrossProcessFileLock:
             )
 
     def acquire(self) -> CrossProcessFileLock:
+        """Acquire and hold on the calling thread."""
+
+        return self._acquire(track_thread_owner=True)
+
+    async def acquire_in_thread(self) -> CrossProcessFileLock:
+        """Acquire off the event loop, then hold it across awaits.
+
+        The pooled worker that runs the blocking acquire returns to the
+        executor as soon as this call finishes, while the lock stays held
+        until the owning coroutine releases it. Thread identity therefore
+        says nothing about ownership here, so the same-thread nesting guard
+        is deliberately skipped: keeping it would reject the next unrelated
+        ``to_thread`` call that the executor happens to schedule onto that
+        same worker.
+        """
+
+        return await asyncio.to_thread(
+            self._acquire,
+            track_thread_owner=False,
+        )
+
+    def _acquire(self, *, track_thread_owner: bool) -> CrossProcessFileLock:
         if self._descriptor is not None:
             raise RuntimeFileValidationError(
                 f"lock is not re-entrant: {self.path}",
             )
-        held_key = (self._identity, threading.get_ident())
-        with _HELD_LOCKS_GUARD:
-            held = _HELD_LOCKS.get(held_key)
-            if held is not None:
-                message = (
-                    "same-thread nested Runtime lock acquisition "
-                    + "would deadlock: "
-                )
-                raise RuntimeFileValidationError(
-                    f"{message}path={self.path} held={held!r}",
-                )
+        held_key = (
+            (self._identity, threading.get_ident())
+            if track_thread_owner
+            else None
+        )
+        if held_key is not None:
+            with _HELD_LOCKS_GUARD:
+                held = _HELD_LOCKS.get(held_key)
+                if held is not None:
+                    message = (
+                        "same-thread nested Runtime lock acquisition "
+                        + "would deadlock: "
+                    )
+                    raise RuntimeFileValidationError(
+                        f"{message}path={self.path} held={held!r}",
+                    )
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         flags = os.O_CREAT | os.O_RDWR
@@ -370,8 +398,9 @@ class CrossProcessFileLock:
                     self._descriptor = descriptor
                     self._owner = owner
                     self._held_key = held_key
-                    with _HELD_LOCKS_GUARD:
-                        _HELD_LOCKS[held_key] = owner
+                    if held_key is not None:
+                        with _HELD_LOCKS_GUARD:
+                            _HELD_LOCKS[held_key] = owner
                     self._log_acquired(time.monotonic() - started)
                     return self
                 except OSError as exc:

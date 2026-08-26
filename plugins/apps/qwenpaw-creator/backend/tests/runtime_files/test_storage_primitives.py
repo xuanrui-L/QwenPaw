@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import asyncio
+import concurrent.futures
 import errno
 import multiprocessing
 import os
@@ -281,6 +283,45 @@ def test_same_thread_nested_lock_fails_immediately_with_owner_details(
         ):
             with CrossProcessFileLock(path):
                 pass
+
+
+def test_lock_held_across_awaits_does_not_fault_its_recycled_worker(tmp_path):
+    """Field run 2026-08-26: a lifecycle lock taken with
+    ``to_thread(lock.acquire)`` stayed held while its pooled worker went
+    back to the executor. The next unrelated ``to_thread`` call that landed
+    on that same worker was rejected as a same-thread nested acquisition and
+    killed the r2v run. Ownership belongs to the awaiting coroutine here, not
+    to whichever worker happened to run the blocking acquire, so the second
+    attempt must report real contention instead.
+    """
+
+    path = tmp_path / "cross-await.lock"
+
+    async def scenario() -> BaseException:
+        loop = asyncio.get_running_loop()
+        # One worker makes "recycled onto the same thread" deterministic.
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        try:
+            holder = CrossProcessFileLock(path)
+            await holder.acquire_in_thread()
+            try:
+
+                def contend() -> None:
+                    with CrossProcessFileLock(path, timeout_seconds=0.2):
+                        pass
+
+                with pytest.raises(BaseException) as caught:
+                    await asyncio.to_thread(contend)
+                return caught.value
+            finally:
+                holder.release()
+        finally:
+            executor.shutdown(wait=True)
+
+    error = asyncio.run(scenario())
+    assert isinstance(error, LockTimeoutError)
+    assert "same-thread nested" not in str(error)
 
 
 def test_cross_thread_release_clears_the_acquiring_threads_owner(tmp_path):

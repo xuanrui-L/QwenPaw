@@ -439,7 +439,7 @@ async def _acquire_existing_project_lifecycle(
     """
 
     lifecycle_lock = services.projects.lifecycle_lock(project_id)
-    await asyncio.to_thread(lifecycle_lock.acquire)
+    await lifecycle_lock.acquire_in_thread()
     try:
         await _require_existing_project(services, project_id)
     except BaseException:
@@ -651,7 +651,7 @@ async def patch_project(
     )
     lifecycle_lock = services.projects.lifecycle_lock(project_id)
     try:
-        await asyncio.to_thread(lifecycle_lock.acquire)
+        await lifecycle_lock.acquire_in_thread()
         # Close the read/delete window before any idempotency or operation lock
         # is allowed to materialize a path below the Project directory.
         await _require_existing_project(services, project_id)
@@ -679,7 +679,7 @@ async def patch_project(
         idempotency_key=key,
     )
     try:
-        await asyncio.to_thread(operation_lock.acquire)
+        await operation_lock.acquire_in_thread()
     except Exception as exc:
         lifecycle_lock.release()
         _translate_storage_error(exc)
@@ -1036,7 +1036,7 @@ async def decide_project_review(
         idempotency_key=key,
     )
     try:
-        await asyncio.to_thread(operation_lock.acquire)
+        await operation_lock.acquire_in_thread()
     except Exception as exc:
         lifecycle_lock.release()
         _translate_storage_error(exc)
