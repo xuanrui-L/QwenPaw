@@ -36,7 +36,9 @@ logger = logging.getLogger("qwenpaw.creator.runtime_files.locking")
 # longer hides a leaked/nested lock instead of fixing it, so ten seconds stays
 # a deadlock fuse.  Readers never take locks, so contention is limited to the
 # rare write/write overlap within one Project domain.
-DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
+DEFAULT_LOCK_TIMEOUT_SECONDS = float(
+    os.environ.get("CREATOR_LOCK_TIMEOUT_SECONDS", "10.0"),
+)
 
 _SHARED_HOLDER_REPORT_LIMIT = 20
 
