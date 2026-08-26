@@ -10,6 +10,7 @@ coverage and provider-specific storyboard reference syntax.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import math
 import re
 from typing import Any
 
@@ -65,10 +66,22 @@ def _touches_element(
 
 
 def _declares_panel_count(prompt: str, count: int) -> bool:
-    patterns = (
-        rf"(?<!\d){count}\s*(?:个\s*)?(?:分镜格|分镜面板|故事板面板|面板)",
-        rf"(?<!\d){count}\s*[- ]?\s*panels?\b",
-        rf"\bpanels?\s*[:=]?\s*{count}(?!\d)",
+    """Accept the shot count or the square-padded cell count.
+
+    The runtime pads the grid to the next perfect square, so a six-shot sheet
+    is a 3x3 of nine cells with three left blank. Both "6 panels" and
+    "9 panels" describe that sheet honestly.
+    """
+
+    side = math.ceil(math.sqrt(count)) if count > 1 else 1
+    patterns = tuple(
+        pattern
+        for value in {count, side * side}
+        for pattern in (
+            rf"(?<!\d){value}\s*(?:个\s*)?(?:宫格|分镜格|分镜面板|故事板面板|面板)",
+            rf"(?<!\d){value}\s*[- ]?\s*panels?\b",
+            rf"\bpanels?\s*[:=]?\s*{value}(?!\d)",
+        )
     )
     return any(
         re.search(pattern, prompt, re.IGNORECASE) for pattern in patterns
