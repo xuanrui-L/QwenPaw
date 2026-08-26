@@ -572,3 +572,62 @@ def test_content_refusal_error_carries_advice_not_a_config_hint() -> None:
     assert "deterministic" in CONTENT_REFUSAL_ADVICE
     assert "Rewrite the prompt" in CONTENT_REFUSAL_ADVICE
     assert "configuration" in CONTENT_REFUSAL_ADVICE  # says it is *not* one
+
+
+def test_over_budget_automatic_chain_truncates_instead_of_stalling(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Field runs 2026-08-26: seven Elements across two projects resolved more
+    automatic references than the model accepts. Every dispatch failed the
+    budget check identically, so those storyboards never rendered and the
+    finished timelines kept holes. Nobody wrote those lists, so keeping the
+    highest-priority references beats stalling the node forever.
+    """
+    snapshot = _snapshot(
+        variants={
+            "items": {
+                "var:budget": {
+                    "variant_id": "var:budget",
+                    "prompt": "budget test",
+                },
+            },
+            "order": ["var:budget"],
+        },
+    )
+    # Five automatic references against a three-reference model.
+    budget_snapshot = _with_remote_variant_refs(snapshot, "var:budget", 5)
+    monkeypatch.setattr(
+        image_execution,
+        "_validate_public_remote_url",
+        lambda value: value,
+    )
+
+    resolved = _resolve_request(
+        snapshot=budget_snapshot,
+        project_root=Path(tmp_path),
+        command=CreatorCommandType.GENERATE_ASSET,
+        target_ref="asset:char:haaland",
+        arguments={"variantId": "var:budget"},
+        image_model_name="qwen-image-3.0",
+        max_reference_images=3,
+    )
+    assert len(resolved.reference_version_ids) == 3
+    # Priority order is preserved: the dropped tail is the least
+    # identity-critical, never an arbitrary subset.
+    assert list(resolved.reference_version_ids) == ["ref-1", "ref-2", "ref-3"]
+
+    # An explicit list stays a hard error: the author named those images.
+    with pytest.raises(ImageReferenceBudgetError):
+        _resolve_request(
+            snapshot=budget_snapshot,
+            project_root=Path(tmp_path),
+            command=CreatorCommandType.GENERATE_ASSET,
+            target_ref="asset:char:haaland",
+            arguments={
+                "variantId": "var:budget",
+                "referenceImageUrls": ["https://images.example/explicit.png"],
+            },
+            image_model_name="qwen-image-3.0",
+            max_reference_images=3,
+        )

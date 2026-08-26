@@ -928,6 +928,38 @@ def _resolve_request(
                 "knownModelRequired": True,
             },
         )
+    if (
+        reference_limit is not None
+        and len(urls) > reference_limit
+        and mode != "translate"
+        and not explicit_version_ids
+        and not explicit_urls
+    ):
+        # Nobody wrote this list: the runtime assembled it from the Element's
+        # entity bindings, so there is no author intent to preserve and
+        # failing would leave the node dispatchable-but-always-failing. The
+        # resolved order leads with the storyboard and character anchors, so
+        # the tail dropped here is the least identity-critical (props, then
+        # scene). Loud, recorded, and deterministic — not a silent truncation.
+        dropped_version_ids = list(active_version_ids[reference_limit:])
+        active_version_ids = tuple(active_version_ids[:reference_limit])
+        local_urls, checksums, read_set = _resolve_version_references(
+            project=project,
+            project_root=project_root,
+            version_ids=active_version_ids,
+        )
+        urls = tuple(dict.fromkeys(local_urls))
+        logger.warning(
+            "automatic reference chain exceeded the model budget; kept the "
+            "highest-priority %d of %d for %s and dropped %s",
+            reference_limit,
+            reference_limit + len(dropped_version_ids),
+            str(target_ref).replace("\r", "\\r").replace("\n", "\\n"),
+            [
+                str(item).replace("\r", "\\r").replace("\n", "\\n")
+                for item in dropped_version_ids
+            ],
+        )
     if reference_limit is not None and len(urls) > reference_limit:
         explicit_id_set = frozenset(explicit_version_ids)
         automatic_ids = [
@@ -940,11 +972,11 @@ def _resolve_request(
         raise ImageReferenceBudgetError(
             f"IMAGE_REFERENCE_BUDGET_EXCEEDED: 本次解析后共 {len(urls)} 张"
             f"参考图，但模型 {model_label} 单次最多接受 {reference_limit} 张。"
-            "执行层没有静默截断，也没有调用 provider。参考图由你显式指定时"
-            "（referenceVersionIds / storyboard_reference_version_ids），"
-            "请直接把显式列表缩减到上限内（多角色同框优先保留阵容图）；"
-            "未显式指定时是自动引用链超限，请显式写一份不超过上限的参考"
-            "列表，或精简 Element 的引用字段后重试。",
+            "这是你显式指定的参考列表（referenceVersionIds / "
+            "storyboard_reference_version_ids），执行层不会替你截断，也没有"
+            "调用 provider：请直接把显式列表缩减到上限内（多角色同框优先"
+            "保留阵容图）。自动引用链超限不会走到这里——那种情况执行层会按"
+            "优先级保留上限内的参考并记录被丢弃的版本。",
             details={
                 "modelName": model_label,
                 "limit": reference_limit,
