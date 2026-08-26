@@ -1746,6 +1746,7 @@
     "expandRoughCut": "Expand strip",
     "collapseRoughCut": "Collapse strip",
     "playRoughCut": "Play rough cut",
+    "playFullFilm": "Play full film",
     "closeRoughCutPlayer": "Close player",
     "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
     "finalCutBadge": "Final cut",
@@ -1787,7 +1788,9 @@
       "elementStoryboard": "Storyboard ready",
       "elementPending": "To generate",
       "renderReady": "Final cut composed",
-      "renderPending": "Waiting for all shots"
+      "renderPending": "Waiting for all shots",
+      "voiceReady": "Voice enrolled (voice-over role)",
+      "impliedByFinal": "Completed with the final cut"
     },
     "scriptTitle": "Script",
     "legacyScriptCard": "Creative brief & shot table (read-only mapping)",

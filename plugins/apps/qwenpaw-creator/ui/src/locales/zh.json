@@ -1746,6 +1746,7 @@
     "expandRoughCut": "展开预览带",
     "collapseRoughCut": "收起预览带",
     "playRoughCut": "播放粗剪",
+    "playFullFilm": "播放整个成片",
     "closeRoughCutPlayer": "关闭播放",
     "roughCutFailed": "粗剪拼接失败：该时间线还没有可用的镜头素材",
     "finalCutBadge": "成片",
@@ -1787,7 +1788,9 @@
       "elementStoryboard": "分镜就绪",
       "elementPending": "待生成",
       "renderReady": "成片已合成",
-      "renderPending": "等待全部镜头就绪"
+      "renderPending": "等待全部镜头就绪",
+      "voiceReady": "音色已建立（画外音角色）",
+      "impliedByFinal": "已随成片完成"
     },
     "scriptTitle": "剧本",
     "legacyScriptCard": "创作总纲与镜头表（只读映射）",
