@@ -788,3 +788,37 @@ def test_deterministic_failure_unlocks_when_media_model_changes(
         await scheduler.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_idle_exit_confirms_the_graph_is_drained_first(tmp_path, monkeypatch):
+    """Field run 2026-08-26: three storyboards reached READY after the agent
+    turn ended. wake() only fires from agent turns and media review, so the
+    project loop idled out and returned with that work undispatched; 43% of
+    the timeline then had no media and the live preview stayed black there.
+    The idle exit must confirm the graph is drained before giving up.
+    """
+
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    dispatch = _RecordingDispatch()
+    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
+    monkeypatch.setattr(work_scheduler, "_IDLE_EXIT_SECONDS", 0.05)
+
+    async def scenario():
+        # Start the loop without ever setting the wake event, so the only
+        # path to dispatch is the idle-timeout drain check.
+        loop_task = asyncio.create_task(scheduler._project_loop(PROJECT_ID))
+        for _ in range(60):
+            await asyncio.sleep(0.05)
+            if dispatch.calls:
+                break
+        loop_task.cancel()
+        try:
+            await loop_task
+        except asyncio.CancelledError:
+            pass
+        await _drain()
+
+    asyncio.run(scenario())
+
+    assert dispatch.calls, "idle exit abandoned a READY node instead of dispatching it"

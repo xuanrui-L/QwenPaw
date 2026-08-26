@@ -335,6 +335,21 @@ class WorkGraphScheduler:
                 async with asyncio.timeout(_IDLE_EXIT_SECONDS):
                     await event.wait()
             except TimeoutError:
+                if self._inflight.get(project_id):
+                    continue
+                # A node can reach READY without a wake arriving here: a gate
+                # clears, or a commit's wake was already consumed by an
+                # earlier tick. wake() is only called from agent turns and
+                # media review, so returning now would strand that node for
+                # good and leave a permanent hole in the rendered timeline.
+                # Confirm the graph is really drained before giving up.
+                try:
+                    await self.tick(project_id)
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception(
+                        "work-graph drain check failed for %s",
+                        project_id,
+                    )
                 if not self._inflight.get(project_id):
                     return
                 continue
