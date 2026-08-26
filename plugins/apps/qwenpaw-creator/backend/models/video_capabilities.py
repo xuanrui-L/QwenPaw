@@ -1417,6 +1417,32 @@ def video_prompt_image_reference_markers(
     )
 
 
+def video_prompt_image_reference_marker(
+    index: int,
+    model_name: str,
+    protocol_backend: str = "",
+    *,
+    language: str = "zh-CN",
+) -> str | None:
+    """Return the provider's exact marker literal for one image index.
+
+    ``None`` means the configured model takes structured references, where
+    inventing an inline number would misdescribe the actual payload. Every
+    literal in the dispatch table is the index-1 form and contains exactly
+    one ``1``, so substituting the index yields that provider's grammar.
+    """
+
+    spec = _image_reference_marker_spec(
+        model_name,
+        protocol_backend,
+        language=language,
+    )
+    if spec is None:
+        return None
+    _pattern, literal = spec
+    return literal.replace("1", str(index))
+
+
 # Provider syntax is deliberately kept in one auditable dispatch table.
 # pylint: disable-next=too-many-branches
 def video_prompt_storyboard_reference_violation(
@@ -1721,6 +1747,7 @@ __all__ = [
     "video_model_duration_guidance",
     "video_model_prompt_guidance",
     "video_model_supported_modes",
+    "video_prompt_image_reference_marker",
     "video_prompt_image_reference_markers",
     "video_reference_capability",
     "video_prompt_storyboard_reference_violation",

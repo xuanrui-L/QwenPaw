@@ -270,30 +270,24 @@ def _storyboard_panel_aspect_contract(
     ratio = aspect_ratio.strip() or "16:9"
     layout = ""
     if panel_count and panel_count > 1:
+        # Splitting a sheet into columns x rows scales each cell by
+        # rows/columns, so only a square grid leaves cells at the sheet's
+        # ratio: a 3x2 grid on a 16:9 sheet yields 32:27 cells. Pad up to the
+        # next perfect square and leave the spare cells empty instead.
         side = math.ceil(math.sqrt(panel_count))
-        try:
-            ratio_width, ratio_height = (
-                float(part.strip()) for part in ratio.split(":", 1)
-            )
-        except (TypeError, ValueError):
-            ratio_width, ratio_height = 16.0, 9.0
-        if ratio_width < ratio_height:
-            rows = side
-            columns = math.ceil(panel_count / rows)
-        else:
-            columns = side
-            rows = math.ceil(panel_count / columns)
+        spare = side * side - panel_count
+        remainder = (
+            f" Leave the remaining {spare} grid cell(s) as unframed outer "
+            "canvas whitespace; never draw, frame or fill a placeholder panel."
+            if spare
+            else ""
+        )
         layout = (
-            f" Use a compact {columns} columns by {rows} rows layout of "
-            "equal-size picture frames. "
-            f"Place exactly {panel_count} story panels in row-major reading "
-            "order. If the final row is incomplete, center its remaining "
-            "equal-size panels and absorb the unused area as unframed outer "
-            "canvas whitespace; never draw, frame or fill a placeholder "
-            "panel. This compact rectangular layout deliberately preserves "
-            "each panel's target ratio while using whitespace instead of "
-            "distortion. Do not use masonry, a hero panel or mixed-size "
-            "frames."
+            f" Use a {side} columns by {side} rows grid of equal-size picture "
+            f"frames: a square grid is what keeps every cell at {ratio} on a "
+            f"{ratio} sheet. Place exactly {panel_count} story panels in "
+            f"row-major reading order.{remainder} Do not use masonry, a hero "
+            "panel or mixed-size frames."
         )
     return (
         "[STORYBOARD PANEL ASPECT CONTRACT — HARD REQUIREMENT]\n"

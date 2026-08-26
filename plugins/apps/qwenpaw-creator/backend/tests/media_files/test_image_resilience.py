@@ -54,14 +54,27 @@ def test_storyboard_panel_aspect_contract_preserves_each_video_frame() -> None:
     assert "target video aspect ratio is 9:16" in contract
     assert "EVERY individual storyboard panel" in contract
     assert "outer storyboard delivery canvas is also 9:16" in contract
-    assert "compact 2 columns by 3 rows layout" in contract
-    assert "center its remaining equal-size panels" in contract
+    # ceil(sqrt(5)) == 3, and only a square grid keeps cells at 9:16.
+    assert "3 columns by 3 rows grid" in contract
+    assert "Leave the remaining 4 grid cell(s)" in contract
     assert "never draw, frame or fill a placeholder panel" in contract
     assert "Do not use masonry, a hero panel or mixed-size frames" in contract
     assert "Do not add a title, header, footer" in contract
     assert "Never stretch, squash, crop, merge, skew" in contract
     assert "exactly one visual instance of each named character" in contract
     assert "never be duplicated or cloned inside one panel" in contract
+
+    # Six panels used to be laid out 3 columns by 2 rows, which scales every
+    # cell by rows/columns and yields 32:27 cells on a 16:9 sheet.
+    six = _storyboard_panel_aspect_contract("16:9", 6)
+    assert "3 columns by 3 rows grid" in six
+    assert "columns by 2 rows" not in six
+    assert "Leave the remaining 3 grid cell(s)" in six
+
+    # A perfect square fills the grid, so there is no whitespace clause.
+    four = _storyboard_panel_aspect_contract("16:9", 4)
+    assert "2 columns by 2 rows grid" in four
+    assert "Leave the remaining" not in four
 
     appended = _append_storyboard_panel_aspect_contract(
         "legacy storyboard prompt",

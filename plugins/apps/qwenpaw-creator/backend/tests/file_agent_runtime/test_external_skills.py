@@ -110,9 +110,9 @@ def test_professional_media_prompt_skill_is_builtin(
 
     loaded = {skill.entry.name: skill for skill in load_skills()}
     skill = loaded["professional-media-prompts"]
-    assert "紧凑行列数" in skill.skill_md
-    assert "并不依赖" in skill.skill_md
-    assert "方阵" in skill.skill_md
+    assert "正方形网格（N 列×N 行）" in skill.skill_md
+    assert "只有列数等于行数时单格才等于外层画幅" in skill.skill_md
+    assert "2–4 格→2×2，5–9 格→3×3" in skill.skill_md
     assert "同一格内每个已命名角色只能" in skill.skill_md
     assert "`clear spatial labels` 和 `no text`" in skill.skill_md
     assert skill.available
