@@ -1854,6 +1854,8 @@
     "promptSaved": "Prompt saved",
     "promptSaveFailed": "Save failed: {{detail}}",
     "visualApproveHint": "Design confirmation happens in the assistant's decision tray; edit only here",
-    "noDesignYet": "Design image pending"
+    "noDesignYet": "Design image pending",
+    "previewChoice": "Choose a path",
+    "previewReplay": "Replay"
   }
 }

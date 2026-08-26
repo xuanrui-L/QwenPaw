@@ -31,14 +31,21 @@ describe("BlueprintRoughCutStrip whole-film preview", () => {
     expect(container.querySelector("[data-roughcut-play-film]")).toBeNull();
   });
 
-  it("plays the entire composed film from the dedicated chip", () => {
-    const { container, getByText } = renderStrip(withWholeFilm(cloneProject()));
+  it("plays the entire composed film in the floating cinema overlay", () => {
+    const { container, baseElement, getByText } = renderStrip(
+      withWholeFilm(cloneProject()),
+    );
 
     const chip = container.querySelector("[data-roughcut-play-film]");
     expect(chip).toBeTruthy();
     fireEvent.click(chip!);
 
-    const video = container.querySelector<HTMLVideoElement>(
+    // The player is a near-fullscreen overlay portaled to <body>, not an
+    // inline expansion inside the strip.
+    expect(container.querySelector("[data-roughcut-cinema]")).toBeNull();
+    const overlay = baseElement.querySelector("[data-roughcut-cinema]");
+    expect(overlay).toBeTruthy();
+    const video = baseElement.querySelector<HTMLVideoElement>(
       "[data-roughcut-player] video",
     );
     expect(video).toBeTruthy();
@@ -48,7 +55,42 @@ describe("BlueprintRoughCutStrip whole-film preview", () => {
 
     // Toggling the chip again closes the player.
     fireEvent.click(chip!);
-    expect(container.querySelector("[data-roughcut-player]")).toBeNull();
+    expect(baseElement.querySelector("[data-roughcut-cinema]")).toBeNull();
+  });
+
+  it("closes the cinema overlay on Escape and on backdrop click", () => {
+    const { container, baseElement } = renderStrip(
+      withWholeFilm(cloneProject()),
+    );
+    const chip = container.querySelector("[data-roughcut-play-film]");
+
+    fireEvent.click(chip!);
+    expect(baseElement.querySelector("[data-roughcut-cinema]")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(baseElement.querySelector("[data-roughcut-cinema]")).toBeNull();
+
+    fireEvent.click(chip!);
+    const backdrop = baseElement.querySelector("[data-roughcut-cinema]");
+    expect(backdrop).toBeTruthy();
+    // Clicking the video frame itself must NOT close the overlay…
+    fireEvent.click(baseElement.querySelector("[data-roughcut-player]")!);
+    expect(baseElement.querySelector("[data-roughcut-cinema]")).toBeTruthy();
+    // …but clicking the scrim backdrop does.
+    fireEvent.click(backdrop!);
+    expect(baseElement.querySelector("[data-roughcut-cinema]")).toBeNull();
+  });
+
+  it("opens the same floating overlay from a per-timeline play chip", () => {
+    const { container, baseElement } = renderStrip(cloneProject());
+    const chip = container.querySelector("[data-roughcut-play]") as
+      | HTMLElement
+      | null;
+    expect(chip).toBeTruthy();
+    fireEvent.click(chip!);
+    const video = baseElement.querySelector<HTMLVideoElement>(
+      "[data-roughcut-cinema] video",
+    );
+    expect(video).toBeTruthy();
   });
 
   it("keeps the whole-film entry even when the shots-only filter leaves no frames", () => {
