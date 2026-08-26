@@ -547,7 +547,8 @@
     "groupResearch": "调研与理解",
     "groupShots": "镜头与成片",
     "groupSources": "来源素材",
-    "groupOther": "其他产物"
+    "groupOther": "其他产物",
+    "versionCount": "{{count}} 个版本"
   },
   "plan": {
     "creativeBrief": "创作总纲",
@@ -1691,10 +1692,10 @@
   },
   "blueprint": {
     "timelineEdit": "时间线编辑",
-    "episodeN": "第{{n}}集",
-    "episodesCount": "剧集 · {{count}}",
-    "collapseEpisodeRail": "收起剧集栏",
-    "expandEpisodeRail": "展开剧集栏",
+    "episodeN": "节点 {{n}}",
+    "episodesCount": "叙事节点 · {{count}}",
+    "collapseEpisodeRail": "收起节点栏",
+    "expandEpisodeRail": "展开节点栏",
     "episodeState": {
       "done": "已成片",
       "run": "生成中",
@@ -1713,11 +1714,11 @@
     "timelineQuick": "时间线",
     "endingNode": "结局",
     "nodeMeta": "镜头 {{ready}}/{{total}}",
-    "branchHint": "选项文案派生自 narrative_edges，改边即改选项",
+    "branchHint": "抉择选项的文案就是分支连线上的标签，修改连线即可同步更新选项",
     "chips": {
       "branching": "{{count}} 个节点",
       "endings": "{{count}} 条结局线",
-      "linear": "线性 {{count}} 集",
+      "linear": "线性 {{count}} 节点",
       "single": "单集生成",
       "videoEdit": "素材剪辑",
       "duration": "时长 {{seconds}}s"
@@ -1746,6 +1747,7 @@
     "downloadFinal": "下载成片",
     "exportProject": "导出项目",
     "downloadOrExport": "下载 / 导出",
+    "episodeFinalCut": "{{title}} · 成片下载",
     "downloadFinalTitle": "下载成片视频文件或导出项目",
     "downloadBundleTitle": "导出互动包或导出项目",
     "waitingForFinalCut": "等待成片合成",
@@ -1851,6 +1853,7 @@
     "promptSaveFailed": "保存失败：{{detail}}",
     "visualApproveHint": "设计确认在创作助手的待决策卡中完成，此处仅编辑",
     "noDesignYet": "设计图待生成",
+    "previewAll": "预览全片",
     "previewChoice": "选择故事走向",
     "previewReplay": "重新播放"
   }

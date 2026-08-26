@@ -242,12 +242,20 @@ class CrossProcessFileLock:
         with _HELD_LOCKS_GUARD:
             held = _HELD_LOCKS.get(held_key)
             if held is not None:
-                message = (
-                    "same-thread nested Runtime lock acquisition "
-                    + "would deadlock: "
-                )
-                raise RuntimeFileValidationError(
-                    f"{message}path={self.path} held={held!r}",
+                # The same pool thread already appears as a holder. This is
+                # usually NOT a nested call stack: holds that span an await
+                # return their thread to the executor pool, and the next
+                # request reused it. Waiting is safe — flock release happens
+                # on whichever thread resumes the holder — so fall through
+                # to the normal timeout-bounded wait instead of failing the
+                # innocent request. A genuine nested acquisition surfaces as
+                # a retryable LockTimeoutError after the deadline.
+                logger.warning(
+                    "same-thread lock reuse detected for %s "
+                    "(likely executor thread reuse); waiting with timeout. "
+                    "holder=%r",
+                    self.path,
+                    held,
                 )
 
         started = time.monotonic()

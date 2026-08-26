@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { message } from "antd";
-import { Check, LayoutList, MessageSquareText, X } from "lucide-react";
+import {
+  Check,
+  Film,
+  LayoutList,
+  MessageSquareText,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   ProjectDocument,
@@ -59,6 +66,80 @@ export function parseScriptMarkdown(markdown: string): ScriptBlock[] {
   return blocks;
 }
 
+const MD_LINK = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+const MD_BOLD = /\*\*([^*]+)\*\*/g;
+
+function renderInlineBold(text: string, keyBase: number): ReactNode[] {
+  MD_BOLD.lastIndex = 0;
+  if (!MD_BOLD.test(text)) return [text];
+  MD_BOLD.lastIndex = 0;
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  let key = keyBase;
+  let match: RegExpExecArray | null;
+  while ((match = MD_BOLD.exec(text))) {
+    if (match.index > last) nodes.push(text.slice(last, match.index));
+    nodes.push(
+      <b key={`b${key++}`} className="text-[var(--color-text-primary)]">
+        {match[1]}
+      </b>,
+    );
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+/**
+ * Scripts are text-first: only real edit-genre source timecode refs render
+ * as chips; any other (hallucinated) media link degrades to its label.
+ * Inline **bold** renders as emphasis instead of raw asterisks.
+ */
+function renderScriptText(text: string): ReactNode {
+  MD_LINK.lastIndex = 0;
+  const hasLink = MD_LINK.test(text);
+  MD_LINK.lastIndex = 0;
+  if (!hasLink) return renderInlineBold(text, 0);
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = MD_LINK.exec(text))) {
+    if (match.index > last) {
+      nodes.push(...renderInlineBold(text.slice(last, match.index), key));
+      key += 50;
+    }
+    const [, label, url] = match;
+    if (url.startsWith("source-version://")) {
+      const params = new URLSearchParams(url.split("?")[1] ?? "");
+      const tin = params.get("in");
+      const tout = params.get("out");
+      nodes.push(
+        <span
+          key={`l${key++}`}
+          className="mx-0.5 inline-flex items-center gap-1 rounded bg-[var(--color-bg-secondary)] px-1.5 py-px align-baseline text-[11px] font-medium text-[var(--color-text-secondary)]"
+          title={url}
+        >
+          <Film className="h-3 w-3 text-[var(--color-accent)]" />
+          {label}
+          {tin && tout && (
+            <span className="tabular-nums text-[var(--color-text-tertiary)]">
+              {tin}–{tout}
+            </span>
+          )}
+        </span>,
+      );
+    } else {
+      nodes.push(label);
+    }
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) {
+    nodes.push(...renderInlineBold(text.slice(last), key + 100));
+  }
+  return nodes;
+}
+
 function BlockView({ block }: { block: ScriptBlock }) {
   if (block.kind === "scene") {
     return (
@@ -78,18 +159,22 @@ function BlockView({ block }: { block: ScriptBlock }) {
             （{block.parenthetical}）
           </span>
         )}
-        {block.text}
+        {renderScriptText(block.text)}
       </p>
     );
   }
   if (block.kind === "hook") {
     return (
       <div className="mt-2.5 rounded-r-lg border-l-[3px] border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
-        {block.text}
+        {renderScriptText(block.text)}
       </div>
     );
   }
-  return <p className="my-1 text-[var(--color-text-secondary)]">{block.text}</p>;
+  return (
+    <p className="my-1 text-[var(--color-text-secondary)]">
+      {renderScriptText(block.text)}
+    </p>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -264,6 +349,19 @@ export default function BlueprintScriptPanel({
   useEffect(() => {
     setSynopsisDraft(timeline?.synopsis ?? "");
   }, [timeline?.synopsis, timelineId, open]);
+
+  // Real users expect Escape to dismiss the inline panel.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
 
   const blocks = useMemo(
     () => (scriptText ? parseScriptMarkdown(scriptText) : []),

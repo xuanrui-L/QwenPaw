@@ -547,7 +547,8 @@
     "groupResearch": "Research & Understanding",
     "groupShots": "Shots & Final Cuts",
     "groupSources": "Source Assets",
-    "groupOther": "Other Artifacts"
+    "groupOther": "Other Artifacts",
+    "versionCount": "{{count}} versions"
   },
   "plan": {
     "creativeBrief": "Creative Brief",
@@ -1691,10 +1692,10 @@
   },
   "blueprint": {
     "timelineEdit": "Timeline Editing",
-    "episodeN": "Episode {{n}}",
-    "episodesCount": "Episodes · {{count}}",
-    "collapseEpisodeRail": "Collapse episode rail",
-    "expandEpisodeRail": "Expand episode rail",
+    "episodeN": "Node {{n}}",
+    "episodesCount": "Nodes · {{count}}",
+    "collapseEpisodeRail": "Collapse node rail",
+    "expandEpisodeRail": "Expand node rail",
     "episodeState": {
       "done": "Final cut ready",
       "run": "Generating",
@@ -1713,11 +1714,11 @@
     "timelineQuick": "Timeline",
     "endingNode": "Ending",
     "nodeMeta": "Shots {{ready}}/{{total}}",
-    "branchHint": "Option copy derives from narrative_edges; edit the edge to edit the option",
+    "branchHint": "Choice labels come from the branch connections — edit a connection to update its option",
     "chips": {
       "branching": "{{count}} nodes",
       "endings": "{{count}} ending paths",
-      "linear": "Linear {{count}} episodes",
+      "linear": "Linear · {{count}} nodes",
       "single": "Single video",
       "videoEdit": "Footage edit",
       "duration": "Duration {{seconds}}s"
@@ -1746,6 +1747,7 @@
     "downloadFinal": "Download Final Cut",
     "exportProject": "Export Project",
     "downloadOrExport": "Download / Export",
+    "episodeFinalCut": "{{title}} · final cut",
     "downloadFinalTitle": "Download final cut video or export project",
     "downloadBundleTitle": "Export interactive bundle or project",
     "waitingForFinalCut": "Waiting for final cut compose",
@@ -1851,6 +1853,7 @@
     "promptSaveFailed": "Save failed: {{detail}}",
     "visualApproveHint": "Design confirmation happens in the assistant's decision tray; edit only here",
     "noDesignYet": "Design image pending",
+    "previewAll": "Preview story",
     "previewChoice": "Choose a path",
     "previewReplay": "Replay"
   }

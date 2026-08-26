@@ -172,7 +172,7 @@ describe("R2V Workbench page", () => {
     // greets with the episode rail (multi-timeline fixture).
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "收起剧集栏" }),
+        screen.getByRole("button", { name: "收起节点栏" }),
       ).toBeInTheDocument(),
     );
     expect(screen.getByDisplayValue("暖色餐厅窗外的橘猫")).toBeInTheDocument();

@@ -48,8 +48,11 @@ _SCRIPT_SYSTEM_PROMPT = (
     "- 台词：`**角色名**（括注，可省略）：台词正文`，一行一句；\n"
     "- 钩子/悬念：markdown 引用块 `> ...`；\n"
     "- 动作/口播 segment：普通段落；\n"
-    "- 剪辑体裁引用素材时间码：`[标签](source-version://<素材版本id>"
-    "?in=<tick>&out=<tick>)`（tick 为该素材时间线刻度）。\n"
+    "- 仅剪辑体裁且素材真实存在时，才可用其真实版本 id 引用时间码："
+    "`[标签](source-version://<素材版本id>?in=<tick>&out=<tick>)`"
+    "（tick 为该素材时间线刻度）。\n"
+    "- 生成体裁（无上传素材）剧本通篇纯文字：禁止虚构任何"
+    " `[...](xxx://...)` 媒体链接或图片，画面呈现交给后续分镜/视频阶段。\n"
     "台词密度遵循短剧规范（约每 2-3 个镜头至少一句台词），"
     "对白使用口语化中文。"
 )
@@ -356,10 +359,17 @@ async def execute_file_script_command(
 
     fingerprint = _request_fingerprint(project, timeline)
     # Stale re-drafts share the node's dispatch idempotency key but must not
-    # reuse the previous publish transaction: scope the durable ids by the
-    # request fingerprint. Identical inputs never reach publish — the
-    # semantic replay below returns the existing version first.
-    idempotency_key = f"{idempotency_key}:{fingerprint[:16]}"
+    # reuse a previous publish transaction. Staleness triggers on more inputs
+    # than the fingerprint covers (e.g. element edits), so scope the durable
+    # ids by fingerprint AND the slot's existing version count — the N-th
+    # re-draft of identical prompt inputs is still a fresh transaction.
+    # Identical fresh inputs never reach publish: the semantic replay below
+    # returns the existing version first.
+    slot = project.assets.artifact_slots_by_id.get(
+        timeline_script_slot_id(timeline_id),
+    )
+    revision = len(slot.version_ids) if slot is not None else 0
+    idempotency_key = f"{idempotency_key}:{fingerprint[:16]}:r{revision}"
     replay = _existing_replay(
         services,
         project,

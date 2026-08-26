@@ -81,6 +81,8 @@ type AssetItem = {
   variantOrder?: number;
   variantLabel?: string;
   variantState?: "active" | "history" | "unselected";
+  /** All versions of the owning slot — one card, switchable preview. */
+  versions?: AssetVersionOption[];
   provenanceRefs: string[];
   metadata: Record<string, unknown>;
   raw:
@@ -88,6 +90,18 @@ type AssetItem = {
     | ArtifactVersionDocument
     | VisualEntityDocument
     | VisualCastLineupDocument;
+};
+
+type AssetVersionOption = {
+  id: string;
+  name: string;
+  stale?: boolean;
+  selected: boolean;
+  mediaKind: string;
+  mediaType: string;
+  previewUrl?: string;
+  createdAt?: string;
+  raw: ArtifactVersionDocument;
 };
 
 type AssetItemGroup = {
@@ -310,8 +324,92 @@ function assetItems(project: ProjectDocument): AssetItem[] {
       raw: source,
     }),
   );
-  const artifacts = Object.values(project.assets.artifact_versions_by_id).map(
-    (artifact): AssetItem => {
+  // Slot-first artifact cards: every ArtifactSlot occupies ONE position and
+  // its versions switch inline (no flat tiling of stale history). Scripts
+  // are text workproducts reviewed on the blueprint, not library assets.
+  const slottedVersionIds = new Set<string>();
+  const slotArtifacts = Object.values(project.assets.artifact_slots_by_id)
+    .filter(
+      (slot) =>
+        slot.kind !== "timeline_script" &&
+        slot.kind !== "research_report" &&
+        slot.version_ids.length > 0,
+    )
+    .flatMap((slot): AssetItem[] => {
+      for (const versionId of slot.version_ids) {
+        slottedVersionIds.add(versionId);
+      }
+      const versions = slot.version_ids
+        .map((versionId) => project.assets.artifact_versions_by_id[versionId])
+        .filter((version): version is ArtifactVersionDocument =>
+          Boolean(version),
+        )
+        .map((version): AssetVersionOption => {
+          const media = artifactMedia(project, version);
+          return {
+            id: version.version_id,
+            name: version.name || version.version_id,
+            stale: version.stale,
+            selected: version.version_id === slot.selected_version_id,
+            mediaKind: media.kind,
+            mediaType: media.type,
+            previewUrl: ["image", "video", "audio"].includes(media.kind)
+              ? getArtifactVersionMediaUrl(version.version_id)
+              : undefined,
+            createdAt: version.created_at,
+            raw: version,
+          };
+        });
+      if (!versions.length) return [];
+      const active =
+        versions.find((version) => version.selected) ??
+        versions[versions.length - 1];
+      const artifact = active.raw;
+      const visualVariant = visualVariantForVersion(project, active.id);
+      return [
+        {
+          id: slot.slot_id,
+          ref: `artifact-version:${active.id}`,
+          kind: "artifact",
+          name: active.name,
+          description:
+            versions.length > 1
+              ? `${slot.kind} · ${i18n.t("assets.versionCount", {
+                  count: versions.length,
+                })}`
+              : `${slot.kind} · generation ${artifact.based_on_generation}`,
+          mediaKind: active.mediaKind,
+          mediaType: active.mediaType,
+          previewUrl: active.previewUrl,
+          createdAt: active.createdAt,
+          stale: artifact.stale,
+          durationSeconds: artifact.duration_seconds,
+          checksum: artifact.checksum,
+          ownerRef: artifact.owner_ref,
+          entityId: visualVariant?.entity.entity_id,
+          variantId: visualVariant?.variant.variant_id,
+          versions: versions.length > 1 ? versions : undefined,
+          provenanceRefs: artifact.provenance_refs,
+          metadata: artifact.metadata,
+          raw: artifact,
+        },
+      ];
+    });
+  const scriptVersionIds = new Set(
+    Object.values(project.assets.artifact_slots_by_id)
+      .filter(
+        (slot) =>
+          slot.kind === "timeline_script" || slot.kind === "research_report",
+      )
+      .flatMap((slot) => slot.version_ids),
+  );
+  const artifacts = Object.values(project.assets.artifact_versions_by_id)
+    .filter(
+      (artifact) =>
+        !slottedVersionIds.has(artifact.version_id) &&
+        !scriptVersionIds.has(artifact.version_id),
+    )
+    .map((artifact): AssetItem => {
       const media = artifactMedia(project, artifact);
       const visualVariant = visualVariantForVersion(
         project,
@@ -482,6 +580,7 @@ function assetItems(project: ProjectDocument): AssetItem[] {
     ...lineups,
     ...visuals,
     ...sources,
+    ...slotArtifacts,
     ...artifacts,
   ]).sort((left, right) => {
     return (
@@ -1089,6 +1188,43 @@ export default function AssetsPage() {
         : `/project/${id}/assets`,
     );
   };
+  // Per-slot version preview choice; defaults to the selected version.
+  const [versionPick, setVersionPick] = useState<Record<string, number>>({});
+  const displayedItem = (item: AssetItem): AssetItem => {
+    if (!item.versions) return item;
+    const fallback = item.versions.findIndex((version) => version.selected);
+    const index = Math.min(
+      Math.max(versionPick[item.id] ?? Math.max(fallback, 0), 0),
+      item.versions.length - 1,
+    );
+    const version = item.versions[index];
+    if (!version || version.raw === item.raw) return item;
+    return {
+      ...item,
+      ref: `artifact-version:${version.id}`,
+      name: version.name,
+      mediaKind: version.mediaKind,
+      mediaType: version.mediaType,
+      previewUrl: version.previewUrl,
+      createdAt: version.createdAt,
+      stale: version.raw.stale,
+      checksum: version.raw.checksum,
+      durationSeconds: version.raw.duration_seconds,
+      provenanceRefs: version.raw.provenance_refs,
+      metadata: version.raw.metadata,
+      raw: version.raw,
+    };
+  };
+  const stepVersion = (item: AssetItem, delta: number) => {
+    if (!item.versions) return;
+    const fallback = item.versions.findIndex((version) => version.selected);
+    const current = versionPick[item.id] ?? Math.max(fallback, 0);
+    const next = Math.min(
+      Math.max(current + delta, 0),
+      item.versions.length - 1,
+    );
+    setVersionPick((state) => ({ ...state, [item.id]: next }));
+  };
   const refreshAfterIngest = async () => {
     await Promise.allSettled([pollOnce(id), refreshTasks(id)]);
   };
@@ -1295,14 +1431,15 @@ export default function AssetsPage() {
                       </div>
                     )}
                     {group.items.map((item) => {
-                      const Icon = mediaIcon(item.mediaKind);
+                      const display = displayedItem(item);
+                      const Icon = mediaIcon(display.mediaKind);
                       return (
                         <button
                           key={`${item.kind}:${item.id}`}
                           type="button"
                           data-creator-module="asset-card"
                           data-creator-module-id={item.id}
-                          onClick={() => selectItem(item)}
+                          onClick={() => selectItem(display)}
                           className={`group overflow-hidden rounded-xl border bg-[var(--color-bg-card)] text-left transition ${
                             selected?.id === item.id
                               ? "border-[var(--color-accent)] shadow-[0_0_0_1px_var(--color-accent)]"
@@ -1311,24 +1448,58 @@ export default function AssetsPage() {
                         >
                           <div className="relative flex h-32 items-center justify-center overflow-hidden bg-[var(--color-bg-secondary)]">
                             <AssetMediaPreview
-                              name={item.name}
-                              mediaType={item.mediaKind}
-                              previewUrl={item.previewUrl}
+                              name={display.name}
+                              mediaType={display.mediaKind}
+                              previewUrl={display.previewUrl}
                               state={
-                                item.previewUrl
+                                display.previewUrl
                                   ? "ready"
-                                  : item.kind === "visual"
+                                  : display.kind === "visual"
                                   ? "planned"
                                   : "unavailable"
                               }
                               mediaClassName="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
                               placeholderClassName="flex flex-col items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)]"
                             />
-                            {!item.previewUrl && (
+                            {!display.previewUrl && (
                               <Icon className="pointer-events-none absolute h-6 w-6 -translate-y-3 text-[var(--color-text-tertiary)]" />
                             )}
+                            {item.versions && (
+                              <span
+                                data-asset-version-switch={item.id}
+                                className="absolute bottom-2 right-2 z-10 flex items-center gap-1 rounded-full bg-black/60 px-1.5 py-0.5 text-[10px] font-bold text-white backdrop-blur-md"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <span
+                                  role="button"
+                                  tabIndex={0}
+                                  className="cursor-pointer px-0.5 transition-transform hover:scale-125"
+                                  onClick={() => stepVersion(item, -1)}
+                                >
+                                  ‹
+                                </span>
+                                <span className="tabular-nums">
+                                  {(versionPick[item.id] ??
+                                    Math.max(
+                                      item.versions.findIndex(
+                                        (version) => version.selected,
+                                      ),
+                                      0,
+                                    )) + 1}
+                                  /{item.versions.length}
+                                </span>
+                                <span
+                                  role="button"
+                                  tabIndex={0}
+                                  className="cursor-pointer px-0.5 transition-transform hover:scale-125"
+                                  onClick={() => stepVersion(item, 1)}
+                                >
+                                  ›
+                                </span>
+                              </span>
+                            )}
                             <span className="absolute left-2 top-2 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                              {kindLabel(item, t)}
+                              {kindLabel(display, t)}
                             </span>
                             <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
                               {item.variantState && (
@@ -1348,7 +1519,7 @@ export default function AssetsPage() {
                                     : t("assets.unselected")}
                                 </span>
                               )}
-                              {item.stale && (
+                              {display.stale && (
                                 <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
                                   {t("assets.stale")}
                                 </span>
@@ -1378,7 +1549,7 @@ export default function AssetsPage() {
                               {item.kind === "visual" &&
                               (filter === "visual" || filter === "byOwner")
                                 ? item.cardName || item.name
-                                : item.name}
+                                : display.name}
                             </h3>
                             <p className="mt-1 line-clamp-2 min-h-8 text-[11px] leading-4 text-[var(--color-text-secondary)]">
                               {item.description}
