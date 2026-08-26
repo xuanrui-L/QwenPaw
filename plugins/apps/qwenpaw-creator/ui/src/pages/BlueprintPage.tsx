@@ -84,7 +84,6 @@ export default function BlueprintPage() {
   const [prepTab, setPrepTab] = useState<PreproductionTab>("visual");
   const [prepFocus, setPrepFocus] = useState<PrepFocus | null>(null);
   const [bundleBusy, setBundleBusy] = useState(false);
-  const [bundleError, setBundleError] = useState(false);
   const [exportProgress, setExportProgress] =
     useState<ExportProgressState | null>(null);
   const exporting = exportProgress?.status === "running";
@@ -175,7 +174,6 @@ export default function BlueprintPage() {
 
   const exportBundle = async () => {
     setBundleBusy(true);
-    setBundleError(false);
     try {
       const response = await fetch(getInteractiveBundleUrl(id));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -187,7 +185,7 @@ export default function BlueprintPage() {
       anchor.click();
       URL.revokeObjectURL(url);
     } catch {
-      setBundleError(true);
+      message.error(t("blueprint.exportBundleFailed"));
     } finally {
       setBundleBusy(false);
     }
@@ -332,40 +330,30 @@ export default function BlueprintPage() {
           ))}
         </div>
         <span className="flex flex-wrap items-center justify-end gap-2">
-          {shape === "branching" && (
-            <>
-              {bundleError && (
-                <span className="max-w-72 truncate text-[11px] font-medium text-[var(--color-warning)]">
-                  {t("blueprint.exportBundleFailed")}
-                </span>
-              )}
-              <button
-                type="button"
-                data-blueprint-export-bundle
-                onClick={() => void exportBundle()}
-                disabled={bundleBusy}
-                className="inline-flex items-center gap-2 rounded-[10px] bg-[var(--color-accent)] px-4 py-2 text-sm font-bold leading-none text-white shadow-[0_2px_8px_rgba(255,127,22,.35)] transition-all hover:-translate-y-px hover:bg-[var(--color-accent-hover)] disabled:cursor-wait disabled:opacity-60"
-              >
-                <Package className="h-4 w-4" />
-                {bundleBusy
-                  ? t("blueprint.exporting")
-                  : t("blueprint.exportBundle")}
-              </button>
-            </>
-          )}
-          {/* Download-final-cut and export-project share one split entry —
-              the project-level export home (moved off the timeline page). */}
+          {/* Download-final-cut (or, for branching projects, the
+              interactive-bundle export) and export-project share one
+              split entry — the project-level export home. */}
           <Dropdown
             trigger={["click"]}
             menu={{
               items: [
-                {
-                  key: "download",
-                  label: t("blueprint.downloadFinal"),
-                  icon: <Download className="h-3.5 w-3.5" />,
-                  disabled: !filmVersion,
-                  onClick: () => void downloadFilm(),
-                },
+                shape === "branching"
+                  ? {
+                      key: "bundle",
+                      label: bundleBusy
+                        ? t("blueprint.exporting")
+                        : t("blueprint.exportBundle"),
+                      icon: <Package className="h-3.5 w-3.5" />,
+                      disabled: bundleBusy,
+                      onClick: () => void exportBundle(),
+                    }
+                  : {
+                      key: "download",
+                      label: t("blueprint.downloadFinal"),
+                      icon: <Download className="h-3.5 w-3.5" />,
+                      disabled: !filmVersion,
+                      onClick: () => void downloadFilm(),
+                    },
                 {
                   key: "export",
                   label: exporting
@@ -382,9 +370,11 @@ export default function BlueprintPage() {
               type="button"
               data-download-render
               title={
-                filmVersion
-                  ? t("blueprint.downloadFinalTitle")
-                  : t("blueprint.waitingForFinalCut")
+                shape === "branching"
+                  ? t("blueprint.downloadBundleTitle")
+                  : filmVersion
+                    ? t("blueprint.downloadFinalTitle")
+                    : t("blueprint.waitingForFinalCut")
               }
               className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
             >

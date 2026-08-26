@@ -158,6 +158,41 @@ describe("BlueprintPage narrative shapes", () => {
     ).not.toHaveAttribute("aria-disabled", "true");
   });
 
+  it("branching projects export the interactive bundle instead of the film", async () => {
+    const project = cloneProject();
+    project.narrative_edges = [
+      {
+        edge_id: "edge:a",
+        source_timeline_id: "timeline:main",
+        target_timeline_id: "timeline:ep2",
+        label: "选择A · 星夜归途",
+        prompt: "此刻，你决定——",
+      },
+    ];
+    seedProject(project);
+    const { container } = renderPage();
+
+    expect(
+      container.querySelector('[data-blueprint-shape="branching"]'),
+    ).toBeInTheDocument();
+    // The standalone bundle button is gone; the dropdown is the export home.
+    expect(
+      container.querySelector("[data-blueprint-export-bundle]"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "下载 / 导出" }));
+    const bundleItem = await screen.findByRole("menuitem", {
+      name: /导出互动包/,
+    });
+    expect(bundleItem).not.toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.queryByRole("menuitem", { name: /下载成片/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitem", { name: /导出项目/ }),
+    ).not.toHaveAttribute("aria-disabled", "true");
+  });
+
   /**
    * The video_edit pipeline stamps none of the generation artifacts the
    * board checks: shots are real clips referenced via render_source
