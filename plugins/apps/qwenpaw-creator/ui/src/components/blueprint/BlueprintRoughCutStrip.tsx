@@ -63,8 +63,16 @@ function PreviewCinema({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const wholeFilm = startId === FULL_FILM_ID;
-  const [currentId, setCurrentId] = useState(startId);
+  // Branching projects have no meaningful composed whole film: the
+  // whole-film sentinel enters the branch-following playback instead,
+  // starting from the entry timeline (same test as selectNarrativeShape).
+  const branching = (project.narrative_edges ?? []).length > 0;
+  const wholeFilm = startId === FULL_FILM_ID && !branching;
+  const initialId =
+    startId === FULL_FILM_ID && branching
+      ? (project.timelines.order[0] ?? startId)
+      : startId;
+  const [currentId, setCurrentId] = useState(initialId);
   const [segmentIndex, setSegmentIndex] = useState(1);
   const [options, setOptions] = useState<CinemaOption[] | null>(null);
   const [ended, setEnded] = useState(false);
@@ -74,13 +82,13 @@ function PreviewCinema({
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
 
   useEffect(() => {
-    setCurrentId(startId);
+    setCurrentId(initialId);
     setSegmentIndex(1);
     setOptions(null);
     setEnded(false);
     setError(false);
     setAspectRatio(null);
-  }, [startId]);
+  }, [startId, initialId]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -294,6 +302,7 @@ export default function BlueprintRoughCutStrip({
     [frames],
   );
   const multiTimeline = timelineIds.length > 1;
+  const isBranching = (project.narrative_edges ?? []).length > 0;
   const filmVersionId = useMemo(
     () => selectFinalFilmVersionId(project),
     [project],
@@ -341,12 +350,18 @@ export default function BlueprintRoughCutStrip({
           })}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
-          {filmUrl && (
+          {(isBranching
+            ? project.timelines.order.length > 0
+            : Boolean(filmUrl)) && (
             <button
               type="button"
               data-roughcut-play-film
               onClick={() => togglePlay(FULL_FILM_ID)}
-              title={t("blueprint.playFullFilm")}
+              title={
+                isBranching
+                  ? t("blueprint.playFullInteractive")
+                  : t("blueprint.playFullFilm")
+              }
               className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
                 playingId === FULL_FILM_ID
                   ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
@@ -354,10 +369,14 @@ export default function BlueprintRoughCutStrip({
               }`}
             >
               <Film className="h-3 w-3" />
-              {t("blueprint.playFullFilm")}
-              <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
-                {t("blueprint.finalCutBadge")}
-              </span>
+              {isBranching
+                ? t("blueprint.playFullInteractive")
+                : t("blueprint.playFullFilm")}
+              {!isBranching && (
+                <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
+                  {t("blueprint.finalCutBadge")}
+                </span>
+              )}
             </button>
           )}
           {timelineIds.map((timelineId) => {
