@@ -92,7 +92,7 @@ from services.media_files.visual_reference_resolution import (
 )
 from services.observability import report_error
 from services.project_files.remote_cache import public_source_url
-from services.project_files.store import ProjectSnapshot
+from services.project_files.store import ProjectSnapshot, ProjectStoreError
 from services.run_review.media_review import (
     release_media_review_reservation,
     reserve_media_review,
@@ -2347,6 +2347,17 @@ class FileR2VExecutionService:
             except asyncio.CancelledError:
                 raise
             except RecordNotFoundError:
+                return
+            except ProjectStoreError as error:
+                # An unparseable project.json never becomes parseable, so
+                # retrying is a hot loop that only floods the log. The corrupt
+                # Project is already surfaced by the recovery scan.
+                logger.warning(
+                    "abandoning deferred R2V terminal recovery for %s/%s: %s",
+                    _log_safe(project_id),
+                    _log_safe(task_id),
+                    error,
+                )
                 return
             except _R2VClaimLost:
                 delay = min(
