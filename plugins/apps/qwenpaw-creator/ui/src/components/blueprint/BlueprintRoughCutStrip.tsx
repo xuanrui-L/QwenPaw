@@ -4,6 +4,7 @@ import {
   ChevronUp,
   Clapperboard,
   Download,
+  Film,
   Play,
   X,
 } from "lucide-react";
@@ -11,9 +12,11 @@ import { useTranslation } from "react-i18next";
 import type { ProjectDocument } from "@/contracts/creator";
 import {
   getArtifactVersionMediaUrl,
+  getAssetVersionMediaUrl,
   getTimelineRoughCutUrl,
 } from "@/api/creator";
 import {
+  selectFinalFilmVersionId,
   selectRoughCutFrames,
   type RoughCutSource,
 } from "@/selectors/blueprintSelectors";
@@ -24,6 +27,9 @@ const SOURCE_STYLE: Record<RoughCutSource, string> = {
   design: "bg-[var(--color-warning)]/90",
   none: "bg-black/50",
 };
+
+/** Sentinel playing id of the whole-film chip (never a real timeline id). */
+const FULL_FILM_ID = "__full_film__";
 
 interface BlueprintRoughCutStripProps {
   project: ProjectDocument;
@@ -51,7 +57,14 @@ export default function BlueprintRoughCutStrip({
     [frames],
   );
   const multiTimeline = timelineIds.length > 1;
-  if (!frames.length) return null;
+  const filmVersionId = useMemo(
+    () => selectFinalFilmVersionId(project),
+    [project],
+  );
+  const filmUrl = filmVersionId
+    ? getArtifactVersionMediaUrl(filmVersionId)
+    : null;
+  if (!frames.length && !filmUrl) return null;
 
   const timelineLabelOf = (timelineId: string) => {
     const timeline = project.timelines.items[timelineId];
@@ -93,6 +106,25 @@ export default function BlueprintRoughCutStrip({
           })}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-1.5">
+          {filmUrl && (
+            <button
+              type="button"
+              data-roughcut-play-film
+              onClick={() => togglePlay(FULL_FILM_ID)}
+              title={t("blueprint.playFullFilm")}
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+                playingId === FULL_FILM_ID
+                  ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                  : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              }`}
+            >
+              <Film className="h-3 w-3" />
+              {t("blueprint.playFullFilm")}
+              <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
+                {t("blueprint.finalCutBadge")}
+              </span>
+            </button>
+          )}
           {timelineIds.map((timelineId) => {
             const finalUrl = finalCutUrlOf(timelineId);
             return (
@@ -164,8 +196,10 @@ export default function BlueprintRoughCutStrip({
             <video
               key={playingId}
               src={
-                finalCutUrlOf(playingId) ??
-                getTimelineRoughCutUrl(project.project_id, playingId)
+                playingId === FULL_FILM_ID
+                  ? (filmUrl ?? undefined)
+                  : (finalCutUrlOf(playingId) ??
+                    getTimelineRoughCutUrl(project.project_id, playingId))
               }
               controls
               autoPlay
@@ -175,10 +209,13 @@ export default function BlueprintRoughCutStrip({
             />
           )}
           <span className="absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-            {timelineLabelOf(playingId)} ·{" "}
-            {finalCutUrlOf(playingId)
-              ? t("blueprint.finalCutBadge")
-              : t("blueprint.roughCut")}
+            {playingId === FULL_FILM_ID
+              ? `${project.name} · ${t("blueprint.finalCutBadge")}`
+              : `${timelineLabelOf(playingId)} · ${
+                  finalCutUrlOf(playingId)
+                    ? t("blueprint.finalCutBadge")
+                    : t("blueprint.roughCut")
+                }`}
           </span>
           <button
             type="button"
@@ -201,7 +238,9 @@ export default function BlueprintRoughCutStrip({
               timeline?.title ||
               t("blueprint.episodeN", { n: frame.timelineIndex + 1 });
             const url = frame.versionId
-              ? getArtifactVersionMediaUrl(frame.versionId)
+              ? frame.versionKind === "source"
+                ? getAssetVersionMediaUrl(frame.versionId)
+                : getArtifactVersionMediaUrl(frame.versionId)
               : null;
             return (
               <span key={frame.key} className="contents">

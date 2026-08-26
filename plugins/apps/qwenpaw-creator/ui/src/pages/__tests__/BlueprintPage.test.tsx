@@ -125,4 +125,88 @@ describe("BlueprintPage narrative shapes", () => {
       "/timelines/items/timeline:ep2/synopsis",
     );
   });
+
+  /**
+   * The video_edit pipeline stamps none of the generation artifacts the
+   * board checks: shots are real clips referenced via render_source
+   * (never element_video slots), the narrator is a voice-only role, no
+   * timeline_script slot or source intelligence version is ever written.
+   * Completion must derive from those durable facts plus the composed
+   * final cut instead of reading steps 1-4 as incomplete.
+   */
+  function videoEditProject(): ProjectDocument {
+    const project = singleProject();
+    project.scenario = "video_edit";
+    const timeline = project.timelines.items["timeline:main"];
+    delete timeline.elements_by_id["r2v-window"];
+    delete timeline.elements_by_id["transition"];
+    delete project.assets.artifact_slots_by_id["element:r2v-window:video"];
+    delete project.assets.artifact_slots_by_id["visual:cat:anchor"];
+    delete project.assets.artifact_versions_by_id["r2v-window-v1"];
+    delete project.assets.artifact_versions_by_id["cat-anchor-v1"];
+    project.visual.entities = {
+      order: ["char:narrator"],
+      items: {
+        "char:narrator": {
+          entity_id: "char:narrator",
+          kind: "character",
+          name: "旁白（画外音）",
+          description: "仅画外音、无视觉形象",
+          continuity: "全片同一音色",
+          required_variant_ids: [],
+          variants: { order: [], items: {} },
+          selected_artifact_version_id: null,
+          voice: {
+            voice_id: "voice-1",
+            target_model: "tts-flash",
+            preferred_name: "教学旁白",
+            sample_source_version_id: null,
+            enrollment_key: "key-1",
+            created_at: "2026-07-20T00:00:00Z",
+          },
+        },
+      },
+    };
+    return project;
+  }
+
+  it("video_edit board derives step completion from clips, voice role and the final cut", () => {
+    seedProject(videoEditProject());
+    const { container } = renderPage();
+
+    expect(
+      container.querySelector('[data-blueprint-shape="single"]'),
+    ).toBeInTheDocument();
+    expect(screen.getByText("素材剪辑")).toBeInTheDocument();
+    // All five stage columns read completed.
+    expect(screen.getAllByText("已完成")).toHaveLength(5);
+    // Shot card: done via its render_source clip (per-shot durable fact).
+    expect(screen.getByText("已生成")).toBeInTheDocument();
+    // Narrator: voice-only role with an enrolled voice needs no visuals.
+    expect(screen.getByText("音色已建立（画外音角色）")).toBeInTheDocument();
+    // Source understanding and the (never-written) script slot never ran
+    // on this path; the composed final cut implies both (a stale final
+    // would drop the implication).
+    expect(screen.getAllByText("已随成片完成")).toHaveLength(2);
+    expect(screen.getByText("成片已合成")).toBeInTheDocument();
+    // Rough-cut strip: the clip counts as a final frame.
+    expect(container.querySelectorAll("[data-roughcut-frame]")).toHaveLength(1);
+    expect(screen.getByText("成片帧")).toBeInTheDocument();
+    // No pending-visual warning chip for the voice-only narrator.
+    expect(screen.queryByText("1 待确认")).not.toBeInTheDocument();
+  });
+
+  it("video_edit board keeps per-shot clip completion but no implication before the final cut", () => {
+    const project = videoEditProject();
+    delete project.assets.artifact_slots_by_id["timeline:timeline:main:render"];
+    delete project.assets.artifact_versions_by_id["final-v1"];
+    seedProject(project);
+    renderPage();
+
+    // The clip-backed shot still reads generated (durable render_source fact)…
+    expect(screen.getByText("已生成")).toBeInTheDocument();
+    // …but with no final cut nothing is implied: understanding stays pending.
+    expect(screen.getByText("待理解")).toBeInTheDocument();
+    expect(screen.queryByText("已随成片完成")).not.toBeInTheDocument();
+  });
 });

@@ -79,6 +79,35 @@ export function selectTimelineRenderSlot(
   return resolveSlot(project, scanned);
 }
 
+/**
+ * The whole composed film of the project: the newest rendered final_video
+ * artifact backed by a real video file. Mirrors the backend derivation of
+ * `finalVideoVersionId` (store._final_video_reference) so the blueprint
+ * surfaces the same 成片 the project list previews.
+ */
+export function selectFinalFilmVersionId(
+  project: ProjectDocument | null | undefined,
+): string | null {
+  if (!project) return null;
+  const files = project.assets.files_by_id;
+  let newest: ArtifactVersionDocument | null = null;
+  for (const version of Object.values(
+    project.assets.artifact_versions_by_id,
+  )) {
+    if (version.kind !== "final_video" || !version.file_id) continue;
+    if (!files[version.file_id]?.media_type?.startsWith("video/")) continue;
+    if (
+      !newest ||
+      version.created_at > newest.created_at ||
+      (version.created_at === newest.created_at &&
+        version.version_id > newest.version_id)
+    ) {
+      newest = version;
+    }
+  }
+  return newest?.version_id ?? null;
+}
+
 const VIDEO_CREATION_TYPES = new Set([
   "r2v",
   "t2v",
@@ -108,7 +137,26 @@ function selectedEntityVersionId(
   return null;
 }
 
+/**
+ * Voice-only role: an enrolled voice with no visual variants required or
+ * present (e.g. the video_edit narrator, 仅画外音). Such entities have no
+ * portrait to design, so they must not read as pending visual work.
+ */
+export function isVoiceOnlyVisualEntity(
+  entity: VisualEntityDocument | undefined | null,
+): boolean {
+  if (!entity) return false;
+  return Boolean(
+    entity.voice &&
+      entity.required_variant_ids.length === 0 &&
+      entity.variants.order.length === 0,
+  );
+}
+
 export type RoughCutSource = "final" | "storyboard" | "design" | "none";
+
+/** Media namespace of RoughCutFrame.versionId: generated artifact vs uploaded/recorded source asset. */
+export type RoughCutVersionKind = "artifact" | "source";
 
 export interface RoughCutFrame {
   key: string;
@@ -116,21 +164,29 @@ export interface RoughCutFrame {
   timelineIndex: number;
   elementId: string;
   label: string;
-  /** Artifact version rendering this frame, if any. */
+  /** Artifact/source-asset version rendering this frame, if any. */
   versionId: string | null;
+  versionKind: RoughCutVersionKind | null;
   mediaKind: "image" | "video" | null;
   source: RoughCutSource;
 }
 
 /**
  * Rough-cut frame of one element, derived purely from existing artifacts
- * (plan §4.8): selected element_video ▸ r2v_storyboard_image ▸ the
- * referenced entity's visual design image ▸ empty placeholder.
+ * (plan §4.8): selected element_video ▸ render_source media (real clips of
+ * the video_edit path / pinned artifact) ▸ motion_clip's carried motion
+ * document ▸ r2v_storyboard_image ▸ the referenced entity's visual design
+ * image ▸ empty placeholder.
  */
 export function roughCutFrameForElement(
   project: ProjectDocument,
   element: TimelineElementDocument,
-): { versionId: string | null; mediaKind: "image" | "video" | null; source: RoughCutSource } {
+): {
+  versionId: string | null;
+  versionKind: RoughCutVersionKind | null;
+  mediaKind: "image" | "video" | null;
+  source: RoughCutSource;
+} {
   // 1. Selected element_video output.
   for (const output of Object.values(element.outputs)) {
     const slot = project.assets.artifact_slots_by_id[output.slot_id];
@@ -138,11 +194,53 @@ export function roughCutFrameForElement(
       continue;
     return {
       versionId: slot.selected_version_id,
+      versionKind: "artifact",
       mediaKind: "video",
       source: "final",
     };
   }
-  // 2. Storyboard image (the mandatory intermediate of generated elements).
+  // 2. The element's render_source — the durable media reference the final
+  //    compositor plays. The video_edit path never produces element_video
+  //    slots: edit elements consume real clips via a source_asset_version
+  //    render_source, so that reference *is* the shot's finished picture.
+  const renderSource = element.render_source;
+  if (renderSource?.type === "source_asset_version") {
+    const version =
+      project.assets.source_versions_by_id[renderSource.version_id];
+    if (version && (version.media_kind === "video" || version.media_kind === "image")) {
+      return {
+        versionId: version.version_id,
+        versionKind: "source",
+        mediaKind: version.media_kind,
+        source: "final",
+      };
+    }
+  } else if (renderSource?.type === "artifact_version") {
+    const version =
+      project.assets.artifact_versions_by_id[renderSource.version_id];
+    if (version && !version.stale) {
+      const file = project.assets.files_by_id[version.file_id];
+      return {
+        versionId: version.version_id,
+        versionKind: "artifact",
+        mediaKind: file?.media_type?.startsWith("image/") ? "image" : "video",
+        source: "final",
+      };
+    }
+  }
+  // (render_source.type === "element_output" pointing at this element's own
+  // slot is already covered by step 1.)
+  // 3. Full-canvas motion clips carry their whole picture in creation.motion
+  //    (rasterized by the backend at composite time): once the design
+  //    pipeline wrote the document the segment is done, with no media
+  //    artifact to point at — mirrors resolveElementPlayback's "ready".
+  if (
+    element.creation.type === "motion_clip" &&
+    (element.creation.motion?.html || element.creation.motion?.html_file_id)
+  ) {
+    return { versionId: null, versionKind: null, mediaKind: null, source: "final" };
+  }
+  // 4. Storyboard image (the mandatory intermediate of generated elements).
   const storyboard = Object.values(project.assets.artifact_slots_by_id).find(
     (slot) =>
       slot.owner_ref === `element:${element.element_id}` &&
@@ -153,11 +251,12 @@ export function roughCutFrameForElement(
   if (storyboard?.selected_version_id) {
     return {
       versionId: storyboard.selected_version_id,
+      versionKind: "artifact",
       mediaKind: "image",
       source: "storyboard",
     };
   }
-  // 3. Referenced visual entity design image.
+  // 5. Referenced visual entity design image.
   const creation = element.creation;
   const entityRefs: string[] = [];
   if (creation.type === "r2v") {
@@ -171,9 +270,14 @@ export function roughCutFrameForElement(
       project.visual.entities.items[ref.replace(/^visual-entity:/, "")];
     const versionId = selectedEntityVersionId(entity);
     if (versionId)
-      return { versionId, mediaKind: "image", source: "design" };
+      return {
+        versionId,
+        versionKind: "artifact",
+        mediaKind: "image",
+        source: "design",
+      };
   }
-  return { versionId: null, mediaKind: null, source: "none" };
+  return { versionId: null, versionKind: null, mediaKind: null, source: "none" };
 }
 
 /** All frames of the project: every enabled element, timeline order first. */

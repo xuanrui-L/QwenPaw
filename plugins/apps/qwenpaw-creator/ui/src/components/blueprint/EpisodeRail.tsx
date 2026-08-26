@@ -5,6 +5,8 @@ import type { ProjectDocument } from "@/contracts/creator";
 import {
   getArtifactVersionFrameUrl,
   getArtifactVersionMediaUrl,
+  getAssetVersionFrameUrl,
+  getAssetVersionMediaUrl,
 } from "@/api/creator";
 import {
   roughCutFrameForElement,
@@ -31,9 +33,15 @@ function firstFrameUrl(
   if (!element) return null;
   const frame = roughCutFrameForElement(project, element);
   if (!frame.versionId) return null;
+  const fromSource = frame.versionKind === "source";
   // Video artifacts can't render inside <img>; use the poster-frame endpoint.
-  return frame.mediaKind === "video"
-    ? getArtifactVersionFrameUrl(frame.versionId, 0, 160)
+  if (frame.mediaKind === "video") {
+    return fromSource
+      ? getAssetVersionFrameUrl(frame.versionId, 0, 160)
+      : getArtifactVersionFrameUrl(frame.versionId, 0, 160);
+  }
+  return fromSource
+    ? getAssetVersionMediaUrl(frame.versionId)
     : getArtifactVersionMediaUrl(frame.versionId);
 }
 

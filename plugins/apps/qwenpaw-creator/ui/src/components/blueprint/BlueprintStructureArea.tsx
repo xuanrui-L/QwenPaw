@@ -15,6 +15,7 @@ import type {
 } from "@/contracts/creator";
 import {
   isVideoProductionElement,
+  isVoiceOnlyVisualEntity,
   layoutNarrativeGraph,
   roughCutFrameForElement,
   selectResearchSlots,
@@ -198,22 +199,28 @@ function SingleBoard({
             onClick: () => onSelectTimeline(timelineId),
           },
     ];
-    // 3. Visual design: real entity states.
+    // 3. Visual design: real entity states; enrolled voice-only roles
+    //    (e.g. the video_edit narrator) have no portrait to design.
     const visualCards: BoardCard[] = project.visual.entities.order
       .map((entityId) => project.visual.entities.items[entityId])
       .filter(Boolean)
       .map((entity) => {
-        const done = Boolean(
-          entity.selected_artifact_version_id ||
-            entity.variants.order.some(
-              (variantId) =>
-                entity.variants.items[variantId]?.selected_artifact_version_id,
-            ),
-        );
+        const voiceOnly = isVoiceOnlyVisualEntity(entity);
+        const done =
+          voiceOnly ||
+          Boolean(
+            entity.selected_artifact_version_id ||
+              entity.variants.order.some(
+                (variantId) =>
+                  entity.variants.items[variantId]?.selected_artifact_version_id,
+              ),
+          );
         return {
           key: `visual:${entity.entity_id}`,
           label: entity.name,
-          sub: done
+          sub: voiceOnly
+            ? t("blueprint.board.voiceReady")
+            : done
             ? t("blueprint.board.visualReady")
             : t("blueprint.board.visualPending"),
           tone: done ? ("done" as const) : ("wait" as const),
@@ -245,17 +252,36 @@ function SingleBoard({
       });
     // 5. Final cut.
     const render = selectTimelineRenderSlot(project, timelineId);
+    const finalReady = Boolean(render?.selected && !render.selected.stale);
     const renderCards: BoardCard[] = [
       {
         key: "render",
         label: render?.selected?.name || t("blueprint.finalCut"),
-        sub:
-          render?.selected && !render.selected.stale
-            ? t("blueprint.board.renderReady")
-            : t("blueprint.board.renderPending"),
-        tone: render?.selected && !render.selected.stale ? "done" : "idle",
+        sub: finalReady
+          ? t("blueprint.board.renderReady")
+          : t("blueprint.board.renderPending"),
+        tone: finalReady ? "done" : "idle",
       },
     ];
+    // A selected, fresh final cut is durable proof the upstream pipeline
+    // ran to completion (any upstream edit would have marked it stale via
+    // staleness propagation). Steps whose scenario path never produces the
+    // artifact checked above — video_edit stamps no source intelligence,
+    // timeline_script or element_video slots — must not read as incomplete
+    // under a composed final video.
+    const impliedDone = (cards: BoardCard[]): BoardCard[] =>
+      finalReady
+        ? cards.map((card) =>
+            card.tone === "wait" || card.tone === "idle"
+              ? {
+                  ...card,
+                  tone: "done" as const,
+                  emphasized: false,
+                  sub: t("blueprint.board.impliedByFinal"),
+                }
+              : card,
+          )
+        : cards;
     const make = (
       key: string,
       name: string,
@@ -277,25 +303,25 @@ function SingleBoard({
         "understanding",
         t("blueprint.columns.understanding"),
         <Brain className="h-3.5 w-3.5" />,
-        [...sourceCards, ...researchCards],
+        impliedDone([...sourceCards, ...researchCards]),
       ),
       make(
         "script",
         t("blueprint.columns.script"),
         <FileText className="h-3.5 w-3.5" />,
-        scriptCards,
+        impliedDone(scriptCards),
       ),
       make(
         "visual",
         t("blueprint.columns.visual"),
         <Palette className="h-3.5 w-3.5" />,
-        visualCards,
+        impliedDone(visualCards),
       ),
       make(
         "video",
         t("blueprint.columns.video"),
         <Clapperboard className="h-3.5 w-3.5" />,
-        elementCards,
+        impliedDone(elementCards),
       ),
       make(
         "final",

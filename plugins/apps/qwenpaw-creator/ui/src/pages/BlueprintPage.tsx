@@ -16,6 +16,7 @@ import {
   selectNarrativeShape,
 } from "@/selectors/timelineElementSelectors";
 import {
+  isVoiceOnlyVisualEntity,
   selectNarrativeEdges,
   selectResearchSlots,
   selectTimelineSummaries,
@@ -156,6 +157,9 @@ export default function BlueprintPage() {
   const pendingVisual = project.visual.entities.order.filter((entityId) => {
     const entity = project.visual.entities.items[entityId];
     if (!entity) return false;
+    // Voice-only roles (enrolled voice, no visual variants) have no
+    // portrait to confirm.
+    if (isVoiceOnlyVisualEntity(entity)) return false;
     return !(
       entity.selected_artifact_version_id ||
       entity.variants.order.some(
