@@ -270,16 +270,14 @@ def test_fcntl_lock_times_out_across_processes_and_releases_on_exit(tmp_path):
         assert path.exists()
 
 
-def test_same_thread_nested_lock_fails_immediately_with_owner_details(
-    tmp_path,
-):
+def test_same_thread_nested_lock_waits_then_times_out(tmp_path):
     path = tmp_path / "nested.lock"
     with CrossProcessFileLock(path):
-        with pytest.raises(
-            RuntimeError,
-            match="same-thread nested Runtime lock acquisition",
-        ):
-            with CrossProcessFileLock(path):
+        # Executor threads are reused across requests while a hold spans an
+        # await, so same-thread re-acquisition must WAIT (not fail fast); a
+        # genuine nested acquisition then surfaces as the retryable timeout.
+        with pytest.raises(LockTimeoutError):
+            with CrossProcessFileLock(path, timeout_seconds=0.2):
                 pass
 
 

@@ -103,7 +103,7 @@ describe("BlueprintPage narrative shapes", () => {
     expect(
       container.querySelector('[data-blueprint-shape="linear"]'),
     ).toBeInTheDocument();
-    expect(screen.getByText("线性 2 集")).toBeInTheDocument();
+    expect(screen.getByText("线性 2 节点")).toBeInTheDocument();
     expect(screen.getByText("第1集 · 晨光出发")).toBeInTheDocument();
     expect(screen.getByText("第2集 · 星夜归途")).toBeInTheDocument();
 

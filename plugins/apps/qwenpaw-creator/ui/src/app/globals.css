@@ -1014,3 +1014,17 @@ a {
     animation: none;
   }
 }
+
+/* Frosted dropdown surfaces (blueprint export menu etc.) */
+.ant-dropdown .ant-dropdown-menu {
+  border-radius: 14px;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-bg-primary) 86%, transparent);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14);
+}
+.ant-dropdown .ant-dropdown-menu .ant-dropdown-menu-item {
+  border-radius: 9px;
+}

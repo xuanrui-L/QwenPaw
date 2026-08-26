@@ -235,7 +235,7 @@ export function DetailView({
               </div>
             </div>
             <div>
-              <FieldLabel>选项（派生自 narrative_edges，改边即改选项）</FieldLabel>
+              <FieldLabel>选项（来自分支连线，修改连线即同步更新）</FieldLabel>
               {detail.options.map((option) => (
                 <div
                   key={option.label}

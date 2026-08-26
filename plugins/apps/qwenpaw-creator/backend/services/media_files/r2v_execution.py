@@ -523,14 +523,16 @@ def _target_element_id(target_ref: str) -> str:
 
 def _duration(value: Any) -> int:
     if isinstance(value, bool):
-        raise ValidationError("R2V durationSeconds 必须是整数")
+        raise ValidationError("R2V durationSeconds 必须是数字")
     try:
         number = float(value)
     except (TypeError, ValueError) as error:
-        raise ValidationError("R2V durationSeconds 必须是整数") from error
-    if not number.is_integer() or not 1 <= number <= 60:
-        raise ValidationError("R2V durationSeconds 必须是 1 到 60 的整数")
-    return int(number)
+        raise ValidationError("R2V durationSeconds 必须是数字") from error
+    if not 1 <= number <= 60:
+        raise ValidationError("R2V durationSeconds 必须在 1 到 60 秒之间")
+    # Shots are planned at sub-second precision but providers only accept
+    # whole seconds — round instead of rejecting the whole dispatch.
+    return max(1, round(number))
 
 
 def _indexed_path(project_root: Path, indexed: IndexedFile) -> Path:

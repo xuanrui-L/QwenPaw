@@ -149,7 +149,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     // The creative brief moved to the blueprint page; the multi-timeline
     // fixture shows the episode rail plus the timeline-title heading instead.
     expect(
-      screen.getByRole("button", { name: "收起剧集栏" }),
+      screen.getByRole("button", { name: "收起节点栏" }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("第1集 · 晨光出发").length).toBeGreaterThan(0);
     expect(screen.queryByText("创作总纲")).not.toBeInTheDocument();

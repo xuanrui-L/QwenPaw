@@ -124,12 +124,14 @@ function VisualDetail({
         {t("blueprint.backToList")}
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pb-2">
-        <div className="flex min-h-[220px] items-end overflow-hidden rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-0">
+        <div className="flex min-h-[220px] items-center justify-center overflow-hidden rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-0">
           {imageUrl ? (
+            // Full-frame portrait designs must show the whole figure —
+            // cover-cropping cut the character's head off.
             <img
               src={imageUrl}
               alt={entity.name}
-              className="h-full w-full object-cover"
+              className="mx-auto max-h-[48vh] w-auto max-w-full object-contain"
             />
           ) : (
             <span className="p-2.5 text-xs text-[var(--color-text-tertiary)]">
@@ -399,6 +401,23 @@ export default function BlueprintPrepDrawer({
     setDetail(focus);
   }, [focus, open]);
 
+  // Escape closes the drawer (detail level first, then the drawer itself).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const target = event.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+      setDetail((current) => {
+        if (current) return null;
+        onClose();
+        return current;
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
   const entities = useMemo(
     () =>
       project.visual.entities.order
@@ -521,7 +540,7 @@ export default function BlueprintPrepDrawer({
                                         )}
                                         alt={entity.name}
                                         loading="lazy"
-                                        className="h-full w-full object-cover"
+                                        className="h-full w-full object-cover object-top"
                                       />
                                     )}
                                     <span className="absolute right-1.5 top-1.5 rounded bg-black/55 px-1.5 py-0.5 text-[9px] font-bold text-white">
