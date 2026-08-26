@@ -17,7 +17,7 @@ import asyncio
 import json
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime  # pylint: disable=no-name-in-module
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 from uuid import uuid4
@@ -66,6 +66,12 @@ _LOOP_TOKEN_ATTR = "_render_review_owner_token"
 _CLAIM_TTL_SECONDS = 30 * 60
 # Bounded dedup history of already-reviewed artifact versions per chain file.
 _REVIEWED_HISTORY_LIMIT = 50
+# Hard safety limits per target_ref, independent of chain lifecycle.
+_MAX_VLM_CALLS_PER_TARGET = 6
+_MAX_REVIEW_WALL_SECONDS = 30 * 60
+# Two rounds whose major findings have the same dimensions and nearly the same
+# evidence timestamps are considered a repeated feedback set: stop the loop.
+_FEEDBACK_REPEAT_TIMESTAMP_TOLERANCE_MS = 1000
 # Audio source metadata that marks a narration/voiceover track. TTS assets
 # record sourceKind=tts_generation; explicit role labels are honoured too.
 _VOICEOVER_SOURCE_KINDS = frozenset({"tts_generation"})
@@ -83,6 +89,12 @@ def _reports_root(services: "CreatorFileServices", project_id: str) -> Path:
 def _chain_path(reports_root: Path, target_ref: str) -> Path:
     safe_ref = _UNSAFE_REF_CHARS.sub("-", target_ref).strip("-") or "target"
     return reports_root / f"chain-{safe_ref}.json"
+
+
+def _budget_path(reports_root: Path, target_ref: str) -> Path:
+    """Per-target review budget, outlives any single chain."""
+    safe_ref = _UNSAFE_REF_CHARS.sub("-", target_ref).strip("-") or "target"
+    return reports_root / f"budget-{safe_ref}.json"
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -109,6 +121,83 @@ def _chain_lock(reports_root: Path, target_ref: str) -> CrossProcessFileLock:
     return CrossProcessFileLock(
         chain_path.with_name(f"{chain_path.name}.lock"),
     )
+
+
+def _read_budget(reports_root: Path, target_ref: str) -> dict[str, Any]:
+    """Return the durable budget for this target, creating it if absent."""
+    payload = _read_json(_budget_path(reports_root, target_ref)) or {}
+    payload.setdefault("target_ref", target_ref)
+    payload.setdefault("rounds_completed", 0)
+    payload.setdefault("vlm_calls_total", 0)
+    payload.setdefault("first_review_at", None)
+    payload.setdefault("last_feedback_signature", None)
+    return payload
+
+
+def _budget_exhausted(budget: Mapping[str, Any]) -> tuple[bool, str]:
+    """Check whether the target-level hard limits are reached.
+
+    Returns ``(exhausted, reason)``.
+    """
+    if int(budget.get("rounds_completed") or 0) >= MAX_REVIEW_ROUNDS:
+        return True, "max_review_rounds"
+    if int(budget.get("vlm_calls_total") or 0) >= _MAX_VLM_CALLS_PER_TARGET:
+        return True, "max_vlm_calls"
+    first = budget.get("first_review_at")
+    if first:
+        try:
+            elapsed = (
+                datetime.now(UTC) - datetime.fromisoformat(str(first))
+            ).total_seconds()
+        except ValueError:
+            elapsed = 0
+        if elapsed >= _MAX_REVIEW_WALL_SECONDS:
+            return True, "max_review_wall_time"
+    return False, ""
+
+
+def _feedback_signature(report: RenderReviewReport) -> dict[str, Any]:
+    """Fingerprint the actionable major findings of a report.
+
+    Used to detect when the editor produced the same set of major failures
+    again, signalling that another regen is unlikely to help.
+    """
+    findings: list[tuple[str, int | None]] = []
+    for item in report.findings:
+        if not item.passed and item.severity == "major":
+            ts = item.evidence_timestamp_ms
+            findings.append((item.dimension.value, ts))
+    findings.sort()
+    return {
+        "dimensions": [dim for dim, _ in findings],
+        "timestamps": [ts for _, ts in findings],
+    }
+
+
+def _is_repeating_feedback(
+    report: RenderReviewReport,
+    budget: Mapping[str, Any],
+) -> bool:
+    """Whether this report repeats the previous actionable major findings."""
+    previous = budget.get("last_feedback_signature")
+    if not isinstance(previous, dict):
+        return False
+    current = _feedback_signature(report)
+    if current["dimensions"] != previous.get("dimensions"):
+        return False
+    prev_ts = previous.get("timestamps") or []
+    curr_ts = current["timestamps"]
+    if len(prev_ts) != len(curr_ts):
+        return False
+    tol = _FEEDBACK_REPEAT_TIMESTAMP_TOLERANCE_MS
+    for a, b in zip(prev_ts, curr_ts):
+        if a is None or b is None:
+            if a is not b:
+                return False
+            continue
+        if abs(int(a) - int(b)) > tol:
+            return False
+    return True
 
 
 def _owner_token() -> str:
@@ -164,10 +253,24 @@ def _admit_round(
     superseded by the newer composition, and the superseded loop drops its
     findings at finalization. ``owner`` is the caller's lease token (this
     function runs in a worker thread, so the scheduling loop resolves it).
+
+    The durable ``budget-{target_ref}.json`` enforces the global round budget
+    across chain restarts; ``chain-*.json`` only tracks the current chain's
+    claim/freshness state.
     """
     owner = owner or _owner_token()
     chain_path = _chain_path(reports_root, target_ref)
+    budget_path = _budget_path(reports_root, target_ref)
     with _chain_lock(reports_root, target_ref):
+        budget = _read_budget(reports_root, target_ref)
+        exhausted, reason = _budget_exhausted(budget)
+        if exhausted:
+            logger.info(
+                "render review admission denied for %s: budget exhausted (%s)",
+                target_ref,
+                reason,
+            )
+            return None
         state = _read_json(chain_path) or {}
         reviewed = [
             str(item) for item in state.get("reviewed_video_ids") or []
@@ -198,12 +301,16 @@ def _admit_round(
         # logical chain happens to be open. A pass, a superseding compose or
         # a stale finalization must never reset paid VLM/challenge attempts
         # back to round one. The stable chain id also keeps feedback request
-        # identities monotonic across those transitions.
+        # identities monotonic across those transitions. The durable
+        # budget file above adds the cross-chain layer on top.
         chain_id = (
             str(state.get("chain_id") or "") or f"chain-{uuid4().hex[:12]}"
         )
         round_number = attempts_started + 1
         now = datetime.now(UTC).isoformat()
+        if budget.get("first_review_at") is None:
+            budget["first_review_at"] = now
+        budget["updated_at"] = now
         state.update(
             {
                 "chain_id": chain_id,
@@ -222,6 +329,7 @@ def _admit_round(
             },
         )
         _write_json(chain_path, state)
+        _write_json(budget_path, budget)
     return round_number, chain_id
 
 
@@ -276,7 +384,7 @@ def _selected_slot_version(
     return slot.selected_version_id if slot is not None else None
 
 
-def _finalize_round(
+def _finalize_round(  # pylint: disable=too-many-statements
     services: "CreatorFileServices",
     reports_root: Path,
     *,
@@ -289,7 +397,7 @@ def _finalize_round(
     report: RenderReviewReport,
     owner: str | None = None,
 ) -> tuple[str, bool]:
-    """Re-validate freshness and admit feedback atomically.
+    """Re-validate freshness, consume budget, and admit feedback atomically.
 
     Returns ``(outcome, feedback_sent)`` where outcome is ``completed``,
     ``superseded`` (a newer composition claimed the chain while the VLM ran),
@@ -300,11 +408,17 @@ def _finalize_round(
     so the selected version cannot change between the check and the durable
     feedback write. Feedback is fail-closed: no proof of freshness means no
     mutation instruction. Non-``completed`` findings keep their report but
-    never mutate the current timeline and never consume a chain round.
+    never mutate the current timeline and never consume budget.
+
+    Budget consumption is tracked in ``budget-{target_ref}.json`` and is
+    independent of chain lifecycle, so a closed chain followed by a fresh
+    composition does not reset the round counter.
     """
     chain_path = _chain_path(reports_root, target_ref)
+    budget_path = _budget_path(reports_root, target_ref)
     owner = owner or _owner_token()
     with _chain_lock(reports_root, target_ref):
+        budget = _read_budget(reports_root, target_ref)
         state = _read_json(chain_path) or {}
         claim = state.get("claim") or {}
         now = datetime.now(UTC).isoformat()
@@ -322,50 +436,63 @@ def _finalize_round(
             state["updated_at"] = now
             _write_json(chain_path, state)
             return "superseded", False
-        needs_feedback = (
-            report.verdict == "revise" and round_number < MAX_REVIEW_ROUNDS
+
+        def _resolve_selected() -> str | None:
+            # Fail closed: an unreadable Project or a missing slot is no
+            # proof of freshness, so no mutation instruction goes out.
+            try:
+                return _selected_slot_version(
+                    services,
+                    project_id,
+                    video_id=video_id,
+                    slot_id=slot_id,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to resolve selected artifact version",
+                )
+                return None
+
+        # Determine freshness first: a stale or unverified round never mutates
+        # the timeline and never consumes budget, even if we would not have
+        # sent feedback anyway.
+        selected = _resolve_selected()
+        if selected is None:
+            outcome = "unverified"
+        elif selected != video_id:
+            outcome = "stale"
+        else:
+            outcome = "completed"
+
+        # Decide whether we would even want to ask for another regen.
+        # ``rounds_completed`` counts rounds already finished; feedback is only
+        # useful if at least one more round can be admitted after this one.
+        rounds_so_far = int(budget.get("rounds_completed") or 0)
+        repeating = _is_repeating_feedback(report, budget)
+        can_regen = rounds_so_far + 1 < MAX_REVIEW_ROUNDS
+        intends_feedback = (
+            outcome == "completed"
+            and report.verdict == "revise"
+            and can_regen
+            and not repeating
         )
-        outcome = "completed"
+
         feedback_sent = False
-        if needs_feedback:
-
-            def _resolve_selected() -> str | None:
-                # Fail closed: an unreadable Project or a missing slot is no
-                # proof of freshness, so no mutation instruction goes out.
-                try:
-                    return _selected_slot_version(
-                        services,
-                        project_id,
-                        video_id=video_id,
-                        slot_id=slot_id,
-                    )
-                except Exception:
-                    logger.exception(
-                        "failed to resolve selected artifact version",
-                    )
-                    return None
-
-            selected = _resolve_selected()
-            if selected is None:
-                outcome = "unverified"
-            elif selected != video_id:
+        if intends_feedback:
+            try:
+                feedback_sent = _admit_feedback(
+                    services,
+                    project_id=project_id,
+                    report=report,
+                    target_ref=target_ref,
+                    chain_id=chain_id,
+                    freshness_guard=(lambda: _resolve_selected() == video_id),
+                )
+            except RequestAdmissionConflict:
+                # A concurrent compose switched the selected render
+                # between the pre-check and the durable write.
                 outcome = "stale"
-            else:
-                try:
-                    feedback_sent = _admit_feedback(
-                        services,
-                        project_id=project_id,
-                        report=report,
-                        target_ref=target_ref,
-                        chain_id=chain_id,
-                        freshness_guard=(
-                            lambda: _resolve_selected() == video_id
-                        ),
-                    )
-                except RequestAdmissionConflict:
-                    # A concurrent compose switched the selected render
-                    # between the pre-check and the durable write.
-                    outcome = "stale"
+
         if outcome != "completed":
             state.update(
                 {
@@ -376,7 +503,19 @@ def _finalize_round(
             )
             _write_json(chain_path, state)
             return outcome, False
-        keep_open = needs_feedback
+
+        # Consume budget now that the round is durable and fresh.
+        budget["rounds_completed"] = rounds_so_far + 1
+        budget["vlm_calls_total"] = int(budget.get("vlm_calls_total") or 0) + 1
+        budget["updated_at"] = now
+
+        if intends_feedback:
+            budget["last_feedback_signature"] = _feedback_signature(report)
+        else:
+            # Drop the signature so a future fresh composition starts clean.
+            budget["last_feedback_signature"] = None
+
+        keep_open = intends_feedback
         state.update(
             {
                 "chain_id": chain_id,
@@ -391,6 +530,31 @@ def _finalize_round(
             },
         )
         _write_json(chain_path, state)
+        _write_json(budget_path, budget)
+
+        if repeating:
+            trace_event(
+                "render_review.converged_by_no_delta",
+                component=_TRACE_COMPONENT,
+                attributes={
+                    "videoRef": report.video_ref,
+                    "round": round_number,
+                    "targetRef": target_ref,
+                },
+                projectId=project_id,
+            )
+        if not can_regen:
+            trace_event(
+                "render_review.budget_exhausted",
+                component=_TRACE_COMPONENT,
+                attributes={
+                    "videoRef": report.video_ref,
+                    "round": round_number,
+                    "targetRef": target_ref,
+                    "roundsCompleted": budget["rounds_completed"],
+                },
+                projectId=project_id,
+            )
         return "completed", feedback_sent
 
 

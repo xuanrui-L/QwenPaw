@@ -2102,29 +2102,30 @@ export default function ModelConfigModal({ open, onClose }: Props) {
             )}
           </div>
         </div>
-        {(type === "image" || type === "video") &&
-          (item.protocol.toLowerCase().includes("dashscope") ||
-            item.protocol.includes("百炼") ||
-            item.protocol.toLowerCase().includes("token plan")) && (
-            <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
-              <Checkbox
-                checked={
-                  type === "image"
-                    ? config.image.reuse_llm_key
-                    : config.video.reuse_llm_key
+        {/* The reuse flag applies to every protocol (the backend falls back
+            to the LLM key whenever the section key is empty), so the
+            checkbox must stay reachable after a protocol switch — hiding
+            it left the API key field permanently locked. */}
+        {(type === "image" || type === "video") && (
+          <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+            <Checkbox
+              checked={
+                type === "image"
+                  ? config.image.reuse_llm_key
+                  : config.video.reuse_llm_key
+              }
+              onChange={(e) => {
+                const checked = e.target.checked;
+                updateItem(type, "reuse_llm_key", checked);
+                if (checked) {
+                  updateItem(type, "api_key", "");
                 }
-                onChange={(e) => {
-                  const checked = e.target.checked;
-                  updateItem(type, "reuse_llm_key", checked);
-                  if (checked) {
-                    updateItem(type, "api_key", "");
-                  }
-                }}
-              >
-                {t("modelConfig.reuseLlmApiKey")}
-              </Checkbox>
-            </div>
-          )}
+              }}
+            >
+              {t("modelConfig.reuseLlmApiKey")}
+            </Checkbox>
+          </div>
+        )}
         {type === "asr" && (
           <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
             <Checkbox

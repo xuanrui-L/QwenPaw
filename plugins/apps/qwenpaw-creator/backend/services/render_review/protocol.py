@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime  # pylint: disable=no-name-in-module
 from typing import Any, Mapping, Sequence
 
 from schemas.render_review import (
@@ -36,6 +36,13 @@ from vendor.media_toolkit.review_rubrics import (
 logger = setup_logger("creator.render_review.protocol")
 
 MAX_REVIEW_ROUNDS = 3
+
+# Dimensions whose failures describe directorial/creative intent rather than
+# an executable edit operation. They are still written to the report and shown
+# to users, but they do not trigger another recompose/regen cycle.
+_ADVISORY_DIMENSIONS = frozenset(
+    {ReviewDimension.CONCEPT, ReviewDimension.CRAFT},
+)
 
 _RUBRIC_BY_KEY = {row.key: row for row in APPEAL_RUBRIC_ROWS}
 
@@ -324,9 +331,17 @@ def findings_feedback_payload(report: RenderReviewReport) -> dict[str, Any]:
     (evidence + suggestion) sorted most-damaging-first, never a score.
     Confirmed near-miss challenges ride along; the eight-row findings
     are always fully preserved (cap, don't erase).
+
+    Advisory dimensions (concept, craft) describe creative intent and are
+    not actionable by another recompose, so they are omitted from the
+    mutation instruction while remaining visible in the persisted report.
     """
     ordered = sorted(
-        report.failed_findings(),
+        (
+            item
+            for item in report.failed_findings()
+            if item.dimension not in _ADVISORY_DIMENSIONS
+        ),
         key=lambda item: 0 if item.severity == "major" else 1,
     )
     payload = {

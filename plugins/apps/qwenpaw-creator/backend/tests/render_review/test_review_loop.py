@@ -33,18 +33,25 @@ TARGET_REF = "timeline:main"
 SLOT_ID = "slot:render"
 
 
-def _vlm_response(*, verdict_major_failure: bool) -> str:
-    failed = ReviewDimension.ENGINEERING if verdict_major_failure else None
-    findings = [
-        {
-            "dimension": dim.value,
-            "passed": dim is not failed,
-            "severity": "major" if dim is failed else "minor",
-            "evidence_timestamp_ms": 1000 if dim is failed else None,
-            "suggestion": "移除 1s 处黑帧" if dim is failed else "",
-        }
-        for dim in ReviewDimension
-    ]
+def _vlm_response(
+    *,
+    verdict_major_failure: bool,
+    timestamp_ms: int = 1000,
+) -> str:
+    findings = []
+    for dimension in ReviewDimension:
+        failed = (
+            verdict_major_failure and dimension is ReviewDimension.ENGINEERING
+        )
+        findings.append(
+            {
+                "dimension": dimension.value,
+                "passed": not failed,
+                "severity": "major" if failed else "minor",
+                "evidence_timestamp_ms": timestamp_ms if failed else None,
+                "suggestion": f"移除 {timestamp_ms}ms 处黑帧" if failed else "",
+            },
+        )
     return json.dumps(
         {
             "findings": findings,
@@ -167,9 +174,14 @@ def _video_path(services: CreatorFileServices, video_id: str) -> Path:
     return path
 
 
-def _run_round(services: CreatorFileServices, video_id: str):
+def _run_round(
+    services: CreatorFileServices,
+    video_id: str,
+    publish_selected: bool = True,
+):
     video_path = _video_path(services, video_id)
-    _publish_selected(services, video_id)
+    if publish_selected:
+        _publish_selected(services, video_id)
     return asyncio.run(
         review_module.run_review_loop(
             services,
@@ -228,7 +240,14 @@ def test_revise_verdict_sends_feedback_and_caps_rounds(
     stubbed_evidence,
     monkeypatch,
 ) -> None:
-    _stub_vlm(monkeypatch, [_vlm_response(verdict_major_failure=True)])
+    # Use distinct evidence timestamps so diff-aware convergence does not
+    # fire before the global budget cap is reached. Spacing must exceed the
+    # 1000ms tolerance used by _is_repeating_feedback.
+    responses = [
+        _vlm_response(verdict_major_failure=True, timestamp_ms=1000 + i * 1500)
+        for i in range(MAX_REVIEW_ROUNDS + 1)
+    ]
+    _stub_vlm(monkeypatch, responses)
 
     for round_number in range(1, MAX_REVIEW_ROUNDS + 1):
         report = _run_round(services, f"video-revise-{round_number}")
@@ -247,10 +266,15 @@ def test_revise_verdict_sends_feedback_and_caps_rounds(
     assert chain["status"] == "closed"
     assert chain["rounds_completed"] == MAX_REVIEW_ROUNDS
 
-    # The target's physical budget is spent: a fourth compose cannot reset
-    # the counter by opening a nominally fresh logical chain.
+    # Both cap layers agree the target's budget is spent: the chain-level
+    # physical counter and the durable cross-chain budget file.
+    review_dir = review_module._reports_root(services, PROJECT_ID)
     assert _run_round(services, "video-revise-4") is None
     assert _chain_state(services)["attempts_started"] == MAX_REVIEW_ROUNDS
+    budget = json.loads(
+        (review_dir / "budget-timeline-main.json").read_text(encoding="utf-8"),
+    )
+    assert budget["rounds_completed"] == MAX_REVIEW_ROUNDS
 
 
 def test_unparsable_vlm_response_fails_closed_and_frees_claim(
@@ -581,3 +605,191 @@ def test_single_shot_render_skips_asr_and_reuses_cut_precheck(
     assert report.verdict == "pass"
     assert observed["transcript_sentences"] is None
     assert observed["predecoded_gray_samples"] is gray_samples
+
+
+def _vlm_response_with_dimensions(
+    *,
+    failed_dimensions: set[ReviewDimension],
+    timestamp_ms: int = 1000,
+) -> str:
+    """Build a VLM response where exactly the given dimensions fail major."""
+    findings = []
+    for dimension in ReviewDimension:
+        failed = dimension in failed_dimensions
+        findings.append(
+            {
+                "dimension": dimension.value,
+                "passed": not failed,
+                "severity": "major" if failed else "minor",
+                "evidence_timestamp_ms": timestamp_ms if failed else None,
+                "suggestion": f"修复 {dimension.value}" if failed else "",
+            },
+        )
+    return json.dumps(
+        {
+            "findings": findings,
+            "verdict": "revise" if failed_dimensions else "pass",
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_diff_aware_convergence_stops_repeat_feedback(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+) -> None:
+    """If the editor produces the same major findings again, close the chain."""
+    _stub_vlm(
+        monkeypatch,
+        [
+            _vlm_response_with_dimensions(
+                failed_dimensions={ReviewDimension.ENGINEERING},
+                timestamp_ms=1000,
+            ),
+            # Same finding as round 1 -> should converge instead of regen.
+            _vlm_response_with_dimensions(
+                failed_dimensions={ReviewDimension.ENGINEERING},
+                timestamp_ms=1000,
+            ),
+        ],
+    )
+
+    report1 = _run_round(services, "video-repeat-1")
+    assert report1 is not None
+    assert report1.verdict == "revise"
+    assert report1.round == 1
+
+    report2 = _run_round(services, "video-repeat-2")
+    assert report2 is not None
+    assert report2.verdict == "revise"
+
+    feedback = _feedback_messages(services)
+    assert len(feedback) == 1
+
+    review_dir = (
+        services.projects.project_root(PROJECT_ID)
+        / "runtime"
+        / "render-review"
+    )
+    chain = json.loads(
+        (review_dir / "chain-timeline-main.json").read_text(encoding="utf-8"),
+    )
+    assert chain["status"] == "closed"
+
+
+def test_advisory_dimensions_omitted_from_feedback_payload(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+) -> None:
+    """Concept and craft failures stay in the report but out of mutation instructions."""
+    _stub_vlm(
+        monkeypatch,
+        [
+            _vlm_response_with_dimensions(
+                failed_dimensions={
+                    ReviewDimension.CONCEPT,
+                    ReviewDimension.CRAFT,
+                    ReviewDimension.ENGINEERING,
+                },
+                timestamp_ms=1000,
+            ),
+        ],
+    )
+
+    report = _run_round(services, "video-advisory-1")
+    assert report is not None
+    assert report.verdict == "revise"
+    failed_dimensions = {f.dimension for f in report.failed_findings()}
+    assert ReviewDimension.CONCEPT in failed_dimensions
+    assert ReviewDimension.CRAFT in failed_dimensions
+    assert ReviewDimension.ENGINEERING in failed_dimensions
+
+    feedback = _feedback_messages(services)
+    assert len(feedback) == 1
+    payload = feedback[0].metadata["renderReview"]
+    feedback_dimensions = {f["dimension"] for f in payload["findings"]}
+    assert "engineering" in feedback_dimensions
+    assert "concept" not in feedback_dimensions
+    assert "craft" not in feedback_dimensions
+
+
+def test_stale_round_does_not_consume_budget(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+) -> None:
+    """A round whose artifact is no longer selected must not count against the cap."""
+    _stub_vlm(
+        monkeypatch,
+        [
+            _vlm_response(verdict_major_failure=True, timestamp_ms=1000),
+            _vlm_response(verdict_major_failure=True, timestamp_ms=1500),
+        ],
+    )
+
+    # Round 1: publish as selected, review runs and consumes budget.
+    report1 = _run_round(services, "video-stale-1", publish_selected=True)
+    assert report1 is not None
+
+    review_dir = (
+        services.projects.project_root(PROJECT_ID)
+        / "runtime"
+        / "render-review"
+    )
+    budget = json.loads(
+        (review_dir / "budget-timeline-main.json").read_text(encoding="utf-8"),
+    )
+    assert budget["rounds_completed"] == 1
+
+    # Round 2: do not publish as selected; freshness check marks stale.
+    # The report is still persisted for inspection, but no feedback goes out
+    # and the durable budget is not consumed.
+    report2 = _run_round(services, "video-stale-2", publish_selected=False)
+    assert report2 is not None
+    assert report2.verdict == "revise"
+
+    budget = json.loads(
+        (review_dir / "budget-timeline-main.json").read_text(encoding="utf-8"),
+    )
+    assert budget["rounds_completed"] == 1
+    assert budget["vlm_calls_total"] == 1
+    assert len(_feedback_messages(services)) == 1
+
+
+def test_global_budget_persists_across_new_chain(
+    services,
+    stubbed_evidence,
+    monkeypatch,
+) -> None:
+    """Closing a chain and starting another does not reset the round budget."""
+    _stub_vlm(
+        monkeypatch,
+        [
+            _vlm_response(
+                verdict_major_failure=True,
+                timestamp_ms=1000 + i * 1500,
+            )
+            for i in range(MAX_REVIEW_ROUNDS + 2)
+        ],
+    )
+
+    for i in range(1, MAX_REVIEW_ROUNDS + 1):
+        report = _run_round(services, f"video-persist-{i}")
+        assert report is not None
+        assert report.verdict == "revise"
+
+    review_dir = (
+        services.projects.project_root(PROJECT_ID)
+        / "runtime"
+        / "render-review"
+    )
+    budget = json.loads(
+        (review_dir / "budget-timeline-main.json").read_text(encoding="utf-8"),
+    )
+    assert budget["rounds_completed"] == MAX_REVIEW_ROUNDS
+
+    # Even though the old chain closed, a fresh composition is blocked.
+    report = _run_round(services, "video-persist-excess")
+    assert report is None

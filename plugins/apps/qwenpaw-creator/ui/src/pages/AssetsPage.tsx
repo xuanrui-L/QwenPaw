@@ -673,6 +673,10 @@ function resolveProvenanceRef(
     const id = ref.slice("asset-version:".length);
     const version = project.assets.source_versions_by_id[id];
     if (!version) return null;
+    // This panel shows visual references only; audio/document provenance
+    // (e.g. narration tracks in a final cut) cannot render as a thumbnail.
+    if (version.media_kind !== "image" && version.media_kind !== "video")
+      return null;
     return {
       name: version.name || id,
       url: getAssetVersionMediaUrl(id),
@@ -686,6 +690,7 @@ function resolveProvenanceRef(
     if (!version) return null;
     const media = artifactMedia(project, version);
     if (!media) return null;
+    if (media.kind !== "image" && media.kind !== "video") return null;
     return {
       name: version.name || id,
       url: getArtifactVersionMediaUrl(id),

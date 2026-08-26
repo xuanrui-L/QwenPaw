@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import UTC, datetime  # pylint: disable=no-name-in-module
+from enum import StrEnum  # pylint: disable=no-name-in-module
 import logging
 import os
 from pathlib import Path
@@ -214,6 +214,51 @@ def is_runtime_only_pointer(pointer: str) -> bool:
     return bool(_RUNTIME_ONLY_POINTER.match(pointer))
 
 
+def _preserve_element_outputs(
+    base_data: Mapping[str, Any],
+    candidate_data: dict[str, Any],
+) -> list[str]:
+    """Restore runtime-owned element ``outputs`` the candidate clobbered.
+
+    Timeline element ``outputs`` bindings are written exclusively by media
+    executors (RUNTIME_TASK commits).  Agents habitually replace a whole
+    element to edit its ``creation``, silently dropping the bindings; the
+    orphaned slot then makes the element permanently undispatchable
+    (field run 2026-08-19, project 05580c2e: scene3 lost its storyboard
+    binding and the R2V node deadlocked with no recovery goal).  For every
+    element present in both documents, a non-empty base binding wins over
+    whatever the candidate carries.  An empty base stays writable so a
+    repair (health monitor, manual fix) can re-add a lost binding.
+    """
+
+    restored: list[str] = []
+    base_timelines = (base_data.get("timelines") or {}).get("items") or {}
+    timelines = (candidate_data.get("timelines") or {}).get("items") or {}
+    for timeline_id, timeline in timelines.items():
+        if not isinstance(timeline, dict):
+            continue
+        base_elements = (base_timelines.get(timeline_id) or {}).get(
+            "elements_by_id",
+        ) or {}
+        elements = timeline.get("elements_by_id") or {}
+        for element_id, element in elements.items():
+            base_element = base_elements.get(element_id)
+            if not isinstance(base_element, dict) or not isinstance(
+                element,
+                dict,
+            ):
+                continue
+            base_outputs = base_element.get("outputs") or {}
+            if not base_outputs or element.get("outputs") == base_outputs:
+                continue
+            element["outputs"] = copy.deepcopy(base_outputs)
+            restored.append(
+                f"/timelines/items/{timeline_id}"
+                f"/elements_by_id/{element_id}/outputs",
+            )
+    return restored
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -352,6 +397,16 @@ class ProjectCommitBoundary:
         policy_value = ReviewPolicy(review_policy)
         base_data = _json(base.project)
         candidate_data = copy.deepcopy(dict(candidate))
+        if origin_value is not ChangeOrigin.RUNTIME_TASK:
+            preserved = _preserve_element_outputs(base_data, candidate_data)
+            if preserved:
+                logger.warning(
+                    "runtime-owned element outputs preserved: project=%s "
+                    "origin=%s pointers=%s",
+                    project_id,
+                    origin_value.value,
+                    preserved,
+                )
         candidate_etag = _candidate_hash(candidate_data)
         requested = diff_json(base_data, candidate_data)
         protected = sorted(

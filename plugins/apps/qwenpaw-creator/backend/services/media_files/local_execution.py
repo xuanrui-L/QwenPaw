@@ -20,7 +20,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 import concurrent.futures
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime  # pylint: disable=no-name-in-module
 import hashlib
 from html import unescape
 import json
@@ -192,13 +192,20 @@ class _SegmentRender:
 
 _DEFAULT_FFMPEG_TIMEOUT_SECONDS = 15 * 60.0
 _DEFAULT_FFMPEG_TERMINATION_GRACE_SECONDS = 5.0
-# Original-footage volume while a Timeline audio Element (narration) plays;
-# ~-9dB keeps ambience audible without competing with the voice.
-_DUCK_VOLUME = 0.35
+# Original-footage volume while a Timeline audio Element (narration) plays.
+# The footage is often r2v output carrying its own dialogue: speech under
+# speech masks badly, so the duck must be decisive (~-16.5dB), not the -9dB
+# that suits ambience beds. Field run e4cd: narration was unintelligible over
+# scene dialogue at 0.35.
+_DUCK_VOLUME = 0.15
+# Ramp length into/out of each duck window; a hard gate pumps audibly.
+_DUCK_FADE_SECONDS = 0.3
 # BGM plays as one continuous low bed under the whole mix; the fixed bed
 # gain keeps music from competing with native dialogue and ambience.
 _BGM_BED_GAIN_DB = -12.0
 # BGM volume while any speech window (shot dialogue, s2v, narration) plays.
+# Music masks speech less than speech does, so 0.4 (~-8dB) suffices, but the
+# same hard-gate pumping applies: ramps, not enable=between().
 _BGM_DUCK_VOLUME = 0.4
 # Unset bgm fades default to min(this, span/4): musical edges for a long
 # bed without swallowing a short segment. Explicit creation fades win.
@@ -212,6 +219,28 @@ _LOUDNORM_TARGET_LRA = 11.0
 # Beat-snapped xfades must keep a perceptible blend; below this the join
 # effectively degrades to a cut and the snap is skipped instead.
 _MIN_SNAPPED_BLEND_SECONDS = 0.05
+
+
+def _duck_filter(
+    start: float,
+    end: float,
+    volume: float = _DUCK_VOLUME,
+    fade: float = _DUCK_FADE_SECONDS,
+) -> str:
+    """Volume filter that ducks [start, end) with linear edge ramps.
+
+    The factor is 1 outside the window, ``volume`` inside, and ramps
+    linearly across ``fade`` seconds on both edges. Chained filters
+    multiply, so non-overlapping (merged) windows stay independent.
+    """
+
+    depth = 1.0 - volume
+    return (
+        "volume=eval=frame:volume="
+        f"'1-{depth:.3f}"
+        f"*clip((t-{start - fade:.3f})/{fade:.3f},0,1)"
+        f"*clip(({end + fade:.3f}-t)/{fade:.3f},0,1)'"
+    )
 
 
 def _merge_windows(
@@ -775,8 +804,7 @@ class FfmpegLocalMediaRunner:
                 # matching the speech windows.
                 for start, end in bgm_duck_windows:
                     chain.append(
-                        f"volume={_BGM_DUCK_VOLUME}:enable="
-                        f"'between(t,{start:.3f},{end:.3f})'",
+                        _duck_filter(start, end, volume=_BGM_DUCK_VOLUME),
                     )
             label = f"[mix{index}]"
             filters.append(",".join(chain) + label)
@@ -784,10 +812,7 @@ class FfmpegLocalMediaRunner:
         if self._probe_has_audio(premix):
             base_chain = ["[0:a]aformat=channel_layouts=stereo"]
             for start, end in _merge_windows(narration_windows):
-                base_chain.append(
-                    f"volume={_DUCK_VOLUME}:enable="
-                    f"'between(t,{start:.3f},{end:.3f})'",
-                )
+                base_chain.append(_duck_filter(start, end))
             filters.append(",".join(base_chain) + "[base]")
             labels.insert(0, "[base]")
         if len(labels) == 1:
