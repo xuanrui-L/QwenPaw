@@ -126,6 +126,38 @@ describe("BlueprintPage narrative shapes", () => {
     );
   });
 
+  it("hosts the project download / export entry (moved off the plan page)", async () => {
+    seedProject(singleProject());
+    const { container } = renderPage();
+
+    const trigger = screen.getByRole("button", { name: "下载 / 导出" });
+    expect(container.querySelector("[data-download-render]")).toBe(trigger);
+    // The single timeline carries a fresh (non-stale) render → downloadable.
+    fireEvent.click(trigger);
+    const downloadItem = await screen.findByRole("menuitem", {
+      name: /下载成片/,
+    });
+    expect(downloadItem).not.toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("menuitem", { name: /导出项目/ }),
+    ).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("keeps project export available but gates the film download until a whole film exists", async () => {
+    // Two timelines, no composed whole-film final_video artifact.
+    seedProject(cloneProject());
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "下载 / 导出" }));
+    const downloadItem = await screen.findByRole("menuitem", {
+      name: /下载成片/,
+    });
+    expect(downloadItem).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("menuitem", { name: /导出项目/ }),
+    ).not.toHaveAttribute("aria-disabled", "true");
+  });
+
   /**
    * The video_edit pipeline stamps none of the generation artifacts the
    * board checks: shots are real clips referenced via render_source

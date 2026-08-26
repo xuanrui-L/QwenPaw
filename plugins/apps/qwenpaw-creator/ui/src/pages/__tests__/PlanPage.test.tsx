@@ -241,7 +241,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("auto-plays a fresh final render in an aspect-ratio-aware preview and downloads it without a new compose", async () => {
+  it("auto-plays a fresh final render in an aspect-ratio-aware preview and hosts no download/export entry", async () => {
     const { calls } = installMockFetch([]);
     const { container } = renderPage();
     fireEvent.click(screen.getByRole("button", { name: "视频预览" }));
@@ -262,18 +262,17 @@ describe("PlanPage Timeline/Element frontend", () => {
     expect(chip).toHaveTextContent("成片");
     expect(chip?.tagName).not.toBe("BUTTON");
 
-    // The fresh render also downloads directly — no re-compose command fires.
-    fireEvent.click(screen.getByRole("button", { name: "下载 / 导出" }));
-    const downloadItem = await screen.findByRole("menuitem", {
-      name: /下载成片/,
-    });
-    expect(downloadItem).not.toHaveAttribute("aria-disabled", "true");
-    const clickSpy = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => undefined);
-    fireEvent.click(downloadItem);
-    await waitFor(() => expect(clickSpy).toHaveBeenCalledTimes(1));
-    clickSpy.mockRestore();
+    // Download / export moved to the blueprint page: the plan header keeps
+    // only the compose entry and never re-composes a fresh render.
+    expect(
+      screen.queryByRole("button", { name: "下载 / 导出" }),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector("[data-download-render]"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "合成成片" }),
+    ).toBeInTheDocument();
     expect(calls.some((call) => call.url.includes("/render"))).toBe(false);
     expect(calls.some((call) => call.url.includes("/commands"))).toBe(false);
   });
@@ -330,8 +329,8 @@ describe("PlanPage Timeline/Element frontend", () => {
 
       // All main-track elements ready and no final render → auto-compose.
       expect(
-        screen.getByRole("button", { name: "下载 / 导出" }),
-      ).toHaveAttribute("title", "等待成片合成");
+        screen.getByRole("button", { name: "合成成片" }),
+      ).toHaveAttribute("title", "点击合成成片");
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1600);
       });
@@ -373,7 +372,7 @@ describe("PlanPage Timeline/Element frontend", () => {
     unmount();
   });
 
-  it("marks generating Elements and keeps download disabled while any compose element is not ready", async () => {
+  it("marks generating Elements and hosts no download/export entry while content generates", async () => {
     const project = cloneProject();
     project.assets.artifact_slots_by_id[
       "element:r2v-window:video"
@@ -406,20 +405,18 @@ describe("PlanPage Timeline/Element frontend", () => {
       block.querySelector(".element-generating-stripes"),
     ).toBeInTheDocument();
 
-    const trigger = screen.getByRole("button", { name: "下载 / 导出" });
-    expect(trigger).toHaveAttribute(
-      "title",
-      expect.stringContaining("项内容生成中"),
-    );
-    // Only the download menu item is gated; export stays available.
-    fireEvent.click(trigger);
-    const downloadItem = await screen.findByRole("menuitem", {
-      name: /下载成片/,
-    });
-    expect(downloadItem).toHaveAttribute("aria-disabled", "true");
+    // Download / export live on the blueprint page now; the plan header
+    // keeps the compose entry only, and nothing auto-fires while content
+    // is still generating.
     expect(
-      screen.getByRole("menuitem", { name: /导出项目/ }),
-    ).not.toHaveAttribute("aria-disabled", "true");
+      screen.queryByRole("button", { name: "下载 / 导出" }),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector("[data-download-render]"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "合成成片" }),
+    ).toBeInTheDocument();
     expect(calls.some((call) => call.url.includes("/render"))).toBe(false);
   });
 

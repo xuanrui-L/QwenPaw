@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Dropdown, message, Modal, Tooltip } from "antd";
+import { message, Modal, Tooltip } from "antd";
 import {
-  ChevronDown,
-  Download,
-  FileOutput,
   Info,
   Loader2,
   PanelLeftOpen,
@@ -16,7 +13,7 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
-import { getArtifactVersionMediaUrl, renderTimeline } from "@/api/creator";
+import { renderTimeline } from "@/api/creator";
 import {
   elementsAtTick,
   overlayContentKind,
@@ -37,11 +34,6 @@ import EpisodeRail from "@/components/blueprint/EpisodeRail";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
 import VisualCoverageCheckpoint from "@/components/creator/VisualCoverageCheckpoint";
-import {
-  ExportProgressCard,
-  saveExportFile,
-  type ExportProgressState,
-} from "@/components/creator/ProjectImportExport";
 import type { TimelineElementDocument } from "@/contracts/creator";
 import { selectVisualVariantCoverage } from "@/selectors/visualVariantCoverage";
 import { useTranslation } from "react-i18next";
@@ -99,8 +91,6 @@ export default function PlanPage() {
   const [playheadTick, setPlayheadTick] = useState(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [composing, setComposing] = useState(false);
-  const [exportProgress, setExportProgress] =
-    useState<ExportProgressState | null>(null);
   const [requestedComposeTaskId, setRequestedComposeTaskId] = useState<
     string | null
   >(null);
@@ -506,64 +496,6 @@ export default function PlanPage() {
     pendingReviewCount,
   ]);
 
-  const downloadRender = useCallback(async () => {
-    if (!freshRender) return;
-    const url = getArtifactVersionMediaUrl(freshRender.version_id);
-    const filename = `${
-      freshRender.name || project?.name || t("plan.finalCut")
-    }.mp4`;
-    try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = blobUrl;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(blobUrl);
-    } catch {
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-    }
-  }, [freshRender, project?.name]);
-
-  const exporting = exportProgress?.status === "running";
-  const exportProject = useCallback(async () => {
-    if (exporting) return;
-    setExportProgress({
-      receivedBytes: 0,
-      totalBytes: null,
-      status: "running",
-    });
-    try {
-      await saveExportFile(id, (receivedBytes, totalBytes) =>
-        setExportProgress({ receivedBytes, totalBytes, status: "running" }),
-      );
-      setExportProgress((state) =>
-        state ? { ...state, status: "done" } : state,
-      );
-    } catch (error) {
-      setExportProgress(null);
-      message.error(
-        t("plan.exportFailed", { detail: (error as Error).message }),
-      );
-    }
-  }, [exporting, id]);
-
-  // The finished card lingers briefly, then clears itself.
-  useEffect(() => {
-    if (exportProgress?.status !== "done") return;
-    const timer = window.setTimeout(() => setExportProgress(null), 5000);
-    return () => window.clearTimeout(timer);
-  }, [exportProgress]);
-
   // Hooks must run unconditionally, before the loading early-returns.
   const narrowWorkspace = useNarrowWorkspace();
   const detailRail = useDetailRail(narrowWorkspace);
@@ -755,97 +687,55 @@ export default function PlanPage() {
               {t("plan.retryCompose")}
             </button>
           )}
+          {/* Compose stays here (it is a generation action); downloading the
+              final cut and exporting the project live on the blueprint page. */}
           <button
             type="button"
-            title={t("plan.composeTooltip")}
+            data-compose-render
+            title={
+              isComposing
+                ? composeElementProgress
+                  ? t("plan.composing", {
+                      completed: composeElementProgress.completed,
+                      total: composeElementProgress.total,
+                    })
+                  : t("plan.preparingCompose")
+                : t("plan.composeTooltip")
+            }
             disabled={isComposing}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)] transition hover:border-[var(--color-accent)] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="relative inline-flex items-center gap-1.5 overflow-hidden rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)] transition hover:border-[var(--color-accent)] disabled:opacity-70 disabled:cursor-not-allowed"
             onClick={() => void composeNow()}
           >
-            <RefreshCw
-              className={`h-3.5 w-3.5 ${isComposing ? "animate-spin" : ""}`}
-            />
-            {isComposing ? t("lib.composing") : t("lib.composeFinalCut")}
-          </button>
-          {/* Download-final-cut and export-project share one split entry. */}
-          <Dropdown
-            trigger={["click"]}
-            menu={{
-              items: [
-                {
-                  key: "download",
-                  label: t("plan.downloadFinal"),
-                  icon: <Download className="h-3.5 w-3.5" />,
-                  disabled: !freshRender,
-                  onClick: () => void downloadRender(),
-                },
-                {
-                  key: "export",
-                  label: exporting
-                    ? t("plan.exporting")
-                    : t("plan.exportProject"),
-                  icon: <FileOutput className="h-3.5 w-3.5" />,
-                  disabled: exporting,
-                  onClick: () => void exportProject(),
-                },
-              ],
-            }}
-          >
-            <button
-              type="button"
-              data-download-render
-              title={
-                freshRender
-                  ? t("plan.downloadFinalTitle")
-                  : isComposing
-                  ? composeElementProgress
-                    ? t("plan.composing", {
-                        completed: composeElementProgress.completed,
-                        total: composeElementProgress.total,
-                      })
-                    : t("plan.preparingCompose")
-                  : readiness.total === 0
-                  ? t("plan.noComposableContent")
-                  : readiness.notReady > 0
-                  ? t("plan.waitingForContent", {
-                      count: readiness.notReady,
-                    })
-                  : t("plan.waitingForCompose")
-              }
-              className="relative inline-flex cursor-pointer items-center gap-1.5 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
-            >
-              {isComposing && (
-                <span
-                  aria-hidden="true"
-                  className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden bg-[var(--color-border)]"
-                >
-                  {composeElementProgress ? (
-                    <span
-                      data-compose-progress
-                      className="block h-full bg-[var(--color-accent)] transition-[width] duration-300 ease-out"
-                      style={{
-                        width: `${composeElementProgress.fraction * 100}%`,
-                      }}
-                    />
-                  ) : (
-                    <span
-                      data-compose-activity
-                      className="block h-full w-full animate-pulse bg-[var(--color-accent)]"
-                    />
-                  )}
-                </span>
-              )}
-              <span className="relative z-[1] inline-flex items-center gap-1.5">
-                {isComposing ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {isComposing && (
+              <span
+                aria-hidden="true"
+                className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden bg-[var(--color-border)]"
+              >
+                {composeElementProgress ? (
+                  <span
+                    data-compose-progress
+                    className="block h-full bg-[var(--color-accent)] transition-[width] duration-300 ease-out"
+                    style={{
+                      width: `${composeElementProgress.fraction * 100}%`,
+                    }}
+                  />
                 ) : (
-                  <Download className="h-3.5 w-3.5" />
+                  <span
+                    data-compose-activity
+                    className="block h-full w-full animate-pulse bg-[var(--color-accent)]"
+                  />
                 )}
-                {isComposing ? composeLabel : t("plan.downloadOrExport")}
-                <ChevronDown className="h-3.5 w-3.5" />
               </span>
-            </button>
-          </Dropdown>
+            )}
+            <span className="relative z-[1] inline-flex items-center gap-1.5">
+              {isComposing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              {isComposing ? composeLabel : t("lib.composeFinalCut")}
+            </span>
+          </button>
         </div>
       </header>
 
@@ -915,14 +805,6 @@ export default function PlanPage() {
           )}
         </main>
       </div>
-
-      {exportProgress && (
-        <ExportProgressCard
-          projectName={project.name}
-          progress={exportProgress}
-          onDismiss={() => setExportProgress(null)}
-        />
-      )}
       </div>
     </div>
   );

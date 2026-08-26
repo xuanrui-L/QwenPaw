@@ -78,7 +78,9 @@ export default function ProjectTour() {
       ),
     },
     {
-      selectors: ["[data-download-render]"],
+      // Download / export moved to the blueprint page; this step anchors on
+      // the compose button and points the user there.
+      selectors: ["[data-compose-render]"],
       title: t("onboarding.projectTourDownload"),
       description: t("onboarding.projectTourDownloadDesc"),
     },
