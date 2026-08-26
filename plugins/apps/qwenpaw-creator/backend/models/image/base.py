@@ -304,6 +304,33 @@ def image_model_prompt_guidance(model_name: str) -> str:
     )
 
 
+CONTENT_REFUSAL_MARKERS = (
+    "rejected by the safety system",
+    "content policy",
+    "content_policy",
+    # DashScope refuses the rendered output rather than the request.
+    "green net check failed",
+    "may contain inappropriate content",
+)
+
+CONTENT_REFUSAL_ADVICE = (
+    "The provider refused this on content grounds, which is deterministic: "
+    "the same prompt and references will be refused again, so this is not a "
+    "configuration problem and must not be retried unchanged. Rewrite the "
+    "prompt wording most likely to have been flagged (uniform insignia that "
+    "reads as police or military, injury, blood, nudity, minors, distress, "
+    "real public figures) and drop reference images containing real people, "
+    "then regenerate so the inputs change."
+)
+
+
+def is_content_refusal(message: str) -> bool:
+    """Whether a provider error is a deterministic content refusal."""
+
+    folded = (message or "").casefold()
+    return any(marker in folded for marker in CONTENT_REFUSAL_MARKERS)
+
+
 def format_http_error_detail(response: httpx.Response) -> str:
     body_text = response.text.strip()
     if body_text:
@@ -707,7 +734,12 @@ class BaseImageModel(ABC):
             )
             raise ModelError(
                 f"Image generation failed with status {e.response.status_code}: "
-                f"{detail[:500]}. Check creator_image_model configuration.",
+                f"{detail[:500]}. "
+                + (
+                    CONTENT_REFUSAL_ADVICE
+                    if is_content_refusal(detail)
+                    else "Check creator_image_model configuration."
+                ),
                 model_name=self.model_name,
             )
         except Exception as e:

@@ -546,3 +546,29 @@ def test_output_moderation_refusal_is_treated_as_deterministic() -> None:
     assert not _is_safety_rejection_message(
         "Image generation failed: rate limited after all retries",
     )
+
+
+def test_content_refusal_error_carries_advice_not_a_config_hint() -> None:
+    """A scheduler-dispatched failure never reaches the agent's tool-result
+    recovery path, so the provider message itself is all the agent sees on a
+    failed work-graph node. Field run 2026-08-26: it ended in "Check
+    creator_image_model configuration", which points at the wrong cause and
+    left twelve nodes gated behind an unfixed prompt.
+    """
+    from models.image.base import (
+        CONTENT_REFUSAL_ADVICE,
+        is_content_refusal,
+    )
+
+    green_net = (
+        "Green net check failed for image (output): Output data may contain "
+        "inappropriate content"
+    )
+    assert is_content_refusal(green_net)
+    assert is_content_refusal("Your request was rejected by the safety system")
+    assert not is_content_refusal("upstream timed out")
+    assert not is_content_refusal("")
+    # The advice has to name the remedy, not the configuration.
+    assert "deterministic" in CONTENT_REFUSAL_ADVICE
+    assert "Rewrite the prompt" in CONTENT_REFUSAL_ADVICE
+    assert "configuration" in CONTENT_REFUSAL_ADVICE  # says it is *not* one

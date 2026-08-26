@@ -50,6 +50,7 @@ from domain.errors import (
 from models.image.base import (
     image_reference_capability,
     image_reference_limit,
+    is_content_refusal,
 )
 from services.project_files.assets import (
     AssetAlreadyExists,
@@ -340,21 +341,10 @@ def _fingerprint(value: Mapping[str, Any]) -> str:
 # references while resending the identical ref list every call, so the
 # refusal must name the refs it saw and repeat-offender calls are blocked
 # locally instead of burning provider quota.
-_SAFETY_REJECTION_MARKERS = (
-    "rejected by the safety system",
-    "content policy",
-    "content_policy",
-    # DashScope refuses the generated output, not the request, and words it
-    # entirely differently (field run 2026-08-26). Same determinism: the same
-    # prompt renders the same rejected image every time.
-    "green net check failed",
-    "may contain inappropriate content",
-)
-
-
 def _is_safety_rejection_message(message: str) -> bool:
-    folded = message.casefold()
-    return any(marker in folded for marker in _SAFETY_REJECTION_MARKERS)
+    # The marker table lives with the provider error text it classifies, so
+    # a new provider wording only has to be added in one place.
+    return is_content_refusal(message)
 
 
 def _resolved_reference_ids(resolved: _ResolvedRequest) -> tuple[str, ...]:
