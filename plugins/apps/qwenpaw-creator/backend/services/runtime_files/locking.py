@@ -43,7 +43,9 @@ if hasattr(os, "register_at_fork"):  # pragma: posix
 # longer hides a leaked/nested lock instead of fixing it, so ten seconds stays
 # a deadlock fuse. Contention is reduced structurally by domain-sharded Runtime
 # locks and by the writer admission gate below.
-DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
+DEFAULT_LOCK_TIMEOUT_SECONDS = float(
+    os.environ.get("CREATOR_LOCK_TIMEOUT_SECONDS", "10.0"),
+)
 
 if os.name == "nt":  # pragma: posix no cover
     import msvcrt
