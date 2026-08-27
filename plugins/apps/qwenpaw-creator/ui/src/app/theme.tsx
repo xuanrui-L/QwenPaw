@@ -71,10 +71,7 @@ export function ThemeProvider({
       setResolvedTheme(next);
       if (typeof document !== "undefined") {
         document.documentElement.classList.toggle("dark", next === "dark");
-        document.documentElement.classList.toggle(
-          "dark-mode",
-          next === "dark",
-        );
+        document.documentElement.classList.toggle("dark-mode", next === "dark");
       }
     };
     apply();
