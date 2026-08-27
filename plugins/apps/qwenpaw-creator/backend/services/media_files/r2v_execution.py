@@ -4251,25 +4251,52 @@ class FileR2VExecutionService:
             _, element = find_timeline_element(project, element_id)
         except Exception:
             return False
-        if not isinstance(element.creation, R2VCreation):
-            return False
-        selected = selected_element_output(project, element, "storyboard")
-        storyboard_id = selected[1] if selected is not None else None
-        if not storyboard_id:
-            return False
-        current_refs = list(
-            dict.fromkeys(
-                [
-                    storyboard_id,
-                    *resolve_r2v_visual_reference_version_ids(
-                        project,
-                        element.creation,
-                        element.creation.video_reference_version_ids,
-                    ),
-                ],
-            ),
-        )
-        return current_refs == [str(item) for item in frozen_refs]
+        creation = element.creation
+        creation_type = getattr(creation, "type", "r2v")
+        if creation_type == "r2v":
+            if not isinstance(creation, R2VCreation):
+                return False
+            selected = selected_element_output(project, element, "storyboard")
+            storyboard_id = selected[1] if selected is not None else None
+            if not storyboard_id:
+                return False
+            current_refs = list(
+                dict.fromkeys(
+                    [
+                        storyboard_id,
+                        *resolve_r2v_visual_reference_version_ids(
+                            project,
+                            creation,
+                            creation.video_reference_version_ids,
+                        ),
+                    ],
+                ),
+            )
+            return current_refs == [str(item) for item in frozen_refs]
+        elif creation_type == "t2v":
+            if not isinstance(creation, T2VCreation):
+                return False
+            return not frozen_refs
+        elif creation_type == "i2v":
+            if not isinstance(creation, I2VCreation):
+                return False
+            resolved_first_frame = raw.get("firstFrameVersionId") or ""
+            current_refs = (
+                [resolved_first_frame] if resolved_first_frame else []
+            )
+            return current_refs == [str(item) for item in frozen_refs]
+        elif creation_type == "s2v":
+            if not isinstance(creation, S2VCreation):
+                return False
+            current_refs = []
+            s2v_image = raw.get("s2vImageVersionId") or ""
+            s2v_audio = raw.get("s2vAudioVersionId") or ""
+            if s2v_image:
+                current_refs.append(s2v_image)
+            if s2v_audio:
+                current_refs.append(s2v_audio)
+            return current_refs == [str(item) for item in frozen_refs]
+        return False
 
     async def _converge(
         self,
@@ -5131,22 +5158,40 @@ async def preflight_s2v_face_detect(
     services: CreatorFileServices,
     *,
     project_id: str,
+    target_ref: str = "",
     arguments: Mapping[str, Any],
 ) -> None:
     """Free wan2.2-s2v-detect gate that runs before execution authorization.
 
     A failed portrait check raises a readable ``ValidationError`` so the
     agent can pick another image without any authorization being created.
+    Falls back to creation.portrait_version_id if characterImageRef is
+    not provided in arguments.
     """
 
     from models.s2v_model import detect_face
 
     image_ref = str(arguments.get("characterImageRef") or "").strip()
+    snapshot = None
+    if not image_ref and target_ref:
+        # Fall back to the element's declared portrait
+        snapshot = await asyncio.to_thread(services.projects.read, project_id)
+        element_id = target_ref.removeprefix("element:")
+        _, element = find_timeline_element(snapshot.project, element_id)
+        creation = element.creation
+        if isinstance(creation, S2VCreation):
+            image_ref = str(creation.portrait_version_id or "").strip()
+        else:
+            raise ValidationError(
+                "仅 creation.type=s2v 的 Element 可以生成数字人视频",
+            )
     if not image_ref:
         raise ValidationError(
-            "s2v_generation 需要 characterImageRef（exact 人像图 version id）",
+            "s2v_generation 需要 characterImageRef 或 "
+            "creation.portrait_version_id（exact 人像图 version id）",
         )
-    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    if snapshot is None:
+        snapshot = await asyncio.to_thread(services.projects.read, project_id)
     image_url, _, _, _ = _resolve_single_media_version(
         project=snapshot.project,
         project_root=services.projects.project_root(project_id),

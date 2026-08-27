@@ -1155,14 +1155,14 @@ export default function AssetsPage() {
               className={`rounded-full px-3 py-1 text-xs transition ${
                 filter === candidate.key
                   ? "bg-[var(--color-accent)] text-white"
-                  : "border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/50"
+                  : "border border-[var(--color-border)] bg-white text-[var(--color-text-secondary)] hover:border-[var(--color-accent)]/50 dark:bg-[var(--color-bg-primary)]"
               }`}
             >
               {t(candidate.labelKey)}
             </button>
           ))}
         </div>
-        <div className="ml-auto flex w-56 items-center rounded-lg border border-[var(--color-border)] bg-white px-2.5">
+        <div className="ml-auto flex w-56 items-center rounded-lg border border-[var(--color-border)] bg-white px-2.5 dark:bg-[var(--color-bg-primary)]">
           <Search className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]" />
           <input
             value={search}

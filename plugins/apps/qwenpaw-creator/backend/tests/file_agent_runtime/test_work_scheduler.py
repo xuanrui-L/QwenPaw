@@ -395,12 +395,12 @@ def test_transient_budget_reopens_after_the_cooldown(tmp_path, monkeypatch):
 
 
 def test_prespend_rejection_never_poisons_the_ledger(tmp_path, monkeypatch):
-    """A ValidationError raised before any task record must not strand
-    the node READY-but-undispatchable (field run 2026-08-12, project
-    27dc: the execution gate refused a storyboard the graph derived
-    READY, and only a restart cleared the ledger). The reopen stays
-    bounded by the transient budget so a persistent graph/executor
-    mismatch cannot hot-loop."""
+    """A ValidationError raised before any task record is a deterministic
+    failure: the node is marked as such and never retried (field run
+    2026-08-12, project 27dc: the execution gate refused a storyboard the
+    graph derived READY, and only a restart cleared the ledger). The
+    deterministic failure is exposed to the driver so the model is
+    invoked to handle it."""
     from domain.errors import ValidationError
 
     services = _services(tmp_path, monkeypatch, ready_variants=1)
@@ -425,7 +425,7 @@ def test_prespend_rejection_never_poisons_the_ledger(tmp_path, monkeypatch):
 
     asyncio.run(scenario())
 
-    assert len(calls) == 3
+    assert len(calls) == 1
 
 
 def test_cancel_project_does_not_resurrect_dispatch_and_wake_rearms(

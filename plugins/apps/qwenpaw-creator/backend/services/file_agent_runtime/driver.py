@@ -4968,9 +4968,13 @@ class FileCreatorAgentRuntime:
             )
 
             inner_arguments = arguments.get("arguments")
+            inner_target_ref = str(
+                arguments.get("targetRef") or "",
+            ).strip()
             await preflight_s2v_face_detect(
                 self.services,
                 project_id=project_id,
+                target_ref=inner_target_ref,
                 arguments=(
                     inner_arguments
                     if isinstance(inner_arguments, Mapping)
@@ -6075,6 +6079,9 @@ class FileCreatorAgentRuntime:
             not after_failure
             and self.work_scheduler.enabled()
             and not model_required
+            and not self.work_scheduler.deterministic_failure_nodes_for_project(
+                project_id,
+            )
         ):
             # Every remaining gap is machine-dispatchable (READY/RUNNING):
             # the scheduler owns it; a resume would only burn model turns.
