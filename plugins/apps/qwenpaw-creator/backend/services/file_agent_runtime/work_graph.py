@@ -614,10 +614,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
             storyboard_id: str | None = None
             storyboard_slot: str | None = None
+            deps: list[str] = []
+            gate_missing: list[str] = []
 
             if creation_type == "r2v":
                 # R2V: storyboard + video dual-node structure
-                deps: list[str] = []
                 for ref in creation.cast_lineup_refs:
                     deps.append(f"lineup:{ref}")
                 for entity_id, variant_id in sorted(
@@ -630,78 +631,86 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     deps,
                 )
 
-            storyboard_id = f"storyboard:{element_id}"
-            storyboard_slot = _slot_selected(
-                project,
-                f"element:{element_id}:storyboard",
-            )
-            key = (TaskKind.IMAGE_GENERATION.value, f"element:{element_id}")
-            task = active.get(key)
-            failure = failed.get(key)
-            missing = (*_upstream_missing(deps, statuses), *gate_missing)
-            upstream_selected = _element_upstream_selected(project, creation)
-            # Mirrors the submit path: agent-specified references are
-            # authoritative, so they (not the auto chain) must drive the
-            # fingerprint and staleness — editing the explicit list has to
-            # reopen dispatch and flag a stale artifact.
-            storyboard_refs: list[str | None] = (
-                list(creation.storyboard_reference_version_ids)
-                or upstream_selected
-            )
-            fingerprint = _fingerprint(
-                storyboard_id,
-                creation.storyboard_prompt,
-                sorted(selected for selected in storyboard_refs if selected),
-            )
-            if task is not None:
-                status = WorkNodeStatus.RUNNING
-            elif storyboard_slot:
-                status = (
-                    WorkNodeStatus.STALE
-                    if _artifact_is_stale(
-                        project,
-                        storyboard_slot,
-                        storyboard_refs,
-                    )
-                    else WorkNodeStatus.DONE
+                storyboard_id = f"storyboard:{element_id}"
+                storyboard_slot = _slot_selected(
+                    project,
+                    f"element:{element_id}:storyboard",
                 )
-            elif missing:
-                status = WorkNodeStatus.GATED
-            elif failure is not None and not _failure_inputs_changed(
-                failure,
-                storyboard_id,
-                fingerprint,
-            ):
-                status = WorkNodeStatus.FAILED
-            elif not (creation.storyboard_prompt or "").strip():
-                # No prompt yet: needs model work, surfaced as GATED with
-                # a non-node reason so the completion loop names it.
-                status = WorkNodeStatus.GATED
-                missing = ("storyboard_prompt 缺失",)
-            else:
-                status = WorkNodeStatus.READY
-            add(
-                WorkNode(
-                    node_id=storyboard_id,
-                    kind="storyboard",
-                    label=f"{label} · 分镜",
-                    status=status,
-                    deps=tuple(deps),
-                    lane=lane,
-                    task_id=getattr(task, "task_id", None),
-                    progress=getattr(task, "progress", None),
-                    error=(
-                        _task_error_summary(failure)
-                        if status is WorkNodeStatus.FAILED
-                        else None
+                key = (
+                    TaskKind.IMAGE_GENERATION.value,
+                    f"element:{element_id}",
+                )
+                task = active.get(key)
+                failure = failed.get(key)
+                missing = (*_upstream_missing(deps, statuses), *gate_missing)
+                upstream_selected = _element_upstream_selected(
+                    project,
+                    creation,
+                )
+                # Mirrors the submit path: agent-specified references are
+                # authoritative, so they (not the auto chain) must drive the
+                # fingerprint and staleness — editing the explicit list has to
+                # reopen dispatch and flag a stale artifact.
+                storyboard_refs: list[str | None] = (
+                    list(creation.storyboard_reference_version_ids)
+                    or upstream_selected
+                )
+                fingerprint = _fingerprint(
+                    storyboard_id,
+                    creation.storyboard_prompt,
+                    sorted(
+                        selected for selected in storyboard_refs if selected
                     ),
-                    missing=missing,
-                    locator={"page": "plan", "elementId": element_id},
-                    command="GENERATE_STORYBOARD_IMAGE",
-                    target_ref=f"element:{element_id}",
-                    dispatch_fingerprint=fingerprint,
-                ),
-            )
+                )
+                if task is not None:
+                    status = WorkNodeStatus.RUNNING
+                elif storyboard_slot:
+                    status = (
+                        WorkNodeStatus.STALE
+                        if _artifact_is_stale(
+                            project,
+                            storyboard_slot,
+                            storyboard_refs,
+                        )
+                        else WorkNodeStatus.DONE
+                    )
+                elif missing:
+                    status = WorkNodeStatus.GATED
+                elif failure is not None and not _failure_inputs_changed(
+                    failure,
+                    storyboard_id,
+                    fingerprint,
+                ):
+                    status = WorkNodeStatus.FAILED
+                elif not (creation.storyboard_prompt or "").strip():
+                    # No prompt yet: needs model work, surfaced as GATED with
+                    # a non-node reason so the completion loop names it.
+                    status = WorkNodeStatus.GATED
+                    missing = ("storyboard_prompt 缺失",)
+                else:
+                    status = WorkNodeStatus.READY
+                add(
+                    WorkNode(
+                        node_id=storyboard_id,
+                        kind="storyboard",
+                        label=f"{label} · 分镜",
+                        status=status,
+                        deps=tuple(deps),
+                        lane=lane,
+                        task_id=getattr(task, "task_id", None),
+                        progress=getattr(task, "progress", None),
+                        error=(
+                            _task_error_summary(failure)
+                            if status is WorkNodeStatus.FAILED
+                            else None
+                        ),
+                        missing=missing,
+                        locator={"page": "plan", "elementId": element_id},
+                        command="GENERATE_STORYBOARD_IMAGE",
+                        target_ref=f"element:{element_id}",
+                        dispatch_fingerprint=fingerprint,
+                    ),
+                )
 
             # Video node for all types
             video_id = f"video:{element_id}"
