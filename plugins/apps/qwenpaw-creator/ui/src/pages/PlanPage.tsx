@@ -701,13 +701,13 @@ export default function PlanPage() {
           {/* When the workspace runs out of width the three info chips fold
               into one tooltip so the action buttons keep their room. */}
           <div className="flex flex-wrap items-center gap-2 @max-[719px]:hidden">
-            <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)]">
+            <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)] dark:bg-[var(--color-bg-elevated)]">
               {sec(durationTick, timeline.ticks_per_second)}s
             </span>
-            <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)]">
+            <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)] dark:bg-[var(--color-bg-elevated)]">
               {project.settings.aspect_ratio}
             </span>
-            <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)]">
+            <span className="rounded-full border border-[var(--color-border)] bg-white px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-secondary)] dark:bg-[var(--color-bg-elevated)]">
               {t("plan.items", {
                 count: Object.keys(timeline.elements_by_id).length,
               })}
@@ -720,7 +720,7 @@ export default function PlanPage() {
               count: Object.keys(timeline.elements_by_id).length,
             })}`}
           >
-            <span className="hidden rounded-full border border-[var(--color-border)] bg-white px-2 py-1 text-[var(--color-text-secondary)] @max-[719px]:inline-flex">
+            <span className="hidden rounded-full border border-[var(--color-border)] bg-white px-2 py-1 text-[var(--color-text-secondary)] @max-[719px]:inline-flex dark:bg-[var(--color-bg-elevated)]">
               <Info className="h-3.5 w-3.5" />
             </span>
           </Tooltip>
