@@ -1073,7 +1073,9 @@ def _append_reference_role_mapping(
         artifact = project.assets.artifact_versions_by_id.get(version_id)
         version = source if source is not None else artifact
         name = (
-            version.name if version is not None and version.name else version_id
+            version.name
+            if version is not None and version.name
+            else version_id
         )
         role = f"分镜图（{name}）" if version_id == storyboard_id else name
         lines.append(f"{marker} = {role}")

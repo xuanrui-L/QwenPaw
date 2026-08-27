@@ -280,7 +280,7 @@ def _storyboard_panel_aspect_contract(
         # rows/columns, so only a square grid leaves cells at the sheet's
         # ratio: a 3x2 grid on a 16:9 sheet yields 32:27 cells. Pad up to the
         # next perfect square and leave the spare cells empty instead.
-        side = math.ceil(math.sqrt(panel_count))
+        side = math.isqrt(panel_count - 1) + 1
         spare = side * side - panel_count
         remainder = (
             f" Leave the remaining {spare} grid cell(s) as unframed outer "
@@ -365,7 +365,9 @@ def _labelled_reference_prompt(
         artifact = project.assets.artifact_versions_by_id.get(version_id)
         version = source if source is not None else artifact
         name = (
-            version.name if version is not None and version.name else version_id
+            version.name
+            if version is not None and version.name
+            else version_id
         )
         lines.append(f"{canonical_marker(index)} = {name}")
     body = "\n".join(lines)

@@ -22,7 +22,10 @@ import re
 
 # Authored form. Case-insensitive and tolerant of internal spacing so a
 # model that writes "[image 2]" or "[Image  2]" still resolves.
-CANONICAL_MARKER_PATTERN = re.compile(r"\[\s*image\s+(\d+)\s*\]", re.IGNORECASE)
+CANONICAL_MARKER_PATTERN = re.compile(
+    r"\[\s*image\s+(\d+)\s*\]",
+    re.IGNORECASE,
+)
 
 
 def canonical_marker(index: int) -> str:

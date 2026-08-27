@@ -94,7 +94,6 @@ from services.project_files.models import (
     SourceAssetVersion,
 )
 from services.project_files.remote_cache import public_source_url
-from services.runtime_files.errors import LockTimeoutError
 from services.runtime_files.models import (
     ChangeOrigin,
     CreatorMessageRecord,
@@ -5991,12 +5990,7 @@ class FileCreatorAgentRuntime:
             node
             for node in model_required
             if node.kind in {"visual", "storyboard", "video"}
-            and any(
-                "prompt" in reason.casefold()
-                or "台词" in reason
-                or "对话密度" in reason
-                for reason in node.missing
-            )
+            and node.authored_text_gap
         )
         if not auto_approve and not prompt_required:
             return

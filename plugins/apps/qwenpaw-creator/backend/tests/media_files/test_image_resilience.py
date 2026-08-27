@@ -637,7 +637,11 @@ def test_image_reference_marker_spec_follows_provider_docs() -> None:
     """Only the qwen families document addressing an input image in-prompt."""
     from models.image.base import image_reference_marker_spec
 
-    for model in ("qwen-image-3.0-pro", "qwen-image-2.0-pro", "qwen-image-edit-plus"):
+    for model in (
+        "qwen-image-3.0-pro",
+        "qwen-image-2.0-pro",
+        "qwen-image-edit-plus",
+    ):
         spec = image_reference_marker_spec(model)
         assert spec is not None, model
         assert spec.render_index(2) == "图2"
@@ -663,7 +667,7 @@ def test_multi_reference_image_prompt_is_labelled_and_rendered() -> None:
         _IMAGE_REFERENCE_ROLE_MARKER,
         _labelled_reference_prompt,
     )
-    from services.project_files.models import ArtifactVersion, Project
+    from services.project_files.models import ArtifactVersion
 
     project = Project.new(project_id="p-img", name="Img")
     for vid, name in (("art:a", "分镜图"), ("art:b", "角色视觉图")):
@@ -681,8 +685,11 @@ def test_multi_reference_image_prompt_is_labelled_and_rendered() -> None:
     ids = ["art:a", "art:b"]
 
     qwen = _labelled_reference_prompt(
-        "画面参考 [Image 2] 的人物。", project, ids,
-        image_model_name="qwen-image-3.0-pro", has_explicit_urls=False,
+        "画面参考 [Image 2] 的人物。",
+        project,
+        ids,
+        image_model_name="qwen-image-3.0-pro",
+        has_explicit_urls=False,
     )
     assert _IMAGE_REFERENCE_ROLE_MARKER in qwen
     assert "图1 = 分镜图" in qwen and "图2 = 角色视觉图" in qwen
@@ -692,8 +699,11 @@ def test_multi_reference_image_prompt_is_labelled_and_rendered() -> None:
 
     # No documented addressing: ordinal prose, never a literal [Image N].
     openai = _labelled_reference_prompt(
-        "画面参考 [Image 2] 的人物。", project, ids,
-        image_model_name="gpt-image-2", has_explicit_urls=False,
+        "画面参考 [Image 2] 的人物。",
+        project,
+        ids,
+        image_model_name="gpt-image-2",
+        has_explicit_urls=False,
     )
     assert "第1张参考图 = 分镜图" in openai
     assert "[Image" not in openai
@@ -701,11 +711,17 @@ def test_multi_reference_image_prompt_is_labelled_and_rendered() -> None:
     # A raw URL is not version-backed, so labelling part of the payload would
     # misnumber the rest.
     assert _IMAGE_REFERENCE_ROLE_MARKER not in _labelled_reference_prompt(
-        "prompt", project, ids,
-        image_model_name="qwen-image-3.0-pro", has_explicit_urls=True,
+        "prompt",
+        project,
+        ids,
+        image_model_name="qwen-image-3.0-pro",
+        has_explicit_urls=True,
     )
     # Nothing to disambiguate with one reference.
     assert _IMAGE_REFERENCE_ROLE_MARKER not in _labelled_reference_prompt(
-        "prompt", project, ["art:a"],
-        image_model_name="qwen-image-3.0-pro", has_explicit_urls=False,
+        "prompt",
+        project,
+        ["art:a"],
+        image_model_name="qwen-image-3.0-pro",
+        has_explicit_urls=False,
     )

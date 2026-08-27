@@ -59,6 +59,11 @@ class WorkNode:
     progress: float | None = None
     error: str | None = None
     missing: tuple[str, ...] = ()  # unmet dependency node ids / reasons
+    # True when every reason in ``missing`` is repairable by rewriting
+    # authored Project text (prompt, dialogue). The completion loop returns
+    # these in every review mode because the repair costs no media call, so
+    # it must not depend on the human-readable wording of ``missing``.
+    authored_text_gap: bool = False
     locator: dict[str, Any] = field(default_factory=dict)
     # Dispatch recipe (command + targetRef) for scheduler / manual retry.
     command: str | None = None
@@ -389,6 +394,20 @@ def _slot_selected(project: Project, slot_id: str) -> str | None:
     return slot.selected_version_id
 
 
+# Ledger fingerprints used to interpolate the configured model names in
+# plaintext, separated by "|". Those keys cannot be compared against today's
+# digest form, and reading the mismatch as drift would flip every artifact
+# rendered before the upgrade from DONE to READY — re-billing the user for
+# storyboards they had already accepted, and replacing them.
+_LEGACY_LEDGER_KEY_MARKER = "|img:"
+
+
+def dispatch_key_predates_digest_ledger(key: str) -> bool:
+    """Whether a durable idempotency key predates the digest ledger format."""
+
+    return _LEGACY_LEDGER_KEY_MARKER in key
+
+
 def _artifact_is_stale(
     project: Project,
     version_id: str | None,
@@ -454,8 +473,10 @@ def _artifact_is_stale(
         )
         key = str(getattr(task, "idempotency_key", "") or "")
         graph_prefix = f"dag-{node_id}-"
-        if key.startswith(graph_prefix) and not key.startswith(
-            f"{graph_prefix}{dispatch_fingerprint}",
+        if (
+            not dispatch_key_predates_digest_ledger(key)
+            and key.startswith(graph_prefix)
+            and not key.startswith(f"{graph_prefix}{dispatch_fingerprint}")
         ):
             return True
     return False
@@ -505,6 +526,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             ):
                 status, task = WorkNodeStatus.READY, None
             missing: tuple[str, ...] = ()
+            authored_text_gap = False
             if (
                 status is WorkNodeStatus.READY
                 and not (variant.prompt or "").strip()
@@ -517,6 +539,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # deliberate prompt, just as storyboards already do.
                 status = WorkNodeStatus.GATED
                 missing = ("visual_prompt 缺失",)
+                authored_text_gap = True
             add(
                 WorkNode(
                     node_id=node_id,
@@ -532,6 +555,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         else None
                     ),
                     missing=missing,
+                    authored_text_gap=authored_text_gap,
                     locator={"page": "assets", "assetId": entity_id},
                     command="GENERATE_ASSET",
                     target_ref=f"asset:{entity_id}",
@@ -661,6 +685,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             task = active.get(key)
             failure = failed.get(key)
             missing = (*_upstream_missing(deps, statuses), *gate_missing)
+            authored_text_gap = False
             upstream_selected = _element_upstream_selected(project, creation)
             # Mirrors the submit path: agent-specified references are
             # authoritative, so they (not the auto chain) must drive the
@@ -705,6 +730,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # a non-node reason so the completion loop names it.
                 status = WorkNodeStatus.GATED
                 missing = ("storyboard_prompt 缺失",)
+                authored_text_gap = True
             else:
                 status = WorkNodeStatus.READY
             add(
@@ -723,6 +749,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         else None
                     ),
                     missing=missing,
+                    authored_text_gap=authored_text_gap,
                     locator={"page": "plan", "elementId": element_id},
                     command="GENERATE_STORYBOARD_IMAGE",
                     target_ref=f"element:{element_id}",
@@ -746,6 +773,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 sorted(creation.video_reference_version_ids),
             )
             video_missing: tuple[str, ...] = ()
+            video_text_gap = False
             if task is not None:
                 status = WorkNodeStatus.RUNNING
             elif video_slot:
@@ -777,11 +805,13 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # ValidationError.
                 status = WorkNodeStatus.GATED
                 video_missing = ("video_prompt 缺失",)
+                video_text_gap = True
             elif dialogue_gaps := _video_prompt_dialogue_gaps(creation):
                 # Planned dialogue must be quoted verbatim in the video
                 # prompt before dispatch — see _video_prompt_dialogue_gaps.
                 status = WorkNodeStatus.GATED
                 video_missing = dialogue_gaps
+                video_text_gap = True
             elif absence_gap := _element_dialogue_density_gap(
                 creation,
                 project.scenario,
@@ -791,6 +821,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # See _element_dialogue_density_gap.
                 status = WorkNodeStatus.GATED
                 video_missing = (absence_gap,)
+                video_text_gap = True
             else:
                 status = WorkNodeStatus.READY
             add(
@@ -809,6 +840,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         else None
                     ),
                     missing=video_missing,
+                    authored_text_gap=video_text_gap,
                     locator={"page": "plan", "elementId": element_id},
                     command="GENERATE_R2V_VIDEO",
                     target_ref=f"element:{element_id}",

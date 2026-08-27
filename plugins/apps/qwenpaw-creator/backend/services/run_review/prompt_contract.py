@@ -74,10 +74,10 @@ def _declares_panel_count(prompt: str, count: int) -> bool:
     "9 panels" describe that sheet honestly.
     """
 
-    side = math.ceil(math.sqrt(count)) if count > 1 else 1
+    side = math.isqrt(count - 1) + 1 if count > 1 else 1
     patterns = tuple(
         pattern
-        for value in {count, side * side}
+        for value in dict.fromkeys((count, side * side))
         for pattern in (
             rf"(?<!\d){value}\s*(?:个\s*)?(?:宫格|分镜格|分镜面板|故事板面板|面板)",
             rf"(?<!\d){value}\s*[- ]?\s*panels?\b",

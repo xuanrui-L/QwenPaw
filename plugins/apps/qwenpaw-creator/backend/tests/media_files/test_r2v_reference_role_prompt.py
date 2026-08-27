@@ -97,7 +97,7 @@ def test_mapping_labels_every_reference_in_payload_order(monkeypatch) -> None:
 def test_submit_path_renders_the_block_into_each_provider_dialect(
     monkeypatch,
 ) -> None:
-    """The block is canonical; submit renders it to what the provider documents."""
+    """Canonical in the block; submit renders the provider's own form."""
     from models import config as model_config
     from services.media_files.r2v_execution import _render_reference_markers
 
@@ -166,6 +166,11 @@ def test_no_references_leaves_prompt_untouched(monkeypatch) -> None:
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "")
 
     assert (
-        _append_reference_role_mapping("纯文本。", _project(), [], storyboard_id="")
+        _append_reference_role_mapping(
+            "纯文本。",
+            _project(),
+            [],
+            storyboard_id="",
+        )
         == "纯文本。"
     )

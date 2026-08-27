@@ -41,6 +41,7 @@ from services.media_files.call_budget import (
 )
 from services.media_files.transient_errors import is_transient_error_message
 from services.file_agent_runtime.work_graph import (
+    dispatch_key_predates_digest_ledger,
     WorkGraph,
     WorkNode,
     derive_work_graph,
@@ -688,7 +689,19 @@ class WorkGraphScheduler:
             if ledger_key not in self._dispatched or node.node_id in inflight:
                 continue
             prefix = f"dag-{node.node_id}-{fingerprint}"
-            if any(key.startswith(prefix) for key in recorded_keys):
+            node_prefix = f"dag-{node.node_id}-"
+            if any(
+                key.startswith(prefix)
+                # A record minted under the old plaintext-model ledger format
+                # cannot match today's digest prefix. Treating it as absent
+                # would reopen a node that already owns a durable task and
+                # pay for the same render twice across an upgrade.
+                or (
+                    key.startswith(node_prefix)
+                    and dispatch_key_predates_digest_ledger(key)
+                )
+                for key in recorded_keys
+            ):
                 # A durable record exists (running / failed / quarantined):
                 # the record — not this reopen path — owns its lifecycle.
                 continue

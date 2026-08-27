@@ -595,6 +595,22 @@ def test_duration_guidance_has_no_global_creator_default() -> None:
             "图1 establishes action.",
             True,
         ),
+        (
+            # 地图/构图 are ordinary words; the digit belongs to the prose,
+            # not to a reference marker, so scene description must survive.
+            "veo-3.1-generate-preview",
+            "veo",
+            "zh-CN",
+            "英雄站在世界地图1角，构图1/3 留白。",
+            False,
+        ),
+        (
+            "minimax-hailuo-02",
+            "minimax",
+            "zh-CN",
+            "特写拼图1块被推入画面。",
+            False,
+        ),
     ],
 )
 def test_storyboard_reference_authoring_check_is_model_specific(

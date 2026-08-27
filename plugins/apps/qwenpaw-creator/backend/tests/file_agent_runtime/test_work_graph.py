@@ -319,6 +319,7 @@ def test_missing_storyboard_prompt_is_a_model_required_gap() -> None:
     storyboard = graph.by_id["storyboard:elem:one"]
     assert storyboard.status is WorkNodeStatus.GATED
     assert storyboard.missing == ("storyboard_prompt 缺失",)
+    assert storyboard.authored_text_gap
     # The scheduler cannot solve this: it needs a model turn.
     assert storyboard in graph.model_required_nodes()
 
@@ -334,6 +335,7 @@ def test_missing_visual_prompt_is_a_model_required_gap() -> None:
     visual = graph.by_id["visual:char:hero:var:default"]
     assert visual.status is WorkNodeStatus.GATED
     assert visual.missing == ("visual_prompt 缺失",)
+    assert visual.authored_text_gap
     # A one-line entity description fallback must never start a paid image
     # task before visual development has committed its production prompt.
     assert visual in graph.model_required_nodes()
@@ -729,7 +731,6 @@ def test_budget_dropped_reference_does_not_stale_the_artifact() -> None:
     a false "needs review" on artifacts that were correct.
     """
     from services.file_agent_runtime.work_graph import _artifact_is_stale
-    from services.project_files.models import ArtifactVersion, Project
 
     project = Project.new(project_id="p-stale", name="Stale")
     project.assets.artifact_versions_by_id["art:sb"] = ArtifactVersion(
@@ -748,9 +749,79 @@ def test_budget_dropped_reference_does_not_stale_the_artifact() -> None:
 
     # The dropped reference must not count as drift...
     assert not _artifact_is_stale(
-        project, "art:sb", ["art:kept", "art:dropped"],
+        project,
+        "art:sb",
+        ["art:kept", "art:dropped"],
     )
     # ...while a genuinely new upstream selection still does.
     assert _artifact_is_stale(
-        project, "art:sb", ["art:kept", "art:something-new"],
+        project,
+        "art:sb",
+        ["art:kept", "art:something-new"],
+    )
+
+
+def test_upgrade_does_not_restale_artifacts_from_the_old_ledger() -> None:
+    """The ledger fingerprint dropped the plaintext model names, and the
+    storyboard graph fingerprint gained aspect ratio and shot count. Every
+    durable key minted before that therefore mismatches today's digest. Reading
+    the mismatch as drift would flip every pre-existing storyboard from DONE to
+    READY and auto-dispatch a paid re-render, replacing artifacts the user had
+    already accepted.
+    """
+    from services.file_agent_runtime.work_graph import (
+        _artifact_is_stale,
+        dispatch_key_predates_digest_ledger,
+    )
+
+    project = Project.new(project_id="p-upgrade", name="Upgrade")
+    project.assets.artifact_versions_by_id["art:sb"] = ArtifactVersion(
+        version_id="art:sb",
+        slot_id="element:elem:1:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:1",
+        name="分镜图",
+        file_id="file-sb",
+        checksum="0" * 64,
+        based_on_generation=1,
+        created_at="2026-08-20T00:00:00Z",
+        metadata={"taskId": "task-legacy"},
+    )
+    node_id = "storyboard:elem:1"
+    legacy_key = (
+        f"dag-{node_id}-a1b2c3d4e5f60718"
+        "|img:qwen-image-3.0-pro|vid:wan3.0-video"
+    )
+    assert dispatch_key_predates_digest_ledger(legacy_key)
+
+    legacy_task = SimpleNamespace(
+        task_id="task-legacy",
+        idempotency_key=legacy_key,
+    )
+    assert not _artifact_is_stale(
+        project,
+        "art:sb",
+        [],
+        node_id=node_id,
+        dispatch_fingerprint="9f8e7d6c5b4a3210",
+        tasks=[legacy_task],
+    )
+
+    # A key already in the digest format is still compared, so a genuine input
+    # change after the upgrade is still caught.
+    versions = project.assets.artifact_versions_by_id
+    versions["art:sb2"] = versions["art:sb"].model_copy(
+        update={"version_id": "art:sb2", "metadata": {"taskId": "task-new"}},
+    )
+    new_task = SimpleNamespace(
+        task_id="task-new",
+        idempotency_key=f"dag-{node_id}-a1b2c3d4e5f60718-mdeadbeefdeadbeef",
+    )
+    assert _artifact_is_stale(
+        project,
+        "art:sb2",
+        [],
+        node_id=node_id,
+        dispatch_fingerprint="9f8e7d6c5b4a3210",
+        tasks=[new_task],
     )

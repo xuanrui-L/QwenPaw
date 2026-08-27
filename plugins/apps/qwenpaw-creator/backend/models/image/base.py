@@ -18,19 +18,18 @@ Adding another backend later means writing one new subclass — no changes to
 callers or the retry shell.
 """
 
+from abc import ABC, abstractmethod
 import asyncio
 from dataclasses import dataclass
 import json
 import os
 import re
 
-from models.reference_markers import ReferenceMarkerSpec
-from abc import ABC, abstractmethod
-
 import httpx
 
 from models import config as model_config
 from models.concurrency import model_slot
+from models.reference_markers import ReferenceMarkerSpec
 from services.runtime_files.atomic_store import atomic_replace_bytes
 from utils.logger import setup_logger
 from utils.exceptions import ModelError

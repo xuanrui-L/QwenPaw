@@ -1345,10 +1345,15 @@ def _model_reference_syntax_guidance(
     )
 
 
+# CJK has no word boundary, so a bare "图\d" also matches inside 地图2, 视图1,
+# 构图3, 草图2, 贴图1, 插图2, 截图3 … Enumerating those prefixes never ends;
+# requiring that the token is not preceded by a CJK character is the actual
+# rule, since a real marker starts a clause or follows punctuation. Without it
+# ordinary prose triggered VIDEO_REFERENCE_SYNTAX_INVALID and GATED the node.
 _POSITIONAL_REFERENCE_TOKEN = re.compile(
-    r"(?:\[Image\s*\d+\]|(?:图片|图)\s*\d+|Image\s+\d+|"
-    r"image\s*_?\d+|character\s*\d+|<<<(?:image|video)_\d+>>>|"
-    r"@(?:image|video)_\d+)",
+    r"(?:\[Image\s*\d+\]|(?<![\u4e00-\u9fff])(?:图片|图)\s*\d+|"
+    r"Image\s+\d+|image\s*_?\d+|character\s*\d+|"
+    r"<<<(?:image|video)_\d+>>>|@(?:image|video)_\d+)",
     re.IGNORECASE,
 )
 
@@ -1361,13 +1366,18 @@ def _image_reference_marker_spec(
     *,
     language: str = "zh-CN",
 ) -> tuple[re.Pattern[str], str] | None:
-    """Return the configured provider's exact numbered-image token syntax."""
+    """Return the provider's pattern plus a ``{index}`` marker template.
+
+    The template is stored rather than an index-1 literal: rebuilding one by
+    substituting "1" silently misplaces the index the moment a literal
+    contains another "1".
+    """
 
     normalized = model_name.strip()
     backend = video_backend_key(normalized, protocol_backend)
     is_chinese = language.strip().casefold().startswith("zh")
     if is_happyhorse_model(normalized):
-        return (re.compile(r"\[Image\s+(\d+)\]"), "[Image 1]")
+        return (re.compile(r"\[Image\s+(\d+)\]"), "[Image {index}]")
     if is_wan3_video_model(normalized) or (
         backend == "wan" and _WAN_27_MODEL_PATTERN.fullmatch(normalized)
     ):
@@ -1375,32 +1385,32 @@ def _image_reference_marker_spec(
             re.compile(r"图\s*(\d+)")
             if is_chinese
             else re.compile(r"\bImage\s+(\d+)\b", re.IGNORECASE),
-            "图1" if is_chinese else "Image 1",
+            "图{index}" if is_chinese else "Image {index}",
         )
     if backend == "wan" and _WAN_26_MODEL_PATTERN.fullmatch(normalized):
         return (
             re.compile(r"\bcharacter\s*(\d+)\b", re.IGNORECASE),
-            "character1",
+            "character{index}",
         )
     if backend == "seedance2":
         return (
             re.compile(r"图片\s*(\d+)")
             if is_chinese
             else re.compile(r"\bimage\s*(\d+)\b", re.IGNORECASE),
-            "图片1" if is_chinese else "image1",
+            "图片{index}" if is_chinese else "image{index}",
         )
     if backend == "kling":
         if "/" in normalized:
             return (
                 re.compile(r"<<<image_(\d+)>>>", re.IGNORECASE),
-                "<<<image_1>>>",
+                "<<<image_{index}>>>",
             )
         return (
             re.compile(r"@image_(\d+)\b", re.IGNORECASE),
-            "@image_1",
+            "@image_{index}",
         )
     if backend == "vidu" and "/" in normalized:
-        return (re.compile(r"图\s*(\d+)"), "图1")
+        return (re.compile(r"图\s*(\d+)"), "图{index}")
     return None
 
 
@@ -1443,9 +1453,7 @@ def video_prompt_image_reference_marker(
     """Return the provider's exact marker literal for one image index.
 
     ``None`` means the configured model takes structured references, where
-    inventing an inline number would misdescribe the actual payload. Every
-    literal in the dispatch table is the index-1 form and contains exactly
-    one ``1``, so substituting the index yields that provider's grammar.
+    inventing an inline number would misdescribe the actual payload.
     """
 
     spec = _image_reference_marker_spec(
@@ -1455,8 +1463,8 @@ def video_prompt_image_reference_marker(
     )
     if spec is None:
         return None
-    _pattern, literal = spec
-    return literal.replace("1", str(index))
+    _pattern, template = spec
+    return template.format(index=index)
 
 
 def video_reference_marker_spec(
@@ -1479,7 +1487,7 @@ def video_reference_marker_spec(
     )
     if spec is None:
         return None
-    pattern, literal = spec
+    pattern, template = spec
     capability = video_reference_capability(
         effective_video_model_name(
             model_name.strip(),
@@ -1488,13 +1496,9 @@ def video_reference_marker_spec(
         ),
     )
     return ReferenceMarkerSpec(
-        # Every literal in the table is the index-1 form, so substituting the
-        # placeholder for that "1" yields the provider's template.
-        template=literal.replace("1", "{index}"),
+        template=template,
         pattern=pattern,
-        documentation_url=(
-            capability.documentation_url if capability else ""
-        ),
+        documentation_url=(capability.documentation_url if capability else ""),
     )
 
 
@@ -1531,7 +1535,8 @@ def video_prompt_storyboard_reference_violation(
     )
 
     if expected is not None:
-        pattern, literal = expected
+        pattern, template = expected
+        literal = template.format(index=1)
         if not addresses_first and not any(
             int(match.group(1)) == 1 for match in pattern.finditer(text)
         ):
