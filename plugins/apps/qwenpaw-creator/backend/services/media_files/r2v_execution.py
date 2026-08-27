@@ -5250,6 +5250,9 @@ async def execute_file_s2v_command(
 ) -> FileR2VDispatch:
     """Digital-human (wan2.2-s2v) dispatch through the R2V durable poller."""
 
+    # Same wallet fuse as the r2v/image entry points: the scheduler now
+    # auto-dispatches s2v nodes with no per-call human authorization.
+    ensure_media_call_budget(services, project_id)
     return await file_r2v_execution_service(services).dispatch(
         project_id=project_id,
         target_ref=target_ref,
