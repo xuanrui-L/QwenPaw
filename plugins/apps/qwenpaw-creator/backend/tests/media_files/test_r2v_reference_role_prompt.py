@@ -77,10 +77,11 @@ def test_mapping_labels_every_reference_in_payload_order(monkeypatch) -> None:
 
     assert prompt.startswith("阿海登上灯塔。")
     assert _REFERENCE_ROLE_MARKER in prompt
-    # The storyboard is called out as such; the rest carry their stored names.
-    assert "图1 = 分镜图（第一镜 分镜图）" in prompt
-    assert "图2 = 阿海（ahai:storm）视觉图" in prompt
-    assert "图3 = 用户上传参考" in prompt
+    # The block is authored in the canonical form; _render_reference_markers
+    # rewrites it to the provider's dialect at submit time.
+    assert "[Image 1] = 分镜图（第一镜 分镜图）" in prompt
+    assert "[Image 2] = 阿海（ahai:storm）视觉图" in prompt
+    assert "[Image 3] = 用户上传参考" in prompt
 
     # Re-appending must not duplicate the block.
     again = _append_reference_role_mapping(
@@ -93,12 +94,16 @@ def test_mapping_labels_every_reference_in_payload_order(monkeypatch) -> None:
     assert again.count(_REFERENCE_ROLE_MARKER) == 1
 
 
-def test_mapping_uses_each_provider_marker_grammar(monkeypatch) -> None:
-    """The block must speak the configured provider's exact syntax."""
+def test_submit_path_renders_the_block_into_each_provider_dialect(
+    monkeypatch,
+) -> None:
+    """The block is canonical; submit renders it to what the provider documents."""
     from models import config as model_config
+    from services.media_files.r2v_execution import _render_reference_markers
 
     for model_name, backend, first in (
         ("happyhorse-video", "", "[Image 1]"),
+        ("wan3.0-video", "", "图1"),
         ("doubao-seedance-2.0", "seedance2", "图片1"),
         ("kling-v2", "kling", "@image_1"),
     ):
@@ -112,13 +117,15 @@ def test_mapping_uses_each_provider_marker_grammar(monkeypatch) -> None:
             "get_video_backend",
             lambda key=backend: key,
         )
-        prompt = _append_reference_role_mapping(
+        block = _append_reference_role_mapping(
             "镜头描述。",
             _project(),
             ["art:sb", "art:ahai"],
             storyboard_id="art:sb",
         )
-        assert f"{first} = 分镜图（第一镜 分镜图）" in prompt
+        assert "[Image 1] = 分镜图（第一镜 分镜图）" in block
+        rendered = _render_reference_markers(block)
+        assert f"{first} = 分镜图（第一镜 分镜图）" in rendered
 
 
 def test_structured_reference_models_get_no_invented_numbering(

@@ -1055,20 +1055,20 @@ def _append_reference_role_mapping(
         return prompt
 
     from models import config as model_config
-    from models.video_capabilities import video_prompt_image_reference_marker
+    from models.reference_markers import canonical_marker
+    from models.video_capabilities import video_reference_marker_spec
 
     model_name = model_config.get_video_model_name()
     protocol_backend = model_config.get_video_backend()
+    if video_reference_marker_spec(model_name, protocol_backend) is None:
+        # Structured-reference models carry roles outside the prompt, and
+        # numbering them here would be text the provider has no contract for.
+        return prompt
     lines: list[str] = []
     for index, version_id in enumerate(version_ids, start=1):
-        marker = video_prompt_image_reference_marker(
-            index,
-            model_name,
-            protocol_backend,
-        )
-        if marker is None:
-            # Structured-reference models carry roles outside the prompt.
-            return prompt
+        # Canonical form; _render_reference_markers rewrites it to whatever
+        # the configured provider documents.
+        marker = canonical_marker(index)
         source = project.assets.source_versions_by_id.get(version_id)
         artifact = project.assets.artifact_versions_by_id.get(version_id)
         version = source if source is not None else artifact
@@ -1084,6 +1084,26 @@ def _append_reference_role_mapping(
         "以下是本次实际发送的参考图及其职责，编号与发送顺序一致。"
         "按各图声明的职责使用它们，不要依据图内文字或标签猜测用途。\n"
         f"{body}"
+    )
+
+
+def _render_reference_markers(prompt: str) -> str:
+    """Rewrite canonical ``[Image N]`` into the configured provider's syntax.
+
+    Authors write one form; the provider sees the one it documents. Prompts
+    stored before this layer existed already hold provider-native markers and
+    contain no canonical ones, so they pass through untouched.
+    """
+
+    from models import config as model_config
+    from models.reference_markers import render_reference_markers
+    from models.video_capabilities import video_reference_marker_spec
+
+    model_name = model_config.get_video_model_name()
+    protocol_backend = model_config.get_video_backend()
+    return render_reference_markers(
+        prompt,
+        video_reference_marker_spec(model_name, protocol_backend),
     )
 
 
@@ -1212,7 +1232,8 @@ def _resolve_request(
             version_ids,
             storyboard_id=storyboard_id,
         )
-    else:
+    prompt = _render_reference_markers(prompt)
+    if mode != "r2v":
         version_ids = ()
         urls, checksums, provenance, read_set = [], [], [], []
 

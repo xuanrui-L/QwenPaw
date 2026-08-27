@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from models.reference_markers import ReferenceMarkerSpec
+
 HAPPYHORSE_MODEL_PREFIX = "happyhorse"
 HAPPYHORSE_MAX_REFERENCE_IMAGES = 9
 HAPPYHORSE_RESOLUTIONS = frozenset({"720P", "1080P"})
@@ -1443,6 +1445,45 @@ def video_prompt_image_reference_marker(
     return literal.replace("1", str(index))
 
 
+def video_reference_marker_spec(
+    model_name: str,
+    protocol_backend: str = "",
+    *,
+    language: str = "zh-CN",
+) -> ReferenceMarkerSpec | None:
+    """This provider's in-prompt reference syntax, for canonical rendering.
+
+    ``None`` means the model takes structured references and documents no
+    per-image addressing, so canonical markers must be reworded rather than
+    emitted.
+    """
+
+    spec = _image_reference_marker_spec(
+        model_name,
+        protocol_backend,
+        language=language,
+    )
+    if spec is None:
+        return None
+    pattern, literal = spec
+    capability = video_reference_capability(
+        effective_video_model_name(
+            model_name.strip(),
+            "r2v",
+            video_backend_key(model_name.strip(), protocol_backend),
+        ),
+    )
+    return ReferenceMarkerSpec(
+        # Every literal in the table is the index-1 form, so substituting the
+        # placeholder for that "1" yields the provider's template.
+        template=literal.replace("1", "{index}"),
+        pattern=pattern,
+        documentation_url=(
+            capability.documentation_url if capability else ""
+        ),
+    )
+
+
 # Provider syntax is deliberately kept in one auditable dispatch table.
 # pylint: disable-next=too-many-branches
 def video_prompt_storyboard_reference_violation(
@@ -1748,6 +1789,7 @@ __all__ = [
     "video_model_prompt_guidance",
     "video_model_supported_modes",
     "video_prompt_image_reference_marker",
+    "video_reference_marker_spec",
     "video_prompt_image_reference_markers",
     "video_reference_capability",
     "video_prompt_storyboard_reference_violation",
