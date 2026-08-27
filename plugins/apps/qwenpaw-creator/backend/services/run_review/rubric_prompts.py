@@ -192,16 +192,6 @@ def render_taste_principles(role: str) -> str:
                 "避免：" + "；".join(COMMON_FAILURES[:5]) + "。"
             ),
         ]
-    if role == "visual_development_agent":
-        composition = next(
-            check
-            for check in SCENE_REVIEW_CHECKS
-            if check.key == "composition_safety"
-        )
-        lines += [
-            f"- 构图安全：{composition.description}",
-            "- 一致性：角色/场景设计图之间保持造型、配色与光线的一致性；文字元素不得乱码或使用占位字形。",
-        ]
     return "\n".join(lines)
 
 

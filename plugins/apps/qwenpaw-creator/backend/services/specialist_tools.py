@@ -117,6 +117,13 @@ _SOURCE_PROJECT_TOOL_NAMES = frozenset({"read_project", "read_project_file"})
 _LEGACY_R2V_REPLAY_ROLES = frozenset(
     {SpecialistRole.R2V_GENERATION_DIRECTOR},
 )
+# VISUAL_DEVELOPMENT is likewise retired from the active delegation registry.
+# Its tool surface remains readable only for durable pre-retirement
+# SpecialistRun checkpoint replay; visual prompts are authored by the main
+# Agent and image dispatch is owned exclusively by Work Graph.
+_LEGACY_VISUAL_REPLAY_ROLES = frozenset(
+    {SpecialistRole.VISUAL_DEVELOPMENT},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1010,12 +1017,8 @@ _SPECS = (
             "文本、模型、音色、语速和角色绑定完全一致时会直接复用已有版本，"
             "即使工具调用 idempotency key 不同也不会再次请求付费 TTS。"
         ),
-        roles=frozenset(
-            {
-                SpecialistRole.VISUAL_DEVELOPMENT,
-                SpecialistRole.AI_EDITING_DIRECTOR,
-            },
-        ),
+        roles=_LEGACY_VISUAL_REPLAY_ROLES
+        | frozenset({SpecialistRole.AI_EDITING_DIRECTOR}),
         parameters=_tool_schema(_TTS_ARGUMENTS),
         requires_execution_authorization=True,
         long_running=True,
@@ -1029,7 +1032,7 @@ _SPECS = (
             "sampleSourceVersionId / sampleText 从音频样本复刻。绑定后该角色的"
             " tts_generation 自动沿用此音色，重新创建会替换旧绑定。"
         ),
-        roles=frozenset({SpecialistRole.VISUAL_DEVELOPMENT}),
+        roles=_LEGACY_VISUAL_REPLAY_ROLES,
         parameters=_tool_schema(_VOICE_ENROLLMENT_ARGUMENTS),
         requires_execution_authorization=True,
         long_running=True,
@@ -1533,26 +1536,14 @@ class FileSpecialistToolRegistry:
             )
 
         if name == "create_character_voice":
-            enrollment = await execute_file_voice_enrollment_command(
+            payload_result = await invoke_character_voice_tool(
                 self.services,
                 project_id=project_id,
                 target_ref=target_ref,
                 arguments=payload,
                 idempotency_key=idempotency_key,
             )
-            return SpecialistToolResult(
-                payload={
-                    "ok": True,
-                    "status": "SUCCEEDED",
-                    "entityId": enrollment.entity_id,
-                    "voiceBound": True,
-                    "voiceOrigin": enrollment.origin,
-                    "sampleSourceVersionId": enrollment.sample_source_version_id,
-                    "generation": enrollment.project_generation,
-                    "etag": enrollment.project_etag,
-                    "replayed": enrollment.replayed,
-                },
-            )
+            return SpecialistToolResult(payload=payload_result)
 
         if name == "design_motion_overlays":
             result = await design_motion_overlays(
@@ -1566,9 +1557,88 @@ class FileSpecialistToolRegistry:
         raise RuntimeError(f"unhandled Specialist tool: {name}")
 
 
+# ── Main-Agent character voice surface ───────────────────────────────────────
+# The retired visual development specialist used to own voice enrollment; the
+# active surface now belongs to the Creator main Agent, which authorizes and
+# invokes the same executor directly.
+
+CHARACTER_VOICE_TOOL_NAME = "create_character_voice"
+
+
+def character_voice_tool_spec() -> SpecialistToolSpec | None:
+    """The voice enrollment spec, or None while TTS is unconfigured."""
+
+    if not _tool_available(CHARACTER_VOICE_TOOL_NAME):
+        return None
+    return _SPECS_BY_NAME[CHARACTER_VOICE_TOOL_NAME]
+
+
+def character_voice_tool_manifest() -> dict[str, Any] | None:
+    """Main-Agent manifest for voice enrollment, or None when TTS is off."""
+
+    spec = character_voice_tool_spec()
+    if spec is None:
+        return None
+    value = provider_function(
+        spec.name,
+        {"description": spec.description, "parameters": spec.parameters},
+    )
+    target = value["function"]["parameters"]["properties"].get("targetRef")
+    if isinstance(target, dict):
+        target["pattern"] = r"^asset:.+$"
+        target["description"] = (
+            "目标 character 实体的 exact asset:<VisualEntity.entity_id>；"
+            "不能使用来源素材 logicalAssetId。"
+        )
+    return value
+
+
+async def invoke_character_voice_tool(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    target_ref: str,
+    arguments: Mapping[str, Any],
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Execute one voice enrollment and return the tool payload."""
+
+    if character_voice_tool_spec() is None:
+        raise ValidationError(
+            "create_character_voice 不可用：当前部署未配置 TTS",
+        )
+    if not target_ref.startswith("asset:") or not target_ref[6:]:
+        raise ValidationError(
+            "create_character_voice 需要 targetRef="
+            "asset:<VisualEntity.entity_id>",
+        )
+    enrollment = await execute_file_voice_enrollment_command(
+        services,
+        project_id=project_id,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+    )
+    return {
+        "ok": True,
+        "status": "SUCCEEDED",
+        "entityId": enrollment.entity_id,
+        "voiceBound": True,
+        "voiceOrigin": enrollment.origin,
+        "sampleSourceVersionId": enrollment.sample_source_version_id,
+        "generation": enrollment.project_generation,
+        "etag": enrollment.project_etag,
+        "replayed": enrollment.replayed,
+    }
+
+
 __all__ = [
+    "CHARACTER_VOICE_TOOL_NAME",
     "FileSpecialistToolRegistry",
     "SpecialistToolResult",
     "SpecialistToolSpec",
     "SpecialistToolWait",
+    "character_voice_tool_manifest",
+    "character_voice_tool_spec",
+    "invoke_character_voice_tool",
 ]

@@ -41,6 +41,7 @@ FILE_AGENT_PROMPT_SPECS = {
             "tts_guidance",
             "video_duration_guidance",
             "video_model_guidance",
+            "image_model_guidance",
             "external_skills",
             "live_operation_guidance",
         ),
@@ -50,14 +51,6 @@ FILE_AGENT_PROMPT_SPECS = {
             "project_id",
             "workspace_schema",
             "memory_guidance",
-        ),
-        _spec(
-            "visual_development_agent.system",
-            "visual_development_agent.system.txt",
-            "project_id",
-            "workspace_schema",
-            "tts_guidance",
-            "image_model_guidance",
         ),
         _spec(
             "ai_editing_director.system",
@@ -126,6 +119,7 @@ def render_creator_system_prompt(
         delegator_guidance,
     )
     from models import config as model_config
+    from models.image.base import image_model_prompt_guidance
     from models.video_capabilities import (
         video_model_delegator_guidance,
         video_model_duration_guidance,
@@ -166,6 +160,9 @@ def render_creator_system_prompt(
                     model_config.get_video_backend(),
                 ),
             ),
+        ),
+        image_model_guidance=image_model_prompt_guidance(
+            model_config.get_image_model_name(),
         ),
         external_skills=external_skills,
         live_operation_guidance=live_operation,

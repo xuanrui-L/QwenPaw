@@ -881,15 +881,15 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
         parent_turn += 1
         if parent_turn == 1:
             return _tool_turn(
-                call_id="delegate-hanging-visual",
+                call_id="delegate-hanging-editing",
                 name="delegate_to_agent",
                 arguments={
-                    "role": "visual_development_agent",
-                    "target_refs": ["asset:hero"],
-                    "task": "编写角色视觉 Prompt",
+                    "role": "ai_editing_director",
+                    "target_refs": ["timeline:timeline:main"],
+                    "task": "编排 Timeline 选段",
                 },
             )
-        return AgentModelTurn(content="视觉模型超时，当前运行已结束。")
+        return AgentModelTurn(content="剪辑模型超时，当前运行已结束。")
 
     async def scenario():
         services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
@@ -932,8 +932,8 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
         if parent_turn <= 2:
             return _delegate_call(
                 f"delegate-review-{parent_turn}",
-                role="visual_development_agent",
-                target_refs=["asset:hero"],
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
                 task="修复本轮异步审阅发现并生成一次新产物",
             )
         assert (
@@ -991,7 +991,10 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
     assert specialist_turns == 1
     assert len(runs) == 1
     assert runs[0].status.value == "SUCCEEDED"
-    assert repair_state["targets"]["asset:hero"]["attempts_started"] == 1
+    assert (
+        repair_state["targets"]["timeline:timeline:main"]["attempts_started"]
+        == 1
+    )
 
 
 def _corrupted_jq_call(*, call_id: str, etag: str) -> AgentToolCall:
@@ -1755,9 +1758,9 @@ def test_specialist_cancel_emits_terminal_event(
             names = {item["function"]["name"] for item in tools}
             if "delegate_to_agent" in names:
                 return _delegate_call(
-                    "delegate-visual",
-                    role="visual_development_agent",
-                    target_refs=["asset:hero"],
+                    "delegate-editing",
+                    role="ai_editing_director",
+                    target_refs=["timeline:timeline:main"],
                     task="角色声音设计",
                 )
             if cancel_phase == "waiting_runtime":
@@ -1975,12 +1978,12 @@ def test_costly_specialist_tool_waits_for_file_authorization(
         parent_turn += 1
         if parent_turn == 1:
             return _delegate_call(
-                "delegate-visual-voice-1",
-                role="visual_development_agent",
-                target_refs=["asset:hero"],
+                "delegate-editing-voice-1",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
                 task="为 hero 生成角色试音",
             )
-        return AgentModelTurn(content="视觉开发 Specialist 已完成。")
+        return AgentModelTurn(content="AI 剪辑 Specialist 已完成。")
 
     async def scenario():
         services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
@@ -2054,6 +2057,102 @@ def test_retired_r2v_specialist_cannot_request_paid_authorization(
 
     authorizations, specialists = asyncio.run(scenario())
     assert authorizations == []
+    assert specialists == []
+
+
+def test_retired_visual_specialist_cannot_be_delegated(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The removed visual development surface rejects new delegations."""
+    _authorization_gate_modes(monkeypatch, authorization="required")
+    parent_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn
+        parent_turn += 1
+        if parent_turn == 1:
+            return _delegate_call(
+                "delegate-hero-design",
+                role="visual_development_agent",
+                target_refs=["asset:char:hero"],
+                task="为角色生成设计图",
+            )
+        return AgentModelTurn(content="视觉资产 prompt 改由主 Agent 直接编写。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
+        driver = _driver(services, callback)
+
+        await _run_to_idle(driver, services)
+        specialists = driver.executions.list_specialist_runs(PROJECT_ID)
+        await driver.stop()
+        return specialists
+
+    specialists = asyncio.run(scenario())
+    assert specialists == []
+
+
+def test_mainline_character_voice_waits_for_authorization(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Voice enrollment moved to the mainline: the paid call still parks on
+    an execution authorization, and no SpecialistRun is ever created."""
+
+    _authorization_gate_modes(monkeypatch, authorization="required")
+    monkeypatch.setenv("TTS_API_KEY", "sk-test")
+
+    async def fake_voice_tool(_services, **_kwargs):
+        return {
+            "ok": True,
+            "status": "SUCCEEDED",
+            "entityId": "char:hero",
+            "voiceBound": True,
+        }
+
+    monkeypatch.setattr(
+        driver_module,
+        "invoke_character_voice_tool",
+        fake_voice_tool,
+    )
+    parent_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        assert "create_character_voice" in names
+        parent_turn += 1
+        if parent_turn == 1:
+            return _tool_turn(
+                call_id="voice-1",
+                name="create_character_voice",
+                arguments={
+                    "projectId": PROJECT_ID,
+                    "targetRef": "asset:char:hero",
+                    "arguments": {"voicePrompt": "低沉沙哑的中年男声"},
+                },
+            )
+        return AgentModelTurn(content="音色已创建并绑定。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="创建角色音色",
+        )
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        authorization = await _wait_first_authorization(driver)
+        _approve(driver, authorization)
+        await _wait_consumed(services)
+        await driver.wait_until_idle(PROJECT_ID)
+        specialists = driver.executions.list_specialist_runs(PROJECT_ID)
+        await driver.stop()
+        return authorization, specialists
+
+    authorization, specialists = asyncio.run(scenario())
+    assert authorization.operation == "create_character_voice"
     assert specialists == []
 
 
@@ -2227,8 +2326,8 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
         if parent_turn == 1:
             return _delegate_call(
                 "delegate-hero-voice",
-                role="visual_development_agent",
-                target_refs=["asset:hero"],
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
                 task="生成 hero 角色试音并等待审阅",
             )
         delegated = json.loads(messages[-1]["content"])
@@ -2279,7 +2378,7 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     assert specialist.metadata["waitingReview"] is True
     assert specialist.metadata["waitingReviewId"] == "review-ep22-storyboard"
     waiting_summary = (
-        "asset:hero 的产物已生成，后续步骤尚未开始。请先完成审阅；" + "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
+        "timeline:timeline:main 的产物已生成，后续步骤尚未开始。请先完成审阅；" + "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
     )
     assert specialist.final_summary_text == waiting_summary
     blocked = [

@@ -37,7 +37,6 @@ def _active_prompt_texts() -> list[str]:
         )
         for role in (
             SpecialistRole.SOURCE_INTELLIGENCE,
-            SpecialistRole.VISUAL_DEVELOPMENT,
             SpecialistRole.AI_EDITING_DIRECTOR,
         )
     )
@@ -56,7 +55,6 @@ def test_file_runtime_prompts_are_structured_files_with_workspace_schema() -> (
     assert set(FILE_AGENT_PROMPT_SPECS) == {
         "creator_agent.system",
         "source_intelligence_agent.system",
-        "visual_development_agent.system",
         "ai_editing_director.system",
     }
     for prompt_id in FILE_AGENT_PROMPT_SPECS:
@@ -97,18 +95,33 @@ def test_creator_owns_timeline_element_planning() -> None:
     assert "台词卡 Overlay Element" in prompt
 
 
-def test_visual_prompt_reuses_an_existing_variant_sheet_by_default() -> None:
-    prompt = load_file_agent_prompt("visual_development_agent.system")
-    assert "一图一 Variant（硬性规则）" in prompt
-    assert "生成前去重（硬性规则）" in prompt
+def _visual_asset_design_skill() -> str:
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[2]
+    return (backend / "skills" / "visual-asset-design" / "SKILL.md").read_text(
+        encoding="utf-8",
+    )
+
+
+def test_creator_owns_the_visual_asset_structural_contract() -> None:
+    prompt = load_file_agent_prompt("creator_agent.system")
+    assert "### 视觉资产结构合同" in prompt
+    assert "一图一 Variant（硬性）" in prompt
+    assert "生成前去重（硬性）" in prompt
     assert "generated_artifact_version_ids" in prompt
-    assert "重复委派、继续执行或重新进入同一目标不等于用户要求重做" in prompt
-    assert "`image_generation` 不注册给视觉开发 Agent" in prompt
-    assert "从工具权限层避免同一 slot 并发或重复付费" in prompt
+    assert "重复进入同一目标不等于用户要求重做" in prompt
+    assert "`required_variant_ids` 是计划合同" in prompt
+    # The craft doctrine is loaded on demand, so the mandatory skill read
+    # must be spelled out where the contract lives and where repair starts.
+    assert "`view_skill` 读取 `visual-asset-design`" in prompt
+    assert "visual-asset-design" in prompt
 
 
-def test_visual_prompt_requires_a_cinematic_identity_board_contract() -> None:
-    prompt = load_file_agent_prompt("visual_development_agent.system")
+def test_visual_asset_design_skill_carries_the_migrated_doctrine() -> None:
+    skill = _visual_asset_design_skill()
+    assert skill.startswith("---")
+    assert "name: visual-asset-design" in skill
     for requirement in (
         "电影感艺术身份板",
         "大型、略偏离中心的英雄全身视角",
@@ -118,10 +131,15 @@ def test_visual_prompt_requires_a_cinematic_identity_board_contract() -> None:
         "小型细节研究区",
         "名称、角色、核心情绪、视觉标志",
         "相同脸部与比例",
+        "规避图片审核误判（硬性）",
+        "构图与镜头语言",
     ):
-        assert requirement in prompt
-    assert "不得同时要求 `clear spatial labels` 与 `no text`" in prompt
-    assert "无文字视觉拓扑" in prompt
+        assert requirement in skill
+    assert "不得同时要求 `clear spatial labels` 与 `no text`" in skill
+    assert "无文字视觉拓扑" in skill
+    # The cost contracts stay inline in the creator prompt, not the skill.
+    assert "一图一 Variant" in skill  # referenced, authoritative copy inline
+    assert "以主 Agent 系统提示中的结构" in skill
 
 
 def test_creator_compiles_dense_action_nodes_without_uniform_timestamps() -> (
@@ -244,9 +262,6 @@ def test_ai_editing_director_requires_pet_inner_monologue_not_action_labels() ->
     assert "第一段 `span.start_tick=0`" in prompt
 
 
-_IMAGE_ROLES = (SpecialistRole.VISUAL_DEVELOPMENT,)
-
-
 def _set_image_model(monkeypatch, name: str) -> None:
     monkeypatch.setattr(model_config, "get_image_model_name", lambda: name)
 
@@ -264,21 +279,25 @@ def _specialist_prompt(role: SpecialistRole, project=None) -> str:
     )
 
 
-@pytest.mark.parametrize("role", _IMAGE_ROLES)
 def test_image_model_guidance_follows_configured_model(
     monkeypatch,
-    role,
 ) -> None:
     _set_video_model(monkeypatch, "wan2.7-r2v")
     _set_image_model(monkeypatch, "qwen-image-3.0")
-    prompt = _specialist_prompt(role)
+    prompt = render_creator_system_prompt(
+        project_id="project-guidance-test",
+        workspace_schema="SCHEMA",
+    )
     assert "qwen-image-3.0" in prompt
     assert "总数必须不超过 3" in prompt
     assert "400 拒绝" in prompt
     assert "总数不超过 5" not in prompt
     assert "{{image_model_guidance}}" not in prompt
     _set_image_model(monkeypatch, "gpt-image-2")
-    prompt = _specialist_prompt(role)
+    prompt = render_creator_system_prompt(
+        project_id="project-guidance-test",
+        workspace_schema="SCHEMA",
+    )
     assert "最多 16 张" in prompt
 
 
@@ -318,6 +337,20 @@ def test_r2v_specialist_is_not_an_active_delegation_surface() -> None:
         _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
 
 
+def test_visual_development_is_not_an_active_delegation_surface() -> None:
+    with pytest.raises(ValueError, match="no active prompt"):
+        _specialist_prompt(SpecialistRole.VISUAL_DEVELOPMENT)
+
+
+def test_active_surfaces_never_mention_the_retired_visual_specialist() -> (
+    None
+):
+    combined = "\n".join(_active_prompt_texts())
+    assert "visual_development_agent" not in combined
+    assert "视觉开发 Specialist" not in combined
+    assert "委派视觉开发" not in combined
+
+
 def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:
     cfg = tts_guidance.model_config
     monkeypatch.setattr(cfg, "is_tts_configured", lambda: configured)
@@ -326,14 +359,10 @@ def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:
 
 def test_unconfigured_tts_leaves_no_trace(monkeypatch) -> None:
     _tts(monkeypatch, model="qwen3-tts-flash", configured=False)
-    for role in (
-        SpecialistRole.VISUAL_DEVELOPMENT,
-        SpecialistRole.AI_EDITING_DIRECTOR,
-    ):
-        prompt = _specialist_prompt(role)
-        assert "tts" not in prompt.lower()
-        assert "音色" not in prompt
-        assert "{{tts_guidance}}" not in prompt
+    prompt = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
+    assert "tts" not in prompt.lower()
+    assert "音色" not in prompt
+    assert "{{tts_guidance}}" not in prompt
     delegator = render_creator_system_prompt(
         project_id="project-guidance-test",
         workspace_schema="SCHEMA",
@@ -347,21 +376,21 @@ def test_model_with_system_voices_presents_design_as_optional(
     monkeypatch,
 ) -> None:
     _tts(monkeypatch, model="qwen3-tts-flash")
-    visual = _specialist_prompt(SpecialistRole.VISUAL_DEVELOPMENT)
-    assert "create_character_voice" in visual
-    assert "voicePrompt" in visual
-    assert "可选" in visual
-    assert "没有系统音色" not in visual
+    delegator = render_creator_system_prompt(
+        project_id="project-guidance-test",
+        workspace_schema="SCHEMA",
+    )
+    # Voice enrollment is a mainline tool now: the design path must be
+    # documented where the tool lives.
+    assert "create_character_voice" in delegator
+    assert "voicePrompt" in delegator
+    assert "可选" in delegator
+    assert "没有系统音色" not in delegator
     editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
     assert "tts_generation" in editing
     assert "默认音色" in editing
     # Real voice names are enumerated so no foreign namespace is invented.
     assert "Cherry" in editing
-    delegator = render_creator_system_prompt(
-        project_id="project-guidance-test",
-        workspace_schema="SCHEMA",
-    )
-    assert "没有系统音色" not in delegator
 
 
 def test_model_without_system_voices_makes_design_a_prerequisite(
@@ -369,19 +398,18 @@ def test_model_without_system_voices_makes_design_a_prerequisite(
 ) -> None:
     """cosyvoice-v3.5-plus can only speak through a created voice."""
     _tts(monkeypatch, model="cosyvoice-v3.5-plus")
-    visual = _specialist_prompt(SpecialistRole.VISUAL_DEVELOPMENT)
-    assert "没有系统音色" in visual
-    assert "必须先创建专属音色" in visual
-    # The audition path needs a system voice, so it is not advertised.
-    assert "sampleText 不可用" in visual
-    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
-    assert "没有系统音色" in editing
-    assert "必须传已绑定音色的 characterRef" in editing
     delegator = render_creator_system_prompt(
         project_id="project-guidance-test",
         workspace_schema="SCHEMA",
     )
-    assert "先委派 visual_development_agent" in delegator
+    assert "没有系统音色" in delegator
+    assert "create_character_voice" in delegator
+    # The audition path needs a system voice, so it is not advertised.
+    assert "sampleText 不可用" in delegator
+    editing = _specialist_prompt(SpecialistRole.AI_EDITING_DIRECTOR)
+    assert "没有系统音色" in editing
+    assert "必须传已绑定音色的 characterRef" in editing
+    assert "create_character_voice" in editing
 
 
 def test_scenario_steers_how_the_voice_is_used(monkeypatch) -> None:

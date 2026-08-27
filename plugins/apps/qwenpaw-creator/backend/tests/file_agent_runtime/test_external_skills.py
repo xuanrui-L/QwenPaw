@@ -131,6 +131,30 @@ def test_professional_media_prompt_skill_is_builtin(
     assert "每一个独立面板内部画框" in parsed["body"]
 
 
+def test_visual_asset_design_skill_is_builtin(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The visual doctrine retired from the specialist ships as a skill."""
+
+    _configure(tmp_path, monkeypatch, [])
+    builtin_root = Path(__file__).resolve().parents[2] / "skills"
+    monkeypatch.setattr(external_skills, "_BUILTIN_SKILLS_ROOT", builtin_root)
+    external_skills._clear_load_cache()
+
+    loaded = {skill.entry.name: skill for skill in load_skills()}
+    skill = loaded["visual-asset-design"]
+    assert skill.available
+    parsed = external_skills.parse_skill_md(skill.skill_md)
+    assert "VisualVariant" in parsed["description"]
+    assert "电影感艺术身份板" in parsed["body"]
+    assert "规避图片审核误判（硬性）" in parsed["body"]
+    assert "构图与镜头语言" in parsed["body"]
+    viewed = external_skills.view_skill(skill_name="visual-asset-design")
+    assert viewed["ok"] is True
+    assert "序列关键帧参考图" in viewed["content"]
+
+
 # ── Driver loop: progressive disclosure end to end ───────────────────────────
 
 

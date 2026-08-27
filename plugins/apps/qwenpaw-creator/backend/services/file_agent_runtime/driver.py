@@ -144,9 +144,13 @@ from services.external_skills import (
 from services.observability import report_error, trace_event, traced_async
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
+    CHARACTER_VOICE_TOOL_NAME,
     FileSpecialistToolRegistry,
     SpecialistToolSpec,
     SpecialistToolWait,
+    character_voice_tool_manifest,
+    character_voice_tool_spec,
+    invoke_character_voice_tool,
 )
 from services.runtime_files.session_store import (
     ProjectRuntimeSessionStore,
@@ -941,6 +945,9 @@ def _creator_agent_tool_manifest(
         manifest.append(_computer_use_tool_manifest())
     if external_skills:
         manifest.extend(external_skill_tool_manifests(external_skills))
+    voice_manifest = character_voice_tool_manifest()
+    if voice_manifest is not None:
+        manifest.append(voice_manifest)
     manifest.append(delegate_tool_manifest())
     return manifest
 
@@ -2731,6 +2738,17 @@ class FileCreatorAgentRuntime:
                             tools=tools,
                             arguments=call.arguments,
                         )
+                    elif call.name == CHARACTER_VOICE_TOOL_NAME:
+                        result = await self._run_mainline_character_voice(
+                            project_id=project_id,
+                            session_id=session_id,
+                            run_id=run_id,
+                            epoch=epoch,
+                            request=request,
+                            tools=tools,
+                            call_id=call.call_id,
+                            arguments=call.arguments,
+                        )
                     elif call.name == GROUND_PROMPT_CONTEXT_TOOL_NAME:
                         result = await self._run_ground_prompt_context(
                             request=request,
@@ -2895,6 +2913,77 @@ class FileCreatorAgentRuntime:
                 )
         raise AgentModelError(
             f"Creator Agent exceeded {effective_max_turns} model turns",
+        )
+
+    async def _run_mainline_character_voice(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        run_id: str,
+        epoch: int,
+        request: CreatorMessageRecord,
+        tools: AgentProjectTools,
+        call_id: str,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Voice enrollment on the mainline (was visual-development-owned).
+
+        The paid TTS enrollment reuses the same execution-authorization
+        machinery as specialist tools; the run identity on the approval
+        record is the mainline run.
+        """
+
+        spec = character_voice_tool_spec()
+        if spec is None:
+            raise FileAgentRuntimeError(
+                "create_character_voice 不可用：当前部署未配置 TTS",
+            )
+        target_ref = str(arguments.get("targetRef") or "")
+        common = {
+            "parentRunId": run_id,
+            "runId": run_id,
+            "role": "creator_agent",
+            "displayName": "creator_agent",
+            "targetRefs": [target_ref] if target_ref else [],
+        }
+        if (
+            spec.requires_execution_authorization
+            and get_execution_authorization_mode()
+            != EXECUTION_AUTHORIZATION_ALLOW_ALL
+        ):
+            await self._await_execution_authorization(
+                project_id=project_id,
+                session_id=session_id,
+                parent_run_id=run_id,
+                specialist_run_id=run_id,
+                round_id=tools.context.round_id or f"agent-round-{run_id}",
+                epoch=epoch,
+                request=request,
+                common=common,
+                call_id=call_id,
+                spec=spec,
+                arguments=arguments,
+                tools=tools,
+                park_specialist_run=False,
+            )
+        payload = arguments.get("arguments")
+        if not isinstance(payload, Mapping):
+            raise FileAgentRuntimeError(
+                "create_character_voice arguments 必须是 object",
+            )
+        idempotency_key = _specialist_tool_invocation_id(
+            run_id,
+            spec.name,
+            arguments,
+            call_id=call_id,
+        )
+        return await invoke_character_voice_tool(
+            self.services,
+            project_id=project_id,
+            target_ref=target_ref,
+            arguments=payload,
+            idempotency_key=idempotency_key,
         )
 
     async def _run_ground_prompt_context(
@@ -3814,7 +3903,6 @@ class FileCreatorAgentRuntime:
             self.services.projects.read,
             project_id,
         )
-        delegated.validate_project_targets(project=snapshot.project)
         repair_attempts: dict[str, int] = {}
         if request.source in review_repair_sources:
             from services.run_review import admission
@@ -5315,16 +5403,18 @@ class FileCreatorAgentRuntime:
         authorization: ExecutionAuthorizationRecord,
         decided_event: str = "execution.authorization_decided",
         decided_payload: Mapping[str, Any] | None = None,
+        park_specialist_run: bool = True,
     ) -> ExecutionAuthorizationRecord:
         """Park the Specialist run until a persisted approval is decided."""
 
-        await asyncio.to_thread(
-            self.executions.transition_specialist_run,
-            project_id,
-            specialist_run_id,
-            expected_status=SpecialistRunStatus.RUNNING_MODEL,
-            status=SpecialistRunStatus.WAITING_AUTHORIZATION,
-        )
+        if park_specialist_run:
+            await asyncio.to_thread(
+                self.executions.transition_specialist_run,
+                project_id,
+                specialist_run_id,
+                expected_status=SpecialistRunStatus.RUNNING_MODEL,
+                status=SpecialistRunStatus.WAITING_AUTHORIZATION,
+            )
         try:
             while authorization.status is ExecutionAuthorizationStatus.PENDING:
                 self._assert_epoch(project_id, parent_run_id, epoch)
@@ -5335,19 +5425,22 @@ class FileCreatorAgentRuntime:
                     authorization.authorization_id,
                 )
         finally:
-            current = await asyncio.to_thread(
-                self.executions.get_specialist_run,
-                project_id,
-                specialist_run_id,
-            )
-            if current.status is SpecialistRunStatus.WAITING_AUTHORIZATION:
-                await asyncio.to_thread(
-                    self.executions.transition_specialist_run,
+            if park_specialist_run:
+                current = await asyncio.to_thread(
+                    self.executions.get_specialist_run,
                     project_id,
                     specialist_run_id,
-                    expected_status=SpecialistRunStatus.WAITING_AUTHORIZATION,
-                    status=SpecialistRunStatus.RUNNING_MODEL,
                 )
+                if current.status is SpecialistRunStatus.WAITING_AUTHORIZATION:
+                    await asyncio.to_thread(
+                        self.executions.transition_specialist_run,
+                        project_id,
+                        specialist_run_id,
+                        expected_status=(
+                            SpecialistRunStatus.WAITING_AUTHORIZATION
+                        ),
+                        status=SpecialistRunStatus.RUNNING_MODEL,
+                    )
         await self._event(
             project_id,
             session_id,
@@ -5449,6 +5542,7 @@ class FileCreatorAgentRuntime:
         spec: SpecialistToolSpec,
         arguments: Mapping[str, Any],
         tools: AgentProjectTools,
+        park_specialist_run: bool = True,
     ) -> str:
         execution_request_id = _specialist_tool_request_id(
             specialist_run_id,
@@ -5631,6 +5725,7 @@ class FileCreatorAgentRuntime:
             common=common,
             call_id=call_id,
             authorization=authorization,
+            park_specialist_run=park_specialist_run,
         )
         logger.info(
             "approval decided: project=%s run=%s role=%s tool=%s call_id=%s status=%s",
