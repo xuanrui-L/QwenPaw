@@ -758,7 +758,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     creation.video_prompt,
                     storyboard_slot,
                     sorted(creation.video_reference_version_ids),
-            )
+                )
 
             video_missing: tuple[str, ...] = ()
             if task is not None:
