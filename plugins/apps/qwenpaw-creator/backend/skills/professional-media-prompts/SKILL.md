@@ -163,23 +163,19 @@ masonry、英雄大格、身份板式非对称布局或任何混合尺寸排布�
 排除项和真实提交顺序。Runtime 的稳定语义顺序是 `storyboard → cast lineup →
 character → scene → prop → explicit extra refs`；同类内部保持 Project 顺序，最终
 版本按 exact version id 去重。不得把 prop 提到 scene 前面，也不得把审美顺序当成
-真实提交顺序。参考素材中的文字标签不能替代职责合同。**不存在通用 `image1` 语法**：只有模型
-协议给出官方字面标记时，才把标记写进最终 Prompt；结构化引用模型只用自然语言。
+真实提交顺序。参考素材中的文字标签不能替代职责合同。
 
-常见协议必须严格区分：
+引用参考图统一写 `[Image 1]`、`[Image 2]` …，编号就是该图在参考图序列中的位置
+（storyboard 恒为 `[Image 1]`）。**不要写任何模型的原生语法**：Runtime 在提交前
+会把 canonical 形式渲染成当前模型官方文档规定的写法——例如 wan3 与 qwen-image 渲染
+为“图1”，HappyHorse 保持 `[Image 1]`，Seedance 为“图片1”，Kling 为 `@image_1` 或
+`<<<image_1>>>`，wan2.6 为 `character1`；没有文档化位置标记的模型（如 OpenAI
+gpt-image、Veo、MiniMax）会被改写为“第 N 张参考图”这类自然语言，因此也不必特殊处理。
 
-| 模型/通道 | 最终 Prompt 的引用写法 | 计数规则 |
-|---|---|---|
-| HappyHorse | `[Image 1]` | 全部图片按 media 单序列；无视频引用 |
-| Wan 2.7 | 中文“图1/视频1”，英文 `Image 1/Video 1` | 图片、视频分别计数 |
-| Wan 2.6 | `character1` | 图片/视频按 reference_urls 混合总顺序 |
-| Seedance API | 中文“图片1/视频1”，英文 `image1/video1` | 各媒体类型分别计数 |
-| Kling 百炼 Omni | `<<<image_1>>>` / `<<<video_1>>>` | 图片、视频分别计数 |
-| Kling 官方 Omni | `@image_1` / `@video_1` | 与 contents 的 id 一致 |
-| Vidu 百炼 | “图1为…” | 按输入图片顺序；勿发明视频标记 |
-| Veo、MiniMax S2V、Vidu 官方 flat API | 无位置标记，自然语言 | 引用由结构化请求字段承载 |
+这样同一份 Prompt 换模型不会失效，也不必记住任何一家的字面语法。参考视频若需在
+Prompt 中点名，按运行时注入的「当前视频模型要求」中该模型的视频标记规则书写——
+canonical 形式只覆盖参考图。
 
-不得把一行的语法迁移到另一模型。模型名/通道不在已知协议中时，付费提交前阻断，
 不能猜测。storyboard 的职责语义始终是：只采用阅读顺序、近似构图、动作推进和镜头
 节奏；最终画面不继承宫格、边框、编号、箭头、标签、草图媒介或占位角色。
 

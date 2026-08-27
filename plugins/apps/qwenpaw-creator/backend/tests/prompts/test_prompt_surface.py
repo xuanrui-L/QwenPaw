@@ -217,7 +217,9 @@ def test_r2v_prompt_supports_clean_and_annotated_storyboard_modes() -> None:
     assert "补到下一个完全平方数" in prompt
     assert "同一格内每个已命名角色只能出现一个视觉实例" in prompt
     assert "不得在某一格克隆出第二个副本" in prompt
-    assert "结构化请求字段承载的模型只用自然语言，不发明编号" in prompt
+    # Authors write one canonical form; the runtime renders per provider.
+    assert "`[Image 1]`、`[Image 2]`" in prompt
+    assert "Runtime 会在提交前渲染成当前模型官方规定的形式" in prompt
     assert (
         "storyboard → cast_lineup_refs（声明顺序）→ character_refs（声明顺序）"
         "→ scene_ref → prop_refs（声明顺序）"
@@ -330,8 +332,9 @@ def test_video_model_guidance_switches_on_configured_model(
     assert "图片最多 5 张" in prompt
     assert "视频最多 5 个" in prompt
     assert "合计最多 5 个" in prompt
-    assert "[Image N]" not in prompt
-    assert "`[Image 1]`、`[Image 2]`" not in prompt
+    # Every model now instructs the canonical form; only the rendered syntax
+    # documented underneath it is model-specific.
+    assert "`[Image 1]`、`[Image 2]`" in prompt
     assert "中文 Prompt 用“图1、图2" in prompt
     _set_video_model(monkeypatch, "wan3.0-video")
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")

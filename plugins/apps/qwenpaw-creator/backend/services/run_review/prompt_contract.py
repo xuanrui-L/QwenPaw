@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from models import config as model_config
+from models.reference_markers import CANONICAL_MARKER_PATTERN
 from models.video_capabilities import (
     video_prompt_image_reference_markers,
     video_prompt_storyboard_reference_violation,
@@ -145,11 +146,24 @@ def _reference_role_mismatches(
         expected_roles.append("scene")
     expected_roles.extend("prop" for _ in (creation.get("prop_refs") or []))
 
-    all_markers = video_prompt_image_reference_markers(
-        prompt,
-        model_name,
-        protocol_backend,
-        language=language,
+    # Prompts are authored canonically now and rendered per provider at
+    # submit, so review sees [Image N]. Legacy prompts still hold the
+    # provider's own form, so both are extracted and merged by position.
+    all_markers = sorted(
+        (
+            *video_prompt_image_reference_markers(
+                prompt,
+                model_name,
+                protocol_backend,
+                language=language,
+            ),
+            *(
+                (index, match.start(), match.group(0))
+                for match in CANONICAL_MARKER_PATTERN.finditer(prompt or "")
+                for index in (int(match.group(1)),)
+            ),
+        ),
+        key=lambda item: item[1],
     )
     first_markers: dict[int, tuple[int, str]] = {}
     for index, offset, literal in all_markers:

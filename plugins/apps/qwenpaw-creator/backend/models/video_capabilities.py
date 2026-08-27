@@ -24,7 +24,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-from models.reference_markers import ReferenceMarkerSpec
+from models.reference_markers import (
+    CANONICAL_MARKER_PATTERN,
+    ReferenceMarkerSpec,
+    canonical_marker_indices,
+)
 
 HAPPYHORSE_MODEL_PREFIX = "happyhorse"
 HAPPYHORSE_MAX_REFERENCE_IMAGES = 9
@@ -1241,7 +1245,13 @@ def _model_reference_syntax_guidance(
     Reference payload order and prompt identifiers are different concepts.
     Some providers expose literal identifiers, some number images and videos
     independently, and others carry references only in structured request
-    fields.  Never invent one universal ``Image N`` convention.
+    fields.
+
+    This describes the *wire* form, which really does differ per provider.
+    Authors no longer write it: they use canonical ``[Image N]`` and
+    ``render_reference_markers`` rewrites it at submit. What stays useful here
+    is each provider's counting rule and its video-reference syntax, which the
+    canonical image form does not cover.
     """
 
     normalized = model_name.strip()
@@ -1251,7 +1261,7 @@ def _model_reference_syntax_guidance(
             "- Wan3.0 All-in-One：中文 Prompt 用“图1、图2 …”和“视频1、"
             "视频2 …”；图片与视频按 media 中各自类型的出现顺序分别计数；"
             "storyboard 是第一张参考图，因此为“图1”。每次引用同时说明素材"
-            "中的具体主体、动作或用途，不得改写成 HappyHorse 方括号语法。"
+            "中的具体主体、动作或用途。"
         )
     if is_happyhorse_model(normalized):
         return (
@@ -1325,10 +1335,14 @@ def _model_reference_syntax_guidance(
         return (
             "- Vidu 官方直连 flat reference2video：图片/视频通过结构化 "
             "`images`/`videos` 数组传入，官方 Prompt 没有位置标记。当前"
-            " Runtime 未使用 subjects API，因此不得发明 `图1` 或 `@subject`；"
+            " Runtime 未使用 subjects API，因此这里不会渲染出任何位置标记；"
             "直接用自然语言描述目标主体与动作。"
         )
-    return "- 当前模型没有已知的 Prompt 引用标记协议；不得套用任何其他模型的" "编号语法，必须在付费 R2V 提交前报告阻塞。"
+    return (
+        "- 当前模型没有已文档化的 Prompt 引用标记协议。照常写 "
+        "`[Image N]`：Runtime 不会为它编造标记，而是改写成“第 N 张"
+        "参考图”这类自然语言，因此不会有任何标记被误当作字面协议。"
+    )
 
 
 _POSITIONAL_REFERENCE_TOKEN = re.compile(
@@ -1509,21 +1523,33 @@ def video_prompt_storyboard_reference_violation(
         language=language,
     )
 
+    # The canonical form is what authors write; the runtime renders it to the
+    # provider literal at submit. Demanding the literal here would reject
+    # every correctly authored prompt.
+    addresses_first = any(
+        index == 1 for index in canonical_marker_indices(text)
+    )
+
     if expected is not None:
         pattern, literal = expected
-        if not any(
+        if not addresses_first and not any(
             int(match.group(1)) == 1 for match in pattern.finditer(text)
         ):
             return (
                 f"当前模型 `{normalized or '未配置'}` 的 storyboard 第一参考"
-                f"必须在 video_prompt 中使用 `{literal}` 指代"
+                f"必须在 video_prompt 中用 `[Image 1]` 指代"
+                f"（Runtime 会渲染为 `{literal}`）"
             )
         return None
 
     if backend in {"veo", "minimax"} or (
         backend == "vidu" and "/" not in normalized
     ):
-        invented = _POSITIONAL_REFERENCE_TOKEN.search(text)
+        # Canonical markers are rewritten to prose for these models, so they
+        # are not an invented provider token; strip them before looking.
+        invented = _POSITIONAL_REFERENCE_TOKEN.search(
+            CANONICAL_MARKER_PATTERN.sub("", text),
+        )
         if invented is not None:
             return (
                 f"当前模型 `{normalized or '未配置'}` 使用结构化参考，"
@@ -1563,11 +1589,16 @@ def video_model_prompt_guidance(
     return "\n".join(
         item
         for item in (
-            f"当前视频生成模型是 `{normalized}`。引用标记必须按该模型/通道" "编译，以下字面语法是硬性协议：",
+            f"当前视频生成模型是 `{normalized}`。**引用参考图时统一写 "
+            f"`[Image 1]`、`[Image 2]` …**，Runtime 会在提交前把它渲染成该"
+            "模型官方文档规定的形式；不要自己写下面的字面语法，也不要跨模型"
+            "套用。下面列出的是渲染结果与各模型的计数规则，供你确认编号含义：",
             _model_reference_syntax_guidance(normalized, protocol_backend),
-            "- 参考职责是语义合同，不等于所有模型都要在最终 Prompt 中逐项写"
-            "编号。仅当上方协议提供官方标记时才把标记写进 Prompt；结构化引用"
-            "模型只用自然语言。无论哪种协议，采用项/排除项必须和 Runtime "
+            "- 参考职责是语义合同。`[Image N]` 的 N 就是该图在参考图序列中的"
+            "位置（storyboard 为 1）；结构化引用模型没有位置标记，Runtime 会把"
+            "标记改写为“第 N 张参考图”这类自然语言。参考视频若需在 Prompt 中"
+            "点名，按上方该模型的视频标记规则自行书写——canonical 形式只覆盖"
+            "参考图。无论哪种协议，采用项/排除项必须和 Runtime "
             "实际提交素材一致，storyboard 只提供阅读顺序、近似构图、动作链和"
             "镜头节奏，最终视频不继承宫格、边框、编号、箭头、彩色标记、"
             "说明文字、草图媒介或占位角色。",

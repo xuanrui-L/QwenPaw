@@ -47,7 +47,7 @@ assets.artifact_versions_by_id
 
 1. 读取 Project，定位唯一目标 Element，确认 `creation.type=r2v`、持续时间符合上方「当前视频模型要求」，且每个 Shot 有 camera、framing 和有效 visual refs。这里没有 Creator 统一的 8–10 秒或 15 秒上限：3 秒短段或 30 秒长段是否可用，只由当前模型能力、用户要求和内容完整性决定。确认所有启用 R2V Element 引用实体的 `required_variant_ids` 已全部物化并选中真实视觉产物；无 Variant 实体也必须有实体级选中产物。实体包含多个必需 Variant 时，必须在 `creation.visual_variant_refs` 中显式绑定本 Element 使用的 Variant；不得使用实体级默认图猜测时代或状态。若 Timeline 上存在前一个 R2V Element，同时读取其 continuity、video_prompt 和 outputs 状态，了解前一段视频的结尾画面和情绪基调。
 2. 根据全部 Shot 的内容和镜头顺序编写 storyboard Prompt。**每个 Shot 必须占据且只占据一个宫格，且每一个宫格内部画框的宽高比必须严格等于 Project `settings.aspect_ratio`（即目标视频画幅）；网格必须是正方形 N 列×N 行，格数不足完全平方数时由 Runtime 补齐并留白**，但先判断这些 Shot 是独立剪辑镜头还是同一动作段落中的连续动作节点。Prompt 先写交付模式、单格画幅/数量/阅读顺序、一句话故事、3–6 个核心电影段落与节奏曲线、身份锁定、统一媒介/版式和全局排除项，再逐 Shot 写动作相位与结束状态、景别/机位/构图、主体运动、摄影机运动、光线和声音/情绪强调。保持主体、场景、道具、风格和光线连续，内容与镜头逐步递进；不要在每格机械重复整套身份描述。整张交付画布也按项目画幅输出；正方形网格下单格自然继承该画幅，多余格用无边框留白吸收，禁止拉伸、压扁、裁边、合并或改造单格比例。
-3. 编写当前 Element 的 video Prompt。先识别「当前视频模型要求」给出的引用协议：有官方位置标记的模型才逐项写对应字面标记；引用由结构化请求字段承载的模型只用自然语言，不发明编号。编译事实中仍需逐一核对实际参考素材，写清每个参考“采用什么、不得继承什么”；然后写视频生成目标、全局身份/场景不变量、动作与镜头执行段、对白/声音和最小排除项。常规内容可以逐 Shot 编译；稠密动作分镜把相邻 Shot 组合为 3–6 个可执行段落，但必须覆盖每个 Shot 的动作顺序。每段只承担一个核心状态变化，写成“起始状态 → 连续主动作与因果 → 明确结束状态”。时间表达必须服从模型：支持时间戳时使用合法、连续的区间；不支持时使用镜头序号或顺序段落。
+3. 编写当前 Element 的 video Prompt。引用参考图统一写 `[Image 1]`、`[Image 2]` …（storyboard 恒为 `[Image 1]`），Runtime 会在提交前渲染成当前模型官方规定的形式，你不要写任何模型的原生语法。编译事实中仍需逐一核对实际参考素材，写清每个参考“采用什么、不得继承什么”；然后写视频生成目标、全局身份/场景不变量、动作与镜头执行段、对白/声音和最小排除项。常规内容可以逐 Shot 编译；稠密动作分镜把相邻 Shot 组合为 3–6 个可执行段落，但必须覆盖每个 Shot 的动作顺序。每段只承担一个核心状态变化，写成“起始状态 → 连续主动作与因果 → 明确结束状态”。时间表达必须服从模型：支持时间戳时使用合法、连续的区间；不支持时使用镜头序号或顺序段落。
 4. 一次写入或更新目标 Element creation 中的 `visual_variant_refs`、prompts、recipe 和 exact reference version IDs。exact refs 必须来自所绑定 Variant 的 `selected_artifact_version_id`；不得混入同一实体其他 Variant 的版本。
 5. 尚无 storyboard output 时调用 `image_generation`。完成后重新读取 Project，确认 `outputs.storyboard` 的 ArtifactSlot 选择了真实 ArtifactVersion。
 6. storyboard 已验证后调用 `r2v_generation`。该工具从目标 Element 读取 storyboard output 和参考版本；storyboard 必须是第一参考。
@@ -138,7 +138,7 @@ Project 的 `settings.aspect_ratio` 同时是最终视频比例和**每一个分
 
 ## 视觉参考绑定规则
 
-- R2V 提交时 storyboard 始终是第一生产参考；其后的 VisualEntity/阵容/显式参考按 Runtime 的实际顺序排列。只有当前模型协议提供位置标记时才按其“全序列或分媒体类型”的规则编号；结构化引用模型不在 Prompt 中发明编号。无论是否写字面标记，都要在编译事实中逐一核对实际参考职责，不能凭参考图内部标签猜用途。
+- R2V 提交时 storyboard 始终是第一生产参考；其后的 VisualEntity/阵容/显式参考按 Runtime 的实际顺序排列。按这个顺序写 canonical 编号 `[Image N]`（storyboard 为 `[Image 1]`）；渲染成各模型的原生写法或自然语言由 Runtime 负责。无论是否写字面标记，都要在编译事实中逐一核对实际参考职责，不能凭参考图内部标签猜用途。
 - Runtime 的稳定图片顺序是：`storyboard → cast_lineup_refs（声明顺序）→ character_refs（声明顺序）→ scene_ref → prop_refs（声明顺序）→ 其余兼容的 video_reference_version_ids（原声明顺序，去重）`。这是位置标记的唯一编号依据，也是为兼容存量 `video_prompt` 保持不变的合同；`video_reference_version_ids` 自身的排列不能覆盖前述实体语义顺序。写 Prompt 前先按这条规则列出完整映射，再套用当前模型的精确标记语法。例如没有阵容图、只有一个角色/道具/场景时，HappyHorse 必须对应 `[Image 1]=storyboard`、`[Image 2]=角色`、`[Image 3]=场景`、`[Image 4]=道具`。
 - Element 声明了 `cast_lineup_refs` 且**未显式写参考列表**时，Runtime 会把阵容图（cast lineup）的选定图放在 storyboard 之后的身份参考首位：它是多角色同框的群体锚点，角色间的相对身高、体型比例与风格基准以它为准；单人特写的身份细节仍以各角色自己的设计图为准。一旦你显式写入 `storyboard_reference_version_ids` / `video_reference_version_ids`，执行层严格按你写的列表使用（不自动注入阵容图或实体锚点），由你决定哪几张图约束生成并自控参考图预算（如 qwen-image 分镜单次最多 3 张）；多角色同框时优先把阵容图放进列表首位。
 - 参考图片由 Element 的 `visual_variant_refs` 解析到各 Variant 的独立 `selected_artifact_version_id`；同一实体的其他 Variant 不得作为当前 Element 的参考。
@@ -222,7 +222,7 @@ video Prompt 在 storyboard Prompt 基础上补足真实时间、动作、运镜
 
 ### 1. 参考资产职责映射（R2V 必选）
 
-- 按照「当前视频模型要求」和 Runtime 实际参考顺序核对 storyboard、角色、阵容、场景、道具、动作/镜头参考。协议提供官方字面标记时才在 Prompt 开头逐一使用；Veo、MiniMax、Vidu 官方 flat API 等结构化引用模型只写自然语言目标，不发明编号。每个实际参考仍保留“采用项 + 排除项”的编译事实；不用的参考不要强行映射。
+- 按照「当前视频模型要求」和 Runtime 实际参考顺序核对 storyboard、角色、阵容、场景、道具、动作/镜头参考。在 Prompt 开头用 `[Image N]` 逐一映射（storyboard 为 `[Image 1]`）；渲染成各模型原生写法、或对结构化引用模型改写为自然语言，都由 Runtime 完成。每个实际参考仍保留“采用项 + 排除项”的编译事实；不用的参考不要强行映射。
 - storyboard 是第一参考，只采用阅读顺序、近似构图、动作推进和镜头节奏。最终画面不继承宫格、边框、编号、箭头、标签、说明文字、草图媒介或占位角色；制作标注分镜还要排除彩色制作标记。
 - 角色参考负责脸、体型/比例、服装、装备和视觉个性；场景参考负责空间、材质、天气和光线；动作/视频参考负责运动机制和速度。只采用局部时明确“仅参考什么”和“不参考什么”。
 

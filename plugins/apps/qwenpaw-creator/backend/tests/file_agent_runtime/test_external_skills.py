@@ -115,14 +115,19 @@ def test_professional_media_prompt_skill_is_builtin(
     assert "2–4 格→2×2，5–9 格→3×3" in skill.skill_md
     assert "同一格内每个已命名角色只能" in skill.skill_md
     assert "`clear spatial labels` 和 `no text`" in skill.skill_md
+    # One authored convention replaced the per-provider dialect table.
+    assert "引用参考图统一写 `[Image 1]`" in skill.skill_md
+    assert "不要写任何模型的原生语法" in skill.skill_md
     assert skill.available
     parsed = external_skills.parse_skill_md(skill.skill_md)
     assert "角色身份板/设定图" in parsed["description"]
     assert "电影分镜图" in parsed["body"]
     assert "参考资产职责映射" in parsed["body"]
     assert "Seedance 2.5" in parsed["body"]
-    assert "不存在通用 `image1` 语法" in parsed["body"]
-    assert "Kling 百炼 Omni" in parsed["body"]
+    # The per-provider dialect table is gone: one authored convention, with
+    # the runtime rendering it to each provider's documented syntax.
+    assert "引用参考图统一写 `[Image 1]`" in parsed["body"]
+    assert "Runtime 在提交前" in parsed["body"]
     assert "每一个独立面板内部画框" in parsed["body"]
 
 

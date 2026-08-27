@@ -434,7 +434,10 @@ def test_guidance_describes_the_mode_matrix_per_model() -> None:
 
     wan = video_model_prompt_guidance("wan2.7-r2v")
     assert "不支持的 mode（video_edit）" in wan
-    assert "`[Image 1]`、`[Image 2]`" not in wan
+    # Canonical [Image N] is now the authoring form for every model; what
+    # differs is the rendered wire syntax the guidance describes below it.
+    assert "`[Image 1]`、`[Image 2]`" in wan
+    assert "Runtime 会在提交前把它渲染成" in wan
     assert "图1、图2" in wan
     assert "Image 1" in wan
     assert "图片与视频" in wan
@@ -520,7 +523,7 @@ def test_guidance_describes_the_mode_matrix_per_model() -> None:
     vidu_direct = video_model_prompt_guidance("viduq3-mix")
     assert "720p/1080p" in vidu_direct
     assert "结构化 `images`/`videos`" in vidu_direct
-    assert "不得发明 `图1` 或 `@subject`" in vidu_direct
+    assert "这里不会渲染出任何位置标记" in vidu_direct
 
 
 def test_duration_guidance_has_no_global_creator_default() -> None:
@@ -575,10 +578,21 @@ def test_duration_guidance_has_no_global_creator_default() -> None:
             False,
         ),
         (
+            # Canonical [Image N] is legitimate even for a structured-reference
+            # model: the runtime rewrites it to ordinal prose, so it never
+            # reaches the provider as an invented token.
             "veo-3.1-generate-preview",
             "veo",
             "en-US",
             "[Image 1] establishes action.",
+            False,
+        ),
+        (
+            # A provider's own token still is invented here.
+            "veo-3.1-generate-preview",
+            "veo",
+            "en-US",
+            "图1 establishes action.",
             True,
         ),
     ],
