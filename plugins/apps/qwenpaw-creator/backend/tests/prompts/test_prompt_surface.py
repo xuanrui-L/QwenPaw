@@ -189,6 +189,10 @@ def test_active_surfaces_never_mention_the_retired_r2v_specialist() -> None:
     assert "r2v_generation_director" not in combined
     assert "不可委派" not in combined
     assert "已停用" not in combined
+    # Media execution belongs to the scheduler, not any specialist; text
+    # implying such a specialist exists is retired-R2V residue.
+    assert "Specialist 兜底" not in combined
+    assert "为媒体执行委派" not in combined
 
 
 def test_source_prompt_requires_outer_vlm_timeline_and_controlled_commit() -> (
