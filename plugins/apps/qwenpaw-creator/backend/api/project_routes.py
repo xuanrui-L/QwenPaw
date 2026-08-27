@@ -771,6 +771,9 @@ async def export_project(
         ) from e
 
 
+_WINDOWS_RESERVED_CHARS = re.compile(r'[<>:"\\|?*]')
+
+
 def _validate_import_archive(saved_zip: Path) -> None:
     """Preflight the archive with ZipInfo before anything is inflated."""
 
@@ -789,6 +792,12 @@ def _validate_import_archive(saved_zip: Path) -> None:
                         f"archive entry escapes the extraction root: "
                         f"{info.filename!r}",
                     )
+                for part in member.parts:
+                    if _WINDOWS_RESERVED_CHARS.search(part):
+                        raise BadRequestError(
+                            f"archive entry contains Windows-reserved "
+                            f"characters: {info.filename!r}",
+                        )
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == stat_module.S_IFLNK:
                     raise BadRequestError(

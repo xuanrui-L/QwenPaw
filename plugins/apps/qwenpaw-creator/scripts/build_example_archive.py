@@ -71,6 +71,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -546,6 +547,17 @@ def _repoint_state_etag(staged: Path, old_etag: str, new_etag: str) -> None:
     state_path.write_text(text.replace(old_etag, new_etag), encoding="utf-8")
 
 
+_WINDOWS_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
+
+
+def _sanitize_path_for_windows(path_str: str) -> str:
+    """Replace Windows-reserved characters in archive entry names."""
+
+    parts = path_str.split("/")
+    sanitized = [_WINDOWS_UNSAFE_CHARS.sub("_", part) for part in parts]
+    return "/".join(sanitized)
+
+
 def _zip_directory(staged: Path, archive_path: Path) -> None:
     with zipfile.ZipFile(
         archive_path,
@@ -554,10 +566,11 @@ def _zip_directory(staged: Path, archive_path: Path) -> None:
     ) as archive:
         for path in sorted(staged.rglob("*")):
             relative = f"{staged.name}/{path.relative_to(staged).as_posix()}"
+            safe_relative = _sanitize_path_for_windows(relative)
             if path.is_dir():
-                archive.writestr(f"{relative}/", b"")
+                archive.writestr(f"{safe_relative}/", b"")
             elif path.is_file():
-                archive.write(path, relative)
+                archive.write(path, safe_relative)
 
 
 def _update_manifest(

@@ -145,8 +145,11 @@ def download_remote_file(
 
         if size_bytes <= 0:
             raise RuntimeError("Remote file downloaded empty")
-        with temporary.open("rb") as handle:
-            os.fsync(handle.fileno())
+        try:
+            with temporary.open("rb") as handle:
+                os.fsync(handle.fileno())
+        except OSError:
+            pass
         os.replace(temporary, target)
         _fsync_directory(target.parent)
         size_mib = target.stat().st_size / 1024 / 1024

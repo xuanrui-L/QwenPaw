@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -299,6 +300,31 @@ def _download_archive(
         )
 
 
+_WINDOWS_UNSAFE_CHARS = re.compile(r'[<>:"\\|?*]')
+
+
+def _sanitize_zip_entry(name: str) -> str:
+    """Replace Windows-reserved characters in each path component."""
+
+    parts = name.split("/")
+    return "/".join(_WINDOWS_UNSAFE_CHARS.sub("_", p) for p in parts)
+
+
+def _extract_example_archive(archive_path: Path, extract_dir: Path) -> None:
+    """Unpack a zip, sanitizing entry names for Windows compatibility."""
+
+    with zipfile.ZipFile(archive_path) as archive:
+        for info in archive.infolist():
+            safe_name = _sanitize_zip_entry(info.filename)
+            target_path = extract_dir / safe_name
+            if info.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+            else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as src, open(target_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+
 def _materialize_example(entry: dict[str, Any], data_root: Path) -> str:
     """Idempotently publish the example Project from its remote archive."""
 
@@ -314,15 +340,9 @@ def _materialize_example(entry: dict[str, Any], data_root: Path) -> str:
     try:
         archive_path = extract_dir / "archive.zip"
         _download_archive(entry, archive_path, data_root)
-        # Pure ZipInfo-level filesystem preflight; no request-scoped state, so
-        # it is safe to run inside asyncio.to_thread worker threads.
         _validate_import_archive(archive_path)
         try:
-            shutil.unpack_archive(
-                str(archive_path),
-                extract_dir=extract_dir,
-                format="zip",
-            )
+            _extract_example_archive(archive_path, extract_dir)
         except Exception as exc:
             raise StorageIntegrityError(
                 f"灵感示例归档无法解包: {entry['id']}",
