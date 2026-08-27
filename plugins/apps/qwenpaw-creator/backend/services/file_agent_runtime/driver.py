@@ -547,8 +547,8 @@ def _specialist_waiting_review_summary(
     if role is SpecialistRole.R2V_GENERATION_DIRECTOR:
         return (
             f"{target} 的分镜图已生成，视频尚未开始。请先审阅分镜图；"
-            "该记录来自已停用的旧版 R2V Specialist。审阅通过后由主 Agent 修复"
-            "必要字段，并让 Runtime 根据 Element 状态继续调度，不要重新委派 R2V Specialist。"
+            "审阅通过后由主 Agent 修复必要字段，Runtime 会根据 Element 状态"
+            "自动继续调度，无需重新委派。"
         )
     return f"{target} 的产物已生成，后续步骤尚未开始。请先完成审阅；" "审阅通过后，主线需重新委派同一目标以继续后续步骤。"
 
@@ -6116,7 +6116,7 @@ class FileCreatorAgentRuntime:
                     "【系统自动消息 · Prompt 合同修复】主线回合已结束，但调度器"
                     "发现以下非空/台词合同缺口，因此没有提交任何对应的付费媒体任务：\n"
                     + "\n".join(f"- {reason}" for reason in reasons)
-                    + "\nR2V prompt 由你直接负责，不要委派 Specialist；请只修复上述"
+                    + "\nR2V prompt 由你直接负责；请只修复上述"
                     " Project 字段并重新核对，保留已经完成的工作。"
                 )
         message_source = (

@@ -192,17 +192,6 @@ def render_taste_principles(role: str) -> str:
                 "避免：" + "；".join(COMMON_FAILURES[:5]) + "。"
             ),
         ]
-    if role == "r2v_generation_director":
-        motion = next(
-            check
-            for check in SCENE_REVIEW_CHECKS
-            if check.key == "motion_quality"
-        )
-        lines += [
-            f"- 概念先行：{concept.anchor_questions}",
-            f"- 镜头与首尾帧：{motion.description}",
-            "- 主体一致：分镜计划声明的主体/场景/道具必须真的出现在画面中，声明而未落地即失败。",
-        ]
     if role == "visual_development_agent":
         composition = next(
             check

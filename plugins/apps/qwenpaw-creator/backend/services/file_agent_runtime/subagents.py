@@ -192,7 +192,6 @@ def delegate_tool_manifest() -> dict[str, Any]:
                 "必须使用 asset:<VisualEntity.entity_id>，阵容图使用 "
                 "lineup:<VisualCastLineup.lineup_id>；来源素材 logicalAssetId 只能"
                 "作为 referenceVersionIds，不能作为 Visual Specialist target_ref；"
-                "R2V prompt 由 Creator 主 Agent 直接编写，不可委派；"
                 "ai_editing_director 使用 timeline:<id>。"
             ),
             "parameters": deepcopy(

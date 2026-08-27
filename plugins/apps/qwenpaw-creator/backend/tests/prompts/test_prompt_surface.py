@@ -57,7 +57,6 @@ def test_file_runtime_prompts_are_structured_files_with_workspace_schema() -> (
         "creator_agent.system",
         "source_intelligence_agent.system",
         "visual_development_agent.system",
-        "r2v_generation_director.system",
         "ai_editing_director.system",
     }
     for prompt_id in FILE_AGENT_PROMPT_SPECS:
@@ -165,7 +164,7 @@ def test_creator_duration_is_injected_from_the_active_video_model(
     assert "`[Image 1]`、`[Image 2]`" in prompt
     assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
     assert "你是 `video_prompt` 的唯一作者" in prompt
-    assert "不存在可委派的 R2V Specialist" in prompt
+    assert "R2V Specialist" not in prompt
     assert "禁止套用“每段固定 5 Shot”" in prompt
     assert "不设统一的 7 秒 Shot 上限" in prompt
     assert "`ops` 必须直接传原生 JSON 数组" in prompt
@@ -184,47 +183,12 @@ def test_creator_duration_is_injected_from_the_active_video_model(
     assert "30 秒长段" in prompt
 
 
-def test_r2v_prompt_supports_clean_and_annotated_storyboard_modes() -> None:
-    prompt = load_file_agent_prompt("r2v_generation_director.system")
-    assert "分镜交付模式与画面纯净性（硬性规则）" in prompt
-    assert "生成参考分镜（R2V 默认）" in prompt
-    assert "制作标注分镜（仅显式请求）" in prompt
-    assert (
-        "No panel numbers, no captions, no labels, no subtitles, "
-        "no watermarks, no annotation text in the image."
-    ) in prompt
-    # Diegetic text (jersey numbers, signage) rides an exception clause.
-    assert "画内叙事文字" in prompt
-    assert "No text except" in prompt
-    assert "不要在未看到图片内容时臆测检查结果" in prompt
-    assert "不要因此自动重复调用 `image_generation`" in prompt
-    for legend in (
-        "红色=主体运动",
-        "蓝色=摄影机运动",
-        "绿色=构图/景别/视觉重心",
-        "橙色=光线方向",
-        "紫色=声音/情绪",
-    ):
-        assert legend in prompt
-    assert "最终视频不得继承宫格、边框、镜头号、箭头、彩色标记" in prompt
-    assert "每段只承担一个主要状态变化" in prompt
-    assert "不得给 10 秒内的 12 格机械分配 12 个小数时间戳" in prompt
-    assert "每一个宫格内部画框的宽高比必须严格等于" in prompt
-    assert "不得把“整张图为 16:9”误解为“内部格子可以是方形”" in prompt
-    assert "正方形、规则、等尺寸的网格（N 列×N 行）" in prompt
-    assert "只有列数等于行数时单格才等于外层画布比例" in prompt
-    assert "不得用重复角色或重复末镜填空" in prompt
-    assert "补到下一个完全平方数" in prompt
-    assert "同一格内每个已命名角色只能出现一个视觉实例" in prompt
-    assert "不得在某一格克隆出第二个副本" in prompt
-    # Authors write one canonical form; the runtime renders per provider.
-    assert "`[Image 1]`、`[Image 2]`" in prompt
-    assert "Runtime 会在提交前渲染成当前模型官方规定的形式" in prompt
-    assert (
-        "storyboard → cast_lineup_refs（声明顺序）→ character_refs（声明顺序）"
-        "→ scene_ref → prop_refs（声明顺序）"
-    ) in prompt
-    assert "[Image 3]=场景" in prompt
+def test_active_surfaces_never_mention_the_retired_r2v_specialist() -> None:
+    combined = "\n".join(_active_prompt_texts())
+    assert "R2V Specialist" not in combined
+    assert "r2v_generation_director" not in combined
+    assert "不可委派" not in combined
+    assert "已停用" not in combined
 
 
 def test_source_prompt_requires_outer_vlm_timeline_and_controlled_commit() -> (
