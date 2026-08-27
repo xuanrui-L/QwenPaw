@@ -291,7 +291,7 @@ export default function HeroComposerCard() {
         <div
           role="radiogroup"
           aria-label={t("home.projectScenario")}
-          className="flex items-center rounded-full bg-[rgba(43,27,0,0.04)] dark:bg-white/5 p-1"
+          className="flex items-center rounded-full bg-[rgba(43,27,0,0.04)] p-1 dark:bg-white/5"
         >
           {SCENARIO_OPTIONS.map((option) => (
             <button

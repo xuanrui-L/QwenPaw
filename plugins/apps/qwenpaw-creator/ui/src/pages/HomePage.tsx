@@ -602,7 +602,7 @@ export default function HomePage() {
           {/* Cards dissolve into the page bottom before reaching the pill. */}
           <div
             aria-hidden="true"
-            className="pointer-events-none fixed inset-x-0 bottom-0 z-30 h-[240px] bg-[linear-gradient(180deg,rgba(250,250,250,0)_0%,rgba(250,250,250,0.9)_45%,#FAFAFA_100%)] dark:bg-[linear-gradient(180deg,rgba(20,20,20,0)_0%,rgba(20,20,20,0.9)_45%,#141414_100%)]"
+            className="pointer-events-none fixed inset-x-0 bottom-0 z-30 h-[240px] bg-[linear-gradient(180deg,rgba(250,250,250,0)_0%,rgba(250,250,250,0.9)_45%,#FAFAFA_100%)] dark:bg-[linear-gradient(180deg,color-mix(in_srgb,var(--background)_0%,transparent)_0%,color-mix(in_srgb,var(--background)_90%,transparent)_45%,var(--background)_100%)]"
           />
           <button
             type="button"
