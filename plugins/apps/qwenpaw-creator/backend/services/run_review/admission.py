@@ -185,22 +185,31 @@ def media_skip_reason(
 ) -> str:
     """Best-effort reason why :func:`admit_media_round` returned ``None``.
 
-    Read-only: budget exhaustion is otherwise silent — the quality gate just
-    stops reviewing new versions — so callers surface this to logs/traces.
+    Read-only and total: budget exhaustion is otherwise silent — the quality
+    gate just stops reviewing new versions — so callers surface this to
+    logs/traces.  A malformed state file yields ``"unknown"`` rather than an
+    exception, which upstream would report as a review-loop failure.
     """
 
-    state = read_json(_media_state_path(reports_root, slot_id)) or {}
-    reviewed = [str(item) for item in state.get("reviewed_version_ids") or []]
-    if version_id in reviewed:
-        return "already_reviewed"
-    claim = state.get("claim") or {}
-    if claim.get("version_id") == version_id:
-        return "claim_in_progress"
-    attempts_started = max(
-        int(state.get("rounds_completed") or 0),
-        int(state.get("attempts_started") or 0),
-        len(reviewed),
-    )
+    try:
+        state = read_json(_media_state_path(reports_root, slot_id)) or {}
+        reviewed = [
+            str(item) for item in state.get("reviewed_version_ids") or []
+        ]
+        if version_id in reviewed:
+            return "already_reviewed"
+        claim = state.get("claim")
+        if isinstance(claim, Mapping) and (
+            claim.get("version_id") == version_id
+        ):
+            return "claim_in_progress"
+        attempts_started = max(
+            int(state.get("rounds_completed") or 0),
+            int(state.get("attempts_started") or 0),
+            len(reviewed),
+        )
+    except (AttributeError, TypeError, ValueError):
+        return "unknown"
     if attempts_started >= MAX_MEDIA_REVIEW_ROUNDS:
         return "budget_spent"
     return "unknown"

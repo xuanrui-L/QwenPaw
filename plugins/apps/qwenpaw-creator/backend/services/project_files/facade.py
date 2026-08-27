@@ -56,6 +56,34 @@ def _log_safe(value: object) -> str:
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
 
+def _remove_tree(entry: Path) -> bool:
+    """Delete one directory tree, reporting whether it actually went away."""
+
+    failures: list[BaseException] = []
+
+    def _record(_func, _path, exc_info) -> None:
+        failures.append(exc_info[1])
+
+    shutil.rmtree(entry, onerror=_record)
+    if failures:
+        logger.warning(
+            "startup GC could not fully remove %s: %s",
+            entry,
+            failures[-1],
+        )
+        return False
+    return True
+
+
+def _remove_file(entry: Path) -> bool:
+    try:
+        entry.unlink(missing_ok=True)
+        return True
+    except OSError as error:
+        logger.warning("startup GC could not remove %s: %s", entry, error)
+        return False
+
+
 def _startup_disk_gc(root: Path) -> None:
     """Remove crash leftovers that no runtime path ever cleans up.
 
@@ -66,72 +94,73 @@ def _startup_disk_gc(root: Path) -> None:
     """
 
     for entry in list(root.glob(".deleted-*")):
-        try:
-            shutil.rmtree(entry, ignore_errors=True)
+        if _remove_tree(entry):
             logger.info("startup GC removed deletion tombstone: %s", entry)
-        except OSError:
-            logger.warning("startup GC failed for %s", entry, exc_info=True)
     staging_root = root / ".staging"
     if staging_root.is_dir():
         for entry in list(staging_root.iterdir()):
-            try:
-                if entry.is_dir():
-                    shutil.rmtree(entry, ignore_errors=True)
-                else:
-                    entry.unlink(missing_ok=True)
+            removed = (
+                _remove_tree(entry) if entry.is_dir() else _remove_file(entry)
+            )
+            if removed:
                 logger.info("startup GC removed staging orphan: %s", entry)
-            except OSError:
-                logger.warning(
-                    "startup GC failed for %s",
-                    entry,
-                    exc_info=True,
-                )
     exports_root = root / "exports"
     if exports_root.is_dir():
         cutoff = time.time() - _EXPORT_GC_AGE_SECONDS
         for entry in list(exports_root.glob("*.zip")):
             try:
-                if entry.stat().st_mtime < cutoff:
-                    entry.unlink(missing_ok=True)
-                    logger.info("startup GC removed stale export: %s", entry)
+                stale = entry.stat().st_mtime < cutoff
             except OSError:
-                logger.warning(
-                    "startup GC failed for %s",
-                    entry,
-                    exc_info=True,
-                )
+                continue
+            if stale and _remove_file(entry):
+                logger.info("startup GC removed stale export: %s", entry)
     _sweep_legacy_lock_artifacts(root)
+
+
+def _legacy_lock_scopes(root: Path) -> list[tuple[Path, bool]]:
+    """Directories the flock implementation used, as ``(path, recursive)``.
+
+    Project asset trees are deliberately excluded: a user may legitimately
+    upload files named ``poetry.lock`` or ``Cargo.lock`` as Project assets,
+    and a startup sweep must never delete them.
+    """
+
+    scopes: list[tuple[Path, bool]] = [
+        (root, False),
+        (root / "config", False),
+        (root / ".locks", True),
+    ]
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        if child.is_dir() and not child.name.startswith("."):
+            scopes.append((child / "runtime", True))
+    return scopes
 
 
 def _sweep_legacy_lock_artifacts(root: Path) -> None:
     """Delete flock-era coordination files.
 
-    The in-process lock implementation neither reads nor writes lock files,
-    so every ``*.lock`` file, ``*.lock.gate`` file and ``*.lock.readers``
-    directory under the data root is a dead artifact of the retired
-    cross-process implementation.
+    The in-process lock implementation never reads or writes lock files, so
+    every leftover under the old lock directories is dead weight.
     """
 
     removed = 0
-    for pattern in ("*.lock", "*.lock.gate"):
-        for entry in list(root.rglob(pattern)):
-            try:
-                if entry.is_file() or entry.is_symlink():
-                    entry.unlink(missing_ok=True)
-                    removed += 1
-            except OSError:
-                logger.warning(
-                    "startup GC failed for %s",
+    for scope, recursive in _legacy_lock_scopes(root):
+        if not scope.is_dir():
+            continue
+        walk = scope.rglob if recursive else scope.glob
+        for pattern in ("*.lock", "*.lock.gate"):
+            for entry in list(walk(pattern)):
+                if (entry.is_file() or entry.is_symlink()) and _remove_file(
                     entry,
-                    exc_info=True,
-                )
-    for entry in list(root.rglob("*.lock.readers")):
-        try:
-            if entry.is_dir():
-                shutil.rmtree(entry, ignore_errors=True)
+                ):
+                    removed += 1
+        for entry in list(walk("*.lock.readers")):
+            if entry.is_dir() and _remove_tree(entry):
                 removed += 1
-        except OSError:
-            logger.warning("startup GC failed for %s", entry, exc_info=True)
     for locks_dir in (root / ".locks", *root.glob("*/runtime/locks")):
         try:
             if locks_dir.is_dir() and not any(locks_dir.iterdir()):
@@ -145,13 +174,14 @@ def _sweep_legacy_lock_artifacts(root: Path) -> None:
         )
 
 
-def _warn_on_second_backend(root: Path) -> None:
+def _warn_on_second_backend(root: Path) -> bool:
     """Advisory (zero-lock) detection of a second backend on this data root.
 
     Two processes running Agents against one data root is unsupported: it
     double-spends reviews and renders.  A pid marker is only a hint — stale
     after a crash if the pid was reused — so this warns loudly instead of
-    blocking.
+    blocking.  Returns whether a live peer was observed, which the caller
+    uses to hold back destructive startup cleanup.
     """
 
     marker = root / "runtime-owner.json"
@@ -160,12 +190,14 @@ def _warn_on_second_backend(root: Path) -> None:
         pid = int(previous.get("pid") or 0)
     except (OSError, ValueError, TypeError):
         pid = 0
+    peer_alive = False
     if pid and pid != os.getpid():
         try:
             os.kill(pid, 0)
         except OSError:
             pass
         else:
+            peer_alive = True
             logger.error(
                 "another QwenPaw Creator backend (pid=%d) appears to be "
                 "using data root %s; running two backends against one data "
@@ -183,6 +215,7 @@ def _warn_on_second_backend(root: Path) -> None:
         os.replace(temporary, marker)
     except OSError:
         logger.warning("failed to write runtime owner marker", exc_info=True)
+    return peer_alive
 
 
 @dataclass(slots=True)
@@ -201,8 +234,17 @@ class CreatorFileServices:
     @classmethod
     def create(cls, root: Path) -> CreatorFileServices:
         projects = ProjectStore(root)
-        _warn_on_second_backend(projects.root)
-        _startup_disk_gc(projects.root)
+        if _warn_on_second_backend(projects.root):
+            # A live peer may own the very artifacts this sweep deletes: an
+            # in-flight staging tree, a streaming export, or (for an older
+            # build) lock files it is still using.  Leave the data root alone
+            # and let the warning drive the fix.
+            logger.warning(
+                "skipping startup disk cleanup while another backend "
+                "appears to share this data root",
+            )
+        else:
+            _startup_disk_gc(projects.root)
         recovery = ProjectCommitRecoveryCoordinator(projects)
         startup_recovery = recovery.recover_all()
         reviews = ProjectReviewService(projects)

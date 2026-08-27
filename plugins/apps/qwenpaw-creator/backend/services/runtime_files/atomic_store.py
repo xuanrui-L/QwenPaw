@@ -13,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError as PydanticValidationError
@@ -105,6 +106,31 @@ def chmod_descriptor_if_supported(descriptor: int, mode: int) -> None:
         fchmod(descriptor, mode)
 
 
+# Reads across the Runtime stores are lock-free.  On POSIX a rename over an
+# open file is invisible to the reader, but Windows opens files without
+# FILE_SHARE_DELETE, so a reader holding a handle makes the publication fail
+# with a sharing violation.  Reads are short, so a bounded retry turns that
+# into a brief wait instead of a lost write.
+_REPLACE_RETRY_ATTEMPTS = 50 if _is_windows() else 1
+_REPLACE_RETRY_DELAY_SECONDS = 0.02
+
+
+def atomic_replace_path(
+    source: str | os.PathLike[str],
+    target: str | os.PathLike[str],
+) -> None:
+    """``os.replace`` with a bounded retry for Windows sharing violations."""
+
+    for attempt in range(_REPLACE_RETRY_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY_SECONDS)
+
+
 def _json_value(value: Any) -> Any:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json", by_alias=True)
@@ -191,7 +217,7 @@ def atomic_replace_bytes(
             os.fsync(handle.fileno())
         if stage_hook is not None:
             stage_hook("temp_fsynced", temporary)
-        os.replace(temporary, path)
+        atomic_replace_path(temporary, path)
         if stage_hook is not None:
             stage_hook("replaced", path)
         fsync_directory(path.parent)

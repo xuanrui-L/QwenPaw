@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import errno
 import os
 import threading
+import time
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -452,3 +453,151 @@ def test_content_store_tolerates_windows_like_private_file_surface(
 
     assert stored.path.read_bytes() == b"creator-content"
     assert stored.size == len(b"creator-content")
+
+
+# ── Conflict regressions for the historical lock incidents ──────────────
+
+
+def test_hammering_readers_never_starve_or_slow_a_writer(tmp_path):
+    """The「停止按钮永远转圈」class: reads must not contend with writes."""
+
+    stream = DurableJsonlStore(tmp_path / "events.jsonl", EventRecord)
+    record = AtomicJsonRecordStore(tmp_path / "session.json")
+    record.write({"status": "IDLE", "revision": 0})
+    stop = threading.Event()
+    reader_errors: list[BaseException] = []
+    read_counts = [0] * 6
+
+    def reader(index: int) -> None:
+        while not stop.is_set():
+            try:
+                stream.read_all()
+                stream.read_records_after(0, limit=20)
+                stream.last_seq()
+                value = record.read_or_none()
+                assert value is None or isinstance(value["revision"], int)
+                read_counts[index] += 1
+            except BaseException as error:  # pragma: no cover - asserted
+                reader_errors.append(error)
+                return
+
+    threads = [
+        threading.Thread(target=reader, args=(index,)) for index in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        started = time.monotonic()
+        for value in range(1, 201):
+            stream.append(EventRecord(worker=0, value=value))
+            record.update(
+                lambda current: {
+                    "status": "RUNNING",
+                    "revision": current["revision"] + 1,
+                },
+            )
+        writer_elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=5)
+    assert not reader_errors
+    # Before the redesign every read also took the write lock, and a single
+    # writer routinely hit the 10s timeout under this pressure.
+    assert writer_elapsed < 20.0
+    assert [e.seq for e in stream.read_all()] == list(range(1, 201))
+    assert record.read()["revision"] == 200
+    assert all(count > 0 for count in read_counts)
+
+
+def test_concurrent_updates_to_one_record_lose_nothing(tmp_path):
+    """Mutual exclusion of the in-process per-path lock: no lost updates."""
+
+    record = AtomicJsonRecordStore(tmp_path / "counter.json")
+    record.write({"value": 0})
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            for _ in range(40):
+                record.update(lambda current: {"value": current["value"] + 1})
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors
+    assert record.read()["value"] == 200
+
+
+def test_shared_holders_overlap_and_exclude_the_exclusive_side(tmp_path):
+    """Runtime writers share the lifecycle lock; delete/commit waits."""
+
+    path = tmp_path / "project-lifecycle.lock"
+    first_in = threading.Event()
+    second_in = threading.Event()
+    release_shared = threading.Event()
+    order: list[str] = []
+
+    def shared_holder(name: str, entered: threading.Event) -> None:
+        with CrossProcessFileLock(path, shared=True, timeout_seconds=5):
+            entered.set()
+            release_shared.wait(timeout=5)
+            order.append(f"{name}-released")
+
+    def exclusive_writer() -> None:
+        with CrossProcessFileLock(path, timeout_seconds=5):
+            order.append("exclusive-acquired")
+
+    holders = [
+        threading.Thread(target=shared_holder, args=("a", first_in)),
+        threading.Thread(target=shared_holder, args=("b", second_in)),
+    ]
+    for thread in holders:
+        thread.start()
+    assert first_in.wait(timeout=2)
+    assert second_in.wait(timeout=2)
+    writer = threading.Thread(target=exclusive_writer)
+    writer.start()
+    time.sleep(0.05)
+    assert "exclusive-acquired" not in order
+    release_shared.set()
+    writer.join(timeout=5)
+    for thread in holders:
+        thread.join(timeout=5)
+    assert order[-1] == "exclusive-acquired"
+
+
+def test_torn_crash_tail_never_breaks_lockfree_readers(tmp_path):
+    """A crash fragment is invisible to readers and repaired by append."""
+
+    path = tmp_path / "events.jsonl"
+    stream = DurableJsonlStore(path, EventRecord)
+    for value in range(1, 4):
+        stream.append(EventRecord(worker=1, value=value))
+    with path.open("ab") as handle:
+        handle.write(b'{"seq":4,"record":{"worker":1')
+
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            for _ in range(50):
+                assert [e.seq for e in stream.read_all()] == [1, 2, 3]
+                assert stream.last_seq() == 3
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not errors
+    # Reads never truncated the fragment; only the next append repairs it.
+    assert not path.read_bytes().endswith(b"\n")
+    assert stream.append(EventRecord(worker=1, value=4)).seq == 4
+    assert [e.seq for e in stream.read_all()] == [1, 2, 3, 4]
