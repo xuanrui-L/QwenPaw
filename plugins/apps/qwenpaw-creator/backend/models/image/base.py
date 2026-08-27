@@ -23,6 +23,8 @@ from dataclasses import dataclass
 import json
 import os
 import re
+
+from models.reference_markers import ReferenceMarkerSpec
 from abc import ABC, abstractmethod
 
 import httpx
@@ -249,6 +251,18 @@ _REFERENCE_CAPABILITIES = (
 )
 
 
+# Only the qwen families document addressing an individual input image from
+# the prompt: the edit guide requires the prompt's numbers to match the input
+# array one-to-one ("数组中的第一张图片为图1，第二张为图2") and its examples read
+# "图1中的女生穿着图2中的黑色裙子". OpenAI's gpt-image family documents array
+# order only — no per-image syntax — and every family below that has not been
+# verified against its provider docs is omitted on purpose.
+_MARKER_TEMPLATES_BY_FAMILY = {
+    "qwen-image-2.x/3.x": "图{index}",
+    "qwen-image-edit": "图{index}",
+}
+
+
 def image_reference_capability(
     model_name: str,
 ) -> ImageReferenceCapability | None:
@@ -260,6 +274,30 @@ def image_reference_capability(
     for pattern, capability in _REFERENCE_CAPABILITIES:
         if pattern.fullmatch(normalized):
             return capability
+    return None
+
+
+def image_reference_marker_spec(
+    model_name: str,
+) -> ReferenceMarkerSpec | None:
+    """This model's documented in-prompt reference syntax, if it has one.
+
+    ``None`` means the provider documents no way to address an individual
+    input image, so a canonical marker must be reworded instead of emitted.
+    Unverified families deliberately land here too: guessing a syntax would
+    silently misdirect references.
+    """
+
+    capability = image_reference_capability(model_name)
+    if capability is None or capability.max_reference_images < 2:
+        # Nothing to disambiguate with zero or one reference.
+        return None
+    if capability.family in _MARKER_TEMPLATES_BY_FAMILY:
+        return ReferenceMarkerSpec(
+            template=_MARKER_TEMPLATES_BY_FAMILY[capability.family],
+            pattern=re.compile(r"图\s*(\d+)"),
+            documentation_url=capability.documentation_url,
+        )
     return None
 
 

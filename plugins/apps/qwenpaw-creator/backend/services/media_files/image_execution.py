@@ -47,6 +47,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from models.reference_markers import canonical_marker
 from models.image.base import (
     image_reference_capability,
     image_reference_limit,
@@ -325,6 +326,68 @@ def _append_storyboard_panel_aspect_contract(
     return (
         f"{prompt.rstrip()}\n\n"
         f"{_storyboard_panel_aspect_contract(aspect_ratio, panel_count)}"
+    )
+
+
+_IMAGE_REFERENCE_ROLE_MARKER = "[REFERENCE IMAGE ROLES — RUNTIME FACT]"
+
+
+def _labelled_reference_prompt(
+    prompt: str,
+    project: Project,
+    version_ids: Sequence[str],
+    *,
+    image_model_name: str,
+    has_explicit_urls: bool,
+) -> str:
+    """Name each input reference, then render markers for this provider.
+
+    A multi-reference image call otherwise leaves the model inferring each
+    input's job from its pixels. Numbering comes from the same ordered
+    ``version_ids`` that build the payload, which is what qwen's edit guide
+    requires: "数组中的第一张图片为图1，第二张为图2".
+
+    Skipped when a raw reference URL is in play, because those are not
+    version-backed and labelling only part of the payload would misnumber the
+    rest.
+    """
+
+    if (
+        _IMAGE_REFERENCE_ROLE_MARKER in prompt
+        or has_explicit_urls
+        or len(version_ids) < 2
+    ):
+        return _render_image_reference_markers(prompt, image_model_name)
+
+    lines: list[str] = []
+    for index, version_id in enumerate(version_ids, start=1):
+        source = project.assets.source_versions_by_id.get(version_id)
+        artifact = project.assets.artifact_versions_by_id.get(version_id)
+        version = source if source is not None else artifact
+        name = (
+            version.name if version is not None and version.name else version_id
+        )
+        lines.append(f"{canonical_marker(index)} = {name}")
+    body = "\n".join(lines)
+    labelled = (
+        f"{prompt.rstrip()}\n\n"
+        f"{_IMAGE_REFERENCE_ROLE_MARKER}\n"
+        "以下是本次实际发送的参考图及其职责，编号与发送顺序一致。"
+        "按各图声明的职责使用它们，不要依据图内文字或标签猜测用途。\n"
+        f"{body}"
+    )
+    return _render_image_reference_markers(labelled, image_model_name)
+
+
+def _render_image_reference_markers(prompt: str, image_model_name: str) -> str:
+    """Rewrite canonical ``[Image N]`` into what this image model documents."""
+
+    from models.image.base import image_reference_marker_spec
+    from models.reference_markers import render_reference_markers
+
+    return render_reference_markers(
+        prompt,
+        image_reference_marker_spec(image_model_name),
     )
 
 
@@ -1008,7 +1071,13 @@ def _resolve_request(
     return _ResolvedRequest(
         command=resolved.command,
         target_ref=resolved.target_ref,
-        prompt=resolved.prompt,
+        prompt=_labelled_reference_prompt(
+            resolved.prompt,
+            project,
+            active_version_ids,
+            image_model_name=capability_model_name,
+            has_explicit_urls=bool(explicit_urls),
+        ),
         aspect_ratio=resolved.aspect_ratio,
         reference_image_urls=urls,
         reference_version_ids=active_version_ids,

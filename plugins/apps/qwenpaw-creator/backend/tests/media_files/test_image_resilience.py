@@ -631,3 +631,81 @@ def test_over_budget_automatic_chain_truncates_instead_of_stalling(
             image_model_name="qwen-image-3.0",
             max_reference_images=3,
         )
+
+
+def test_image_reference_marker_spec_follows_provider_docs() -> None:
+    """Only the qwen families document addressing an input image in-prompt."""
+    from models.image.base import image_reference_marker_spec
+
+    for model in ("qwen-image-3.0-pro", "qwen-image-2.0-pro", "qwen-image-edit-plus"):
+        spec = image_reference_marker_spec(model)
+        assert spec is not None, model
+        assert spec.render_index(2) == "图2"
+        assert "qwen-image-edit-guide" in spec.documentation_url
+
+    # gpt-image takes many references but documents array order only, so
+    # inventing a marker would be text it has no contract for.
+    assert image_reference_marker_spec("gpt-image-2") is None
+    assert image_reference_marker_spec("gpt-image-1") is None
+    # Nothing to disambiguate at zero or one reference.
+    assert image_reference_marker_spec("qwen-image") is None
+    assert image_reference_marker_spec("qwen-mt-image") is None
+    # Unverified families stay fail-closed rather than guessing.
+    assert image_reference_marker_spec("gemini-3-pro-image") is None
+    assert image_reference_marker_spec("unknown-alias") is None
+
+
+def test_multi_reference_image_prompt_is_labelled_and_rendered() -> None:
+    """Field gap: image prompts named none of their references, so the model
+    had to infer each input's job from its pixels.
+    """
+    from services.media_files.image_execution import (
+        _IMAGE_REFERENCE_ROLE_MARKER,
+        _labelled_reference_prompt,
+    )
+    from services.project_files.models import ArtifactVersion, Project
+
+    project = Project.new(project_id="p-img", name="Img")
+    for vid, name in (("art:a", "分镜图"), ("art:b", "角色视觉图")):
+        project.assets.artifact_versions_by_id[vid] = ArtifactVersion(
+            version_id=vid,
+            slot_id=f"visual:{vid}",
+            kind="visual_asset_image",
+            owner_ref=f"visual:{vid}",
+            name=name,
+            file_id=f"file-{vid}",
+            checksum="0" * 64,
+            based_on_generation=1,
+            created_at="2026-08-27T00:00:00Z",
+        )
+    ids = ["art:a", "art:b"]
+
+    qwen = _labelled_reference_prompt(
+        "画面参考 [Image 2] 的人物。", project, ids,
+        image_model_name="qwen-image-3.0-pro", has_explicit_urls=False,
+    )
+    assert _IMAGE_REFERENCE_ROLE_MARKER in qwen
+    assert "图1 = 分镜图" in qwen and "图2 = 角色视觉图" in qwen
+    # The author's inline canonical marker is rendered by the same pass.
+    assert "参考 图2 的人物" in qwen
+    assert "[Image" not in qwen
+
+    # No documented addressing: ordinal prose, never a literal [Image N].
+    openai = _labelled_reference_prompt(
+        "画面参考 [Image 2] 的人物。", project, ids,
+        image_model_name="gpt-image-2", has_explicit_urls=False,
+    )
+    assert "第1张参考图 = 分镜图" in openai
+    assert "[Image" not in openai
+
+    # A raw URL is not version-backed, so labelling part of the payload would
+    # misnumber the rest.
+    assert _IMAGE_REFERENCE_ROLE_MARKER not in _labelled_reference_prompt(
+        "prompt", project, ids,
+        image_model_name="qwen-image-3.0-pro", has_explicit_urls=True,
+    )
+    # Nothing to disambiguate with one reference.
+    assert _IMAGE_REFERENCE_ROLE_MARKER not in _labelled_reference_prompt(
+        "prompt", project, ["art:a"],
+        image_model_name="qwen-image-3.0-pro", has_explicit_urls=False,
+    )
