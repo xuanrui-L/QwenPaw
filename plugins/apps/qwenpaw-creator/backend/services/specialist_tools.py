@@ -1442,12 +1442,12 @@ class FileSpecialistToolRegistry:
 
         if name == "image_generation":
             if target_ref.startswith("lineup:"):
-                # The cast lineup is the group anchor; only the visual
-                # development role may draw it, storyboard directors
-                # consume it through the reference chain instead.
+                # The cast lineup is the group anchor; its rendering is
+                # scheduler-owned, and only pre-retirement visual replay
+                # may still reach this branch.
                 if role is not SpecialistRole.VISUAL_DEVELOPMENT:
                     raise PermissionDeniedError(
-                        "只有视觉开发 Specialist 可以生成阵容图",
+                        "阵容图由工作图调度器自动生成，Specialist 不能直接生成",
                     )
                 command = CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE
             elif role is SpecialistRole.VISUAL_DEVELOPMENT:
