@@ -292,7 +292,13 @@ class ContentStore:
             target.parent.mkdir(parents=True, exist_ok=True)
 
             if target.exists():
-                self._verify_file(target, digest, expected_size=size)
+                # Content-addressed dedup: the name already commits to the
+                # digest.  A full re-hash of the existing blob doubles I/O for
+                # large media on every duplicate write, so only the cheap size
+                # invariant is checked; a mismatch falls back to the full
+                # verify for exact diagnostics.
+                if target.stat().st_size != size:
+                    self._verify_file(target, digest, expected_size=size)
                 temp_path.unlink(missing_ok=True)
                 _notify(self.stage_hook, "deduplicated", target)
                 return StoredContent(namespace, digest, size, target)

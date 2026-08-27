@@ -232,7 +232,12 @@ def test_reconcile_reclaims_a_queued_run_bound_to_a_terminal_goal(
     orphan, records, session = asyncio.run(scenario())
 
     assert orphan.status.value == "CANCELLED"
-    assert (orphan.error or {}).get("code") == "ORPHANED_ON_TERMINAL_GOAL"
+    # Either healing pass may win: the steady-state terminal-goal reclaim or
+    # the startup orphan reclaim that now runs in the start() sweep.
+    assert (orphan.error or {}).get("code") in {
+        "ORPHANED_ON_TERMINAL_GOAL",
+        "ORPHANED_BY_RESTART",
+    }
     succeeded = [
         record for record in records if record.status.value == "SUCCEEDED"
     ]
@@ -342,8 +347,15 @@ def test_stalled_interrupt_reclaims_a_running_run_with_no_live_owner(
 
     reclaimed, session = asyncio.run(scenario())
 
-    assert reclaimed.status.value == "FAILED"
-    assert (reclaimed.error or {}).get("code") == "INTERRUPTED"
+    # Either healing pass may win: the stalled-interrupt reclaim or the
+    # startup orphan reclaim that now runs in the start() sweep.
+    assert (
+        reclaimed.status.value,
+        (reclaimed.error or {}).get("code"),
+    ) in {
+        ("FAILED", "INTERRUPTED"),
+        ("CANCELLED", "ORPHANED_BY_RESTART"),
+    }
     assert session.status.value == "CANCELLED"
     assert session.active_run_id is None
     assert session.last_consumed_message_seq == session.last_message_seq

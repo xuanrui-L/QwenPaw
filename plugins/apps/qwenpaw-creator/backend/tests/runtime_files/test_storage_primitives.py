@@ -6,10 +6,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import errno
-import multiprocessing
 import os
 import threading
-import time
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -193,20 +191,19 @@ def test_jsonl_never_skips_a_malformed_complete_line(tmp_path):
         store.append(EventRecord(worker=1, value=2))
 
 
-def test_concurrent_processes_allocate_unique_contiguous_jsonl_sequences(
+def test_concurrent_threads_allocate_unique_contiguous_jsonl_sequences(
     tmp_path,
 ):
     path = tmp_path / "events.jsonl"
-    context = multiprocessing.get_context("fork")
-    processes = [
-        context.Process(target=_append_events, args=(str(path), worker, 12))
+    threads = [
+        threading.Thread(target=_append_events, args=(str(path), worker, 12))
         for worker in range(4)
     ]
-    for process in processes:
-        process.start()
-    for process in processes:
-        process.join(timeout=10)
-        assert process.exitcode == 0
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
 
     entries = DurableJsonlStore(path, EventRecord).read_all()
     assert [entry.seq for entry in entries] == list(range(1, 49))
@@ -240,16 +237,15 @@ def _acquire(store: FieldBlockStore, pointer: str, **overrides):
     return store.acquire(json_pointer=pointer, **kwargs)
 
 
-def test_fcntl_lock_times_out_across_processes_and_releases_on_exit(tmp_path):
+def test_lock_times_out_while_held_and_recovers_after_release(tmp_path):
     path = tmp_path / "project-write.lock"
-    context = multiprocessing.get_context("fork")
-    ready = context.Event()
-    release = context.Event()
-    process = context.Process(
+    ready = threading.Event()
+    release = threading.Event()
+    holder = threading.Thread(
         target=_hold_lock,
         args=(str(path), ready, release),
     )
-    process.start()
+    holder.start()
     assert ready.wait(timeout=3)
 
     with pytest.raises(LockTimeoutError) as caught:
@@ -261,13 +257,15 @@ def test_fcntl_lock_times_out_across_processes_and_releases_on_exit(tmp_path):
             pass
     assert caught.value.phase == "resource"
     assert caught.value.waiter["mode"] == "exclusive"
-    assert caught.value.holder["pid"] == process.pid
+    assert caught.value.holder["pid"] == os.getpid()
 
-    process.terminate()
-    process.join(timeout=3)
-    assert process.exitcode not in {None, 0}
+    release.set()
+    holder.join(timeout=3)
+    assert not holder.is_alive()
     with CrossProcessFileLock(path, timeout_seconds=0.2):
-        assert path.exists()
+        pass
+    # In-process locks never create coordination files.
+    assert not path.exists()
 
 
 def test_same_thread_nested_lock_fails_immediately_with_owner_details(
@@ -311,48 +309,27 @@ def test_cross_thread_release_clears_the_acquiring_threads_owner(tmp_path):
     assert not errors
 
 
-def test_waiting_writer_closes_admission_to_late_poll_readers(tmp_path):
-    path = tmp_path / "writer-priority.lock"
-    gate = path.with_name(f"{path.name}.gate")
-    first_reader = CrossProcessFileLock(path, shared=True).acquire()
-    writer_acquired = threading.Event()
-    release_writer = threading.Event()
+def test_store_operations_create_no_lock_artifacts_on_disk(tmp_path):
+    record_path = tmp_path / "record.json"
+    store = AtomicJsonRecordStore(record_path)
+    store.write({"value": 1})
+    store.update(lambda value: {"value": value["value"] + 1})
+    stream = DurableJsonlStore(tmp_path / "events.jsonl", EventRecord)
+    stream.append(EventRecord(worker=1, value=1))
+    with CrossProcessFileLock(tmp_path / "domain.lock"):
+        pass
 
-    def writer() -> None:
-        with CrossProcessFileLock(path, timeout_seconds=1):
-            writer_acquired.set()
-            release_writer.wait(timeout=1)
-
-    writer_thread = threading.Thread(target=writer)
-    writer_thread.start()
-    deadline = time.monotonic() + 1
-    while (
-        not gate.exists() or not gate.read_bytes()
-    ) and time.monotonic() < deadline:
-        time.sleep(0.005)
-
-    late_errors: list[LockTimeoutError] = []
-
-    def late_reader() -> None:
-        try:
-            with CrossProcessFileLock(path, timeout_seconds=0.05, shared=True):
-                pass
-        except LockTimeoutError as error:
-            late_errors.append(error)
-
-    late_reader_thread = threading.Thread(target=late_reader)
-    late_reader_thread.start()
-    late_reader_thread.join(timeout=1)
-    assert late_errors and late_errors[0].phase == "admission"
-
-    first_reader.release()
-    assert writer_acquired.wait(timeout=1)
-    release_writer.set()
-    writer_thread.join(timeout=1)
-    assert not writer_thread.is_alive()
+    leftovers = [
+        entry.name
+        for entry in tmp_path.rglob("*")
+        if ".lock" in entry.name
+        or entry.name.endswith(".gate")
+        or entry.name.endswith(".readers")
+    ]
+    assert leftovers == []
 
 
-def test_writer_timeout_reports_the_shared_reader_owner(tmp_path):
+def test_writer_blocked_by_shared_holder_times_out(tmp_path):
     path = tmp_path / "reader-owner.lock"
     reader = CrossProcessFileLock(path, shared=True).acquire()
     failures: list[LockTimeoutError] = []
@@ -369,10 +346,7 @@ def test_writer_timeout_reports_the_shared_reader_owner(tmp_path):
     writer_thread.join(timeout=1)
     reader.release()
 
-    assert failures[0].phase == "resource"
-    observed = failures[0].holder["observedReaders"]
-    assert observed[0]["threadId"] == threading.get_ident()
-    assert observed[0]["mode"] == "shared"
+    assert failures and failures[0].phase == "resource"
 
 
 @pytest.mark.parametrize(

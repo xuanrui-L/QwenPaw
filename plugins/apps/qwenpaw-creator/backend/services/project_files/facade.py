@@ -6,9 +6,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 import logging
+import os
 from pathlib import Path
+import shutil
 import threading
+import time
 from typing import Any, Mapping
 
 from services.runtime_files.field_blocks import FieldBlockStore
@@ -42,10 +46,143 @@ from .store import ProjectSnapshot, ProjectStore
 
 logger = logging.getLogger(__name__)
 
+# Export zips are per-request scratch; anything this old is an orphan from a
+# crashed download.
+_EXPORT_GC_AGE_SECONDS = 24 * 3600.0
+
 
 def _log_safe(value: object) -> str:
     """Neutralise CR/LF so user-provided values cannot forge log lines."""
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _startup_disk_gc(root: Path) -> None:
+    """Remove crash leftovers that no runtime path ever cleans up.
+
+    Deletion tombstones (``.deleted-*``) and orphaned staging trees
+    (``.staging/*``) can hold gigabytes after a kill -9; export zips are
+    per-request scratch.  Single-process deployment means nothing can be
+    using them at startup.
+    """
+
+    for entry in list(root.glob(".deleted-*")):
+        try:
+            shutil.rmtree(entry, ignore_errors=True)
+            logger.info("startup GC removed deletion tombstone: %s", entry)
+        except OSError:
+            logger.warning("startup GC failed for %s", entry, exc_info=True)
+    staging_root = root / ".staging"
+    if staging_root.is_dir():
+        for entry in list(staging_root.iterdir()):
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                logger.info("startup GC removed staging orphan: %s", entry)
+            except OSError:
+                logger.warning(
+                    "startup GC failed for %s",
+                    entry,
+                    exc_info=True,
+                )
+    exports_root = root / "exports"
+    if exports_root.is_dir():
+        cutoff = time.time() - _EXPORT_GC_AGE_SECONDS
+        for entry in list(exports_root.glob("*.zip")):
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink(missing_ok=True)
+                    logger.info("startup GC removed stale export: %s", entry)
+            except OSError:
+                logger.warning(
+                    "startup GC failed for %s",
+                    entry,
+                    exc_info=True,
+                )
+    _sweep_legacy_lock_artifacts(root)
+
+
+def _sweep_legacy_lock_artifacts(root: Path) -> None:
+    """Delete flock-era coordination files.
+
+    The in-process lock implementation neither reads nor writes lock files,
+    so every ``*.lock`` file, ``*.lock.gate`` file and ``*.lock.readers``
+    directory under the data root is a dead artifact of the retired
+    cross-process implementation.
+    """
+
+    removed = 0
+    for pattern in ("*.lock", "*.lock.gate"):
+        for entry in list(root.rglob(pattern)):
+            try:
+                if entry.is_file() or entry.is_symlink():
+                    entry.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                logger.warning(
+                    "startup GC failed for %s",
+                    entry,
+                    exc_info=True,
+                )
+    for entry in list(root.rglob("*.lock.readers")):
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+                removed += 1
+        except OSError:
+            logger.warning("startup GC failed for %s", entry, exc_info=True)
+    for locks_dir in (root / ".locks", *root.glob("*/runtime/locks")):
+        try:
+            if locks_dir.is_dir() and not any(locks_dir.iterdir()):
+                locks_dir.rmdir()
+        except OSError:
+            pass
+    if removed:
+        logger.info(
+            "startup GC removed %d legacy lock artifact(s)",
+            removed,
+        )
+
+
+def _warn_on_second_backend(root: Path) -> None:
+    """Advisory (zero-lock) detection of a second backend on this data root.
+
+    Two processes running Agents against one data root is unsupported: it
+    double-spends reviews and renders.  A pid marker is only a hint — stale
+    after a crash if the pid was reused — so this warns loudly instead of
+    blocking.
+    """
+
+    marker = root / "runtime-owner.json"
+    try:
+        previous = json.loads(marker.read_text(encoding="utf-8"))
+        pid = int(previous.get("pid") or 0)
+    except (OSError, ValueError, TypeError):
+        pid = 0
+    if pid and pid != os.getpid():
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            pass
+        else:
+            logger.error(
+                "another QwenPaw Creator backend (pid=%d) appears to be "
+                "using data root %s; running two backends against one data "
+                "root is unsupported and can double-spend generation and "
+                "review calls",
+                pid,
+                root,
+            )
+    try:
+        payload = json.dumps(
+            {"pid": os.getpid(), "startedAtEpoch": time.time()},
+        )
+        temporary = marker.with_name(f".{marker.name}.{os.getpid()}.tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, marker)
+    except OSError:
+        logger.warning("failed to write runtime owner marker", exc_info=True)
 
 
 @dataclass(slots=True)
@@ -64,6 +201,8 @@ class CreatorFileServices:
     @classmethod
     def create(cls, root: Path) -> CreatorFileServices:
         projects = ProjectStore(root)
+        _warn_on_second_backend(projects.root)
+        _startup_disk_gc(projects.root)
         recovery = ProjectCommitRecoveryCoordinator(projects)
         startup_recovery = recovery.recover_all()
         reviews = ProjectReviewService(projects)
