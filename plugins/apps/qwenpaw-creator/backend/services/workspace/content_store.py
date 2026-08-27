@@ -23,6 +23,7 @@ from typing import BinaryIO, Literal, Protocol
 
 from domain.errors import StorageIntegrityError, ValidationError
 from services.runtime_files.atomic_store import (
+    atomic_replace_path,
     chmod_descriptor_if_supported,
     fsync_directory as runtime_fsync_directory,
 )
@@ -89,7 +90,7 @@ def atomic_replace_bytes(
             handle.flush()
             os.fsync(handle.fileno())
         _notify(stage_hook, "temp_fsynced", temp_path)
-        os.replace(temp_path, target)
+        atomic_replace_path(temp_path, target)
         _notify(stage_hook, "renamed", target)
         _fsync_directory(target.parent)
         _notify(stage_hook, "directory_fsynced", target.parent)
@@ -138,7 +139,7 @@ def atomic_copy_file(
             output_handle.flush()
             os.fsync(output_handle.fileno())
         _notify(stage_hook, "temp_fsynced", temp_path)
-        os.replace(temp_path, target)
+        atomic_replace_path(temp_path, target)
         _notify(stage_hook, "renamed", target)
         _fsync_directory(target.parent)
         _notify(stage_hook, "directory_fsynced", target.parent)
@@ -303,7 +304,7 @@ class ContentStore:
                 _notify(self.stage_hook, "deduplicated", target)
                 return StoredContent(namespace, digest, size, target)
 
-            os.replace(temp_path, target)
+            atomic_replace_path(temp_path, target)
             _notify(self.stage_hook, "renamed", target)
             _fsync_directory(target.parent)
             # The source .tmp directory also changed during a cross-directory

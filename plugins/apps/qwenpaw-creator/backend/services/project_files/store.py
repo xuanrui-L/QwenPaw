@@ -527,7 +527,7 @@ class ProjectStore:
             project_root = self.project_root(safe_id)
             tombstone = self.root / f".deleted-{safe_id}-{uuid4().hex}"
             try:
-                os.replace(project_root, tombstone)
+                atomic_replace_path(project_root, tombstone)
                 _fsync_directory(self.root)
             except OSError as exc:
                 raise ProjectStoreError(

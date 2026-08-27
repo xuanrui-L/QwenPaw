@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from services.runtime_files.atomic_store import atomic_replace_path
 from services.runtime_files.field_blocks import FieldBlockStore
 from services.runtime_files import (
     MessageChannel,
@@ -212,7 +213,7 @@ def _warn_on_second_backend(root: Path) -> bool:
         )
         temporary = marker.with_name(f".{marker.name}.{os.getpid()}.tmp")
         temporary.write_text(payload, encoding="utf-8")
-        os.replace(temporary, marker)
+        atomic_replace_path(temporary, marker)
     except OSError:
         logger.warning("failed to write runtime owner marker", exc_info=True)
     return peer_alive

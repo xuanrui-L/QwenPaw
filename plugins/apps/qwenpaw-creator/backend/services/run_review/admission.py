@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from services.runtime_files.atomic_store import atomic_replace_path
 from services.runtime_files.locking import CrossProcessFileLock
 from utils.logger import setup_logger
 
@@ -62,7 +62,7 @@ def write_json(path: Path, payload: Mapping[str, Any]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    os.replace(staging, path)
+    atomic_replace_path(staging, path)
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
