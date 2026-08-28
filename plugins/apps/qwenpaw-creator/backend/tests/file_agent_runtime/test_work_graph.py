@@ -602,3 +602,260 @@ def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
     compose = graph.by_id["compose:final"]
     assert compose.status is WorkNodeStatus.READY
     assert compose in graph.ready_media_nodes()
+
+
+def test_t2v_element_produces_only_video_node() -> None:
+    """T2V elements skip storyboard and produce only a video node."""
+    from services.project_files.models import T2VCreation
+
+    project = _project()
+    element = TimelineElement(
+        element_id="elem:t2v",
+        label="T2V Element",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=T2VCreation(
+            video_prompt="A beautiful sunset",
+        ),
+    )
+    _add_element(project, element)
+
+    graph = derive_work_graph(project)
+    by_id = graph.by_id
+
+    # No storyboard node for T2V
+    assert "storyboard:elem:t2v" not in by_id
+
+    # Video node exists and is READY (prompt is set)
+    video_node = by_id["video:elem:t2v"]
+    assert video_node.status is WorkNodeStatus.READY
+    assert video_node.command == "GENERATE_R2V_VIDEO"
+    assert video_node.dispatch_arguments == {"mode": "t2v"}
+
+
+def test_t2v_element_gated_without_prompt() -> None:
+    """T2V elements are GATED when video_prompt is missing."""
+    from services.project_files.models import T2VCreation
+
+    project = _project()
+    element = TimelineElement(
+        element_id="elem:t2v",
+        label="T2V Element",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=T2VCreation(video_prompt=""),
+    )
+    _add_element(project, element)
+
+    graph = derive_work_graph(project)
+    video_node = graph.by_id["video:elem:t2v"]
+    assert video_node.status is WorkNodeStatus.GATED
+    assert "video_prompt 缺失" in video_node.missing
+
+
+def test_i2v_element_produces_only_video_node() -> None:
+    """I2V elements skip storyboard and depend on first_frame."""
+    from services.project_files.models import I2VCreation
+
+    project = _project()
+    element = TimelineElement(
+        element_id="elem:i2v",
+        label="I2V Element",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=I2VCreation(
+            video_prompt="A beautiful sunset",
+            first_frame_version_id="img:first-frame",
+        ),
+    )
+    _add_element(project, element)
+
+    graph = derive_work_graph(project)
+    by_id = graph.by_id
+
+    # No storyboard node for I2V
+    assert "storyboard:elem:i2v" not in by_id
+
+    # Video node exists and is READY (prompt + first_frame are set)
+    video_node = by_id["video:elem:i2v"]
+    assert video_node.status is WorkNodeStatus.READY
+    assert video_node.command == "GENERATE_R2V_VIDEO"
+    assert video_node.dispatch_arguments == {"mode": "i2v"}
+
+
+def test_i2v_element_gated_without_first_frame() -> None:
+    """I2V elements are GATED when first_frame_version_id is missing."""
+    from services.project_files.models import I2VCreation
+
+    project = _project()
+    element = TimelineElement(
+        element_id="elem:i2v",
+        label="I2V Element",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=I2VCreation(
+            video_prompt="A beautiful sunset",
+            first_frame_version_id=None,
+        ),
+    )
+    _add_element(project, element)
+
+    graph = derive_work_graph(project)
+    video_node = graph.by_id["video:elem:i2v"]
+    assert video_node.status is WorkNodeStatus.GATED
+    assert "first_frame_version_id 缺失" in video_node.missing
+
+
+def test_s2v_element_produces_only_video_node() -> None:
+    """S2V elements skip storyboard and depend on portrait + audio."""
+    from services.project_files.models import S2VCreation
+
+    project = _project()
+    element = TimelineElement(
+        element_id="elem:s2v",
+        label="S2V Element",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=S2VCreation(
+            portrait_version_id="img:portrait",
+            audio_version_id="aud:voice",
+        ),
+    )
+    _add_element(project, element)
+
+    graph = derive_work_graph(project)
+    by_id = graph.by_id
+
+    # No storyboard node for S2V
+    assert "storyboard:elem:s2v" not in by_id
+
+    # Video node exists and is READY (portrait + audio are set)
+    video_node = by_id["video:elem:s2v"]
+    assert video_node.status is WorkNodeStatus.READY
+    assert video_node.command == "GENERATE_S2V_VIDEO"
+    assert video_node.dispatch_arguments == {}
+
+
+def test_s2v_element_gated_without_portrait_or_audio() -> None:
+    """S2V elements are GATED when portrait or audio is missing."""
+    from services.project_files.models import S2VCreation
+
+    project = _project()
+    # Missing both portrait and audio
+    element = TimelineElement(
+        element_id="elem:s2v",
+        label="S2V Element",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=S2VCreation(
+            portrait_version_id=None,
+            audio_version_id=None,
+        ),
+    )
+    _add_element(project, element)
+
+    graph = derive_work_graph(project)
+    video_node = graph.by_id["video:elem:s2v"]
+    assert video_node.status is WorkNodeStatus.GATED
+    assert "portrait_version_id 缺失" in video_node.missing
+    assert "audio_version_id 缺失" in video_node.missing
+
+
+def test_mixed_timeline_compose_includes_t2v_i2v_s2v() -> None:
+    """Compose node includes T2V/I2V/S2V video nodes as dependencies."""
+    from services.project_files.models import (
+        I2VCreation,
+        S2VCreation,
+        T2VCreation,
+    )
+
+    project = _project()
+
+    # Add T2V element
+    t2v_element = TimelineElement(
+        element_id="elem:t2v",
+        label="T2V",
+        span=TimelineSpan(start_tick=0, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=T2VCreation(video_prompt="T2V prompt"),
+    )
+    _add_element(project, t2v_element)
+
+    # Add I2V element
+    i2v_element = TimelineElement(
+        element_id="elem:i2v",
+        label="I2V",
+        span=TimelineSpan(start_tick=4_000, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=I2VCreation(
+            video_prompt="I2V prompt",
+            first_frame_version_id="img:first",
+        ),
+    )
+    _add_element(project, i2v_element)
+
+    # Add S2V element
+    s2v_element = TimelineElement(
+        element_id="elem:s2v",
+        label="S2V",
+        span=TimelineSpan(start_tick=8_000, duration_tick=4_000),
+        location=ElementLocation(),
+        creation=S2VCreation(
+            portrait_version_id="img:portrait",
+            audio_version_id="aud:voice",
+        ),
+    )
+    _add_element(project, s2v_element)
+
+    graph = derive_work_graph(project)
+    by_id = graph.by_id
+
+    # All three video nodes exist
+    assert "video:elem:t2v" in by_id
+    assert "video:elem:i2v" in by_id
+    assert "video:elem:s2v" in by_id
+
+    # Compose node exists and depends on all video nodes
+    compose = by_id["compose:final"]
+    assert compose is not None
+    assert "video:elem:t2v" in compose.deps
+    assert "video:elem:i2v" in compose.deps
+    assert "video:elem:s2v" in compose.deps
+
+
+def test_stale_nodes_are_model_required() -> None:
+    """STALE nodes are included in model_required_nodes()."""
+    project = _project()
+
+    # Create an R2V element with storyboard and video
+    element = _element("elem:one")
+    _add_element(project, element)
+
+    # Set up storyboard slot with a selected version
+    _select_slot(
+        project,
+        slot_id="element:elem:one:storyboard",
+        kind="storyboard",
+        owner_ref="element:elem:one",
+        version_id="art:storyboard",
+        provenance=[],  # Empty provenance - not stale
+    )
+
+    # Set up video slot with provenance that doesn't include storyboard
+    # This makes the video node STALE because storyboard selection changed
+    _select_slot(
+        project,
+        slot_id="element:elem:one:main",
+        kind="element_video",
+        owner_ref="element:elem:one",
+        version_id="art:video",
+        provenance=["asset-version:old-storyboard"],  # Not current storyboard
+    )
+
+    graph = derive_work_graph(project)
+    video_node = graph.by_id["video:elem:one"]
+    assert video_node.status is WorkNodeStatus.STALE
+
+    # STALE nodes should be in model_required_nodes
+    required = graph.model_required_nodes()
+    assert video_node in required

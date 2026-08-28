@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>空闲/等待时间分析 — 「检查全开1」</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; background: #f5f5f7; color: #1d1d1f; padding: 32px; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 700; margin-bottom: 6px; }
+  .subtitle { font-size: 13px; color: #86868b; margin-bottom: 28px; line-height: 1.5; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 32px; }
+  .stat-card { background: #fff; border-radius: 10px; padding: 18px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  .stat-value { font-size: 28px; font-weight: 700; color: #0071e3; }
+  .stat-value.green { color: #34c759; }
+  .stat-value.orange { color: #ff9500; }
+  .stat-value.red { color: #ff3b30; }
+  .stat-label { font-size: 12px; color: #86868b; margin-top: 6px; line-height: 1.5; }
+  .section-title { font-size: 18px; font-weight: 600; margin: 36px 0 16px; padding-left: 12px; border-left: 4px solid #0071e3; }
+  .card { background: #fff; border-radius: 10px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 24px; }
+  .timeline-bar { display: flex; align-items: center; margin-bottom: 12px; }
+  .timeline-label { font-size: 12px; color: #555; min-width: 180px; text-align: right; padding-right: 12px; flex-shrink: 0; }
+  .timeline-track { position: relative; flex: 1; height: 28px; background: #f0f0f2; border-radius: 5px; overflow: visible; }
+  .timeline-seg { position: absolute; top: 2px; height: 24px; border-radius: 4px; font-size: 10px; color: #fff; font-weight: 500; display: flex; align-items: center; padding: 0 8px; white-space: nowrap; }
+  .seg-active { background: #34c759; }
+  .seg-idle-bug { background: #ff3b30; }
+  .seg-idle-normal { background: #8e8e93; }
+  .time-axis { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: #aaa; padding: 0 192px 0 0; }
+  .idle-detail { border-left: 4px solid #ff3b30; background: #fff; border-radius: 0 10px 10px 0; padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 20px; }
+  .idle-detail.minor { border-left-color: #8e8e93; }
+  .idle-detail .id-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .idle-detail .id-title { font-size: 16px; font-weight: 700; color: #ff3b30; }
+  .idle-detail.minor .id-title { color: #8e8e93; }
+  .idle-detail .id-duration { font-size: 14px; font-weight: 600; color: #ff3b30; background: #fde8e8; padding: 2px 10px; border-radius: 12px; }
+  .idle-detail.minor .id-duration { color: #8e8e93; background: #f0f0f2; }
+  .idle-detail .id-section { font-size: 13px; font-weight: 600; color: #333; margin: 14px 0 6px; }
+  .idle-detail .id-text { font-size: 13px; color: #555; line-height: 1.7; margin-bottom: 8px; }
+  .idle-detail .id-text strong { color: #1d1d1f; }
+  .idle-detail .id-text code { background: #f0f0f2; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+  .root-cause-box { background: #fff8f0; border: 1px solid #ffd6a0; border-radius: 8px; padding: 14px 18px; margin-top: 12px; font-size: 13px; line-height: 1.7; }
+  .root-cause-box .rc-label { font-weight: 700; color: #ff9500; margin-bottom: 4px; }
+  .evidence-box { background: #f0f7ff; border: 1px solid #b8daff; border-radius: 8px; padding: 14px 18px; margin-top: 12px; font-size: 13px; line-height: 1.7; }
+  .evidence-box .ev-label { font-weight: 700; color: #0071e3; margin-bottom: 4px; }
+  .task-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .task-table th { text-align: left; padding: 8px 10px; border-bottom: 2px solid #e5e5e7; color: #86868b; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; }
+  .task-table td { padding: 7px 10px; border-bottom: 1px solid #f0f0f2; vertical-align: middle; }
+  .task-table tr:hover { background: #f9f9fb; }
+  .severity-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  .severity-badge.critical { background: #fde8e8; color: #c0392b; }
+  .severity-badge.high { background: #fff3e0; color: #e67e22; }
+  .severity-badge.low { background: #e8f8ee; color: #1b8a3d; }
+  .summary-box { background: #f0f7ff; border: 1px solid #b8daff; border-radius: 10px; padding: 20px; margin-top: 24px; font-size: 13px; line-height: 1.9; }
+  .summary-box strong { color: #0071e3; }
+  .rec-card { background: #fff; border-radius: 10px; padding: 18px 22px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); margin-bottom: 14px; border-left: 4px solid #0071e3; }
+  .rec-card.critical { border-left-color: #ff3b30; }
+  .rec-card.high { border-left-color: #ff9500; }
+  .rec-card.medium { border-left-color: #5ac8fa; }
+  .rec-card .rec-priority { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .rec-card.critical .rec-priority { color: #ff3b30; }
+  .rec-card.high .rec-priority { color: #ff9500; }
+  .rec-card.medium .rec-priority { color: #5ac8fa; }
+  .rec-card .rec-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  .rec-card .rec-text { font-size: 13px; color: #555; line-height: 1.7; }
+  .mask-timeline { display: flex; align-items: center; gap: 0; margin: 20px 0; }
+  .mask-seg { height: 36px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #fff; font-weight: 600; }
+  .mask-seg:first-child { border-radius: 6px 0 0 6px; }
+  .mask-seg:last-child { border-radius: 0 6px 6px 0; }
+  .mask-label { font-size: 11px; color: #86868b; text-align: center; margin-top: 4px; }
+  .legend-row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; font-size: 12px; color: #555; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>空闲/等待时间分析 — 「检查全开1」</h1>
+<p class="subtitle">project-70d9f4e47a025bbbb9eda7cb7dea7a8f · 卫生安全宣传视频 · 2026-08-24 · 11:20:25 → 13:29:20</p>
+
+<div class="stats">
+  <div class="stat-card">
+    <div class="stat-value">129 min</div>
+    <div class="stat-label">项目总墙钟时间<br>11:20:25 → 13:29:20</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value green">40 min</div>
+    <div class="stat-label">活跃处理时间<br>规划 + 生成 + 审阅 + 合成</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value red">89 min</div>
+    <div class="stat-label">空闲时间（69%）<br>其中 Bug 导致 ~84 min</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value orange">5 min</div>
+    <div class="stat-label">正常处理延迟<br>锁竞争 + VLM/Agent 处理</div>
+  </div>
+</div>
+
+<div class="section-title">空闲时间线总览</div>
+
+<div class="card">
+  <div class="legend-row">
+    <div class="legend-item"><div class="legend-dot" style="background:#34c759"></div> 活跃处理</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff3b30"></div> Bug 导致的空闲</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#8e8e93"></div> 正常延迟</div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">11:20 → 11:29</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-active" style="left:0%; width:100%;">规划 + 图片生成 + TTS</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">11:29 → 11:30</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-idle-normal" style="left:0%; width:100%;">70s TTS→Agent 间隙</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">11:30 → 11:47</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-active" style="left:0%; width:100%;">审阅循环 ×15 + 图片/视频重生成</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">11:47 → 12:11</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-idle-bug" style="left:0%; width:100%;">🔴 调度器停滞 · 24 min · 零日志</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">12:11 → 12:12</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-active" style="left:0%; width:100%;">用户检查「进度如何？」→ Agent 状态响应</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">12:12 → 13:12</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-idle-bug" style="left:0%; width:100%;">🔴 调度器完全休眠 · 60 min · 零日志</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">13:12 → 13:14</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-idle-normal" style="left:0%; width:100%;">锁竞争 + 用户消息「stale是旧状态吗？」</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">13:14 → 13:17</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-active" style="left:0%; width:100%;">elem:mask 视频 + 合成 ×2 + 审阅</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">13:17 → 13:22</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-active" style="left:0%; width:70%;">审阅 + 合成</div>
+      <div class="timeline-seg seg-idle-normal" style="left:70%; width:30%;">锁超时 10s</div>
+    </div>
+  </div>
+
+  <div class="timeline-bar">
+    <div class="timeline-label">13:22 → 13:29</div>
+    <div class="timeline-track">
+      <div class="timeline-seg seg-active" style="left:0%; width:100%;">合成重试 + 收尾</div>
+    </div>
+  </div>
+
+  <div class="time-axis">
+    <span>11:20</span><span>11:30</span><span>11:40</span><span>11:50</span><span>12:00</span><span>12:10</span><span>12:30</span><span>13:00</span><span>13:15</span><span>13:29</span>
+  </div>
+</div>
+
+<div class="section-title">空闲时段详细分析</div>
+
+<div class="idle-detail">
+  <div class="id-header">
+    <div class="id-title">空闲 #1：调度器停滞</div>
+    <div class="id-duration">24 min 14s</div>
+    <span class="severity-badge high">高</span>
+  </div>
+  <div class="id-text"><strong>时间段：</strong>11:47:42 → 12:11:56</div>
+
+  <div class="id-section">之前发生了什么</div>
+  <div class="id-text">最后一个审阅目标（<code>goal-aa6a5d85</code>，分镜视频审阅 1/2 轮）在 11:47:42 完成。此前从 11:31 到 11:47 连续运行了 ~15 个审阅目标，每个 30-90s 完成。</div>
+
+  <div class="id-section">期间发生了什么</div>
+  <div class="id-text"><strong>完全沉默</strong>：零日志条目，无调度器 tick，无 agent run，无任务派发，无锁活动。工作图调度器停止了运作。</div>
+
+  <div class="id-section">什么触发了恢复</div>
+  <div class="id-text">用户在 12:11:56 发送消息：「执行的怎么样了？进度如何」。消息被接纳到 session，创建新目标，agent run 在 12:12:07 启动。</div>
+
+  <div class="root-cause-box">
+    <div class="rc-label">根因</div>
+    工作图调度器在完成审阅循环后<strong>静默停滞</strong>。调度器一直在快速派发目标（每 30-90s 一个），最后一个审阅目标完成后，它未能检查或派发下一批工作项。没有错误日志、没有崩溃、没有异常——调度器只是停止了 tick。
+  </div>
+
+  <div class="evidence-box">
+    <div class="ev-label">证据</div>
+    <ul style="margin: 6px 0 0 18px; font-size: 13px; color: #555; line-height: 1.7;">
+      <li><code>state.json</code> 显示 <code>active_goal_id: null</code>，系统认为自己是空闲的</li>
+      <li>24 分钟间隙内无调度器 tick 日志</li>
+      <li>工作图有待处理的工作（elem:mask 视频生成），但在此期间从未被派发</li>
+    </ul>
+  </div>
+</div>
+
+<div class="idle-detail">
+  <div class="id-header">
+    <div class="id-title">空闲 #2：调度器完全休眠</div>
+    <div class="id-duration">59 min 59s</div>
+    <span class="severity-badge critical">严重</span>
+  </div>
+  <div class="id-text"><strong>时间段：</strong>12:12:27 → 13:12:26</div>
+
+  <div class="id-section">之前发生了什么</div>
+  <div class="id-text">Agent 在 12:12:07 响应了用户的检查消息，读取了项目，在 12:12:27 完成状态检查目标。Agent 的响应告诉用户"一切正常"，但没有实际触发任何新工作。</div>
+
+  <div class="id-section">期间发生了什么</div>
+  <div class="id-text"><strong>完全沉默 60 分钟</strong>：零日志条目，无调度器活动，无 agent run，无任务派发。系统完全休眠。</div>
+
+  <div class="id-section">什么触发了恢复</div>
+  <div class="id-text">13:12:26 出现锁获取警告——项目锁在 0.55s 后获取（可能是后台健康检查或客户端轮询）。13:14:05 用户发送第二条消息：「stale是旧状态吗？」。13:14:22 调度器终于派发了 <code>elem:mask</code> 视频生成任务。</div>
+
+  <div class="root-cause-box">
+    <div class="rc-label">关键观察</div>
+    <code>elem:mask</code> R2V 视频生成任务在 13:14:22 创建，13:16:08 完成——<strong>实际工作不到 2 分钟</strong>。这意味着工作早已就绪且可执行，纯粹是调度器未能派发导致了 60 分钟空闲。
+  </div>
+
+  <div class="root-cause-box">
+    <div class="rc-label">根因</div>
+    与空闲 #1 相同的底层 Bug，但更严重。Agent 完成状态检查目标后，调度器再次未能派发待处理的工作图节点。系统进入完全休眠状态。
+  </div>
+</div>
+
+<div class="idle-detail minor">
+  <div class="id-header">
+    <div class="id-title">空闲 #3：锁竞争 + 用户交互延迟</div>
+    <div class="id-duration">1 min 39s</div>
+    <span class="severity-badge low">低</span>
+  </div>
+  <div class="id-text"><strong>时间段：</strong>13:12:26 → 13:14:05</div>
+  <div class="id-text">13:12:26 的锁获取唤醒了某些东西，但调度器直到 13:14:22 才派发 elem:mask 任务。13:14:05 的用户消息似乎是最终触发器。1.5 分钟间隙包括锁竞争（锁获取耗时 0.55s）和用户消息传播时间。</div>
+  <div class="id-text"><strong>分类：</strong>轻微。部分是预期的（用户交互延迟），部分是锁竞争。</div>
+</div>
+
+<div class="idle-detail minor">
+  <div class="id-header">
+    <div class="id-title">空闲 #4：VLM/Agent 处理延迟</div>
+    <div class="id-duration">1 min 52s</div>
+    <span class="severity-badge low">低</span>
+  </div>
+  <div class="id-text"><strong>时间段：</strong>13:20:06 → 13:21:58</div>
+  <div class="id-text">Agent 处理 VLM 审阅结果并决策的正常延迟。属于预期行为。</div>
+</div>
+
+<div class="section-title">elem:mask 任务之谜</div>
+
+<div class="card">
+  <div class="id-text" style="font-size: 14px; font-weight: 600; margin-bottom: 12px;">问题：为什么 elem:mask 从 ~11:32 到 13:14 才完成？</div>
+
+  <div class="mask-timeline">
+    <div class="mask-seg" style="background:#34c759; width:12%;">11:32<br>识别需要</div>
+    <div class="mask-seg" style="background:#ff3b30; width:28%;">11:47→12:11<br>调度器停滞</div>
+    <div class="mask-seg" style="background:#8e8e93; width:8%;">12:11→12:12<br>用户检查</div>
+    <div class="mask-seg" style="background:#ff3b30; width:42%;">12:12→13:14<br>完全休眠</div>
+    <div class="mask-seg" style="background:#34c759; width:10%;">13:14→13:16<br>生成成功</div>
+  </div>
+  <div class="mask-label" style="display:flex; justify-content:space-between; font-size:11px; color:#86868b;">
+    <span>11:32</span><span>11:47</span><span>12:11</span><span>12:12</span><span>13:14</span><span>13:16</span>
+  </div>
+
+  <div class="root-cause-box" style="margin-top: 20px;">
+    <div class="rc-label">真相</div>
+    日志中<strong>没有</strong>显示 11:32 到 12:17 之间有任何 elem:mask 任务的创建或执行。elem:mask R2V 视频生成任务实际<strong>创建时间是 13:14:22</strong>，<strong>成功时间是 13:16:08</strong>——从未被取消。<br><br>
+    elem:mask 元素从 ~11:32（首次被识别需要视频生成）到 13:14:22（最终被派发）期间一直"卡"在待处理/排队状态。~1h42m 的"等待"不是单个任务在运行，而是<strong>工作图调度器在整个期间未能派发该任务</strong>。任务本身一旦派发，不到 2 分钟就完成了。
+  </div>
+</div>
+
+<div class="section-title">锁竞争分析</div>
+
+<div class="card">
+  <h3 style="font-size:15px; font-weight:600; margin-bottom:16px;">严重锁错误（同线程嵌套死锁防护）</h3>
+  <table class="task-table">
+    <thead>
+      <tr><th>时间戳</th><th>详情</th><th>影响</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>11:26:31</td><td><code>list_specialist_runs</code> API 调用尝试获取读锁，但同线程已持有排他锁</td><td>请求失败（500）</td></tr>
+      <tr><td>11:32:48</td><td><code>append_event</code> 在 specialist run 回调期间尝试获取锁</td><td><code>specialist-run-a8b11ca8</code>（visual_development_agent）<strong>完全失败</strong></td></tr>
+      <tr><td>11:36:50</td><td>同模式：<code>list_specialist_runs</code> API 调用嵌套锁尝试</td><td>请求失败</td></tr>
+    </tbody>
+  </table>
+
+  <h3 style="font-size:15px; font-weight:600; margin: 24px 0 16px;">锁获取警告（慢获取 >0.5s）</h3>
+  <table class="task-table">
+    <thead>
+      <tr><th>时间戳</th><th>等待时间</th><th>锁路径</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>11:33:32</td><td>0.97s</td><td>execution-runtime.lock</td></tr>
+      <tr><td>11:36:56</td><td>1.06s</td><td>project lock</td></tr>
+      <tr><td>11:41:37</td><td style="color:#ff3b30; font-weight:600;">2.58s</td><td>session-runtime.lock</td></tr>
+      <tr><td>11:41:40</td><td>0.50s</td><td>session-runtime.lock</td></tr>
+      <tr><td>11:41:42</td><td>1.46s</td><td>session-runtime.lock</td></tr>
+      <tr><td>11:41:47</td><td>0.77s</td><td>project lock</td></tr>
+      <tr><td>11:41:48</td><td>0.92s</td><td>session-runtime.lock</td></tr>
+      <tr><td>11:41:53</td><td>0.66s</td><td>session-runtime.lock</td></tr>
+      <tr><td>13:12:26</td><td>0.55s</td><td>project lock</td></tr>
+      <tr><td>13:16:14</td><td>1.15-1.19s</td><td>project lock（多个）</td></tr>
+      <tr><td>13:16:14</td><td>0.53s</td><td>execution-runtime.lock</td></tr>
+      <tr><td>13:17:18</td><td>0.50-1.08s</td><td>session-runtime + project locks</td></tr>
+      <tr><td style="color:#ff3b30; font-weight:600;">13:22:09</td><td style="color:#ff3b30; font-weight:600;">10.00s（超时）</td><td style="color:#ff3b30;">project lock — 导致 compose 任务失败</td></tr>
+      <tr><td>13:25:46</td><td>0.71-0.76s</td><td>project lock（多个）</td></tr>
+    </tbody>
+  </table>
+
+  <div class="root-cause-box" style="margin-top: 20px;">
+    <div class="rc-label">锁竞争影响</div>
+    <ul style="margin: 6px 0 0 18px; font-size: 13px; color: #555; line-height: 1.7;">
+      <li>13:22:09 的 10 秒锁超时导致 <code>task-b380f918</code>（compose）失败。调度器重试（retry 1/6）后成功。</li>
+      <li>11:26:31 和 11:32:48 的锁错误导致直接失败且无重试。</li>
+      <li>嵌套锁死锁检测正常工作（防止实际死锁），但底层问题是同一线程（asyncio 事件循环线程）尝试重入锁获取，锁实现正确地拒绝了。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section-title">分类总结</div>
+
+<div class="card">
+  <table class="task-table">
+    <thead>
+      <tr><th>空闲时段</th><th>时长</th><th>分类</th><th>严重程度</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>11:47:42 → 12:11:56</td><td>24 min</td><td><span style="color:#ff3b30; font-weight:600;">Bug</span> — 调度器静默停止派发</td><td><span class="severity-badge high">高</span></td></tr>
+      <tr><td>12:12:27 → 13:12:26</td><td>60 min</td><td><span style="color:#ff3b30; font-weight:600;">Bug</span> — 系统完全休眠，有待处理工作</td><td><span class="severity-badge critical">严重</span></td></tr>
+      <tr><td>13:12:26 → 13:14:05</td><td>1.5 min</td><td>预期（用户交互延迟 + 锁竞争）</td><td><span class="severity-badge low">低</span></td></tr>
+      <tr><td>13:20:06 → 13:21:58</td><td>2 min</td><td>预期（VLM/Agent 处理）</td><td><span class="severity-badge low">低</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="section-title">修复建议</div>
+
+<div class="rec-card critical">
+  <div class="rec-priority">严重 · 修复 84 分钟空闲</div>
+  <div class="rec-title">1. 工作图调度器派发循环需要看门狗/心跳</div>
+  <div class="rec-text">调度器应有周期性 tick（如每 5-10 秒），即使没有活跃目标也检查可派发的工作图节点。当前设计似乎只在目标完成事件触发时派发，这意味着如果最后一批目标的完成没有产生新的可派发节点（因为它们依赖外部条件或处于不同阶段），调度器就会静默。</div>
+</div>
+
+<div class="rec-card critical">
+  <div class="rec-priority">严重 · 修复 84 分钟空闲</div>
+  <div class="rec-title">2. 添加调度器停滞检测</div>
+  <div class="rec-text">如果 >60 秒没有调度器 tick 同时存在待处理（QUEUED）任务或未处理的工作图节点，记录 WARNING。如果 >120 秒，尝试强制重启派发循环。</div>
+</div>
+
+<div class="rec-card critical">
+  <div class="rec-priority">严重 · 修复 84 分钟空闲</div>
+  <div class="rec-title">3. 用户消息不应是解除调度器卡住的唯一方式</div>
+  <div class="rec-text">两个主要空闲时段都只在用户交互后结束，表明调度器没有自愈机制。添加周期性后台任务检查停滞的调度器并重启它们。</div>
+</div>
+
+<div class="rec-card high">
+  <div class="rec-priority">高 · 修复锁竞争</div>
+  <div class="rec-title">4. 修复同线程嵌套锁获取</div>
+  <div class="rec-text">11:26:31、11:32:48、11:36:50 的三个 <code>RuntimeFileValidationError</code> 错误是由同一 asyncio 线程尝试重新获取它已持有的锁引起的。<code>store.py:626</code> 的 <code>lifecycle_lock</code> 持有排他锁，然后该作用域内的代码路径（如 <code>append_event</code>、<code>list_specialist_runs</code>）尝试再次获取同一锁。要么使锁对同一线程可重入，要么重构代码使嵌套调用不尝试重新获取锁（如使用内部无锁版本的方法）。</div>
+</div>
+
+<div class="rec-card high">
+  <div class="rec-priority">高 · 修复锁竞争</div>
+  <div class="rec-title">5. 减少锁持有时间</div>
+  <div class="rec-text">多个锁获取耗时 >1s。项目锁不应在其它线程需要访问期间长时间持有。考虑更细粒度的锁或更短的临界区。</div>
+</div>
+
+<div class="rec-card medium">
+  <div class="rec-priority">中等</div>
+  <div class="rec-title">6. 向可观测性添加空闲时间监控</div>
+  <div class="rec-text">日志文件没有周期性的"调度器存活"心跳条目。从调度器循环每 30 秒添加 DEBUG 级别日志，使空闲时间在日志中可见，而不是表现为神秘的间隙。</div>
+</div>
+
+<div class="rec-card medium">
+  <div class="rec-priority">中等</div>
+  <div class="rec-title">7. 审查审阅循环</div>
+  <div class="rec-text">11:31 到 11:47 之间，系统快速运行了 ~15 个审阅目标。每个审阅目标完成后立即生成下一个。考虑是否所有这些审阅都是必要的，或者是否可以批处理/并行化以减少总循环时间。</div>
+</div>
+
+</div>
+</body>
+</html>

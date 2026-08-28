@@ -63,7 +63,7 @@ export function NotFoundPage({ projectId }: { projectId?: string }) {
           onClick={() =>
             navigate(projectId ? `/project/${projectId}/plan` : "/", true)
           }
-          className="mt-4 rounded border border-[var(--color-border)] bg-white px-3 py-1.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]"
+          className="mt-4 rounded border border-[var(--color-border)] bg-white px-3 py-1.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] dark:bg-[var(--color-bg-primary)]"
         >
           {t("router.back")}
         </button>

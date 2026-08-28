@@ -61,13 +61,6 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #141414;
-    --foreground: #f5f1ea;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
@@ -890,7 +883,7 @@ a {
   inset: 0;
   overflow: hidden;
   pointer-events: none;
-  background: #ffffff;
+  background: var(--background);
 }
 
 .hero-bg-canvas {

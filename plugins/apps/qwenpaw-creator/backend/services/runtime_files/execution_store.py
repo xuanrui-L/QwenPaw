@@ -1822,36 +1822,27 @@ class ProjectExecutionStore:
 
     @contextmanager
     def _project_lock_read(self, project_id: str):
-        """Shared-lock variant of :meth:`_project_lock` for read-only paths.
+        """Lock-free guard for read-only paths.
 
-        Both locks are taken as ``LOCK_SH`` so concurrent readers never block
-        each other; they only wait for a writer.  Callers must not mutate any
-        file under this lock.
+        Reads never take locks: records are published by atomic replacement,
+        so a reader always observes a complete old or new file.  Callers must
+        not mutate any file under this guard.
         """
         project_id = self._safe(project_id, "project_id")
-        with CrossProcessFileLock(
-            self.data_root / ".locks" / f"project-{project_id}.lock",
-            timeout_seconds=self.lock_timeout_seconds,
-            shared=True,
-        ):
-            self._require_project(project_id)
-            with CrossProcessFileLock(
-                self._runtime_root(project_id)
-                / "locks"
-                / "execution-runtime.lock",
-                timeout_seconds=self.lock_timeout_seconds,
-                shared=True,
-            ):
-                yield
+        self._require_project(project_id)
+        yield
 
     def _run_store(
         self,
         project_id: str,
         run_id: str,
     ) -> AtomicJsonRecordStore[SpecialistRunRecord]:
+        # Writers all hold the exclusive execution-runtime domain lock, so
+        # the per-record lock would only add file opens and a second timeout.
         return AtomicJsonRecordStore(
             self._runtime_root(project_id) / "runs" / run_id / "run.json",
             SpecialistRunRecord,
+            locked=False,
         )
 
     def _messages_store(
@@ -1888,6 +1879,7 @@ class ProjectExecutionStore:
         return AtomicJsonRecordStore(
             self._runtime_root(project_id) / "tasks" / task_id / "task.json",
             TaskRecord,
+            locked=False,
         )
 
     def _attempts_store(
@@ -1913,6 +1905,7 @@ class ProjectExecutionStore:
             / "authorizations"
             / f"{authorization_id}.json",
             ExecutionAuthorizationRecord,
+            locked=False,
         )
 
     def _authorization_records(
@@ -1944,6 +1937,7 @@ class ProjectExecutionStore:
         return AtomicJsonRecordStore(
             self._runtime_root(project_id) / "quarantine" / f"{task_id}.json",
             QuarantinedTaskResult,
+            locked=False,
         )
 
 

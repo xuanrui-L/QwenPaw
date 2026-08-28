@@ -79,7 +79,7 @@ export function MockElementDetail() {
   return (
     <MockFrame>
       <MockCaption>{t("tourMocks.sampleDetail")}</MockCaption>
-      <div className="rounded-md border border-[var(--color-border)] bg-white p-2">
+      <div className="rounded-md border border-[var(--color-border)] bg-white p-2 dark:bg-[var(--color-bg-elevated)]">
         <div className="flex items-center gap-1.5">
           <span className="rounded-full bg-[var(--color-accent-soft)] px-1.5 py-px text-[9px] font-semibold text-[var(--color-accent)]">
             {t("tourMocks.frame")}
@@ -120,7 +120,7 @@ export function MockElementDetail() {
 export function MockSelectionDemo() {
   const { t } = useTranslation();
   const chip = (
-    <span className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[var(--color-text-primary)] shadow-sm">
+    <span className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] bg-white px-1.5 py-0.5 text-[9px] font-semibold text-[var(--color-text-primary)] shadow-sm dark:bg-[var(--color-bg-elevated)]">
       <MessageSquarePlus className="h-3 w-3" />
       {t("tourMocks.addToConversation")}
     </span>
@@ -140,7 +140,7 @@ export function MockSelectionDemo() {
           {chip}
         </div>
         <div className="flex items-center gap-2">
-          <div className="relative h-4 w-40 overflow-hidden rounded border border-[var(--color-border)] bg-white">
+          <div className="relative h-4 w-40 overflow-hidden rounded border border-[var(--color-border)] bg-white dark:bg-[var(--color-bg-elevated)]">
             <span className="absolute inset-y-0 left-[30%] w-[40%] border-x border-[var(--color-accent)] bg-[var(--color-accent-soft)]" />
           </div>
           {chip}
@@ -159,10 +159,10 @@ export function MockAgentChat() {
         <p className="ml-auto w-fit max-w-[85%] rounded-lg bg-[var(--color-accent)] px-2 py-1 text-[10px] text-white">
           {t("tourMocks.sampleMessage")}
         </p>
-        <p className="w-fit max-w-[85%] rounded-lg bg-white px-2 py-1 text-[10px] text-[var(--color-text-secondary)]">
+        <p className="w-fit max-w-[85%] rounded-lg bg-white px-2 py-1 text-[10px] text-[var(--color-text-secondary)] dark:bg-[var(--color-bg-elevated)]">
           {t("tourMocks.sampleReply")}
         </p>
-        <span className="inline-flex items-center gap-1 rounded border border-[var(--color-border)] bg-white px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)]">
+        <span className="inline-flex items-center gap-1 rounded border border-[var(--color-border)] bg-white px-1.5 py-0.5 text-[9px] text-[var(--color-text-tertiary)] dark:bg-[var(--color-bg-elevated)]">
           {t("tourMocks.sampleTool")}
         </span>
       </div>
@@ -196,7 +196,7 @@ export function MockAssetCards() {
         {cards.map((card) => (
           <div
             key={card.name}
-            className="w-20 overflow-hidden rounded-md border border-[var(--color-border)] bg-white"
+            className="w-20 overflow-hidden rounded-md border border-[var(--color-border)] bg-white dark:bg-[var(--color-bg-elevated)]"
           >
             <div
               className={`flex h-10 items-center justify-center text-[9px] font-bold ${card.tone}`}

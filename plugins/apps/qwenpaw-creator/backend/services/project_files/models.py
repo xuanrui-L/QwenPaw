@@ -197,6 +197,11 @@ class SourceAssetVersion(StrictModel):
     logical_asset_id: EntityId
     name: str
     file_id: EntityId | None = None
+    # For file-backed versions this is the content sha256.  For remote-URL
+    # versions (file_id is None) it is the sha256 of the public URL — an
+    # identity fingerprint, never comparable against bytes; content
+    # integrity for cached bytes flows through RemoteCacheEntry.sha256.
+    # The validator below enforces the URL-fingerprint invariant.
     checksum: Sha256
     media_kind: Literal["image", "video", "audio", "document", "text", "other"]
     media_type: str = Field(min_length=1)

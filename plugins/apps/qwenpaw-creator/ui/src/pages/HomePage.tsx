@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, memo, useRef } from "react";
-import { Modal, message, Tooltip } from "antd";
+import { Modal, message, Tooltip, Button, Space } from "antd";
 import {
   Film,
   ArrowUp,
@@ -105,7 +105,7 @@ const ProjectCard = memo(function ProjectCard({
       onKeyDown={(e) => {
         if (e.key === "Enter") onOpen(project.projectId);
       }}
-      className="group relative flex w-full cursor-pointer flex-col gap-5 overflow-hidden rounded-lg border border-[#EAE9E7] bg-white p-4 transition-colors hover:bg-[rgba(243,243,242,0.3)]"
+      className="group relative flex w-full cursor-pointer flex-col gap-5 overflow-hidden rounded-lg border border-[#EAE9E7] bg-white p-4 transition-colors hover:bg-[rgba(243,243,242,0.3)] dark:border-[var(--color-border)] dark:bg-[var(--color-bg-card)] dark:hover:bg-[var(--color-bg-elevated)]"
     >
       <div className="flex flex-col gap-3">
         <div className="flex items-center gap-1">
@@ -120,7 +120,7 @@ const ProjectCard = memo(function ProjectCard({
                 onPreview(project);
               }}
               aria-label={t("home.previewFinal", { name: project.name })}
-              className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded bg-white px-2 text-sm font-medium leading-6 text-[#353332] transition-colors hover:text-[var(--color-accent)]"
+              className="flex h-6 shrink-0 cursor-pointer items-center gap-1 rounded bg-white px-2 text-sm font-medium leading-6 text-[#353332] transition-colors hover:text-[var(--color-accent)] dark:bg-[var(--color-bg-elevated)] dark:text-[var(--color-text-primary)]"
             >
               <MaskIcon src={previewEyeIcon} size={16} />
               {t("common.preview")}
@@ -288,21 +288,58 @@ export default function HomePage() {
 
   const handleDelete = useCallback(
     (project: ProjectSummary) => {
-      Modal.confirm({
+      const modal = Modal.confirm({
         title: t("home.deleteConfirm"),
         content: t("home.deleteConfirmContent", { name: project.name }),
-        okText: t("common.delete"),
-        cancelText: t("common.cancel"),
-        okButtonProps: { danger: true },
-        onOk: async () => {
-          try {
-            await deleteProject(project.projectId);
-            message.success(t("home.deleteSuccess"));
-            fetchProjects();
-          } catch {
-            message.error(t("home.deleteFailed"));
-          }
-        },
+        footer: (
+          <Space style={{ display: "flex", justifyContent: "flex-end" }}>
+            <Button onClick={() => modal.destroy()}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              danger
+              onClick={async () => {
+                try {
+                  await deleteProject(project.projectId, false);
+                  message.success(t("home.deleteSuccess"));
+                  fetchProjects();
+                  modal.destroy();
+                } catch {
+                  message.error(t("home.deleteFailed"));
+                }
+              }}
+            >
+              {t("common.delete")}
+            </Button>
+            <Button
+              danger
+              type="primary"
+              onClick={() => {
+                modal.destroy();
+                Modal.confirm({
+                  title: t("home.deleteAllData"),
+                  content: t("home.deleteAllDataConfirmContent", {
+                    name: project.name,
+                  }),
+                  okText: t("home.deleteAllData"),
+                  cancelText: t("common.cancel"),
+                  okButtonProps: { danger: true },
+                  onOk: async () => {
+                    try {
+                      await deleteProject(project.projectId, true);
+                      message.success(t("home.deleteAllDataSuccess"));
+                      fetchProjects();
+                    } catch {
+                      message.error(t("home.deleteAllDataFailed"));
+                    }
+                  },
+                });
+              }}
+            >
+              {t("home.deleteAllData")}
+            </Button>
+          </Space>
+        ),
       });
     },
     [fetchProjects],
@@ -461,7 +498,7 @@ export default function HomePage() {
             <div className="hero-fade-up">
               <HeroTitle />
             </div>
-            <p className="hero-fade-up mt-6 w-[624px] max-w-full text-center text-sm leading-7 text-[#3D3D3D] [animation-delay:0.08s]">
+            <p className="hero-fade-up mt-6 w-[624px] max-w-full text-center text-sm leading-7 text-[#3D3D3D] [animation-delay:0.08s] dark:text-[var(--color-text-secondary)]">
               {t("home.startCreatingDesc")}
               <br />
               {t("home.startCreatingDesc2")}
@@ -495,7 +532,7 @@ export default function HomePage() {
           </div>
         </main>
       ) : (
-        <main className="min-h-[calc(100vh-72px)] bg-[linear-gradient(180deg,#FFFFFF_31%,#FAFAFA_43%)]">
+        <main className="min-h-[calc(100vh-72px)] bg-[linear-gradient(180deg,#FFFFFF_31%,#FAFAFA_43%)] dark:bg-[linear-gradient(180deg,var(--color-bg-primary)_31%,var(--color-bg-layout)_43%)]">
           <div className="mx-auto w-full max-w-[1360px] px-5">
             {!llmReady && (
               <button
@@ -523,7 +560,7 @@ export default function HomePage() {
                   value={sortBy}
                   onChange={handleSortChange}
                   aria-label={t("home.sortBy")}
-                  className="cursor-pointer rounded-md border border-[#EAE9E7] bg-white px-3 py-1 text-sm font-medium leading-6 text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
+                  className="cursor-pointer rounded-md border border-[#EAE9E7] bg-white px-3 py-1 text-sm font-medium leading-6 text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)] dark:border-[var(--color-border)] dark:bg-[var(--color-bg-primary)]"
                 >
                   {SORT_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -533,7 +570,7 @@ export default function HomePage() {
                 </select>
                 <button
                   onClick={handleSortOrderToggle}
-                  className="cursor-pointer rounded-md border border-[#EAE9E7] bg-white p-1.5 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  className="cursor-pointer rounded-md border border-[#EAE9E7] bg-white p-1.5 text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-[var(--color-border)] dark:bg-[var(--color-bg-primary)]"
                   title={
                     sortOrder === "asc"
                       ? t("home.ascending")
@@ -549,7 +586,7 @@ export default function HomePage() {
                 <button
                   onClick={() => setImporterOpen(true)}
                   data-onboarding-id="import-project"
-                  className="flex cursor-pointer items-center gap-2 rounded-md border border-[#EAE9E7] bg-white px-3 py-1 text-sm font-medium leading-6 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  className="flex cursor-pointer items-center gap-2 rounded-md border border-[#EAE9E7] bg-white px-3 py-1 text-sm font-medium leading-6 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-[var(--color-border)] dark:bg-[var(--color-bg-primary)]"
                 >
                   <MaskIcon src={importProjectIcon} size={20} />
                   {t("home.importProject")}
@@ -560,7 +597,7 @@ export default function HomePage() {
             {loading ? (
               <div
                 data-onboarding-id="project-list"
-                className="flex items-center justify-center rounded-lg border border-[#EAE9E7] bg-white py-28"
+                className="flex items-center justify-center rounded-lg border border-[#EAE9E7] bg-white py-28 dark:border-[var(--color-border)] dark:bg-[var(--color-bg-card)]"
               >
                 <div className="text-sm text-[var(--color-text-secondary)]">
                   {t("common.loading")}
@@ -569,7 +606,7 @@ export default function HomePage() {
             ) : projects.length === 0 ? (
               <div
                 data-onboarding-id="project-list"
-                className="flex flex-col items-center justify-center rounded-lg border border-[#EAE9E7] bg-white px-6 py-28 text-center"
+                className="flex flex-col items-center justify-center rounded-lg border border-[#EAE9E7] bg-white px-6 py-28 text-center dark:border-[var(--color-border)] dark:bg-[var(--color-bg-card)]"
               >
                 <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-lg bg-[var(--color-accent-soft)]">
                   <Film className="h-7 w-7 text-[var(--color-accent)]" />
@@ -602,7 +639,7 @@ export default function HomePage() {
           {/* Cards dissolve into the page bottom before reaching the pill. */}
           <div
             aria-hidden="true"
-            className="pointer-events-none fixed inset-x-0 bottom-0 z-30 h-[240px] bg-[linear-gradient(180deg,rgba(250,250,250,0)_0%,rgba(250,250,250,0.9)_45%,#FAFAFA_100%)]"
+            className="pointer-events-none fixed inset-x-0 bottom-0 z-30 h-[240px] bg-[linear-gradient(180deg,rgba(250,250,250,0)_0%,rgba(250,250,250,0.9)_45%,#FAFAFA_100%)] dark:bg-[linear-gradient(180deg,color-mix(in_srgb,var(--background)_0%,transparent)_0%,color-mix(in_srgb,var(--background)_90%,transparent)_45%,var(--background)_100%)]"
           />
           <button
             type="button"

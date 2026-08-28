@@ -22,6 +22,7 @@ Safety posture:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -88,6 +89,7 @@ _DETERMINISTIC_ERROR_CODES = frozenset(
         "VIDEO_REFERENCE_BUDGET_EXCEEDED",
         "IMAGE_MODEL_CAPABILITY_UNKNOWN",
         "VIDEO_MODEL_CAPABILITY_UNKNOWN",
+        "VALIDATION_ERROR",
     },
 )
 
@@ -133,6 +135,7 @@ def _quarantined_stale_targets(tasks: Sequence[Any]) -> set[str]:
 
 
 _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
+_S2V_COMMANDS = {CreatorCommandType.GENERATE_S2V_VIDEO.value}
 _COMPOSE_COMMANDS = {CreatorCommandType.COMPOSE_FINAL_VIDEO.value}
 
 # Publication stays non-blocking, but dependent unattended work waits for the
@@ -172,12 +175,14 @@ class WorkGraphScheduler:
         *,
         image_dispatch: Callable[..., Awaitable[Any]] | None = None,
         r2v_dispatch: Callable[..., Awaitable[Any]] | None = None,
+        s2v_dispatch: Callable[..., Awaitable[Any]] | None = None,
         on_tick: DispatchHook | None = None,
     ) -> None:
         self.services = services
         self.executions = ProjectExecutionStore(services.root)
         self._image_dispatch = image_dispatch
         self._r2v_dispatch = r2v_dispatch
+        self._s2v_dispatch = s2v_dispatch
         self._on_tick = on_tick
         self._wakes: dict[str, asyncio.Event] = {}
         self._loops: dict[str, asyncio.Task[None]] = {}
@@ -227,13 +232,24 @@ class WorkGraphScheduler:
         larger reference budget after IMAGE_REFERENCE_BUDGET_EXCEEDED
         left the node deterministically locked forever (same inputs,
         same fingerprint, no unlock path).
+
+        The value is embedded in the dispatch idempotency key, which is
+        persisted as a single filesystem path segment.  Model names carry
+        characters outside that alphabet, and joining them raw with "|"
+        made every dispatch fail path validation before reaching a
+        provider, so inputs and models are folded into one digest.
         """
 
         base = node.dispatch_fingerprint or node.node_id
-        return (
-            f"{base}|img:{get_image_model_name().strip()}"
-            f"|vid:{get_video_model_name().strip()}"
-        )
+        return hashlib.sha256(
+            "\x1f".join(
+                (
+                    base,
+                    get_image_model_name().strip(),
+                    get_video_model_name().strip(),
+                ),
+            ).encode("utf-8"),
+        ).hexdigest()[:24]
 
     # -- lifecycle -----------------------------------------------------
 
@@ -343,6 +359,25 @@ class WorkGraphScheduler:
             get_execution_authorization_mode()
             == EXECUTION_AUTHORIZATION_ALLOW_ALL
         )
+
+    def deterministic_failure_nodes_for_project(
+        self,
+        project_id: str,
+    ) -> dict[str, str]:
+        """Nodes whose dispatch failed with a deterministic error.
+
+        These nodes are stuck READY but cannot be re-dispatched until the
+        agent modifies the project.  The driver uses this to decide whether
+        a model turn is needed.
+        """
+        return {
+            node_id: error
+            for (
+                pid,
+                node_id,
+            ), error in self._deterministic_failure_nodes.items()
+            if pid == project_id
+        }
 
     # pylint: disable=too-many-statements
     async def tick(self, project_id: str) -> WorkGraph | None:
@@ -765,7 +800,9 @@ class WorkGraphScheduler:
             generation = self._transient_retries.get(ledger_key, 0)
             if generation:
                 idempotency_key = f"{idempotency_key}-r{generation}"
-        if node.command in _R2V_COMMANDS:
+        if node.command in _S2V_COMMANDS:
+            dispatch = self._s2v_dispatch or _default_s2v_dispatch
+        elif node.command in _R2V_COMMANDS:
             dispatch = self._r2v_dispatch or _default_r2v_dispatch
         elif node.command in _COMPOSE_COMMANDS:
             dispatch = _default_compose_dispatch
@@ -823,6 +860,37 @@ async def _default_r2v_dispatch(
     # The r2v entry point has a single command and takes no command kwarg.
     del command
     return await execute_file_r2v_command(
+        services,
+        project_id=project_id,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def _default_s2v_dispatch(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    command: str | None = None,
+    target_ref: str,
+    arguments: dict[str, Any],
+    idempotency_key: str,
+) -> Any:
+    # pylint: disable=import-outside-toplevel
+    from services.media_files.r2v_execution import (
+        execute_file_s2v_command,
+        preflight_s2v_face_detect,
+    )
+
+    del command
+    await preflight_s2v_face_detect(
+        services,
+        project_id=project_id,
+        target_ref=target_ref,
+        arguments=arguments,
+    )
+    return await execute_file_s2v_command(
         services,
         project_id=project_id,
         target_ref=target_ref,

@@ -39,6 +39,7 @@ from services.project_files.store import (
     UnsafeProjectPath,
     _safe_project_id,
 )
+from services.runtime_files.atomic_store import atomic_replace_path
 from services.runtime_files.locking import CrossProcessFileLock
 from services.storage_root import require_creator_data_root
 from utils.logger import setup_logger
@@ -210,7 +211,7 @@ class _ExampleProgressWriter:
             )
             temporary = self._path.with_suffix(f".{uuid4().hex}.tmp")
             temporary.write_text(payload, encoding="utf-8")
-            os.replace(temporary, self._path)
+            atomic_replace_path(temporary, self._path)
         except OSError:
             # Progress is best effort; a write failure must never break the
             # download itself.

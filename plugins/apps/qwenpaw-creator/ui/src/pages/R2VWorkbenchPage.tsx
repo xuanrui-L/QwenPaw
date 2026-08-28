@@ -367,7 +367,7 @@ export default function R2VWorkbenchPage() {
           <button
             type="button"
             onClick={() => navigate(planPath, true)}
-            className="mt-4 rounded border border-[var(--color-border)] bg-white px-3 py-1.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]"
+            className="mt-4 rounded border border-[var(--color-border)] bg-white px-3 py-1.5 text-sm font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] dark:bg-[var(--color-bg-primary)]"
           >
             {t("r2v.backToPlan")}
           </button>

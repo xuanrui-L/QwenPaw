@@ -93,6 +93,10 @@
     "deleteConfirmContent": "Are you sure you want to delete project \"{{name}}\"? This action cannot be undone.",
     "deleteSuccess": "Project deleted",
     "deleteFailed": "Failed to delete project",
+    "deleteAllData": "Delete All Data",
+    "deleteAllDataConfirmContent": "Are you sure you want to delete project \"{{name}}\" and ALL associated data (assets, sessions, generated content)? This action cannot be undone.",
+    "deleteAllDataSuccess": "Project and all related data deleted",
+    "deleteAllDataFailed": "Failed to delete project data",
     "copyProject": "Copy {{name}}",
     "copySuccess": "Project copied",
     "copyFailed": "Failed to copy project",
@@ -139,7 +143,10 @@
     "heroTitleDirector": "Director",
     "heroTitleWriter": "Writer",
     "heroTitleEffects": "Effects",
-    "heroTitleEditor": "Editor"
+    "heroTitleEditor": "Editor",
+    "videoTemplate": "Video Template",
+    "videoTemplateNone": "No Template",
+    "videoTemplateHint": "Choose a preset to get started quickly"
   },
   "nav": {
     "videoPlan": "Video Plan",
