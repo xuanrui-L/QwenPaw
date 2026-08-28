@@ -155,7 +155,8 @@ Shot 是 Creator 中最小的可编排叙事/动作节点，每个 Shot 同时�
 - `camera` / `framing`：服务于内容节拍和镜头节奏
 
 3. 单个 R2V Element 的时长必须落在「当前视频模型时长要求」内，不设 Creator 全局上限。支持 30 秒的模型可以生成单个 30 秒 Element；只支持 3–15 秒的模型则不得规划 30 秒单段。只有内容需要或超过当前模型能力时才拆为多个首尾衔接的 Element；下一项的 `start_tick` 等于上一项的 `start_tick + duration_tick`，除非创作意图明确要求 gap 或 overlap。
-4. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。先从用户描述中提取每个 VisualEntity 的全部必需状态，完整写入 `required_variant_ids`；再建立对应 Variant，并让每个 Element 通过 `visual_variant_refs` 绑定正确状态。
+4. **R2V Element 时长必须是整数秒（硬性规则）**：`span.duration_tick` 必须让该 Element 的时长恰好等于整数秒（例如 `ticks_per_second=1000` 时 `duration_tick` 只能是 3000、4000，不能是 3500）。视频执行器只接受 1–60 的整数秒，小数时长在派发时被拒，该镜头永远拿不到视频且不会自动纠正（实战事故：规划写了 3.5 秒的两个镜头，成片只剩一个镜头有画面）。需要更细的节奏就调整 Shot 内部的动作分配，不要用小数秒时长。
+5. `creation.storyboard_prompt`、`video_prompt`、recipe 和 exact reference version IDs 属于当前 Element。先从用户描述中提取每个 VisualEntity 的全部必需状态，完整写入 `required_variant_ids`；再建立对应 Variant，并让每个 Element 通过 `visual_variant_refs` 绑定正确状态。
 
 **显式媒体预算覆盖默认资产拆分（硬性规则）**：若用户明确把**共享角色/场景设计资产**限制为“一张共享参考图/合成基准图”，该资产上限优先于逐角色 Variant 和 cast lineup 的默认做法。此时把需要共同保持的角色、道具和场景建模为**一个复合 scene VisualEntity 的一个 Variant**，其 prompt 同时包含所有持久判别子；所有 R2V Element 通过同一个 `scene_ref` / `visual_variant_refs` 复用这张选定图。不得再创建会被调度器自动展开的独立角色/道具 `required_variant_ids`，不得创建需要额外角色锚点和额外图片调用的 cast lineup。注意：R2V 执行器仍强制每个 R2V Element 生成一个归属于该 Element 的 storyboard，不能用共享设计 Artifact 冒充、跨 Element 复用或构造占位版本。若用户限制的是**全部图片生成调用总数**，写入前必须计算 `共享设计图数 + R2V Element 数`；超出上限时在任何付费调用前汇报冲突并 `[BLOCKED]`，不得偷偷超限或删除必需 storyboard。写入前按调度器实际节点计算图片/视频/TTS 调用总数，必须不超过用户声明的硬上限。
 

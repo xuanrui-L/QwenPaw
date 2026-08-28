@@ -673,12 +673,13 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
             storyboard_id: str | None = None
             storyboard_slot: str | None = None
+            deps: list[str] = []
+            gate_missing: list[str] = []
 
             if creation_type == "r2v":
                 # R2V: storyboard + video dual-node structure; only r2v
                 # elements produce a storyboard (T2V/I2V/S2V creations carry
                 # no shots, storyboard prompt or reference stacks).
-                deps: list[str] = []
                 for ref in creation.cast_lineup_refs:
                     deps.append(f"lineup:{ref}")
                 for entity_id, variant_id in sorted(
@@ -722,9 +723,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     project.settings.aspect_ratio,
                     len(creation.shots.order),
                     sorted(
-                        selected
-                        for selected in storyboard_refs
-                        if selected
+                        selected for selected in storyboard_refs if selected
                     ),
                 )
                 if task is not None:

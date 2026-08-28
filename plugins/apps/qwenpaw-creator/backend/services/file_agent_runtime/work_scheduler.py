@@ -233,6 +233,12 @@ class WorkGraphScheduler:
         larger reference budget after IMAGE_REFERENCE_BUDGET_EXCEEDED
         left the node deterministically locked forever (same inputs,
         same fingerprint, no unlock path).
+
+        The value is embedded in the dispatch idempotency key, which is
+        persisted as a single filesystem path segment.  Model names carry
+        characters outside that alphabet, and joining them raw with "|"
+        made every dispatch fail path validation before reaching a
+        provider, so inputs and models are folded into one digest.
         """
 
         base = node.dispatch_fingerprint or node.node_id

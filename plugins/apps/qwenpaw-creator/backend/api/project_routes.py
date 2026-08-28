@@ -393,69 +393,70 @@ async def create_project(
     )
 
     def operation() -> ProjectCreateResponse:
-        # The name-uniqueness check and the create must share one
-        # cross-process lock; per-project lifecycle locks have different
-        # domains for different project ids.
+        # The global name lock only covers the uniqueness check.  The create
+        # itself stages privately and publishes via an atomic rename that
+        # refuses an existing Project id, so holding a global boundary across
+        # the Runtime bootstrap would only serialize unrelated creations.
+        target_name = request.name.strip()
         with CrossProcessFileLock(
             services.projects.root / ".project-names.lock",
         ):
             existing = services.projects.list()
-            target_name = request.name.strip()
             if any(item.name == target_name for item in existing):
                 raise ValidationError(
                     f"项目名称「{target_name}」已存在，请使用其他名称",
                 )
 
-            holder: list[ProjectRuntimeBootstrap] = []
+        holder: list[ProjectRuntimeBootstrap] = []
 
-            def initialize(staged_project_root) -> None:
-                holder.append(
-                    services.sessions.initialize_staged_project(
-                        staged_project_root,
-                        project_id,
-                        session_id=session_id,
-                        conversation_id=conversation_id,
-                        session_metadata={
-                            "projectCreate": {
-                                "clientRequestId": client_request_id,
-                                "requestHash": request_hash,
-                                "projectSnapshotId": project_snapshot_id,
-                                "response": initial_response.model_dump(
-                                    mode="json",
-                                    by_alias=True,
-                                ),
-                            },
+        def initialize(staged_project_root) -> None:
+            holder.append(
+                services.sessions.initialize_staged_project(
+                    staged_project_root,
+                    project_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    session_metadata={
+                        "projectCreate": {
+                            "clientRequestId": client_request_id,
+                            "requestHash": request_hash,
+                            "projectSnapshotId": project_snapshot_id,
+                            "response": initial_response.model_dump(
+                                mode="json",
+                                by_alias=True,
+                            ),
                         },
-                        initial_goal=request.initial_goal,
-                        goal_id=goal_id
+                    },
+                    initial_goal=request.initial_goal,
+                    goal_id=goal_id
+                    if request.initial_goal is not None
+                    else None,
+                    initial_message_id=(
+                        message_id
                         if request.initial_goal is not None
-                        else None,
-                        initial_message_id=(
-                            message_id
-                            if request.initial_goal is not None
-                            else None
-                        ),
-                        initial_client_message_id=(
-                            f"initial-goal:{client_request_id}"
-                            if request.initial_goal is not None
-                            else None
-                        ),
+                        else None
                     ),
-                )
+                    initial_client_message_id=(
+                        f"initial-goal:{client_request_id}"
+                        if request.initial_goal is not None
+                        else None
+                    ),
+                ),
+            )
 
-            try:
-                snapshot = services.projects.create(
-                    project,
-                    initialize_staged_project=initialize,
-                )
-            except ProjectAlreadyExists:
-                return _existing_bootstrap(
-                    services,
-                    project_id=project_id,
-                    expected_session_id=session_id,
-                    expected_conversation_id=conversation_id,
-                    request_hash=request_hash,
-                )
+        try:
+            snapshot = services.projects.create(
+                project,
+                initialize_staged_project=initialize,
+            )
+        except ProjectAlreadyExists:
+            return _existing_bootstrap(
+                services,
+                project_id=project_id,
+                expected_session_id=session_id,
+                expected_conversation_id=conversation_id,
+                request_hash=request_hash,
+            )
         if len(holder) != 1:
             raise StorageIntegrityError("Project Runtime 未随 Project 原子创建")
         services.poller.note_commit(snapshot)
@@ -484,6 +485,11 @@ async def create_project(
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
     project_id: str,
+    cascade: bool = Query(
+        True,
+        description="When false, only the project manifest is removed; "
+        "assets and runtime data are preserved on disk.",
+    ),
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> Response:
@@ -503,7 +509,11 @@ async def delete_project(
 
     _cancel_detached_project_tasks(services, project_id)
     try:
-        await asyncio.to_thread(services.projects.delete, project_id)
+        await asyncio.to_thread(
+            services.projects.delete,
+            project_id,
+            cascade=cascade,
+        )
     except ProjectNotFound:
         pass
     except (ProjectIntegrityError, ProjectStoreError) as exc:
@@ -583,6 +593,12 @@ async def copy_project(
     new_conversation_id = _stable_id("conversation", copy_identity)
 
     def operation() -> dict[str, Any]:
+        # The global name lock only covers the replay-receipt check and the
+        # copy-name computation.  The asset tree copy and Runtime bootstrap
+        # run in a private staging directory outside the lock (export learned
+        # this the hard way: holding a global boundary across large-tree I/O
+        # caused routine 10-second lock timeouts) and are published by the
+        # create's atomic rename, which refuses an already-existing Project.
         with CrossProcessFileLock(
             services.projects.root / ".project-names.lock",
         ):
@@ -597,86 +613,87 @@ async def copy_project(
                 )
             except ProjectNotFound:
                 pass
+            source_name = services.projects.read(project_id).project.name
+            copy_name = f"{source_name} copy"
+            existing = services.projects.list()
+            base_name = copy_name
+            suffix = 1
+            while any(item.name == copy_name for item in existing):
+                suffix += 1
+                copy_name = f"{base_name} {suffix}"
 
-            # Freeze the source Project and its asset tree at one revision for
-            # the whole copy. Project commits/deletion take the exclusive side.
-            with services.projects.lifecycle_lock(project_id, shared=True):
-                source_snapshot = services.projects.read(project_id)
-                source = source_snapshot.project
-                source_root = services.projects.project_root(project_id)
-                copy_name = f"{source.name} copy"
-                existing = services.projects.list()
-                base_name = copy_name
-                suffix = 1
-                while any(item.name == copy_name for item in existing):
-                    suffix += 1
-                    copy_name = f"{base_name} {suffix}"
+        # Freeze the source Project and its asset tree at one revision for
+        # the whole copy. Project commits/deletion take the exclusive side.
+        with services.projects.lifecycle_lock(project_id, shared=True):
+            source_snapshot = services.projects.read(project_id)
+            source = source_snapshot.project
+            source_root = services.projects.project_root(project_id)
 
-                new_project = Project.new(
-                    project_id=new_project_id,
-                    name=copy_name,
-                    description=source.description,
-                    scenario=source.scenario,
-                    settings=source.settings,
-                )
-                new_project = new_project.model_copy(
-                    update={
-                        "strategy": source.strategy,
-                        "visual": source.visual,
-                        "timelines": source.timelines,
-                        "assets": source.assets,
-                    },
-                )
-                initial_response = {"projectId": new_project_id}
-                holder: list[ProjectRuntimeBootstrap] = []
+            new_project = Project.new(
+                project_id=new_project_id,
+                name=copy_name,
+                description=source.description,
+                scenario=source.scenario,
+                settings=source.settings,
+            )
+            new_project = new_project.model_copy(
+                update={
+                    "strategy": source.strategy,
+                    "visual": source.visual,
+                    "timelines": source.timelines,
+                    "assets": source.assets,
+                },
+            )
+            initial_response = {"projectId": new_project_id}
+            holder: list[ProjectRuntimeBootstrap] = []
 
-                def initialize(staged_root: Path) -> None:
-                    assets_src = source_root / "assets"
-                    assets_dst = staged_root / "assets"
-                    if assets_src.is_dir():
-                        for item in assets_src.iterdir():
-                            dst = assets_dst / item.name
-                            if item.is_dir():
-                                shutil.copytree(
-                                    str(item),
-                                    str(dst),
-                                    dirs_exist_ok=True,
-                                )
-                            else:
-                                shutil.copy2(str(item), str(dst))
-                    holder.append(
-                        services.sessions.initialize_staged_project(
-                            staged_root,
-                            new_project_id,
-                            session_id=new_session_id,
-                            conversation_id=new_conversation_id,
-                            session_metadata={
-                                "projectCopy": {
-                                    "clientRequestId": client_request_id,
-                                    "requestHash": request_hash,
-                                    "sourceProjectId": project_id,
-                                    "sourceGeneration": source_snapshot.generation,
-                                    "sourceEtag": source_snapshot.etag,
-                                    "response": initial_response,
-                                },
+            def initialize(staged_root: Path) -> None:
+                assets_src = source_root / "assets"
+                assets_dst = staged_root / "assets"
+                if assets_src.is_dir():
+                    for item in assets_src.iterdir():
+                        dst = assets_dst / item.name
+                        if item.is_dir():
+                            shutil.copytree(
+                                str(item),
+                                str(dst),
+                                dirs_exist_ok=True,
+                            )
+                        else:
+                            shutil.copy2(str(item), str(dst))
+                holder.append(
+                    services.sessions.initialize_staged_project(
+                        staged_root,
+                        new_project_id,
+                        session_id=new_session_id,
+                        conversation_id=new_conversation_id,
+                        session_metadata={
+                            "projectCopy": {
+                                "clientRequestId": client_request_id,
+                                "requestHash": request_hash,
+                                "sourceProjectId": project_id,
+                                "sourceGeneration": source_snapshot.generation,
+                                "sourceEtag": source_snapshot.etag,
+                                "response": initial_response,
                             },
-                        ),
-                    )
+                        },
+                    ),
+                )
 
-                try:
-                    snapshot = services.projects.create(
-                        new_project,
-                        initialize_staged_project=initialize,
-                    )
-                except ProjectAlreadyExists:
-                    return _existing_copy_receipt(
-                        services,
-                        target_project_id=new_project_id,
-                        expected_session_id=new_session_id,
-                        expected_conversation_id=new_conversation_id,
-                        client_request_id=client_request_id,
-                        request_hash=request_hash,
-                    )
+            try:
+                snapshot = services.projects.create(
+                    new_project,
+                    initialize_staged_project=initialize,
+                )
+            except ProjectAlreadyExists:
+                return _existing_copy_receipt(
+                    services,
+                    target_project_id=new_project_id,
+                    expected_session_id=new_session_id,
+                    expected_conversation_id=new_conversation_id,
+                    client_request_id=client_request_id,
+                    request_hash=request_hash,
+                )
 
         if len(holder) != 1:
             raise StorageIntegrityError(

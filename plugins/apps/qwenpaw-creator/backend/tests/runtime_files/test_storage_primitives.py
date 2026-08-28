@@ -5,10 +5,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-import asyncio
-import concurrent.futures
 import errno
-import multiprocessing
 import os
 import threading
 import time
@@ -195,20 +192,19 @@ def test_jsonl_never_skips_a_malformed_complete_line(tmp_path):
         store.append(EventRecord(worker=1, value=2))
 
 
-def test_concurrent_processes_allocate_unique_contiguous_jsonl_sequences(
+def test_concurrent_threads_allocate_unique_contiguous_jsonl_sequences(
     tmp_path,
 ):
     path = tmp_path / "events.jsonl"
-    context = multiprocessing.get_context("fork")
-    processes = [
-        context.Process(target=_append_events, args=(str(path), worker, 12))
+    threads = [
+        threading.Thread(target=_append_events, args=(str(path), worker, 12))
         for worker in range(4)
     ]
-    for process in processes:
-        process.start()
-    for process in processes:
-        process.join(timeout=10)
-        assert process.exitcode == 0
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
 
     entries = DurableJsonlStore(path, EventRecord).read_all()
     assert [entry.seq for entry in entries] == list(range(1, 49))
@@ -242,16 +238,15 @@ def _acquire(store: FieldBlockStore, pointer: str, **overrides):
     return store.acquire(json_pointer=pointer, **kwargs)
 
 
-def test_fcntl_lock_times_out_across_processes_and_releases_on_exit(tmp_path):
+def test_lock_times_out_while_held_and_recovers_after_release(tmp_path):
     path = tmp_path / "project-write.lock"
-    context = multiprocessing.get_context("fork")
-    ready = context.Event()
-    release = context.Event()
-    process = context.Process(
+    ready = threading.Event()
+    release = threading.Event()
+    holder = threading.Thread(
         target=_hold_lock,
         args=(str(path), ready, release),
     )
-    process.start()
+    holder.start()
     assert ready.wait(timeout=3)
 
     with pytest.raises(LockTimeoutError) as caught:
@@ -263,13 +258,15 @@ def test_fcntl_lock_times_out_across_processes_and_releases_on_exit(tmp_path):
             pass
     assert caught.value.phase == "resource"
     assert caught.value.waiter["mode"] == "exclusive"
-    assert caught.value.holder["pid"] == process.pid
+    assert caught.value.holder["pid"] == os.getpid()
 
-    process.terminate()
-    process.join(timeout=3)
-    assert process.exitcode not in {None, 0}
+    release.set()
+    holder.join(timeout=3)
+    assert not holder.is_alive()
     with CrossProcessFileLock(path, timeout_seconds=0.2):
-        assert path.exists()
+        pass
+    # In-process locks never create coordination files.
+    assert not path.exists()
 
 
 def test_same_thread_nested_lock_fails_immediately_with_owner_details(
@@ -283,45 +280,6 @@ def test_same_thread_nested_lock_fails_immediately_with_owner_details(
         ):
             with CrossProcessFileLock(path):
                 pass
-
-
-def test_lock_held_across_awaits_does_not_fault_its_recycled_worker(tmp_path):
-    """Field run 2026-08-26: a lifecycle lock taken with
-    ``to_thread(lock.acquire)`` stayed held while its pooled worker went
-    back to the executor. The next unrelated ``to_thread`` call that landed
-    on that same worker was rejected as a same-thread nested acquisition and
-    killed the r2v run. Ownership belongs to the awaiting coroutine here, not
-    to whichever worker happened to run the blocking acquire, so the second
-    attempt must report real contention instead.
-    """
-
-    path = tmp_path / "cross-await.lock"
-
-    async def scenario() -> BaseException:
-        loop = asyncio.get_running_loop()
-        # One worker makes "recycled onto the same thread" deterministic.
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        loop.set_default_executor(executor)
-        try:
-            holder = CrossProcessFileLock(path)
-            await holder.acquire_in_thread()
-            try:
-
-                def contend() -> None:
-                    with CrossProcessFileLock(path, timeout_seconds=0.2):
-                        pass
-
-                with pytest.raises(BaseException) as caught:
-                    await asyncio.to_thread(contend)
-                return caught.value
-            finally:
-                holder.release()
-        finally:
-            executor.shutdown(wait=True)
-
-    error = asyncio.run(scenario())
-    assert isinstance(error, LockTimeoutError)
-    assert "same-thread nested" not in str(error)
 
 
 def test_cross_thread_release_clears_the_acquiring_threads_owner(tmp_path):
@@ -352,48 +310,27 @@ def test_cross_thread_release_clears_the_acquiring_threads_owner(tmp_path):
     assert not errors
 
 
-def test_waiting_writer_closes_admission_to_late_poll_readers(tmp_path):
-    path = tmp_path / "writer-priority.lock"
-    gate = path.with_name(f"{path.name}.gate")
-    first_reader = CrossProcessFileLock(path, shared=True).acquire()
-    writer_acquired = threading.Event()
-    release_writer = threading.Event()
+def test_store_operations_create_no_lock_artifacts_on_disk(tmp_path):
+    record_path = tmp_path / "record.json"
+    store = AtomicJsonRecordStore(record_path)
+    store.write({"value": 1})
+    store.update(lambda value: {"value": value["value"] + 1})
+    stream = DurableJsonlStore(tmp_path / "events.jsonl", EventRecord)
+    stream.append(EventRecord(worker=1, value=1))
+    with CrossProcessFileLock(tmp_path / "domain.lock"):
+        pass
 
-    def writer() -> None:
-        with CrossProcessFileLock(path, timeout_seconds=1):
-            writer_acquired.set()
-            release_writer.wait(timeout=1)
-
-    writer_thread = threading.Thread(target=writer)
-    writer_thread.start()
-    deadline = time.monotonic() + 1
-    while (
-        not gate.exists() or not gate.read_bytes()
-    ) and time.monotonic() < deadline:
-        time.sleep(0.005)
-
-    late_errors: list[LockTimeoutError] = []
-
-    def late_reader() -> None:
-        try:
-            with CrossProcessFileLock(path, timeout_seconds=0.05, shared=True):
-                pass
-        except LockTimeoutError as error:
-            late_errors.append(error)
-
-    late_reader_thread = threading.Thread(target=late_reader)
-    late_reader_thread.start()
-    late_reader_thread.join(timeout=1)
-    assert late_errors and late_errors[0].phase == "admission"
-
-    first_reader.release()
-    assert writer_acquired.wait(timeout=1)
-    release_writer.set()
-    writer_thread.join(timeout=1)
-    assert not writer_thread.is_alive()
+    leftovers = [
+        entry.name
+        for entry in tmp_path.rglob("*")
+        if ".lock" in entry.name
+        or entry.name.endswith(".gate")
+        or entry.name.endswith(".readers")
+    ]
+    assert leftovers == []
 
 
-def test_writer_timeout_reports_the_shared_reader_owner(tmp_path):
+def test_writer_blocked_by_shared_holder_times_out(tmp_path):
     path = tmp_path / "reader-owner.lock"
     reader = CrossProcessFileLock(path, shared=True).acquire()
     failures: list[LockTimeoutError] = []
@@ -410,10 +347,7 @@ def test_writer_timeout_reports_the_shared_reader_owner(tmp_path):
     writer_thread.join(timeout=1)
     reader.release()
 
-    assert failures[0].phase == "resource"
-    observed = failures[0].holder["observedReaders"]
-    assert observed[0]["threadId"] == threading.get_ident()
-    assert observed[0]["mode"] == "shared"
+    assert failures and failures[0].phase == "resource"
 
 
 @pytest.mark.parametrize(
@@ -519,3 +453,151 @@ def test_content_store_tolerates_windows_like_private_file_surface(
 
     assert stored.path.read_bytes() == b"creator-content"
     assert stored.size == len(b"creator-content")
+
+
+# ── Conflict regressions for the historical lock incidents ──────────────
+
+
+def test_hammering_readers_never_starve_or_slow_a_writer(tmp_path):
+    """The「停止按钮永远转圈」class: reads must not contend with writes."""
+
+    stream = DurableJsonlStore(tmp_path / "events.jsonl", EventRecord)
+    record = AtomicJsonRecordStore(tmp_path / "session.json")
+    record.write({"status": "IDLE", "revision": 0})
+    stop = threading.Event()
+    reader_errors: list[BaseException] = []
+    read_counts = [0] * 6
+
+    def reader(index: int) -> None:
+        while not stop.is_set():
+            try:
+                stream.read_all()
+                stream.read_records_after(0, limit=20)
+                stream.last_seq()
+                value = record.read_or_none()
+                assert value is None or isinstance(value["revision"], int)
+                read_counts[index] += 1
+            except BaseException as error:  # pragma: no cover - asserted
+                reader_errors.append(error)
+                return
+
+    threads = [
+        threading.Thread(target=reader, args=(index,)) for index in range(6)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        started = time.monotonic()
+        for value in range(1, 201):
+            stream.append(EventRecord(worker=0, value=value))
+            record.update(
+                lambda current: {
+                    "status": "RUNNING",
+                    "revision": current["revision"] + 1,
+                },
+            )
+        writer_elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=5)
+    assert not reader_errors
+    # Before the redesign every read also took the write lock, and a single
+    # writer routinely hit the 10s timeout under this pressure.
+    assert writer_elapsed < 20.0
+    assert [e.seq for e in stream.read_all()] == list(range(1, 201))
+    assert record.read()["revision"] == 200
+    assert all(count > 0 for count in read_counts)
+
+
+def test_concurrent_updates_to_one_record_lose_nothing(tmp_path):
+    """Mutual exclusion of the in-process per-path lock: no lost updates."""
+
+    record = AtomicJsonRecordStore(tmp_path / "counter.json")
+    record.write({"value": 0})
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            for _ in range(40):
+                record.update(lambda current: {"value": current["value"] + 1})
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors
+    assert record.read()["value"] == 200
+
+
+def test_shared_holders_overlap_and_exclude_the_exclusive_side(tmp_path):
+    """Runtime writers share the lifecycle lock; delete/commit waits."""
+
+    path = tmp_path / "project-lifecycle.lock"
+    first_in = threading.Event()
+    second_in = threading.Event()
+    release_shared = threading.Event()
+    order: list[str] = []
+
+    def shared_holder(name: str, entered: threading.Event) -> None:
+        with CrossProcessFileLock(path, shared=True, timeout_seconds=5):
+            entered.set()
+            release_shared.wait(timeout=5)
+            order.append(f"{name}-released")
+
+    def exclusive_writer() -> None:
+        with CrossProcessFileLock(path, timeout_seconds=5):
+            order.append("exclusive-acquired")
+
+    holders = [
+        threading.Thread(target=shared_holder, args=("a", first_in)),
+        threading.Thread(target=shared_holder, args=("b", second_in)),
+    ]
+    for thread in holders:
+        thread.start()
+    assert first_in.wait(timeout=2)
+    assert second_in.wait(timeout=2)
+    writer = threading.Thread(target=exclusive_writer)
+    writer.start()
+    time.sleep(0.05)
+    assert "exclusive-acquired" not in order
+    release_shared.set()
+    writer.join(timeout=5)
+    for thread in holders:
+        thread.join(timeout=5)
+    assert order[-1] == "exclusive-acquired"
+
+
+def test_torn_crash_tail_never_breaks_lockfree_readers(tmp_path):
+    """A crash fragment is invisible to readers and repaired by append."""
+
+    path = tmp_path / "events.jsonl"
+    stream = DurableJsonlStore(path, EventRecord)
+    for value in range(1, 4):
+        stream.append(EventRecord(worker=1, value=value))
+    with path.open("ab") as handle:
+        handle.write(b'{"seq":4,"record":{"worker":1')
+
+    errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            for _ in range(50):
+                assert [e.seq for e in stream.read_all()] == [1, 2, 3]
+                assert stream.last_seq() == 3
+        except BaseException as error:  # pragma: no cover - asserted below
+            errors.append(error)
+
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not errors
+    # Reads never truncated the fragment; only the next append repairs it.
+    assert not path.read_bytes().endswith(b"\n")
+    assert stream.append(EventRecord(worker=1, value=4)).seq == 4
+    assert [e.seq for e in stream.read_all()] == [1, 2, 3, 4]

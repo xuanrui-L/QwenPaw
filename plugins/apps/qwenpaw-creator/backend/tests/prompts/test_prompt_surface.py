@@ -342,9 +342,7 @@ def test_visual_development_is_not_an_active_delegation_surface() -> None:
         _specialist_prompt(SpecialistRole.VISUAL_DEVELOPMENT)
 
 
-def test_active_surfaces_never_mention_the_retired_visual_specialist() -> (
-    None
-):
+def test_active_surfaces_never_mention_the_retired_visual_specialist() -> None:
     combined = "\n".join(_active_prompt_texts())
     assert "visual_development_agent" not in combined
     assert "视觉开发 Specialist" not in combined

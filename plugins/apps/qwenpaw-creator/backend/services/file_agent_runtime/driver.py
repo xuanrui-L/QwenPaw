@@ -1502,12 +1502,84 @@ class FileCreatorAgentRuntime:
         for summary in summaries:
             self.work_scheduler.wake(summary.project_id)
             try:
+                await self._reclaim_startup_orphans(summary.project_id)
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "startup orphan reclaim failed for %s",
+                    summary.project_id,
+                )
+            try:
                 await self._resume_interrupted_run(summary.project_id)
             except Exception:  # pylint: disable=broad-except
                 logger.exception(
                     "startup interrupted-run resume failed for %s",
                     summary.project_id,
                 )
+
+    async def _reclaim_startup_orphans(self, project_id: str) -> None:
+        """Fail over Agent runs stranded by an unclean previous exit.
+
+        Single-process deployment is the supported topology, so at startup no
+        other process can own a QUEUED/RUNNING run: any non-terminal run is a
+        crash leftover.  Without this pass the Session shows a phantom
+        "running" Agent until the user presses stop and the interrupt stall
+        fuse expires.  Media/specialist tasks are deliberately left alone:
+        they carry their own provider-resume machinery and an in-progress
+        cloud job may still be reusable.
+        """
+
+        try:
+            records = await asyncio.to_thread(self.runs.list, project_id)
+        except Exception:  # pylint: disable=broad-except
+            return
+        for run in records:
+            if run.status not in {
+                AgentRunStatus.QUEUED,
+                AgentRunStatus.RUNNING,
+            }:
+                continue
+            try:
+                await asyncio.to_thread(
+                    self.runs.transition,
+                    project_id,
+                    run.run_id,
+                    expected_status=run.status,
+                    status=AgentRunStatus.CANCELLED,
+                    updates={
+                        "error": {
+                            "code": "ORPHANED_BY_RESTART",
+                            "message": (
+                                "non-terminal run reclaimed at startup; the "
+                                "previous process exited before persisting a "
+                                "terminal status"
+                            ),
+                            "retryable": True,
+                        },
+                    },
+                )
+            except AgentRunStateConflict:
+                continue
+            logger.warning(
+                "reclaimed orphaned %s run at startup: project=%s run=%s",
+                run.status.value,
+                _log_safe(project_id),
+                _log_safe(run.run_id),
+            )
+            try:
+                session = await asyncio.to_thread(
+                    self.sessions.get_project_session_snapshot,
+                    project_id,
+                )
+            except Exception:  # pylint: disable=broad-except
+                continue
+            if session.active_run_id == run.run_id:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        self.sessions.clear_active_run,
+                        project_id,
+                        session.session_id,
+                        expected_run_id=run.run_id,
+                    )
 
     async def _resume_interrupted_run(self, project_id: str) -> None:
         """Queue one YOLO continuation for a stalled unattended project.
@@ -1531,7 +1603,7 @@ class FileCreatorAgentRuntime:
         last = records[-1]
         if last.status is AgentRunStatus.CANCELLED:
             code = str((last.error or {}).get("code") or "")
-            if code != "SHUTDOWN":
+            if code not in {"SHUTDOWN", "ORPHANED_BY_RESTART"}:
                 # SUPERSEDED/INTERRUPTED carry human intent (a replacement
                 # request or an explicit stop); restarting must not
                 # overrule them.
