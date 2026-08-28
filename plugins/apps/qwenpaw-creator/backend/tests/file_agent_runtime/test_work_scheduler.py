@@ -58,6 +58,47 @@ def test_async_media_review_fences_only_dependent_billed_work(
 
 
 @pytest.mark.parametrize(
+    ("kind", "target_ref", "active_slots", "blocked"),
+    [
+        # visual/lineup without target_ref: never blocked
+        ("visual", None, {"slot:char:hero"}, False),
+        ("lineup", None, {"slot:char:hero"}, False),
+        # visual/lineup with non-matching target_ref: not blocked
+        ("visual", "slot:char:hero", {"slot:char:villain"}, False),
+        ("lineup", "slot:char:hero", {"slot:char:villain"}, False),
+        # visual/lineup with matching target_ref: blocked
+        ("visual", "slot:char:hero", {"slot:char:hero"}, True),
+        ("lineup", "slot:char:hero", {"slot:char:hero"}, True),
+        # storyboard/video/compose: always blocked when any slot is active
+        ("storyboard", None, {"slot:char:hero"}, True),
+        ("video", None, {"slot:char:hero"}, True),
+        ("compose", None, {"slot:char:hero"}, True),
+        # storyboard/video/compose: not blocked when no slots are active
+        ("storyboard", None, set(), False),
+        ("video", None, set(), False),
+        ("compose", None, set(), False),
+    ],
+)
+def test_media_review_blocking_considers_target_ref(
+    kind: str,
+    target_ref: str | None,
+    active_slots: set[str],
+    blocked: bool,
+) -> None:
+    node = WorkNode(
+        node_id=f"{kind}:test",
+        kind=kind,
+        label=kind,
+        status=WorkNodeStatus.READY,
+        target_ref=target_ref,
+    )
+    assert (
+        _blocked_by_active_media_review(node, frozenset(active_slots))
+        is blocked
+    )
+
+
+@pytest.mark.parametrize(
     ("kind", "blocked"),
     [
         ("visual", False),

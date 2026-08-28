@@ -142,15 +142,27 @@ _COMPOSE_COMMANDS = {CreatorCommandType.COMPOSE_FINAL_VIDEO.value}
 # asynchronous reviewer to settle. Otherwise a short image review can replace
 # a storyboard while a paid two-minute video is already running; that finished
 # video is quarantined as stale and the provider gets billed a second time.
-# Independent visual/lineup image nodes remain parallel.
-_MEDIA_REVIEW_DEPENDENT_KINDS = frozenset({"storyboard", "video", "compose"})
+# Visual/lineup nodes are blocked only when targeting a slot under review,
+# preventing double-generation that would invalidate the pending review.
+_MEDIA_REVIEW_DEPENDENT_KINDS = frozenset(
+    {"visual", "lineup", "storyboard", "video", "compose"},
+)
+# Sync review (pre-generation text review) only blocks downstream dependents
+# that need stable text inputs. Visual/lineup are independent image generation.
+_SYNC_REVIEW_DEPENDENT_KINDS = frozenset({"storyboard", "video", "compose"})
 
 
 def _blocked_by_active_media_review(
     node: WorkNode,
     active_slots: frozenset[str],
 ) -> bool:
-    return bool(active_slots) and node.kind in _MEDIA_REVIEW_DEPENDENT_KINDS
+    if not active_slots or node.kind not in _MEDIA_REVIEW_DEPENDENT_KINDS:
+        return False
+    if node.kind in _SYNC_REVIEW_DEPENDENT_KINDS:
+        return True
+    if node.target_ref is not None:
+        return node.target_ref in active_slots
+    return False
 
 
 def _blocked_by_active_sync_review(
@@ -160,7 +172,7 @@ def _blocked_by_active_sync_review(
 ) -> bool:
     """Fence storyboard/video/compose until pre-generation text review ends."""
 
-    return sync_review_pending and node.kind in _MEDIA_REVIEW_DEPENDENT_KINDS
+    return sync_review_pending and node.kind in _SYNC_REVIEW_DEPENDENT_KINDS
 
 
 DispatchHook = Callable[[str, WorkGraph], Awaitable[None]]
