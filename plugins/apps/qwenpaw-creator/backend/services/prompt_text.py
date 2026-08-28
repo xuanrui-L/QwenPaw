@@ -6,10 +6,34 @@ from __future__ import annotations
 import re
 
 
-def dialogue_match_key(text: str) -> str:
-    """Normalize harmless whitespace differences before dialogue matching."""
+# Authors and models mix punctuation widths freely in Chinese prompts
+# ("，" vs ",", curly vs straight quotes). Width and quote style never
+# change the spoken words, so the match key folds them before the verbatim
+# containment check; letters and digits only lose their full-width forms.
+_PUNCTUATION_FOLD = str.maketrans(
+    {
+        **{chr(code): chr(code - 0xFEE0) for code in range(0xFF01, 0xFF5F)},
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "「": '"',
+        "」": '"',
+        "『": '"',
+        "』": '"',
+        "。": ".",
+        "、": ",",
+        "…": "...",
+        "—": "-",
+        "–": "-",
+    },
+)
 
-    return "".join(text.split())
+
+def dialogue_match_key(text: str) -> str:
+    """Normalize whitespace and punctuation-width noise before matching."""
+
+    return "".join(text.split()).translate(_PUNCTUATION_FOLD)
 
 
 # Speaker prefixes ("老板娘：…" / "Regular: …") and stage directions

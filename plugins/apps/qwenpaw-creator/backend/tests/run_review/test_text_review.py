@@ -666,6 +666,65 @@ def test_panel_count_requires_an_explicit_panel_noun(monkeypatch) -> None:
     ]
 
 
+def test_dialogue_match_tolerates_punctuation_width_variants(
+    monkeypatch,
+) -> None:
+    """Full-width vs half-width punctuation must not gate a paid call."""
+
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    project = _r2v_contract_project(
+        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
+        video_prompt=('[Image 1] 仅提供分镜动作顺序。阿穆低声说:"灯塔,亮起来!"'),
+        dialogues=("阿穆：“灯塔，亮起来！”",),
+    )
+
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    assert report["passed"] is True
+
+
+def test_panel_count_accepts_chinese_numerals(monkeypatch) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    dialogues = ("",) * 6  # six shots pad to a 3x3 grid of nine cells
+    declared = _r2v_contract_project(
+        storyboard_prompt=("16:9 故事板，九宫格布局；" "每一个分镜格内部均为 16:9。"),
+        video_prompt="[Image 1] 仅提供分镜动作顺序。",
+        dialogues=dialogues,
+    )
+    mismatched = _r2v_contract_project(
+        storyboard_prompt=("16:9 故事板，十六宫格布局；" "每一个分镜格内部均为 16:9。"),
+        video_prompt="[Image 1] 仅提供分镜动作顺序。",
+        dialogues=dialogues,
+    )
+
+    declared_report = check_changed_r2v_prompt_contracts(
+        declared,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+    mismatched_report = check_changed_r2v_prompt_contracts(
+        mismatched,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    assert declared_report["passed"] is True
+    assert [item["code"] for item in mismatched_report["findings"]] == [
+        "STORYBOARD_PANEL_COUNT_MISSING",
+    ]
+
+
 def test_happyhorse_role_scan_uses_the_full_reference_segment(
     monkeypatch,
 ) -> None:

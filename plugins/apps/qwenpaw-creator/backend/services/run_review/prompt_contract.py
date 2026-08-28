@@ -66,24 +66,49 @@ def _touches_element(
     )
 
 
+_CN_DIGITS = "零一二三四五六七八九"
+
+
+def _chinese_numeral(value: int) -> str | None:
+    """Render 1-99 the way prompts write it（九、十六、二十五）."""
+
+    if not 1 <= value <= 99:
+        return None
+    tens, ones = divmod(value, 10)
+    if tens == 0:
+        return _CN_DIGITS[ones]
+    prefix = "十" if tens == 1 else _CN_DIGITS[tens] + "十"
+    return prefix + (_CN_DIGITS[ones] if ones else "")
+
+
 def _declares_panel_count(prompt: str, count: int) -> bool:
     """Accept the shot count or the square-padded cell count.
 
     The runtime pads the grid to the next perfect square, so a six-shot sheet
     is a 3x3 of nine cells with three left blank. Both "6 panels" and
-    "9 panels" describe that sheet honestly.
+    "9 panels" describe that sheet honestly. Chinese numerals with the same
+    panel nouns（"九宫格"）count too; a bare "格" still does not.
     """
 
     side = math.isqrt(count - 1) + 1 if count > 1 else 1
-    patterns = tuple(
+    values = tuple(dict.fromkeys((count, side * side)))
+    patterns = [
         pattern
-        for value in dict.fromkeys((count, side * side))
+        for value in values
         for pattern in (
             rf"(?<!\d){value}\s*(?:个\s*)?(?:宫格|分镜格|分镜面板|故事板面板|面板)",
             rf"(?<!\d){value}\s*[- ]?\s*panels?\b",
             rf"\bpanels?\s*[:=]?\s*{value}(?!\d)",
         )
-    )
+    ]
+    for value in values:
+        numeral = _chinese_numeral(value)
+        if numeral:
+            # The look-behind keeps "十六" from satisfying a check for 六.
+            patterns.append(
+                rf"(?<![{_CN_DIGITS}十]){numeral}"
+                r"\s*(?:个\s*)?(?:宫格|分镜格|分镜面板|故事板面板|面板)",
+            )
     return any(
         re.search(pattern, prompt, re.IGNORECASE) for pattern in patterns
     )

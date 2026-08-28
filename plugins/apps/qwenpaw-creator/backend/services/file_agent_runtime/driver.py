@@ -1592,7 +1592,8 @@ class FileCreatorAgentRuntime:
         race automation that invalidates state right after it passed
         (field run 2026-08-09: the pre-compose design pass expired scene
         locks minutes after the run's clean exit). Both continuations go
-        through the standard YOLO gate (auto-approve mode only, resume
+        through the standard YOLO gate (paid continuation only under
+        auto-approve, free prompt repairs in every review mode, resume
         caps, no-progress fuse), so an actually-finished project is a
         no-op.
         """
@@ -6132,12 +6133,12 @@ class FileCreatorAgentRuntime:
         ``after_failure`` covers retryable faults (empty model turns,
         transport blips): the failure itself proves the work is unfinished,
         so the completion criterion is skipped — an early failure with no
-        elements yet must still resume.
+        elements yet must still resume. Outside auto_approve such a failure
+        still queues only the free prompt repair; paid continuation keeps
+        waiting for a human.
         """
 
         auto_approve = get_media_review_mode() == MEDIA_REVIEW_AUTO_APPROVE
-        if after_failure and not auto_approve:
-            return
         try:
             snapshot = await asyncio.to_thread(
                 self.services.projects.read,
@@ -6261,7 +6262,7 @@ class FileCreatorAgentRuntime:
                 snapshot.generation,
             )
             return
-        if after_failure:
+        if after_failure and auto_approve:
             text = (
                 "【系统自动消息 · YOLO 持续执行】上一回合因瞬态故障中止"
                 "（如模型空响应或传输抖动），项目尚未完成。\n"
@@ -6286,8 +6287,11 @@ class FileCreatorAgentRuntime:
                     + "\n请针对上述环节修复结构、补全 prompt 或调整参数；不要重复已完成的工作。"
                 )
             else:
+                opening = (
+                    "上一回合因瞬态故障中止（如模型空响应或传输抖动）" if after_failure else "主线回合已结束"
+                )
                 text = (
-                    "【系统自动消息 · Prompt 合同修复】主线回合已结束，但调度器"
+                    f"【系统自动消息 · Prompt 合同修复】{opening}，但调度器"
                     "发现以下非空/台词合同缺口，因此没有提交任何对应的付费媒体任务：\n"
                     + "\n".join(f"- {reason}" for reason in reasons)
                     + "\nR2V prompt 由你直接负责；请只修复上述"

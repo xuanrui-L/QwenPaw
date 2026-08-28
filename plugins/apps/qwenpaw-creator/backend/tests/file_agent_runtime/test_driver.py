@@ -2203,6 +2203,100 @@ def test_prompt_gap_feedback_is_queued_outside_auto_approve(
     assert wakes == [], "non-auto prompt repair must not wake paid scheduling"
 
 
+def test_prompt_gap_repair_survives_retryable_failure_outside_auto_approve(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A transient fault must not swallow the free manual-mode repair turn."""
+
+    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    node = WorkNode(
+        node_id="video:ep1",
+        kind="video",
+        label="第一场 · 视频",
+        status=WorkNodeStatus.GATED,
+        missing=("video_prompt 缺失",),
+        authored_text_gap=True,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+    )
+    wakes: list[str] = []
+    monkeypatch.setattr(driver.work_scheduler, "wake", wakes.append)
+
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-transient-failure",
+            after_failure=True,
+        ),
+    )
+
+    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    feedback = messages[-1]
+    assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    assert "瞬态故障" in feedback.content_parts[0].text
+    assert "video_prompt 缺失" in feedback.content_parts[0].text
+    assert wakes == [], "non-auto prompt repair must not wake paid scheduling"
+
+
+def test_manual_mode_failure_without_prompt_gap_waits_for_a_human(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Paid continuation after a fault stays a YOLO-only behavior."""
+
+    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    node = WorkNode(
+        node_id="video:ep1",
+        kind="video",
+        label="第一场 · 视频",
+        status=WorkNodeStatus.GATED,
+        missing=("上游分镜未完成",),
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+    )
+
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-transient-failure-no-gap",
+            after_failure=True,
+        ),
+    )
+
+    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    assert all(
+        item.source
+        not in {
+            driver.YOLO_RESUME_SOURCE,
+            driver.PROMPT_CONTRACT_RESUME_SOURCE,
+        }
+        for item in messages
+    )
+
+
 def test_prompt_repair_fuse_is_independent_from_previous_yolo_mode(
     tmp_path,
     monkeypatch,
