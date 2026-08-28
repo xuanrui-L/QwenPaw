@@ -147,9 +147,11 @@ _COMPOSE_COMMANDS = {CreatorCommandType.COMPOSE_FINAL_VIDEO.value}
 _MEDIA_REVIEW_DEPENDENT_KINDS = frozenset(
     {"visual", "lineup", "storyboard", "video", "compose"},
 )
-# Sync review (pre-generation text review) only blocks downstream dependents
-# that need stable text inputs. Visual/lineup are independent image generation.
-_SYNC_REVIEW_DEPENDENT_KINDS = frozenset({"storyboard", "video", "compose"})
+# Heavy/billed nodes that need stable inputs: storyboard, video, and compose.
+# These are unconditionally fenced by both media review (any active slot) and
+# sync review (text review pending). Visual/lineup are lighter and only fenced
+# when their specific target slot is under review.
+_HEAVY_NODE_KINDS = frozenset({"storyboard", "video", "compose"})
 
 
 def _blocked_by_active_media_review(
@@ -158,7 +160,7 @@ def _blocked_by_active_media_review(
 ) -> bool:
     if not active_slots or node.kind not in _MEDIA_REVIEW_DEPENDENT_KINDS:
         return False
-    if node.kind in _SYNC_REVIEW_DEPENDENT_KINDS:
+    if node.kind in _HEAVY_NODE_KINDS:
         return True
     if node.target_ref is not None:
         return node.target_ref in active_slots
@@ -172,7 +174,7 @@ def _blocked_by_active_sync_review(
 ) -> bool:
     """Fence storyboard/video/compose until pre-generation text review ends."""
 
-    return sync_review_pending and node.kind in _SYNC_REVIEW_DEPENDENT_KINDS
+    return sync_review_pending and node.kind in _HEAVY_NODE_KINDS
 
 
 DispatchHook = Callable[[str, WorkGraph], Awaitable[None]]

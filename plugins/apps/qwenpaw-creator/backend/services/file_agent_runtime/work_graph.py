@@ -1158,11 +1158,19 @@ def _video_upstream_refs(
     creation_type: str,
     creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
     project: Project,
-) -> list[str | None]:
-    """Return upstream version ids for staleness check by creation type."""
+) -> list[str]:
+    """Return upstream version ids for staleness check by creation type.
+
+    Returns a list of non-None version ids that this node depends on.
+    Missing ids are excluded (not returned as None).
+    """
     if creation_type == "r2v":
         assert isinstance(creation, R2VCreation)
-        return _element_upstream_selected(project, creation)
+        return [
+            ref
+            for ref in _element_upstream_selected(project, creation)
+            if ref is not None
+        ]
     if creation_type == "i2v":
         assert isinstance(creation, I2VCreation)
         return (
@@ -1172,7 +1180,7 @@ def _video_upstream_refs(
         )
     if creation_type == "s2v":
         assert isinstance(creation, S2VCreation)
-        refs: list[str | None] = []
+        refs: list[str] = []
         if creation.portrait_version_id:
             refs.append(creation.portrait_version_id)
         if creation.audio_version_id:
@@ -1186,7 +1194,12 @@ def _video_readiness_gates(
     creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
     project: Project,
 ) -> tuple[str, ...] | None:
-    """Return missing reasons if the video node is gated, else None."""
+    """Return missing reasons if the video node is gated, else None.
+
+    Note: T2V's video_prompt check is handled by the caller before invoking
+    this function. This function only checks additional gates beyond the
+    prompt requirement.
+    """
     if creation_type == "s2v":
         assert isinstance(creation, S2VCreation)
         gaps: list[str] = []
