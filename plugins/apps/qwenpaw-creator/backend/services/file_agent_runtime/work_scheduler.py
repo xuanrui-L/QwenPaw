@@ -158,13 +158,18 @@ _HEAVY_NODE_KINDS = frozenset({"storyboard", "video", "compose"})
 def _blocked_by_active_media_review(
     node: WorkNode,
     active_slots: frozenset[str],
+    active_owner_refs: frozenset[str],
 ) -> bool:
     if not active_slots or node.kind not in _MEDIA_REVIEW_DEPENDENT_KINDS:
         return False
     if node.kind in _HEAVY_NODE_KINDS:
         return True
+    # ArtifactSlot ids are opaque (asset:{id}:variant:{vid}:image), while a
+    # visual/lineup node's target_ref is the slot's owner_ref (asset:{id},
+    # lineup:{id}); the caller resolves reviewing slots to owner refs so the
+    # membership check compares like with like.
     if node.target_ref is not None:
-        return node.target_ref in active_slots
+        return node.target_ref in active_owner_refs
     return False
 
 
@@ -451,6 +456,12 @@ class WorkGraphScheduler:
         from services.run_review.media_review import active_media_review_slots
 
         reviewing_slots = active_media_review_slots(project_id)
+        slots_by_id = snapshot.project.assets.artifact_slots_by_id
+        reviewing_owners = frozenset(
+            slot.owner_ref
+            for slot_id in reviewing_slots
+            if (slot := slots_by_id.get(slot_id)) is not None
+        )
         reports_root = (
             self.services.projects.project_root(project_id)
             / "runtime"
@@ -500,7 +511,11 @@ class WorkGraphScheduler:
                     node.node_id,
                 )
                 continue
-            if _blocked_by_active_media_review(node, reviewing_slots):
+            if _blocked_by_active_media_review(
+                node,
+                reviewing_slots,
+                reviewing_owners,
+            ):
                 logger.info(
                     "work-graph node %s waits for async review of %s",
                     node.node_id,
