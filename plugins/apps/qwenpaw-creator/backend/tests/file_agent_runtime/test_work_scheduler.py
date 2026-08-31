@@ -53,10 +53,102 @@ def test_async_media_review_fences_only_dependent_billed_work(
         _blocked_by_active_media_review(
             node,
             frozenset({"element:e:storyboard"}),
+            frozenset({"element:e"}),
         )
         is blocked
     )
-    assert _blocked_by_active_media_review(node, frozenset()) is False
+    assert (
+        _blocked_by_active_media_review(node, frozenset(), frozenset())
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "target_ref", "active_slots", "active_owners", "blocked"),
+    [
+        # visual/lineup without target_ref: never blocked
+        (
+            "visual",
+            None,
+            {"asset:hero:variant:v1:image"},
+            {"asset:hero"},
+            False,
+        ),
+        ("lineup", None, {"lineup:cast:image"}, {"lineup:cast"}, False),
+        # visual/lineup with non-matching target_ref: not blocked
+        (
+            "visual",
+            "asset:hero",
+            {"asset:villain:variant:v1:image"},
+            {"asset:villain"},
+            False,
+        ),
+        (
+            "lineup",
+            "lineup:cast-a",
+            {"lineup:cast-b:image"},
+            {"lineup:cast-b"},
+            False,
+        ),
+        # visual/lineup whose owner is under review: blocked
+        (
+            "visual",
+            "asset:hero",
+            {"asset:hero:variant:v1:image"},
+            {"asset:hero"},
+            True,
+        ),
+        (
+            "lineup",
+            "lineup:cast",
+            {"lineup:cast:image"},
+            {"lineup:cast"},
+            True,
+        ),
+        # storyboard/video/compose: always blocked when any slot is active
+        (
+            "storyboard",
+            None,
+            {"asset:hero:variant:v1:image"},
+            {"asset:hero"},
+            True,
+        ),
+        ("video", None, {"asset:hero:variant:v1:image"}, {"asset:hero"}, True),
+        (
+            "compose",
+            None,
+            {"asset:hero:variant:v1:image"},
+            {"asset:hero"},
+            True,
+        ),
+        # storyboard/video/compose: not blocked when no slots are active
+        ("storyboard", None, set(), set(), False),
+        ("video", None, set(), set(), False),
+        ("compose", None, set(), set(), False),
+    ],
+)
+def test_media_review_blocking_considers_target_ref(
+    kind: str,
+    target_ref: str | None,
+    active_slots: set[str],
+    active_owners: set[str],
+    blocked: bool,
+) -> None:
+    node = WorkNode(
+        node_id=f"{kind}:test",
+        kind=kind,
+        label=kind,
+        status=WorkNodeStatus.READY,
+        target_ref=target_ref,
+    )
+    assert (
+        _blocked_by_active_media_review(
+            node,
+            frozenset(active_slots),
+            frozenset(active_owners),
+        )
+        is blocked
+    )
 
 
 @pytest.mark.parametrize(
