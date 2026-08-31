@@ -20,7 +20,7 @@ import secrets
 import shutil
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
@@ -1351,6 +1351,63 @@ class _LoopResult:
     review_ids: tuple[str, ...]
 
 
+class _RunFence(Protocol):
+    """Liveness gate asserted at model/tool/commit boundaries."""
+
+    def assert_alive(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _EpochFence:
+    """Mainline fence: alive while the per-project epoch is unchanged."""
+
+    driver: "FileCreatorAgentRuntime"
+    project_id: str
+    run_id: str
+    epoch: int
+
+    def assert_alive(self) -> None:
+        self.driver._assert_epoch(self.project_id, self.run_id, self.epoch)
+
+
+@dataclass(slots=True)
+class _SpecialistHandle:
+    """Lifecycle of one detached (asynchronous) specialist run.
+
+    Detached specialists must not assert the project epoch: every new
+    mainline run increments it (_begin_epoch), which would kill an
+    in-flight specialist the moment any notification-triggered run
+    starts. Revocation is an explicit token flipped by interrupt/stop/
+    project-delete instead.
+    """
+
+    project_id: str
+    specialist_run_id: str
+    cancel_reason: str | None = None
+    task: asyncio.Task[None] | None = None
+
+    def cancel(self, reason: str) -> None:
+        if self.cancel_reason is None:
+            self.cancel_reason = reason
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+
+
+@dataclass(frozen=True, slots=True)
+class _TokenFence:
+    """Detached-specialist fence: alive until its handle is revoked."""
+
+    handle: _SpecialistHandle
+
+    def assert_alive(self) -> None:
+        if self.handle.cancel_reason is not None:
+            raise StaleAgentRun(
+                "specialist run revoked "
+                f"({self.handle.cancel_reason}): "
+                f"{self.handle.specialist_run_id}",
+            )
+
+
 class _FencedCommitBoundary:
     """Hold the run fence throughout publication.
 
@@ -1362,20 +1419,16 @@ class _FencedCommitBoundary:
     def __init__(
         self,
         driver: FileCreatorAgentRuntime,
-        project_id: str,
-        run_id: str,
-        epoch: int,
+        fence: _RunFence,
         delegate: ProjectCommitBoundary,
     ) -> None:
         self.driver = driver
-        self.project_id = project_id
-        self.run_id = run_id
-        self.epoch = epoch
+        self.fence = fence
         self.delegate = delegate
 
     def commit(self, **kwargs: Any):
         with self.driver._publication_lock:
-            self.driver._assert_epoch(self.project_id, self.run_id, self.epoch)
+            self.fence.assert_alive()
             return self.delegate.commit(**kwargs)
 
 
@@ -2290,9 +2343,7 @@ class FileCreatorAgentRuntime:
 
         commits = _FencedCommitBoundary(
             self,
-            project_id,
-            run_id,
-            epoch,
+            _EpochFence(self, project_id, run_id, epoch),
             ProjectCommitBoundary(self.services.projects),
         )
         tools = AgentProjectTools(
@@ -3095,7 +3146,7 @@ class FileCreatorAgentRuntime:
                 parent_run_id=run_id,
                 specialist_run_id=run_id,
                 round_id=tools.context.round_id or f"agent-round-{run_id}",
-                epoch=epoch,
+                fence=_EpochFence(self, project_id, run_id, epoch),
                 request=request,
                 common=common,
                 call_id=call_id,
@@ -4036,6 +4087,12 @@ class FileCreatorAgentRuntime:
                 )
         role = delegated.role
         role_name = role.value
+        fence: _RunFence = _EpochFence(
+            self,
+            project_id,
+            parent_run_id,
+            epoch,
+        )
         snapshot = await asyncio.to_thread(
             self.services.projects.read,
             project_id,
@@ -4271,7 +4328,7 @@ class FileCreatorAgentRuntime:
                             ),
                         },
                     )
-                self._assert_epoch(project_id, parent_run_id, epoch)
+                fence.assert_alive()
                 message_id = f"specialist-message-{uuid4().hex}"
                 delta_index = 0
 
@@ -4279,7 +4336,7 @@ class FileCreatorAgentRuntime:
                     nonlocal delta_index
                     if not delta:
                         return
-                    self._assert_epoch(project_id, parent_run_id, epoch)
+                    fence.assert_alive()
                     await self._event(
                         project_id,
                         session_id,
@@ -4308,7 +4365,7 @@ class FileCreatorAgentRuntime:
                     complete: bool,
                 ) -> None:
                     nonlocal delta_index
-                    self._assert_epoch(project_id, parent_run_id, epoch)
+                    fence.assert_alive()
                     await self._event(
                         project_id,
                         session_id,
@@ -4660,7 +4717,7 @@ class FileCreatorAgentRuntime:
                         round_id=round_id,
                         role=role,
                         admitted_target_refs=delegated.target_refs,
-                        epoch=epoch,
+                        fence=fence,
                         request=request,
                         common=common,
                         call_id=call.call_id,
@@ -5080,7 +5137,7 @@ class FileCreatorAgentRuntime:
         round_id: str,
         role: SpecialistRole,
         admitted_target_refs: list[str],
-        epoch: int,
+        fence: _RunFence,
         request: CreatorMessageRecord,
         common: Mapping[str, Any],
         call_id: str,
@@ -5106,7 +5163,7 @@ class FileCreatorAgentRuntime:
                 parent_run_id=parent_run_id,
                 specialist_run_id=specialist_run_id,
                 round_id=round_id,
-                epoch=epoch,
+                fence=fence,
                 request=request,
                 common=common,
                 call_id=call_id,
@@ -5149,7 +5206,7 @@ class FileCreatorAgentRuntime:
                 parent_run_id=parent_run_id,
                 specialist_run_id=specialist_run_id,
                 round_id=round_id,
-                epoch=epoch,
+                fence=fence,
                 request=request,
                 common=common,
                 call_id=call_id,
@@ -5286,7 +5343,7 @@ class FileCreatorAgentRuntime:
                 task = await self._await_specialist_task(
                     project_id=project_id,
                     parent_run_id=parent_run_id,
-                    epoch=epoch,
+                    fence=fence,
                     task_id=invoked.task_id,
                 )
                 result.update(
@@ -5306,7 +5363,7 @@ class FileCreatorAgentRuntime:
                 result["tasks"] = await self._await_specialist_tasks(
                     project_id=project_id,
                     parent_run_id=parent_run_id,
-                    epoch=epoch,
+                    fence=fence,
                     task_ids=invoked.task_ids,
                 )
             if authorization_id is not None:
@@ -5349,7 +5406,7 @@ class FileCreatorAgentRuntime:
         parent_run_id: str,
         specialist_run_id: str,
         round_id: str,
-        epoch: int,
+        fence: _RunFence,
         request: CreatorMessageRecord,
         common: Mapping[str, Any],
         call_id: str,
@@ -5417,7 +5474,7 @@ class FileCreatorAgentRuntime:
                     session_id=session_id,
                     parent_run_id=parent_run_id,
                     specialist_run_id=specialist_run_id,
-                    epoch=epoch,
+                    fence=fence,
                     request=request,
                     common=common,
                     call_id=call_id,
@@ -5533,7 +5590,7 @@ class FileCreatorAgentRuntime:
         session_id: str,
         parent_run_id: str,
         specialist_run_id: str,
-        epoch: int,
+        fence: _RunFence,
         request: CreatorMessageRecord,
         common: Mapping[str, Any],
         call_id: str,
@@ -5554,7 +5611,7 @@ class FileCreatorAgentRuntime:
             )
         try:
             while authorization.status is ExecutionAuthorizationStatus.PENDING:
-                self._assert_epoch(project_id, parent_run_id, epoch)
+                fence.assert_alive()
                 await asyncio.sleep(min(self.poll_interval_seconds, 0.5))
                 authorization = await asyncio.to_thread(
                     self.executions.get_execution_authorization,
@@ -5672,7 +5729,7 @@ class FileCreatorAgentRuntime:
         parent_run_id: str,
         specialist_run_id: str,
         round_id: str,
-        epoch: int,
+        fence: _RunFence,
         request: CreatorMessageRecord,
         common: Mapping[str, Any],
         call_id: str,
@@ -5857,7 +5914,7 @@ class FileCreatorAgentRuntime:
             session_id=session_id,
             parent_run_id=parent_run_id,
             specialist_run_id=specialist_run_id,
-            epoch=epoch,
+            fence=fence,
             request=request,
             common=common,
             call_id=call_id,
@@ -5884,11 +5941,11 @@ class FileCreatorAgentRuntime:
         *,
         project_id: str,
         parent_run_id: str,
-        epoch: int,
+        fence: _RunFence,
         task_id: str,
     ) -> Any:
         while True:
-            self._assert_epoch(project_id, parent_run_id, epoch)
+            fence.assert_alive()
             task = await asyncio.to_thread(
                 self.executions.get_task,
                 project_id,
@@ -5912,7 +5969,7 @@ class FileCreatorAgentRuntime:
         *,
         project_id: str,
         parent_run_id: str,
-        epoch: int,
+        fence: _RunFence,
         task_ids: Sequence[str],
     ) -> list[dict[str, Any]]:
         """Await a batch of tasks in parallel, tolerating per-task failure.
@@ -5927,7 +5984,7 @@ class FileCreatorAgentRuntime:
                 task = await self._await_specialist_task(
                     project_id=project_id,
                     parent_run_id=parent_run_id,
-                    epoch=epoch,
+                    fence=fence,
                     task_id=task_id,
                 )
             except (asyncio.CancelledError, StaleAgentRun):
