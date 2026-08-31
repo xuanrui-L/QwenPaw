@@ -369,6 +369,63 @@ class RuntimeNotificationBus:
         except RecordNotFoundError:
             pass
 
+    async def inject_pending_into_run(
+        self,
+        project_id: str,
+        *,
+        run_id: str,
+    ) -> str:
+        """Render staged progress into a live run's next model turn.
+
+        The records turn INJECTED (no durable session message); the
+        caller settles them when the run succeeds or reopens them when it
+        fails, and a restart sweep reopens any survivors.
+        """
+
+        try:
+            claimed = await asyncio.to_thread(
+                self.store.mark_injected,
+                project_id,
+                run_id,
+            )
+        except RecordNotFoundError:
+            return ""
+        return render_resume_digest(claimed)
+
+    async def settle_injected(
+        self,
+        project_id: str,
+        *,
+        run_id: str,
+        success: bool,
+    ) -> None:
+        try:
+            if success:
+                await asyncio.to_thread(
+                    self.store.settle,
+                    project_id,
+                    f"injected-{run_id}",
+                )
+            else:
+                await asyncio.to_thread(
+                    self.store.reopen_injected,
+                    project_id,
+                    run_id=run_id,
+                )
+        except RecordNotFoundError:
+            pass
+
+    async def reopen_all_injected(self, project_id: str) -> None:
+        """Startup sweep: any surviving INJECTED record belongs to a dead run."""
+
+        try:
+            await asyncio.to_thread(
+                self.store.reopen_injected,
+                project_id,
+            )
+        except RecordNotFoundError:
+            pass
+
     async def cancel_pending(self, project_id: str) -> None:
         """Drop undelivered progress: a human hard stop took over."""
 

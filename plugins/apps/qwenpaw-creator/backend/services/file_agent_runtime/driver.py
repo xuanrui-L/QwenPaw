@@ -1356,7 +1356,8 @@ class _LoopResult:
 class _RunFence(Protocol):
     """Liveness gate asserted at model/tool/commit boundaries."""
 
-    def assert_alive(self) -> None: ...
+    def assert_alive(self) -> None:
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -1589,6 +1590,18 @@ class FileCreatorAgentRuntime:
             summaries = []
         for summary in summaries:
             self.work_scheduler.wake(summary.project_id)
+            try:
+                # Any surviving INJECTED record belongs to a run that died
+                # with the previous process; return it to PENDING so it
+                # rides along with the startup resume digest.
+                await self.notifications.reopen_all_injected(
+                    summary.project_id,
+                )
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "startup injected-notification reopen failed for %s",
+                    summary.project_id,
+                )
             try:
                 await self._reclaim_startup_orphans(summary.project_id)
             except Exception:  # pylint: disable=broad-except
@@ -2465,6 +2478,7 @@ class FileCreatorAgentRuntime:
             transformer=self.services.jq,
             commits=commits,
         )
+        injected_settled = False
         try:
             result = await self._model_loop(
                 project_id=project_id,
@@ -2495,6 +2509,12 @@ class FileCreatorAgentRuntime:
                 through_seq=batch[-1].message_seq,
                 goal_id=goal.goal_id,
             )
+            await self.notifications.settle_injected(
+                project_id,
+                run_id=run_id,
+                success=True,
+            )
+            injected_settled = True
             needs_review = bool(result.review_ids)
             await asyncio.to_thread(
                 self.sessions.set_goal_status,
@@ -2698,6 +2718,17 @@ class FileCreatorAgentRuntime:
                 retryable=False,
             )
             self._blocked_heads[project_id] = message.message_seq
+        finally:
+            if not injected_settled:
+                # The run did not reach its success settlement: whatever
+                # was injected into its wire messages never became durable
+                # context, so the records return to PENDING for the next
+                # delivery.
+                await self.notifications.settle_injected(
+                    project_id,
+                    run_id=run_id,
+                    success=False,
+                )
 
     async def _model_loop(
         self,
@@ -2783,6 +2814,20 @@ class FileCreatorAgentRuntime:
         while turn_number < effective_max_turns:
             turn_number += 1
             self._assert_epoch(project_id, run_id, epoch)
+            # Turn-boundary drain: quiet progress staged while this run is
+            # working (e.g. a detached specialist finishing mid-run) joins
+            # the live conversation as a non-durable user turn instead of
+            # waiting for the run to end. Durable steer messages are NOT
+            # injected here — they queue in the inbox and would be
+            # double-delivered.
+            injected_digest = await self.notifications.inject_pending_into_run(
+                project_id,
+                run_id=run_id,
+            )
+            if injected_digest:
+                messages.append(
+                    {"role": "user", "content": injected_digest},
+                )
             _compact_wire_project_snapshots(messages)
             assistant_message_id = f"message-{uuid4().hex}"
             delta_index = 0
@@ -4546,10 +4591,7 @@ class FileCreatorAgentRuntime:
                 "的目标。"
             )
         else:
-            lines.append(
-                "请重新读取 Project 核对该委派的实际产出，再决定下一步；"
-                "不要重复已完成的工作。"
-            )
+            lines.append("请重新读取 Project 核对该委派的实际产出，再决定下一步；" "不要重复已完成的工作。")
         payload: dict[str, Any] = {
             "specialistRunId": specialist_run_id,
             "role": role_name,

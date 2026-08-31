@@ -84,7 +84,12 @@ def delegate_tool_manifest() -> dict[str, Any]:
             "description": (
                 "把一个边界明确的素材理解或 AI 剪辑任务委派给对应 Creator "
                 "Specialist。source_intelligence_agent 使用 asset:<logicalAssetId>；"
-                "ai_editing_director 使用 timeline:<id>。"
+                "ai_editing_director 使用 timeline:<id>。调用立即返回 "
+                "status=ACCEPTED 与 runId，Specialist 在后台执行；其终态"
+                "（SUCCESS/BLOCKED/FAILED 或等待审阅）会以【系统自动消息 · "
+                "Runtime 通知】送达，届时再读取 Project 验证产出。接受后"
+                "不要等待、不要轮询，也不要对同一目标重复委派；可以继续"
+                "处理其他不依赖该产物的目标，或结束本回合。"
             ),
             "parameters": deepcopy(
                 {

@@ -43,6 +43,7 @@ from .models import (
 NotificationRecordState = Literal[
     "PENDING",
     "ASSIGNED",
+    "INJECTED",
     "DRAINED",
     "CANCELLED",
 ]
@@ -241,7 +242,7 @@ class NotificationOutboxStore:
             settled = 0
             for record in self._current_versions(project_id).values():
                 if (
-                    record.state == "ASSIGNED"
+                    record.state in {"ASSIGNED", "INJECTED"}
                     and record.assigned_to == assigned_to
                 ):
                     self._transition(
@@ -252,13 +253,71 @@ class NotificationOutboxStore:
                     settled += 1
             return settled
 
+    def mark_injected(
+        self,
+        project_id: str,
+        run_id: str,
+    ) -> list[NotificationOutboxRecord]:
+        """Claim pending records for injection into one live run's turn.
+
+        Injected records have no durable session message; the run's
+        outcome decides their fate (settle -> DRAINED, failure/restart ->
+        reopen to PENDING). Records already INJECTED for the same run are
+        returned again so a retried turn renders the same digest.
+        """
+
+        assigned_to = f"injected-{run_id}"
+        with self._op_lock(project_id):
+            claimed: list[NotificationOutboxRecord] = []
+            for record in self._current_versions(project_id).values():
+                if (
+                    record.state == "INJECTED"
+                    and record.assigned_to == assigned_to
+                ):
+                    claimed.append(record)
+                elif record.state == "PENDING":
+                    claimed.append(
+                        self._transition(
+                            record,
+                            state="INJECTED",
+                            assigned_to=assigned_to,
+                        ),
+                    )
+            return claimed
+
+    def reopen_injected(
+        self,
+        project_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> int:
+        """Return INJECTED records to PENDING (failed run or restart)."""
+
+        assigned_to = f"injected-{run_id}" if run_id is not None else None
+        with self._op_lock(project_id):
+            reopened = 0
+            for record in self._current_versions(project_id).values():
+                if record.state != "INJECTED":
+                    continue
+                if assigned_to is not None and (
+                    record.assigned_to != assigned_to
+                ):
+                    continue
+                self._transition(
+                    record,
+                    state="PENDING",
+                    assigned_to=None,
+                )
+                reopened += 1
+            return reopened
+
     def cancel_pending(self, project_id: str) -> int:
         """Cancel undelivered records (hard stop: a human took over)."""
 
         with self._op_lock(project_id):
             cancelled = 0
             for record in self._current_versions(project_id).values():
-                if record.state in {"PENDING", "ASSIGNED"}:
+                if record.state in {"PENDING", "ASSIGNED", "INJECTED"}:
                     self._transition(
                         record,
                         state="CANCELLED",

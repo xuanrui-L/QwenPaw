@@ -2503,8 +2503,7 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
         # decides.
         await _wait_for(
             lambda: any(
-                item.role == "user"
-                and item.source == "runtime_notification"
+                item.role == "user" and item.source == "runtime_notification"
                 for item in services.sessions.list_messages(
                     PROJECT_ID,
                     SESSION_ID,
@@ -2512,9 +2511,9 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
             ),
         )
         await asyncio.sleep(0.05)
-        assert parent_turn == 2, (
-            "the notification run must wait for the review decision"
-        )
+        assert (
+            parent_turn == 2
+        ), "the notification run must wait for the review decision"
         pending_reviews.clear()
         await _wait_for(lambda: parent_turn >= 3)
         await driver.wait_until_idle(PROJECT_ID)
@@ -2902,3 +2901,328 @@ def test_batch_stops_at_non_batchable_message(
     assert "RUNTIME_NOTIFICATIONS_BATCH" not in received[0]
     assert "请修一下这个问题" in received[1]
     assert len(driver.runs.list(PROJECT_ID)) == 3
+
+
+# -- asynchronous delegation ------------------------------------------------
+
+
+def test_delegate_accepted_then_terminal_notification_resumes(
+    tmp_path,
+) -> None:
+    """ACCEPTED tool result now; terminal outcome as a steer notification."""
+
+    parent_turn = 0
+
+    async def callback(messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            return AgentModelTurn(content="[SUCCESS] 素材理解已提交。")
+        parent_turn += 1
+        if parent_turn == 1:
+            return _delegate_call(
+                "delegate-async-1",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="编排 Timeline 选段",
+            )
+        if parent_turn == 2:
+            delegated = json.loads(messages[-1]["content"])
+            assert delegated["status"] == "ACCEPTED"
+            assert delegated["runId"].startswith("specialist-run-")
+            assert delegated["ok"] is True
+            return AgentModelTurn(content="已委派，等待 Specialist 终态通知。")
+        assert "[SUCCESS]" in messages[1]["content"]
+        return AgentModelTurn(content="Specialist 结果已核对。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+        driver = _driver(services, callback)
+        driver.specialist_tools.invoke = _succeeded_invoke  # type: ignore[method-assign]
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(lambda: parent_turn >= 3)
+        await driver.wait_until_idle(PROJECT_ID)
+        runs = driver.executions.list_specialist_runs(PROJECT_ID)
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        await driver.stop()
+        return runs, messages
+
+    runs, messages = asyncio.run(scenario())
+
+    assert len(runs) == 1
+    assert runs[0].status.value == "SUCCEEDED"
+    notifications = [
+        item
+        for item in messages
+        if item.role == "user" and item.source == "runtime_notification"
+    ]
+    assert len(notifications) == 1
+    assert notifications[0].metadata["specialistStatus"] == "SUCCEEDED"
+    assert notifications[0].metadata["specialistRunId"] == runs[0].run_id
+
+
+def test_new_mainline_run_does_not_cancel_running_specialist(
+    tmp_path,
+) -> None:
+    """_begin_epoch of a later run must not kill a detached specialist."""
+
+    release = asyncio.Event()
+    specialist_started = asyncio.Event()
+    parent_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            specialist_started.set()
+            await release.wait()
+            return AgentModelTurn(content="[SUCCESS] 剪辑完成。")
+        parent_turn += 1
+        if parent_turn == 1:
+            return _delegate_call(
+                "delegate-longrun",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="编排 Timeline 选段",
+            )
+        return AgentModelTurn(content="收到。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+        driver = _driver(services, callback)
+
+        def consumed() -> int:
+            # Snapshot read: the full get_project_session recovery holds
+            # the exclusive session lock and, polled tightly, starves the
+            # dispatcher's shared snapshot read (writer-priority lock).
+            return services.sessions.get_project_session_snapshot(
+                PROJECT_ID,
+            ).last_consumed_message_seq
+
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await asyncio.wait_for(specialist_started.wait(), timeout=5.0)
+        await _wait_for(lambda: consumed() >= 1)
+        # A human message starts a NEW mainline run while the specialist
+        # is still working: its _begin_epoch increments the project epoch.
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": "顺便改一下标题"}],
+            source="user",
+        )
+        driver.notify(PROJECT_ID)
+        await _wait_for(lambda: consumed() >= 2)
+        release.set()
+        await _wait_for(
+            lambda: (
+                (runs := driver.executions.list_specialist_runs(PROJECT_ID))
+                and runs[0].status.value == "SUCCEEDED"
+            ),
+        )
+        runs = driver.executions.list_specialist_runs(PROJECT_ID)
+        await driver.stop()
+        return runs
+
+    runs = asyncio.run(scenario())
+    assert runs[0].status.value == "SUCCEEDED"
+
+
+def test_stop_cancels_detached_specialists_without_notification(
+    tmp_path,
+) -> None:
+    release = asyncio.Event()
+    specialist_started = asyncio.Event()
+    parent_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            specialist_started.set()
+            await release.wait()
+            return AgentModelTurn(content="[SUCCESS] 不应到达。")
+        parent_turn += 1
+        if parent_turn == 1:
+            return _delegate_call(
+                "delegate-stop",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="编排 Timeline 选段",
+            )
+        return AgentModelTurn(content="收到。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await asyncio.wait_for(specialist_started.wait(), timeout=5.0)
+        await _wait_consumed(services, 1)
+        await driver.stop()
+        runs = driver.executions.list_specialist_runs(PROJECT_ID)
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        return runs, messages
+
+    runs, messages = asyncio.run(scenario())
+    assert runs[0].status.value == "CANCELLED"
+    assert not [
+        item
+        for item in messages
+        if item.role == "user" and item.source == "runtime_notification"
+    ], "a human-initiated stop must not chase the cancelled work"
+
+
+def test_inflight_target_refuses_duplicate_delegation(tmp_path) -> None:
+    release = asyncio.Event()
+    parent_turn = 0
+    duplicate_error: list[str] = []
+
+    async def callback(messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            await release.wait()
+            return AgentModelTurn(content="[SUCCESS] 剪辑完成。")
+        parent_turn += 1
+        if parent_turn <= 2:
+            return _delegate_call(
+                f"delegate-dup-{parent_turn}",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="编排 Timeline 选段",
+            )
+        duplicate_error.append(messages[-1]["content"])
+        release.set()
+        return AgentModelTurn(content="等待首个委派完成。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(lambda: parent_turn >= 3)
+        await _wait_consumed(services, 1)
+        await _wait_for(
+            lambda: any(
+                run.status.value == "SUCCEEDED"
+                for run in driver.executions.list_specialist_runs(PROJECT_ID)
+            ),
+        )
+        runs = driver.executions.list_specialist_runs(PROJECT_ID)
+        await driver.stop()
+        return runs
+
+    runs = asyncio.run(scenario())
+    assert len(runs) == 1, "the duplicate delegation must not spawn a run"
+    assert duplicate_error
+    assert "already in flight" in duplicate_error[0]
+
+
+def test_startup_reclaims_orphaned_specialist_runs(tmp_path) -> None:
+    from domain.enums import SpecialistRole as SpecialistRoleEnum
+    from domain.enums import SpecialistRunStatus as RunStatus
+    from services.runtime_files.execution_models import SpecialistRunRecord
+
+    async def scenario():
+        services, snapshot = _create_project(tmp_path, initial_goal="剪辑")
+        executions = _driver(
+            services,
+            lambda _messages, _tools: AgentModelTurn(),
+        ).executions
+        record = SpecialistRunRecord(
+            run_id="specialist-run-orphan",
+            project_id=PROJECT_ID,
+            round_id="agent-round-old",
+            role=SpecialistRoleEnum.AI_EDITING_DIRECTOR,
+            target_refs=["timeline:timeline:main"],
+            input_generation=snapshot.generation,
+            input_etag=snapshot.etag,
+            related_run_id="agent-run-old",
+            prompt_spec_id="file_project_json.ai_editing_director.v1",
+            caused_by_message_id="message-initial",
+            caused_by_message_seq=1,
+        )
+        executions.create_specialist_run(record)
+        executions.transition_specialist_run(
+            PROJECT_ID,
+            record.run_id,
+            expected_status=RunStatus.QUEUED,
+            status=RunStatus.RUNNING_MODEL,
+        )
+        # Fresh process: the run has no owning task anymore.
+        driver = _driver(
+            services,
+            lambda _messages, _tools: AgentModelTurn(),
+        )
+        await driver.start()
+        await _wait_for(
+            lambda: driver.executions.get_specialist_run(
+                PROJECT_ID,
+                record.run_id,
+            ).status.value
+            == "FAILED",
+        )
+        reclaimed = driver.executions.get_specialist_run(
+            PROJECT_ID,
+            record.run_id,
+        )
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        await driver.stop()
+        return reclaimed, messages
+
+    reclaimed, messages = asyncio.run(scenario())
+    assert reclaimed.status.value == "FAILED"
+    assert "orphaned by restart" in (reclaimed.final_summary_text or "")
+    notifications = [
+        item
+        for item in messages
+        if item.role == "user" and item.source == "runtime_notification"
+    ]
+    assert len(notifications) == 1
+    assert notifications[0].metadata["specialistStatus"] == "FAILED"
+    assert "进程重启" in notifications[0].content_parts[0].text
+
+
+def test_turn_boundary_injects_quiet_digest_into_live_run(tmp_path) -> None:
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    seen_digest: list[str] = []
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+
+        async def callback(messages, _tools):
+            for item in messages:
+                if item["role"] == "user" and "已开始生成：视频 e9" in str(
+                    item["content"],
+                ):
+                    seen_digest.append(str(item["content"]))
+            return AgentModelTurn(content="收到进度。")
+
+        driver = _driver(services, callback)
+        await driver.notifications.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
+            request_id="node_dispatch_started-video:e9-fp1",
+            text="已开始生成：视频 e9",
+        )
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_consumed(services, 1)
+        await driver.wait_until_idle(PROJECT_ID)
+        states = {
+            record.state
+            for record in driver.notifications.store._current_versions(
+                PROJECT_ID,
+            ).values()
+        }
+        await driver.stop()
+        return states
+
+    states = asyncio.run(scenario())
+    assert seen_digest, "the quiet digest must join the live run's messages"
+    assert states == {"DRAINED"}
