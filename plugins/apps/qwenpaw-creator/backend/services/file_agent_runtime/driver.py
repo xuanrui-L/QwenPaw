@@ -30,6 +30,7 @@ from domain.enums import (
     CreatorSessionStatus,
     SpecialistRole,
     SpecialistRunStatus,
+    TERMINAL_SPECIALIST_STATUSES,
     TaskStatus,
 )
 from domain.errors import (
@@ -200,6 +201,7 @@ from .native_media import (
 )
 from .notifications import (
     NOTIFICATION_SOURCE,
+    RuntimeEventKind,
     RuntimeNotificationBus,
 )
 from .prompts import render_creator_system_prompt
@@ -1383,6 +1385,8 @@ class _SpecialistHandle:
 
     project_id: str
     specialist_run_id: str
+    role: str = ""
+    target_refs: tuple[str, ...] = ()
     cancel_reason: str | None = None
     task: asyncio.Task[None] | None = None
 
@@ -1479,6 +1483,9 @@ class FileCreatorAgentRuntime:
         self._wake = asyncio.Event()
         self._stopping = False
         self._active: dict[str, _ProjectTask] = {}
+        # Detached (asynchronous) specialist runs by project; cancelled
+        # by interrupt/stop/project-delete, never by a new mainline run.
+        self._specialist_tasks: dict[str, dict[str, _SpecialistHandle]] = {}
         self._interrupt_cleanup_tasks: set[asyncio.Task[Any]] = set()
         self._blocked_heads: dict[str, int] = {}
         # Durable-interrupt stall tracking: project -> (run_id, first seen
@@ -1590,6 +1597,13 @@ class FileCreatorAgentRuntime:
                     summary.project_id,
                 )
             try:
+                await self._reclaim_specialist_orphans(summary.project_id)
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "startup specialist orphan reclaim failed for %s",
+                    summary.project_id,
+                )
+            try:
                 await self._resume_interrupted_run(summary.project_id)
             except Exception:  # pylint: disable=broad-except
                 logger.exception(
@@ -1604,9 +1618,10 @@ class FileCreatorAgentRuntime:
         other process can own a QUEUED/RUNNING run: any non-terminal run is a
         crash leftover.  Without this pass the Session shows a phantom
         "running" Agent until the user presses stop and the interrupt stall
-        fuse expires.  Media/specialist tasks are deliberately left alone:
-        they carry their own provider-resume machinery and an in-progress
-        cloud job may still be reusable.
+        fuse expires.  Detached specialist runs are reclaimed by
+        ``_reclaim_specialist_orphans``; media tasks are deliberately left
+        alone: they carry their own provider-resume machinery and an
+        in-progress cloud job may still be reusable.
         """
 
         try:
@@ -1728,6 +1743,13 @@ class FileCreatorAgentRuntime:
                 handle.epoch,
             )
             handle.task.cancel()
+        specialist_handles = [
+            item
+            for project_handles in self._specialist_tasks.values()
+            for item in project_handles.values()
+        ]
+        for specialist in specialist_handles:
+            specialist.cancel("shutdown")
         cleanup_tasks = list(self._interrupt_cleanup_tasks)
         for task in cleanup_tasks:
             task.cancel()
@@ -1736,11 +1758,17 @@ class FileCreatorAgentRuntime:
                 *(handle.task for handle in handles),
                 return_exceptions=True,
             )
+        specialist_tasks = [
+            item.task for item in specialist_handles if item.task is not None
+        ]
+        if specialist_tasks:
+            await asyncio.gather(*specialist_tasks, return_exceptions=True)
         if dispatcher is not None:
             await asyncio.gather(dispatcher, return_exceptions=True)
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         self._active.clear()
+        self._specialist_tasks.clear()
         self._interrupt_cleanup_tasks.clear()
         self._loop = None
 
@@ -1795,7 +1823,9 @@ class FileCreatorAgentRuntime:
                 # cleanup writer from racing deletion and recreating Runtime
                 # parents under the old Project id.
                 self.work_scheduler.cancel_project(project_id)
+                self._cancel_project_specialists(project_id, reason=reason)
                 return False
+            self._cancel_project_specialists(project_id, reason=reason)
             await self._record_idle_interrupt(project_id, reason=reason)
             self.notify(project_id)
             return False
@@ -1822,6 +1852,7 @@ class FileCreatorAgentRuntime:
                 handle.epoch,
             )
             self.work_scheduler.cancel_project(project_id)
+            self._cancel_project_specialists(project_id, reason=reason)
             handle.task.cancel()
             self.notify(project_id)
             return True
@@ -1829,6 +1860,7 @@ class FileCreatorAgentRuntime:
         # publication already holding the in-process commit boundary; stop and
         # delete must not keep the caller waiting for that completed decision.
         self.work_scheduler.cancel_project(project_id)
+        self._cancel_project_specialists(project_id, reason=reason)
         handle.task.cancel()
         cleanup = asyncio.create_task(
             asyncio.to_thread(
@@ -1843,6 +1875,73 @@ class FileCreatorAgentRuntime:
         cleanup.add_done_callback(self._interrupt_cleanup_tasks.discard)
         self.notify(project_id)
         return True
+
+    def _cancel_project_specialists(
+        self,
+        project_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        """Revoke every detached specialist of one Project.
+
+        Only interrupt/stop/project-delete reach here; a new mainline run
+        never cancels a detached specialist.
+        """
+
+        for handle in list(
+            self._specialist_tasks.get(project_id, {}).values(),
+        ):
+            handle.cancel(reason)
+
+    async def _reclaim_specialist_orphans(self, project_id: str) -> None:
+        """Fail over detached specialist runs stranded by an unclean exit.
+
+        A restart loses every in-process specialist task; their durable
+        records would sit in RUNNING_MODEL / WAITING_* forever and their
+        delegation targets would stay locked against re-delegation. Each
+        orphan turns FAILED and reports through the notification bus so
+        the mainline Agent can decide whether to re-delegate.
+        """
+
+        try:
+            records = await asyncio.to_thread(
+                self.executions.list_specialist_runs,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return
+        for record in records:
+            if record.status in TERMINAL_SPECIALIST_STATUSES:
+                continue
+            try:
+                await asyncio.to_thread(
+                    self.executions.transition_specialist_run,
+                    project_id,
+                    record.run_id,
+                    expected_status=record.status,
+                    status=SpecialistRunStatus.FAILED,
+                    updates={
+                        "final_marker": "FAILED",
+                        "final_summary_text": (
+                            "specialist run orphaned by restart"
+                        ),
+                    },
+                )
+            except Exception:  # pylint: disable=broad-except
+                logger.exception(
+                    "specialist orphan reclaim failed: project=%s run=%s",
+                    project_id,
+                    record.run_id,
+                )
+                continue
+            await self._notify_specialist_terminal(
+                project_id,
+                specialist_run_id=record.run_id,
+                role_name=record.role.value,
+                target_refs=list(record.target_refs),
+                status="FAILED",
+                summary="进程重启导致该委派中断，未产出终态结果。",
+            )
 
     async def wait_until_idle(
         self,
@@ -2154,6 +2253,20 @@ class FileCreatorAgentRuntime:
                 )
             except SessionStateConflict:
                 pass
+            return
+        # A detached specialist can create a Review after its mainline run
+        # already finished, so the Session never transitioned to
+        # PENDING_REVIEW. Gate on the durable Review record itself
+        # (read-only, and only when a run is about to launch): queued
+        # messages wait and are consumed once the user decides.
+        try:
+            active_review = await asyncio.to_thread(
+                self.services.reviews.active,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            active_review = None
+        if active_review is not None:
             return
         run_id = f"agent-run-{uuid4().hex}"
         epoch = self._begin_epoch(project_id, run_id)
@@ -4037,6 +4150,50 @@ class FileCreatorAgentRuntime:
             skill_name=skill_name,
         )
 
+    async def _delegation_origin(
+        self,
+        project_id: str,
+        request: CreatorMessageRecord,
+    ) -> tuple[str, str]:
+        """Resolve which user message a delegation is really answering.
+
+        A specialist terminal notification is runtime-authored; the
+        delegation it prompts still belongs to the message that caused the
+        reported specialist run (e.g. a review-feedback message whose
+        repair identity gates dedup and the paid repair budget).
+        """
+
+        if (
+            request.source != NOTIFICATION_SOURCE
+            or request.metadata.get("notificationKind")
+            != RuntimeEventKind.SUBAGENT_TERMINAL.value
+        ):
+            return request.source, request.message_id
+        specialist_run_id = str(
+            request.metadata.get("specialistRunId") or "",
+        )
+        if not specialist_run_id:
+            return request.source, request.message_id
+        try:
+            record = await asyncio.to_thread(
+                self.executions.get_specialist_run,
+                project_id,
+                specialist_run_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return request.source, request.message_id
+        origin_source = str(
+            record.metadata.get("originSource") or "",
+        )
+        origin_message_id = str(
+            record.metadata.get("originMessageId")
+            or record.caused_by_message_id
+            or "",
+        )
+        if not origin_source or not origin_message_id:
+            return request.source, request.message_id
+        return origin_source, origin_message_id
+
     async def _run_subagent(
         self,
         *,
@@ -4063,7 +4220,17 @@ class FileCreatorAgentRuntime:
             "run_review_feedback",
             "render_review_feedback",
         }
-        if request.source in review_repair_sources:
+        # A repair delegation may arrive one hop later: the feedback run
+        # delegates, the specialist finishes asynchronously, and the model
+        # re-delegates from the terminal-notification run. The repair
+        # identity (dedup + paid budget) must follow that chain, or the
+        # notification hop would reopen an unbounded paid regeneration
+        # loop for the same feedback goal.
+        origin_source, origin_message_id = await self._delegation_origin(
+            project_id,
+            request,
+        )
+        if origin_source in review_repair_sources:
             prior_runs = await asyncio.to_thread(
                 self.executions.list_specialist_runs,
                 project_id,
@@ -4071,8 +4238,17 @@ class FileCreatorAgentRuntime:
             already_repaired = {
                 target_ref
                 for record in prior_runs
-                if record.caused_by_message_id == request.message_id
-                and record.status is SpecialistRunStatus.SUCCEEDED
+                if (
+                    record.caused_by_message_id == origin_message_id
+                    or record.metadata.get("originMessageId")
+                    == origin_message_id
+                )
+                and (
+                    record.status is SpecialistRunStatus.SUCCEEDED
+                    # A still-running repair holds its targets: asynchronous
+                    # delegation must not double-pay while it is in flight.
+                    or record.status not in TERMINAL_SPECIALIST_STATUSES
+                )
                 for target_ref in record.target_refs
             }
             repeated = already_repaired.intersection(delegated.target_refs)
@@ -4087,18 +4263,31 @@ class FileCreatorAgentRuntime:
                 )
         role = delegated.role
         role_name = role.value
-        fence: _RunFence = _EpochFence(
-            self,
-            project_id,
-            parent_run_id,
-            epoch,
+        self._assert_epoch(project_id, parent_run_id, epoch)
+        inflight_targets = sorted(
+            {
+                target_ref
+                for handle in self._specialist_tasks.get(
+                    project_id,
+                    {},
+                ).values()
+                for target_ref in handle.target_refs
+                if target_ref in set(delegated.target_refs)
+            },
         )
+        if inflight_targets:
+            raise FileAgentRuntimeError(
+                "a specialist delegation is already in flight for: "
+                + ", ".join(inflight_targets)
+                + "; wait for its terminal Runtime notification instead of "
+                "delegating the same target again.",
+            )
         snapshot = await asyncio.to_thread(
             self.services.projects.read,
             project_id,
         )
         repair_attempts: dict[str, int] = {}
-        if request.source in review_repair_sources:
+        if origin_source in review_repair_sources:
             from services.run_review import admission
 
             reports_root = (
@@ -4110,7 +4299,7 @@ class FileCreatorAgentRuntime:
                 admission.admit_repair_attempts,
                 reports_root,
                 target_refs=delegated.target_refs,
-                attempt_id=f"{request.message_id}:{parent_action_id}",
+                attempt_id=f"{origin_message_id}:{parent_action_id}",
             )
             if admitted_attempts is None:
                 raise FileAgentRuntimeError(
@@ -4132,7 +4321,11 @@ class FileCreatorAgentRuntime:
             project_root=self.services.projects.project_root(project_id),
             target_refs=delegated.target_refs,
         )
-        record_metadata: dict[str, Any] = {"parentActionId": parent_action_id}
+        record_metadata: dict[str, Any] = {
+            "parentActionId": parent_action_id,
+            "originSource": origin_source,
+            "originMessageId": origin_message_id,
+        }
         if repair_attempts:
             record_metadata["reviewRepairAttempts"] = repair_attempts
         if request.source == "review_rejection_feedback":
@@ -4194,6 +4387,213 @@ class FileCreatorAgentRuntime:
             common,
         )
 
+        handle = _SpecialistHandle(
+            project_id=project_id,
+            specialist_run_id=specialist_run_id,
+            role=role_name,
+            target_refs=tuple(delegated.target_refs),
+        )
+        # The detached specialist owns its tools: commits go through a
+        # token fence, so a later mainline run (which increments the
+        # project epoch) can never invalidate this run's publications.
+        specialist_tools = AgentProjectTools(
+            self.services.projects,
+            context=tools.context,
+            transformer=self.services.jq,
+            commits=_FencedCommitBoundary(
+                self,
+                _TokenFence(handle),
+                ProjectCommitBoundary(self.services.projects),
+            ),
+        )
+        drive = asyncio.create_task(
+            self._drive_subagent(
+                project_id=project_id,
+                session_id=session_id,
+                parent_run_id=parent_run_id,
+                parent_action_id=parent_action_id,
+                request=request,
+                tools=specialist_tools,
+                delegated=delegated,
+                role=role,
+                snapshot=snapshot,
+                prompt=prompt,
+                specialist_run_id=specialist_run_id,
+                round_id=round_id,
+                common=common,
+                record_metadata=record_metadata,
+                handle=handle,
+            ),
+            name=f"creator-specialist:{project_id}:{specialist_run_id}",
+        )
+        handle.task = drive
+        self._specialist_tasks.setdefault(project_id, {})[
+            specialist_run_id
+        ] = handle
+
+        def _discard(
+            done: asyncio.Task[Any],
+            *,
+            owner: str = project_id,
+            run: str = specialist_run_id,
+        ) -> None:
+            handles = self._specialist_tasks.get(owner)
+            if handles is not None:
+                handles.pop(run, None)
+                if not handles:
+                    self._specialist_tasks.pop(owner, None)
+            if not done.cancelled() and done.exception() is not None:
+                logger.error(
+                    "specialist run crashed: project=%s run=%s",
+                    owner,
+                    run,
+                    exc_info=done.exception(),
+                )
+
+        drive.add_done_callback(_discard)
+        return {
+            "ok": True,
+            "status": "ACCEPTED",
+            "runId": specialist_run_id,
+            "role": role_name,
+            "targetRefs": list(delegated.target_refs),
+        }
+
+    async def _drive_subagent(
+        self,
+        *,
+        project_id: str,
+        specialist_run_id: str,
+        role: SpecialistRole,
+        delegated: DelegateToAgentInput,
+        handle: _SpecialistHandle,
+        **inner_kwargs: Any,
+    ) -> None:
+        """Drive one detached specialist run and report its terminal state.
+
+        Runs as a background task after delegate_to_agent returned
+        ACCEPTED; the terminal outcome reaches the mainline Agent through
+        the runtime notification bus (a durable user message), never
+        through a tool result.
+        """
+
+        try:
+            result = await self._drive_subagent_inner(
+                project_id=project_id,
+                specialist_run_id=specialist_run_id,
+                role=role,
+                delegated=delegated,
+                handle=handle,
+                **inner_kwargs,
+            )
+        except (asyncio.CancelledError, StaleAgentRun):
+            # Revoked by interrupt/stop/project-delete: a human took over,
+            # so no notification chases the cancelled work.
+            raise
+        except Exception as exc:  # pylint: disable=broad-except
+            await self._notify_specialist_terminal(
+                project_id,
+                specialist_run_id=specialist_run_id,
+                role_name=role.value,
+                target_refs=list(delegated.target_refs),
+                status="FAILED",
+                summary=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        await self._notify_specialist_terminal(
+            project_id,
+            specialist_run_id=specialist_run_id,
+            role_name=role.value,
+            target_refs=list(delegated.target_refs),
+            status=str(result.get("status") or "FAILED"),
+            summary=str(result.get("summary") or ""),
+            generation=result.get("generation"),
+            review_id=result.get("reviewId"),
+        )
+
+    async def _notify_specialist_terminal(
+        self,
+        project_id: str,
+        *,
+        specialist_run_id: str,
+        role_name: str,
+        target_refs: list[str],
+        status: str,
+        summary: str,
+        generation: int | None = None,
+        review_id: str | None = None,
+    ) -> None:
+        """Deliver one specialist terminal outcome as a steer notification."""
+
+        marker = {
+            "SUCCEEDED": "[SUCCESS]",
+            "BLOCKED": "[BLOCKED]",
+            "FAILED": "[FAILED]",
+            "WAITING_REVIEW": "[WAITING_REVIEW]",
+        }.get(status, f"[{status}]")
+        lines = [
+            f"Specialist 终态 {marker}：{role_name} 对 "
+            f"{'、'.join(target_refs)} 的委派已结束。",
+        ]
+        if summary:
+            lines.append(f"摘要：{summary}")
+        if generation is not None:
+            lines.append(f"Project generation：{generation}")
+        if status == "WAITING_REVIEW":
+            lines.append(
+                "该委派的产物正在等待审阅，这是正常暂停而不是制作失败："
+                "不要重试同一目标或启动其下游，可以继续处理不依赖该产物"
+                "的目标。"
+            )
+        else:
+            lines.append(
+                "请重新读取 Project 核对该委派的实际产出，再决定下一步；"
+                "不要重复已完成的工作。"
+            )
+        payload: dict[str, Any] = {
+            "specialistRunId": specialist_run_id,
+            "role": role_name,
+            "targetRefs": list(target_refs),
+            "specialistStatus": status,
+        }
+        if review_id:
+            payload["reviewId"] = review_id
+        try:
+            await self.notifications.notify(
+                project_id,
+                kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+                request_id=f"specialist-{specialist_run_id}",
+                text="\n".join(lines),
+                payload=payload,
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "specialist terminal notification failed: project=%s run=%s",
+                project_id,
+                specialist_run_id,
+            )
+
+    async def _drive_subagent_inner(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        parent_run_id: str,
+        parent_action_id: str,
+        request: CreatorMessageRecord,
+        tools: AgentProjectTools,
+        delegated: DelegateToAgentInput,
+        role: SpecialistRole,
+        snapshot: Any,
+        prompt: str,
+        specialist_run_id: str,
+        round_id: str,
+        common: Mapping[str, Any],
+        record_metadata: dict[str, Any],
+        handle: _SpecialistHandle,
+    ) -> dict[str, Any]:
+        role_name = role.value
+        fence: _RunFence = _TokenFence(handle)
         user_text = (
             f"父任务的用户原始要求：\n{_message_text(request)}\n\n"
             f"本次委派：\n{delegated.task}\n\n"

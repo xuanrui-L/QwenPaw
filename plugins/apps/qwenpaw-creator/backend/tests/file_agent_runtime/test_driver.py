@@ -902,7 +902,14 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
         driver.notify(PROJECT_ID)
         await asyncio.wait_for(specialist_started.wait(), timeout=2.0)
         await _wait_consumed(services)
-        await driver.wait_until_idle(PROJECT_ID)
+        # The specialist is detached: its wall-clock guard trips well after
+        # the mainline run has already gone idle.
+        await _wait_for(
+            lambda: (
+                (runs := driver.executions.list_specialist_runs(PROJECT_ID))
+                and runs[0].status.value == "FAILED"
+            ),
+        )
         specialist = driver.executions.list_specialist_runs(PROJECT_ID)[0]
         await driver.stop()
         return specialist
@@ -929,9 +936,22 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
             specialist_turns += 1
             return AgentModelTurn(content="[SUCCESS] 修复产物已写入 selected output。")
         parent_turn += 1
-        if parent_turn <= 2:
+        if parent_turn == 1:
             return _delegate_call(
-                f"delegate-review-{parent_turn}",
+                "delegate-review-1",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="修复本轮异步审阅发现并生成一次新产物",
+            )
+        if parent_turn == 2:
+            assert '"status":"ACCEPTED"' in messages[-1]["content"]
+            return AgentModelTurn(content="已委派修复，等待 Specialist 终态通知。")
+        if parent_turn == 3:
+            # The terminal-notification run: a misbehaving model retries the
+            # same feedback target — the repair identity must follow the
+            # notification hop and refuse a second paid delegation.
+            return _delegate_call(
+                "delegate-review-2",
                 role="ai_editing_director",
                 target_refs=["timeline:timeline:main"],
                 task="修复本轮异步审阅发现并生成一次新产物",
@@ -971,7 +991,7 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
         driver = _driver(services, callback)
         await driver.start()
         driver.notify(PROJECT_ID)
-        await _wait_consumed(services)
+        await _wait_for(lambda: parent_turn >= 4)
         await driver.wait_until_idle(PROJECT_ID)
         runs = driver.executions.list_specialist_runs(PROJECT_ID)
         await driver.stop()
@@ -987,7 +1007,7 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
         return runs, repair_state
 
     runs, repair_state = asyncio.run(scenario())
-    assert parent_turn == 3
+    assert parent_turn == 4
     assert specialist_turns == 1
     assert len(runs) == 1
     assert runs[0].status.value == "SUCCEEDED"
@@ -2004,7 +2024,13 @@ def test_costly_specialist_tool_waits_for_file_authorization(
         )
         _approve(driver, authorization)
         await _wait_consumed(services)
-        await driver.wait_until_idle(PROJECT_ID)
+        await _wait_for(
+            lambda: driver.executions.get_specialist_run(
+                PROJECT_ID,
+                authorization.run_id,
+            ).status.value
+            == "SUCCEEDED",
+        )
         completed_run = driver.executions.get_specialist_run(
             PROJECT_ID,
             authorization.run_id,
@@ -2424,11 +2450,14 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
                 target_refs=["timeline:timeline:main"],
                 task="生成 hero 角色试音并等待审阅",
             )
-        delegated = json.loads(messages[-1]["content"])
-        assert delegated["status"] == "WAITING_REVIEW"
-        assert delegated["waitingReview"] is True
+        if parent_turn == 2:
+            delegated = json.loads(messages[-1]["content"])
+            assert delegated["status"] == "ACCEPTED"
+            return AgentModelTurn(content="已委派，等待 Specialist 终态通知。")
+        # The terminal-notification run reports the review pause.
+        assert "[WAITING_REVIEW]" in messages[1]["content"]
         return AgentModelTurn(
-            content="ep22 分镜图等待审阅。审阅通过后告诉我“继续”，我会接着生成视频。",
+            content="ep22 分镜图等待审阅，审阅通过后自动继续。",
         )
 
     async def scenario():
@@ -2440,14 +2469,17 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
         class PendingReview:
             review_id = "review-ep22-storyboard"
 
+        pending_reviews: list = []
         monkeypatch.setattr(
             services.reviews,
             "all_pending",
-            lambda _project_id: [PendingReview()],
+            lambda _project_id: list(pending_reviews),
         )
         driver = _driver(services, callback)
 
         async def reviewed_read(**_kwargs):
+            # The specialist tool creates the review mid-run.
+            pending_reviews.append(PendingReview())
             return SpecialistToolResult(
                 payload={
                     "ok": True,
@@ -2458,16 +2490,41 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
             )
 
         driver.specialist_tools.invoke = reviewed_read  # type: ignore[method-assign]
-        await _run_to_idle(driver, services)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_for(
+            lambda: (
+                (runs := driver.executions.list_specialist_runs(PROJECT_ID))
+                and runs[0].status.value == "BLOCKED"
+            ),
+        )
+        # The terminal notification is durably queued, but the active
+        # review gates consumption: no new run may start until the user
+        # decides.
+        await _wait_for(
+            lambda: any(
+                item.role == "user"
+                and item.source == "runtime_notification"
+                for item in services.sessions.list_messages(
+                    PROJECT_ID,
+                    SESSION_ID,
+                )
+            ),
+        )
+        await asyncio.sleep(0.05)
+        assert parent_turn == 2, (
+            "the notification run must wait for the review decision"
+        )
+        pending_reviews.clear()
+        await _wait_for(lambda: parent_turn >= 3)
+        await driver.wait_until_idle(PROJECT_ID)
         specialist = driver.executions.list_specialist_runs(PROJECT_ID)[0]
         events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
-        session = services.sessions.get_project_session(PROJECT_ID)
-        run = driver.runs.list(PROJECT_ID)[0]
         messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
         await driver.stop()
-        return specialist, events, session, run, messages
+        return specialist, events, messages
 
-    specialist, events, session, run, messages = asyncio.run(scenario())
+    specialist, events, messages = asyncio.run(scenario())
     assert specialist.status.value == "BLOCKED"
     assert specialist.metadata["waitingReview"] is True
     assert specialist.metadata["waitingReviewId"] == "review-ep22-storyboard"
@@ -2482,11 +2539,15 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     assert len(blocked) == 1
     assert blocked[0].payload["waitingReview"] is True
     assert blocked[0].payload["reviewId"] == "review-ep22-storyboard"
-    assert session.status.value == "PENDING_REVIEW"
-    expected_final_summary = f"{waiting_summary}\n\n无需另行发送消息。"
-    assert run.final_summary == expected_final_summary
-    assert messages[-1].content_parts[0].text == expected_final_summary
-    assert "告诉我" not in (run.final_summary or "")
+    notifications = [
+        item
+        for item in messages
+        if item.role == "user" and item.source == "runtime_notification"
+    ]
+    assert len(notifications) == 1
+    assert notifications[0].metadata["specialistStatus"] == "WAITING_REVIEW"
+    assert notifications[0].metadata["reviewId"] == "review-ep22-storyboard"
+    assert "[WAITING_REVIEW]" in notifications[0].content_parts[0].text
 
 
 def test_workspace_commits_wake_the_media_scheduler(tmp_path) -> None:

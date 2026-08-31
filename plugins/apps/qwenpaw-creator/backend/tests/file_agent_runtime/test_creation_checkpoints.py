@@ -339,9 +339,19 @@ def test_declined_plan_checkpoint_refuses_without_generating(
             lambda: services.sessions.get_project_session(
                 PROJECT_ID,
             ).last_consumed_message_seq
-            == 1,
+            >= 1,
         )
-        await driver.wait_until_idle(PROJECT_ID)
+        # The specialist runs detached from the mainline turn: wait for it
+        # to observe the rejection instead of racing driver.stop().
+        await _wait_for(
+            lambda: any(
+                "CreationCheckpointBlocked" in str(item.content_parts)
+                for item in driver.executions.list_specialist_messages(
+                    PROJECT_ID,
+                    pending.run_id,
+                )
+            ),
+        )
         messages = driver.executions.list_specialist_messages(
             PROJECT_ID,
             pending.run_id,
