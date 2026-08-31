@@ -771,7 +771,35 @@ async def export_project(
         ) from e
 
 
-_WINDOWS_RESERVED_CHARS = re.compile(r'[<>:"\\|?*]')
+_WINDOWS_UNSAFE_CHARS = re.compile(r'[<>:"\\|?*]')
+
+
+def _sanitize_zip_entry(name: str) -> str:
+    """Replace Windows-reserved characters in each path component."""
+
+    parts = name.split("/")
+    return "/".join(_WINDOWS_UNSAFE_CHARS.sub("_", p) for p in parts)
+
+
+def _extract_archive_sanitized(archive_path: Path, extract_dir: Path) -> None:
+    """Unpack a zip, sanitizing entry names and guarding against path traversal."""
+
+    resolved_base = extract_dir.resolve()
+    with zipfile.ZipFile(archive_path) as archive:
+        for info in archive.infolist():
+            safe_name = _sanitize_zip_entry(info.filename)
+            target_path = (extract_dir / safe_name).resolve()
+            if not target_path.is_relative_to(resolved_base):
+                raise StorageIntegrityError(
+                    f"archive entry escapes extraction root: "
+                    f"{info.filename!r}",
+                )
+            if info.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+            else:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as src, target_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
 
 
 def _validate_import_archive(saved_zip: Path) -> None:
@@ -792,12 +820,6 @@ def _validate_import_archive(saved_zip: Path) -> None:
                         f"archive entry escapes the extraction root: "
                         f"{info.filename!r}",
                     )
-                for part in member.parts:
-                    if _WINDOWS_RESERVED_CHARS.search(part):
-                        raise BadRequestError(
-                            f"archive entry contains Windows-reserved "
-                            f"characters: {info.filename!r}",
-                        )
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode == stat_module.S_IFLNK:
                     raise BadRequestError(
@@ -907,10 +929,9 @@ async def _run_import(upload) -> str:
         extract_dir.mkdir(mode=0o700)
         try:
             await asyncio.to_thread(
-                shutil.unpack_archive,
-                str(saved_zip),
-                extract_dir=extract_dir,
-                format="zip",
+                _extract_archive_sanitized,
+                saved_zip,
+                extract_dir,
             )
             logger.info(
                 f"unpacked zip file {_log_safe(saved_zip)} to {extract_dir}",
