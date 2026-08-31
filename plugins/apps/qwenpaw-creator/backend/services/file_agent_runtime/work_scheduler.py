@@ -40,10 +40,12 @@ from services.media_files.call_budget import (
     ensure_media_call_budget,
 )
 from services.media_files.transient_errors import is_transient_error_message
+from services.file_agent_runtime.notifications import RuntimeEventKind
 from services.file_agent_runtime.work_graph import (
     dispatch_key_predates_digest_ledger,
     WorkGraph,
     WorkNode,
+    WorkNodeStatus,
     derive_work_graph,
 )
 from services.project_files.facade import CreatorFileServices
@@ -183,9 +185,6 @@ def _blocked_by_active_sync_review(
     return sync_review_pending and node.kind in _HEAVY_NODE_KINDS
 
 
-DispatchHook = Callable[[str, WorkGraph], Awaitable[None]]
-
-
 class WorkGraphScheduler:
     """Per-project event loops dispatching READY media nodes."""
 
@@ -196,14 +195,17 @@ class WorkGraphScheduler:
         image_dispatch: Callable[..., Awaitable[Any]] | None = None,
         r2v_dispatch: Callable[..., Awaitable[Any]] | None = None,
         s2v_dispatch: Callable[..., Awaitable[Any]] | None = None,
-        on_tick: DispatchHook | None = None,
+        notifications: Any | None = None,
     ) -> None:
         self.services = services
         self.executions = ProjectExecutionStore(services.root)
         self._image_dispatch = image_dispatch
         self._r2v_dispatch = r2v_dispatch
         self._s2v_dispatch = s2v_dispatch
-        self._on_tick = on_tick
+        self._notifications = notifications
+        # Per-project last observed node states for edge-triggered
+        # notifications: {project_id: {node_id: (status, fingerprint)}}.
+        self._graph_progress: dict[str, dict[str, tuple[str, str]]] = {}
         self._wakes: dict[str, asyncio.Event] = {}
         self._loops: dict[str, asyncio.Task[None]] = {}
         # (project_id, node_id, fingerprint) -> already dispatched once.
@@ -330,6 +332,7 @@ class WorkGraphScheduler:
             task.cancel()
         self._inflight.pop(project_id, None)
         self._wakes.pop(project_id, None)
+        self._graph_progress.pop(project_id, None)
         recheck = self._sync_gate_rechecks.pop(project_id, None)
         if recheck is not None:
             recheck.cancel()
@@ -492,8 +495,11 @@ class WorkGraphScheduler:
                 project_id,
                 exc,
             )
-            if self._on_tick is not None:
-                await self._on_tick(project_id, graph)
+            await self._emit_graph_transitions(
+                project_id,
+                graph,
+                snapshot.generation,
+            )
             return graph
         running = sum(
             1 for node in graph.nodes if node.status.value == "running"
@@ -549,8 +555,11 @@ class WorkGraphScheduler:
                     done.exception()
 
             task.add_done_callback(discard)
-        if self._on_tick is not None:
-            await self._on_tick(project_id, graph)
+        await self._emit_graph_transitions(
+            project_id,
+            graph,
+            snapshot.generation,
+        )
         return graph
 
     async def _rereview_stale_scenes(
@@ -769,6 +778,129 @@ class WorkGraphScheduler:
             self._note_transient_retry(ledger_key)
             self._dispatched.discard(ledger_key)
 
+    async def _notify(
+        self,
+        project_id: str,
+        *,
+        kind: RuntimeEventKind,
+        request_id: str,
+        text: str,
+        node: WorkNode | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        """Report one event to the Agent; delivery failures never propagate."""
+
+        if self._notifications is None:
+            return
+        payload: dict[str, Any] = {}
+        if node is not None:
+            payload = {
+                "nodeId": node.node_id,
+                "nodeKind": node.kind,
+                "targetRef": node.target_ref,
+            }
+        if error_code is not None:
+            payload["errorCode"] = error_code
+        try:
+            await self._notifications.notify(
+                project_id,
+                kind=kind,
+                request_id=request_id,
+                text=text,
+                payload=payload,
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "work-graph notification failed project=%s event=%s",
+                project_id,
+                request_id,
+            )
+
+    async def _emit_graph_transitions(
+        self,
+        project_id: str,
+        graph: WorkGraph,
+        generation: int,
+    ) -> None:
+        """Edge-triggered progress events from consecutive graph snapshots.
+
+        Covers completions the dispatch return cannot observe (r2v/s2v write
+        their terminal state from a background poller; the commit listener
+        wakes this scheduler and the next tick lands here). The first
+        observed snapshot only establishes the baseline — replaying the
+        whole historical graph as events after a restart would be noise;
+        the request-id idempotency layers absorb any duplicates.
+        """
+
+        if self._notifications is None:
+            return
+        previous = self._graph_progress.get(project_id)
+        current: dict[str, tuple[str, str]] = {}
+        for node in graph.nodes:
+            current[node.node_id] = (
+                node.status.value,
+                self._ledger_fingerprint(node),
+            )
+        self._graph_progress[project_id] = current
+        if previous is not None:
+            for node in graph.nodes:
+                fingerprint = current[node.node_id][1]
+                prior = previous.get(node.node_id)
+                prior_status = prior[0] if prior is not None else None
+                if (
+                    node.status is WorkNodeStatus.DONE
+                    and prior is not None
+                    and prior_status != WorkNodeStatus.DONE.value
+                ):
+                    if node.kind == "compose":
+                        await self._notify(
+                            project_id,
+                            kind=RuntimeEventKind.COMPOSE_COMPLETED,
+                            request_id=f"compose-{node.node_id}-{fingerprint}",
+                            text=(
+                                f"成片合成完成：{node.label}。请读取 Project "
+                                "核对最终产物与用户目标，确认交付状态。"
+                            ),
+                            node=node,
+                        )
+                    else:
+                        await self._notify(
+                            project_id,
+                            kind=RuntimeEventKind.NODE_SUCCEEDED,
+                            request_id=(
+                                f"node_succeeded-{node.node_id}-{fingerprint}"
+                            ),
+                            text=f"生成完成：{node.label}",
+                            node=node,
+                        )
+                elif (
+                    node.status is WorkNodeStatus.GATED
+                    and prior_status != WorkNodeStatus.GATED.value
+                ):
+                    reasons = "；".join(node.missing[:3]) or "等待依赖"
+                    await self._notify(
+                        project_id,
+                        kind=RuntimeEventKind.NODE_GATED,
+                        request_id=f"node_gated-{node.node_id}-{fingerprint}",
+                        text=f"待条件满足：{node.label}（{reasons}）",
+                        node=node,
+                    )
+        had_unfinished = previous is None or any(
+            status != WorkNodeStatus.DONE.value
+            for status, _fingerprint in previous.values()
+        )
+        if graph.nodes and not graph.unfinished() and had_unfinished:
+            await self._notify(
+                project_id,
+                kind=RuntimeEventKind.GRAPH_ALL_DONE,
+                request_id=f"graphdone-g{generation}",
+                text=(
+                    f"当前工作图全部 {len(graph.nodes)} 个节点已完成"
+                    f"（generation {generation}）。请核对产物是否达成用户"
+                    "目标并进行收尾确认；不要重复生成。"
+                ),
+            )
+
     async def _dispatch(
         self,
         project_id: str,
@@ -781,12 +913,34 @@ class WorkGraphScheduler:
             node.node_id,
             node.command,
         )
+        await self._notify(
+            project_id,
+            kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
+            request_id=f"node_dispatch_started-{node.node_id}-{fingerprint}",
+            text=f"已开始生成：{node.label}",
+            node=node,
+        )
         try:
             await self.dispatch_node(project_id, node, fingerprint)
             self._deterministic_failure_nodes.pop(
                 (project_id, node.node_id, fingerprint),
                 None,
             )
+            # r2v/s2v dispatch only admits the provider task (the background
+            # poller writes its terminal state; the tick graph diff reports
+            # it); compose completion is the COMPOSE_COMPLETED milestone.
+            if (
+                node.command not in _R2V_COMMANDS
+                and node.command not in _S2V_COMMANDS
+                and node.command not in _COMPOSE_COMMANDS
+            ):
+                await self._notify(
+                    project_id,
+                    kind=RuntimeEventKind.NODE_SUCCEEDED,
+                    request_id=f"node_succeeded-{node.node_id}-{fingerprint}",
+                    text=f"生成完成：{node.label}",
+                    node=node,
+                )
         except Exception as exc:  # pylint: disable=broad-except
             ledger_key = (project_id, node.node_id, fingerprint)
             if _is_transient_dispatch_error(
@@ -825,6 +979,40 @@ class WorkGraphScheduler:
                     self._deterministic_failure_nodes[
                         (project_id, node.node_id, fingerprint)
                     ] = str(exc)[:200]
+                    await self._notify(
+                        project_id,
+                        kind=RuntimeEventKind.NODE_DETERMINISTIC_FAILURE,
+                        request_id=(
+                            f"detfail-{node.node_id}-{fingerprint}"
+                            f"-{error_code}"
+                        ),
+                        text=(
+                            f"媒体节点 {node.label}（{node.node_id}）生成失败，"
+                            f"且在输入修改前不会自动重试：{exc}\n"
+                            "请修复对应 Project 字段（如参考图数量、prompt "
+                            "或引用）；修复后调度器会自动重新生成。"
+                        ),
+                        node=node,
+                        error_code=str(error_code),
+                    )
+                elif (
+                    _is_transient_dispatch_error(exc)
+                    and self._transient_retries.get(ledger_key, 0)
+                    >= _TRANSIENT_RETRY_HARD_CAP
+                ):
+                    await self._notify(
+                        project_id,
+                        kind=RuntimeEventKind.NODE_TRANSIENT_CAP_EXHAUSTED,
+                        request_id=(
+                            f"transientcap-{node.node_id}-{fingerprint}"
+                        ),
+                        text=(
+                            f"媒体节点 {node.label}（{node.node_id}）连续多次"
+                            f"瞬态失败，自动重试预算已用尽：{exc}\n"
+                            "请检查供应商状态，或调整该节点的输入后再继续。"
+                        ),
+                        node=node,
+                    )
                 logger.warning(
                     "work-graph dispatch failed project=%s node=%s: %s",
                     project_id,

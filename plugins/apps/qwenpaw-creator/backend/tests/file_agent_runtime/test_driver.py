@@ -2530,3 +2530,314 @@ def test_workspace_commits_wake_the_media_scheduler(tmp_path) -> None:
         return woken
 
     assert asyncio.run(scenario()) == [PROJECT_ID]
+
+
+# -- runtime notification bus integration ----------------------------------
+
+
+def test_yolo_resume_message_carries_quiet_digest_prefix(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Pending quiet progress rides along with the end-of-run resume."""
+
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    node = WorkNode(
+        node_id="video:ep1",
+        kind="video",
+        label="第一场 · 视频",
+        status=WorkNodeStatus.GATED,
+        missing=("video_prompt 缺失",),
+        authored_text_gap=True,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+    )
+
+    async def scenario():
+        await driver.notifications.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_SUCCEEDED,
+            request_id="node_succeeded-visual:hero-fp1",
+            text="生成完成：角色设计 Hero",
+        )
+        await driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-digest",
+        )
+
+    asyncio.run(scenario())
+
+    feedback = services.sessions.list_messages(PROJECT_ID, SESSION_ID)[-1]
+    assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    text = feedback.content_parts[0].text
+    assert "生成完成：角色设计 Hero" in text
+    assert "video_prompt 缺失" in text
+    assert (
+        driver.notifications.store.pending_records(PROJECT_ID) == []
+    ), "drained quiet records must settle after the resume append"
+
+
+def test_yolo_streak_skips_notification_messages_without_reset(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Interleaved notifications neither spend nor reset the resume fuse."""
+
+    from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
+
+    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    for index in range(driver.PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"repair {index}"}],
+            source=driver.PROMPT_CONTRACT_RESUME_SOURCE,
+            channel=MessageChannel.RUNTIME,
+        )
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"进度速报 {index}"}],
+            source=NOTIFICATION_SOURCE,
+            channel=MessageChannel.RUNTIME,
+        )
+    node = WorkNode(
+        node_id="video:ep1",
+        kind="video",
+        label="第一场 · 视频",
+        status=WorkNodeStatus.GATED,
+        missing=("video_prompt 缺失",),
+        authored_text_gap=True,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "manual",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+    )
+
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-fuse",
+        ),
+    )
+
+    repairs = [
+        item
+        for item in services.sessions.list_messages(
+            PROJECT_ID,
+            SESSION_ID,
+            after_seq=0,
+            limit=None,
+        )
+        if item.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+    ]
+    assert (
+        len(repairs) == driver.PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE
+    ), "notification messages must not reset the resume fuse streak"
+
+
+def test_mainline_resume_message_carries_quiet_digest_prefix(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services, snapshot = _create_project(tmp_path, initial_goal="主线目标")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    driver.runs.create(
+        {
+            "run_id": "old-run",
+            "project_id": PROJECT_ID,
+            "session_id": SESSION_ID,
+            "goal_id": GOAL_ID,
+            "conversation_id": CONVERSATION_ID,
+            "round_id": "agent-round-old-run",
+            "caused_by_message_id": "message-initial",
+            "caused_by_message_seq": 1,
+            "caused_by_request_id": "client-initial",
+            "origin": "runtime_task",
+            "review_policy": "auto_fix",
+            "input_generation": snapshot.generation,
+            "input_etag": snapshot.etag,
+        },
+    )
+    driver.runs.transition(
+        PROJECT_ID,
+        "old-run",
+        expected_status=AgentRunStatus.QUEUED,
+        status=AgentRunStatus.RUNNING,
+    )
+    driver.runs.transition(
+        PROJECT_ID,
+        "old-run",
+        expected_status=AgentRunStatus.RUNNING,
+        status=AgentRunStatus.CANCELLED,
+    )
+
+    async def scenario():
+        await driver.notifications.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
+            request_id="node_dispatch_started-video:e1-fp1",
+            text="已开始生成：视频 e1",
+        )
+        await driver._queue_mainline_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            intervention_run_id="branch-run",
+            interrupted_run_id="old-run",
+        )
+
+    asyncio.run(scenario())
+
+    resume = services.sessions.list_messages(PROJECT_ID, SESSION_ID)[-1]
+    assert resume.source == driver.MAINLINE_RESUME_SOURCE
+    text = resume.content_parts[0].text
+    assert "已开始生成：视频 e1" in text
+    assert "主线恢复提醒" in text
+    assert driver.notifications.store.pending_records(PROJECT_ID) == []
+
+
+def test_reconcile_batches_consecutive_notification_messages(tmp_path) -> None:
+    """Three queued notifications merge into one run (input-queue drain)."""
+
+    from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
+
+    received: list[str] = []
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="初始目标")
+        services.sessions.mark_messages_consumed(
+            PROJECT_ID,
+            SESSION_ID,
+            through_seq=1,
+        )
+        for index in range(3):
+            services.sessions.append_message(
+                PROJECT_ID,
+                SESSION_ID,
+                CONVERSATION_ID,
+                role="user",
+                content_parts=[
+                    {
+                        "type": "text",
+                        "text": f"【系统自动消息 · Runtime 通知】进度 {index}",
+                    },
+                ],
+                source=NOTIFICATION_SOURCE,
+                channel=MessageChannel.RUNTIME,
+            )
+
+        async def callback(messages, _tools):
+            received.append(messages[1]["content"])
+            return AgentModelTurn(content="已核对通知。")
+
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_consumed(services, 4)
+        await driver.wait_until_idle(PROJECT_ID)
+        await driver.stop()
+        return services, driver
+
+    services, driver = asyncio.run(scenario())
+
+    assert len(received) == 1, "queued notifications must merge into one run"
+    content = received[0]
+    assert "进度 0" in content
+    assert "RUNTIME_NOTIFICATIONS_BATCH" in content
+    assert "进度 1" in content
+    assert "进度 2" in content
+    assert len(driver.runs.list(PROJECT_ID)) == 1
+    assert (
+        services.sessions.get_project_session(
+            PROJECT_ID,
+        ).last_consumed_message_seq
+        == 4
+    )
+
+
+@pytest.mark.parametrize(
+    "blocking_source",
+    ["user", "run_review_feedback"],
+)
+def test_batch_stops_at_non_batchable_message(
+    tmp_path,
+    blocking_source,
+) -> None:
+    """Human and review-feedback messages keep one-message-per-run."""
+
+    from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
+
+    received: list[str] = []
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="初始目标")
+        services.sessions.mark_messages_consumed(
+            PROJECT_ID,
+            SESSION_ID,
+            through_seq=1,
+        )
+        texts = [
+            ("【系统自动消息 · Runtime 通知】进度 A", NOTIFICATION_SOURCE),
+            ("请修一下这个问题", blocking_source),
+            ("【系统自动消息 · Runtime 通知】进度 B", NOTIFICATION_SOURCE),
+        ]
+        for text, source in texts:
+            services.sessions.append_message(
+                PROJECT_ID,
+                SESSION_ID,
+                CONVERSATION_ID,
+                role="user",
+                content_parts=[{"type": "text", "text": text}],
+                source=source,
+                channel=MessageChannel.RUNTIME,
+            )
+
+        async def callback(messages, _tools):
+            received.append(messages[1]["content"])
+            return AgentModelTurn(content="处理完毕。")
+
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_consumed(services, 4)
+        await driver.wait_until_idle(PROJECT_ID)
+        await driver.stop()
+        return driver
+
+    driver = asyncio.run(scenario())
+
+    assert (
+        len(received) == 3
+    ), "the batch must stop before a non-batchable message"
+    assert "RUNTIME_NOTIFICATIONS_BATCH" not in received[0]
+    assert "请修一下这个问题" in received[1]
+    assert len(driver.runs.list(PROJECT_ID)) == 3

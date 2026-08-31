@@ -9,7 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from domain.enums import TaskStatus
-from services.file_agent_runtime.work_graph import WorkNode, WorkNodeStatus
+from services.file_agent_runtime.work_graph import (
+    WorkGraph,
+    WorkNode,
+    WorkNodeStatus,
+)
 from services.file_agent_runtime import work_scheduler
 from services.file_agent_runtime.work_scheduler import (
     WorkGraphScheduler,
@@ -915,3 +919,389 @@ def test_idle_exit_confirms_the_graph_is_drained_first(tmp_path, monkeypatch):
     assert (
         dispatch.calls
     ), "idle exit abandoned a READY node instead of dispatching it"
+
+
+# -- notification bus emission -------------------------------------------
+
+
+class _RecordingBus:
+    def __init__(self) -> None:
+        self.events: list[SimpleNamespace] = []
+
+    async def notify(
+        self,
+        project_id,
+        *,
+        kind,
+        request_id,
+        text,
+        payload=None,
+    ) -> None:
+        self.events.append(
+            SimpleNamespace(
+                project_id=project_id,
+                kind=kind,
+                request_id=request_id,
+                text=text,
+                payload=dict(payload or {}),
+            ),
+        )
+
+    def kinds(self) -> list:
+        return [event.kind for event in self.events]
+
+
+def test_dispatch_start_and_image_success_emit_quiet(tmp_path, monkeypatch):
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+    dispatch = _RecordingDispatch()
+    scheduler = WorkGraphScheduler(
+        services,
+        image_dispatch=dispatch,
+        notifications=bus,
+    )
+
+    async def scenario():
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    assert bus.kinds() == [
+        RuntimeEventKind.NODE_DISPATCH_STARTED,
+        RuntimeEventKind.NODE_SUCCEEDED,
+    ]
+    assert bus.events[0].payload["nodeId"] == bus.events[1].payload["nodeId"]
+
+
+def test_r2v_submit_does_not_emit_success(tmp_path, monkeypatch):
+    from domain.enums import CreatorCommandType
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    bus = _RecordingBus()
+
+    async def submitting_r2v(inner_services, **kwargs):  # noqa: ARG001
+        del inner_services, kwargs
+        return SimpleNamespace(task_id="task-r2v-1")
+
+    scheduler = WorkGraphScheduler(
+        services,
+        r2v_dispatch=submitting_r2v,
+        notifications=bus,
+    )
+    node = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.READY,
+        command=CreatorCommandType.GENERATE_R2V_VIDEO.value,
+        target_ref="element:e1",
+        dispatch_fingerprint="fp-r2v",
+    )
+
+    asyncio.run(scheduler._dispatch(PROJECT_ID, node, "fp-r2v"))
+
+    assert bus.kinds() == [RuntimeEventKind.NODE_DISPATCH_STARTED]
+
+
+def test_deterministic_failure_emits_steer(tmp_path, monkeypatch):
+    from domain.errors import ValidationError
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+
+    class BudgetExceededError(ValidationError):
+        code = "IMAGE_REFERENCE_BUDGET_EXCEEDED"
+
+    async def rejecting_dispatch(inner_services, **kwargs):  # noqa: ARG001
+        del inner_services, kwargs
+        raise BudgetExceededError("4 张参考图超过模型限制 3 张")
+
+    scheduler = WorkGraphScheduler(
+        services,
+        image_dispatch=rejecting_dispatch,
+        notifications=bus,
+    )
+
+    async def scenario():
+        for _ in range(3):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    failures = [
+        event
+        for event in bus.events
+        if event.kind is RuntimeEventKind.NODE_DETERMINISTIC_FAILURE
+    ]
+    assert len(failures) == 1
+    assert "IMAGE_REFERENCE_BUDGET_EXCEEDED" in failures[0].request_id
+    assert "参考图" in failures[0].text
+    assert failures[0].payload["errorCode"] == (
+        "IMAGE_REFERENCE_BUDGET_EXCEEDED"
+    )
+
+
+def test_transient_hard_cap_emits_steer_once(tmp_path, monkeypatch):
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+    dispatch = _RecordingDispatch(
+        fail=True,
+        error="Image generation timed out after 240s",
+    )
+    scheduler = WorkGraphScheduler(
+        services,
+        image_dispatch=dispatch,
+        notifications=bus,
+    )
+
+    def age_past_cooldown() -> None:
+        stamps = scheduler._transient_last
+        for key in list(stamps):
+            stamps[key] -= 301.0
+
+    async def scenario():
+        for _ in range(4):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        for _ in range(10):
+            age_past_cooldown()
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    exhausted = [
+        event
+        for event in bus.events
+        if event.kind is RuntimeEventKind.NODE_TRANSIENT_CAP_EXHAUSTED
+    ]
+    assert len(exhausted) == 1
+
+
+def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
+    state = {"index": 0}
+
+    def fake_derive(_project, tasks=()):  # noqa: ARG001
+        index = min(state["index"], len(graphs) - 1)
+        state["index"] += 1
+        return graphs[index]
+
+    monkeypatch.setattr(work_scheduler, "derive_work_graph", fake_derive)
+
+
+def test_all_done_edge_emits_graph_done_once_across_ticks(
+    tmp_path,
+    monkeypatch,
+):
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+    running = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.RUNNING,
+    )
+    done = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.DONE,
+    )
+    _graph_sequence(
+        monkeypatch,
+        [
+            WorkGraph(nodes=(running,), generation=1),
+            WorkGraph(nodes=(done,), generation=2),
+            WorkGraph(nodes=(done,), generation=2),
+        ],
+    )
+    scheduler = WorkGraphScheduler(services, notifications=bus)
+
+    async def scenario():
+        for _ in range(3):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    assert bus.kinds() == [
+        RuntimeEventKind.NODE_SUCCEEDED,
+        RuntimeEventKind.GRAPH_ALL_DONE,
+    ]
+
+
+def test_compose_done_edge_emits_steer(tmp_path, monkeypatch):
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+    running = WorkNode(
+        node_id="compose:final",
+        kind="compose",
+        label="成片",
+        status=WorkNodeStatus.RUNNING,
+    )
+    done = WorkNode(
+        node_id="compose:final",
+        kind="compose",
+        label="成片",
+        status=WorkNodeStatus.DONE,
+    )
+    _graph_sequence(
+        monkeypatch,
+        [
+            WorkGraph(nodes=(running,), generation=3),
+            WorkGraph(nodes=(done,), generation=4),
+        ],
+    )
+    scheduler = WorkGraphScheduler(services, notifications=bus)
+
+    async def scenario():
+        for _ in range(2):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    assert bus.kinds() == [
+        RuntimeEventKind.COMPOSE_COMPLETED,
+        RuntimeEventKind.GRAPH_ALL_DONE,
+    ]
+
+
+def test_gated_node_emits_quiet_with_missing(tmp_path, monkeypatch):
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+    running = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.RUNNING,
+    )
+    gated = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.GATED,
+        missing=("缺少 Shot 台词原文",),
+    )
+    _graph_sequence(
+        monkeypatch,
+        [
+            WorkGraph(nodes=(running,), generation=5),
+            WorkGraph(nodes=(gated,), generation=6),
+        ],
+    )
+    scheduler = WorkGraphScheduler(services, notifications=bus)
+
+    async def scenario():
+        for _ in range(2):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    assert bus.kinds() == [RuntimeEventKind.NODE_GATED]
+    assert "缺少 Shot 台词原文" in bus.events[0].text
+
+
+def test_restart_scheduler_does_not_duplicate_milestone(
+    tmp_path,
+    monkeypatch,
+):
+    """A steer replay after restart converges on the durable message."""
+
+    from services.file_agent_runtime.notifications import (
+        NOTIFICATION_SOURCE,
+        RuntimeNotificationBus,
+    )
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    services = CreatorFileServices.create(tmp_path.resolve())
+
+    def initialize(staged_root) -> None:
+        services.sessions.initialize_staged_project(
+            staged_root,
+            PROJECT_ID,
+            session_id="session-restart",
+            conversation_id="conversation-restart",
+            initial_goal="build",
+            goal_id="goal-restart",
+            initial_message_id="message-initial",
+            initial_client_message_id="client-initial",
+        )
+
+    services.projects.create(
+        Project.new(project_id=PROJECT_ID, name="Restart"),
+        initialize_staged_project=initialize,
+    )
+    _enable_yolo(monkeypatch)
+    done = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.DONE,
+    )
+    _graph_sequence(
+        monkeypatch,
+        [WorkGraph(nodes=(done,), generation=1)],
+    )
+
+    async def scenario():
+        first = WorkGraphScheduler(
+            services,
+            notifications=RuntimeNotificationBus(
+                services,
+                wake_dispatcher=lambda _project_id: None,
+            ),
+        )
+        await first.tick(PROJECT_ID)
+        await first.shutdown()
+        # Process restart: fresh scheduler + bus, same durable stores.
+        second = WorkGraphScheduler(
+            services,
+            notifications=RuntimeNotificationBus(
+                services,
+                wake_dispatcher=lambda _project_id: None,
+            ),
+        )
+        await second.tick(PROJECT_ID)
+        await second.shutdown()
+
+    asyncio.run(scenario())
+
+    notifications = [
+        item
+        for item in services.sessions.list_messages(
+            PROJECT_ID,
+            "session-restart",
+            after_seq=0,
+            limit=None,
+        )
+        if item.role == "user" and item.source == NOTIFICATION_SOURCE
+    ]
+    assert len(notifications) == 1

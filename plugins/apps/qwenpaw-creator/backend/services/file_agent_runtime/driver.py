@@ -198,6 +198,10 @@ from .native_media import (
     video_frame_content_parts,
     source_intelligence_content_parts,
 )
+from .notifications import (
+    NOTIFICATION_SOURCE,
+    RuntimeNotificationBus,
+)
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
 from .work_graph import derive_work_graph
@@ -210,6 +214,20 @@ from .subagents import (
 )
 
 logger = setup_logger("creator.agent_runtime")
+
+# Runtime-authored user messages whose consecutive queue prefix merges into
+# one Agent run (Codex-style input-queue drain). Review-feedback sources
+# (run_review_feedback / render_review_feedback / review_rejection_feedback)
+# must never join a batch: repair deduplication, repair budgets and target
+# constraints are all keyed to the individual request message.
+BATCHABLE_NOTIFICATION_SOURCES = frozenset(
+    {
+        NOTIFICATION_SOURCE,
+        "yolo_auto_resume",
+        "prompt_contract_resume",
+        "mainline_resume",
+    },
+)
 
 
 def _log_safe(value: object) -> str:
@@ -1418,9 +1436,19 @@ class FileCreatorAgentRuntime:
         self._interrupt_stalls: dict[str, tuple[str, float]] = {}
         self._epochs: dict[str, int] = {}
         self._publication_lock = threading.RLock()
+        # Runtime→Agent notification bus: background work (scheduler nodes,
+        # asynchronous specialists) reports back as durable RUNTIME-channel
+        # user messages that the dispatcher consumes at run boundaries.
+        self.notifications = RuntimeNotificationBus(
+            services,
+            wake_dispatcher=self.notify,
+        )
         # Event-driven media fan-out: the model plans, the Runtime executes
         # READY work-graph nodes in parallel (unattended ladder only).
-        self.work_scheduler = WorkGraphScheduler(services)
+        self.work_scheduler = WorkGraphScheduler(
+            services,
+            notifications=self.notifications,
+        )
         # Media workers commit from thread-pool threads; route their
         # post-commit signal onto the loop so a finished r2v/compose task
         # re-evaluates the work graph without waiting for a model turn.
@@ -2076,8 +2104,33 @@ class FileCreatorAgentRuntime:
             return
         run_id = f"agent-run-{uuid4().hex}"
         epoch = self._begin_epoch(project_id, run_id)
+        # Consecutive runtime-authored messages (notifications, resumes)
+        # merge into one run: three queued progress reports must not spend
+        # three model runs. Human requests and review-feedback messages
+        # keep their one-message-per-run identity — review repair budgets
+        # and target constraints are keyed to the request message.
+        batch = [message]
+        if (
+            message.source in BATCHABLE_NOTIFICATION_SOURCES
+            and message.review_boundary is None
+        ):
+            for item in user_messages[1:]:
+                if (
+                    item.source in BATCHABLE_NOTIFICATION_SOURCES
+                    and item.review_boundary is None
+                    and item.conversation_id == message.conversation_id
+                ):
+                    batch.append(item)
+                else:
+                    break
         task = asyncio.create_task(
-            self._run_message(project_id, message, run_id=run_id, epoch=epoch),
+            self._run_message(
+                project_id,
+                message,
+                run_id=run_id,
+                epoch=epoch,
+                batch=batch,
+            ),
             name=f"creator-file-agent:{project_id}:{run_id}",
         )
         handle = _ProjectTask(
@@ -2100,13 +2153,13 @@ class FileCreatorAgentRuntime:
     @traced_async(
         "creator.agent.execution",
         component="creator.file_agent_runtime",
-        context=lambda _self, project_id, message, *, run_id, epoch: {
+        context=lambda _self, project_id, message, *, run_id, epoch, **_kw: {
             "projectId": project_id,
             "sessionId": message.creator_session_id,
             "conversationId": message.conversation_id,
             "runId": run_id,
         },
-        attributes=lambda _self, project_id, message, *, run_id, epoch: {
+        attributes=lambda _self, project_id, message, *, run_id, epoch, **_kw: {
             "messageId": message.message_id,
             "messageSeq": message.message_seq,
             "epoch": epoch,
@@ -2119,7 +2172,12 @@ class FileCreatorAgentRuntime:
         *,
         run_id: str,
         epoch: int,
+        batch: list[CreatorMessageRecord] | None = None,
     ) -> None:
+        # ``batch`` is the head message plus any consecutive runtime-authored
+        # messages (notifications, resumes) merged into this run; consumption
+        # advances to the batch tail on success.
+        batch = batch if batch else [message]
         # Snapshot read: _run_message only needs session identity (session_id,
         # active_goal_id) to build the run record and resolve its goal; the
         # durable writes that follow (activate_run, runs.create, ...) take the
@@ -2251,6 +2309,7 @@ class FileCreatorAgentRuntime:
                 epoch=epoch,
                 request=message,
                 tools=tools,
+                batch_tail=batch[1:],
             )
             self._assert_epoch(project_id, run_id, epoch)
             await asyncio.to_thread(
@@ -2269,7 +2328,7 @@ class FileCreatorAgentRuntime:
                 self.sessions.mark_messages_consumed,
                 project_id,
                 session.session_id,
-                through_seq=message.message_seq,
+                through_seq=batch[-1].message_seq,
                 goal_id=goal.goal_id,
             )
             needs_review = bool(result.review_ids)
@@ -2485,6 +2544,7 @@ class FileCreatorAgentRuntime:
         epoch: int,
         request: CreatorMessageRecord,
         tools: AgentProjectTools,
+        batch_tail: list[CreatorMessageRecord] | None = None,
     ) -> _LoopResult:
         # External skills never break the run: loading is isolated and a
         # broken configuration only yields an empty toolset/context block.
@@ -2518,7 +2578,11 @@ class FileCreatorAgentRuntime:
             },
             {
                 "role": "user",
-                "content": _continuation_message_text(request, prior_context),
+                "content": _continuation_message_text(
+                    request,
+                    prior_context,
+                    batch_tail=batch_tail,
+                ),
             },
         ]
         tool_call_count = 0
@@ -6242,6 +6306,12 @@ class FileCreatorAgentRuntime:
                 break
             if item.source == self.MAINLINE_RESUME_SOURCE:
                 continue
+            if item.source == NOTIFICATION_SOURCE:
+                # A runtime notification carries a new external fact, so it
+                # does not spend resume-fuse allowance; but it must not
+                # reset the streak either, or interleaved notifications
+                # would let resumes chain past the fuse forever.
+                continue
             break
         if resume_streak >= resume_limit:
             logger.warning(
@@ -6302,6 +6372,13 @@ class FileCreatorAgentRuntime:
             if auto_approve
             else self.PROMPT_CONTRACT_RESUME_SOURCE
         )
+        digest_identity = f"digest-{run_id}"
+        digest_prefix = await self.notifications.drain_into_resume(
+            project_id,
+            assigned_to=digest_identity,
+        )
+        if digest_prefix:
+            text = digest_prefix + "\n" + text
         appended = await asyncio.to_thread(
             self.sessions.append_message,
             project_id,
@@ -6319,6 +6396,10 @@ class FileCreatorAgentRuntime:
                     node.node_id for node in feedback_nodes[:12]
                 ],
             },
+        )
+        await self.notifications.settle_resume(
+            project_id,
+            assigned_to=digest_identity,
         )
         await self._event(
             project_id,
@@ -6418,6 +6499,13 @@ class FileCreatorAgentRuntime:
         )
         if mainline_goal:
             text += f"\n\n被中断的主线任务原始请求：\n{mainline_goal}"
+        digest_identity = f"digest-mainline-{intervention_run_id}"
+        digest_prefix = await self.notifications.drain_into_resume(
+            project_id,
+            assigned_to=digest_identity,
+        )
+        if digest_prefix:
+            text = digest_prefix + "\n" + text
         appended = await asyncio.to_thread(
             self.sessions.append_message,
             project_id,
@@ -6431,6 +6519,10 @@ class FileCreatorAgentRuntime:
                 "resumeAfterRunId": intervention_run_id,
                 "interruptedRunId": interrupted_run_id,
             },
+        )
+        await self.notifications.settle_resume(
+            project_id,
+            assigned_to=digest_identity,
         )
         await self._event(
             project_id,
@@ -6645,6 +6737,9 @@ class FileCreatorAgentRuntime:
                 )
             except SessionStateConflict:
                 pass
+            # A human took over: staged automatic progress must not resurface
+            # inside a later notification hours after this stop.
+            await self.notifications.cancel_pending(project_id)
         try:
             await asyncio.to_thread(
                 self.sessions.set_goal_status,
@@ -7379,10 +7474,32 @@ def _compact_wire_project_snapshots(messages: list[dict[str, Any]]) -> None:
 def _continuation_message_text(
     request: CreatorMessageRecord,
     prior_context: list[CreatorMessageRecord],
+    *,
+    batch_tail: list[CreatorMessageRecord] | None = None,
 ) -> str:
     """Carry one durable AgentDock Conversation into the next Agent run."""
 
     current = _message_text(request)
+    if batch_tail:
+        batch_payload = [
+            {
+                "messageSeq": item.message_seq,
+                "source": item.source,
+                "text": _message_text(item),
+                "metadata": dict(item.metadata),
+            }
+            for item in batch_tail
+        ]
+        current += (
+            "\n\n以下 RUNTIME_NOTIFICATIONS_BATCH 是与本请求一并送达的后续"
+            "Runtime 自动消息（已合并进本回合，处理完本回合即视为处理完毕）：\n"
+            "RUNTIME_NOTIFICATIONS_BATCH="
+            + json.dumps(
+                batch_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
     if not prior_context:
         return current
     snapshot_receipts = _elide_stale_snapshots(prior_context)
