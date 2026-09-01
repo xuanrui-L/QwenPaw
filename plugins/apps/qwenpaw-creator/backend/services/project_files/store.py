@@ -644,6 +644,7 @@ class ProjectStore:
         project_id: str,
         *,
         shared: bool = False,
+        cross_thread_hold: bool = False,
     ) -> CrossProcessFileLock:
         """Guard a Project lifetime without serializing unrelated Runtime domains.
 
@@ -659,6 +660,7 @@ class ProjectStore:
             / f"project-{_safe_project_id(project_id)}.lock",
             timeout_seconds=10.0,
             shared=shared,
+            cross_thread_hold=cross_thread_hold,
         )
 
     def _checked_payload(self, project: Project) -> bytes:

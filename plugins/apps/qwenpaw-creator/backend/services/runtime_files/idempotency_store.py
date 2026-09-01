@@ -146,6 +146,7 @@ class IdempotencyRecordStore:
         owner_id: str,
         scope: str,
         idempotency_key: str,
+        cross_thread_hold: bool = False,
     ) -> CrossProcessFileLock:
         """Serialize execution/recovery for one idempotency identity.
 
@@ -159,6 +160,7 @@ class IdempotencyRecordStore:
         _key_hash, key = self._key(owner_id, scope, idempotency_key)
         return CrossProcessFileLock(
             self.root / ".operation-locks" / f"{key}.lock",
+            cross_thread_hold=cross_thread_hold,
             timeout_seconds=self.lock_timeout_seconds,
         )
 

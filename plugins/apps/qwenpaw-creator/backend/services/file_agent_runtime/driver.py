@@ -1926,6 +1926,13 @@ class FileCreatorAgentRuntime:
         for record in records:
             if record.status in TERMINAL_SPECIALIST_STATUSES:
                 continue
+            # The SpecialistRun store is shared with media execution runs
+            # (r2v/image executor identities). Those carry their own
+            # provider-resume machinery and MUST survive a restart; only
+            # chat-delegated runs (spawned by delegate_to_agent, marked by
+            # parentActionId) lose their driving task with the process.
+            if not record.metadata.get("parentActionId"):
+                continue
             try:
                 await asyncio.to_thread(
                     self.executions.transition_specialist_run,

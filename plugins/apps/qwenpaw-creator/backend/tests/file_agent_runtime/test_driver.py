@@ -3145,11 +3145,35 @@ def test_startup_reclaims_orphaned_specialist_runs(tmp_path) -> None:
             prompt_spec_id="file_project_json.ai_editing_director.v1",
             caused_by_message_id="message-initial",
             caused_by_message_seq=1,
+            metadata={"parentActionId": "delegate-call-1"},
         )
         executions.create_specialist_run(record)
         executions.transition_specialist_run(
             PROJECT_ID,
             record.run_id,
+            expected_status=RunStatus.QUEUED,
+            status=RunStatus.RUNNING_MODEL,
+        )
+        # A media-execution run (no parentActionId) shares the same store
+        # but owns provider-resume machinery: restart must not touch it.
+        media_record = SpecialistRunRecord(
+            run_id="specialist-run-media",
+            project_id=PROJECT_ID,
+            round_id="agent-round-old",
+            role=SpecialistRoleEnum.AI_EDITING_DIRECTOR,
+            target_refs=["element:e1"],
+            input_generation=snapshot.generation,
+            input_etag=snapshot.etag,
+            related_run_id="agent-run-old",
+            prompt_spec_id="file_project_json.ai_editing_director.v1",
+            caused_by_message_id="message-initial",
+            caused_by_message_seq=1,
+            metadata={"commandType": "generate_storyboard_image"},
+        )
+        executions.create_specialist_run(media_record)
+        executions.transition_specialist_run(
+            PROJECT_ID,
+            media_record.run_id,
             expected_status=RunStatus.QUEUED,
             status=RunStatus.RUNNING_MODEL,
         )
@@ -3170,12 +3194,19 @@ def test_startup_reclaims_orphaned_specialist_runs(tmp_path) -> None:
             PROJECT_ID,
             record.run_id,
         )
+        media_untouched = driver.executions.get_specialist_run(
+            PROJECT_ID,
+            media_record.run_id,
+        )
         messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
         await driver.stop()
-        return reclaimed, messages
+        return reclaimed, media_untouched, messages
 
-    reclaimed, messages = asyncio.run(scenario())
+    reclaimed, media_untouched, messages = asyncio.run(scenario())
     assert reclaimed.status.value == "FAILED"
+    assert (
+        media_untouched.status.value == "RUNNING_MODEL"
+    ), "media execution runs must survive the restart sweep"
     assert "orphaned by restart" in (reclaimed.final_summary_text or "")
     notifications = [
         item

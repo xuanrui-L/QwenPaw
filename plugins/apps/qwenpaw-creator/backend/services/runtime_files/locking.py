@@ -24,6 +24,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 from types import TracebackType
 from typing import Any
 from uuid import uuid4
@@ -133,6 +134,7 @@ class CrossProcessFileLock:
         poll_interval_seconds: float = 0.01,
         mode: int = 0o600,
         shared: bool = False,
+        cross_thread_hold: bool = False,
     ) -> None:
         self.path = Path(path)
         if timeout_seconds is not None and timeout_seconds < 0:
@@ -147,6 +149,16 @@ class CrossProcessFileLock:
         self.poll_interval_seconds = poll_interval_seconds
         self.mode = mode
         self.shared = shared
+        # A detached hold is acquired on one executor thread (often a bare
+        # ``asyncio.to_thread(lock.acquire)``) and released from another
+        # after async work in between. The worker thread returns to the
+        # pool while the lock stays held, so the per-thread nesting guard
+        # must neither register this hold nor blame later unrelated jobs
+        # that happen to reuse the same pool thread (field incident
+        # 2026-09-01: mainline delta persists crashed with a false
+        # "same-thread nested" error whenever they landed on the worker
+        # that had just performed a route's detached lifecycle acquire).
+        self.cross_thread_hold = cross_thread_hold
         self._identity = _lock_key(self.path)
         self._state: _PathLockState | None = None
         self._owner: dict[str, Any] | None = None
@@ -238,11 +250,27 @@ class CrossProcessFileLock:
             )
         held_key = (self._identity, threading.get_ident())
         with _HELD_LOCKS_GUARD:
-            held = _HELD_LOCKS.get(held_key)
+            held = (
+                None
+                if self.cross_thread_hold
+                else _HELD_LOCKS.get(
+                    held_key,
+                )
+            )
             if held is not None:
                 message = (
                     "same-thread nested Runtime lock acquisition "
                     + "would deadlock: "
+                )
+                acquirer_stack = "".join(
+                    traceback.format_stack(limit=18),
+                )
+                logger.error(
+                    "%spath=%s held=%r acquirer stack:\n%s",
+                    message,
+                    self.path,
+                    held,
+                    acquirer_stack,
                 )
                 raise RuntimeFileValidationError(
                     f"{message}path={self.path} held={held!r}",
@@ -283,9 +311,12 @@ class CrossProcessFileLock:
             raise
         self._state = state
         self._owner = owner
-        self._held_key = held_key
-        with _HELD_LOCKS_GUARD:
-            _HELD_LOCKS[held_key] = owner
+        if self.cross_thread_hold:
+            self._held_key = None
+        else:
+            self._held_key = held_key
+            with _HELD_LOCKS_GUARD:
+                _HELD_LOCKS[held_key] = owner
         self._log_acquired(time.monotonic() - started)
         return self
 
