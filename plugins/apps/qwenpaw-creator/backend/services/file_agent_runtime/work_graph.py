@@ -314,8 +314,7 @@ def _upstream_missing(
     statuses: Mapping[str, WorkNodeStatus],
 ) -> tuple[str, ...]:
     return tuple(
-        dep for dep in dep_ids
-        if statuses.get(dep) is not WorkNodeStatus.DONE
+        dep for dep in dep_ids if statuses.get(dep) is not WorkNodeStatus.DONE
     )
 
 
@@ -376,9 +375,7 @@ def _element_dialogue_density_gap(
         scenario == "short_drama"
         and creation.character_refs
         and creation.min_dialogue_ratio > 0
-        and "有意静默" not in (
-            creation.narrative or ""
-        )
+        and "有意静默" not in (creation.narrative or "")
     ):
         shots = [creation.shots.items.get(sid) for sid in creation.shots.order]
         shots = [s for s in shots if s is not None]
@@ -718,7 +715,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 storyboard_refs: list[str | None] = (
                     list(
                         creation.storyboard_reference_version_ids,
-                    ) or upstream_selected
+                    )
+                    or upstream_selected
                 )
                 fingerprint = _fingerprint(
                     storyboard_id,
@@ -726,9 +724,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     project.settings.aspect_ratio,
                     len(creation.shots.order),
                     sorted(
-                        selected
-                        for selected in storyboard_refs
-                        if selected
+                        selected for selected in storyboard_refs if selected
                     ),
                 )
                 if task is not None:
@@ -828,11 +824,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # Prompt-only changes are caught by the dispatch fingerprint
                 # for failure-parking, but do NOT trigger STALE re-generation.
                 upstream_for_stale = (
-                    (
-                        [storyboard_slot]
-                        if creation_type == "r2v"
-                        else upstream_selected
-                    )
+                    [storyboard_slot]
+                    if creation_type == "r2v"
+                    else upstream_selected
                 )
                 status = (
                     WorkNodeStatus.STALE
@@ -970,8 +964,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 for (kind, _), item in active.items()
                 if kind == TaskKind.COMPOSE.value
                 and str(
-                    item.metadata.get("targetRef") or ""
-                ) == timeline_target
+                    item.metadata.get("targetRef") or "",
+                )
+                == timeline_target
             ),
             None,
         )
@@ -1258,11 +1253,9 @@ def _video_upstream_refs(
     if creation_type == "i2v":
         assert isinstance(creation, I2VCreation)
         return (
-            (
-                [creation.first_frame_version_id]
-                if creation.first_frame_version_id
-                else []
-            )
+            [creation.first_frame_version_id]
+            if creation.first_frame_version_id
+            else []
         )
     if creation_type == "s2v":
         assert isinstance(creation, S2VCreation)
