@@ -842,6 +842,34 @@ class WorkGraphScheduler:
                 self._ledger_fingerprint(node),
             )
         self._graph_progress[project_id] = current
+        for node in graph.nodes:
+            fingerprint = current[node.node_id][1]
+            prior = previous.get(node.node_id) if previous else None
+            prior_status = prior[0] if prior is not None else None
+            # A durably FAILED node the scheduler will not retry on its own
+            # (deterministic refusals, interrupted provider claims, spent
+            # budgets) needs the Agent. Unlike DONE/GATED progress this
+            # fires even on the baseline-establishing tick: after a restart
+            # the failure edge happened while nobody watched, and the
+            # request-id idempotency absorbs re-emission.
+            if (
+                node.status is WorkNodeStatus.FAILED
+                and prior_status != WorkNodeStatus.FAILED.value
+                and node.node_id not in self._inflight.get(project_id, set())
+            ):
+                await self._notify(
+                    project_id,
+                    kind=RuntimeEventKind.NODE_DETERMINISTIC_FAILURE,
+                    request_id=f"nodefail-{node.node_id}-{fingerprint}",
+                    text=(
+                        f"媒体节点 {node.label}（{node.node_id}）处于失败状态，"
+                        f"调度器不会自动重试：{node.error or '未知原因'}\n"
+                        "请检查该节点的输入（prompt、参考、上游选择），修复后"
+                        "调度器会以新的输入指纹自动重新生成；如输入本身无误，"
+                        "可通过重新触发该环节生成新的任务。"
+                    ),
+                    node=node,
+                )
         if previous is not None:
             for node in graph.nodes:
                 fingerprint = current[node.node_id][1]

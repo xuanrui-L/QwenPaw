@@ -1305,3 +1305,49 @@ def test_restart_scheduler_does_not_duplicate_milestone(
         if item.role == "user" and item.source == NOTIFICATION_SOURCE
     ]
     assert len(notifications) == 1
+
+
+def test_stuck_failed_node_emits_steer_even_on_baseline_tick(
+    tmp_path,
+    monkeypatch,
+):
+    """A durably FAILED node needs the Agent even right after a restart."""
+
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+    failed = WorkNode(
+        node_id="storyboard:e4",
+        kind="storyboard",
+        label="第四幕 · 分镜",
+        status=WorkNodeStatus.FAILED,
+        error="image provider call was interrupted; refusing resubmission",
+    )
+    _graph_sequence(
+        monkeypatch,
+        [
+            WorkGraph(nodes=(failed,), generation=9),
+            WorkGraph(nodes=(failed,), generation=9),
+        ],
+    )
+    scheduler = WorkGraphScheduler(services, notifications=bus)
+
+    async def scenario():
+        for _ in range(2):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    failures = [
+        event
+        for event in bus.events
+        if event.kind is RuntimeEventKind.NODE_DETERMINISTIC_FAILURE
+    ]
+    assert (
+        len(failures) == 1
+    ), "baseline tick must report, later ticks must not"
+    assert "provider call was interrupted" in failures[0].text
