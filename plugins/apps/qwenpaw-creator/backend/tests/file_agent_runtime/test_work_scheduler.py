@@ -1104,9 +1104,20 @@ def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     monkeypatch.setattr(work_scheduler, "derive_work_graph", fake_derive)
 
 
-def test_all_done_edge_emits_graph_done_once_across_ticks(
+@pytest.mark.parametrize(
+    ("node_kind", "node_id", "label", "milestone"),
+    [
+        ("video", "video:e1", "视频 e1", "node_succeeded"),
+        ("compose", "compose:final", "成片", "compose_completed"),
+    ],
+)
+def test_done_edge_emits_milestone_once_across_ticks(
     tmp_path,
     monkeypatch,
+    node_kind,
+    node_id,
+    label,
+    milestone,
 ):
     from services.file_agent_runtime.notifications import RuntimeEventKind
 
@@ -1114,15 +1125,15 @@ def test_all_done_edge_emits_graph_done_once_across_ticks(
     _enable_yolo(monkeypatch)
     bus = _RecordingBus()
     running = WorkNode(
-        node_id="video:e1",
-        kind="video",
-        label="视频 e1",
+        node_id=node_id,
+        kind=node_kind,
+        label=label,
         status=WorkNodeStatus.RUNNING,
     )
     done = WorkNode(
-        node_id="video:e1",
-        kind="video",
-        label="视频 e1",
+        node_id=node_id,
+        kind=node_kind,
+        label=label,
         status=WorkNodeStatus.DONE,
     )
     _graph_sequence(
@@ -1144,48 +1155,7 @@ def test_all_done_edge_emits_graph_done_once_across_ticks(
     asyncio.run(scenario())
 
     assert bus.kinds() == [
-        RuntimeEventKind.NODE_SUCCEEDED,
-        RuntimeEventKind.GRAPH_ALL_DONE,
-    ]
-
-
-def test_compose_done_edge_emits_steer(tmp_path, monkeypatch):
-    from services.file_agent_runtime.notifications import RuntimeEventKind
-
-    services = _services(tmp_path, monkeypatch, ready_variants=0)
-    _enable_yolo(monkeypatch)
-    bus = _RecordingBus()
-    running = WorkNode(
-        node_id="compose:final",
-        kind="compose",
-        label="成片",
-        status=WorkNodeStatus.RUNNING,
-    )
-    done = WorkNode(
-        node_id="compose:final",
-        kind="compose",
-        label="成片",
-        status=WorkNodeStatus.DONE,
-    )
-    _graph_sequence(
-        monkeypatch,
-        [
-            WorkGraph(nodes=(running,), generation=3),
-            WorkGraph(nodes=(done,), generation=4),
-        ],
-    )
-    scheduler = WorkGraphScheduler(services, notifications=bus)
-
-    async def scenario():
-        for _ in range(2):
-            await scheduler.tick(PROJECT_ID)
-            await _drain()
-        await scheduler.shutdown()
-
-    asyncio.run(scenario())
-
-    assert bus.kinds() == [
-        RuntimeEventKind.COMPOSE_COMPLETED,
+        RuntimeEventKind(milestone),
         RuntimeEventKind.GRAPH_ALL_DONE,
     ]
 
@@ -1357,7 +1327,7 @@ def test_all_done_baseline_emits_no_milestone(tmp_path, monkeypatch):
     assert not [
         event
         for event in bus.events
-        if event["kind"] is RuntimeEventKind.GRAPH_ALL_DONE
+        if event.kind is RuntimeEventKind.GRAPH_ALL_DONE
     ]
 
 

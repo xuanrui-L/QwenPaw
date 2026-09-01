@@ -2595,13 +2595,17 @@ def test_workspace_commits_wake_the_media_scheduler(tmp_path) -> None:
 # -- runtime notification bus integration ----------------------------------
 
 
-def test_yolo_resume_message_carries_quiet_digest_prefix(
+def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """Pending quiet progress rides along with the end-of-run resume."""
+    """Pending quiet progress rides along with the end-of-run resume, and
+    interleaved notifications neither spend nor reset the resume fuse."""
 
-    from services.file_agent_runtime.notifications import RuntimeEventKind
+    from services.file_agent_runtime.notifications import (
+        NOTIFICATION_SOURCE,
+        RuntimeEventKind,
+    )
 
     services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
     driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
@@ -2649,18 +2653,9 @@ def test_yolo_resume_message_carries_quiet_digest_prefix(
         driver.notifications.store.pending_records(PROJECT_ID) == []
     ), "drained quiet records must settle after the resume append"
 
-
-def test_yolo_streak_skips_notification_messages_without_reset(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Interleaved notifications neither spend nor reset the resume fuse."""
-
-    from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
-
-    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
-    for index in range(driver.PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE):
+    # Seed the streak to the cap with a notification after every resume:
+    # the fuse must count the resumes and skip the notifications.
+    for index in range(driver.PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE - 1):
         services.sessions.append_message(
             PROJECT_ID,
             SESSION_ID,
@@ -2679,24 +2674,6 @@ def test_yolo_streak_skips_notification_messages_without_reset(
             source=NOTIFICATION_SOURCE,
             channel=MessageChannel.RUNTIME,
         )
-    node = WorkNode(
-        node_id="video:ep1",
-        kind="video",
-        label="第一场 · 视频",
-        status=WorkNodeStatus.GATED,
-        missing=("video_prompt 缺失",),
-        authored_text_gap=True,
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_media_review_mode",
-        lambda: "manual",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
-    )
 
     asyncio.run(
         driver._queue_yolo_completion_resume(
@@ -2751,12 +2728,20 @@ def test_idle_session_flushes_parked_notification_and_consumes_it(
         services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
         driver = _driver(services, callback)
         await _run_to_idle(driver, services)
+        driver._specialist_tasks[PROJECT_ID] = {"spec-1": object()}
         await driver.notifications.inject(
             PROJECT_ID,
             kind=RuntimeEventKind.SUBAGENT_TERMINAL,
             request_id="specialist-run-parked-1",
             text="Specialist 终态 [BLOCKED]：TTS 服务不可用。",
         )
+        # In-flight specialists own the wake-up: their terminal steer (or
+        # the run it starts) drains the outbox, so the valve stays closed.
+        await driver._maybe_flush_idle_notifications(PROJECT_ID)
+        assert (
+            len(driver.notifications.store.pending_records(PROJECT_ID)) == 1
+        ), "the valve must stay closed mid-delegation"
+        driver._specialist_tasks.pop(PROJECT_ID)
         driver.notify(PROJECT_ID)
 
         def flush_consumed() -> bool:
@@ -2794,47 +2779,6 @@ def test_idle_session_flushes_parked_notification_and_consumes_it(
         if "Runtime 通知" in text and "TTS 服务不可用" in text
     ]
     assert flush_inputs, "the model must see the flushed notification"
-
-
-def test_idle_flush_skipped_while_specialists_active(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """In-flight specialists own the wake-up: their terminal steer (or the
-    run it starts) drains the outbox, so the valve stays closed."""
-
-    from services.file_agent_runtime import (
-        notifications as notifications_module,
-    )
-    from services.file_agent_runtime.notifications import RuntimeEventKind
-
-    monkeypatch.setattr(
-        notifications_module,
-        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
-        0.0,
-    )
-
-    async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-        driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
-        await driver.notifications.inject(
-            PROJECT_ID,
-            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
-            request_id="specialist-run-parked-2",
-            text="Specialist 终态 [BLOCKED]。",
-        )
-        driver._specialist_tasks[PROJECT_ID] = {"spec-1": object()}
-        await driver._maybe_flush_idle_notifications(PROJECT_ID)
-        parked = driver.notifications.store.pending_records(PROJECT_ID)
-        driver._specialist_tasks.pop(PROJECT_ID)
-        await driver._maybe_flush_idle_notifications(PROJECT_ID)
-        drained = driver.notifications.store.undelivered_records(PROJECT_ID)
-        return parked, drained
-
-    parked, drained = asyncio.run(scenario())
-
-    assert len(parked) == 1, "the valve must stay closed mid-delegation"
-    assert drained == []
 
 
 def test_mainline_resume_message_carries_quiet_digest_prefix(
@@ -2900,74 +2844,16 @@ def test_mainline_resume_message_carries_quiet_digest_prefix(
     assert driver.notifications.store.pending_records(PROJECT_ID) == []
 
 
-def test_reconcile_batches_consecutive_notification_messages(tmp_path) -> None:
-    """Three queued notifications merge into one run (input-queue drain)."""
-
-    from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
-
-    received: list[str] = []
-
-    async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="初始目标")
-        services.sessions.mark_messages_consumed(
-            PROJECT_ID,
-            SESSION_ID,
-            through_seq=1,
-        )
-        for index in range(3):
-            services.sessions.append_message(
-                PROJECT_ID,
-                SESSION_ID,
-                CONVERSATION_ID,
-                role="user",
-                content_parts=[
-                    {
-                        "type": "text",
-                        "text": f"【系统自动消息 · Runtime 通知】进度 {index}",
-                    },
-                ],
-                source=NOTIFICATION_SOURCE,
-                channel=MessageChannel.RUNTIME,
-            )
-
-        async def callback(messages, _tools):
-            received.append(messages[1]["content"])
-            return AgentModelTurn(content="已核对通知。")
-
-        driver = _driver(services, callback)
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        await _wait_consumed(services, 4)
-        await driver.wait_until_idle(PROJECT_ID)
-        await driver.stop()
-        return services, driver
-
-    services, driver = asyncio.run(scenario())
-
-    assert len(received) == 1, "queued notifications must merge into one run"
-    content = received[0]
-    assert "进度 0" in content
-    assert "RUNTIME_NOTIFICATIONS_BATCH" in content
-    assert "进度 1" in content
-    assert "进度 2" in content
-    assert len(driver.runs.list(PROJECT_ID)) == 1
-    assert (
-        services.sessions.get_project_session(
-            PROJECT_ID,
-        ).last_consumed_message_seq
-        == 4
-    )
-
-
 @pytest.mark.parametrize(
     "blocking_source",
     ["user", "run_review_feedback"],
 )
-def test_batch_stops_at_non_batchable_message(
+def test_batch_merges_notifications_but_stops_at_non_batchable(
     tmp_path,
     blocking_source,
 ) -> None:
-    """Human and review-feedback messages keep one-message-per-run."""
+    """Consecutive notifications merge into one run (input-queue drain);
+    human and review-feedback messages keep one-message-per-run."""
 
     from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
 
@@ -2981,7 +2867,8 @@ def test_batch_stops_at_non_batchable_message(
             through_seq=1,
         )
         texts = [
-            ("【系统自动消息 · Runtime 通知】进度 A", NOTIFICATION_SOURCE),
+            ("【系统自动消息 · Runtime 通知】进度 0", NOTIFICATION_SOURCE),
+            ("【系统自动消息 · Runtime 通知】进度 1", NOTIFICATION_SOURCE),
             ("请修一下这个问题", blocking_source),
             ("【系统自动消息 · Runtime 通知】进度 B", NOTIFICATION_SOURCE),
         ]
@@ -3003,19 +2890,29 @@ def test_batch_stops_at_non_batchable_message(
         driver = _driver(services, callback)
         await driver.start()
         driver.notify(PROJECT_ID)
-        await _wait_consumed(services, 4)
+        await _wait_consumed(services, 5)
         await driver.wait_until_idle(PROJECT_ID)
         await driver.stop()
-        return driver
+        return services, driver
 
-    driver = asyncio.run(scenario())
+    services, driver = asyncio.run(scenario())
 
     assert (
         len(received) == 3
-    ), "the batch must stop before a non-batchable message"
-    assert "RUNTIME_NOTIFICATIONS_BATCH" not in received[0]
+    ), "notifications must merge and the batch must stop at a non-batchable"
+    assert "RUNTIME_NOTIFICATIONS_BATCH" in received[0]
+    assert "进度 0" in received[0]
+    assert "进度 1" in received[0]
     assert "请修一下这个问题" in received[1]
+    assert "RUNTIME_NOTIFICATIONS_BATCH" not in received[1]
+    assert "进度 B" in received[2]
     assert len(driver.runs.list(PROJECT_ID)) == 3
+    assert (
+        services.sessions.get_project_session(
+            PROJECT_ID,
+        ).last_consumed_message_seq
+        == 5
+    )
 
 
 # -- asynchronous delegation ------------------------------------------------
@@ -3411,47 +3308,6 @@ def test_startup_reclaims_orphaned_specialist_runs(tmp_path) -> None:
     assert "进程重启" in notifications[0].content_parts[0].text
 
 
-def test_turn_boundary_injects_quiet_digest_into_live_run(tmp_path) -> None:
-    from services.file_agent_runtime.notifications import RuntimeEventKind
-
-    seen_digest: list[str] = []
-
-    async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
-
-        async def callback(messages, _tools):
-            for item in messages:
-                if item["role"] == "user" and "已开始生成：视频 e9" in str(
-                    item["content"],
-                ):
-                    seen_digest.append(str(item["content"]))
-            return AgentModelTurn(content="收到进度。")
-
-        driver = _driver(services, callback)
-        await driver.notifications.inject(
-            PROJECT_ID,
-            kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
-            request_id="node_dispatch_started-video:e9-fp1",
-            text="已开始生成：视频 e9",
-        )
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        await _wait_consumed(services, 1)
-        await driver.wait_until_idle(PROJECT_ID)
-        states = {
-            record.state
-            for record in driver.notifications.store._current_versions(
-                PROJECT_ID,
-            ).values()
-        }
-        await driver.stop()
-        return states
-
-    states = asyncio.run(scenario())
-    assert seen_digest, "the quiet digest must join the live run's messages"
-    assert states == {"DRAINED"}
-
-
 def test_subagent_terminal_notification_is_never_batched(tmp_path) -> None:
     """Terminal notifications carry delegation-origin identity resolved
     from the run's head message; merging one into another head's batch
@@ -3561,9 +3417,16 @@ def test_turn_boundary_digest_injected_once_across_turns(tmp_path) -> None:
         driver.notify(PROJECT_ID)
         await _wait_consumed(services, 1)
         await driver.wait_until_idle(PROJECT_ID)
+        states = {
+            record.state
+            for record in driver.notifications.store._current_versions(
+                PROJECT_ID,
+            ).values()
+        }
         await driver.stop()
+        return states
 
-    asyncio.run(scenario())
+    states = asyncio.run(scenario())
 
     assert final_turn_messages, "the run must reach a second model turn"
     digest_count = sum(
@@ -3572,6 +3435,7 @@ def test_turn_boundary_digest_injected_once_across_turns(tmp_path) -> None:
     assert (
         digest_count == 1
     ), "the injected digest must appear exactly once across model turns"
+    assert states == {"DRAINED"}
 
 
 def test_idle_hard_stop_cancels_pending_notifications(tmp_path) -> None:

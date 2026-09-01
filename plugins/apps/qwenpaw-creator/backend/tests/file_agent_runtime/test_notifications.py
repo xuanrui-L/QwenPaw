@@ -79,11 +79,43 @@ def _user_messages(services):
     ]
 
 
-def test_every_event_kind_declares_level() -> None:
+def _exhaust_hard_cap(services) -> None:
+    for index in range(NOTIFY_AUTONOMOUS_HARD_CAP):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"自动续跑 {index}"}],
+            source="yolo_auto_resume",
+        )
+
+
+def test_event_level_registry_is_complete_and_enforced(
+    tmp_path,
+    monkeypatch,
+) -> None:
     assert set(EVENT_LEVELS) == set(RuntimeEventKind)
 
+    services = _services(tmp_path, monkeypatch)
+    bus, _wakes = _bus(services)
+    monkeypatch.delitem(
+        notifications_module.EVENT_LEVELS,
+        RuntimeEventKind.NODE_GATED,
+    )
 
-def test_steer_appends_one_user_message_and_wakes(
+    with pytest.raises(ValueError):
+        asyncio.run(
+            bus.notify(
+                PROJECT_ID,
+                kind=RuntimeEventKind.NODE_GATED,
+                request_id="node_gated-x",
+                text="x",
+            ),
+        )
+
+
+def test_steer_delivers_once_per_request_id_and_wakes(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -100,30 +132,24 @@ def test_steer_appends_one_user_message_and_wakes(
         ),
     )
 
-    messages = _user_messages(services)
-    assert messages[-1].source == NOTIFICATION_SOURCE
-    assert "参考图超出上限" in messages[-1].content_parts[0].text
-    assert messages[-1].metadata["notificationKind"] == (
+    message = _user_messages(services)[-1]
+    assert message.source == NOTIFICATION_SOURCE
+    assert "参考图超出上限" in message.content_parts[0].text
+    assert message.metadata["notificationKind"] == (
         RuntimeEventKind.NODE_DETERMINISTIC_FAILURE.value
     )
     assert wakes.calls == [PROJECT_ID]
 
-
-def test_steer_is_idempotent_by_request_id(tmp_path, monkeypatch) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, _wakes = _bus(services)
-
-    async def deliver_twice() -> None:
-        for _ in range(2):
-            await bus.steer(
-                PROJECT_ID,
-                kind=RuntimeEventKind.GRAPH_ALL_DONE,
-                request_id="graphdone-g7",
-                text="工作图全部节点已完成。",
-            )
-
-    asyncio.run(deliver_twice())
-
+    # A replay of the same request_id must converge on the same message.
+    asyncio.run(
+        bus.steer(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_DETERMINISTIC_FAILURE,
+            request_id="detfail-node-1-fp-CODE",
+            text="节点 storyboard:e1 生成失败：参考图超出上限。",
+            payload={"nodeId": "storyboard:e1"},
+        ),
+    )
     notifications = [
         item
         for item in _user_messages(services)
@@ -319,33 +345,15 @@ def test_steer_survives_transient_append_failure(
     assert bus.store.undelivered_records(PROJECT_ID) == []
 
 
-def test_mark_injected_returns_each_record_once(tmp_path, monkeypatch) -> None:
-    """Same-run re-claims must not duplicate the digest on every turn."""
+def test_outbox_survives_reopen_and_marks_injected_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Records persist across a store reopen, and same-run re-claims must
+    not duplicate the digest on every turn."""
 
     services = _services(tmp_path, monkeypatch)
     bus, _wakes = _bus(services)
-    asyncio.run(
-        bus.inject(
-            PROJECT_ID,
-            kind=RuntimeEventKind.NODE_SUCCEEDED,
-            request_id="node_succeeded-video:e7-fp1",
-            text="生成完成：视频 e7",
-        ),
-    )
-
-    first = bus.store.mark_injected(PROJECT_ID, "agent-run-turns")
-    second = bus.store.mark_injected(PROJECT_ID, "agent-run-turns")
-
-    assert [record.request_id for record in first] == [
-        "node_succeeded-video:e7-fp1",
-    ]
-    assert second == []
-
-
-def test_outbox_survives_store_reopen(tmp_path, monkeypatch) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, _wakes = _bus(services)
-
     asyncio.run(
         bus.inject(
             PROJECT_ID,
@@ -361,24 +369,23 @@ def test_outbox_survives_store_reopen(tmp_path, monkeypatch) -> None:
         "node_gated-video:e2-fp3",
     ]
 
+    first = reopened.mark_injected(PROJECT_ID, "agent-run-turns")
+    second = reopened.mark_injected(PROJECT_ID, "agent-run-turns")
+    assert [record.request_id for record in first] == [
+        "node_gated-video:e2-fp3",
+    ]
+    assert second == []
 
-def test_autonomous_hard_cap_downgrades_steer_to_inject(
+
+def test_hard_cap_parks_steer_until_human_resets_streak(
     tmp_path,
     monkeypatch,
 ) -> None:
     services = _services(tmp_path, monkeypatch)
     bus, wakes = _bus(services)
-    for index in range(NOTIFY_AUTONOMOUS_HARD_CAP):
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            content_parts=[{"type": "text", "text": f"自动续跑 {index}"}],
-            source="yolo_auto_resume",
-        )
+    _exhaust_hard_cap(services)
 
-    delivered = asyncio.run(
+    parked = asyncio.run(
         bus.steer(
             PROJECT_ID,
             kind=RuntimeEventKind.GRAPH_ALL_DONE,
@@ -387,7 +394,7 @@ def test_autonomous_hard_cap_downgrades_steer_to_inject(
         ),
     )
 
-    assert delivered is False
+    assert parked is False
     assert wakes.calls == []
     assert not [
         item
@@ -398,22 +405,6 @@ def test_autonomous_hard_cap_downgrades_steer_to_inject(
         record.request_id for record in bus.store.pending_records(PROJECT_ID)
     ] == ["graphdone-g5"]
 
-
-def test_human_message_resets_autonomous_streak(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, _wakes = _bus(services)
-    for index in range(NOTIFY_AUTONOMOUS_HARD_CAP):
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            content_parts=[{"type": "text", "text": f"自动续跑 {index}"}],
-            source="yolo_auto_resume",
-        )
     services.sessions.append_message(
         PROJECT_ID,
         SESSION_ID,
@@ -434,6 +425,11 @@ def test_human_message_resets_autonomous_streak(
 
     assert delivered is True
     assert _user_messages(services)[-1].source == NOTIFICATION_SOURCE
+    # The earlier parked NEXT_STEP event keeps its own delivery identity
+    # and must not be folded into the later steer.
+    assert [
+        record.request_id for record in bus.store.pending_records(PROJECT_ID)
+    ] == ["graphdone-g5"]
 
 
 def test_drain_into_resume_never_steals_a_live_claim(
@@ -448,6 +444,10 @@ def test_drain_into_resume_never_steals_a_live_claim(
     store = bus.store
 
     async def scenario() -> tuple[str, str]:
+        assert (
+            await bus.drain_into_resume(PROJECT_ID, assigned_to="digest-run-0")
+            == ""
+        ), "an empty outbox must drain into an empty digest"
         await bus.inject(
             PROJECT_ID,
             kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
@@ -498,20 +498,6 @@ def test_drain_into_resume_never_steals_a_live_claim(
     assert states == {"DRAINED"}
 
 
-def test_drain_into_resume_returns_empty_when_nothing_pends(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, _wakes = _bus(services)
-
-    digest = asyncio.run(
-        bus.drain_into_resume(PROJECT_ID, assigned_to="digest-run-1"),
-    )
-
-    assert digest == ""
-
-
 def test_cancel_pending_clears_outbox(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path, monkeypatch)
     bus, _wakes = _bus(services)
@@ -541,110 +527,25 @@ def test_cancel_pending_clears_outbox(tmp_path, monkeypatch) -> None:
     assert states == {"CANCELLED"}
 
 
-def test_notify_rejects_undeclared_level(tmp_path, monkeypatch) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, _wakes = _bus(services)
-    monkeypatch.delitem(
-        notifications_module.EVENT_LEVELS,
-        RuntimeEventKind.NODE_GATED,
-    )
-
-    with pytest.raises(ValueError):
-        asyncio.run(
-            bus.notify(
-                PROJECT_ID,
-                kind=RuntimeEventKind.NODE_GATED,
-                request_id="node_gated-x",
-                text="x",
-            ),
-        )
-
-
-def _exhaust_hard_cap(services) -> None:
-    for index in range(NOTIFY_AUTONOMOUS_HARD_CAP):
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            content_parts=[{"type": "text", "text": f"自动续跑 {index}"}],
-            source="yolo_auto_resume",
-        )
-
-
-def test_idle_flush_delivers_parked_next_step_after_cooldown(
+def test_idle_flush_lifecycle_delivers_parked_terminals(
     tmp_path,
     monkeypatch,
 ) -> None:
+    """Cooldown gate → wave delivery: each parked NEXT_STEP event reaches
+    the session under its own steer identity with its original kind and
+    payload, so delegation-origin restoration and repair budgets still
+    key on the original event."""
+
     services = _services(tmp_path, monkeypatch)
     bus, wakes = _bus(services)
-    _exhaust_hard_cap(services)
-    asyncio.run(
-        bus.steer(
-            PROJECT_ID,
-            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
-            request_id="specialist-run-blocked-1",
-            text="Specialist 终态 [BLOCKED]：TTS 服务不可用。",
-            payload={
-                "specialistRunId": "specialist-run-blocked-1",
-                "originSource": "run_review_feedback",
-                "originMessageId": "message-review-9",
-            },
-        ),
-    )
-    assert bus.store.pending_records(PROJECT_ID) != []
+    default_cooldown = notifications_module.NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS
     monkeypatch.setattr(
         notifications_module,
         "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
         0.0,
     )
 
-    flushed = asyncio.run(bus.flush_pending_on_idle(PROJECT_ID))
-
-    assert flushed is True
-    message = _user_messages(services)[-1]
-    assert message.source == NOTIFICATION_SOURCE
-    assert message.metadata["idleFlush"] is True
-    # The event keeps its own identity: kind and payload survive the
-    # flush, so delegation-origin restoration and repair budgets still
-    # key on the original review feedback.
-    assert message.metadata["notificationKind"] == "subagent_terminal"
-    assert message.metadata["specialistRunId"] == "specialist-run-blocked-1"
-    assert message.metadata["originSource"] == "run_review_feedback"
-    assert message.metadata["originMessageId"] == "message-review-9"
-    assert "TTS 服务不可用" in message.content_parts[0].text
-    assert wakes.calls == [PROJECT_ID]
-    assert bus.store.undelivered_records(PROJECT_ID) == []
-
-
-def test_idle_flush_waits_out_cooldown(tmp_path, monkeypatch) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, wakes = _bus(services)
-    asyncio.run(
-        bus.inject(
-            PROJECT_ID,
-            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
-            request_id="specialist-run-blocked-2",
-            text="Specialist 终态 [BLOCKED]。",
-        ),
-    )
-
-    flushed = asyncio.run(bus.flush_pending_on_idle(PROJECT_ID))
-
-    assert flushed is False
-    assert asyncio.run(bus.has_flush_candidates(PROJECT_ID)) is False
-    assert wakes.calls == []
-    assert len(bus.store.pending_records(PROJECT_ID)) == 1
-
-
-def test_idle_flush_requires_a_next_step_event(tmp_path, monkeypatch) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, _wakes = _bus(services)
-    monkeypatch.setattr(
-        notifications_module,
-        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
-        0.0,
-    )
+    # A quiet-only outbox never triggers a flush, even past the cooldown.
     asyncio.run(
         bus.inject(
             PROJECT_ID,
@@ -653,11 +554,72 @@ def test_idle_flush_requires_a_next_step_event(tmp_path, monkeypatch) -> None:
             text="节点待条件满足：视频 e2",
         ),
     )
-
-    flushed = asyncio.run(bus.flush_pending_on_idle(PROJECT_ID))
-
-    assert flushed is False
+    assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is False
     assert len(bus.store.pending_records(PROJECT_ID)) == 1
+
+    # The hard cap parks a NEXT_STEP steer; a second terminal joins it.
+    _exhaust_hard_cap(services)
+    parked = asyncio.run(
+        bus.steer(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-parked-a",
+            text="Specialist 终态 [BLOCKED]：TTS 服务不可用。",
+            payload={
+                "specialistRunId": "specialist-run-parked-a",
+                "originSource": "run_review_feedback",
+                "originMessageId": "message-review-9",
+            },
+        ),
+    )
+    assert parked is False
+    asyncio.run(
+        bus.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-parked-b",
+            text="Specialist 终态 [FAILED]：B。",
+            payload={"specialistRunId": "specialist-run-parked-b"},
+        ),
+    )
+
+    # Fresh records wait out the cooldown.
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        default_cooldown,
+    )
+    assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is False
+    assert asyncio.run(bus.has_flush_candidates(PROJECT_ID)) is False
+    assert wakes.calls == []
+
+    # Past the cooldown, one wave delivers each terminal separately;
+    # the quiet record rides along with the first delivery.
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        0.0,
+    )
+    assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is True
+
+    flushes = [
+        item
+        for item in _user_messages(services)
+        if item.metadata.get("idleFlush")
+    ]
+    assert [item.metadata["specialistRunId"] for item in flushes] == [
+        "specialist-run-parked-a",
+        "specialist-run-parked-b",
+    ]
+    first = flushes[0]
+    assert first.source == NOTIFICATION_SOURCE
+    assert first.metadata["notificationKind"] == "subagent_terminal"
+    assert first.metadata["originSource"] == "run_review_feedback"
+    assert first.metadata["originMessageId"] == "message-review-9"
+    assert "TTS 服务不可用" in first.content_parts[0].text
+    assert "节点待条件满足：视频 e2" in first.content_parts[0].text
+    assert wakes.calls == [PROJECT_ID]
+    assert bus.store.undelivered_records(PROJECT_ID) == []
 
 
 def test_idle_flush_budget_exhausts_and_resets_on_human(
@@ -772,48 +734,6 @@ def test_idle_flush_folds_quiet_but_never_steals_live_claims(
     assert states["specialist-run-blocked-4"] == "DRAINED"
     assert states["node_succeeded-video:e1-fp1"] == "DRAINED"
     assert states["node_gated-video:e2-fp9"] == "ASSIGNED"
-
-
-def test_idle_flush_wave_delivers_each_terminal_under_its_identity(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    services = _services(tmp_path, monkeypatch)
-    bus, _wakes = _bus(services)
-    monkeypatch.setattr(
-        notifications_module,
-        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
-        0.0,
-    )
-
-    async def scenario() -> bool:
-        await bus.inject(
-            PROJECT_ID,
-            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
-            request_id="specialist-run-parked-a",
-            text="Specialist 终态 [BLOCKED]：A。",
-            payload={"specialistRunId": "specialist-run-parked-a"},
-        )
-        await bus.inject(
-            PROJECT_ID,
-            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
-            request_id="specialist-run-parked-b",
-            text="Specialist 终态 [FAILED]：B。",
-            payload={"specialistRunId": "specialist-run-parked-b"},
-        )
-        return await bus.flush_pending_on_idle(PROJECT_ID)
-
-    assert asyncio.run(scenario()) is True
-    flushes = [
-        item
-        for item in _user_messages(services)
-        if item.metadata.get("idleFlush")
-    ]
-    assert [item.metadata["specialistRunId"] for item in flushes] == [
-        "specialist-run-parked-a",
-        "specialist-run-parked-b",
-    ]
-    assert bus.store.undelivered_records(PROJECT_ID) == []
 
 
 def test_outbox_write_after_delete_cannot_recreate_project(
