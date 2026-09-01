@@ -165,6 +165,34 @@ def _download_audio(url: str) -> tuple[bytes, str]:
     return content, media_type
 
 
+def _is_abnormal_websocket_close(exc: BaseException) -> bool:
+    """Exception shapes an abnormally closed synthesis websocket produces.
+
+    Sending into a dropped connection raises
+    ``WebSocketConnectionClosedException`` (every websocket-client
+    version). websocket-client 1.9.x additionally races in
+    ``WebSocketApp.close()`` — it reads ``self.sock.close_frame`` after
+    the reader thread nulled ``self.sock`` on an abnormal server close —
+    and the SDK's own sock-alive checks have the same TOCTOU on
+    ``connected``/``send``; all three surface as ``AttributeError`` on
+    ``None``. Anything else is a real bug and must propagate.
+    """
+
+    import websocket  # noqa: PLC0415 - optional surface
+
+    if isinstance(exc, websocket.WebSocketException):
+        return True
+    if isinstance(exc, AttributeError):
+        message = str(exc)
+        if "'NoneType' object has no attribute" not in message:
+            return False
+        return any(
+            f"'{name}'" in message
+            for name in ("close_frame", "connected", "send")
+        )
+    return False
+
+
 def _synthesize_over_websocket(
     *,
     model: str,
@@ -221,16 +249,13 @@ def _synthesize_over_websocket(
     try:
         synthesizer.streaming_call(text)
         synthesizer.streaming_complete()
-    except AttributeError as exc:
-        # websocket-client 1.9.x race: WebSocketApp.close() dereferences
-        # self.sock.close_frame after the reader thread nulled self.sock on
-        # an abnormal server close; the raw AttributeError masks the real
-        # "provider closed the connection" condition.
-        if "close_frame" not in str(exc):
+    except Exception as exc:  # noqa: BLE001 - normalized just below
+        if not _is_abnormal_websocket_close(exc):
             raise
         failure.append(
             "the provider closed the websocket abnormally before the "
-            "synthesis finished; the service is likely unstable, retry later",
+            f"synthesis finished ({exc}); the service is likely unstable, "
+            "retry later",
         )
         finished.set()
     finished.wait(timeout=config.get_tts_timeout_seconds())
