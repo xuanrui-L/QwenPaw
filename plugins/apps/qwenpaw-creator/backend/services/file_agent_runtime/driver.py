@@ -107,6 +107,7 @@ from services.runtime_files.execution_models import (
     SpecialistRunRecord,
 )
 from services.runtime_files.execution_store import (
+    ExecutionStateConflict,
     ExecutionStoreError,
     ProjectExecutionStore,
 )
@@ -5596,14 +5597,32 @@ class FileCreatorAgentRuntime:
                 # specialist cleanup recreate Runtime directories below the
                 # removed id.
                 raise
-            await asyncio.to_thread(
-                self.executions.transition_specialist_run,
+            # The stop may land after the terminal status already persisted
+            # (the finalizer was still awaiting its terminal event): keep
+            # the durable outcome and propagate the cancellation — a CAS
+            # conflict here must never masquerade as a business failure
+            # that would chase a hard stop with a spurious [FAILED]
+            # notification.
+            current = await asyncio.to_thread(
+                self.executions.get_specialist_run,
                 project_id,
                 specialist_run_id,
-                expected_status=SpecialistRunStatus.RUNNING_MODEL,
-                status=SpecialistRunStatus.CANCELLED,
-                updates={"final_marker": "CANCELLED"},
             )
+            if current.status in TERMINAL_SPECIALIST_STATUSES:
+                raise
+            try:
+                await asyncio.to_thread(
+                    self.executions.transition_specialist_run,
+                    project_id,
+                    specialist_run_id,
+                    expected_status=current.status,
+                    status=SpecialistRunStatus.CANCELLED,
+                    updates={"final_marker": "CANCELLED"},
+                )
+            except ExecutionStateConflict:
+                # The run reached a terminal state concurrently; whoever
+                # moved it owns the outcome.
+                raise asyncio.CancelledError() from None
             # Emit subagent.failed so the frontend can disarm.
             await self._event(
                 project_id,

@@ -74,9 +74,10 @@ NOTIFY_AUTONOMOUS_HARD_CAP = 10
 # turn boundary could inject the parked outbox — without a valve those
 # events would wait forever for a human.  Once a parked NEXT_STEP event
 # has aged past the cooldown on an idle session, the dispatcher may
-# deliver one batched flush message, at most ``NOTIFY_IDLE_FLUSH_BUDGET``
-# times since the last human message: the flush→run→park loop stays
-# bounded even when every flush spawns work that parks again.
+# deliver it under its own steer identity (kind + payload preserved), at
+# most ``NOTIFY_IDLE_FLUSH_BUDGET`` flush messages since the last human
+# message: the flush→run→park loop stays bounded even when every flush
+# spawns work that parks again.
 NOTIFY_IDLE_FLUSH_BUDGET = 2
 NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS = 120.0
 
@@ -150,29 +151,6 @@ def render_resume_digest(
     lines = [_DIGEST_HEADER]
     lines.extend(f"- {record.text}" for record in quiet_records)
     lines.append("")
-    return "\n".join(lines)
-
-
-_IDLE_FLUSH_HEADER = "自动执行此前因连续自主消息达到上限而暂停主动推进；会话已空闲一段时间，按空闲兜底策略补投递以下挂起通知。"
-
-
-def render_idle_flush_message(
-    records: list[NotificationOutboxRecord],
-) -> str:
-    """Deterministically render one idle-flush message (byte-stable)."""
-
-    actionable = [item for item in records if item.level == "next_step"]
-    quiet = [item for item in records if item.level != "next_step"]
-    lines = [_STEER_HEADER, _IDLE_FLUSH_HEADER, ""]
-    if actionable:
-        lines.append("【待处理事项】")
-        lines.extend(f"- {record.text}" for record in actionable)
-        lines.append("")
-    if quiet:
-        lines.append(_DIGEST_HEADER)
-        lines.extend(f"- {record.text}" for record in quiet)
-        lines.append("")
-    lines.append(_STEER_FOOTER)
     return "\n".join(lines)
 
 
@@ -336,10 +314,14 @@ class RuntimeNotificationBus:
             )
             return False
         try:
+            # Quiet progress rides along; other NEXT_STEP records keep
+            # their own delivery identity and are never folded here.
             claimed = await asyncio.to_thread(
-                self.store.assign,
-                project_id,
-                client_message_id,
+                lambda: self.store.assign(
+                    project_id,
+                    client_message_id,
+                    extra_request_ids=frozenset({request_id}),
+                ),
             )
         except RecordNotFoundError:
             return False
@@ -406,11 +388,12 @@ class RuntimeNotificationBus:
         *,
         assigned_to: str,
     ) -> str:
-        """Claim pending progress for an end-of-run resume message.
+        """Claim pending quiet progress for an end-of-run resume message.
 
-        Also rescues records a crashed earlier drain left ASSIGNED.  The
-        caller appends its resume message, then calls
-        :meth:`settle_resume` with the same identity.
+        The caller appends its resume message, then calls
+        :meth:`settle_resume` with the same identity.  Records claimed by
+        another delivery are never stolen — that delivery may be between
+        its claim and its append; crash leftovers reopen on startup.
         """
 
         try:
@@ -418,7 +401,6 @@ class RuntimeNotificationBus:
                 self.store.assign,
                 project_id,
                 assigned_to,
-                include_stale_assigned=True,
             )
         except RecordNotFoundError:
             return ""
@@ -486,11 +468,16 @@ class RuntimeNotificationBus:
             pass
 
     async def reopen_all_injected(self, project_id: str) -> None:
-        """Startup sweep: any surviving INJECTED record belongs to a dead run."""
+        """Startup sweep: surviving claims all belong to dead deliveries.
+
+        Reopens both INJECTED (dead run turns) and ASSIGNED (deliveries
+        that crashed between claim and append) records to PENDING; this
+        is the sole crash-recovery boundary for stranded claims.
+        """
 
         try:
             await asyncio.to_thread(
-                self.store.reopen_injected,
+                self.store.reopen_undelivered,
                 project_id,
             )
         except RecordNotFoundError:
@@ -514,21 +501,24 @@ class RuntimeNotificationBus:
             )
         except RecordNotFoundError:
             return False
-        return self._flush_anchor(outstanding) is not None
+        return bool(self._flush_candidates(outstanding))
 
     # Guard-clause delivery pipeline: early returns are the clearest shape.
     async def flush_pending_on_idle(  # pylint: disable=too-many-return-statements
         self,
         project_id: str,
     ) -> bool:
-        """Deliver hard-cap parked events on an idle session (bounded).
+        """Deliver hard-cap parked NEXT_STEP events on an idle session.
 
         The caller (dispatcher reconcile) guarantees the session is idle:
         no active run, no queued user messages, no active review, no
-        in-flight specialists.  Delivery follows the same assign-then-
-        append discipline as :meth:`steer`, anchored to the newest parked
-        NEXT_STEP record so a crash replay converges on the same
-        ``client_message_id``.  Undelivered quiet records ride along.
+        in-flight specialists.  Every parked event is delivered as its
+        own message under its steer identity with its original kind and
+        payload metadata — flattening a SUBAGENT_TERMINAL into a text
+        digest would strip the delegation-origin identity that repair
+        dedup and the paid repair budget key on.  Quiet records ride
+        along with the first delivery; the wave is capped by the
+        remaining flush budget.
         """
 
         try:
@@ -538,12 +528,9 @@ class RuntimeNotificationBus:
             )
         except RecordNotFoundError:
             return False
-        anchor = self._flush_anchor(outstanding)
-        if anchor is None:
+        candidates = self._flush_candidates(outstanding)
+        if not candidates:
             return False
-        request_id = f"idleflush-{anchor.request_id}"
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:24]
-        client_message_id = f"notif-idle-flush-{digest}"
         try:
             session = await asyncio.to_thread(
                 self.services.sessions.get_project_session_snapshot,
@@ -564,11 +551,12 @@ class RuntimeNotificationBus:
         )
         if conversation_id is None:
             return False
-        if await asyncio.to_thread(
-            self._idle_flush_budget_exhausted,
+        remaining_budget = await asyncio.to_thread(
+            self._idle_flush_budget_remaining,
             project_id,
             session,
-        ):
+        )
+        if remaining_budget <= 0:
             self._idle_flush_blocked[project_id] = session.last_message_seq
             logger.info(
                 "idle flush skipped for %s: budget of %d used since the "
@@ -577,21 +565,66 @@ class RuntimeNotificationBus:
                 NOTIFY_IDLE_FLUSH_BUDGET,
             )
             return False
+        delivered = 0
+        for index, record in enumerate(candidates[:remaining_budget]):
+            if await self._flush_one(
+                project_id,
+                session,
+                conversation_id,
+                record,
+                fold_quiet=index == 0,
+            ):
+                delivered += 1
+            else:
+                break
+        if delivered == 0:
+            return False
+        logger.warning(
+            "idle flush delivered %d parked notification(s) for %s",
+            delivered,
+            project_id,
+        )
+        self._wake_dispatcher(project_id)
+        return True
+
+    async def _flush_one(
+        self,
+        project_id: str,
+        session: Any,
+        conversation_id: str,
+        record: NotificationOutboxRecord,
+        *,
+        fold_quiet: bool,
+    ) -> bool:
+        """Deliver one parked event under its steer identity."""
+
+        digest = hashlib.sha256(
+            record.request_id.encode("utf-8"),
+        ).hexdigest()[:24]
+        client_message_id = f"notif-{record.kind}-{digest}"
         try:
             claimed = await asyncio.to_thread(
-                self.store.assign,
-                project_id,
-                client_message_id,
-                include_stale_assigned=True,
+                lambda: self.store.assign(
+                    project_id,
+                    client_message_id,
+                    levels=(
+                        frozenset({"quiet"}) if fold_quiet else frozenset()
+                    ),
+                    extra_request_ids=frozenset({record.request_id}),
+                ),
             )
         except RecordNotFoundError:
             return False
-        if not claimed:
+        if not any(item.request_id == record.request_id for item in claimed):
             return False
-        message_text = render_idle_flush_message(claimed)
+        quiet_records = [
+            item for item in claimed if item.request_id != record.request_id
+        ]
+        message_text = render_steer_message(record.text, quiet_records)
         metadata = {
-            "notificationKind": "idle_flush",
-            "requestId": request_id,
+            "notificationKind": record.kind,
+            "requestId": record.request_id,
+            **dict(record.payload),
             "idleFlush": True,
         }
         try:
@@ -608,9 +641,8 @@ class RuntimeNotificationBus:
                 metadata=metadata,
             )
         except MessagePayloadConflict:
-            # A flush message for this anchor already exists, rendered
-            # from a different claimed set. Only the anchor is provably
-            # inside it; the rest goes back to PENDING.
+            # A message for this identity already exists (a partially
+            # delivered steer); only the anchor is provably inside it.
             logger.info(
                 "idle flush replay converged on existing message: %s %s",
                 project_id,
@@ -620,13 +652,13 @@ class RuntimeNotificationBus:
                 self.store.reopen_assigned,
                 project_id,
                 client_message_id,
-                keep_request_ids=frozenset({anchor.request_id}),
+                keep_request_ids=frozenset({record.request_id}),
             )
         except Exception:  # pylint: disable=broad-except
             logger.exception(
                 "idle flush delivery failed for %s %s",
                 project_id,
-                request_id,
+                record.request_id,
             )
             return False
         await asyncio.to_thread(
@@ -634,13 +666,6 @@ class RuntimeNotificationBus:
             project_id,
             client_message_id,
         )
-        logger.warning(
-            "idle flush delivered %d parked notification(s) for %s: %s",
-            len(claimed),
-            project_id,
-            request_id,
-        )
-        self._wake_dispatcher(project_id)
         return True
 
     # -- internals ---------------------------------------------------------
@@ -684,36 +709,34 @@ class RuntimeNotificationBus:
             break
         return False
 
-    def _flush_anchor(
+    def _flush_candidates(
         self,
         outstanding: list[NotificationOutboxRecord],
-    ) -> NotificationOutboxRecord | None:
-        """Newest undelivered NEXT_STEP record aged past the cooldown.
+    ) -> list[NotificationOutboxRecord]:
+        """Undelivered NEXT_STEP records aged past the cooldown, oldest first.
 
         The age gate doubles as the idleness signal: had any run happened
-        since the record parked, its turn boundary or end-of-run digest
-        would have drained it already.
+        since a record parked, its steer identity would already have been
+        retried or delivered.
         """
 
-        candidates = [
-            record for record in outstanding if record.level == "next_step"
-        ]
-        if not candidates:
-            return None
-        anchor = max(
-            candidates,
+        now = datetime.now(UTC)
+        return sorted(
+            (
+                record
+                for record in outstanding
+                if record.level == "next_step"
+                and (now - record.created_at).total_seconds()
+                >= NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS
+            ),
             key=lambda record: (record.created_at, record.record_id),
         )
-        age = (datetime.now(UTC) - anchor.created_at).total_seconds()
-        if age < NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS:
-            return None
-        return anchor
 
-    def _idle_flush_budget_exhausted(
+    def _idle_flush_budget_remaining(
         self,
         project_id: str,
         session: Any,
-    ) -> bool:
+    ) -> int:
         after_seq = max(0, session.last_message_seq - _FUSE_TAIL_WINDOW)
         messages = self.services.sessions.list_messages(
             project_id,
@@ -729,9 +752,7 @@ class RuntimeNotificationBus:
                 break
             if item.metadata.get("idleFlush"):
                 flushes += 1
-                if flushes >= NOTIFY_IDLE_FLUSH_BUDGET:
-                    return True
-        return False
+        return NOTIFY_IDLE_FLUSH_BUDGET - flushes
 
 
 __all__ = [
@@ -744,7 +765,6 @@ __all__ = [
     "RUNTIME_AUTONOMOUS_SOURCES",
     "RuntimeEventKind",
     "RuntimeNotificationBus",
-    "render_idle_flush_message",
     "render_resume_digest",
     "render_steer_message",
 ]

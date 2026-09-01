@@ -175,12 +175,14 @@ def _is_abnormal_websocket_close(exc: BaseException) -> bool:
     the reader thread nulled ``self.sock`` on an abnormal server close —
     and the SDK's own sock-alive checks have the same TOCTOU on
     ``connected``/``send``; all three surface as ``AttributeError`` on
-    ``None``. Anything else is a real bug and must propagate.
+    ``None``. Handshake, protocol, address and timeout errors are NOT
+    normalized here: they are configuration or provider faults with
+    their own diagnosis and must not masquerade as transient closes.
     """
 
     import websocket  # noqa: PLC0415 - optional surface
 
-    if isinstance(exc, websocket.WebSocketException):
+    if isinstance(exc, websocket.WebSocketConnectionClosedException):
         return True
     if isinstance(exc, AttributeError):
         message = str(exc)
@@ -191,6 +193,25 @@ def _is_abnormal_websocket_close(exc: BaseException) -> bool:
             for name in ("close_frame", "connected", "send")
         )
     return False
+
+
+def _websocket_handshake_status(
+    exc: BaseException,
+) -> tuple[int, bool] | None:
+    """(status_code, retryable) for a failed websocket handshake.
+
+    401/403/404 mean a wrong API key, model permission or endpoint —
+    permanent configuration faults that retries can never fix; only
+    throttling (429) and provider-side 5xx are worth retrying.
+    """
+
+    import websocket  # noqa: PLC0415 - optional surface
+
+    if not isinstance(exc, websocket.WebSocketBadStatusException):
+        return None
+    status = int(getattr(exc, "status_code", 0) or 0)
+    retryable = status == 429 or status >= 500
+    return status, retryable
 
 
 def _synthesize_over_websocket(
@@ -252,6 +273,21 @@ def _synthesize_over_websocket(
         synthesizer.streaming_call(text)
         synthesizer.streaming_complete()
     except Exception as exc:  # noqa: BLE001 - normalized just below
+        handshake = _websocket_handshake_status(exc)
+        if handshake is not None:
+            status_code, retryable = handshake
+            detail = (
+                "the provider is throttling or unstable, retry later"
+                if retryable
+                else "check the API key, model permission and endpoint "
+                "configuration"
+            )
+            raise ModelError(
+                f"TTS websocket handshake failed with HTTP {status_code}: "
+                f"{detail}",
+                model_name=model,
+                retryable=retryable,
+            ) from exc
         if not _is_abnormal_websocket_close(exc):
             raise
         failure.append(

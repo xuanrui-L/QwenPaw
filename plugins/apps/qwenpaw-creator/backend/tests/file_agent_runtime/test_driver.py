@@ -2789,7 +2789,9 @@ def test_idle_session_flushes_parked_notification_and_consumes_it(
 
     assert undelivered == []
     flush_inputs = [
-        text for text in received if "待处理事项" in text and "TTS 服务不可用" in text
+        text
+        for text in received
+        if "Runtime 通知" in text and "TTS 服务不可用" in text
     ]
     assert flush_inputs, "the model must see the flushed notification"
 
@@ -3073,6 +3075,84 @@ def test_delegate_accepted_then_terminal_notification_resumes(
     assert len(notifications) == 1
     assert notifications[0].metadata["specialistStatus"] == "SUCCEEDED"
     assert notifications[0].metadata["specialistRunId"] == runs[0].run_id
+
+
+def test_stop_after_terminal_persisted_keeps_outcome_and_stays_silent(
+    tmp_path,
+) -> None:
+    """A hard stop landing after SUCCEEDED persisted must neither
+    overwrite the terminal outcome nor chase the stop with a spurious
+    [FAILED] notification."""
+
+    reached_terminal_event = asyncio.Event()
+    parent_turn = 0
+
+    async def callback(_messages, tools):
+        nonlocal parent_turn
+        names = {item["function"]["name"] for item in tools}
+        if "delegate_to_agent" not in names:
+            return AgentModelTurn(content="[SUCCESS] 剪辑完成。")
+        parent_turn += 1
+        if parent_turn == 1:
+            return _delegate_call(
+                "delegate-stop-race",
+                role="ai_editing_director",
+                target_refs=["timeline:timeline:main"],
+                task="编排 Timeline 选段",
+            )
+        return AgentModelTurn(content="已委派。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+        driver = _driver(services, callback)
+        driver.specialist_tools.invoke = _succeeded_invoke  # type: ignore[method-assign]
+        original_event = driver._event
+
+        async def gated_event(project_id, session_id, event_type, *args):
+            if event_type == "subagent.completed":
+                # SUCCEEDED is already durable; park here so the stop
+                # lands inside the terminal-event window.
+                reached_terminal_event.set()
+                await asyncio.Event().wait()
+            return await original_event(
+                project_id,
+                session_id,
+                event_type,
+                *args,
+            )
+
+        driver._event = gated_event  # type: ignore[method-assign]
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await asyncio.wait_for(reached_terminal_event.wait(), timeout=10)
+        driver._cancel_project_specialists(
+            PROJECT_ID,
+            reason="user_interrupt",
+        )
+        await _wait_for(
+            lambda: not driver._specialist_tasks.get(PROJECT_ID),
+        )
+        await driver.wait_until_idle(PROJECT_ID)
+        runs = driver.executions.list_specialist_runs(PROJECT_ID)
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        await driver.stop()
+        return runs, messages
+
+    runs, messages = asyncio.run(scenario())
+
+    assert len(runs) == 1
+    assert (
+        runs[0].status.value == "SUCCEEDED"
+    ), "the durable terminal outcome must survive the stop"
+    notifications = [
+        item
+        for item in messages
+        if item.role == "user" and item.source == "runtime_notification"
+    ]
+    assert notifications == [], (
+        "a hard stop must not be chased by a fabricated terminal "
+        "notification"
+    )
 
 
 def test_new_mainline_run_does_not_cancel_running_specialist(

@@ -1234,7 +1234,13 @@ def test_restart_scheduler_does_not_duplicate_milestone(
     tmp_path,
     monkeypatch,
 ):
-    """A steer replay after restart converges on the durable message."""
+    """The milestone fires on the unfinished→done edge exactly once.
+
+    An all-DONE baseline (previous is None: restart, or first wake of a
+    long-completed project) must stay silent — otherwise every historical
+    completed project would replay a NEXT_STEP message and a paid model
+    run after each deploy.
+    """
 
     from services.file_agent_runtime.notifications import (
         NOTIFICATION_SOURCE,
@@ -1261,6 +1267,12 @@ def test_restart_scheduler_does_not_duplicate_milestone(
         initialize_staged_project=initialize,
     )
     _enable_yolo(monkeypatch)
+    running = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.RUNNING,
+    )
     done = WorkNode(
         node_id="video:e1",
         kind="video",
@@ -1269,7 +1281,10 @@ def test_restart_scheduler_does_not_duplicate_milestone(
     )
     _graph_sequence(
         monkeypatch,
-        [WorkGraph(nodes=(done,), generation=1)],
+        [
+            WorkGraph(nodes=(running,), generation=1),
+            WorkGraph(nodes=(done,), generation=1),
+        ],
     )
 
     async def scenario():
@@ -1280,9 +1295,12 @@ def test_restart_scheduler_does_not_duplicate_milestone(
                 wake_dispatcher=lambda _project_id: None,
             ),
         )
-        await first.tick(PROJECT_ID)
+        await first.tick(PROJECT_ID)  # baseline: RUNNING, silent
+        await first.tick(PROJECT_ID)  # edge: unfinished -> all done
         await first.shutdown()
-        # Process restart: fresh scheduler + bus, same durable stores.
+        # Process restart: fresh scheduler + bus, same durable stores. The
+        # all-DONE baseline must stay silent and the request-id history
+        # keeps the milestone from re-landing either way.
         second = WorkGraphScheduler(
             services,
             notifications=RuntimeNotificationBus(
@@ -1290,6 +1308,7 @@ def test_restart_scheduler_does_not_duplicate_milestone(
                 wake_dispatcher=lambda _project_id: None,
             ),
         )
+        await second.tick(PROJECT_ID)
         await second.tick(PROJECT_ID)
         await second.shutdown()
 
@@ -1306,6 +1325,40 @@ def test_restart_scheduler_does_not_duplicate_milestone(
         if item.role == "user" and item.source == NOTIFICATION_SOURCE
     ]
     assert len(notifications) == 1
+
+
+def test_all_done_baseline_emits_no_milestone(tmp_path, monkeypatch):
+    """A historical completed project must not replay GRAPH_ALL_DONE."""
+
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    _enable_yolo(monkeypatch)
+    bus = _RecordingBus()
+    done = WorkNode(
+        node_id="video:e1",
+        kind="video",
+        label="视频 e1",
+        status=WorkNodeStatus.DONE,
+    )
+    _graph_sequence(
+        monkeypatch,
+        [WorkGraph(nodes=(done,), generation=7)],
+    )
+
+    async def scenario():
+        scheduler = WorkGraphScheduler(services, notifications=bus)
+        await scheduler.tick(PROJECT_ID)
+        await scheduler.tick(PROJECT_ID)
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    assert not [
+        event
+        for event in bus.events
+        if event["kind"] is RuntimeEventKind.GRAPH_ALL_DONE
+    ]
 
 
 def test_stuck_failed_node_emits_steer_even_on_baseline_tick(

@@ -913,7 +913,12 @@ class WorkGraphScheduler:
                         text=f"待条件满足：{node.label}（{reasons}）",
                         node=node,
                     )
-        had_unfinished = previous is None or any(
+        # Only a real unfinished→done edge is a milestone. An all-DONE
+        # baseline (previous is None: restart, or first wake of a long-
+        # completed project) must stay silent — emitting there would replay
+        # one NEXT_STEP message and a paid model run per historical project
+        # on every deploy without the outbox history.
+        had_unfinished = previous is not None and any(
             status != WorkNodeStatus.DONE.value
             for status, _fingerprint in previous.values()
         )

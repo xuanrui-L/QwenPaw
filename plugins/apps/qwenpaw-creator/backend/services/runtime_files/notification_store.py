@@ -22,6 +22,8 @@ outside it.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -110,6 +112,26 @@ class NotificationOutboxStore:
             timeout_seconds=self.lock_timeout_seconds,
         )
 
+    @contextmanager
+    def _write_guard(self, project_id: str) -> Iterator[None]:
+        """Project lifecycle shared lock + the notification op lock.
+
+        Matching ProjectStore's lifecycle lock orders outbox writes
+        against DELETE's atomic rename: the Project's existence is
+        re-checked under the shared lock, so a write that raced a delete
+        can never recreate a ghost project directory through the JSONL
+        append's ``mkdir``.
+        """
+
+        with CrossProcessFileLock(
+            self.data_root / ".locks" / f"project-{project_id}.lock",
+            timeout_seconds=self.lock_timeout_seconds,
+            shared=True,
+        ):
+            self._require_project(project_id)
+            with self._op_lock(project_id):
+                yield
+
     def _require_project(self, project_id: str) -> None:
         if not (self._project_root(project_id) / "project.json").is_file():
             raise RecordNotFoundError(f"Project not found: {project_id}")
@@ -174,8 +196,7 @@ class NotificationOutboxStore:
         fact.
         """
 
-        with self._op_lock(project_id):
-            self._require_project(project_id)
+        with self._write_guard(project_id):
             if request_id in self.seen_request_ids(project_id):
                 return None
             record = NotificationOutboxRecord(
@@ -212,33 +233,34 @@ class NotificationOutboxStore:
         project_id: str,
         assigned_to: str,
         *,
-        include_stale_assigned: bool = False,
+        levels: frozenset[str] = frozenset({"quiet"}),
+        extra_request_ids: frozenset[str] = frozenset(),
     ) -> list[NotificationOutboxRecord]:
-        """Atomically claim pending records for one delivery identity.
+        """Atomically claim deliverable records for one delivery identity.
 
-        Returns records already assigned to ``assigned_to`` (crash-replay
-        path: the render must be byte-stable for the same identity) plus
-        newly claimed PENDING records.  ``include_stale_assigned`` lets the
-        end-of-run digest also rescue records a crashed earlier drain left
-        ASSIGNED — re-delivering informational progress is harmless while
-        losing it would strand the events forever.
+        Only PENDING records whose ``level`` is in ``levels`` or whose
+        ``request_id`` is explicitly listed are claimed: NEXT_STEP events
+        keep their own stable delivery identity and payload and are never
+        folded into another identity's digest.  Records already ASSIGNED
+        to ``assigned_to`` are returned again (crash-replay: the render
+        must be reproducible for the same identity).  Records ASSIGNED to
+        a different identity are never stolen — a live delivery may sit
+        between its claim and its append; crash leftovers are reopened by
+        the startup sweep instead.
         """
 
-        with self._op_lock(project_id):
+        with self._write_guard(project_id):
             claimed: list[NotificationOutboxRecord] = []
             for record in self._current_versions(project_id).values():
-                if record.state == "ASSIGNED":
-                    if record.assigned_to == assigned_to:
-                        claimed.append(record)
-                    elif include_stale_assigned:
-                        claimed.append(
-                            self._transition(
-                                record,
-                                state="ASSIGNED",
-                                assigned_to=assigned_to,
-                            ),
-                        )
-                elif record.state == "PENDING":
+                if (
+                    record.state == "ASSIGNED"
+                    and record.assigned_to == assigned_to
+                ):
+                    claimed.append(record)
+                elif record.state == "PENDING" and (
+                    record.level in levels
+                    or record.request_id in extra_request_ids
+                ):
                     claimed.append(
                         self._transition(
                             record,
@@ -251,7 +273,7 @@ class NotificationOutboxStore:
     def settle(self, project_id: str, assigned_to: str) -> int:
         """Mark every record assigned to one delivery identity DRAINED."""
 
-        with self._op_lock(project_id):
+        with self._write_guard(project_id):
             settled = 0
             for record in self._current_versions(project_id).values():
                 if (
@@ -282,10 +304,10 @@ class NotificationOutboxStore:
         """
 
         assigned_to = f"injected-{run_id}"
-        with self._op_lock(project_id):
+        with self._write_guard(project_id):
             claimed: list[NotificationOutboxRecord] = []
             for record in self._current_versions(project_id).values():
-                if record.state == "PENDING":
+                if record.state == "PENDING" and record.level == "quiet":
                     claimed.append(
                         self._transition(
                             record,
@@ -304,7 +326,7 @@ class NotificationOutboxStore:
         """Return INJECTED records to PENDING (failed run or restart)."""
 
         assigned_to = f"injected-{run_id}" if run_id is not None else None
-        with self._op_lock(project_id):
+        with self._write_guard(project_id):
             reopened = 0
             for record in self._current_versions(project_id).values():
                 if record.state != "INJECTED":
@@ -336,7 +358,7 @@ class NotificationOutboxStore:
         to PENDING for a later delivery instead of being drained unseen.
         """
 
-        with self._op_lock(project_id):
+        with self._write_guard(project_id):
             reopened = 0
             for record in self._current_versions(project_id).values():
                 if (
@@ -353,10 +375,31 @@ class NotificationOutboxStore:
                 reopened += 1
             return reopened
 
+    def reopen_undelivered(self, project_id: str) -> int:
+        """Startup sweep: return ASSIGNED and INJECTED records to PENDING.
+
+        After a restart every surviving claim belongs to a dead delivery.
+        This is the sole crash-recovery boundary for stranded claims —
+        runtime deliveries never steal another identity's records.
+        """
+
+        with self._write_guard(project_id):
+            reopened = 0
+            for record in self._current_versions(project_id).values():
+                if record.state not in {"ASSIGNED", "INJECTED"}:
+                    continue
+                self._transition(
+                    record,
+                    state="PENDING",
+                    assigned_to=None,
+                )
+                reopened += 1
+            return reopened
+
     def cancel_pending(self, project_id: str) -> int:
         """Cancel undelivered records (hard stop: a human took over)."""
 
-        with self._op_lock(project_id):
+        with self._write_guard(project_id):
             cancelled = 0
             for record in self._current_versions(project_id).values():
                 if record.state in {"PENDING", "ASSIGNED", "INJECTED"}:

@@ -241,6 +241,59 @@ def test_connection_closed_surfaces_as_provider_error(monkeypatch) -> None:
         _run_real_websocket_synthesis(monkeypatch, _Synth)
 
 
+def test_handshake_401_is_a_permanent_configuration_error(
+    monkeypatch,
+) -> None:
+    """A rejected handshake is not a transient close: 401/403/404 mean a
+    wrong API key, permission or endpoint and must not be retried."""
+
+    import websocket
+
+    from utils.exceptions import ModelError
+
+    class _Synth(_FakeSynthesizerBase):
+        def streaming_call(self, text) -> None:
+            raise websocket.WebSocketBadStatusException(
+                "handshake rejected",
+                401,
+            )
+
+    with pytest.raises(ModelError, match="HTTP 401") as excinfo:
+        _run_real_websocket_synthesis(monkeypatch, _Synth)
+    assert excinfo.value.retryable is False
+
+
+def test_handshake_503_stays_retryable(monkeypatch) -> None:
+    import websocket
+
+    from utils.exceptions import ModelError
+
+    class _Synth(_FakeSynthesizerBase):
+        def streaming_call(self, text) -> None:
+            raise websocket.WebSocketBadStatusException(
+                "handshake rejected",
+                503,
+            )
+
+    with pytest.raises(ModelError, match="HTTP 503") as excinfo:
+        _run_real_websocket_synthesis(monkeypatch, _Synth)
+    assert excinfo.value.retryable is True
+
+
+def test_other_websocket_exceptions_propagate_raw(monkeypatch) -> None:
+    """Timeout/protocol/address errors carry their own diagnosis and must
+    not masquerade as an abnormal transient close."""
+
+    import websocket
+
+    class _Synth(_FakeSynthesizerBase):
+        def streaming_call(self, text) -> None:
+            raise websocket.WebSocketTimeoutException("ping timed out")
+
+    with pytest.raises(websocket.WebSocketTimeoutException):
+        _run_real_websocket_synthesis(monkeypatch, _Synth)
+
+
 def test_partial_audio_before_disconnect_is_rejected(monkeypatch) -> None:
     """Chunks that arrived before an abnormal close are a truncated
     narration, not a deliverable: without on_complete they must raise."""
