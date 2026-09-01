@@ -32,6 +32,7 @@ for steer messages.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from enum import StrEnum
 import hashlib
 from typing import Any, Callable, Mapping
@@ -67,6 +68,17 @@ RUNTIME_AUTONOMOUS_SOURCES = frozenset(
 )
 
 NOTIFY_AUTONOMOUS_HARD_CAP = 10
+
+# Escape valve for hard-cap parked NEXT_STEP events.  The cap stops
+# autonomous steers, and a fully idle session has no future run whose
+# turn boundary could inject the parked outbox — without a valve those
+# events would wait forever for a human.  Once a parked NEXT_STEP event
+# has aged past the cooldown on an idle session, the dispatcher may
+# deliver one batched flush message, at most ``NOTIFY_IDLE_FLUSH_BUDGET``
+# times since the last human message: the flush→run→park loop stays
+# bounded even when every flush spawns work that parks again.
+NOTIFY_IDLE_FLUSH_BUDGET = 2
+NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS = 120.0
 
 # Window of tail messages inspected for the hard fuse; the streak resets on
 # any human message, so a bounded window never miscounts a longer streak
@@ -138,6 +150,32 @@ def render_resume_digest(
     lines = [_DIGEST_HEADER]
     lines.extend(f"- {record.text}" for record in quiet_records)
     lines.append("")
+    return "\n".join(lines)
+
+
+_IDLE_FLUSH_HEADER = (
+    "自动执行此前因连续自主消息达到上限而暂停主动推进；"
+    "会话已空闲一段时间，按空闲兜底策略补投递以下挂起通知。"
+)
+
+
+def render_idle_flush_message(
+    records: list[NotificationOutboxRecord],
+) -> str:
+    """Deterministically render one idle-flush message (byte-stable)."""
+
+    actionable = [item for item in records if item.level == "next_step"]
+    quiet = [item for item in records if item.level != "next_step"]
+    lines = [_STEER_HEADER, _IDLE_FLUSH_HEADER, ""]
+    if actionable:
+        lines.append("【待处理事项】")
+        lines.extend(f"- {record.text}" for record in actionable)
+        lines.append("")
+    if quiet:
+        lines.append(_DIGEST_HEADER)
+        lines.extend(f"- {record.text}" for record in quiet)
+        lines.append("")
+    lines.append(_STEER_FOOTER)
     return "\n".join(lines)
 
 
@@ -434,6 +472,125 @@ class RuntimeNotificationBus:
         except RecordNotFoundError:
             pass
 
+    async def has_flush_candidates(self, project_id: str) -> bool:
+        """Cheap probe: an aged, undelivered NEXT_STEP event exists."""
+
+        try:
+            outstanding = await asyncio.to_thread(
+                self.store.undelivered_records,
+                project_id,
+            )
+        except RecordNotFoundError:
+            return False
+        return self._flush_anchor(outstanding) is not None
+
+    async def flush_pending_on_idle(self, project_id: str) -> bool:
+        """Deliver hard-cap parked events on an idle session (bounded).
+
+        The caller (dispatcher reconcile) guarantees the session is idle:
+        no active run, no queued user messages, no active review, no
+        in-flight specialists.  Delivery follows the same assign-then-
+        append discipline as :meth:`steer`, anchored to the newest parked
+        NEXT_STEP record so a crash replay converges on the same
+        ``client_message_id``.  Undelivered quiet records ride along.
+        """
+
+        try:
+            outstanding = await asyncio.to_thread(
+                self.store.undelivered_records,
+                project_id,
+            )
+        except RecordNotFoundError:
+            return False
+        anchor = self._flush_anchor(outstanding)
+        if anchor is None:
+            return False
+        request_id = f"idleflush-{anchor.request_id}"
+        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:24]
+        client_message_id = f"notif-idle-flush-{digest}"
+        try:
+            session = await asyncio.to_thread(
+                self.services.sessions.get_project_session_snapshot,
+                project_id,
+            )
+        except RuntimeSessionNotFound:
+            return False
+        conversation_id = await asyncio.to_thread(
+            self._default_conversation_id,
+            project_id,
+            session.session_id,
+        )
+        if conversation_id is None:
+            return False
+        if await asyncio.to_thread(
+            self._idle_flush_budget_exhausted,
+            project_id,
+            session,
+        ):
+            logger.info(
+                "idle flush skipped for %s: budget of %d used since the "
+                "last human message; parked notifications wait for a human",
+                project_id,
+                NOTIFY_IDLE_FLUSH_BUDGET,
+            )
+            return False
+        try:
+            claimed = await asyncio.to_thread(
+                self.store.assign,
+                project_id,
+                client_message_id,
+                include_stale_assigned=True,
+            )
+        except RecordNotFoundError:
+            return False
+        if not claimed:
+            return False
+        message_text = render_idle_flush_message(claimed)
+        metadata = {
+            "notificationKind": "idle_flush",
+            "requestId": request_id,
+            "idleFlush": True,
+        }
+        try:
+            await asyncio.to_thread(
+                self.services.sessions.append_message,
+                project_id,
+                session.session_id,
+                conversation_id,
+                role="user",
+                content_parts=[{"type": "text", "text": message_text}],
+                client_message_id=client_message_id,
+                source=NOTIFICATION_SOURCE,
+                channel=MessageChannel.RUNTIME,
+                metadata=metadata,
+            )
+        except MessagePayloadConflict:
+            logger.info(
+                "idle flush replay converged on existing message: %s %s",
+                project_id,
+                client_message_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "idle flush delivery failed for %s %s",
+                project_id,
+                request_id,
+            )
+            return False
+        await asyncio.to_thread(
+            self.store.settle,
+            project_id,
+            client_message_id,
+        )
+        logger.warning(
+            "idle flush delivered %d parked notification(s) for %s: %s",
+            len(claimed),
+            project_id,
+            request_id,
+        )
+        self._wake_dispatcher(project_id)
+        return True
+
     # -- internals ---------------------------------------------------------
 
     def _default_conversation_id(
@@ -475,15 +632,69 @@ class RuntimeNotificationBus:
             break
         return False
 
+    def _flush_anchor(
+        self,
+        outstanding: list[NotificationOutboxRecord],
+    ) -> NotificationOutboxRecord | None:
+        """Newest undelivered NEXT_STEP record aged past the cooldown.
+
+        The age gate doubles as the idleness signal: had any run happened
+        since the record parked, its turn boundary or end-of-run digest
+        would have drained it already.
+        """
+
+        candidates = [
+            record
+            for record in outstanding
+            if record.level == "next_step"
+        ]
+        if not candidates:
+            return None
+        anchor = max(
+            candidates,
+            key=lambda record: (record.created_at, record.record_id),
+        )
+        age = (datetime.now(UTC) - anchor.created_at).total_seconds()
+        if age < NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS:
+            return None
+        return anchor
+
+    def _idle_flush_budget_exhausted(
+        self,
+        project_id: str,
+        session: Any,
+    ) -> bool:
+        after_seq = max(0, session.last_message_seq - _FUSE_TAIL_WINDOW)
+        messages = self.services.sessions.list_messages(
+            project_id,
+            session.session_id,
+            after_seq=after_seq,
+            limit=None,
+        )
+        flushes = 0
+        for item in reversed(messages):
+            if item.role != "user":
+                continue
+            if item.source not in RUNTIME_AUTONOMOUS_SOURCES:
+                break
+            if item.metadata.get("idleFlush"):
+                flushes += 1
+                if flushes >= NOTIFY_IDLE_FLUSH_BUDGET:
+                    return True
+        return False
+
 
 __all__ = [
     "EVENT_LEVELS",
     "NOTIFICATION_SOURCE",
     "NOTIFY_AUTONOMOUS_HARD_CAP",
+    "NOTIFY_IDLE_FLUSH_BUDGET",
+    "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
     "NotificationLevel",
     "RUNTIME_AUTONOMOUS_SOURCES",
     "RuntimeEventKind",
     "RuntimeNotificationBus",
+    "render_idle_flush_message",
     "render_resume_digest",
     "render_steer_message",
 ]

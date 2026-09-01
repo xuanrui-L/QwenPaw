@@ -218,8 +218,21 @@ def _synthesize_over_websocket(
         speech_rate=speech_rate,
         callback=_Collector(),
     )
-    synthesizer.streaming_call(text)
-    synthesizer.streaming_complete()
+    try:
+        synthesizer.streaming_call(text)
+        synthesizer.streaming_complete()
+    except AttributeError as exc:
+        # websocket-client 1.9.x race: WebSocketApp.close() dereferences
+        # self.sock.close_frame after the reader thread nulled self.sock on
+        # an abnormal server close; the raw AttributeError masks the real
+        # "provider closed the connection" condition.
+        if "close_frame" not in str(exc):
+            raise
+        failure.append(
+            "the provider closed the websocket abnormally before the "
+            "synthesis finished; the service is likely unstable, retry later",
+        )
+        finished.set()
     finished.wait(timeout=config.get_tts_timeout_seconds())
     audio = b"".join(chunks)
     if not audio:

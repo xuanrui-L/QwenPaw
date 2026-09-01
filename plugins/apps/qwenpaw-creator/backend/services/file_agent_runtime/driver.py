@@ -2247,6 +2247,11 @@ class FileCreatorAgentRuntime:
                     session.session_id,
                     CreatorSessionStatus.IDLE,
                 )
+            elif session.status is CreatorSessionStatus.IDLE:
+                # Hard-cap parked NEXT_STEP notifications have no future
+                # run to ride into on an idle session; the poll-driven
+                # reconcile is their bounded escape valve.
+                await self._maybe_flush_idle_notifications(project_id)
             return
         message = user_messages[0]
         if self._blocked_heads.get(project_id) == message.message_seq:
@@ -2335,6 +2340,35 @@ class FileCreatorAgentRuntime:
             self._wake.set()
 
         task.add_done_callback(completed)
+
+    async def _maybe_flush_idle_notifications(self, project_id: str) -> None:
+        """Deliver hard-cap parked notifications once the session idles.
+
+        Skipped while detached specialists are still running (their
+        terminal steer or the run it wakes will drain the outbox) and
+        while a Review waits on the user (a human is already coming, and
+        their message resets the autonomous streak anyway).
+        """
+
+        if self._specialist_tasks.get(project_id):
+            return
+        try:
+            if not await self.notifications.has_flush_candidates(project_id):
+                return
+            active_review = await asyncio.to_thread(
+                self.services.reviews.active,
+                project_id,
+            )
+            if active_review is not None:
+                return
+            await self.notifications.flush_pending_on_idle(project_id)
+        except Exception:  # pylint: disable=broad-except
+            # The escape valve must never break the dispatch loop; parked
+            # records simply wait for the next poll tick.
+            logger.exception(
+                "idle notification flush failed for %s",
+                project_id,
+            )
 
     @traced_async(
         "creator.agent.execution",

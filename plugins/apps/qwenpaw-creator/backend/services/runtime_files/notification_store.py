@@ -142,6 +142,18 @@ class NotificationOutboxStore:
             if record.state == "PENDING"
         ]
 
+    def undelivered_records(
+        self,
+        project_id: str,
+    ) -> list[NotificationOutboxRecord]:
+        """PENDING plus ASSIGNED strays a crashed drain left behind."""
+
+        return [
+            record
+            for record in self._current_versions(project_id).values()
+            if record.state in {"PENDING", "ASSIGNED"}
+        ]
+
     # -- writes ------------------------------------------------------------
 
     def append_pending(

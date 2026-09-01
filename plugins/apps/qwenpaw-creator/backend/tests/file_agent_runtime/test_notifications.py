@@ -468,3 +468,182 @@ def test_notify_rejects_undeclared_level(tmp_path, monkeypatch) -> None:
                 text="x",
             ),
         )
+
+
+def _exhaust_hard_cap(services) -> None:
+    for index in range(NOTIFY_AUTONOMOUS_HARD_CAP):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"自动续跑 {index}"}],
+            source="yolo_auto_resume",
+        )
+
+
+def test_idle_flush_delivers_parked_next_step_after_cooldown(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path, monkeypatch)
+    bus, wakes = _bus(services)
+    _exhaust_hard_cap(services)
+    asyncio.run(
+        bus.steer(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-blocked-1",
+            text="Specialist 终态 [BLOCKED]：TTS 服务不可用。",
+        ),
+    )
+    assert bus.store.pending_records(PROJECT_ID) != []
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        0.0,
+    )
+
+    flushed = asyncio.run(bus.flush_pending_on_idle(PROJECT_ID))
+
+    assert flushed is True
+    message = _user_messages(services)[-1]
+    assert message.source == NOTIFICATION_SOURCE
+    assert message.metadata["idleFlush"] is True
+    assert "待处理事项" in message.content_parts[0].text
+    assert "TTS 服务不可用" in message.content_parts[0].text
+    assert wakes.calls == [PROJECT_ID]
+    assert bus.store.undelivered_records(PROJECT_ID) == []
+
+
+def test_idle_flush_waits_out_cooldown(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path, monkeypatch)
+    bus, wakes = _bus(services)
+    asyncio.run(
+        bus.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-blocked-2",
+            text="Specialist 终态 [BLOCKED]。",
+        ),
+    )
+
+    flushed = asyncio.run(bus.flush_pending_on_idle(PROJECT_ID))
+
+    assert flushed is False
+    assert asyncio.run(bus.has_flush_candidates(PROJECT_ID)) is False
+    assert wakes.calls == []
+    assert len(bus.store.pending_records(PROJECT_ID)) == 1
+
+
+def test_idle_flush_requires_a_next_step_event(tmp_path, monkeypatch) -> None:
+    services = _services(tmp_path, monkeypatch)
+    bus, _wakes = _bus(services)
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        0.0,
+    )
+    asyncio.run(
+        bus.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_GATED,
+            request_id="node_gated-video:e2-fp3",
+            text="节点待条件满足：视频 e2",
+        ),
+    )
+
+    flushed = asyncio.run(bus.flush_pending_on_idle(PROJECT_ID))
+
+    assert flushed is False
+    assert len(bus.store.pending_records(PROJECT_ID)) == 1
+
+
+def test_idle_flush_budget_exhausts_and_resets_on_human(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path, monkeypatch)
+    bus, _wakes = _bus(services)
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        0.0,
+    )
+    for index in range(notifications_module.NOTIFY_IDLE_FLUSH_BUDGET):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"兜底投递 {index}"}],
+            source=NOTIFICATION_SOURCE,
+            metadata={"idleFlush": True},
+        )
+    asyncio.run(
+        bus.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-blocked-3",
+            text="Specialist 终态 [BLOCKED]。",
+        ),
+    )
+
+    assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is False
+    assert len(bus.store.pending_records(PROJECT_ID)) == 1
+
+    services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        content_parts=[{"type": "text", "text": "请继续"}],
+        source="user",
+    )
+
+    assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is True
+    assert bus.store.undelivered_records(PROJECT_ID) == []
+
+
+def test_idle_flush_folds_quiet_and_rescues_stale_assigned(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path, monkeypatch)
+    bus, _wakes = _bus(services)
+    store = bus.store
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        0.0,
+    )
+
+    async def scenario() -> bool:
+        await bus.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-blocked-4",
+            text="Specialist 终态 [BLOCKED]。",
+        )
+        await bus.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_SUCCEEDED,
+            request_id="node_succeeded-video:e1-fp1",
+            text="生成完成：视频 e1",
+        )
+        # A crashed earlier drain left everything ASSIGNED; the flush must
+        # still see and rescue the records.
+        await asyncio.to_thread(store.assign, PROJECT_ID, "digest-crashed")
+        return await bus.flush_pending_on_idle(PROJECT_ID)
+
+    assert asyncio.run(scenario()) is True
+    text = _user_messages(services)[-1].content_parts[0].text
+    assert "Specialist 终态 [BLOCKED]。" in text
+    assert "生成完成：视频 e1" in text
+    states = {
+        record.state
+        for record in store._current_versions(  # noqa: SLF001
+            PROJECT_ID,
+        ).values()
+    }
+    assert states == {"DRAINED"}

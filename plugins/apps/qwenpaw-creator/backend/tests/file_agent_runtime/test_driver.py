@@ -2722,6 +2722,122 @@ def test_yolo_streak_skips_notification_messages_without_reset(
     ), "notification messages must not reset the resume fuse streak"
 
 
+def test_idle_session_flushes_parked_notification_and_consumes_it(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A hard-cap parked NEXT_STEP event must not wait forever on an idle
+    session: the dispatcher's escape valve delivers it and a run consumes
+    it like any other notification message."""
+
+    from services.file_agent_runtime import (
+        notifications as notifications_module,
+    )
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        0.0,
+    )
+    received: list[str] = []
+
+    async def callback(messages, _tools):
+        if messages[-1]["role"] == "user":
+            received.append(messages[-1]["content"])
+        return AgentModelTurn(content="收到。")
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+        driver = _driver(services, callback)
+        await _run_to_idle(driver, services)
+        await driver.notifications.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-parked-1",
+            text="Specialist 终态 [BLOCKED]：TTS 服务不可用。",
+        )
+        driver.notify(PROJECT_ID)
+
+        def flush_consumed() -> bool:
+            session = services.sessions.get_project_session_snapshot(
+                PROJECT_ID,
+            )
+            flushes = [
+                item
+                for item in services.sessions.list_messages(
+                    PROJECT_ID,
+                    SESSION_ID,
+                    after_seq=0,
+                    limit=None,
+                )
+                if item.role == "user" and item.metadata.get("idleFlush")
+            ]
+            return bool(flushes) and (
+                session.last_consumed_message_seq
+                >= flushes[-1].message_seq
+            )
+
+        await _wait_for(flush_consumed)
+        await driver.wait_until_idle(PROJECT_ID)
+        undelivered = driver.notifications.store.undelivered_records(
+            PROJECT_ID,
+        )
+        await driver.stop()
+        return undelivered
+
+    undelivered = asyncio.run(scenario())
+
+    assert undelivered == []
+    flush_inputs = [
+        text
+        for text in received
+        if "待处理事项" in text and "TTS 服务不可用" in text
+    ]
+    assert flush_inputs, "the model must see the flushed notification"
+
+
+def test_idle_flush_skipped_while_specialists_active(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """In-flight specialists own the wake-up: their terminal steer (or the
+    run it starts) drains the outbox, so the valve stays closed."""
+
+    from services.file_agent_runtime import (
+        notifications as notifications_module,
+    )
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    monkeypatch.setattr(
+        notifications_module,
+        "NOTIFY_IDLE_FLUSH_COOLDOWN_SECONDS",
+        0.0,
+    )
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+        driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+        await driver.notifications.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-parked-2",
+            text="Specialist 终态 [BLOCKED]。",
+        )
+        driver._specialist_tasks[PROJECT_ID] = {"spec-1": object()}
+        await driver._maybe_flush_idle_notifications(PROJECT_ID)
+        parked = driver.notifications.store.pending_records(PROJECT_ID)
+        driver._specialist_tasks.pop(PROJECT_ID)
+        await driver._maybe_flush_idle_notifications(PROJECT_ID)
+        drained = driver.notifications.store.undelivered_records(PROJECT_ID)
+        return parked, drained
+
+    parked, drained = asyncio.run(scenario())
+
+    assert len(parked) == 1, "the valve must stay closed mid-delegation"
+    assert drained == []
+
+
 def test_mainline_resume_message_carries_quiet_digest_prefix(
     tmp_path,
     monkeypatch,
