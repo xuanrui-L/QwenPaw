@@ -26,13 +26,25 @@ export interface ResolvedArtifactOutput {
 
 export function selectPrimaryTimeline(
   project: ProjectDocument | null | undefined,
+  activeTimelineId?: string | null,
 ): TimelineDocument | null {
   if (!project) return null;
+  if (activeTimelineId && project.timelines.items[activeTimelineId]) {
+    return project.timelines.items[activeTimelineId];
+  }
   const orderedId = project.timelines.order.find(
     (id) => project.timelines.items[id],
   );
   if (orderedId) return project.timelines.items[orderedId];
   return Object.values(project.timelines.items)[0] ?? null;
+}
+
+export function selectTimelineById(
+  project: ProjectDocument | null | undefined,
+  timelineId: string | null | undefined,
+): TimelineDocument | null {
+  if (!project || !timelineId) return null;
+  return project.timelines.items[timelineId] ?? null;
 }
 
 export function timelineEndTick(

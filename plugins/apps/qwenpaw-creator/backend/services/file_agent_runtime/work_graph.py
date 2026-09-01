@@ -314,7 +314,8 @@ def _upstream_missing(
     statuses: Mapping[str, WorkNodeStatus],
 ) -> tuple[str, ...]:
     return tuple(
-        dep for dep in dep_ids if statuses.get(dep) is not WorkNodeStatus.DONE
+        dep for dep in dep_ids
+        if statuses.get(dep) is not WorkNodeStatus.DONE
     )
 
 
@@ -375,7 +376,9 @@ def _element_dialogue_density_gap(
         scenario == "short_drama"
         and creation.character_refs
         and creation.min_dialogue_ratio > 0
-        and "有意静默" not in (creation.narrative or "")
+        and "有意静默" not in (
+            creation.narrative or ""
+        )
     ):
         shots = [creation.shots.items.get(sid) for sid in creation.shots.order]
         shots = [s for s in shots if s is not None]
@@ -713,8 +716,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # fingerprint and staleness — editing the explicit list has
                 # to reopen dispatch and flag a stale artifact.
                 storyboard_refs: list[str | None] = (
-                    list(creation.storyboard_reference_version_ids)
-                    or upstream_selected
+                    list(
+                        creation.storyboard_reference_version_ids,
+                    ) or upstream_selected
                 )
                 fingerprint = _fingerprint(
                     storyboard_id,
@@ -722,7 +726,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     project.settings.aspect_ratio,
                     len(creation.shots.order),
                     sorted(
-                        selected for selected in storyboard_refs if selected
+                        selected
+                        for selected in storyboard_refs
+                        if selected
                     ),
                 )
                 if task is not None:
@@ -822,9 +828,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # Prompt-only changes are caught by the dispatch fingerprint
                 # for failure-parking, but do NOT trigger STALE re-generation.
                 upstream_for_stale = (
-                    [storyboard_slot]
-                    if creation_type == "r2v"
-                    else upstream_selected
+                    (
+                        [storyboard_slot]
+                        if creation_type == "r2v"
+                        else upstream_selected
+                    )
                 )
                 status = (
                     WorkNodeStatus.STALE
@@ -898,9 +906,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             )
             video_node_ids.append(video_id)
 
-    # ---- Final compose ------------------------------------------------
-    # Any timeline whose main track carries enabled content (R2V, T2V, I2V,
-    # S2V, Edit or motion-clip Elements) ends in one deterministic master
+    # ---- Final compose (one node per content-bearing timeline) ---------
+    # Each timeline whose main track carries enabled content (R2V, T2V, I2V,
+    # S2V, Edit or motion-clip Elements) gets its own deterministic master
     # render. The node is machine-dispatchable so an unattended (delegated)
     # project reaches its final cut without a user pressing "render"; the
     # scene ledger gate mirrors validate_scene_ledger_locked so dispatch
@@ -910,10 +918,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         MotionClipCreation,
     )
 
-    compose_timeline_id: str | None = None
-    for timeline_id in project.timelines.order:
-        timeline = project.timelines.items[timeline_id]
-        has_content = any(
+    def _timeline_has_content(tid: str) -> bool:
+        tl = project.timelines.items[tid]
+        return any(
             element.enabled
             and isinstance(
                 element.creation,
@@ -926,13 +933,16 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     MotionClipCreation,
                 ),
             )
-            for element in timeline.elements_by_id.values()
+            for element in tl.elements_by_id.values()
         )
-        if has_content:
-            compose_timeline_id = timeline_id
-            break
-    if compose_timeline_id is not None:
+
+    for compose_timeline_id in (
+        tid for tid in project.timelines.order if _timeline_has_content(tid)
+    ):
         timeline = project.timelines.items[compose_timeline_id]
+        node_id = f"compose:{compose_timeline_id}"
+        timeline_target = f"timeline:{compose_timeline_id}"
+        timeline_render_slot_id = f"timeline:{compose_timeline_id}:render"
         missing = _upstream_missing(video_node_ids, statuses)
         scene_gaps: list[str] = []
         plan = getattr(timeline, "edit_plan", None)
@@ -959,21 +969,25 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 item
                 for (kind, _), item in active.items()
                 if kind == TaskKind.COMPOSE.value
+                and str(
+                    item.metadata.get("targetRef") or ""
+                ) == timeline_target
             ),
             None,
         )
         final_slot = next(
             (
                 slot.selected_version_id
-                for slot in project.assets.artifact_slots_by_id.values()
-                if slot.kind == "final_video" and slot.selected_version_id
+                for slot_id, slot in (
+                    project.assets.artifact_slots_by_id.items()
+                )
+                if slot.kind == "final_video"
+                and slot.selected_version_id
+                and slot_id == timeline_render_slot_id
             ),
             None,
         )
         if final_slot is not None:
-            # A stale master render (edit impact marked it after content
-            # changes) must not read as DONE, or the unattended pipeline
-            # would stop one compose short of the corrected final cut.
             version = project.assets.artifact_versions_by_id.get(final_slot)
             if version is not None and (
                 getattr(version, "stale", False)
@@ -990,9 +1004,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             status = WorkNodeStatus.READY
         add(
             WorkNode(
-                node_id="compose:final",
+                node_id=node_id,
                 kind="compose",
-                label="最终合成",
+                label=f"最终合成 ({timeline.name or compose_timeline_id})",
                 status=status,
                 deps=tuple(video_node_ids),
                 lane="compose",
@@ -1001,14 +1015,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 missing=missing,
                 locator={"page": "plan"},
                 command="COMPOSE_FINAL_VIDEO",
-                target_ref=f"timeline:{compose_timeline_id}",
-                # The fingerprint must change whenever the rendered output
-                # would: spans alone miss re-picked source ranges
-                # (render_source), edited overlays/motion documents and
-                # regenerated media versions, which previously replayed a
-                # stale compose as an idempotent no-op.
+                target_ref=timeline_target,
                 dispatch_fingerprint=_fingerprint(
-                    "compose:final",
+                    node_id,
                     timeline.color_grade,
                     sorted(
                         (
@@ -1249,9 +1258,11 @@ def _video_upstream_refs(
     if creation_type == "i2v":
         assert isinstance(creation, I2VCreation)
         return (
-            [creation.first_frame_version_id]
-            if creation.first_frame_version_id
-            else []
+            (
+                [creation.first_frame_version_id]
+                if creation.first_frame_version_id
+                else []
+            )
         )
     if creation_type == "s2v":
         assert isinstance(creation, S2VCreation)

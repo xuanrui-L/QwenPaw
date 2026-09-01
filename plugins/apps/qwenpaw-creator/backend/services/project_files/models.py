@@ -1220,6 +1220,8 @@ class Timeline(StrictModel):
     """One time coordinate system containing freely overlapping Elements."""
 
     timeline_id: EntityId
+    name: str = ""
+    description: str = ""
     ticks_per_second: int = Field(
         default=DEFAULT_TIMELINE_TICKS_PER_SECOND,
         gt=0,

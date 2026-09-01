@@ -284,7 +284,7 @@ def test_element_lane_storyboard_then_video() -> None:
     assert storyboard.status is WorkNodeStatus.READY
     assert video.status is WorkNodeStatus.GATED
     assert video.missing == ("storyboard:elem:one",)
-    assert graph.by_id["compose:final"].status is WorkNodeStatus.GATED
+    assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.GATED
 
     # Storyboard lands: video becomes READY.
     _select_slot(
@@ -308,7 +308,7 @@ def test_element_lane_storyboard_then_video() -> None:
     )
     graph = derive_work_graph(project)
     assert graph.by_id["video:elem:one"].status is WorkNodeStatus.DONE
-    assert graph.by_id["compose:final"].status is WorkNodeStatus.READY
+    assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.READY
 
 
 def test_missing_storyboard_prompt_is_a_model_required_gap() -> None:
@@ -661,11 +661,11 @@ def test_stale_final_render_reopens_compose() -> None:
     )
 
     graph = derive_work_graph(project)
-    assert graph.by_id["compose:final"].status is WorkNodeStatus.DONE
+    assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.DONE
 
     project.assets.artifact_versions_by_id["art:final"].stale = True
     graph = derive_work_graph(project)
-    compose = graph.by_id["compose:final"]
+    compose = graph.by_id["compose:timeline:main"]
     assert compose.status is WorkNodeStatus.READY
     assert compose in graph.ready_media_nodes()
 
@@ -705,7 +705,7 @@ def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
         ],
     }
     assert (
-        derive_work_graph(project).by_id["compose:final"].status
+        derive_work_graph(project).by_id["compose:timeline:main"].status
         is WorkNodeStatus.DONE
     )
 
@@ -719,7 +719,7 @@ def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
     # The lifecycle bug observed in the real run left this false.
     assert not project.assets.artifact_versions_by_id["art:final"].stale
     graph = derive_work_graph(project)
-    compose = graph.by_id["compose:final"]
+    compose = graph.by_id["compose:timeline:main"]
     assert compose.status is WorkNodeStatus.READY
     assert compose in graph.ready_media_nodes()
 
@@ -1039,7 +1039,7 @@ def test_mixed_timeline_compose_includes_t2v_i2v_s2v() -> None:
     assert "video:elem:s2v" in by_id
 
     # Compose node exists and depends on all video nodes
-    compose = by_id["compose:final"]
+    compose = by_id["compose:timeline:main"]
     assert compose is not None
     assert "video:elem:t2v" in compose.deps
     assert "video:elem:i2v" in compose.deps

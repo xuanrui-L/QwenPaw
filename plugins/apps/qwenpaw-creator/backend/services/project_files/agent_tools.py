@@ -36,6 +36,7 @@ from services.runtime_files.models import (
 from utils.logger import setup_logger
 
 from .assets import AssetFileStore
+from .auto_snapshot import auto_snapshot_timelines
 from .candidate_normalization import normalize_project_candidate
 from .commit import PROTECTED_EXACT_POINTERS, ProjectCommitBoundary
 from .jq_transform import JqProjectTransformer
@@ -994,6 +995,10 @@ class AgentProjectTools:
             json_args=request.json_args,
         )
         candidate = self._apply_agent_edit_impacts(base, candidate)
+        auto_snapshot_timelines(
+            base.project.model_dump(mode="json"),
+            candidate,
+        )
         normalized_pointers = normalize_project_candidate(candidate)
         base_data = base.project.model_dump(mode="json")
         changed_protected = [
@@ -1374,6 +1379,10 @@ class AgentProjectTools:
         candidate = base.project.model_dump(mode="json")
         apply_patch_ops(candidate, request.ops)
         candidate = self._apply_agent_edit_impacts(base, candidate)
+        auto_snapshot_timelines(
+            base.project.model_dump(mode="json"),
+            candidate,
+        )
         normalized_pointers = normalize_project_candidate(candidate)
         sync_fence = self._begin_sync_review_fence(
             base.project.model_dump(mode="json"),

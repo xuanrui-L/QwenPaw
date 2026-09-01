@@ -7,4 +7,5 @@ export * from "./models";
 export * from "./projects";
 export * from "./sessions";
 export * from "./tasks";
+export * from "./timelines";
 export * from "./videoTemplates";

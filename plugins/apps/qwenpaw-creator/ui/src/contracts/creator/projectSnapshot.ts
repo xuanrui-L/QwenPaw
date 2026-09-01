@@ -425,7 +425,10 @@ export interface EditPlanDocument extends ProjectJsonRecord {
 
 export interface TimelineDocument extends ProjectJsonRecord {
   timeline_id: string;
+  name: string;
+  description: string;
   ticks_per_second: number;
+  color_grade?: string;
   edit_plan?: EditPlanDocument | null;
   elements_by_id: Record<string, TimelineElementDocument>;
 }

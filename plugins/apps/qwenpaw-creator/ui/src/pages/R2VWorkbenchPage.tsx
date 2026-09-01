@@ -12,6 +12,7 @@ import {
 } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
+import { useTimelineStore } from "@/store/timelineStore";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import {
   getArtifactVersionMediaUrl,
@@ -212,7 +213,11 @@ export default function R2VWorkbenchPage() {
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
-  const timeline = useMemo(() => selectPrimaryTimeline(project), [project]);
+  const activeTimelineId = useTimelineStore((s) => s.activeTimelineId);
+  const timeline = useMemo(
+    () => selectPrimaryTimeline(project, activeTimelineId),
+    [project, activeTimelineId],
+  );
   const authorityElement = timeline?.elements_by_id[elementId] ?? null;
   const elementDraft = useProjectDraft<TimelineElementDocument | null>(
     authorityElement,

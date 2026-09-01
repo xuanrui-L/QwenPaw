@@ -284,9 +284,11 @@ def get_video_template(template_id: str) -> VideoTemplate | None:
 def apply_video_template_to_project(
     project: Project,
     template: VideoTemplate,
+    *,
+    timeline_id: str | None = None,
 ) -> Project:
-    main_tid = DEFAULT_TIMELINE_ID
-    timeline = project.timelines.items.get(main_tid)
+    target_tid = timeline_id or DEFAULT_TIMELINE_ID
+    timeline = project.timelines.items.get(target_tid)
     if timeline is None:
         return project
 
@@ -335,7 +337,7 @@ def apply_video_template_to_project(
 
     updated_timelines = project.timelines.model_copy(
         update={
-            "items": {**project.timelines.items, main_tid: updated_timeline},
+            "items": {**project.timelines.items, target_tid: updated_timeline},
         },
     )
 

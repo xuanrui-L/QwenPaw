@@ -1136,7 +1136,20 @@
     "compactOverviewAriaLabel": "Compact timeline overview; click any moment to see concurrent content",
     "editBufferTooltip": "Your manual edits from the workbench have been applied; these changes will be synced to the Agent with your next message so it can assess dependency adjustments",
     "pendingEditCount": "{{count}} manual edits will sync with Agent on next message",
-    "itemsAtMomentBadge": "{{count}} items at this moment"
+    "itemsAtMomentBadge": "{{count}} items at this moment",
+    "addTimeline": "Add timeline",
+    "createTitle": "New Timeline",
+    "renameTitle": "Rename Timeline",
+    "namePlaceholder": "Timeline name",
+    "defaultNewName": "New Timeline",
+    "copySuffix": "Copy",
+    "rename": "Rename",
+    "duplicate": "Duplicate",
+    "delete": "Delete",
+    "compareAB": "A/B Compare",
+    "exitCompare": "Exit Compare",
+    "deleteConfirmTitle": "Delete Timeline",
+    "deleteConfirmContent": "Are you sure you want to delete \"{{name}}\"? All elements on this timeline will be removed."
   },
   "editPlan": {
     "title": "Edit plan",

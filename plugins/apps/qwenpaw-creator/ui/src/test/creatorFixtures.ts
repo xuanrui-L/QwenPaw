@@ -99,6 +99,8 @@ export const projectDocument: ProjectDocument = {
     items: {
       "timeline:main": {
         timeline_id: "timeline:main",
+        name: "",
+        description: "",
         ticks_per_second: 1000,
         elements_by_id: {
           "edit-opening": {

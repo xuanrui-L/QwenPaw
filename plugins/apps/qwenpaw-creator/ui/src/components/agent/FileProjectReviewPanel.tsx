@@ -21,6 +21,7 @@ import { navigateToLocator } from "@/routing/locators";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { useTimelineStore } from "@/store/timelineStore";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import DiffView from "./DiffView";
 import RejectionFeedbackModal from "./RejectionFeedbackModal";
@@ -254,7 +255,10 @@ export default function FileProjectReviewPanel({
   >([]);
 
   const elementNames = (() => {
-    const timeline = selectPrimaryTimeline(project);
+    const timeline = selectPrimaryTimeline(
+      project,
+      useTimelineStore.getState().activeTimelineId,
+    );
     const names: Record<string, string> = {};
     if (timeline) {
       Object.values(timeline.elements_by_id).forEach((element) => {
@@ -264,7 +268,8 @@ export default function FileProjectReviewPanel({
     return names;
   })();
   const ticksPerSecond =
-    selectPrimaryTimeline(project)?.ticks_per_second ?? 1000;
+    selectPrimaryTimeline(project, useTimelineStore.getState().activeTimelineId)
+      ?.ticks_per_second ?? 1000;
   const assetName = (assetId: string): string =>
     project?.visual.entities.items[assetId]?.name || assetId;
   const mediaOwnerLine = (locator: Record<string, string>): string => {

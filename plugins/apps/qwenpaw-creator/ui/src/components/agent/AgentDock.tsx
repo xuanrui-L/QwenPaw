@@ -54,6 +54,7 @@ import WorkGraphPanel from "@/components/agent/WorkGraphPanel";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { useTimelineStore } from "@/store/timelineStore";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import SourceCacheGate from "@/components/creator/SourceCacheGate";
 import { useSourceCache } from "@/lib/sourceCache";
@@ -1432,7 +1433,10 @@ function projectRefItems(
   limit = 6,
 ): RefSearchItem[] {
   if (!project) return [];
-  const timeline = selectPrimaryTimeline(project);
+  const timeline = selectPrimaryTimeline(
+    project,
+    useTimelineStore.getState().activeTimelineId,
+  );
   const needle = query.trim().toLocaleLowerCase();
   const items: RefSearchItem[] = [];
   if (timeline) {
@@ -1528,7 +1532,8 @@ function WorkspacePanel() {
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const workGraph = useWorkGraphStore((state) => state.graph);
   const project = useProjectSnapshotStore((state) => state.project);
-  const timeline = selectPrimaryTimeline(project);
+  const activeTimelineId = useTimelineStore((s) => s.activeTimelineId);
+  const timeline = selectPrimaryTimeline(project, activeTimelineId);
   const sourceCount = project
     ? Object.keys(project.assets.source_versions_by_id).length
     : 0;
@@ -1752,7 +1757,8 @@ export default function AgentDock({ sidebar = false }: { sidebar?: boolean }) {
   // the full originals cached locally, so gate sending until they land.
   const sourceCache = useSourceCache(projectId, builtinExample);
   const originalsGate = builtinExample && sourceCache.originalsMissing;
-  const timeline = selectPrimaryTimeline(project);
+  const dockActiveTimelineId = useTimelineStore((s) => s.activeTimelineId);
+  const timeline = selectPrimaryTimeline(project, dockActiveTimelineId);
 
   const streaming = Boolean(
     session &&

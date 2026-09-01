@@ -15,12 +15,14 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
+import { useTimelineStore } from "@/store/timelineStore";
 import { getArtifactVersionMediaUrl, renderTimeline } from "@/api/creator";
 import {
   elementsAtTick,
   overlayContentKind,
   resolveTimelineRender,
   selectPrimaryTimeline,
+  selectTimelineById,
   timelineEndTick,
 } from "@/selectors/timelineElementSelectors";
 import { resolveElementPlayback } from "@/selectors/elementPlaybackSelectors";
@@ -30,6 +32,7 @@ import { useProjectDraft } from "@/lib/useProjectDraft";
 import { startVisiblePolling } from "@/lib/visiblePolling";
 import { useNarrowWorkspace, useDetailRail } from "@/lib/useNarrowWorkspace";
 import TimelineCanvas from "@/components/timeline/TimelineCanvas";
+import TimelineSwitcher from "@/components/timeline/TimelineSwitcher";
 import ElementList from "@/components/timeline/ElementList";
 import ElementDetail from "@/components/timeline/ElementDetail";
 import PageSkeleton from "@/components/PageSkeleton";
@@ -62,7 +65,19 @@ export default function PlanPage() {
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
-  const timeline = useMemo(() => selectPrimaryTimeline(project), [project]);
+  const activeTimelineId = useTimelineStore((s) => s.activeTimelineId);
+  const compareTimelineId = useTimelineStore((s) => s.compareTimelineId);
+  const timeline = useMemo(
+    () => selectPrimaryTimeline(project, activeTimelineId),
+    [project, activeTimelineId],
+  );
+  const compareTimeline = useMemo(
+    () =>
+      compareTimelineId && compareTimelineId !== activeTimelineId
+        ? selectTimelineById(project, compareTimelineId)
+        : null,
+    [project, compareTimelineId, activeTimelineId],
+  );
   const visualCoverage = useMemo(
     () => (project ? selectVisualVariantCoverage(project) : null),
     [project],
@@ -829,6 +844,13 @@ export default function PlanPage() {
         </div>
       </header>
 
+      <TimelineSwitcher
+        project={project}
+        onPatch={async (operations) => {
+          await patchProject(id, operations);
+        }}
+      />
+
       {syncStatus === "degraded" && (
         <div className="shrink-0 border-b border-[var(--color-warning)]/20 bg-[var(--color-warning-soft)] px-5 py-1.5 text-[11px] text-[var(--color-warning)]">
           {t("plan.syncDegraded")}
@@ -838,21 +860,90 @@ export default function PlanPage() {
 
       {visualCoverage && <VisualCoverageCheckpoint report={visualCoverage} />}
 
-      <TimelineCanvas
-        project={project}
-        timeline={timeline}
-        durationTick={displayDurationTick}
-        playheadTick={clampedPlayheadTick}
-        selectedElementId={selectedElementId}
-        previewOpen={previewOpen}
-        tasks={tasks}
-        onPreviewOpenChange={setPreviewOpen}
-        onPlayheadChange={(tick) =>
-          movePlayhead(Math.max(0, Math.min(displayDurationTick, tick)))
-        }
-        onSelectElement={selectElement}
-        onActiveElementIdsChange={setExplicitActiveIds}
-      />
+      {compareTimeline ? (
+        <div className="flex min-h-0 shrink-0 divide-x divide-[var(--color-border)]">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-accent-soft)] px-4 py-1">
+              <span className="rounded bg-[var(--color-accent)] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                A
+              </span>
+              <span className="truncate text-xs font-medium text-[var(--color-text-primary)]">
+                {timeline?.name || timeline?.timeline_id}
+              </span>
+            </div>
+            <TimelineCanvas
+              project={project}
+              timeline={timeline}
+              durationTick={displayDurationTick}
+              playheadTick={clampedPlayheadTick}
+              selectedElementId={selectedElementId}
+              previewOpen={previewOpen}
+              tasks={tasks}
+              onPreviewOpenChange={setPreviewOpen}
+              onPlayheadChange={(tick) =>
+                movePlayhead(Math.max(0, Math.min(displayDurationTick, tick)))
+              }
+              onSelectElement={selectElement}
+              onActiveElementIdsChange={setExplicitActiveIds}
+            />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-4 py-1">
+              <span className="rounded bg-[var(--color-text-secondary)] px-1.5 py-0.5 text-[10px] font-bold text-white dark:bg-[var(--color-text-primary)]">
+                B
+              </span>
+              <span className="truncate text-xs font-medium text-[var(--color-text-secondary)]">
+                {compareTimeline.name || compareTimeline.timeline_id}
+              </span>
+            </div>
+            <TimelineCanvas
+              project={project}
+              timeline={compareTimeline}
+              durationTick={Math.max(
+                displayDurationTick,
+                timelineEndTick(compareTimeline),
+              )}
+              playheadTick={clampedPlayheadTick}
+              selectedElementId={null}
+              previewOpen={previewOpen}
+              tasks={tasks}
+              onPreviewOpenChange={setPreviewOpen}
+              onPlayheadChange={(tick) =>
+                movePlayhead(
+                  Math.max(
+                    0,
+                    Math.min(
+                      Math.max(
+                        displayDurationTick,
+                        timelineEndTick(compareTimeline),
+                      ),
+                      tick,
+                    ),
+                  ),
+                )
+              }
+              onSelectElement={() => {}}
+              onActiveElementIdsChange={() => {}}
+            />
+          </div>
+        </div>
+      ) : (
+        <TimelineCanvas
+          project={project}
+          timeline={timeline}
+          durationTick={displayDurationTick}
+          playheadTick={clampedPlayheadTick}
+          selectedElementId={selectedElementId}
+          previewOpen={previewOpen}
+          tasks={tasks}
+          onPreviewOpenChange={setPreviewOpen}
+          onPlayheadChange={(tick) =>
+            movePlayhead(Math.max(0, Math.min(displayDurationTick, tick)))
+          }
+          onSelectElement={selectElement}
+          onActiveElementIdsChange={setExplicitActiveIds}
+        />
+      )}
 
       {/* The wrapper is the size container for the editor grid: container
           queries cannot match the querying element itself, and scoping it

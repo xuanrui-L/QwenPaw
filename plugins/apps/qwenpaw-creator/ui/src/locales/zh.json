@@ -1136,7 +1136,20 @@
     "compactOverviewAriaLabel": "紧凑时间轴概览；点击任意时刻查看同时出现的内容",
     "editBufferTooltip": "你在编辑台手动应用的修改已生效；下次发送消息时会把这些变化同步给 Agent，便于它判断依赖是否需要调整",
     "pendingEditCount": "{{count}} 项手动修改将随下条消息同步给 Agent",
-    "itemsAtMomentBadge": "该时刻有 {{count}} 项内容"
+    "itemsAtMomentBadge": "该时刻有 {{count}} 项内容",
+    "addTimeline": "添加时间线",
+    "createTitle": "新建时间线",
+    "renameTitle": "重命名时间线",
+    "namePlaceholder": "时间线名称",
+    "defaultNewName": "新时间线",
+    "copySuffix": "副本",
+    "rename": "重命名",
+    "duplicate": "复制",
+    "delete": "删除",
+    "compareAB": "A/B 对比",
+    "exitCompare": "退出对比",
+    "deleteConfirmTitle": "删除时间线",
+    "deleteConfirmContent": "确定要删除「{{name}}」吗？该时间线上的所有元素都将被移除。"
   },
   "editPlan": {
     "title": "剪辑契约",

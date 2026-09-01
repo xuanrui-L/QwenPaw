@@ -6,6 +6,7 @@ import {
   useSearchParams,
 } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { useTimelineStore } from "@/store/timelineStore";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import { useTranslation } from "react-i18next";
 
@@ -20,7 +21,8 @@ export function useBreadcrumbs(): Crumb[] {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const project = useProjectSnapshotStore((state) => state.project);
-  const timeline = selectPrimaryTimeline(project);
+  const activeTimelineId = useTimelineStore((s) => s.activeTimelineId);
+  const timeline = selectPrimaryTimeline(project, activeTimelineId);
 
   if (!projectId) return [];
   const base = `/project/${projectId}`;

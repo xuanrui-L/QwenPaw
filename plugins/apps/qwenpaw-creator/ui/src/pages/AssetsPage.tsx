@@ -41,6 +41,7 @@ import {
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { useTimelineStore } from "@/store/timelineStore";
 import { useNarrowWorkspace, useDetailRail } from "@/lib/useNarrowWorkspace";
 import AssetMediaPreview from "@/components/assets/AssetMediaPreview";
 import DocumentUnderstanding from "@/components/assets/DocumentUnderstanding";
@@ -816,7 +817,8 @@ function generationPromptTarget(
   }
   if (ownerRef.startsWith("element:")) {
     const elementId = ownerRef.slice("element:".length);
-    const timeline = selectPrimaryTimeline(project);
+    const activeTid = useTimelineStore.getState().activeTimelineId;
+    const timeline = selectPrimaryTimeline(project, activeTid);
     const element = timeline?.elements_by_id[elementId];
     if (!timeline || !element) return null;
     const base = `/timelines/items/${timeline.timeline_id}/elements_by_id/${elementId}/creation`;
