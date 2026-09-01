@@ -2774,8 +2774,7 @@ def test_idle_session_flushes_parked_notification_and_consumes_it(
                 if item.role == "user" and item.metadata.get("idleFlush")
             ]
             return bool(flushes) and (
-                session.last_consumed_message_seq
-                >= flushes[-1].message_seq
+                session.last_consumed_message_seq >= flushes[-1].message_seq
             )
 
         await _wait_for(flush_consumed)
@@ -2790,9 +2789,7 @@ def test_idle_session_flushes_parked_notification_and_consumes_it(
 
     assert undelivered == []
     flush_inputs = [
-        text
-        for text in received
-        if "待处理事项" in text and "TTS 服务不可用" in text
+        text for text in received if "待处理事项" in text and "TTS 服务不可用" in text
     ]
     assert flush_inputs, "the model must see the flushed notification"
 
@@ -3373,3 +3370,192 @@ def test_turn_boundary_injects_quiet_digest_into_live_run(tmp_path) -> None:
     states = asyncio.run(scenario())
     assert seen_digest, "the quiet digest must join the live run's messages"
     assert states == {"DRAINED"}
+
+
+def test_subagent_terminal_notification_is_never_batched(tmp_path) -> None:
+    """Terminal notifications carry delegation-origin identity resolved
+    from the run's head message; merging one into another head's batch
+    would strip repair dedup and the paid repair budget."""
+
+    from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
+
+    received: list[str] = []
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="初始目标")
+        services.sessions.mark_messages_consumed(
+            PROJECT_ID,
+            SESSION_ID,
+            through_seq=1,
+        )
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[
+                {"type": "text", "text": "【系统自动消息 · Runtime 通知】普通进度"},
+            ],
+            source=NOTIFICATION_SOURCE,
+            channel=MessageChannel.RUNTIME,
+            metadata={"notificationKind": "node_succeeded"},
+        )
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[
+                {
+                    "type": "text",
+                    "text": "【系统自动消息 · Runtime 通知】Specialist 终态 [SUCCEEDED]",
+                },
+            ],
+            source=NOTIFICATION_SOURCE,
+            channel=MessageChannel.RUNTIME,
+            metadata={
+                "notificationKind": "subagent_terminal",
+                "originSource": "run_review_feedback",
+                "originMessageId": "message-review-1",
+            },
+        )
+
+        async def callback(messages, _tools):
+            received.append(messages[1]["content"])
+            return AgentModelTurn(content="已核对。")
+
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_consumed(services, 3)
+        await driver.wait_until_idle(PROJECT_ID)
+        runs = driver.runs.list(PROJECT_ID)
+        await driver.stop()
+        return runs
+
+    runs = asyncio.run(scenario())
+
+    assert len(received) == 2, (
+        "the terminal notification must start its own run so its origin "
+        "identity governs repair dedup and budget"
+    )
+    assert "普通进度" in received[0]
+    assert "Specialist 终态" in received[1]
+    assert "Specialist 终态" not in received[0]
+    assert len(runs) == 2
+
+
+def test_turn_boundary_digest_injected_once_across_turns(tmp_path) -> None:
+    """The same staged progress must not be re-appended on every model turn."""
+
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    final_turn_messages: list[list[str]] = []
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+
+        turn = {"count": 0}
+
+        async def callback(messages, _tools):
+            turn["count"] += 1
+            if turn["count"] == 1:
+                return _read_call("read-1")
+            final_turn_messages.append(
+                [
+                    str(item["content"])
+                    for item in messages
+                    if item["role"] == "user"
+                ],
+            )
+            return AgentModelTurn(content="收到进度。")
+
+        driver = _driver(services, callback)
+        await driver.notifications.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
+            request_id="node_dispatch_started-video:e9-fp1",
+            text="已开始生成：视频 e9",
+        )
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await _wait_consumed(services, 1)
+        await driver.wait_until_idle(PROJECT_ID)
+        await driver.stop()
+
+    asyncio.run(scenario())
+
+    assert final_turn_messages, "the run must reach a second model turn"
+    digest_count = sum(
+        "已开始生成：视频 e9" in content for content in final_turn_messages[-1]
+    )
+    assert (
+        digest_count == 1
+    ), "the injected digest must appear exactly once across model turns"
+
+
+def test_idle_hard_stop_cancels_pending_notifications(tmp_path) -> None:
+    """A hard stop with no active mainline must drop undelivered progress."""
+
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+        driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+        await driver.notifications.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
+            request_id="node_dispatch_started-video:e1-fp1",
+            text="已开始生成：视频 e1",
+        )
+        await driver.interrupt(PROJECT_ID, reason="user_interrupt")
+        return {
+            record.state
+            for record in driver.notifications.store._current_versions(
+                PROJECT_ID,
+            ).values()
+        }
+
+    states = asyncio.run(scenario())
+
+    assert states == {"CANCELLED"}
+
+
+def test_review_gate_read_failure_holds_queued_message(tmp_path) -> None:
+    """An unreadable Review state must fail closed instead of launching."""
+
+    turns = {"count": 0}
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="剪辑")
+
+        def broken_active(_project_id):
+            raise TimeoutError("review store lock timed out")
+
+        original_active = services.reviews.active
+        services.reviews.active = broken_active
+
+        async def callback(_messages, _tools):
+            turns["count"] += 1
+            return AgentModelTurn(content="不应运行。")
+
+        driver = _driver(services, callback)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await asyncio.sleep(0.3)
+        held = services.sessions.get_project_session_snapshot(
+            PROJECT_ID,
+        ).last_consumed_message_seq
+        turns_while_broken = turns["count"]
+        # Restoring the store lets the next poll tick proceed normally.
+        services.reviews.active = original_active
+        await _wait_consumed(services, 1)
+        await driver.wait_until_idle(PROJECT_ID)
+        await driver.stop()
+        return held, turns_while_broken
+
+    held, turns_while_broken = asyncio.run(scenario())
+
+    assert held == 0, "the queued message must stay unconsumed while unknown"
+    assert turns_while_broken == 0, "no model turn may run while unknown"
+    assert turns["count"] >= 1, "recovery must consume the message normally"

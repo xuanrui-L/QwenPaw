@@ -92,7 +92,8 @@ class NotificationOutboxStore:
         )
 
     def _stream(
-        self, project_id: str
+        self,
+        project_id: str,
     ) -> DurableJsonlStore[NotificationOutboxRecord]:
         return DurableJsonlStore(
             self._outbox_path(project_id),
@@ -274,20 +275,17 @@ class NotificationOutboxStore:
 
         Injected records have no durable session message; the run's
         outcome decides their fate (settle -> DRAINED, failure/restart ->
-        reopen to PENDING). Records already INJECTED for the same run are
-        returned again so a retried turn renders the same digest.
+        reopen to PENDING). Only records newly claimed from PENDING are
+        returned: the run's in-memory message list already carries every
+        previously injected digest, so re-returning same-run INJECTED
+        records would duplicate the same progress on every model turn.
         """
 
         assigned_to = f"injected-{run_id}"
         with self._op_lock(project_id):
             claimed: list[NotificationOutboxRecord] = []
             for record in self._current_versions(project_id).values():
-                if (
-                    record.state == "INJECTED"
-                    and record.assigned_to == assigned_to
-                ):
-                    claimed.append(record)
-                elif record.state == "PENDING":
+                if record.state == "PENDING":
                     claimed.append(
                         self._transition(
                             record,
@@ -313,6 +311,38 @@ class NotificationOutboxStore:
                     continue
                 if assigned_to is not None and (
                     record.assigned_to != assigned_to
+                ):
+                    continue
+                self._transition(
+                    record,
+                    state="PENDING",
+                    assigned_to=None,
+                )
+                reopened += 1
+            return reopened
+
+    def reopen_assigned(
+        self,
+        project_id: str,
+        assigned_to: str,
+        *,
+        keep_request_ids: frozenset[str] = frozenset(),
+    ) -> int:
+        """Return one identity's ASSIGNED records to PENDING.
+
+        Used after a message payload conflict: only the facts listed in
+        ``keep_request_ids`` are provably inside the already-durable
+        message; everything else claimed under this identity must go back
+        to PENDING for a later delivery instead of being drained unseen.
+        """
+
+        with self._op_lock(project_id):
+            reopened = 0
+            for record in self._current_versions(project_id).values():
+                if (
+                    record.state != "ASSIGNED"
+                    or record.assigned_to != assigned_to
+                    or record.request_id in keep_request_ids
                 ):
                     continue
                 self._transition(

@@ -378,7 +378,7 @@ class CrossProcessFileLock:
         self,
         exc_type: type[BaseException] | None,
         exc_value: BaseException | None,
-        traceback: TracebackType | None,
+        exc_traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc_value, traceback
+        del exc_type, exc_value, exc_traceback
         self.release()

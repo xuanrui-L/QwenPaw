@@ -1839,6 +1839,11 @@ class FileCreatorAgentRuntime:
                 self._cancel_project_specialists(project_id, reason=reason)
                 return False
             self._cancel_project_specialists(project_id, reason=reason)
+            # A hard stop with no active mainline (idle, or only detached
+            # specialists) must still drop undelivered progress: leaving
+            # the outbox pending would re-inject the cancelled work's
+            # notifications into the next run.
+            await self.notifications.cancel_pending(project_id)
             await self._record_idle_interrupt(project_id, reason=reason)
             self.notify(project_id)
             return False
@@ -2290,7 +2295,14 @@ class FileCreatorAgentRuntime:
                 project_id,
             )
         except Exception:  # pylint: disable=broad-except
-            active_review = None
+            # Fail closed: with the Review state unknown (lock timeout,
+            # I/O error), launching a run could consume queued messages an
+            # active Review must hold. The next poll tick retries the read.
+            logger.exception(
+                "review gate read failed for %s; holding the queued message",
+                project_id,
+            )
+            return
         if active_review is not None:
             return
         run_id = f"agent-run-{uuid4().hex}"
@@ -2310,6 +2322,14 @@ class FileCreatorAgentRuntime:
                     item.source in BATCHABLE_NOTIFICATION_SOURCES
                     and item.review_boundary is None
                     and item.conversation_id == message.conversation_id
+                    # Specialist terminal notifications carry the
+                    # delegation-origin identity (repair dedup + paid
+                    # budget), which _delegation_origin resolves from the
+                    # run's HEAD message. Folding one into another head's
+                    # batch would strip that identity, so it must start
+                    # its own run.
+                    and item.metadata.get("notificationKind")
+                    != RuntimeEventKind.SUBAGENT_TERMINAL.value
                 ):
                     batch.append(item)
                 else:
@@ -4549,11 +4569,20 @@ class FileCreatorAgentRuntime:
         self,
         *,
         project_id: str,
-        specialist_run_id: str,
-        role: SpecialistRole,
+        session_id: str,
+        parent_run_id: str,
+        parent_action_id: str,
+        request: CreatorMessageRecord,
+        tools: AgentProjectTools,
         delegated: DelegateToAgentInput,
+        role: SpecialistRole,
+        snapshot: Any,
+        prompt: str,
+        specialist_run_id: str,
+        round_id: str,
+        common: Mapping[str, Any],
+        record_metadata: dict[str, Any],
         handle: _SpecialistHandle,
-        **inner_kwargs: Any,
     ) -> None:
         """Drive one detached specialist run and report its terminal state.
 
@@ -4566,11 +4595,20 @@ class FileCreatorAgentRuntime:
         try:
             result = await self._drive_subagent_inner(
                 project_id=project_id,
-                specialist_run_id=specialist_run_id,
-                role=role,
+                session_id=session_id,
+                parent_run_id=parent_run_id,
+                parent_action_id=parent_action_id,
+                request=request,
+                tools=tools,
                 delegated=delegated,
+                role=role,
+                snapshot=snapshot,
+                prompt=prompt,
+                specialist_run_id=specialist_run_id,
+                round_id=round_id,
+                common=common,
+                record_metadata=record_metadata,
                 handle=handle,
-                **inner_kwargs,
             )
         except (asyncio.CancelledError, StaleAgentRun):
             # Revoked by interrupt/stop/project-delete: a human took over,
@@ -4627,12 +4665,12 @@ class FileCreatorAgentRuntime:
             lines.append(f"Project generation：{generation}")
         if status == "WAITING_REVIEW":
             lines.append(
-                "该委派的产物正在等待审阅，这是正常暂停而不是制作失败："
-                "不要重试同一目标或启动其下游，可以继续处理不依赖该产物"
-                "的目标。"
+                "该委派的产物正在等待审阅，这是正常暂停而不是制作失败：不要重试同一目标或启动其下游，可以继续处理不依赖该产物的目标。",
             )
         else:
-            lines.append("请重新读取 Project 核对该委派的实际产出，再决定下一步；" "不要重复已完成的工作。")
+            lines.append(
+                "请重新读取 Project 核对该委派的实际产出，再决定下一步；不要重复已完成的工作。",
+            )
         payload: dict[str, Any] = {
             "specialistRunId": specialist_run_id,
             "role": role_name,

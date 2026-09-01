@@ -1095,7 +1095,8 @@ def test_transient_hard_cap_emits_steer_once(tmp_path, monkeypatch):
 def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     state = {"index": 0}
 
-    def fake_derive(_project, tasks=()):  # noqa: ARG001
+    def fake_derive(_project, tasks=()):
+        del tasks
         index = min(state["index"], len(graphs) - 1)
         state["index"] += 1
         return graphs[index]

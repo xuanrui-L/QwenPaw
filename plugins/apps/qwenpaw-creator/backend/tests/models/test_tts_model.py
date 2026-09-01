@@ -241,6 +241,25 @@ def test_connection_closed_surfaces_as_provider_error(monkeypatch) -> None:
         _run_real_websocket_synthesis(monkeypatch, _Synth)
 
 
+def test_partial_audio_before_disconnect_is_rejected(monkeypatch) -> None:
+    """Chunks that arrived before an abnormal close are a truncated
+    narration, not a deliverable: without on_complete they must raise."""
+
+    from utils.exceptions import ModelError
+
+    class _Synth(_FakeSynthesizerBase):
+        def streaming_call(self, text) -> None:
+            self.callback.on_data(b"PARTIAL-MP3")
+
+        def streaming_complete(self) -> None:
+            raise AttributeError(
+                "'NoneType' object has no attribute 'close_frame'",
+            )
+
+    with pytest.raises(ModelError, match="closed the websocket abnormally"):
+        _run_real_websocket_synthesis(monkeypatch, _Synth)
+
+
 def test_close_race_after_complete_still_returns_audio(monkeypatch) -> None:
     """A close-time race after the audio fully streamed must not discard
     the synthesis."""

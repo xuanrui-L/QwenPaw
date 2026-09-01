@@ -153,10 +153,7 @@ def render_resume_digest(
     return "\n".join(lines)
 
 
-_IDLE_FLUSH_HEADER = (
-    "自动执行此前因连续自主消息达到上限而暂停主动推进；"
-    "会话已空闲一段时间，按空闲兜底策略补投递以下挂起通知。"
-)
+_IDLE_FLUSH_HEADER = "自动执行此前因连续自主消息达到上限而暂停主动推进；会话已空闲一段时间，按空闲兜底策略补投递以下挂起通知。"
 
 
 def render_idle_flush_message(
@@ -260,7 +257,8 @@ class RuntimeNotificationBus:
                 request_id,
             )
 
-    async def steer(
+    # Guard-clause delivery pipeline: early returns are the clearest shape.
+    async def steer(  # pylint: disable=too-many-return-statements
         self,
         project_id: str,
         *,
@@ -271,16 +269,35 @@ class RuntimeNotificationBus:
     ) -> bool:
         """Deliver one next-step event as a durable user message + wake.
 
-        Returns ``True`` when a message is durably present for this
-        ``request_id`` (freshly appended or an idempotent replay).
-        Assign-then-append: pending quiet records are claimed under the
-        notification lock first, the message is rendered from the claimed
-        set (byte-stable per ``client_message_id``), appended outside the
-        lock, then the claimed records settle to DRAINED.
+        Durable-intent-first: the event is staged in the outbox before any
+        delivery attempt, so a transient Session write failure can never
+        lose it — the staged record rides a later digest, turn-boundary
+        injection or idle flush instead.  Assign-then-append: staged
+        records are claimed under the notification lock, the message is
+        rendered from the claimed set, appended outside the lock, then
+        the claimed records settle to DRAINED.  Returns ``True`` when a
+        message is durably present for this ``request_id``.
         """
 
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:24]
         client_message_id = f"notif-{kind.value}-{digest}"
+        try:
+            await asyncio.to_thread(
+                self.store.append_pending,
+                project_id,
+                kind=kind.value,
+                level=EVENT_LEVELS[kind].value,
+                request_id=request_id,
+                text=text,
+                payload=dict(payload or {}),
+            )
+        except RecordNotFoundError:
+            logger.info(
+                "steer dropped, project gone: %s %s",
+                project_id,
+                request_id,
+            )
+            return False
         try:
             session = await asyncio.to_thread(
                 self.services.sessions.get_project_session_snapshot,
@@ -288,7 +305,7 @@ class RuntimeNotificationBus:
             )
         except RuntimeSessionNotFound:
             logger.info(
-                "steer skipped, project %s has no runtime session",
+                "steer staged only, project %s has no runtime session",
                 project_id,
             )
             return False
@@ -299,7 +316,7 @@ class RuntimeNotificationBus:
         )
         if conversation_id is None:
             logger.warning(
-                "steer skipped, project %s has no conversation",
+                "steer staged only, project %s has no conversation",
                 project_id,
             )
             return False
@@ -308,19 +325,14 @@ class RuntimeNotificationBus:
             project_id,
             session,
         ):
+            # The event is already staged in the outbox; parking it there
+            # is the downgrade.
             logger.warning(
                 "steer downgraded to outbox for %s (%d consecutive "
                 "runtime-authored messages without a human): %s",
                 project_id,
                 NOTIFY_AUTONOMOUS_HARD_CAP,
                 request_id,
-            )
-            await self.inject(
-                project_id,
-                kind=kind,
-                request_id=request_id,
-                text=text,
-                payload=payload,
             )
             return False
         try:
@@ -331,7 +343,10 @@ class RuntimeNotificationBus:
             )
         except RecordNotFoundError:
             return False
-        message_text = render_steer_message(text, claimed)
+        quiet_records = [
+            record for record in claimed if record.request_id != request_id
+        ]
+        message_text = render_steer_message(text, quiet_records)
         metadata = {
             "notificationKind": kind.value,
             "requestId": request_id,
@@ -351,18 +366,26 @@ class RuntimeNotificationBus:
                 metadata=metadata,
             )
         except MessagePayloadConflict:
-            # The same request_id already landed with different folded
-            # progress (an end-of-run digest claimed the records between
-            # our crash and this replay). The fact is durably delivered.
+            # A message for this identity already exists, rendered from a
+            # different claimed set. Only the anchor fact is provably
+            # inside it; late-claimed records go back to PENDING for a
+            # later delivery instead of being drained unseen.
             logger.info(
                 "steer replay converged on existing message: %s %s",
                 project_id,
                 client_message_id,
             )
+            await asyncio.to_thread(
+                self.store.reopen_assigned,
+                project_id,
+                client_message_id,
+                keep_request_ids=frozenset({request_id}),
+            )
         except Exception:  # pylint: disable=broad-except
             # Delivery failure must never break the producer (scheduler
-            # dispatch, specialist finalizer). Claimed records stay
-            # ASSIGNED and are rescued by the next end-of-run digest.
+            # dispatch, specialist finalizer). Claimed records — including
+            # the staged event itself — stay ASSIGNED and are rescued by
+            # the next end-of-run digest.
             logger.exception(
                 "steer delivery failed for %s %s",
                 project_id,
@@ -402,7 +425,10 @@ class RuntimeNotificationBus:
         return render_resume_digest(claimed)
 
     async def settle_resume(
-        self, project_id: str, *, assigned_to: str
+        self,
+        project_id: str,
+        *,
+        assigned_to: str,
     ) -> None:
         try:
             await asyncio.to_thread(
@@ -490,7 +516,11 @@ class RuntimeNotificationBus:
             return False
         return self._flush_anchor(outstanding) is not None
 
-    async def flush_pending_on_idle(self, project_id: str) -> bool:
+    # Guard-clause delivery pipeline: early returns are the clearest shape.
+    async def flush_pending_on_idle(  # pylint: disable=too-many-return-statements
+        self,
+        project_id: str,
+    ) -> bool:
         """Deliver hard-cap parked events on an idle session (bounded).
 
         The caller (dispatcher reconcile) guarantees the session is idle:
@@ -521,7 +551,10 @@ class RuntimeNotificationBus:
             )
         except RuntimeSessionNotFound:
             return False
-        if self._idle_flush_blocked.get(project_id) == session.last_message_seq:
+        if (
+            self._idle_flush_blocked.get(project_id)
+            == session.last_message_seq
+        ):
             return False
         self._idle_flush_blocked.pop(project_id, None)
         conversation_id = await asyncio.to_thread(
@@ -575,10 +608,19 @@ class RuntimeNotificationBus:
                 metadata=metadata,
             )
         except MessagePayloadConflict:
+            # A flush message for this anchor already exists, rendered
+            # from a different claimed set. Only the anchor is provably
+            # inside it; the rest goes back to PENDING.
             logger.info(
                 "idle flush replay converged on existing message: %s %s",
                 project_id,
                 client_message_id,
+            )
+            await asyncio.to_thread(
+                self.store.reopen_assigned,
+                project_id,
+                client_message_id,
+                keep_request_ids=frozenset({anchor.request_id}),
             )
         except Exception:  # pylint: disable=broad-except
             logger.exception(
@@ -654,9 +696,7 @@ class RuntimeNotificationBus:
         """
 
         candidates = [
-            record
-            for record in outstanding
-            if record.level == "next_step"
+            record for record in outstanding if record.level == "next_step"
         ]
         if not candidates:
             return None

@@ -217,6 +217,7 @@ def _synthesize_over_websocket(
     chunks: list[bytes] = []
     failure: list[str] = []
     finished = threading.Event()
+    completed = threading.Event()
 
     class _Collector(ResultCallback):
         def on_open(self) -> None:
@@ -226,6 +227,7 @@ def _synthesize_over_websocket(
             chunks.append(data)
 
         def on_complete(self) -> None:
+            completed.set()
             finished.set()
 
         def on_error(self, message: Any) -> None:
@@ -260,8 +262,15 @@ def _synthesize_over_websocket(
         finished.set()
     finished.wait(timeout=config.get_tts_timeout_seconds())
     audio = b"".join(chunks)
-    if not audio:
-        detail = failure[0] if failure else "no audio was streamed"
+    # Audio counts only after on_complete: chunks that arrived before an
+    # abnormal close are a truncated narration, not a deliverable.
+    if not completed.is_set() or not audio:
+        if failure:
+            detail = failure[0]
+        elif audio:
+            detail = "the stream ended before the synthesis completed"
+        else:
+            detail = "no audio was streamed"
         raise ModelError(
             f"TTS websocket synthesis failed: {detail}",
             model_name=model,

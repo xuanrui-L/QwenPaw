@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=protected-access,use-implicit-booleaness-not-comparison
 """Runtime notification bus: steer/inject delivery and idempotency."""
 from __future__ import annotations
 
@@ -110,7 +111,7 @@ def test_steer_appends_one_user_message_and_wakes(
 
 def test_steer_is_idempotent_by_request_id(tmp_path, monkeypatch) -> None:
     services = _services(tmp_path, monkeypatch)
-    bus, wakes = _bus(services)
+    bus, _wakes = _bus(services)
 
     async def deliver_twice() -> None:
         for _ in range(2):
@@ -162,17 +163,7 @@ def test_inject_dedupes_against_full_history(tmp_path, monkeypatch) -> None:
 
     store = bus.store
     assert store.pending_records(PROJECT_ID) == []
-    assert (
-        len(
-            [
-                record
-                for record in store._current_versions(  # noqa: SLF001
-                    PROJECT_ID,
-                ).values()
-            ],
-        )
-        == 1
-    )
+    assert len(store._current_versions(PROJECT_ID)) == 1  # noqa: SLF001
 
 
 def test_steer_folds_pending_quiet_prefix(tmp_path, monkeypatch) -> None:
@@ -217,7 +208,7 @@ def test_steer_replay_after_partial_drain_converges(
     bus, _wakes = _bus(services)
     store = bus.store
 
-    async def scenario() -> None:
+    async def scenario() -> str:
         await bus.steer(
             PROJECT_ID,
             kind=RuntimeEventKind.GRAPH_ALL_DONE,
@@ -237,17 +228,24 @@ def test_steer_replay_after_partial_drain_converges(
             + hashlib.sha256(b"graphdone-g3").hexdigest()[:24]
         )
         await asyncio.to_thread(store.assign, PROJECT_ID, stale_id)
-        # Replay: rendered text now differs from the durable message; the
-        # payload conflict must converge instead of raising, and the
-        # claimed record must settle.
+        # Replay: rendered text now differs from the durable message. The
+        # payload conflict must converge without data loss — the anchor is
+        # provably inside the durable message, but the late-claimed quiet
+        # record was never delivered and must return to PENDING.
         await bus.steer(
             PROJECT_ID,
             kind=RuntimeEventKind.GRAPH_ALL_DONE,
             request_id="graphdone-g3",
             text="工作图全部节点已完成。",
         )
+        digest = await bus.drain_into_resume(
+            PROJECT_ID,
+            assigned_to="digest-after-replay",
+        )
+        await bus.settle_resume(PROJECT_ID, assigned_to="digest-after-replay")
+        return digest
 
-    asyncio.run(scenario())
+    digest = asyncio.run(scenario())
 
     notifications = [
         item
@@ -255,7 +253,9 @@ def test_steer_replay_after_partial_drain_converges(
         if item.source == NOTIFICATION_SOURCE
     ]
     assert len(notifications) == 1
-    assert store.pending_records(PROJECT_ID) == []
+    assert "生成完成：视频 e1" not in notifications[0].content_parts[0].text
+    # The undelivered fact must reach a durable surface via the digest.
+    assert "生成完成：视频 e1" in digest
     states = {
         record.state
         for record in store._current_versions(  # noqa: SLF001
@@ -263,6 +263,83 @@ def test_steer_replay_after_partial_drain_converges(
         ).values()
     }
     assert states == {"DRAINED"}
+
+
+def test_steer_survives_transient_append_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A transient Session write failure must not lose the NEXT_STEP event:
+    it stays durable in the outbox and a retry delivers it exactly once."""
+
+    services = _services(tmp_path, monkeypatch)
+    bus, wakes = _bus(services)
+    original_append = services.sessions.append_message
+    failures = {"remaining": 1}
+
+    def flaky_append(*args, **kwargs):
+        if failures["remaining"] > 0:
+            failures["remaining"] -= 1
+            raise OSError("transient session write failure")
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(services.sessions, "append_message", flaky_append)
+
+    delivered_first = asyncio.run(
+        bus.steer(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-transient-1",
+            text="Specialist 终态 [FAILED]：测试瞬时失败。",
+        ),
+    )
+    assert delivered_first is False
+    assert wakes.calls == []
+    staged = bus.store.undelivered_records(PROJECT_ID)
+    assert [record.request_id for record in staged] == [
+        "specialist-run-transient-1",
+    ], "the event must stay durable in the outbox after the failed append"
+
+    delivered_retry = asyncio.run(
+        bus.steer(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SUBAGENT_TERMINAL,
+            request_id="specialist-run-transient-1",
+            text="Specialist 终态 [FAILED]：测试瞬时失败。",
+        ),
+    )
+    assert delivered_retry is True
+    notifications = [
+        item
+        for item in _user_messages(services)
+        if item.source == NOTIFICATION_SOURCE
+    ]
+    assert len(notifications) == 1
+    assert "测试瞬时失败" in notifications[0].content_parts[0].text
+    assert bus.store.undelivered_records(PROJECT_ID) == []
+
+
+def test_mark_injected_returns_each_record_once(tmp_path, monkeypatch) -> None:
+    """Same-run re-claims must not duplicate the digest on every turn."""
+
+    services = _services(tmp_path, monkeypatch)
+    bus, _wakes = _bus(services)
+    asyncio.run(
+        bus.inject(
+            PROJECT_ID,
+            kind=RuntimeEventKind.NODE_SUCCEEDED,
+            request_id="node_succeeded-video:e7-fp1",
+            text="生成完成：视频 e7",
+        ),
+    )
+
+    first = bus.store.mark_injected(PROJECT_ID, "agent-run-turns")
+    second = bus.store.mark_injected(PROJECT_ID, "agent-run-turns")
+
+    assert [record.request_id for record in first] == [
+        "node_succeeded-video:e7-fp1",
+    ]
+    assert second == []
 
 
 def test_outbox_survives_store_reopen(tmp_path, monkeypatch) -> None:
@@ -596,7 +673,9 @@ def test_idle_flush_budget_exhausts_and_resets_on_human(
         for _ in range(3):
             assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is False
     assert (
-        sum("idle flush skipped" in record.message for record in caplog.records)
+        sum(
+            "idle flush skipped" in record.message for record in caplog.records
+        )
         == 1
     )
     assert len(bus.store.pending_records(PROJECT_ID)) == 1
