@@ -562,6 +562,7 @@ def test_idle_flush_requires_a_next_step_event(tmp_path, monkeypatch) -> None:
 def test_idle_flush_budget_exhausts_and_resets_on_human(
     tmp_path,
     monkeypatch,
+    caplog,
 ) -> None:
     services = _services(tmp_path, monkeypatch)
     bus, _wakes = _bus(services)
@@ -589,7 +590,15 @@ def test_idle_flush_budget_exhausts_and_resets_on_human(
         ),
     )
 
-    assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is False
+    with caplog.at_level("INFO", logger="creator.notifications"):
+        # The dispatcher probes every poll tick; only the first blocked
+        # attempt may scan and log — later ticks short-circuit silently.
+        for _ in range(3):
+            assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is False
+    assert (
+        sum("idle flush skipped" in record.message for record in caplog.records)
+        == 1
+    )
     assert len(bus.store.pending_records(PROJECT_ID)) == 1
 
     services.sessions.append_message(

@@ -1190,8 +1190,15 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
         : "started"
       : status;
   // When the project reached a terminal state, force "started" tools terminal too.
+  // Exception: a detached specialist legitimately outlives the mainline run,
+  // so an IDLE session keeps its live delegation card spinning (and its
+  // streaming disclosure open) while the activity is still incomplete.
+  const liveDetachedDelegation =
+    delegated && Boolean(activity) && !activity.completed;
   const resolvedStatus =
-    isProjectDone && effectiveStatus === "started"
+    isProjectDone &&
+    effectiveStatus === "started" &&
+    (isProjectFailed || !liveDetachedDelegation)
       ? isProjectFailed
         ? "failed"
         : "succeeded"
@@ -1231,6 +1238,30 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
     resolvedStatus === "waiting_review"
       ? withoutSpecialistOutcomeMarker(rawStatusMessage)
       : simplifyErrorMessage(rawStatusMessage);
+
+  // Collapsed cards must still prove a background specialist is alive:
+  // surface the newest stream tail so the feed visibly moves during long
+  // model turns while the mainline session sits idle.
+  const liveStreamTail = (() => {
+    if (!active || !delegated || !activity || activity.completed) return null;
+    const streams = Object.values(activity.messages)
+      .filter((message) => !message.completed)
+      .sort((left, right) => left.firstEventSeq - right.firstEventSeq);
+    const latest = streams[streams.length - 1];
+    if (!latest) return null;
+    const tailOf = (deltas: Record<number, string>) =>
+      Object.keys(deltas)
+        .map(Number)
+        .sort((left, right) => left - right)
+        .slice(-12)
+        .map((key) => deltas[key])
+        .join("");
+    const tail = (tailOf(latest.deltas) || tailOf(latest.thinkingDeltas))
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!tail) return null;
+    return tail.length > 72 ? `…${tail.slice(-72)}` : tail;
+  })();
 
   return (
     <div
@@ -1293,6 +1324,14 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
           </button>
         )}
       </div>
+      {liveStreamTail && !expanded && (
+        <p
+          data-subagent-live-tail
+          className="mt-0.5 truncate pl-5 text-[10px] text-[var(--color-text-tertiary)]"
+        >
+          {liveStreamTail}
+        </p>
+      )}
       {resolvedStatus === "failed" && statusMessage && (
         <div className="mt-1 rounded-md bg-[var(--color-danger-soft)] px-2 py-1.5 text-[10px] text-[var(--color-danger)]">
           {statusMessage}

@@ -192,6 +192,12 @@ class RuntimeNotificationBus:
         self.services = services
         self.store = store or NotificationOutboxStore(services.root)
         self._wake_dispatcher = wake_dispatcher
+        # Projects whose idle-flush budget is exhausted, keyed to the
+        # session's last_message_seq at exhaustion: the poll-driven
+        # dispatcher probes every tick, and without this memo each tick
+        # would repeat the budget tail scan and its log line. Any new
+        # session message moves the seq and re-evaluates once.
+        self._idle_flush_blocked: dict[str, int] = {}
 
     # -- public API ------------------------------------------------------
 
@@ -515,6 +521,9 @@ class RuntimeNotificationBus:
             )
         except RuntimeSessionNotFound:
             return False
+        if self._idle_flush_blocked.get(project_id) == session.last_message_seq:
+            return False
+        self._idle_flush_blocked.pop(project_id, None)
         conversation_id = await asyncio.to_thread(
             self._default_conversation_id,
             project_id,
@@ -527,6 +536,7 @@ class RuntimeNotificationBus:
             project_id,
             session,
         ):
+            self._idle_flush_blocked[project_id] = session.last_message_seq
             logger.info(
                 "idle flush skipped for %s: budget of %d used since the "
                 "last human message; parked notifications wait for a human",
