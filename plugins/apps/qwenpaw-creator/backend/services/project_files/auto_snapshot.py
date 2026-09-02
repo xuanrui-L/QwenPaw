@@ -130,7 +130,8 @@ def auto_snapshot_timelines(
 
     Mutates *candidate_data* in place. For each timeline whose elements
     changed between *base_data* and *candidate_data*, a frozen copy of the
-    **base** timeline is inserted into the candidate with a versioned name.
+    **candidate** (post-change) timeline is inserted into the candidate with
+    a versioned name, preserving the latest modifications in the snapshot.
 
     Only fires when elements are added, removed, or modified inside
     ``elements_by_id``.  Timeline-level property changes (name, description,
@@ -140,8 +141,6 @@ def auto_snapshot_timelines(
     if not changed_ids:
         return
 
-    base_timelines = base_data.get("timelines", {})
-    base_items = base_timelines.get("items", {})
     candidate_timelines = candidate_data.setdefault(
         "timelines",
         {"items": {}, "order": []},
@@ -149,26 +148,39 @@ def auto_snapshot_timelines(
     candidate_items = candidate_timelines.setdefault("items", {})
     candidate_order = candidate_timelines.setdefault("order", [])
 
+    base_timelines = base_data.get("timelines", {})
+    base_items = base_timelines.get("items", {})
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
     for timeline_id in sorted(changed_ids):
-        base_timeline = base_items.get(timeline_id)
-        if base_timeline is None:
+        candidate_timeline = candidate_items.get(timeline_id)
+        if candidate_timeline is None:
             continue
-        elements = base_timeline.get("elements_by_id", {})
+        elements = candidate_timeline.get("elements_by_id", {})
         if not elements:
             continue
 
         snapshot_id = _next_snapshot_id(candidate_items, timeline_id)
-        original_name = base_timeline.get("name") or timeline_id
+        original_name = candidate_timeline.get("name") or timeline_id
         snapshot_name = f"快照 · {original_name} · {now}"
 
-        snapshot_timeline = copy.deepcopy(base_timeline)
+        snapshot_timeline = copy.deepcopy(candidate_timeline)
         snapshot_timeline["timeline_id"] = snapshot_id
         snapshot_timeline["name"] = snapshot_name
-        snapshot_timeline["description"] = "自动快照：Agent 修改前的时间轴副本"
+        snapshot_timeline["description"] = "自动快照：Agent 修改后的时间轴副本"
         _remap_snapshot_elements(snapshot_timeline, snapshot_id)
 
         candidate_items[snapshot_id] = snapshot_timeline
         if snapshot_id not in candidate_order:
             candidate_order.append(snapshot_id)
+
+        base_timeline = base_items.get(timeline_id)
+        if base_timeline is not None:
+            candidate_timeline["elements_by_id"] = copy.deepcopy(
+                base_timeline.get("elements_by_id", {}),
+            )
+            if "edit_plan" in base_timeline:
+                candidate_timeline["edit_plan"] = copy.deepcopy(
+                    base_timeline["edit_plan"],
+                )

@@ -158,10 +158,10 @@ class TestAutoSnapshotTimelines:
         assert "主时间轴" in snapshot["name"]
         remapped = f"{sid}:{ELEM}"
         assert remapped in snapshot["elements_by_id"]
-        assert snapshot["elements_by_id"][remapped]["label"] == "Shot 1"
+        assert snapshot["elements_by_id"][remapped]["label"] == "Modified"
         assert sid in candidate["timelines"]["order"]
 
-    def test_snapshot_preserves_base_not_candidate(self):
+    def test_snapshot_preserves_candidate_not_base(self):
         base = _minimal_project(elements={ELEM: _element(ELEM)})
         candidate = copy.deepcopy(base)
         _elems(candidate)[ELEM]["label"] = "Modified"
@@ -171,16 +171,20 @@ class TestAutoSnapshotTimelines:
         sid = "snapshot:timeline:main:1"
         snapshot = candidate["timelines"]["items"][sid]
         remapped = f"{sid}:{ELEM}"
-        assert snapshot["elements_by_id"][remapped]["label"] == "Shot 1"
+        assert snapshot["elements_by_id"][remapped]["label"] == "Modified"
 
-    def test_candidate_retains_modifications(self):
+    def test_original_timeline_reverted_to_base(self):
         base = _minimal_project(elements={ELEM: _element(ELEM)})
         candidate = copy.deepcopy(base)
         _elems(candidate)[ELEM]["label"] = "Modified"
 
         auto_snapshot_timelines(base, candidate)
 
-        assert _elems(candidate)[ELEM]["label"] == "Modified"
+        assert _elems(candidate)[ELEM]["label"] == "Shot 1"
+        sid = "snapshot:timeline:main:1"
+        snapshot = candidate["timelines"]["items"][sid]
+        remapped = f"{sid}:{ELEM}"
+        assert snapshot["elements_by_id"][remapped]["label"] == "Modified"
 
     def test_multiple_snapshots_increment(self):
         base = _minimal_project(elements={ELEM: _element(ELEM)})

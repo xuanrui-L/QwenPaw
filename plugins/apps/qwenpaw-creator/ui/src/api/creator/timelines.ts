@@ -66,10 +66,12 @@ export function deleteTimelineOperations(
     {
       op: "remove",
       path: `/timelines/items/${timelineId}`,
+      before: project.timelines.items[timelineId],
     },
     {
       op: "remove",
       path: `/timelines/order/${idx}`,
+      before: project.timelines.order[idx],
     },
   ];
 }
