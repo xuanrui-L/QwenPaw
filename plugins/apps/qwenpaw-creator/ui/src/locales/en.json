@@ -146,7 +146,20 @@
     "heroTitleEditor": "Editor",
     "videoTemplate": "Video Template",
     "videoTemplateNone": "No Template",
-    "videoTemplateHint": "Choose a preset to get started quickly"
+    "videoTemplateHint": "Choose a preset to get started quickly",
+    "videoTemplateUserSection": "My Templates",
+    "saveAsTemplate": "Save as Template",
+    "saveAsTemplateTitle": "Save Current Style as Template",
+    "saveAsTemplateName": "Template Name",
+    "saveAsTemplateNamePlaceholder": "Enter template name",
+    "saveAsTemplateDesc": "Description (optional)",
+    "saveAsTemplateDescPlaceholder": "Brief description of this template",
+    "saveAsTemplateIcon": "Icon Emoji",
+    "saveAsTemplateSuccess": "Template saved successfully",
+    "saveAsTemplateFailed": "Failed to save template",
+    "deleteTemplateConfirm": "Delete template \"{{name}}\"?",
+    "deleteTemplateSuccess": "Template deleted",
+    "deleteTemplateFailed": "Failed to delete template"
   },
   "nav": {
     "videoPlan": "Video Plan",

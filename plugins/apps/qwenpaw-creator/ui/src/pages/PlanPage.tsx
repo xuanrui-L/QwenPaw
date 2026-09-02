@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Dropdown, message, Modal, Tooltip } from "antd";
 import {
+  Bookmark,
   ChevronDown,
   Download,
   FileOutput,
@@ -43,6 +44,7 @@ import {
   saveExportFile,
   type ExportProgressState,
 } from "@/components/creator/ProjectImportExport";
+import SaveAsTemplateDialog from "@/components/creator/SaveAsTemplateDialog";
 import type { TimelineElementDocument } from "@/contracts/creator";
 import { selectVisualVariantCoverage } from "@/selectors/visualVariantCoverage";
 import { useTranslation } from "react-i18next";
@@ -109,6 +111,7 @@ export default function PlanPage() {
     string | null
   >(null);
   const [composeFailed, setComposeFailed] = useState(false);
+  const [saveAsTemplateOpen, setSaveAsTemplateOpen] = useState(false);
   const composeAttemptedGeneration = useRef<number | null>(null);
   const hadPendingReviews = useRef(false);
   const handledComposeTask = useRef<string | null>(null);
@@ -783,6 +786,12 @@ export default function PlanPage() {
                   disabled: exporting,
                   onClick: () => void exportProject(),
                 },
+                {
+                  key: "save-template",
+                  label: t("home.saveAsTemplate"),
+                  icon: <Bookmark className="h-3.5 w-3.5" />,
+                  onClick: () => setSaveAsTemplateOpen(true),
+                },
               ],
             }}
           >
@@ -841,6 +850,11 @@ export default function PlanPage() {
               </span>
             </button>
           </Dropdown>
+          <SaveAsTemplateDialog
+            open={saveAsTemplateOpen}
+            onClose={() => setSaveAsTemplateOpen(false)}
+            projectId={id}
+          />
         </div>
       </header>
 

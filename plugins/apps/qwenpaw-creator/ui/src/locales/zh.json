@@ -146,7 +146,20 @@
     "heroTitleEditor": "剪辑",
     "videoTemplate": "视频模板",
     "videoTemplateNone": "不使用模板",
-    "videoTemplateHint": "选择预设模板快速开始"
+    "videoTemplateHint": "选择预设模板快速开始",
+    "videoTemplateUserSection": "我的模板",
+    "saveAsTemplate": "保存为模板",
+    "saveAsTemplateTitle": "将当前风格保存为模板",
+    "saveAsTemplateName": "模板名称",
+    "saveAsTemplateNamePlaceholder": "输入模板名称",
+    "saveAsTemplateDesc": "描述（可选）",
+    "saveAsTemplateDescPlaceholder": "简要描述此模板",
+    "saveAsTemplateIcon": "图标表情",
+    "saveAsTemplateSuccess": "模板保存成功",
+    "saveAsTemplateFailed": "保存模板失败",
+    "deleteTemplateConfirm": "删除模板「{{name}}」？",
+    "deleteTemplateSuccess": "模板已删除",
+    "deleteTemplateFailed": "删除模板失败"
   },
   "nav": {
     "videoPlan": "视频方案",

@@ -382,8 +382,46 @@ async def create_project(
 
         template = get_video_template(request.template_id)
         if template is None:
-            raise ValidationError(
-                f"未知的视频模板: {request.template_id}",
+            from services.media_files.user_templates import (
+                load_user_template,
+            )
+            from services.media_files.video_templates import (
+                VideoTemplate,
+                VideoTemplateDesignFloor,
+            )
+
+            user_tpl = load_user_template(request.template_id)
+            if user_tpl is None:
+                raise ValidationError(
+                    f"未知的视频模板: {request.template_id}",
+                )
+            template = VideoTemplate(
+                template_id=user_tpl.template_id,
+                name=user_tpl.name,
+                description=user_tpl.description,
+                content_type=user_tpl.content_type,
+                scenario=user_tpl.scenario,
+                opening_caption_blueprint=(user_tpl.opening_caption_blueprint),
+                closing_caption_blueprint=(user_tpl.closing_caption_blueprint),
+                default_transition_kind=(user_tpl.default_transition_kind),
+                transition_blend_seconds=(user_tpl.transition_blend_seconds),
+                caption_blueprint_order=tuple(
+                    user_tpl.caption_blueprint_order,
+                ),
+                color_grade=user_tpl.color_grade,
+                energy=user_tpl.energy,
+                density=user_tpl.density,
+                decoration=user_tpl.decoration,
+                design_floor=VideoTemplateDesignFloor(
+                    opening=user_tpl.design_floor_opening,
+                    transitions=user_tpl.design_floor_transitions,
+                    body=user_tpl.design_floor_body,
+                    ending=user_tpl.design_floor_ending,
+                ),
+                decoration_catalog=(),
+                frame_blueprint="",
+                preview_description=user_tpl.preview_description,
+                icon_emoji=user_tpl.icon_emoji,
             )
         project = apply_video_template_to_project(project, template)
     initial_response = ProjectCreateResponse(
