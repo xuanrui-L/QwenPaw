@@ -593,7 +593,9 @@ function GraphCanvas({
             return (
               <path
                 key={edge.edge_id}
-                d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`}
+                d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${
+                  x2 - dx
+                } ${y2}, ${x2} ${y2}`}
                 fill="none"
                 stroke="var(--color-border-strong)"
                 strokeWidth={1.5}
@@ -655,7 +657,9 @@ function GraphCanvas({
                     : t("blueprint.episodeN", { n: summary.index + 1 })}
                 </span>
                 <span
-                  className={`rounded px-1.5 text-[9px] font-semibold leading-[16px] ${TONE_CHIP[status.tone]}`}
+                  className={`rounded px-1.5 text-[9px] font-semibold leading-[16px] ${
+                    TONE_CHIP[status.tone]
+                  }`}
                 >
                   {t(`blueprint.episodeStatus.${status.key}`)}
                 </span>

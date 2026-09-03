@@ -1772,22 +1772,22 @@ def _make_branching(project: Project) -> None:
             label="选择B · 保持沉默",
         ),
     ]
-    project.timelines.items["timeline:main"].elements_by_id["el:choice"] = (
-        TimelineElement(
-            element_id="el:choice",
-            label="观众抉择",
-            span=TimelineSpan(start_tick=88_000, duration_tick=4_000),
-            creation=InteractionCreation(
-                type="interaction",
-                question="是否当众揭发沈修？",
-                options=[
-                    InteractionOption(edge_ref="edge:a"),
-                    InteractionOption(edge_ref="edge:b"),
-                ],
-                countdown_seconds=10,
-                default_edge_ref="edge:a",
-            ),
-        )
+    project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ] = TimelineElement(
+        element_id="el:choice",
+        label="观众抉择",
+        span=TimelineSpan(start_tick=88_000, duration_tick=4_000),
+        creation=InteractionCreation(
+            type="interaction",
+            question="是否当众揭发沈修？",
+            options=[
+                InteractionOption(edge_ref="edge:a"),
+                InteractionOption(edge_ref="edge:b"),
+            ],
+            countdown_seconds=10,
+            default_edge_ref="edge:a",
+        ),
     )
 
 
@@ -1800,7 +1800,7 @@ def _draft_choice_motion(project: Project) -> None:
     element.creation.motion = MotionGraphic(
         format="html_css",
         html=(
-            '<!DOCTYPE html><html><body>'
+            "<!DOCTYPE html><html><body>"
             '<button data-edge-ref="edge:a">A</button>'
             '<button data-edge-ref="edge:b">B</button>'
             "</body></html>"
@@ -1859,9 +1859,7 @@ def test_interaction_node_done_when_motion_is_drafted() -> None:
     _draft_choice_motion(project)
 
     graph = derive_work_graph(project)
-    assert (
-        graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
-    )
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
 
 
 def test_interaction_node_reopens_when_options_change_after_draft() -> None:
@@ -1895,9 +1893,7 @@ def test_interaction_node_reopens_when_options_change_after_draft() -> None:
         f"抉择动效\n{FINGERPRINT_MARKER}{fingerprint}"
     )
     graph = derive_work_graph(project)
-    assert (
-        graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
-    )
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
 
     project.narrative_edges.append(
         NarrativeEdge(
@@ -1909,9 +1905,7 @@ def test_interaction_node_reopens_when_options_change_after_draft() -> None:
     )
     element.creation.options.append(InteractionOption(edge_ref="edge:c"))
     graph = derive_work_graph(project)
-    assert (
-        graph.by_id["interaction:el:choice"].status is WorkNodeStatus.READY
-    )
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.READY
 
 
 def test_running_interaction_task_projects_running_status() -> None:

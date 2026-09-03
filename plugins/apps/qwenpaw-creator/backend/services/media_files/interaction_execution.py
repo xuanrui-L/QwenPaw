@@ -13,7 +13,6 @@ edges 指纹嵌入 design_notes），同输入重复派发直接复放。
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -23,6 +22,7 @@ from domain.errors import ValidationError
 from models import text_model
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
+    narrative_timeline_ids,
     InteractionCreation,
     MotionGraphic,
     NarrativeEdge,
@@ -30,12 +30,13 @@ from services.project_files.models import (
     TimelineElement,
 )
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
+from utils.exceptions import ModelError
+from utils.logger import setup_logger
+
 from .interaction_fingerprint import (
     FINGERPRINT_MARKER as _FINGERPRINT_MARKER,
     interaction_request_fingerprint as _request_fingerprint,
 )
-from utils.exceptions import ModelError
-from utils.logger import setup_logger
 
 logger = setup_logger("media_files.interaction")
 
@@ -54,7 +55,7 @@ _INTERACTION_SYSTEM_PROMPT = (
     "（以 <!DOCTYPE html> 开头），作为观众抉择点的可点击动效层。硬性要求：\n"
     "- 全部样式与动画写在内联 <style> 中，只用 CSS 动画（@keyframes）；\n"
     "- 禁止出现 <script>，禁止引用任何外部资源（外链、外部字体、外部图片）；\n"
-    "- 每个选项渲染为一个可点击元素，且必须带 data-edge-ref=\"<边id>\" 属性，"
+    '- 每个选项渲染为一个可点击元素，且必须带 data-edge-ref="<边id>" 属性，'
     "属性值逐字使用给定的边 id，每个选项恰好一个，不得多不得少；\n"
     "- 蓝图风格约束：深色影视氛围、竖屏 9:16 布局、问题文案醒目居中，"
     "选项按钮沿画面下部排布；若有倒计时则在画面角落预留倒计时视觉位；\n"
@@ -93,7 +94,7 @@ def _locate_interaction(
     project: Project,
     element_id: str,
 ) -> tuple[str, TimelineElement]:
-    for timeline_id in project.timelines.order:
+    for timeline_id in narrative_timeline_ids(project):
         timeline = project.timelines.items[timeline_id]
         element = timeline.elements_by_id.get(element_id)
         if element is None:
@@ -141,8 +142,7 @@ def _build_interaction_prompt(
         f"项目：{project.name}（{project.description or '无描述'}）",
         f"源集（抉择点所在叙事节点）：{timeline.title or timeline_id}",
         f"抉择问题：{creation.question}",
-        "选项（每个选项一个可点击元素，data-edge-ref 逐字用边id）：\n"
-        + "\n".join(option_lines),
+        "选项（每个选项一个可点击元素，data-edge-ref 逐字用边id）：\n" + "\n".join(option_lines),
         f"倒计时：{countdown}",
         "请输出这份抉择动效的完整 HTML 文档。",
     ]

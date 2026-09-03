@@ -75,22 +75,22 @@ def _services(tmp_path) -> CreatorFileServices:
             label="选择B · 保持沉默",
         ),
     ]
-    project.timelines.items["timeline:main"].elements_by_id[ELEMENT_ID] = (
-        TimelineElement(
-            element_id=ELEMENT_ID,
-            label="观众抉择",
-            span=TimelineSpan(start_tick=88_000, duration_tick=4_000),
-            creation=InteractionCreation(
-                type="interaction",
-                question="是否当众揭发沈修？",
-                options=[
-                    InteractionOption(edge_ref="edge:a"),
-                    InteractionOption(edge_ref="edge:b"),
-                ],
-                countdown_seconds=10,
-                default_edge_ref="edge:a",
-            ),
-        )
+    project.timelines.items["timeline:main"].elements_by_id[
+        ELEMENT_ID
+    ] = TimelineElement(
+        element_id=ELEMENT_ID,
+        label="观众抉择",
+        span=TimelineSpan(start_tick=88_000, duration_tick=4_000),
+        creation=InteractionCreation(
+            type="interaction",
+            question="是否当众揭发沈修？",
+            options=[
+                InteractionOption(edge_ref="edge:a"),
+                InteractionOption(edge_ref="edge:b"),
+            ],
+            countdown_seconds=10,
+            default_edge_ref="edge:a",
+        ),
     )
     services.projects.create(
         Project.model_validate(project.model_dump(mode="json")),
@@ -101,7 +101,7 @@ def _services(tmp_path) -> CreatorFileServices:
 def _mock_chat(monkeypatch, replies: list[str]):
     calls: list[dict] = []
 
-    async def fake_chat_completion(prompt, *, system_prompt="", **kwargs):
+    async def fake_chat_completion(prompt, *, system_prompt="", **_kwargs):
         calls.append({"prompt": prompt, "system": system_prompt})
         return replies[min(len(calls) - 1, len(replies) - 1)]
 

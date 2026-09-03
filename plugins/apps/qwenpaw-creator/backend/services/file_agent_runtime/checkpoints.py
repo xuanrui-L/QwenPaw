@@ -25,8 +25,7 @@ CHECKPOINT_PROVIDER = "creator-checkpoint"
 
 _CHECKPOINT_SUMMARIES = {
     CHECKPOINT_STRUCTURE: (
-        "结构检查点：确认分集/分支结构（各集标题、梗概与叙事分支）之后再"
-        "起草剧本与生成媒体。通过后本项目不再重复询问。"
+        "结构检查点：确认分集/分支结构（各集标题、梗概与叙事分支）之后再" "起草剧本与生成媒体。通过后本项目不再重复询问。"
     ),
     CHECKPOINT_SCRIPT: ("剧本检查点：确认当前剧本草稿之后再进入设计与分镜。" "剧本修改后需要重新确认，媒体生成仍需单独授权。"),
     CHECKPOINT_PLAN: (

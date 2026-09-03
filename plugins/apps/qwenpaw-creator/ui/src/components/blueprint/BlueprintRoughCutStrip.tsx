@@ -139,7 +139,7 @@ function PreviewCinema({
   const wholeFilm = startId === FULL_FILM_ID && !branching;
   const initialId =
     startId === FULL_FILM_ID && branching
-      ? (project.timelines.order[0] ?? startId)
+      ? (selectLiveTimelineIds(project)[0] ?? startId)
       : startId;
   const [currentId, setCurrentId] = useState(initialId);
   const [segmentIndex, setSegmentIndex] = useState(1);
@@ -207,8 +207,7 @@ function PreviewCinema({
       setOptions(
         outgoing.map((edge) => ({
           edgeId: edge.edge_id,
-          label:
-            edge.label || edge.prompt || labelOf(edge.target_timeline_id),
+          label: edge.label || edge.prompt || labelOf(edge.target_timeline_id),
           target: edge.target_timeline_id,
         })),
       );

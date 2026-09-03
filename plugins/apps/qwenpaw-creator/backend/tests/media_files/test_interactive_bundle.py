@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Interactive bundle assembly tests (branching deliverable, plan §2.7b)."""
 
 from __future__ import annotations
@@ -195,9 +196,7 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         assert manifest["meta"]["bundle_id"] == "project-branching"
         assert manifest["meta"]["title"] == "雾山谜案"
         assert manifest["meta"]["tagline"] == "雾山深处的双重身份悬疑剧。"
-        assert manifest["meta"]["synopsis"] == (
-            "互动悬疑短剧《雾山谜案》创意简报。"
-        )
+        assert manifest["meta"]["synopsis"] == ("互动悬疑短剧《雾山谜案》创意简报。")
         assert manifest["meta"]["accent"] == "#b8ff2e"
         assert manifest["nodes"]["tl:ep3"] == {
             "title": "第3集 · 双重身份",
@@ -206,12 +205,8 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
             "is_ending": False,
         }
         assert manifest["nodes"]["tl:ep4a"]["is_ending"] is True
-        assert manifest["nodes"]["tl:ep4a"]["synopsis"] == (
-            "真相大白，正义得到伸张。"
-        )
-        assert (
-            archive.read("segments/tl_ep3.mp4") == b"video-bytes-tl:ep3"
-        )
+        assert manifest["nodes"]["tl:ep4a"]["synopsis"] == ("真相大白，正义得到伸张。")
+        assert archive.read("segments/tl_ep3.mp4") == b"video-bytes-tl:ep3"
         player = archive.read("index.html").decode()
         assert "edge_index" in player and "countdown" in player
         # Playback must start behind a user gesture: the game shell only
@@ -332,7 +327,7 @@ def test_player_themed_choice_cards_contract() -> None:
     # Choice-area CSS (countdown ring + cards) no longer hardcodes the
     # default green — it must follow the derived accent palette.
     choice_css = player[
-        player.index(".cd-ring"):player.index("gate (tap-to-start")
+        player.index(".cd-ring") : player.index("gate (tap-to-start")
     ]
     assert "rgba(184,255,46" not in choice_css
     # Face capture: offscreen <video> + <canvas>, taint-safe.
@@ -391,7 +386,7 @@ def test_linear_project_nodes_chain_in_order() -> None:
 
 
 def test_linear_project_bundles_every_ordered_timeline() -> None:
-    project, payloads = _branching_project()
+    project, _payloads = _branching_project()
     project.narrative_edges = []
     # Drop the choice element so the linear cut stays plain video.
     project.timelines.items["tl:ep3"].elements_by_id.clear()

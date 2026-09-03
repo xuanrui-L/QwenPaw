@@ -85,7 +85,8 @@ DISPATCHABLE_KINDS = frozenset(
 @dataclass(frozen=True, slots=True)
 class WorkNode:
     node_id: str
-    kind: str  # script|visual|lineup|storyboard|video|compose|interaction|bundle
+    # script|visual|lineup|storyboard|video|compose|interaction|bundle
+    kind: str
     label: str
     status: WorkNodeStatus
     deps: tuple[str, ...] = ()
@@ -1432,7 +1433,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
     # 文案还会变，先起草只会浪费再重画。
     interaction_node_ids: list[str] = []
     edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
-    for timeline_id in project.timelines.order:
+    for timeline_id in live_timeline_ids:
         timeline = project.timelines.items[timeline_id]
         script_node = script_node_by_timeline.get(timeline_id)
         for element_id, element in timeline.elements_by_id.items():

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Interactive bundle assembly for branching projects.
 
 A branching project's final deliverable is NOT a single mp4: the audience
@@ -25,6 +26,7 @@ from collections.abc import Callable
 from typing import Any
 
 from services.project_files.models import (
+    narrative_timeline_ids,
     InteractionCreation,
     InteractionPoint,
     InteractiveManifest,
@@ -81,7 +83,7 @@ def reachable_timeline_ids(project: Project) -> list[str]:
     single path and included in order.
     """
 
-    order = list(project.timelines.order)
+    order = list(narrative_timeline_ids(project))
     if not order:
         raise InteractiveBundleError("project has no timelines to bundle")
     if not project.narrative_edges:
@@ -208,7 +210,7 @@ def _node_index(
     else:
         order = [
             timeline_id
-            for timeline_id in project.timelines.order
+            for timeline_id in narrative_timeline_ids(project)
             if timeline_id in manifest.segments
         ]
         for source, target in zip(order, order[1:]):
@@ -299,7 +301,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
   animation:fogdrift 16s ease-in-out infinite alternate}
 @keyframes fogdrift{from{transform:translateX(-2.5%) scale(1)}
   to{transform:translateX(2.5%) scale(1.06)}}
-.atmos--grain{z-index:42;opacity:.5;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.14'/%3E%3C/svg%3E");
+.atmos--grain{z-index:42;opacity:.5;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.14'/%3E%3C/svg%3E");  # noqa: E501
   animation:grainjit .5s steps(3) infinite}
 @keyframes grainjit{0%{transform:translate(0,0)}
   34%{transform:translate(-14px,9px)}67%{transform:translate(9px,-13px)}
@@ -1804,7 +1806,8 @@ def assemble_interactive_bundle(
             version = project.assets.artifact_versions_by_id.get(version_id)
             if version is None:
                 raise InteractiveBundleError(
-                    f"segment version {version_id!r} is not in the asset index",
+                    f"segment version {version_id!r} "
+                    "is not in the asset index",
                 )
             bundle.writestr(
                 payload["segments"][timeline_id],

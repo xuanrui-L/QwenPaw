@@ -192,13 +192,18 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
                 },
             ),
             _op(project, "add", "/timelines/order/1", second_id),
-            _op(project, "add", "/narrative_edges/0", {
-                "edge_id": "edge:1",
-                "source_timeline_id": primary_id,
-                "target_timeline_id": second_id,
-                "label": "选择 · 进入旧宅",
-                "prompt": "是否进入旧宅？",
-            }),
+            _op(
+                project,
+                "add",
+                "/narrative_edges/0",
+                {
+                    "edge_id": "edge:1",
+                    "source_timeline_id": primary_id,
+                    "target_timeline_id": second_id,
+                    "label": "选择 · 进入旧宅",
+                    "prompt": "是否进入旧宅？",
+                },
+            ),
         ],
     )
     updated = _snapshot(client, project_id)
