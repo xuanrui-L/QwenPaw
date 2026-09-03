@@ -139,7 +139,7 @@ def _intelligence_digest(
 
 
 def _narrative_context(project: Project, timeline_id: str) -> str:
-    """本集在整体结构中的位置：前后集。"""
+    """本集在整体结构中的位置：前后集与分支边。"""
 
     lines: list[str] = []
     for index, other_id in enumerate(
@@ -152,6 +152,14 @@ def _narrative_context(project: Project, timeline_id: str) -> str:
             f"{index}. {other.title or other_id}"
             f"（{other.synopsis or '暂无梗概'}）{marker}",
         )
+    for edge in project.narrative_edges:
+        if timeline_id in (edge.source_timeline_id, edge.target_timeline_id):
+            lines.append(
+                f"分支边 {edge.edge_id}: {edge.source_timeline_id} → "
+                f"{edge.target_timeline_id}"
+                + (f" · 选项「{edge.label}」" if edge.label else "")
+                + (f" · 抉择「{edge.prompt}」" if edge.prompt else ""),
+            )
     return "\n".join(lines)
 
 

@@ -25,6 +25,7 @@ from .file_session_routes import router as file_sessions_router
 from .file_source_intelligence_routes import (
     router as file_source_intelligence_router,
 )
+from .interactive_bundle_routes import router as interactive_bundle_router
 from .model_routes import bind_creator_tool_config
 from .model_routes import router as model_router
 from .observability_routes import router as observability_router
@@ -67,6 +68,7 @@ configured_router.include_router(model_router)
 configured_router.include_router(observability_router)
 configured_router.include_router(video_templates_router)
 configured_router.include_router(voice_router)
+configured_router.include_router(interactive_bundle_router)
 router.include_router(configured_router)
 
 

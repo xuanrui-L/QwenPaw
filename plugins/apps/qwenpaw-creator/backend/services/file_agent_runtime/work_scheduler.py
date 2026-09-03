@@ -153,6 +153,7 @@ _R2V_COMMANDS = {CreatorCommandType.GENERATE_R2V_VIDEO.value}
 _S2V_COMMANDS = {CreatorCommandType.GENERATE_S2V_VIDEO.value}
 _COMPOSE_COMMANDS = {CreatorCommandType.COMPOSE_FINAL_VIDEO.value}
 _SCRIPT_COMMANDS = {CreatorCommandType.GENERATE_TIMELINE_SCRIPT.value}
+_INTERACTION_COMMANDS = {CreatorCommandType.GENERATE_INTERACTION_MOTION.value}
 
 # Publication stays non-blocking, but dependent unattended work waits for the
 # asynchronous reviewer to settle. Otherwise a short image review can replace
@@ -1706,6 +1707,8 @@ class WorkGraphScheduler:
             dispatch = _default_compose_dispatch
         elif node.command in _SCRIPT_COMMANDS:
             dispatch = _default_script_dispatch
+        elif node.command in _INTERACTION_COMMANDS:
+            dispatch = _default_interaction_dispatch
         else:
             dispatch = self._image_dispatch or _default_image_dispatch
         return await dispatch(
@@ -1779,6 +1782,33 @@ async def _default_script_dispatch(
         ):
             raise ConflictError("剧本命令目标已被其他写者修改")
     return await execute_file_script_command(
+        services,
+        project_id=project_id,
+        target_ref=target_ref,
+        arguments=arguments,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def _default_interaction_dispatch(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    command: str | None = None,
+    target_ref: str,
+    arguments: dict[str, Any],
+    idempotency_key: str,
+) -> Any:
+    """Draft one interaction element's html_css motion (text model only)."""
+
+    # pylint: disable=import-outside-toplevel
+    from services.media_files.interaction_execution import (
+        execute_file_interaction_command,
+    )
+
+    # Single-command entry point: no command kwarg to forward.
+    del command
+    return await execute_file_interaction_command(
         services,
         project_id=project_id,
         target_ref=target_ref,

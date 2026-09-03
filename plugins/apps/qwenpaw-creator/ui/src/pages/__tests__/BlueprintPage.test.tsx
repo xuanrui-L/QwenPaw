@@ -137,6 +137,50 @@ describe("BlueprintPage narrative shapes", () => {
     );
   });
 
+  it("hosts the pre-production entries and the download/export home", () => {
+    seedProject(singleProject());
+    renderPage();
+
+    // Header: page title left (no 返回 on the blueprint itself), prep entries
+    // and the download / export dropdown right.
+    expect(
+      screen.queryByRole("button", { name: "返回" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("剧集蓝图")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /调研与素材/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /视觉开发/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "下载 / 导出" }),
+    ).toBeInTheDocument();
+    // Footer is the production task status bar.
+    expect(screen.getByText("暂无进行中的生产任务")).toBeInTheDocument();
+  });
+
+  it("branching projects keep the structure graph and the bundle export entry", () => {
+    const project = cloneProject();
+    project.narrative_edges = [
+      {
+        edge_id: "edge:a",
+        source_timeline_id: "timeline:main",
+        target_timeline_id: "timeline:ep2",
+        label: "选择A · 星夜归途",
+        prompt: "此刻，你决定——",
+      },
+    ];
+    seedProject(project);
+    const { container } = renderPage();
+
+    expect(
+      container.querySelector('[data-blueprint-shape="branching"]'),
+    ).toBeInTheDocument();
+    expect(container.querySelector("[data-export-bundle]")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "下载 / 导出" }),
+    ).toBeInTheDocument();
+  });
+
   /**
    * The video_edit pipeline stamps none of the generation artifacts the
    * board checks: shots are real clips referenced via render_source
