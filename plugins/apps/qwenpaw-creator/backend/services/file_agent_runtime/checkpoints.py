@@ -27,8 +27,8 @@ from domain.enums import SpecialistRole
 CHECKPOINT_PLAN = "plan"
 CHECKPOINT_DESIGN = "design"
 CHECKPOINT_DIRECTION = "direction"
-# Blueprint ladder (方案 3.1)：多集项目在生成开始前先确认叙事结构
-# （timelines），再逐节点审阅剧本 artifact。
+# Blueprint ladder (方案 3.1)：多集/分支项目在生成开始前先确认叙事结构
+# （timelines + narrative_edges），再逐节点审阅剧本 artifact。
 CHECKPOINT_STRUCTURE = "structure"
 CHECKPOINT_SCRIPT = "script"
 
@@ -37,7 +37,7 @@ CHECKPOINT_PROVIDER = "creator-checkpoint"
 
 _CHECKPOINT_SUMMARIES = {
     CHECKPOINT_STRUCTURE: (
-        "结构检查点：确认分集结构（各集标题与梗概）之后再" "起草剧本与生成媒体。通过后本项目不再重复询问。"
+        "结构检查点：确认分集/分支结构（各集标题、梗概与叙事分支）之后再" "起草剧本与生成媒体。通过后本项目不再重复询问。"
     ),
     CHECKPOINT_SCRIPT: (
         "剧本检查点：确认各集剧本草稿之后再进入设计与分镜，" "文本阶段修改的成本远低于媒体阶段。通过后本项目不再重复询问。"

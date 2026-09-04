@@ -1208,6 +1208,260 @@ def test_running_script_task_projects_running_status() -> None:
     assert node.progress == 0.5
 
 
+# ---- Phase 3: interaction motions & interactive bundle gate -----------
+
+
+def _make_branching(project: Project) -> None:
+    """timeline:main --edge:a/b--> ep4a / ep4b，主线末尾挂抉择 element。"""
+
+    from services.project_files.models import (
+        InteractionCreation,
+        InteractionOption,
+        NarrativeEdge,
+        Timeline,
+    )
+
+    project.timelines.items["timeline:main"].title = "第3集 · 双重身份"
+    for timeline_id, title in (
+        ("timeline:ep4a", "第4集A · 真相大白"),
+        ("timeline:ep4b", "第4集B · 沉默代价"),
+    ):
+        project.timelines.items[timeline_id] = Timeline(
+            timeline_id=timeline_id,
+            title=title,
+        )
+        project.timelines.order.append(timeline_id)
+    project.narrative_edges = [
+        NarrativeEdge(
+            edge_id="edge:a",
+            source_timeline_id="timeline:main",
+            target_timeline_id="timeline:ep4a",
+            label="选择A · 揭发真相",
+        ),
+        NarrativeEdge(
+            edge_id="edge:b",
+            source_timeline_id="timeline:main",
+            target_timeline_id="timeline:ep4b",
+            label="选择B · 保持沉默",
+        ),
+    ]
+    project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ] = TimelineElement(
+        element_id="el:choice",
+        label="观众抉择",
+        span=TimelineSpan(start_tick=88_000, duration_tick=4_000),
+        creation=InteractionCreation(
+            type="interaction",
+            question="是否当众揭发沈修？",
+            options=[
+                InteractionOption(edge_ref="edge:a"),
+                InteractionOption(edge_ref="edge:b"),
+            ],
+            countdown_seconds=10,
+            default_edge_ref="edge:a",
+        ),
+    )
+
+
+def _draft_choice_motion(project: Project) -> None:
+    from services.project_files.models import MotionGraphic
+
+    element = project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ]
+    element.creation.motion = MotionGraphic(
+        format="html_css",
+        html=(
+            "<!DOCTYPE html><html><body>"
+            '<button data-edge-ref="edge:a">A</button>'
+            '<button data-edge-ref="edge:b">B</button>'
+            "</body></html>"
+        ),
+    )
+
+
+def _select_final_video(project: Project, timeline_id: str) -> None:
+    _select_slot(
+        project,
+        slot_id=f"timeline:{timeline_id}:render",
+        kind="final_video",
+        owner_ref=f"timeline:{timeline_id}",
+        version_id=f"art:final-{timeline_id}",
+    )
+
+
+def test_interaction_node_gates_on_script_then_becomes_dispatchable() -> None:
+    project = _project()
+    _make_branching(project)
+
+    graph = derive_work_graph(project)
+    node = graph.by_id["interaction:el:choice"]
+    assert node.kind == "interaction"
+    assert node.timeline_id == "timeline:main"
+    assert node.lane == "第3集 · 双重身份"
+    assert node.deps == ("script:timeline:main",)
+    # 剧本未定稿：抉择动效等剧本节点。
+    assert node.status is WorkNodeStatus.GATED
+    assert "script:timeline:main" in node.missing
+    assert node.command == "GENERATE_INTERACTION_MOTION"
+    assert node.target_ref == "element:el:choice"
+    assert node.locator == {
+        "page": "blueprint",
+        "timelineId": "timeline:main",
+        "elementId": "el:choice",
+    }
+
+    _select_slot(
+        project,
+        slot_id="script:timeline:main",
+        kind="timeline_script",
+        owner_ref="timeline:timeline:main",
+        version_id="art:script-main",
+    )
+    graph = derive_work_graph(project)
+    node = graph.by_id["interaction:el:choice"]
+    assert node.status is WorkNodeStatus.READY
+    # interaction 在 DISPATCHABLE_KINDS 中：调度器可直接派发。
+    assert node in graph.ready_media_nodes()
+
+
+def test_interaction_node_done_when_motion_is_drafted() -> None:
+    project = _project()
+    _make_branching(project)
+    _draft_choice_motion(project)
+
+    graph = derive_work_graph(project)
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
+
+
+def test_interaction_node_reopens_when_options_change_after_draft() -> None:
+    """加选项/改边文案后旧动效必须失效（stale 收窄，方案 2.7a）。"""
+
+    from services.media_files.interaction_fingerprint import (
+        FINGERPRINT_MARKER,
+        interaction_request_fingerprint,
+    )
+    from services.project_files.models import InteractionOption, NarrativeEdge
+
+    project = _project()
+    _make_branching(project)
+    _draft_choice_motion(project)
+    _select_slot(
+        project,
+        slot_id="script:timeline:main",
+        kind="timeline_script",
+        owner_ref="timeline:timeline:main",
+        version_id="art:script-main",
+    )
+    element = project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ]
+    edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
+    fingerprint = interaction_request_fingerprint(
+        element.creation,
+        edges_by_id,
+    )
+    element.creation.motion.design_notes = (
+        f"抉择动效\n{FINGERPRINT_MARKER}{fingerprint}"
+    )
+    graph = derive_work_graph(project)
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
+
+    project.narrative_edges.append(
+        NarrativeEdge(
+            edge_id="edge:c",
+            source_timeline_id="timeline:main",
+            target_timeline_id="timeline:ep4a",
+            label="选择C · 报警",
+        ),
+    )
+    element.creation.options.append(InteractionOption(edge_ref="edge:c"))
+    graph = derive_work_graph(project)
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.READY
+
+
+def test_running_interaction_task_projects_running_status() -> None:
+    project = _project()
+    _make_branching(project)
+    graph = derive_work_graph(
+        project,
+        tasks=[
+            _task(
+                "interaction_draft",
+                "element:el:choice",
+                TaskStatus.RUNNING,
+                progress=0.3,
+            ),
+        ],
+    )
+    node = graph.by_id["interaction:el:choice"]
+    assert node.status is WorkNodeStatus.RUNNING
+    assert node.progress == 0.3
+
+
+def test_bundle_node_gates_until_segments_and_interactions_done() -> None:
+    project = _project()
+    _make_branching(project)
+
+    graph = derive_work_graph(project)
+    bundle = graph.by_id["bundle:project"]
+    assert bundle.kind == "bundle"
+    assert bundle.lane == "compose"
+    assert bundle.status is WorkNodeStatus.GATED
+    # 门禁点名：抉择动效未就绪 + 全部可达分段缺成片。
+    assert "interaction:el:choice" in bundle.deps
+    assert "interaction:el:choice" in bundle.missing
+    assert "timeline:timeline:main 缺成片" in bundle.missing
+    assert "timeline:timeline:ep4a 缺成片" in bundle.missing
+    assert "timeline:timeline:ep4b 缺成片" in bundle.missing
+    # bundle 不派发媒体任务：经 GET /interactive-bundle 导出。
+    assert bundle.command is None
+    assert bundle not in graph.ready_media_nodes()
+    assert "interactive-bundle" in bundle.label
+    assert bundle.locator == {
+        "page": "blueprint",
+        "export": "interactive-bundle",
+    }
+
+    _draft_choice_motion(project)
+    for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
+        _select_final_video(project, timeline_id)
+    graph = derive_work_graph(project)
+    assert graph.by_id["bundle:project"].status is WorkNodeStatus.READY
+
+
+def test_bundle_node_goes_stale_when_a_segment_final_is_stale() -> None:
+    project = _project()
+    _make_branching(project)
+    _draft_choice_motion(project)
+    for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
+        _select_final_video(project, timeline_id)
+    project.assets.artifact_versions_by_id[
+        "art:final-timeline:ep4a"
+    ].stale = True
+
+    graph = derive_work_graph(project)
+    assert graph.by_id["bundle:project"].status is WorkNodeStatus.STALE
+
+
+def test_projects_without_edges_have_no_interaction_or_bundle_nodes() -> None:
+    # 旧单 timeline 项目与线性多集项目零回退。
+    legacy = _project()
+    _add_element(legacy, _element("elem:one"))
+    graph = derive_work_graph(legacy)
+    assert not [
+        node for node in graph.nodes if node.kind in ("interaction", "bundle")
+    ]
+
+    linear = _project()
+    _add_second_timeline(linear)
+    graph = derive_work_graph(linear)
+    assert not [
+        node for node in graph.nodes if node.kind in ("interaction", "bundle")
+    ]
+
+
 # ---- History snapshots are frozen: never part of the production graph ----
 
 

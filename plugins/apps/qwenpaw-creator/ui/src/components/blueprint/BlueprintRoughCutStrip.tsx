@@ -37,8 +37,15 @@ const FULL_FILM_ID = "__full_film__";
 /* ------------------------------------------------------------------ */
 /* Cinema preview: a near-fullscreen floating overlay. The whole-film  */
 /* chip plays the composed mp4; timeline chips play the story in       */
-/* narrative order.                                                    */
+/* narrative order — at branch points the audience choice surfaces so  */
+/* every fork is previewable.                                          */
 /* ------------------------------------------------------------------ */
+
+interface CinemaOption {
+  edgeId: string;
+  label: string;
+  target: string;
+}
 
 function PreviewCinema({
   project,
@@ -57,10 +64,18 @@ function PreviewCinema({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const wholeFilm = startId === FULL_FILM_ID;
-  const initialId = startId;
+  // Branching projects have no meaningful composed whole film: the
+  // whole-film sentinel enters the branch-following playback instead,
+  // starting from the entry timeline (same test as selectNarrativeShape).
+  const branching = (project.narrative_edges ?? []).length > 0;
+  const wholeFilm = startId === FULL_FILM_ID && !branching;
+  const initialId =
+    startId === FULL_FILM_ID && branching
+      ? selectLiveTimelineIds(project)[0] ?? startId
+      : startId;
   const [currentId, setCurrentId] = useState(initialId);
   const [segmentIndex, setSegmentIndex] = useState(1);
+  const [options, setOptions] = useState<CinemaOption[] | null>(null);
   const [ended, setEnded] = useState(false);
   const [error, setError] = useState(false);
   const [replayNonce, setReplayNonce] = useState(0);
@@ -70,6 +85,7 @@ function PreviewCinema({
   useEffect(() => {
     setCurrentId(initialId);
     setSegmentIndex(1);
+    setOptions(null);
     setEnded(false);
     setError(false);
     setAspectRatio(null);
@@ -85,9 +101,26 @@ function PreviewCinema({
 
   const liveOrder = useMemo(() => selectLiveTimelineIds(project), [project]);
 
+  const edges = useMemo(
+    () => project.narrative_edges ?? [],
+    [project.narrative_edges],
+  );
+
+  const interactionQuestion = useMemo(() => {
+    const timeline = project.timelines.items[currentId];
+    if (!timeline) return null;
+    for (const element of Object.values(timeline.elements_by_id)) {
+      if (element.enabled && element.creation.type === "interaction") {
+        return element.creation.question || null;
+      }
+    }
+    return null;
+  }, [project, currentId]);
+
   const advanceTo = useCallback((timelineId: string) => {
     setCurrentId(timelineId);
     setSegmentIndex((index) => index + 1);
+    setOptions(null);
     setEnded(false);
     setError(false);
     setAspectRatio(null);
@@ -98,14 +131,33 @@ function PreviewCinema({
       setEnded(true);
       return;
     }
-    // Linear story: fall through the live timelines in narrative order.
-    const next = liveOrder[liveOrder.indexOf(currentId) + 1];
-    if (next) {
-      advanceTo(next);
+    const outgoing = edges.filter(
+      (edge) => edge.source_timeline_id === currentId,
+    );
+    if (outgoing.length > 1) {
+      setOptions(
+        outgoing.map((edge) => ({
+          edgeId: edge.edge_id,
+          label: edge.label || edge.prompt || labelOf(edge.target_timeline_id),
+          target: edge.target_timeline_id,
+        })),
+      );
       return;
     }
+    if (outgoing.length === 1) {
+      advanceTo(outgoing[0].target_timeline_id);
+      return;
+    }
+    if (edges.length === 0) {
+      // Linear story: fall through the live timelines in narrative order.
+      const next = liveOrder[liveOrder.indexOf(currentId) + 1];
+      if (next) {
+        advanceTo(next);
+        return;
+      }
+    }
     setEnded(true);
-  }, [wholeFilm, currentId, liveOrder, advanceTo]);
+  }, [wholeFilm, edges, liveOrder, currentId, labelOf, advanceTo]);
 
   const replay = useCallback(() => {
     setReplayNonce((nonce) => nonce + 1);
@@ -173,6 +225,25 @@ function PreviewCinema({
           />
         )}
 
+        {/* Branch choice overlay — every fork stays previewable. */}
+        {options && (
+          <div className="absolute inset-0 flex flex-col items-center justify-end gap-2.5 bg-gradient-to-t from-black/85 via-black/35 to-transparent pb-[12%]">
+            <p className="mb-1 px-6 text-center text-sm font-bold text-white drop-shadow">
+              {interactionQuestion ?? t("blueprint.previewChoice")}
+            </p>
+            {options.map((option) => (
+              <button
+                key={option.edgeId}
+                type="button"
+                onClick={() => advanceTo(option.target)}
+                className="w-[min(78%,320px)] rounded-xl border border-white/40 bg-white/10 px-4 py-2.5 text-[13px] font-bold text-white backdrop-blur-md transition-all hover:scale-[1.03] hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/50"
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Playback finished — offer replay from the entry. */}
         {ended && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/70 backdrop-blur-sm">
@@ -231,6 +302,7 @@ export default function BlueprintRoughCutStrip({
     () => [...new Set(frames.map((frame) => frame.timelineId))],
     [frames],
   );
+  const isBranching = (project.narrative_edges ?? []).length > 0;
   const filmVersionId = useMemo(
     () => selectFinalFilmVersionId(project),
     [project],
@@ -286,12 +358,18 @@ export default function BlueprintRoughCutStrip({
           })}
         </span>
         <span className="ml-auto flex min-w-0 shrink items-center gap-1.5 overflow-x-auto py-0.5 [scrollbar-width:none]">
-          {Boolean(filmUrl) && (
+          {(isBranching
+            ? selectLiveTimelineIds(project).length > 0
+            : Boolean(filmUrl)) && (
             <button
               type="button"
               data-roughcut-play-film
               onClick={() => togglePlay(FULL_FILM_ID)}
-              title={t("blueprint.playFullFilm")}
+              title={
+                isBranching
+                  ? t("blueprint.playFullInteractive")
+                  : t("blueprint.playFullFilm")
+              }
               className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
                 playingId === FULL_FILM_ID
                   ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
@@ -299,10 +377,14 @@ export default function BlueprintRoughCutStrip({
               }`}
             >
               <Film className="h-3 w-3" />
-              {t("blueprint.playFullFilm")}
-              <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
-                {t("blueprint.finalCutBadge")}
-              </span>
+              {isBranching
+                ? t("blueprint.playFullInteractive")
+                : t("blueprint.playFullFilm")}
+              {!isBranching && (
+                <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
+                  {t("blueprint.finalCutBadge")}
+                </span>
+              )}
             </button>
           )}
           <button

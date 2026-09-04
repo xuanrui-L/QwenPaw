@@ -1,6 +1,7 @@
 import type {
   ArtifactSlotDocument,
   ArtifactVersionDocument,
+  NarrativeEdgeDocument,
   ProjectDocument,
   TimelineDocument,
   TimelineElementDocument,
@@ -375,4 +376,45 @@ export function selectTimelineSummaries(
   return selectLiveTimelineIds(project)
     .map((timelineId, index) => summarizeTimeline(project, timelineId, index))
     .filter((summary): summary is TimelineSummary => Boolean(summary));
+}
+
+export function selectNarrativeEdges(
+  project: ProjectDocument | null | undefined,
+): NarrativeEdgeDocument[] {
+  return project?.narrative_edges ?? [];
+}
+
+/**
+ * Layered auto-layout for the branching canvas: longest-path layering from
+ * the roots, one column per layer, row = index inside the layer.
+ */
+export function layoutNarrativeGraph(
+  summaries: TimelineSummary[],
+  edges: NarrativeEdgeDocument[],
+): Map<string, { layer: number; row: number }> {
+  const ids = summaries.map((summary) => summary.timelineId);
+  const layerById = new Map<string, number>(ids.map((id) => [id, 0]));
+  // Relax edges |V| times (graphs are tiny; cycles just stop raising).
+  for (let pass = 0; pass < ids.length; pass += 1) {
+    let changed = false;
+    for (const edge of edges) {
+      const source = layerById.get(edge.source_timeline_id);
+      const target = layerById.get(edge.target_timeline_id);
+      if (source === undefined || target === undefined) continue;
+      if (target < source + 1) {
+        layerById.set(edge.target_timeline_id, source + 1);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const rows = new Map<number, number>();
+  const positions = new Map<string, { layer: number; row: number }>();
+  for (const id of ids) {
+    const layer = layerById.get(id) ?? 0;
+    const row = rows.get(layer) ?? 0;
+    rows.set(layer, row + 1);
+    positions.set(id, { layer, row });
+  }
+  return positions;
 }

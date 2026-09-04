@@ -19,6 +19,27 @@ function withWholeFilm(project: ProjectDocument): ProjectDocument {
   return project;
 }
 
+/** Two outgoing edges from the entry timeline = a branching choice point. */
+function withBranching(project: ProjectDocument): ProjectDocument {
+  project.narrative_edges = [
+    {
+      edge_id: "edge:a",
+      source_timeline_id: "timeline:main",
+      target_timeline_id: "timeline:ep2",
+      label: "选择A · 星夜归途",
+      prompt: "此刻，你决定——",
+    },
+    {
+      edge_id: "edge:b",
+      source_timeline_id: "timeline:main",
+      target_timeline_id: "timeline:ep2",
+      label: "选择B · 回到晨光",
+      prompt: "",
+    },
+  ];
+  return project;
+}
+
 function renderStrip(project: ProjectDocument) {
   return render(
     <BlueprintRoughCutStrip project={project} onSelectTimeline={vi.fn()} />,
@@ -107,5 +128,50 @@ describe("BlueprintRoughCutStrip whole-film preview", () => {
     const { container } = renderStrip(project);
     expect(container.querySelectorAll("[data-roughcut-frame]")).toHaveLength(0);
     expect(container.querySelector("[data-roughcut-play-film]")).toBeTruthy();
+  });
+
+  it("branching projects play the interactive story from the entry segment", () => {
+    const project = withBranching(cloneProject());
+    const { container, baseElement, getByText } = renderStrip(project);
+
+    // No composed whole film, yet the whole-story chip is offered — and it
+    // is the interactive entry, not the 成片 one.
+    const chip = container.querySelector("[data-roughcut-play-film]");
+    expect(chip).toBeTruthy();
+    expect(chip!.textContent).toContain("播放整个互动包");
+    expect(chip!.textContent).not.toContain("成片");
+
+    fireEvent.click(chip!);
+    const video = baseElement.querySelector<HTMLVideoElement>(
+      "[data-roughcut-player] video",
+    );
+    expect(video).toBeTruthy();
+    // Starts from the entry timeline's segment, not a composed artifact.
+    expect(video!.getAttribute("src")).not.toContain("final-v1");
+    expect(video!.getAttribute("src")).toContain(
+      encodeURIComponent("timeline:main"),
+    );
+
+    // The branch point surfaces the audience choice instead of ending.
+    fireEvent.ended(video!);
+    expect(getByText("选择A · 星夜归途")).toBeInTheDocument();
+    fireEvent.click(getByText("选择B · 回到晨光"));
+    const nextVideo = baseElement.querySelector<HTMLVideoElement>(
+      "[data-roughcut-player] video",
+    );
+    expect(nextVideo!.getAttribute("src")).toContain(
+      encodeURIComponent("timeline:ep2"),
+    );
+  });
+
+  it("branching projects with a composed film still enter the interactive playback", () => {
+    const project = withBranching(withWholeFilm(cloneProject()));
+    const { container, baseElement } = renderStrip(project);
+
+    fireEvent.click(container.querySelector("[data-roughcut-play-film]")!);
+    const video = baseElement.querySelector<HTMLVideoElement>(
+      "[data-roughcut-player] video",
+    );
+    expect(video!.getAttribute("src")).not.toContain("final-v1");
   });
 });

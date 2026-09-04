@@ -290,6 +290,7 @@ export const projectDocument: ProjectDocument = {
       },
     },
   },
+  narrative_edges: [],
   assets: {
     files_by_id: {
       "file:source-video": {

@@ -19,12 +19,16 @@ from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, TaskKind, TaskStatus
+from services.media_files.interaction_fingerprint import (
+    motion_matches_request,
+)
 from services.prompt_text import dialogue_match_key, dialogue_spoken_lines
 from services.project_files.models import (
     ArtifactVersionRenderSource,
     narrative_timeline_ids,
     ElementOutputRenderSource,
     I2VCreation,
+    InteractionCreation,
     Project,
     R2VCreation,
     S2VCreation,
@@ -53,6 +57,7 @@ DISPATCHABLE_KINDS = frozenset(
         "storyboard",
         "video",
         "compose",
+        "interaction",
     },
 )
 
@@ -60,7 +65,8 @@ DISPATCHABLE_KINDS = frozenset(
 @dataclass(frozen=True, slots=True)
 class WorkNode:
     node_id: str
-    kind: str  # script|visual|lineup|storyboard|video|compose
+    # script|visual|lineup|storyboard|video|compose|interaction|bundle
+    kind: str
     label: str
     status: WorkNodeStatus
     deps: tuple[str, ...] = ()
@@ -990,6 +996,98 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             )
             video_node_ids.append(video_id)
 
+    # ---- Lane: interaction motions (方案 2.7a 抉择点) -------------------
+    # 每个启用的 InteractionCreation element 一个 kind="interaction" 节点：
+    # motion 未起草（None 或无 html 文档）→ READY（interaction_draft 只花
+    # 一次文本调用，调度器可直接派发）；已有 html_css 文档 → DONE。
+    # deps = 该 timeline 的 script 节点（若存在）：剧本定稿前问题/选项
+    # 文案还会变，先起草只会浪费再重画。
+    interaction_node_ids: list[str] = []
+    edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
+    for timeline_id in live_timeline_ids:
+        timeline = project.timelines.items[timeline_id]
+        script_node = script_node_by_timeline.get(timeline_id)
+        for element_id, element in timeline.elements_by_id.items():
+            creation = element.creation
+            if not element.enabled or not isinstance(
+                creation,
+                InteractionCreation,
+            ):
+                continue
+            node_id = f"interaction:{element_id}"
+            deps = (script_node,) if script_node is not None else ()
+            key = (
+                TaskKind.INTERACTION_DRAFT.value,
+                f"element:{element_id}",
+            )
+            task = active.get(key)
+            failure = failed.get(key)
+            fingerprint = _fingerprint(
+                node_id,
+                creation.question,
+                str(creation.countdown_seconds or ""),
+                creation.default_edge_ref or "",
+                sorted(
+                    (
+                        option.edge_ref,
+                        getattr(edges_by_id.get(option.edge_ref), "label", ""),
+                        getattr(
+                            edges_by_id.get(option.edge_ref),
+                            "prompt",
+                            "",
+                        ),
+                    )
+                    for option in creation.options
+                ),
+            )
+            motion = creation.motion
+            # DONE only while the draft still covers the CURRENT
+            # question/options/edges; an edited choice point re-opens.
+            drafted = motion_matches_request(motion, creation, edges_by_id)
+            missing = _upstream_missing(deps, statuses)
+            if task is not None:
+                status = WorkNodeStatus.RUNNING
+            elif drafted:
+                status = WorkNodeStatus.DONE
+            elif missing:
+                status = WorkNodeStatus.GATED
+            elif failure is not None and not _failure_inputs_changed(
+                failure,
+                node_id,
+                fingerprint,
+            ):
+                status = WorkNodeStatus.FAILED
+            else:
+                status = WorkNodeStatus.READY
+            add(
+                WorkNode(
+                    node_id=node_id,
+                    kind="interaction",
+                    label=f"{element.label or element_id} · 抉择动效",
+                    status=status,
+                    deps=deps,
+                    lane=timeline.title or f"timeline:{timeline_id}",
+                    timeline_id=timeline_id,
+                    task_id=getattr(task, "task_id", None),
+                    progress=getattr(task, "progress", None),
+                    error=(
+                        _task_error_summary(failure)
+                        if status is WorkNodeStatus.FAILED
+                        else None
+                    ),
+                    missing=missing,
+                    locator={
+                        "page": "blueprint",
+                        "timelineId": timeline_id,
+                        "elementId": element_id,
+                    },
+                    command="GENERATE_INTERACTION_MOTION",
+                    target_ref=f"element:{element_id}",
+                    dispatch_fingerprint=fingerprint,
+                ),
+            )
+            interaction_node_ids.append(node_id)
+
     # ---- Final compose (one node per content-bearing timeline) ---------
     # Each timeline whose main track carries enabled content (R2V, T2V, I2V,
     # S2V, Edit or motion-clip Elements) gets its own deterministic master
@@ -1128,6 +1226,76 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         if slot.kind != "final_video"
                     ),
                 ),
+            ),
+        )
+
+    # ---- Interactive bundle gate (方案 2.7b) ---------------------------
+    # 分支项目的最终交付是互动包，不是单一 mp4。bundle 节点是纯门禁投影：
+    # 全部可达分段有未过期成片 + 全部抉择动效就绪 → READY（此时经
+    # GET /projects/{id}/interactive-bundle 导出，节点本身不派发媒体任务，
+    # dispatchable=False）；任一分段成片 stale / 依赖 stale → STALE。
+    if project.narrative_edges:
+        # pylint: disable-next=import-outside-toplevel
+        from services.media_files.interactive_bundle import (
+            reachable_timeline_ids,
+        )
+
+        reachable = reachable_timeline_ids(project)
+        bundle_deps: list[str] = []
+        segment_gaps: list[str] = []
+        stale = False
+        for timeline_id in reachable:
+            # Multi-timeline compose: every content-bearing timeline owns a
+            # compose:{timeline_id} node the bundle can wait on directly.
+            segment_compose_id = f"compose:{timeline_id}"
+            has_compose_node = segment_compose_id in statuses
+            if has_compose_node:
+                bundle_deps.append(segment_compose_id)
+            slot = project.assets.artifact_slots_by_id.get(
+                f"timeline:{timeline_id}:render",
+            )
+            selected = (
+                slot.selected_version_id
+                if slot is not None and slot.kind == "final_video"
+                else None
+            )
+            version = (
+                project.assets.artifact_versions_by_id.get(selected)
+                if selected
+                else None
+            )
+            if version is None:
+                if not has_compose_node:
+                    # 没有图节点可等（该分段没有可合成的内容），用文字缺
+                    # 口点名该分段，路由到模型侧。
+                    segment_gaps.append(f"timeline:{timeline_id} 缺成片")
+            elif getattr(version, "stale", False):
+                stale = True
+        bundle_deps.extend(interaction_node_ids)
+        missing = (
+            *_upstream_missing(bundle_deps, statuses),
+            *segment_gaps,
+        )
+        if any(
+            statuses.get(dep) is WorkNodeStatus.STALE for dep in bundle_deps
+        ):
+            stale = True
+        if stale:
+            status = WorkNodeStatus.STALE
+        elif missing:
+            status = WorkNodeStatus.GATED
+        else:
+            status = WorkNodeStatus.READY
+        add(
+            WorkNode(
+                node_id="bundle:project",
+                kind="bundle",
+                label="互动包 · 经 GET /interactive-bundle 导出",
+                status=status,
+                deps=tuple(bundle_deps),
+                lane="compose",
+                missing=missing,
+                locator={"page": "blueprint", "export": "interactive-bundle"},
             ),
         )
 

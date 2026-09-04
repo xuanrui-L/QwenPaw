@@ -645,8 +645,8 @@ def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
     interval) so the migration never emits a document its own validator
     rejects.
 
-    v9 also adds per-Timeline display fields
-    (``title`` / ``synopsis`` / ``planned_duration_seconds``).
+    v9 also adds ``Project.narrative_edges`` plus per-Timeline display
+    fields (``title`` / ``synopsis`` / ``planned_duration_seconds``).
     Legacy projects are presented as a single narrative node
     (single-video generation / edit); no script artifact is backfilled —
     the blueprint maps existing information (creative_brief, element
@@ -654,6 +654,7 @@ def _migrate_v8_to_v9(document: dict[str, Any]) -> dict[str, Any]:
     """
 
     migrated = _stamp_missing_audio_roles(dict(document), step="v8->v9")
+    migrated.setdefault("narrative_edges", [])
     timelines = dict(migrated.get("timelines") or {})
     items = dict(timelines.get("items") or {})
     for timeline_id, timeline in list(items.items()):
