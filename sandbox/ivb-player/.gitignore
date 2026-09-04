@@ -1,0 +1,11 @@
+# 走查/演示产物：真实 mp4、state.db、临时 zip 都不该进版本库
+build/
+*.staging
+.state.db
+.state.db-wal
+.state.db-shm
+
+# 仓库本地 .git/info/exclude 里有一条裸 `docs/` 会误伤本项目的规范文档与
+# ER 图（它们是要入库的产品产物），这里显式反向。深层 .gitignore 优先级
+# 高于 info/exclude，所以能生效。
+!docs/

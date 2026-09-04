@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>IVB 放映</title>
+<link rel="stylesheet" href="/assets/styles/player.css"/>
+</head>
+<body data-screen="loading">
+
+<!-- ① 标题屏 -->
+<section id="screen-title" class="screen">
+  <div class="title-frame">
+    <p class="title-kicker">互动故事</p>
+    <h1 id="title-name">载入中…</h1>
+    <p id="title-tagline" class="title-tagline"></p>
+    <p id="title-synopsis" class="title-synopsis"></p>
+    <dl id="title-stats" class="title-stats"></dl>
+    <div class="title-actions">
+      <button id="btn-start" class="cta" type="button">开始游戏</button>
+      <button id="btn-resume" class="ghost hidden" type="button">继续上次</button>
+      <button id="btn-map-from-title" class="ghost" type="button">剧情地图</button>
+      <button id="btn-reset" class="ghost danger hidden" type="button">重新开始</button>
+    </div>
+  </div>
+  <footer class="title-foot">
+    <span id="foot-bundle"></span>
+    <span id="foot-warnings"></span>
+  </footer>
+</section>
+
+<!-- ② 播放屏 -->
+<section id="screen-play" class="screen">
+  <video id="stage" playsinline preload="metadata"></video>
+  <div id="play-hud">
+    <span id="hud-node"></span>
+    <button id="btn-map" class="hud-btn" type="button">地图</button>
+    <button id="btn-title" class="hud-btn" type="button">标题</button>
+  </div>
+
+  <div id="choice-overlay" class="hidden">
+    <div class="choice-shell">
+      <h2 id="choice-question"></h2>
+      <div id="choice-timer" class="hidden">
+        <span id="choice-count"></span>
+        <div class="timer-bar"><i id="timer-fill"></i></div>
+      </div>
+      <div id="choice-cards"></div>
+      <p id="choice-hint" class="choice-hint hidden">时间到还没选,继续播下去也不会自动替你决定。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ③ 地图屏 -->
+<section id="screen-map" class="screen">
+  <header class="map-head">
+    <h2>剧情地图</h2>
+    <p id="map-progress"></p>
+    <button id="btn-map-back" class="ghost" type="button">返回</button>
+  </header>
+  <div id="map-canvas">
+    <svg id="map-links" preserveAspectRatio="none"></svg>
+    <div id="map-nodes"></div>
+  </div>
+  <legend class="map-legend">
+    <span class="lg lg-seen">已看</span>
+    <span class="lg lg-current">当前</span>
+    <span class="lg lg-locked">可去未看</span>
+    <span class="lg lg-fog">未解锁</span>
+  </legend>
+</section>
+
+<!-- ④ 结局屏 -->
+<section id="screen-ending" class="screen">
+  <div class="ending-frame">
+    <p id="ending-kicker" class="title-kicker">结局</p>
+    <h1 id="ending-name"></h1>
+    <p id="ending-synopsis" class="title-synopsis"></p>
+    <p id="ending-unlock-note" class="unlock-note hidden">新结局已记录</p>
+    <h3 id="ending-review-head" class="review-head">你的路径</h3>
+    <ol id="ending-review" class="review-list"></ol>
+    <div class="title-actions">
+      <button id="btn-replay" class="cta" type="button">再看一遍</button>
+      <button id="btn-ending-map" class="ghost" type="button">剧情地图</button>
+      <button id="btn-ending-title" class="ghost" type="button">回标题</button>
+    </div>
+    <p id="ending-coverage" class="coverage"></p>
+  </div>
+</section>
+
+<div id="toast" class="hidden"></div>
+<div id="fatal" class="hidden"></div>
+
+<script src="/assets/state.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>
