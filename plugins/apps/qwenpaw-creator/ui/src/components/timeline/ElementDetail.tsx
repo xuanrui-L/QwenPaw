@@ -947,10 +947,10 @@ export default function ElementDetail({
                   <Box className="h-3.5 w-3.5 text-[var(--color-accent)]" />
                   {t("elementDetail.positionInFrame")}
                 </h4>
-                <div className="grid gap-4 lg:grid-cols-[180px_minmax(0,1fr)]">
+                <div className="space-y-3">
                   <div className="flex min-h-40 items-center justify-center rounded-lg bg-[#191613] p-3">
                     <div
-                      className="relative max-h-36 w-full overflow-hidden rounded border border-white/15 bg-[#312b26]"
+                      className="relative max-h-36 w-full max-w-[240px] overflow-hidden rounded border border-white/15 bg-[#312b26]"
                       style={{
                         aspectRatio: project.settings.aspect_ratio.replace(
                           ":",
@@ -987,7 +987,7 @@ export default function ElementDetail({
                       </div>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  <div className="grid grid-cols-3 gap-x-3 gap-y-2">
                     {(
                       [
                         "x",
