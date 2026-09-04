@@ -209,11 +209,12 @@ def test_artifact_selection_injects_window_around_offsets(tmp_path):
     assert "## 场 1" not in note
 
 
-def test_stale_artifact_selection_reports_expired_version(tmp_path):
+def test_invalid_selection_reports_fallback_note(tmp_path):
     from services.file_agent_runtime.driver import _artifact_selection_note
 
     project, version, _ = _script_selection_project(tmp_path)
-    note = _artifact_selection_note(
+    # 过期版本：报告选区版本已过期并指出当前版本。
+    stale = _artifact_selection_note(
         project,
         tmp_path,
         {
@@ -222,23 +223,17 @@ def test_stale_artifact_selection_reports_expired_version(tmp_path):
             "end": 5,
         },
     )
-
-    assert note is not None
-    assert "选区所在版本已过期" in note
-    assert version.version_id in note
-
-
-def test_unknown_slot_selection_reports_missing(tmp_path):
-    from services.file_agent_runtime.driver import _artifact_selection_note
-
-    project, _, _ = _script_selection_project(tmp_path)
-    note = _artifact_selection_note(
+    assert stale is not None
+    assert "选区所在版本已过期" in stale
+    assert version.version_id in stale
+    # 未知槽位：报告选区目标已不存在。
+    missing = _artifact_selection_note(
         project,
         tmp_path,
         {"path": "artifact:script:timeline:ghost@v1"},
     )
-    assert note is not None
-    assert "已不存在" in note
+    assert missing is not None
+    assert "已不存在" in missing
 
 
 def test_message_text_appends_selection_notes(tmp_path):

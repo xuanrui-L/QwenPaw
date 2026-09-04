@@ -75,6 +75,23 @@ describe("BlueprintPage narrative shapes", () => {
     expect(
       screen.getByRole("button", { name: "提出修改" }),
     ).toBeInTheDocument();
+    // Header chrome: page title left (no 返回 on the blueprint itself),
+    // prep entries and the download / export dropdown right; the footer is
+    // the production task status bar.
+    expect(
+      screen.queryByRole("button", { name: "返回" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("剧集蓝图")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /调研与素材/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /视觉开发/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "下载 / 导出" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("暂无进行中的生产任务")).toBeInTheDocument();
   });
 
   it("renders the linear episode card grid for multi-timeline projects without edges", () => {
@@ -112,29 +129,6 @@ describe("BlueprintPage narrative shapes", () => {
       "data-creator-path",
       "/timelines/items/timeline:ep2/synopsis",
     );
-  });
-
-  it("hosts the pre-production entries and the download/export home", () => {
-    seedProject(singleProject());
-    renderPage();
-
-    // Header: page title left (no 返回 on the blueprint itself), prep entries
-    // and the download / export dropdown right.
-    expect(
-      screen.queryByRole("button", { name: "返回" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("剧集蓝图")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /调研与素材/ }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /视觉开发/ }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "下载 / 导出" }),
-    ).toBeInTheDocument();
-    // Footer is the production task status bar.
-    expect(screen.getByText("暂无进行中的生产任务")).toBeInTheDocument();
   });
 
   it("branching projects keep the structure graph and the bundle export entry", () => {
@@ -204,16 +198,16 @@ describe("BlueprintPage narrative shapes", () => {
     return project;
   }
 
-  it("video_edit single projects render the script view; the strip keeps final-cut facts", () => {
+  it("video_edit single projects render the script view; final-cut facts survive a missing render", () => {
     seedProject(videoEditProject());
-    const { container } = renderPage();
+    const first = renderPage();
 
     // 单集设计 (84:37778): no structure board, the script document renders.
     expect(
-      container.querySelector("[data-blueprint-script-panel]"),
+      first.container.querySelector("[data-blueprint-script-panel]"),
     ).toBeInTheDocument();
     expect(
-      container.querySelector('[data-blueprint-shape="single"]'),
+      first.container.querySelector('[data-blueprint-shape="single"]'),
     ).not.toBeInTheDocument();
     // Legacy read-only mapping (no timeline_script slot on this path).
     expect(
@@ -221,25 +215,27 @@ describe("BlueprintPage narrative shapes", () => {
         .length,
     ).toBeGreaterThan(0);
     // Rough-cut strip: the render_source clip counts as a final frame.
-    expect(container.querySelectorAll("[data-roughcut-frame]")).toHaveLength(1);
+    expect(
+      first.container.querySelectorAll("[data-roughcut-frame]"),
+    ).toHaveLength(1);
     expect(screen.getByText("成片帧")).toBeInTheDocument();
     // No pending-visual warning chip for the voice-only narrator.
     expect(screen.queryByText("1 待确认")).not.toBeInTheDocument();
-  });
+    first.unmount();
 
-  it("video_edit script view survives a missing final cut", () => {
+    // The clip-backed shot still reads as a final frame after the composed
+    // final cut disappears — render_source is a durable per-shot fact.
     const project = videoEditProject();
     delete project.assets.artifact_slots_by_id["timeline:timeline:main:render"];
     delete project.assets.artifact_versions_by_id["final-v1"];
     seedProject(project);
-    const { container } = renderPage();
-
+    const second = renderPage();
     expect(
-      container.querySelector("[data-blueprint-script-panel]"),
+      second.container.querySelector("[data-blueprint-script-panel]"),
     ).toBeInTheDocument();
-    // The clip-backed shot still reads as a final frame — render_source is a
-    // durable per-shot fact independent of the composed final cut.
-    expect(container.querySelectorAll("[data-roughcut-frame]")).toHaveLength(1);
+    expect(
+      second.container.querySelectorAll("[data-roughcut-frame]"),
+    ).toHaveLength(1);
     expect(screen.getByText("成片帧")).toBeInTheDocument();
   });
 });

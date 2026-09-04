@@ -145,32 +145,27 @@ def _submit(monkeypatch, model, *, backend="wan"):
     return captured["body"]
 
 
-def test_wan27_binds_voice_on_its_subject_media_entry(monkeypatch) -> None:
-    body = _submit(monkeypatch, "wan2.7-r2v")
-    media = body["input"]["media"]
+def test_request_body_shape_per_family(monkeypatch) -> None:
+    # wan2.7: voice rides on its subject media entry; voiceless refs carry
+    # no reference_voice key at all.
+    media = _submit(monkeypatch, "wan2.7-r2v")["input"]["media"]
     assert media[0] == {
         "type": "reference_image",
         "url": "resolved://rusty.png",
         "reference_voice": "resolved://rusty-voice.mp3",
     }
-    # The voiceless reference carries no reference_voice key at all.
     assert media[1] == {
         "type": "reference_image",
         "url": "resolved://scene.png",
     }
-
-
-def test_wan30_appends_standalone_reference_audio_entries(monkeypatch) -> None:
-    body = _submit(monkeypatch, "wan3.0-video")
-    media = body["input"]["media"]
+    # wan3.0: standalone reference_audio entries, never per-media keys.
+    media = _submit(monkeypatch, "wan3.0-video")["input"]["media"]
     assert {
         "type": "reference_audio",
         "url": "resolved://rusty-voice.mp3",
     } in media
     assert all("reference_voice" not in item for item in media)
-
-
-def test_seedance_translates_audio_into_audio_url_content(monkeypatch) -> None:
+    # seedance: audio becomes audio_url content items.
     body = _submit(
         monkeypatch,
         "doubao-seedance-2-0-260128",
@@ -186,11 +181,8 @@ def test_seedance_translates_audio_into_audio_url_content(monkeypatch) -> None:
             "audio_url": {"url": "resolved://rusty-voice.mp3"},
         },
     ]
-
-
-def test_unsupported_families_silently_drop_voices(monkeypatch) -> None:
-    body = _submit(monkeypatch, "happyhorse-1.1-r2v")
-    media = body["input"]["media"]
+    # Families without documented audio input silently drop voices.
+    media = _submit(monkeypatch, "happyhorse-1.1-r2v")["input"]["media"]
     assert all(item["type"] == "reference_image" for item in media)
     assert all("reference_voice" not in item for item in media)
 

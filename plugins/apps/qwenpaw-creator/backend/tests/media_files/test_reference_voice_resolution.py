@@ -103,32 +103,24 @@ def test_voice_rides_with_its_characters_reference(monkeypatch) -> None:
     assert entries == [{"ref": "source:rusty-sample"}]
 
 
-def test_unsupported_model_resolves_nothing(monkeypatch) -> None:
-    _gate(monkeypatch, supported=False)
+def test_non_qualifying_contexts_resolve_nothing(monkeypatch) -> None:
     _stub_sample_resolution(monkeypatch)
+
+    # Unsupported model family: nothing resolves even for a voiced ref.
+    _gate(monkeypatch, supported=False)
     project = _project_with_voiced_character()
     creation = SimpleNamespace(character_refs=["char:rusty"])
-
     voice_urls, entries = r2v_execution._resolve_reference_voices(
         project=project,
         project_root=Path("/tmp"),
         creation=creation,
         version_ids=("artifact:rusty-image",),
     )
-
     assert not voice_urls
     assert not entries
 
-
-def test_voiceless_or_unreferenced_characters_contribute_nothing(
-    monkeypatch,
-) -> None:
-    _gate(monkeypatch, supported=True)
-    _stub_sample_resolution(monkeypatch)
-    project = _project_with_voiced_character()
-    creation = SimpleNamespace(character_refs=["char:rusty"])
-
     # The character's image is not part of this submission's references.
+    _gate(monkeypatch, supported=True)
     voice_urls, entries = r2v_execution._resolve_reference_voices(
         project=project,
         project_root=Path("/tmp"),
