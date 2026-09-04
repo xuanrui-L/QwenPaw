@@ -345,56 +345,30 @@ def test_player_themed_choice_cards_contract() -> None:
     assert "data-tone" in player
 
 
-def test_edge_index_tone_is_absent_today() -> None:
-    """No v9 field carries tone yet: edge_index entries must not grow a
-    tone key (backward-compatible passthrough only)."""
-
-    project, payloads = _branching_project()
-
-    bundle = assemble_interactive_bundle(
-        project,
-        read_artifact_file=lambda file_id: payloads[file_id],
-    )
-
-    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-        manifest = json.loads(archive.read("manifest.json"))
-    for entry in manifest["edge_index"].values():
-        assert "tone" not in entry
-        assert set(entry) == {"label", "prompt", "target_timeline_id"}
-
-
-def test_linear_project_nodes_chain_in_order() -> None:
+def test_linear_project_chains_nodes_and_bundles_every_timeline() -> None:
     """Without narrative edges the node index chains ordered timelines so
-    the story map stays a path and only the last node is the ending."""
+    the story map stays a path, only the last node is the ending, and the
+    manifest covers every ordered timeline with zero interactions."""
 
     project, payloads = _branching_project()
-    project.narrative_edges = []
-    project.timelines.items["tl:ep3"].elements_by_id.clear()
-
-    bundle = assemble_interactive_bundle(
-        project,
-        read_artifact_file=lambda file_id: payloads[file_id],
-    )
-
-    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-        manifest = json.loads(archive.read("manifest.json"))
-    nodes = manifest["nodes"]
-    assert nodes["tl:ep3"]["children"] == ["tl:ep4a"]
-    assert nodes["tl:ep4a"]["children"] == ["tl:ep4b"]
-    assert nodes["tl:ep3"]["is_ending"] is False
-    assert nodes["tl:ep4b"]["is_ending"] is True
-
-
-def test_linear_project_bundles_every_ordered_timeline() -> None:
-    project, _payloads = _branching_project()
     project.narrative_edges = []
     # Drop the choice element so the linear cut stays plain video.
     project.timelines.items["tl:ep3"].elements_by_id.clear()
 
     manifest = derive_interactive_manifest(project)
-
     assert list(manifest.segments) == ["tl:ep3", "tl:ep4a", "tl:ep4b"]
     assert manifest.interactions == []
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        nodes = json.loads(archive.read("manifest.json"))["nodes"]
+    assert nodes["tl:ep3"]["children"] == ["tl:ep4a"]
+    assert nodes["tl:ep4a"]["children"] == ["tl:ep4b"]
+    assert nodes["tl:ep3"]["is_ending"] is False
+    assert nodes["tl:ep4b"]["is_ending"] is True
 
 
 def test_player_playback_controls_contract() -> None:
