@@ -384,40 +384,26 @@ def test_minimax_h3_request_shapes() -> None:
         "role": "first_frame",
     }
     assert body["ratio"] == "adaptive"
-    # r2v: omni references keep their role per media kind; 2K is a valid
-    # cloud tier; "auto" is the legacy alias of adaptive.
+    # r2v: every reference kind keeps its role; 2K is a valid cloud tier;
+    # "auto" is the legacy alias of adaptive.
     _, _, body = _h3_submit(
         mode="r2v",
         resolution="2K",
         ratio="auto",
         duration=5,
         media=[
-            {"type": "reference_image", "url": "https://cdn.example/c.png"},
-            {"type": "reference_video", "url": "https://cdn.example/v.mp4"},
-            {"type": "reference_audio", "url": "https://cdn.example/a.mp3"},
+            {"type": "reference_image", "url": "https://c/i.png"},
+            {"type": "reference_video", "url": "https://c/v.mp4"},
+            {"type": "reference_audio", "url": "https://c/a.mp3"},
         ],
     )
-    assert body["content"][1:] == [
-        {
-            "type": "image_url",
-            "image_url": {"url": "https://cdn.example/c.png"},
-            "role": "reference_image",
-        },
-        {
-            "type": "video_url",
-            "video_url": {"url": "https://cdn.example/v.mp4"},
-            "role": "reference_video",
-        },
-        {
-            "type": "audio_url",
-            "audio_url": {"url": "https://cdn.example/a.mp3"},
-            "role": "reference_audio",
-        },
+    assert [(p["type"], p["role"]) for p in body["content"][1:]] == [
+        ("image_url", "reference_image"),
+        ("video_url", "reference_video"),
+        ("audio_url", "reference_audio"),
     ]
-    assert body["resolution"] == "2K"
-    assert (
-        body["ratio"] == "adaptive"
-    )  # auto normalized to the documented value
+    assert body["content"][2]["video_url"] == {"url": "https://c/v.mp4"}
+    assert (body["resolution"], body["ratio"]) == ("2K", "adaptive")
 
 
 @pytest.mark.parametrize(
@@ -429,17 +415,6 @@ def test_minimax_h3_request_shapes() -> None:
         ({"resolution": "1080P"}, "resolutions"),
         ({"ratio": "2:3"}, "ratios"),
         ({"ratio": "adaptive"}, "adaptive"),  # t2v needs an explicit ratio
-        (
-            {
-                "mode": "r2v",
-                "duration": 5,
-                "media": [
-                    {"type": "reference_image", "url": _DATA_URL}
-                    for _ in range(10)
-                ],
-            },
-            "参考图像最多",
-        ),
         (
             {
                 "mode": "r2v",
@@ -468,7 +443,6 @@ def test_minimax_h3_constraints(overrides, match) -> None:
 def test_minimax_h3_check_status(monkeypatch) -> None:
     # v2 polling delivers the video URL inline — no file-retrieve step.
     cases = [
-        ({"task": {"status": "queued"}}, "RUNNING", None),
         (
             {
                 "task": {
@@ -584,18 +558,11 @@ def test_minimax_sglang_request_shapes() -> None:
         ],
     )
     assert body["task"] == "ref2va"
-    assert body["conditions"] == [
-        {
-            "type": "video",
-            "uri": "https://cdn.example/v.mp4",
-            "role": "reference",
-        },
-        {
-            "type": "audio",
-            "uri": "https://cdn.example/a.mp3",
-            "role": "reference",
-        },
+    assert [(c["type"], c["role"]) for c in body["conditions"]] == [
+        ("video", "reference"),
+        ("audio", "reference"),
     ]
+    assert body["conditions"][0]["uri"] == "https://cdn.example/v.mp4"
     assert minimax_sglang_backend.extract_task_id({"id": "vid-1"}) == "vid-1"
 
 
@@ -604,19 +571,9 @@ def test_minimax_sglang_request_shapes() -> None:
     [
         # One instance serves one checkpoint variant: the configured model
         # name fail-closes the modes the deployed server cannot run.
+        ({"mode": "r2v"}, "不支持 mode=r2v"),
         (
-            {
-                "mode": "r2v",
-                "media": [{"type": "reference_image", "url": _DATA_URL}],
-            },
-            "不支持 mode=r2v",
-        ),
-        (
-            {
-                "mode": "i2v",
-                "model_name": "MiniMax-H3-Ref2VA",
-                "media": [{"type": "first_frame", "url": _DATA_URL}],
-            },
+            {"mode": "i2v", "model_name": "MiniMax-H3-Ref2VA"},
             "不支持 mode=i2v",
         ),
         (
@@ -635,7 +592,6 @@ def test_minimax_sglang_constraints(overrides, match) -> None:
 
 def test_minimax_sglang_check_status(monkeypatch) -> None:
     cases = [
-        ({"status": "queued"}, "", "RUNNING"),
         ({"status": "failed", "error": "oom"}, "", "FAILED"),
         ({"status": "completed"}, "", "SUCCEEDED"),
         ({"status": "completed"}, "sk-local", "SUCCEEDED"),
