@@ -385,11 +385,11 @@ def test_minimax_h3_request_shapes() -> None:
     }
     assert body["ratio"] == "adaptive"
     # r2v: omni references keep their role per media kind; 2K is a valid
-    # cloud tier.
+    # cloud tier; "auto" is the legacy alias of adaptive.
     _, _, body = _h3_submit(
         mode="r2v",
         resolution="2K",
-        ratio="adaptive",
+        ratio="auto",
         duration=5,
         media=[
             {"type": "reference_image", "url": "https://cdn.example/c.png"},
@@ -415,6 +415,9 @@ def test_minimax_h3_request_shapes() -> None:
         },
     ]
     assert body["resolution"] == "2K"
+    assert (
+        body["ratio"] == "adaptive"
+    )  # auto normalized to the documented value
 
 
 @pytest.mark.parametrize(
@@ -534,8 +537,9 @@ def _sglang_submit(**overrides):
 
 
 def test_minimax_sglang_request_shapes() -> None:
-    # t2va: keyless deployments send no Authorization header.
-    url, headers, body = _sglang_submit()
+    # t2va: keyless deployments send no Authorization header; an empty
+    # ratio pins the official t2va script value 16:9.
+    url, headers, body = _sglang_submit(ratio="")
     assert url == "http://localhost:30010/v1/videos"
     assert "Authorization" not in headers
     assert body == {
@@ -621,6 +625,7 @@ def test_minimax_sglang_request_shapes() -> None:
         ),
         ({"resolution": "1080P"}, "768P"),  # self-hosted H3-Base is 768P-only
         ({"duration": 16}, "4-15"),
+        ({"ratio": "adaptive"}, "adaptive"),  # t2v needs an explicit ratio
     ],
 )
 def test_minimax_sglang_constraints(overrides, match) -> None:

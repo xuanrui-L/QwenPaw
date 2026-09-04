@@ -44,6 +44,8 @@ directly at ``task.content.url`` — there is no file-retrieve step.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import httpx
 
 from models.video_capabilities import (
@@ -137,6 +139,10 @@ def _h3_media_part(part_type: str, url: str, role: str) -> dict:
 
 def _validated_h3_ratio(ratio: str, mode: str, model_name: str) -> str:
     normalized = (ratio or "").strip().casefold()
+    if normalized == "auto":
+        # Legacy alias of the documented "adaptive" value, kept consistent
+        # across providers (the Seedance branch documents the same alias).
+        normalized = "adaptive"
     if not normalized:
         normalized = "16:9" if mode == "t2v" else "adaptive"
     if normalized not in MINIMAX_H3_RATIOS:
@@ -382,7 +388,7 @@ async def _check_h3_status(
     base = _api_base(base_url)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(
-            f"{base}/v2/query/video_generation/{task_id}",
+            f"{base}/v2/query/video_generation/{quote(task_id, safe='')}",
             headers=headers,
         )
         if resp.status_code >= 400:

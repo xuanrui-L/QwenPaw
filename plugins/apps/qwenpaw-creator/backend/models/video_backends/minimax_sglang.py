@@ -32,6 +32,8 @@ carry ``Authorization: Bearer``.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import httpx
 
 from models.video_capabilities import (
@@ -93,10 +95,21 @@ def _validated_duration(
         )
 
 
-def _validated_aspect_ratio(ratio: str, model_name: str) -> str:
+def _validated_aspect_ratio(ratio: str, mode: str, model_name: str) -> str:
     normalized = (ratio or "").strip().casefold()
-    if not normalized or normalized in {"adaptive", "auto"}:
+    if normalized in {"adaptive", "auto"}:
+        # The documented contract (and the cloud v2 path) rejects
+        # adaptive for text-only generation.
+        if mode == "t2v":
+            raise ModelError(
+                "MiniMax H3 t2v does not accept ratio=adaptive; "
+                "pick an explicit aspect ratio",
+                model_name=model_name,
+            )
         return "auto"
+    if not normalized:
+        # The official t2va reproduction script pins 16:9 explicitly.
+        return "16:9" if mode == "t2v" else "auto"
     if normalized not in MINIMAX_H3_RATIOS:
         raise ModelError(
             f"MiniMax H3 supports ratios {sorted(MINIMAX_H3_RATIOS)}, "
@@ -208,7 +221,11 @@ def build_submit_request(
         "conditions": conditions,
         "target": {
             "short_edge": H3_SHORT_EDGE,
-            "aspect_ratio": _validated_aspect_ratio(ratio, model_name),
+            "aspect_ratio": _validated_aspect_ratio(
+                ratio,
+                normalized_mode,
+                model_name,
+            ),
             "duration_seconds": duration,
         },
     }
@@ -236,7 +253,7 @@ async def check_status(
     base = _api_base(base_url)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(
-            f"{base}/v1/videos/{task_id}",
+            f"{base}/v1/videos/{quote(task_id, safe='')}",
             headers=_auth_headers(api_key),
         )
         if resp.status_code >= 400:
@@ -252,7 +269,9 @@ async def check_status(
         result: dict = {
             "task_id": task_id,
             "status": "SUCCEEDED",
-            "result_url": f"{base}/v1/videos/{task_id}/content",
+            "result_url": (
+                f"{base}/v1/videos/{quote(task_id, safe='')}/content"
+            ),
         }
         if api_key:
             result["download_auth"] = BEARER_DOWNLOAD_AUTH
