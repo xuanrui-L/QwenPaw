@@ -197,6 +197,11 @@ def auto_snapshot_timelines(
     stamp = now.strftime(_SNAPSHOT_STAMP_FORMAT)
 
     for timeline_id in sorted(changed_ids):
+        # Snapshots are frozen copies: re-snapshotting one would mint
+        # "snapshot:snapshot:..." ids, and since every nested id is new the
+        # dedupe window never bounds the growth.
+        if timeline_id.startswith(_SNAPSHOT_PREFIX):
+            continue
         base_timeline = base_items.get(timeline_id)
         if base_timeline is None:
             continue
