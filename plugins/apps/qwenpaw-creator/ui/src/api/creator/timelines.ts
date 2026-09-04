@@ -60,20 +60,37 @@ export function deleteTimelineOperations(
   project: ProjectDocument,
   timelineId: string,
 ): ProjectEditOperation[] {
-  const idx = project.timelines.order.indexOf(timelineId);
-  if (idx < 0) return [];
-  return [
-    {
+  if (!project.timelines.order.includes(timelineId)) return [];
+  // A base timeline takes its snapshots with it — the snapshot panel only
+  // lists the current timeline's prefix, so survivors would be unreachable.
+  const doomed = new Set([
+    timelineId,
+    ...project.timelines.order.filter((id) =>
+      id.startsWith(`${SNAPSHOT_PREFIX}${timelineId}:`),
+    ),
+  ]);
+  const operations: ProjectEditOperation[] = [];
+  for (const id of doomed) {
+    operations.push({
       op: "remove",
-      path: `/timelines/items/${timelineId}`,
-      before: project.timelines.items[timelineId],
-    },
-    {
+      path: `/timelines/items/${id}`,
+      before: project.timelines.items[id],
+    });
+  }
+  // Descending order indices: removing a lower index first would shift the
+  // later ones and make their `before` hashes miss.
+  const indices = project.timelines.order
+    .map((id, index) => ({ id, index }))
+    .filter(({ id }) => doomed.has(id))
+    .sort((a, b) => b.index - a.index);
+  for (const { id, index } of indices) {
+    operations.push({
       op: "remove",
-      path: `/timelines/order/${idx}`,
-      before: project.timelines.order[idx],
-    },
-  ];
+      path: `/timelines/order/${index}`,
+      before: id,
+    });
+  }
+  return operations;
 }
 
 export function duplicateTimelineOperations(
@@ -119,10 +136,6 @@ export function duplicateTimelineOperations(
 // auto_snapshot_timelines remapping).
 
 const SNAPSHOT_PREFIX = "snapshot:";
-
-export function isSnapshotTimelineId(timelineId: string): boolean {
-  return timelineId.startsWith(SNAPSHOT_PREFIX);
-}
 
 /** Snapshots of one base timeline, newest first. */
 export function listTimelineSnapshots(
@@ -228,10 +241,15 @@ export function createSnapshotOperations(
   const source = project.timelines.items[timelineId];
   if (!source) return [];
   const prefix = `${SNAPSHOT_PREFIX}${timelineId}:`;
-  const count = project.timelines.order.filter((id) =>
-    id.startsWith(prefix),
-  ).length;
-  const snapshotId = `${prefix}${count + 1}`;
+  // Max suffix + 1, not count + 1: snapshots are deletable, and counting
+  // after a deletion would collide with a surviving snapshot id.
+  const highest = project.timelines.order
+    .filter((id) => id.startsWith(prefix))
+    .reduce((max, id) => {
+      const suffix = Number(id.slice(prefix.length));
+      return Number.isInteger(suffix) ? Math.max(max, suffix) : max;
+    }, 0);
+  const snapshotId = `${prefix}${highest + 1}`;
   const orderIndex = project.timelines.order.length;
   return [
     {
@@ -348,6 +366,16 @@ export function snapshotMatchesTimeline(
 ): boolean {
   const operations = restoreSnapshotOperations(project, snapshotId);
   if (!operations.length) return false;
+  // Cheap short-circuit before the full canonical comparison: differing
+  // element counts can never match, and the panel recomputes on every poll.
+  const [elementsOp] = operations;
+  const beforeKeys = Object.keys(
+    (elementsOp.before ?? {}) as Record<string, unknown>,
+  );
+  const valueKeys = Object.keys(
+    (elementsOp.value ?? {}) as Record<string, unknown>,
+  );
+  if (beforeKeys.length !== valueKeys.length) return false;
   return operations.every(
     (operation) =>
       stableStringify(operation.before ?? null) ===

@@ -170,9 +170,14 @@ async def regenerate_narration(
         def _rebind() -> None:
             fresh = services.projects.read(project_id)
             candidate = fresh.project.model_copy(deep=True)
-            target = candidate.timelines.items[timeline_id].elements_by_id[
-                element_id
-            ]
+            fresh_timeline = candidate.timelines.items.get(timeline_id)
+            target = (
+                fresh_timeline.elements_by_id.get(element_id)
+                if fresh_timeline
+                else None
+            )
+            if target is None:
+                raise NotFoundError("元素在重新合成期间被删除")
             if not isinstance(target.creation, AudioCreation):
                 raise ValidationError("元素类型在重新合成期间被修改")
             target.creation.source_asset_version_id = new_version_id
