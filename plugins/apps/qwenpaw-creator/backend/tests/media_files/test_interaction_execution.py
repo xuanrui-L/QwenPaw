@@ -204,21 +204,18 @@ def test_persistently_bad_output_raises_model_error(tmp_path, monkeypatch):
     assert element.creation.motion is None
 
 
-def test_script_output_is_rejected(tmp_path, monkeypatch):
+def test_bad_inputs_are_rejected_fail_closed(tmp_path, monkeypatch):
     services = _services(tmp_path)
+    # Model output smuggling a <script> is a deterministic model error.
     scripted = GOOD_HTML.replace(
         "</body>",
         "<script>alert(1)</script></body>",
     )
-    _mock_chat(monkeypatch, [scripted, scripted])
-
+    calls = _mock_chat(monkeypatch, [scripted, scripted, GOOD_HTML])
     with pytest.raises(ModelError, match="script"):
         _execute(services)
-
-
-def test_unknown_element_is_rejected(tmp_path, monkeypatch):
-    services = _services(tmp_path)
-    _mock_chat(monkeypatch, [GOOD_HTML])
+    # An unknown target element never reaches the model.
+    del calls[:]
     with pytest.raises(ValidationError, match="element 不存在"):
         asyncio.run(
             execute_file_interaction_command(
@@ -229,3 +226,4 @@ def test_unknown_element_is_rejected(tmp_path, monkeypatch):
                 idempotency_key="dag-interaction-x",
             ),
         )
+    assert not calls
