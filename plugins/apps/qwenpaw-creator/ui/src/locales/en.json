@@ -1273,7 +1273,9 @@
     "snapshotDeleteTitle": "Delete snapshot",
     "snapshotDeleteDesc": "Deleting “{{name}}” cannot be undone. Delete it?",
     "snapshotDeleted": "Snapshot deleted",
-    "snapshotPreApplyBackup": "Backup before apply"
+    "snapshotPreApplyBackup": "Backup before apply",
+    "snapshotInUse": "Applied",
+    "snapshotCurrentMatches": "Content matches “{{name}}”"
   },
   "editPlan": {
     "title": "Edit plan",
@@ -1354,7 +1356,7 @@
     "step3Title": "Step 3: Enter Creative Workspace",
     "step3Desc": "Created projects appear in 'My Projects', click a project card to enter the creative workspace: Agent will plan the creative brief and timeline and generate frames. First-time entry also has a dedicated tour.",
     "projectTourBrief": "Script & brief live in the Blueprint",
-    "projectTourBriefDesc": "The creative brief and per-episode scripts now live on the Project Blueprint page; this page focuses on timeline editing, and the Episodes tab in the left sidebar switches between episodes.",
+    "projectTourBriefDesc": "The creative outline and each episode's script are reviewed on the Project Blueprint page; this page focuses on timeline editing, and the Episodes tab in the left sidebar switches between episodes.",
     "projectTourTimeline": "Timeline",
     "projectTourTimelineDesc": "Frames, edits, subtitle effects and sound are layered on the timeline. During new project creation, Agent is planning, track content appears in real-time as planning and generation results come in.",
     "projectTourDetail": "Content Detail",
@@ -1408,7 +1410,9 @@
     "modelGuideGoConfigure": "Configure →",
     "modelGuideWhatModels": "What models for what scenarios?",
     "modelGuideProviders": "Currently supported providers / protocols",
-    "modelGuideSetupDesc": "Fill in Base URL, API Key and Model Name in 'Model Configuration', enable after passing 'Test Connection'; VLM can directly reuse multimodal-capable LLM configuration."
+    "modelGuideSetupDesc": "Fill in Base URL, API Key and Model Name in 'Model Configuration', enable after passing 'Test Connection'; VLM can directly reuse multimodal-capable LLM configuration.",
+    "projectTourSnapshot": "History snapshots",
+    "projectTourSnapshotDesc": "Snapshots keep timeline baselines: the Agent backs up automatically before big rewrites, and you can create one manually. Pick a snapshot, toggle the eye for an A/B compare, and Apply first backs up the current state before restoring the chosen version (the applied one is badged). Unwanted snapshots can be deleted anytime."
   },
   "tourMocks": {
     "sampleTimeline": "Sample: Timeline after planning",
@@ -1452,7 +1456,17 @@
     "collapsePanel": "Collapse panel",
     "expandPanel": "Expand panel",
     "panelExpanded": "Panel is expanded; after collapsing, a handle will appear on the right edge",
-    "panelCollapsed": "Collapsed: click the handle on the right edge, or click the button again to expand"
+    "panelCollapsed": "Collapsed: click the handle on the right edge, or click the button again to expand",
+    "sampleSnapshots": "Sample: snapshot list",
+    "snapshotCurrentName": "The Last Gardener: A Flower of Hope",
+    "snapshotCurrentTag": "Current",
+    "snapshotMatches": "Content matches “Auto snapshot”",
+    "snapshotRowName": "Auto snapshot",
+    "snapshotAppliedTag": "Applied",
+    "snapshotBackupName": "Backup before apply",
+    "snapshotApply": "Apply snapshot",
+    "snapshotApplyHint": "Backs up, then restores",
+    "snapshotCreate": "Create snapshot"
   },
   "inspiration": {
     "promoVideo": "Product Promo Video",

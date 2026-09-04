@@ -325,3 +325,32 @@ export function restoreSnapshotOperations(
     },
   ];
 }
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** Whether the base timeline's current content equals this snapshot —
+ *  i.e. applying it would be a no-op. Powers the "已应用" badge so the user
+ *  can see which version the live timeline currently matches. */
+export function snapshotMatchesTimeline(
+  project: ProjectDocument,
+  snapshotId: string,
+): boolean {
+  const operations = restoreSnapshotOperations(project, snapshotId);
+  if (!operations.length) return false;
+  return operations.every(
+    (operation) =>
+      stableStringify(operation.before ?? null) ===
+      stableStringify(operation.value ?? null),
+  );
+}

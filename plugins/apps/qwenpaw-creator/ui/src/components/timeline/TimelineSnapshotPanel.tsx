@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Input, message, Modal, Popover } from "antd";
 import { Camera, Eye, History, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -10,6 +10,7 @@ import {
   deleteTimelineOperations,
   listTimelineSnapshots,
   restoreSnapshotOperations,
+  snapshotMatchesTimeline,
 } from "@/api/creator/timelines";
 
 /** "快照 · name · 2026-09-03 14:22" → ["name 的部分", "时间部分"] */
@@ -73,6 +74,17 @@ export default function TimelineSnapshotPanel({
     ? compareId
     : null;
   const previewing = isSnapshot(compareId) ? compareId : null;
+  // Which snapshot the live content currently equals (i.e. the applied one);
+  // derived by content so a later manual edit clears the badge naturally.
+  const matchedId = useMemo(() => {
+    if (!open) return null;
+    return (
+      snapshots.find((snapshot) =>
+        snapshotMatchesTimeline(project, snapshot.timeline_id),
+      )?.timeline_id ?? null
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, project, timeline.timeline_id]);
 
   const snapshotTitle = (snapshot: TimelineDocument): [string, string] => {
     const [title, time] = splitSnapshotName(snapshot.name || "");
@@ -212,7 +224,11 @@ export default function TimelineSnapshotPanel({
         {entryRow(
           timeline.timeline_id,
           timeline.name || timeline.title || t("timeline.snapshotCurrent"),
-          "",
+          matchedId
+            ? t("timeline.snapshotCurrentMatches", {
+                name: snapshotTitle(project.timelines.items[matchedId])[0],
+              })
+            : "",
           <span className="shrink-0 rounded border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
             {t("timeline.snapshotCurrent")}
           </span>,
@@ -226,11 +242,20 @@ export default function TimelineSnapshotPanel({
           const [title, time] = snapshotTitle(snapshot);
           const picked = selected === snapshot.timeline_id;
           const inPreview = previewing === snapshot.timeline_id;
+          const applied = matchedId === snapshot.timeline_id;
           return entryRow(
             snapshot.timeline_id,
             title,
             time,
             <span className="flex shrink-0 items-center gap-1.5">
+              {applied && (
+                <span
+                  data-snapshot-applied={snapshot.timeline_id}
+                  className="rounded border border-[var(--color-accent)]/40 bg-[var(--color-accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]"
+                >
+                  {t("timeline.snapshotInUse")}
+                </span>
+              )}
               {picked && (
                 <>
                   <span

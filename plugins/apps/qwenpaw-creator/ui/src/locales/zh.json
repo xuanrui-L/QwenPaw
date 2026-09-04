@@ -1273,7 +1273,9 @@
     "snapshotDeleteTitle": "删除快照",
     "snapshotDeleteDesc": "删除「{{name}}」后无法恢复，确定删除吗？",
     "snapshotDeleted": "快照已删除",
-    "snapshotPreApplyBackup": "应用前备份"
+    "snapshotPreApplyBackup": "应用前备份",
+    "snapshotInUse": "已应用",
+    "snapshotCurrentMatches": "内容与「{{name}}」一致"
   },
   "editPlan": {
     "title": "剪辑契约",
@@ -1354,7 +1356,7 @@
     "step3Title": "第三步：进入创作工作区",
     "step3Desc": "项目创建后会出现在「我的项目」中，点击项目卡片即可进入创作工作区：Agent 会规划创作总纲与时间轴并生成画面。首次进入工作区还有一段专属导览。",
     "projectTourBrief": "剧本与总纲在项目蓝图",
-    "projectTourBriefDesc": "创作总纲与每集剧本已移至「项目蓝图」页审阅；本页专注时间线编排，左侧边栏的「剧集列表」标签可快速切换分集。",
+    "projectTourBriefDesc": "创作总纲与每集剧本在「项目蓝图」页审阅；本页专注时间线编排，左侧边栏的「剧集列表」标签可快速切换分集。",
     "projectTourTimeline": "时间轴",
     "projectTourTimelineDesc": "画面、剪辑、字幕动效与声音在时间轴上叠加呈现。新建项目时 Agent 正在规划，轨道内容会随规划与生成结果实时出现。",
     "projectTourDetail": "内容详情",
@@ -1408,7 +1410,9 @@
     "modelGuideGoConfigure": "去配置 →",
     "modelGuideWhatModels": "什么场景需要配什么模型？",
     "modelGuideProviders": "当前支持的提供商 / 协议",
-    "modelGuideSetupDesc": "在「模型配置」中填写 Base URL、API Key 与模型名称，并通过「测试连通性」后启用；VLM 可直接复用支持多模态的 LLM 配置。"
+    "modelGuideSetupDesc": "在「模型配置」中填写 Base URL、API Key 与模型名称，并通过「测试连通性」后启用；VLM 可直接复用支持多模态的 LLM 配置。",
+    "projectTourSnapshot": "历史快照",
+    "projectTourSnapshotDesc": "「历史快照」为时间线留底：Agent 大改前会自动备份，你也可以手动创建快照。选中一条快照后，点眼睛进入 A/B 对比，「应用快照」会先备份当前状态再恢复所选版本（列表中会标出「已应用」），不需要的快照可随时删除。"
   },
   "tourMocks": {
     "sampleTimeline": "示例：规划完成后的时间轴",
@@ -1452,7 +1456,17 @@
     "collapsePanel": "收起面板",
     "expandPanel": "展开面板",
     "panelExpanded": "面板当前已展开；收起后右缘会出现贴边把手",
-    "panelCollapsed": "已收起：点击屏幕右缘的把手，或再点一次按钮展开"
+    "panelCollapsed": "已收起：点击屏幕右缘的把手，或再点一次按钮展开",
+    "sampleSnapshots": "示例：快照列表",
+    "snapshotCurrentName": "末日花匠：一朵花的希望",
+    "snapshotCurrentTag": "当前版本",
+    "snapshotMatches": "内容与「自动快照」一致",
+    "snapshotRowName": "自动快照",
+    "snapshotAppliedTag": "已应用",
+    "snapshotBackupName": "应用前备份",
+    "snapshotApply": "应用快照",
+    "snapshotApplyHint": "先备份再恢复",
+    "snapshotCreate": "创建快照"
   },
   "inspiration": {
     "promoVideo": "产品宣传视频",
