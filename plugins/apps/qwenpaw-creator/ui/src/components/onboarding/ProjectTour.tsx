@@ -7,6 +7,7 @@ import {
   LiveSelectionDemo,
   MockAgentChat,
   MockElementDetail,
+  MockSnapshotPanel,
   MockTimeline,
 } from "./TourMocks";
 
@@ -43,6 +44,16 @@ export default function ProjectTour() {
         <div className="space-y-2">
           <p>{t("onboarding.projectTourTimelineDesc")}</p>
           <MockTimeline />
+        </div>
+      ),
+    },
+    {
+      selectors: ["[data-snapshot-entry]"],
+      title: t("onboarding.projectTourSnapshot"),
+      description: (
+        <div className="space-y-2">
+          <p>{t("onboarding.projectTourSnapshotDesc")}</p>
+          <MockSnapshotPanel />
         </div>
       ),
     },
