@@ -26,7 +26,6 @@ from services.file_agent_runtime import notify_creator_agent_runtime
 from services.media_files.visual_reference_resolution import (
     preview_r2v_reference_order,
 )
-from services.project_files.auto_snapshot import auto_snapshot_timelines
 from services.project_files.commit import (
     ActiveReviewConflictError,
     CommitJournalState,
@@ -754,10 +753,6 @@ async def patch_project(
                     frontend_edit_hold.element_ids_from_pointers(
                         operation.path for operation in request.operations
                     ),
-                )
-                auto_snapshot_timelines(
-                    base.project.model_dump(mode="json"),
-                    candidate,
                 )
                 result = await services.commit_candidate(
                     base=base,

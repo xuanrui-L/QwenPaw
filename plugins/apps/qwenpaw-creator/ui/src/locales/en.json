@@ -1267,7 +1267,13 @@
     "compareAB": "A/B Compare",
     "exitCompare": "Exit Compare",
     "deleteConfirmTitle": "Delete Timeline",
-    "deleteConfirmContent": "Are you sure you want to delete \"{{name}}\"? All elements on this timeline will be removed."
+    "deleteConfirmContent": "Are you sure you want to delete \"{{name}}\"? All elements on this timeline will be removed.",
+    "snapshotAutoName": "Auto snapshot",
+    "snapshotDelete": "Delete snapshot",
+    "snapshotDeleteTitle": "Delete snapshot",
+    "snapshotDeleteDesc": "Deleting “{{name}}” cannot be undone. Delete it?",
+    "snapshotDeleted": "Snapshot deleted",
+    "snapshotPreApplyBackup": "Backup before apply"
   },
   "editPlan": {
     "title": "Edit plan",

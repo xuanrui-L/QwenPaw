@@ -1267,7 +1267,13 @@
     "compareAB": "A/B 对比",
     "exitCompare": "退出对比",
     "deleteConfirmTitle": "删除时间线",
-    "deleteConfirmContent": "确定要删除「{{name}}」吗？该时间线上的所有元素都将被移除。"
+    "deleteConfirmContent": "确定要删除「{{name}}」吗？该时间线上的所有元素都将被移除。",
+    "snapshotAutoName": "自动快照",
+    "snapshotDelete": "删除快照",
+    "snapshotDeleteTitle": "删除快照",
+    "snapshotDeleteDesc": "删除「{{name}}」后无法恢复，确定删除吗？",
+    "snapshotDeleted": "快照已删除",
+    "snapshotPreApplyBackup": "应用前备份"
   },
   "editPlan": {
     "title": "剪辑契约",
