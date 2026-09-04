@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Input, message, Modal, Popover } from "antd";
-import { Camera, Eye, History } from "lucide-react";
+import { Camera, Eye, History, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectDocument, TimelineDocument } from "@/contracts/creator";
 import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import {
   createSnapshotOperations,
+  deleteTimelineOperations,
   listTimelineSnapshots,
   restoreSnapshotOperations,
 } from "@/api/creator/timelines";
@@ -18,12 +19,30 @@ function splitSnapshotName(name: string): [string, string] {
   return [name, ""];
 }
 
+/** Internal ids like "timeline:main" must never render as a user-facing
+    snapshot title (legacy data predates the friendly-name backend fix). */
+function isInternalTimelineId(title: string): boolean {
+  return /^(snapshot:)?timeline:/.test(title.trim());
+}
+
+function nowStamp(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(
+    2,
+    "0",
+  )}-${String(now.getDate()).padStart(2, "0")} ${String(
+    now.getHours(),
+  ).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+}
+
 /**
  * 历史快照 popover (design 84:039752): entry pill on the transport row; the
  * panel lists the current version plus this timeline's snapshots. Clicking a
  * row only selects it (radio); the eye toggle on the selected row opens the
- * A/B compare preview; 应用快照 restores the selected snapshot onto the base
- * timeline; 创建快照 freezes the current state under a name.
+ * A/B compare preview; 应用快照 first backs up the current state and then
+ * restores the selected snapshot onto the base timeline; the trash icon on
+ * the selected row deletes that snapshot; 创建快照 freezes the current state
+ * under a name.
  */
 export default function TimelineSnapshotPanel({
   project,
@@ -39,14 +58,15 @@ export default function TimelineSnapshotPanel({
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [busy, setBusy] = useState(false);
-  const [localSelected, setLocalSelected] = useState<string | null>(null);
+  // Store-held selection: compare mode and background project polls both
+  // remount this panel, and a component-local pick would be wiped.
+  const localSelected = useTimelineStore((s) => s.snapshotSelectedId);
+  const setLocalSelected = useTimelineStore((s) => s.setSnapshotSelectedId);
   const compareId = useTimelineStore((s) => s.compareTimelineId);
   const setCompareTimelineId = useTimelineStore((s) => s.setCompareTimelineId);
   const snapshots = listTimelineSnapshots(project, timeline.timeline_id);
   const isSnapshot = (id: string | null): id is string =>
     !!id && snapshots.some((s) => s.timeline_id === id);
-  // Entering compare remounts the panel (the transport moves into the A
-  // canvas); fall back to the previewed snapshot so the selection survives.
   const selected = isSnapshot(localSelected)
     ? localSelected
     : isSnapshot(compareId)
@@ -54,18 +74,31 @@ export default function TimelineSnapshotPanel({
     : null;
   const previewing = isSnapshot(compareId) ? compareId : null;
 
+  const snapshotTitle = (snapshot: TimelineDocument): [string, string] => {
+    const [title, time] = splitSnapshotName(snapshot.name || "");
+    if (!title || isInternalTimelineId(title))
+      return [t("timeline.snapshotAutoName"), time];
+    return [title, time];
+  };
+
   const applySnapshot = () => {
     if (!selected) return;
-    const [label] = splitSnapshotName(
-      project.timelines.items[selected]?.name ?? selected,
-    );
+    const [label] = snapshotTitle(project.timelines.items[selected]);
     Modal.confirm({
       title: t("timeline.snapshotApplyTitle"),
       content: t("timeline.snapshotApplyDesc", { name: label }),
       okText: t("timeline.snapshotApply"),
       cancelText: t("common.cancel"),
       onOk: async () => {
-        const operations = restoreSnapshotOperations(project, selected);
+        // Back up the current state first so applying is always reversible.
+        const operations = [
+          ...createSnapshotOperations(
+            project,
+            timeline.timeline_id,
+            `${t("timeline.snapshotPreApplyBackup")} · ${nowStamp()}`,
+          ),
+          ...restoreSnapshotOperations(project, selected),
+        ];
         if (!operations.length) return;
         setBusy(true);
         try {
@@ -83,19 +116,38 @@ export default function TimelineSnapshotPanel({
     });
   };
 
+  const deleteSnapshot = (snapshotId: string) => {
+    const [label] = snapshotTitle(project.timelines.items[snapshotId]);
+    Modal.confirm({
+      title: t("timeline.snapshotDeleteTitle"),
+      content: t("timeline.snapshotDeleteDesc", { name: label }),
+      okText: t("timeline.snapshotDelete"),
+      okButtonProps: { danger: true },
+      cancelText: t("common.cancel"),
+      onOk: async () => {
+        const operations = deleteTimelineOperations(project, snapshotId);
+        if (!operations.length) return;
+        setBusy(true);
+        try {
+          await onPatch(operations);
+          setLocalSelected(null);
+          setCompareTimelineId(null);
+          message.success(t("timeline.snapshotDeleted"));
+        } catch (error) {
+          message.error((error as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      },
+    });
+  };
+
   const createSnapshot = async () => {
     const name = createName.trim() || t("timeline.snapshotDefaultName");
-    const now = new Date();
-    const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(
-      2,
-      "0",
-    )}-${String(now.getDate()).padStart(2, "0")} ${String(
-      now.getHours(),
-    ).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
     const operations = createSnapshotOperations(
       project,
       timeline.timeline_id,
-      `${name} · ${stamp}`,
+      `${name} · ${nowStamp()}`,
     );
     if (!operations.length) return;
     setBusy(true);
@@ -171,46 +223,67 @@ export default function TimelineSnapshotPanel({
           },
         )}
         {snapshots.map((snapshot) => {
-          const [title, time] = splitSnapshotName(snapshot.name);
+          const [title, time] = snapshotTitle(snapshot);
           const picked = selected === snapshot.timeline_id;
           const inPreview = previewing === snapshot.timeline_id;
           return entryRow(
             snapshot.timeline_id,
-            title || snapshot.timeline_id,
+            title,
             time,
             <span className="flex shrink-0 items-center gap-1.5">
               {picked && (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  data-snapshot-preview={snapshot.timeline_id}
-                  title={
-                    inPreview
-                      ? t("timeline.snapshotExitCompare")
-                      : t("timeline.snapshotPreview")
-                  }
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setCompareTimelineId(
-                      inPreview ? null : snapshot.timeline_id,
-                    );
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" && event.key !== " ") return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    setCompareTimelineId(
-                      inPreview ? null : snapshot.timeline_id,
-                    );
-                  }}
-                  className={`flex h-5 w-5 items-center justify-center rounded ${
-                    inPreview
-                      ? "bg-[var(--color-accent)] text-white"
-                      : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
-                  }`}
-                >
-                  <Eye className="h-3.5 w-3.5" />
-                </span>
+                <>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    data-snapshot-preview={snapshot.timeline_id}
+                    title={
+                      inPreview
+                        ? t("timeline.snapshotExitCompare")
+                        : t("timeline.snapshotPreview")
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setCompareTimelineId(
+                        inPreview ? null : snapshot.timeline_id,
+                      );
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setCompareTimelineId(
+                        inPreview ? null : snapshot.timeline_id,
+                      );
+                    }}
+                    className={`flex h-5 w-5 items-center justify-center rounded ${
+                      inPreview
+                        ? "bg-[var(--color-accent)] text-white"
+                        : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)]"
+                    }`}
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                  </span>
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    data-snapshot-delete={snapshot.timeline_id}
+                    title={t("timeline.snapshotDelete")}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      deleteSnapshot(snapshot.timeline_id);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      deleteSnapshot(snapshot.timeline_id);
+                    }}
+                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-danger)]"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </span>
+                </>
               )}
               <span
                 aria-hidden="true"

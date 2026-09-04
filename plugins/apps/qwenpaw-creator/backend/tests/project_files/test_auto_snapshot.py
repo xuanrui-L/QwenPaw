@@ -158,33 +158,55 @@ class TestAutoSnapshotTimelines:
         assert "主时间轴" in snapshot["name"]
         remapped = f"{sid}:{ELEM}"
         assert remapped in snapshot["elements_by_id"]
-        assert snapshot["elements_by_id"][remapped]["label"] == "Modified"
         assert sid in candidate["timelines"]["order"]
 
-    def test_snapshot_preserves_candidate_not_base(self):
+    def test_snapshot_freezes_base_and_live_keeps_the_edit(self):
+        """铁律①：用户修改的永远是 live timeline —— 快照只冻结修改前
+        的底稿，绝不吞掉 candidate 的变更。"""
         base = _minimal_project(elements={ELEM: _element(ELEM)})
         candidate = copy.deepcopy(base)
         _elems(candidate)[ELEM]["label"] = "Modified"
 
         auto_snapshot_timelines(base, candidate)
 
+        assert _elems(candidate)[ELEM]["label"] == "Modified"
         sid = "snapshot:timeline:main:1"
         snapshot = candidate["timelines"]["items"][sid]
         remapped = f"{sid}:{ELEM}"
-        assert snapshot["elements_by_id"][remapped]["label"] == "Modified"
+        assert snapshot["elements_by_id"][remapped]["label"] == "Shot 1"
 
-    def test_original_timeline_reverted_to_base(self):
-        base = _minimal_project(elements={ELEM: _element(ELEM)})
+    def test_snapshot_name_never_leaks_internal_ids(self):
+        base = _minimal_project(
+            name="",
+            elements={ELEM: _element(ELEM)},
+        )
         candidate = copy.deepcopy(base)
         _elems(candidate)[ELEM]["label"] = "Modified"
 
         auto_snapshot_timelines(base, candidate)
 
-        assert _elems(candidate)[ELEM]["label"] == "Shot 1"
-        sid = "snapshot:timeline:main:1"
-        snapshot = candidate["timelines"]["items"][sid]
-        remapped = f"{sid}:{ELEM}"
-        assert snapshot["elements_by_id"][remapped]["label"] == "Modified"
+        snapshot = candidate["timelines"]["items"]["snapshot:timeline:main:1"]
+        assert "timeline:main" not in snapshot["name"]
+        assert "时间线" in snapshot["name"]
+
+    def _age_snapshot(self, doc: dict, sid: str) -> None:
+        snapshot = doc["timelines"]["items"][sid]
+        snapshot["name"] = f"{snapshot['name'][:-16]}2020-01-01 00:00"
+
+    def test_fresh_auto_snapshot_suppresses_resnapshot(self):
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        c1 = copy.deepcopy(base)
+        _elems(c1)[ELEM]["label"] = "V2"
+        auto_snapshot_timelines(base, c1)
+        assert "snapshot:timeline:main:1" in c1["timelines"]["items"]
+
+        # 十分钟内的第二次编辑不再重复留底。
+        base2 = copy.deepcopy(c1)
+        c2 = copy.deepcopy(base2)
+        _elems(c2)[ELEM]["label"] = "V3"
+        auto_snapshot_timelines(base2, c2)
+        assert "snapshot:timeline:main:2" not in c2["timelines"]["items"]
+        assert _elems(c2)[ELEM]["label"] == "V3"
 
     def test_multiple_snapshots_increment(self):
         base = _minimal_project(elements={ELEM: _element(ELEM)})
@@ -194,6 +216,8 @@ class TestAutoSnapshotTimelines:
         auto_snapshot_timelines(base, c1)
         assert "snapshot:timeline:main:1" in c1["timelines"]["items"]
 
+        # 窗口外（把首个快照的时间戳做旧）再次编辑会继续编号留底。
+        self._age_snapshot(c1, "snapshot:timeline:main:1")
         base2 = copy.deepcopy(c1)
         c2 = copy.deepcopy(base2)
         _elems(c2)[ELEM]["label"] = "V3"
@@ -291,7 +315,9 @@ class TestSnapshotProjectValidation:
         Project.model_validate(raw)  # live baseline is valid
 
         base = copy.deepcopy(raw)
-        base["timelines"]["items"]["timeline:main"]["elements_by_id"] = {}
+        # The candidate drops the element; the frozen base copy carries the
+        # remapped slot reference under test.
+        raw["timelines"]["items"]["timeline:main"]["elements_by_id"] = {}
         auto_snapshot_timelines(base, raw)
         snapshot_ids = [
             tid

@@ -822,7 +822,9 @@ export default function PlanPage() {
                   A
                 </span>
                 <span className="truncate text-xs font-medium text-[var(--color-text-primary)]">
-                  {timeline?.name || timeline?.timeline_id}
+                  {timeline?.name ||
+                    timeline?.title ||
+                    t("timeline.snapshotCurrent")}
                 </span>
               </div>
               <TimelineCanvas
@@ -848,7 +850,17 @@ export default function PlanPage() {
                   B
                 </span>
                 <span className="truncate text-xs font-medium text-[var(--color-text-secondary)]">
-                  {compareTimeline.name || compareTimeline.timeline_id}
+                  {(() => {
+                    const raw = compareTimeline.name || "";
+                    const match =
+                      /^(?:快照\s*·\s*)?(.*?)(?:\s*·\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2})?$/.exec(
+                        raw,
+                      );
+                    const label = (match?.[1] ?? raw).trim();
+                    return !label || /^(snapshot:)?timeline:/.test(label)
+                      ? t("timeline.snapshotAutoName")
+                      : label;
+                  })()}
                 </span>
                 <button
                   type="button"
