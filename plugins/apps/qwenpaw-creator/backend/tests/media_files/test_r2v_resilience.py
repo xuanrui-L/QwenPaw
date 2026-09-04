@@ -296,10 +296,12 @@ def test_transient_download_failures_are_retried(tmp_path, monkeypatch):
     assert len(calls) == 3
 
 
-def test_veo_download_auth_is_resolved_only_for_materialization(
+def test_provider_download_auth_is_resolved_only_for_materialization(
     tmp_path,
     monkeypatch,
 ) -> None:
+    """Veo x-goog-api-key and SGLang bearer resolve at request time only."""
+
     from models import config as model_config
 
     sentinel = object()
@@ -334,6 +336,34 @@ def test_veo_download_auth_is_resolved_only_for_materialization(
     assert "new-secret" not in repr(captured["output"])
     assert captured["kwargs"]["request_headers"] == {
         "x-goog-api-key": "new-secret",
+    }
+
+    # Bearer flavor: a protected SGLang /content download resolves
+    # Authorization from the current video key, kept out of durable state.
+    bearer_durable = r2v_execution._durable_provider_result(
+        {
+            "status": "SUCCEEDED",
+            "result_url": "http://localhost:30010/v1/videos/vid-1/content",
+            "download_auth": "authorization-bearer",
+        },
+    )
+    monkeypatch.setattr(
+        model_config,
+        "get_video_api_key",
+        lambda: "sk-local",
+    )
+    captured.clear()
+    result = _run_materialize(
+        _mat_worker(tmp_path / "bearer", monkeypatch),
+        monkeypatch,
+        stub,
+        provider_result=bearer_durable,
+    )
+
+    assert result is sentinel
+    assert "sk-local" not in repr(captured["output"])
+    assert captured["kwargs"]["request_headers"] == {
+        "Authorization": "Bearer sk-local",
     }
 
 
