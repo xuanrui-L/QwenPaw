@@ -907,6 +907,23 @@ function variantReferenceCandidates(
     ...variant.reference_artifact_version_ids,
     ...variant.generated_artifact_version_ids,
   ]);
+  // Artifact versions produced by a visual entity's variants carry that
+  // entity's kind so the condensed asset-library picker can offer real
+  // category tabs; loose versions stay "material".
+  const kindByVersionId = new Map<string, PromptRefCandidate["kind"]>();
+  for (const entityId of project.visual.entities.order) {
+    const entity = project.visual.entities.items[entityId];
+    if (!entity) continue;
+    for (const variantId of entity.variants.order) {
+      for (const versionId of entity.variants.items[variantId]
+        ?.generated_artifact_version_ids ?? []) {
+        kindByVersionId.set(
+          versionId,
+          entity.kind as PromptRefCandidate["kind"],
+        );
+      }
+    }
+  }
   const sources = Object.values(project.assets.source_versions_by_id)
     .filter(
       (version) =>
@@ -915,6 +932,7 @@ function variantReferenceCandidates(
     .map((version) => ({
       id: version.version_id,
       name: version.name || version.version_id,
+      kind: "material" as const,
       thumbUrl: refImageThumbUrl(
         project,
         null,
@@ -931,6 +949,7 @@ function variantReferenceCandidates(
     .map((version) => ({
       id: version.version_id,
       name: version.name || version.version_id,
+      kind: kindByVersionId.get(version.version_id) ?? ("material" as const),
       thumbUrl: refImageThumbUrl(
         project,
         null,
