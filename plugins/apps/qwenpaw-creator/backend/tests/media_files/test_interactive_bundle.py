@@ -12,9 +12,13 @@ from datetime import datetime, timezone
 import pytest
 
 from services.media_files.interactive_bundle import (
-    InteractiveBundleError,
     assemble_interactive_bundle,
     derive_interactive_manifest,
+    InteractiveBundleError,
+    PLAYER_HTML,
+    TONE_BADGES,
+    TITLE_CTA_LABEL,
+    TITLE_RESUME_LABEL,
 )
 from services.project_files.models import (
     ArtifactSlot,
@@ -345,9 +349,9 @@ def test_player_themed_choice_cards_contract() -> None:
     assert "data-tone" in player
 
 
-def test_edge_index_tone_is_absent_today() -> None:
-    """No v9 field carries tone yet: edge_index entries must not grow a
-    tone key (backward-compatible passthrough only)."""
+def test_edge_index_omits_tone_when_unset() -> None:
+    """``NarrativeEdge.tone`` is optional: an untiered edge must not grow a
+    tone key, so pre-tone projects keep rendering the neutral card."""
 
     project, payloads = _branching_project()
 
@@ -361,6 +365,113 @@ def test_edge_index_tone_is_absent_today() -> None:
     for entry in manifest["edge_index"].values():
         assert "tone" not in entry
         assert set(entry) == {"label", "prompt", "target_timeline_id"}
+
+
+def test_edge_index_carries_tone() -> None:
+    """All three tiers must survive the edge → manifest join verbatim; the
+    player styles the card and teaches the audience what to expect."""
+
+    project, payloads = _branching_project()
+    project.narrative_edges[0].tone = "safe"
+    project.narrative_edges[1].tone = "danger"
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    assert manifest["edge_index"]["edge:a"]["tone"] == "safe"
+    assert manifest["edge_index"]["edge:b"]["tone"] == "danger"
+
+
+def test_story_cycle_fails_closed() -> None:
+    """A cycle would let the audience "continue" forever without ever
+    reaching an ending — export must name the cycle, not emit it."""
+
+    project, _ = _branching_project()
+    project.narrative_edges.append(
+        NarrativeEdge(
+            edge_id="edge:loop",
+            source_timeline_id="tl:ep4a",
+            target_timeline_id="tl:ep3",
+            label="回到第3集",
+        ),
+    )
+
+    with pytest.raises(
+        InteractiveBundleError,
+        match=r"tl:ep3 -> tl:ep4a -> tl:ep3",
+    ):
+        derive_interactive_manifest(project)
+
+
+def test_fork_without_interaction_fails_closed() -> None:
+    """Two outgoing edges and no tappable decision point is a broken fork:
+    the bundle plays, but the audience cannot pick a branch."""
+
+    project, _ = _branching_project()
+    project.timelines.items["tl:ep3"].elements_by_id.clear()
+
+    with pytest.raises(InteractiveBundleError, match="tl:ep3"):
+        derive_interactive_manifest(project)
+
+
+def test_single_option_interaction_fails_closed() -> None:
+    """One option is a continue button, not a choice — and the player would
+    reject the package as fatal, so refuse it at export time."""
+
+    project, _ = _branching_project()
+    element = project.timelines.items["tl:ep3"].elements_by_id["el:choice"]
+    element.creation.options = element.creation.options[:1]
+    element.creation.default_edge_ref = None
+
+    with pytest.raises(InteractiveBundleError, match="tl:ep3"):
+        derive_interactive_manifest(project)
+
+
+def test_presentation_json_matches_the_bundled_shell() -> None:
+    """The optional presentation member must describe the shipped shell
+    exactly — otherwise a standalone player restyling from it would drift
+    from what the in-zip ``index.html`` actually looks like."""
+
+    project, payloads = _branching_project()
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=lambda file_id: payloads[file_id],
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        presentation = json.loads(archive.read("presentation.json"))
+        manifest = json.loads(archive.read("manifest.json"))
+    assert presentation["schema_version"] == 1
+    assert set(presentation["theme"]) == {
+        "accent",
+        "danger",
+        "warning",
+        "success",
+        "background",
+        "surface",
+        "surface_alt",
+        "text",
+        "text_dim",
+        "fog",
+    }
+    assert presentation["theme"]["accent"] == manifest["meta"]["accent"]
+    assert set(presentation["screens"]) == {
+        "title",
+        "choice",
+        "map",
+        "ending",
+    }
+    assert presentation["screens"]["choice"]["badge_labels"] == TONE_BADGES
+    assert presentation["stylesheets"] == []
+    # Single source of truth for the duplicated-in-JS copy: the shell keeps
+    # its own literals (file:// cannot fetch a sibling), so guard the pair.
+    for label in (*TONE_BADGES.values(), TITLE_CTA_LABEL, TITLE_RESUME_LABEL):
+        assert label in PLAYER_HTML, label
 
 
 def test_linear_project_nodes_chain_in_order() -> None:

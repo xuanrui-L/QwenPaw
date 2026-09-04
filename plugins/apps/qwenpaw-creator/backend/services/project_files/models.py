@@ -1424,6 +1424,15 @@ class NarrativeEdge(StrictModel):
     label: str = ""
     # Choice question copy; edges sharing a source share the prompt.
     prompt: str = ""
+    # Risk tier drives what the audience *expects* when they tap. Two axes:
+    # relation to the character's goal, and reversibility of the cost.
+    #   safe   aligned, cheap/reversible       — the obvious pick
+    #   risky  aligned, cost unknown or high   — a deliberate gamble
+    #   danger against the goal, irreversible  — walking into it on purpose
+    # Tiebreaker for the drafting model: "does this *almost certainly* end
+    # badly?" yes -> danger, "it might" -> risky. Absent = neutral card, so
+    # pre-tone projects stay valid and players keep working.
+    tone: Literal["safe", "risky", "danger"] | None = None
 
 
 class InteractionPoint(StrictModel):

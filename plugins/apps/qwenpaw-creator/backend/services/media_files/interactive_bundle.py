@@ -22,7 +22,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 from services.project_files.models import (
@@ -105,6 +105,102 @@ def reachable_timeline_ids(project: Project) -> list[str]:
     return seen
 
 
+def _narrative_adjacency(project: Project) -> dict[str, list[str]]:
+    """source timeline -> de-duplicated targets, in edge declaration order."""
+
+    adjacency: dict[str, list[str]] = {}
+    for edge in project.narrative_edges:
+        targets = adjacency.setdefault(edge.source_timeline_id, [])
+        if edge.target_timeline_id not in targets:
+            targets.append(edge.target_timeline_id)
+    return adjacency
+
+
+_UNVISITED, ON_PATH, DONE = 0, 1, 2
+
+
+def _find_cycle(
+    adjacency: Mapping[str, Sequence[str]],
+) -> list[str] | None:
+    """One cycle as a node path ending on the repeated node, else ``None``.
+
+    Iterative white/grey/black DFS: recursion would blow the stack on a
+    long hand-edited chain, and the path form is what makes the message
+    actionable (``tl:a -> tl:b -> tl:a``) instead of "the graph is bad".
+    """
+
+    state: dict[str, int] = {}
+    for root in adjacency:
+        if state.get(root, _UNVISITED) != _UNVISITED:
+            continue
+        state[root] = ON_PATH
+        path: list[str] = [root]
+        pending: list[Iterator[str]] = [iter(adjacency.get(root, ()))]
+        while path:
+            target = next(pending[-1], None)
+            if target is None:
+                state[path[-1]] = DONE
+                path.pop()
+                pending.pop()
+                continue
+            mark = state.get(target, _UNVISITED)
+            if mark == ON_PATH:
+                return path[path.index(target) :] + [target]
+            if mark == DONE:
+                continue
+            state[target] = ON_PATH
+            path.append(target)
+            pending.append(iter(adjacency.get(target, ())))
+    return None
+
+
+def _validate_story_graph(
+    project: Project,
+    reachable: list[str],
+    interactions: list[InteractionPoint],
+) -> None:
+    """Refuse the two shapes that export a bundle which only *looks* done.
+
+    A cycle never terminates at an ending, and a fork with no tappable
+    decision leaves the audience staring at two segments they cannot pick
+    between. Both are cheap to catch here and undiagnosable after export.
+    """
+
+    adjacency = _narrative_adjacency(project)
+    cycle = _find_cycle(adjacency)
+    if cycle is not None:
+        raise InteractiveBundleError(
+            "narrative edges form a cycle ("
+            + " -> ".join(cycle)
+            + "); the player can never reach an ending",
+        )
+    reachable_set = set(reachable)
+    decided = {point.source_timeline_id for point in interactions}
+    forks = sorted(
+        source
+        for source, targets in adjacency.items()
+        if len(targets) > 1
+        and source in reachable_set
+        and source not in decided
+    )
+    if forks:
+        raise InteractiveBundleError(
+            "these timelines branch into several segments but carry no "
+            "enabled interaction element, so the audience cannot choose: "
+            + ", ".join(forks),
+        )
+    thin = sorted(
+        point.source_timeline_id
+        for point in interactions
+        if len(point.options) < 2
+    )
+    if thin:
+        raise InteractiveBundleError(
+            "an interaction is only a decision with at least two options; "
+            "these have one: " + ", ".join(thin),
+        )
+
+
 def derive_interactive_manifest(project: Project) -> InteractiveManifest:
     """Project → manifest. Fails closed when a reachable segment lacks its
     final cut, mirroring the work-graph assembly gate."""
@@ -138,6 +234,7 @@ def derive_interactive_manifest(project: Project) -> InteractiveManifest:
             "cannot assemble the interactive bundle before every reachable "
             "segment has a final cut; missing: " + ", ".join(sorted(missing)),
         )
+    _validate_story_graph(project, reachable, interactions)
     return InteractiveManifest(
         entry_timeline_id=reachable[0],
         segments=segments,
@@ -153,13 +250,11 @@ def _edge_index(project: Project) -> dict[str, dict[str, str]]:
             "prompt": edge.prompt,
             "target_timeline_id": edge.target_timeline_id,
         }
-        # Optional per-choice tone ("risky" / "safe" / "danger"). No v9
-        # schema field carries it today (NarrativeEdge is strict), but a
-        # future field — or a hand-edited manifest — flows straight through
-        # to the player's card treatment; absent tone = neutral card.
-        tone = getattr(edge, "tone", "") or ""
-        if tone:
-            entry["tone"] = tone
+        # Risk tier is optional; absent means "neutral card" so projects
+        # drafted before the tone field still play. The key is omitted
+        # rather than emitted empty — the player distinguishes the two.
+        if edge.tone:
+            entry["tone"] = edge.tone
         index[edge.edge_id] = entry
     return index
 
@@ -168,6 +263,11 @@ def _edge_index(project: Project) -> dict[str, dict[str, str]]:
 # may override it through ``meta.accent`` in a future schema bump; assembly
 # always emits the default today so the player has one source of truth.
 DEFAULT_ACCENT = "#b8ff2e"
+
+#: Presentation-layer member name / version. Players must treat this file as
+#: optional, so bumping it is never required for an older bundle to work.
+PRESENTATION_FILENAME = "presentation.json"
+PRESENTATION_SCHEMA_VERSION = 1
 
 
 def _bundle_meta(project: Project) -> dict[str, str]:
@@ -183,6 +283,64 @@ def _bundle_meta(project: Project) -> dict[str, str]:
         "tagline": tagline,
         "synopsis": (project.strategy.creative_brief or "").strip(),
         "accent": DEFAULT_ACCENT,
+    }
+
+
+#: The game-shell palette, re-exported for the presentation layer. Only
+#: ``accent`` reaches ``index.html`` (it is derived at boot from ``meta``);
+#: the rest lets the standalone player match this shell without duplicating
+#: literals. See bundle-format.md §5.
+BUNDLE_THEME: dict[str, str] = {
+    "accent": DEFAULT_ACCENT,
+    "danger": "#ff3355",
+    "warning": "#ffb547",
+    "success": DEFAULT_ACCENT,
+    "background": "#05070a",
+    "surface": "#0a0d11",
+    "surface_alt": "#11161c",
+    "text": "#dfe8ec",
+    "text_dim": "#8fa3b0",
+    "fog": "#1a222b",
+}
+
+#: Tone badges. ``PLAYER_HTML`` keeps its own ``TONE_LABELS`` copy because a
+#: file:// bundle cannot fetch a sibling json — the contract test asserts the
+#: two stay word-for-word identical.
+TONE_BADGES: dict[str, str] = {
+    "safe": "○ 稳妥",
+    "risky": "△ 冒险",
+    "danger": "✕ 危险",
+}
+
+TITLE_CTA_LABEL = "开始故事"
+TITLE_RESUME_LABEL = "继续上次"
+
+
+def _presentation_payload(meta: dict[str, str]) -> dict[str, Any]:
+    """Optional presentation layer: theme plus title/choice/map/ending copy.
+
+    The bundled shell ships its look inline and ignores this file
+    (``file://`` forbids fetching siblings). Emitting it is what makes the
+    package restyle-able by the server-backed player instead of forcing a
+    code fork — one extra json member, zero risk to the built-in player.
+    """
+
+    return {
+        "schema_version": PRESENTATION_SCHEMA_VERSION,
+        "theme": {**BUNDLE_THEME, "accent": meta["accent"]},
+        "screens": {
+            "title": {
+                "cta_label": TITLE_CTA_LABEL,
+                "secondary_label": TITLE_RESUME_LABEL,
+            },
+            "choice": {"layout": "list", "badge_labels": dict(TONE_BADGES)},
+            # Frontier-only fog of war: reveal visited nodes plus their "?"
+            # children, nothing deeper — the map must not spoil structure.
+            "map": {"reveal_depth": 1},
+            "ending": {"show_review": True},
+        },
+        # No external stylesheet: the shell is self-contained by design.
+        "stylesheets": [],
     }
 
 
@@ -268,6 +426,7 @@ PLAYER_HTML = """<!DOCTYPE html>
 :root{
   --ink-0:#05070a; --ink-1:#0a0d11; --ink-2:#11161c; --ink-3:#1a222b;
   --fluor:#b8ff2e; --fluor-dim:#5f8a1a; --neon-red:#ff3355;
+  --amber:#ffb547; --amber-rgb:255,181,71;
   --accent-rgb:184,255,46; /* JS re-derives from meta.accent at boot */
   --fog:#8fa3b0; --fog-dim:#4d5c66; --paper:#dfe8ec;
   --serif-cjk:"Songti SC","Noto Serif CJK SC","Source Han Serif SC",
@@ -702,15 +861,21 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
     0 0 30px rgba(var(--accent-rgb),.16)}
 .choice-card:hover .c-key{border-color:var(--fluor);color:var(--fluor)}
 .choice-card:active{transform:translateY(-4px) scale(.98)}
-/* Optional manifest `tone`: subtle border/icon shade, neutral when
-   absent (backward compatible). */
-.choice-card[data-tone="risky"],.choice-card[data-tone="danger"]{
-  border-color:rgba(255,51,85,.4)}
-.choice-card[data-tone="risky"]:hover,
+/* tone tiers must read as three temperatures, not "green plus two reds":
+   safe = accent, risky = amber (cost unknown), danger = neon red
+   (walking into it on purpose). Neutral card when tone is absent. */
+.choice-card[data-tone="risky"]{border-color:rgba(var(--amber-rgb),.42)}
+.choice-card[data-tone="risky"]:hover{
+  border-color:rgba(var(--amber-rgb),.85);
+  box-shadow:0 18px 44px rgba(0,0,0,.6),
+    0 0 30px rgba(var(--amber-rgb),.2)}
+.choice-card[data-tone="risky"] .c-tone{color:var(--amber)}
+.choice-card[data-tone="risky"] .c-risk i{background:var(--amber);
+  box-shadow:0 0 8px rgba(var(--amber-rgb),.5)}
+.choice-card[data-tone="danger"]{border-color:rgba(255,51,85,.4)}
 .choice-card[data-tone="danger"]:hover{
   border-color:rgba(255,51,85,.8);
   box-shadow:0 18px 44px rgba(0,0,0,.6),0 0 30px rgba(255,51,85,.2)}
-.choice-card[data-tone="risky"] .c-tone,
 .choice-card[data-tone="danger"] .c-tone{color:var(--neon-red)}
 .choice-card[data-tone="safe"]{
   border-color:rgba(var(--accent-rgb),.35)}
@@ -1655,7 +1820,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;
   // Optional manifest `tone` (per option, else per edge): subtle card
   // treatment. Unknown / absent tones = neutral card, fully backward
   // compatible with manifests that never carry the field.
-  const TONE_LABELS = { risky: "△ 冒险", danger: "▲ 危险", safe: "○ 稳妥" };
+  const TONE_LABELS = { risky: "△ 冒险", danger: "✕ 危险", safe: "○ 稳妥" };
 
   function showChoice(point) {
     setCtrlLocked(true);
@@ -1800,6 +1965,14 @@ def assemble_interactive_bundle(
         bundle.writestr(
             "manifest.json",
             json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+        bundle.writestr(
+            PRESENTATION_FILENAME,
+            json.dumps(
+                _presentation_payload(payload["meta"]),
+                ensure_ascii=False,
+                indent=2,
+            ),
         )
         for timeline_id, ref in manifest.segments.items():
             version_id = ref.removeprefix("artifact-version:")

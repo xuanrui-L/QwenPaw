@@ -27,7 +27,7 @@ Project
 │       ├── edit_plan                 # 剪辑品味契约（可为 null）：concept、dials(energy/density/decoration: low|mid|high)、signature_device、pacing、design_floor(opening/transitions/body/ending)、mechanical_exemption、scene_ledger[]
 │       └── elements_by_id
 │           └── span, location, z_index, creation, outputs, render_source
-├── narrative_edges                   # 分支剧情边列表（NarrativeEdge：edge_id、source/target_timeline_id、label、prompt）；线性多集留空，顺序即 timelines.order
+├── narrative_edges                   # 分支剧情边列表（NarrativeEdge：edge_id、source/target_timeline_id、label、prompt、tone）；线性多集留空，顺序即 timelines.order
 └── assets                            # 文件、源版本、理解版本、Artifact 槽位与版本索引
 ```
 
@@ -36,6 +36,8 @@ Project
 - `EntityCollection` 始终由 `items` 和 `order` 组成；两者 ID 集合必须完全一致且顺序不重复。
 - 分支项目同时写入 `narrative_edges`，source/target 必须为已存在的 timelineId；同一 source 的多条边共享 prompt 文案。
 - 结构起草（structure_draft）：多集项目直接用 `patch_project` 创建/更新 `timelines.items[*]`，`title` 是本集标题，`synopsis` 是梗概，`description` 保存可读的完整正文剧本（动作、表演、衔接、对白和声音），`planned_duration_seconds` 是本集时长；顺序写入 `timelines.order`。已有选中的 `timeline_script` 正文时沿用该剧本，不重复创建另一份。按集增量写作与制作，后续集尚未写完不阻塞前面已就绪的镜头。
+- 分支项目的每个分岔节点还必须在该 Timeline 的 `elements_by_id` 里放一个 `creation.type="interaction"` 元素：只有 `narrative_edges` 而没有这个元素，导出会被确定性拒绝（观众看得到多条分支却无从点选）。`options[*].edge_ref` 必须指向本源 timeline 的已有边，且至少两条——两条以上就是一个真正的抉择点；`question` 是屏幕上抛给观众的问句；`countdown_seconds` 留空表示不倒计时，`default_edge_ref` 必须是 `options` 之一，表示超时后的默认走向；`base_frame_ref` / `motion` 由交互生成服务写回，起草时留空。span 落在该集成片的中后段（默认 1000 tick/秒，例如 88 秒处写 `start_tick=88000`、`duration_tick=4000`），一个节点可以有多个前后相继的抉择点。
+- `narrative_edges[*].tone` 是观众点下去之前对风险的预期，三档取一（可留空 = 中性卡）：`safe` 顺着目标走、代价已知且可逆；`risky` 仍然顺着目标，但代价未知或很高——一次主动冒险；`danger` 违背目标且不可逆，明知会变糟仍走进去。拿不准时只问一句“这一步几乎肯定会让事情变糟吗？”——是 → `danger`，只是“可能会” → `risky`。逐条边独立判定，不要为了“显得有对比”而强行拉档。
 - `variants` 只存在于 `visual.entities.items[<entityId>].variants`；`visual` 顶层没有 `variants` 字段。
 - `required_variant_ids` 是用户需求中全部必需视觉状态的结构化合同。先完整列出，再逐项建立 `variants`；不得把它缩减成当前已经创建的 Variant。每个实际 Variant ID 都必须已在该清单中声明。
 - R2V Element 通过 `creation.visual_variant_refs[entityId]=variantId` 绑定本段使用的角色/场景/道具状态；引用多 Variant 实体时不得依赖实体级默认图。`visual_variant_refs` 的每个 entityId 必须同时出现在本 creation 顶层的 `character_refs`/`prop_refs`/`scene_ref` 中，绑定前先把实体加入对应引用列表。
@@ -48,7 +50,7 @@ Project
 - `location.x/y` 是内容框锚点在归一化成片画面中的位置，`anchor_x/anchor_y` 指定框内哪个点对齐到该位置并作为旋转基点；全画面内容使用 `x=0.5, y=0.5, width=1, height=1, anchor_x=0.5, anchor_y=0.5`。
 - Edit 的 `span.duration_tick` 必须等于 `round((source_out_tick-source_in_tick)/playback_rate)`。
 - Project 不持久化额外的内容分组、轨道、独立 Content、ProductionFlow 或顺序 Composition。
-- `creation.type` 表达 r2v/edit/overlay/transition/audio 的创作语义；执行器与任务状态不属于该结构。
+- `creation.type` 表达 r2v/t2v/i2v/s2v/edit/overlay/motion_clip/transition/audio/interaction 的创作语义；执行器与任务状态不属于该结构。
 - Overlay `creation` 结构（`type="overlay"`）：字段只有 `text`、`vibe`、`prompt`、`reference_version_ids`、`motion`，没有 kind 字段——角色由数据决定。常用形式：台词卡（宠物 OS 内心独白、采访要点摘要等）把权威文案写入 `text`；无文字装饰动效把 `text` 留空、创意写入 `prompt`、动效文档在 `creation.motion`；媒体贴片把 `text` 留空并用 Element 的 `render_source` 引用媒体版本。`text` 为空的 Overlay 必须携带非空 `prompt` 或引用版本。`emotion`、`entrance`、`exit`、`intensity`、`theme`、`variant`、`motif`、`html`、`fps`、`loop`、`design_notes` 等动效字段属于 `MotionGraphic`，必须放在 `creation.motion` 子对象内，不得直接写在 `creation` 上。正确示例：
   ```json
   {"type":"overlay","prompt":"聚焦标记动效","motion":{"html":"<html>…</html>","emotion":"curious","entrance":"pop","exit":"soft_fade","intensity":0.6}}
