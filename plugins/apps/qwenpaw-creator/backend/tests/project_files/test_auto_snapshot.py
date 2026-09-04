@@ -126,6 +126,11 @@ class TestNextSnapshotId:
         result = _next_snapshot_id(items, "timeline:b")
         assert result == "snapshot:timeline:b:1"
 
+    def test_gap_after_deletion_never_collides(self):
+        # :1 was deleted; count+1 would mint :2 again and collide.
+        items = {TL: {}, "snapshot:timeline:main:2": {}}
+        assert _next_snapshot_id(items, TL) == "snapshot:timeline:main:3"
+
 
 class TestAutoSnapshotTimelines:
     def test_no_change_no_snapshot(self):

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from .json_pointer import diff_json
@@ -39,12 +39,17 @@ def _next_snapshot_id(
     timelines_items: dict[str, Any],
     timeline_id: str,
 ) -> str:
-    existing = [
-        key
-        for key in timelines_items
-        if key.startswith(f"{_SNAPSHOT_PREFIX}{timeline_id}:")
-    ]
-    return f"{_SNAPSHOT_PREFIX}{timeline_id}:{len(existing) + 1}"
+    # Max suffix + 1, not count + 1: snapshots are deletable, and a count
+    # after deleting an early snapshot would collide with a surviving id.
+    prefix = f"{_SNAPSHOT_PREFIX}{timeline_id}:"
+    highest = 0
+    for key in timelines_items:
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix) :]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return f"{prefix}{highest + 1}"
 
 
 def _remap_element_id(element_id: str, snapshot_id: str) -> str:
@@ -142,10 +147,7 @@ def _latest_auto_snapshot_age_seconds(
             continue
         stamp = str(timeline.get("name", ""))[-16:]
         try:
-            created = datetime.strptime(
-                stamp,
-                _SNAPSHOT_STAMP_FORMAT,
-            ).replace(tzinfo=timezone.utc)
+            created = datetime.strptime(stamp, _SNAPSHOT_STAMP_FORMAT)
         except ValueError:
             continue
         if latest is None or created > latest:
@@ -189,7 +191,9 @@ def auto_snapshot_timelines(
     base_timelines = base_data.get("timelines", {})
     base_items = base_timelines.get("items", {})
 
-    now = datetime.now(timezone.utc)
+    # Local time on purpose: the frontend stamps manual snapshots with the
+    # user's local clock, and the panel shows both side by side.
+    now = datetime.now()
     stamp = now.strftime(_SNAPSHOT_STAMP_FORMAT)
 
     for timeline_id in sorted(changed_ids):
