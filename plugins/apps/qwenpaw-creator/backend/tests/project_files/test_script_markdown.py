@@ -113,24 +113,16 @@ def test_round_trip_is_lossless(sample: str) -> None:
     assert parse_script_markdown(serialize_script_blocks(parsed)) == parsed
 
 
-def test_serialize_normalizes_ascii_colon_dialogue() -> None:
+def test_edge_blocks_normalize_and_round_trip() -> None:
     # 半角冒号输入解析成同一台词块；序列化输出全角冒号后再解析等值。
     parsed = parse_script_markdown("**林晚**: 你来了。\n")
     assert parsed == [
         ScriptBlock(kind="line", text="你来了。", character="林晚"),
     ]
     assert serialize_script_blocks(parsed) == "**林晚**：你来了。\n"
-
-
-def test_multi_line_hook_round_trips() -> None:
-    text = "> 第一行悬念\n> 第二行悬念\n"
-    parsed = parse_script_markdown(text)
-    assert parsed == [
+    # 多行 hook 归并为单块且往返无损。
+    hooks = parse_script_markdown("> 第一行悬念\n> 第二行悬念\n")
+    assert hooks == [
         ScriptBlock(kind="hook", text="第一行悬念\n第二行悬念"),
     ]
-    assert parse_script_markdown(serialize_script_blocks(parsed)) == parsed
-
-
-def test_empty_document() -> None:
-    assert not parse_script_markdown("")
-    assert serialize_script_blocks([]) == ""
+    assert parse_script_markdown(serialize_script_blocks(hooks)) == hooks

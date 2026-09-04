@@ -61,32 +61,26 @@ def test_ensure_slot_rejects_unknown_timeline() -> None:
         ensure_timeline_script_slot(_project(), "timeline:ghost")
 
 
-def test_add_script_version_creates_slot_and_selects() -> None:
+def test_version_lifecycle_creates_slot_then_appends_and_reselects() -> None:
     project = _project()
-    version = _add(project, "## 场 1 · 内景 · 旧宅大厅 · 夜\n\n开场。\n")
+    first = _add(project, "## 场 1 · 内景 · 旧宅大厅 · 夜\n\n开场。\n")
 
     slot_id = timeline_script_slot_id("timeline:ep2")
     slot = project.assets.artifact_slots_by_id[slot_id]
     assert slot.kind == "timeline_script"
     assert slot.owner_ref == "timeline:timeline:ep2"
-    assert slot.version_ids == [version.version_id]
-    assert slot.selected_version_id == version.version_id
-    assert version.provenance_refs == ["asset-version:sv-novel"]
-    indexed = project.assets.files_by_id[version.file_id]
+    assert slot.version_ids == [first.version_id]
+    assert slot.selected_version_id == first.version_id
+    assert first.provenance_refs == ["asset-version:sv-novel"]
+    indexed = project.assets.files_by_id[first.file_id]
     assert indexed.media_type == "text/markdown"
-    assert indexed.relative_uri == script_file_relative_uri(version.file_id)
-    # 完整 Project 序列化往返必须通过 AssetIndex 全部校验。
-    Project.model_validate(project.model_dump(mode="json"))
+    assert indexed.relative_uri == script_file_relative_uri(first.file_id)
 
-
-def test_second_version_appends_and_reselects() -> None:
-    project = _project()
-    first = _add(project, "初稿。\n")
     second = _add(project, "修改稿。\n", name="剧本 v2")
-
-    slot = project.assets.artifact_slots_by_id["script:timeline:ep2"]
+    slot = project.assets.artifact_slots_by_id[slot_id]
     assert slot.version_ids == [first.version_id, second.version_id]
     assert slot.selected_version_id == second.version_id
+    # 完整 Project 序列化往返必须通过 AssetIndex 全部校验。
     Project.model_validate(project.model_dump(mode="json"))
 
 

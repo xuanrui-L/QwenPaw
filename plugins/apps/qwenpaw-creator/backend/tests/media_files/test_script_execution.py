@@ -228,20 +228,28 @@ def _draft(services, *, guidance=None, key):
     )
 
 
-def test_first_guidance_reaches_the_model_as_a_new_draft(
+def test_changed_guidance_always_reaches_the_model(
     tmp_path,
     monkeypatch,
 ) -> None:
     services = _services(tmp_path)
-    calls = _mock_chat(monkeypatch, [DRAFT, DRAFT + "\n\n（喜剧结尾稿）"])
+    calls = _mock_chat(
+        monkeypatch,
+        [DRAFT, DRAFT + "\n\n（喜剧结尾稿）", DRAFT + "\n\n（悲剧结尾稿）"],
+    )
 
     first = _draft(services, key="dag-script-1")
+    # none → A：首次 guidance 必达模型并产出新版本。
     second = _draft(services, guidance="改成喜剧结尾", key="dag-script-2")
-
     assert not second.replayed
     assert second.artifact_version_id != first.artifact_version_id
-    assert len(calls) == 2
     assert "改成喜剧结尾" in calls[1]["prompt"]
+    # A → B：guidance 变化同样不被语义复放吞掉。
+    third = _draft(services, guidance="改成悲剧结尾", key="dag-script-3")
+    assert not third.replayed
+    assert third.artifact_version_id != second.artifact_version_id
+    assert len(calls) == 3
+    assert "改成悲剧结尾" in calls[2]["prompt"]
 
 
 def test_same_guidance_retry_still_replays(tmp_path, monkeypatch) -> None:
@@ -254,19 +262,3 @@ def test_same_guidance_retry_still_replays(tmp_path, monkeypatch) -> None:
     assert retry.replayed
     assert retry.artifact_version_id == first.artifact_version_id
     assert len(calls) == 1
-
-
-def test_different_guidance_drafts_a_new_version(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    services = _services(tmp_path)
-    calls = _mock_chat(monkeypatch, [DRAFT, DRAFT + "\n\n（悲剧结尾稿）"])
-
-    first = _draft(services, guidance="改成喜剧结尾", key="dag-script-1")
-    second = _draft(services, guidance="改成悲剧结尾", key="dag-script-2")
-
-    assert not second.replayed
-    assert second.artifact_version_id != first.artifact_version_id
-    assert len(calls) == 2
-    assert "改成悲剧结尾" in calls[1]["prompt"]

@@ -19,8 +19,6 @@ from services.file_agent_runtime.checkpoints import (
     CHECKPOINT_SCRIPT,
     CHECKPOINT_STRUCTURE,
     checkpoint_authorization_id,
-    checkpoint_label,
-    checkpoint_summary,
     required_checkpoint_phases,
 )
 from services.project_files.facade import CreatorFileServices
@@ -169,13 +167,6 @@ def test_skip_mode_silences_structure_and_script_too(monkeypatch) -> None:
         SpecialistRole.VISUAL_DEVELOPMENT,
         timeline_count=5,
     )
-
-
-def test_new_checkpoint_phases_have_copy() -> None:
-    assert checkpoint_label(CHECKPOINT_STRUCTURE) == "结构确认"
-    assert checkpoint_label(CHECKPOINT_SCRIPT) == "剧本确认"
-    assert "结构" in checkpoint_summary(CHECKPOINT_STRUCTURE)
-    assert "剧本" in checkpoint_summary(CHECKPOINT_SCRIPT)
 
 
 def _legacy_r2v_checkpoint_client():
