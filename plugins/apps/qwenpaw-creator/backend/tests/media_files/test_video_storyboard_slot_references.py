@@ -186,11 +186,16 @@ def test_storyboard_image_can_still_explicitly_reference_its_old_version(
     assert [r["versionId"] for r in preview["references"]] == ["sb-old"]
 
 
+@pytest.mark.parametrize("repeat_version", [False, True])
 def test_actual_fresh_request_uses_preview_order_and_four_native_markers(
     tmp_path,
     monkeypatch,
+    repeat_version,
 ):
     snapshot, element, anchors = _renewed(tmp_path, monkeypatch)
+    if repeat_version:
+        # A repeated version must not create a fifth prompt reference slot.
+        element.creation.video_reference_version_ids.append(anchors[0])
     preview = preview_r2v_reference_order(snapshot.project, element.element_id)
     resolved = _resolve_request(
         snapshot=snapshot,

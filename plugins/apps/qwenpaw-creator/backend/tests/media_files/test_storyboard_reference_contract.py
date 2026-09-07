@@ -95,12 +95,23 @@ def _resolve(snapshot, tmp_path, model="qwen-image-3.0-pro"):
         ("doubao-seedream-4-5", "第2张参考图"),
     ],
 )
+@pytest.mark.parametrize("repeat_version", [False, True])
 def test_actual_resolver_matches_phase_preview_and_provider_wording(
     tmp_path,
     model,
     word,
+    repeat_version,
 ):
     snapshot = _snapshot()
+    if repeat_version:
+        creation = (
+            snapshot.project.timelines.items["timeline:main"]
+            .elements_by_id["shot:one"]
+            .creation
+        )
+        creation.storyboard_reference_version_ids.append(
+            creation.storyboard_reference_version_ids[0],
+        )
     before = snapshot.project.model_dump_json()
     preview = preview_r2v_reference_order(
         snapshot.project,
