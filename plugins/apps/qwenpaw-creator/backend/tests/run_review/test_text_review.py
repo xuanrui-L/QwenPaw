@@ -641,7 +641,11 @@ def test_narrative_speech_must_reach_video_prompt_but_sign_text_need_not():
     project = _r2v_contract_project(
         storyboard_prompt="16:9 故事板，1 个分镜格，每格 16:9。",
         video_prompt="[Image 1]提供分镜顺序，女子回头。",
-        dialogues=("招牌写着“星光旅店”。女子说：“别走！”",),
+        dialogues=(
+            "招牌写着“星光旅店”。纸上的说明：“此门不通行”。"
+            '女子没说“再会”。She does not say "farewell". '
+            'The sign says "CLOSED"。女子不舍地说：“别走！”',
+        ),
     )
     pointer = "/timelines/items/t/elements_by_id/e"
     report = check_changed_r2v_prompt_contracts(project, [pointer])
