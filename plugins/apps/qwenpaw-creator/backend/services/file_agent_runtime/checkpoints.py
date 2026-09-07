@@ -1,21 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Creation pit-stop checkpoints for the file-native Creator Runtime.
+"""Checkpoints for reviewable creative deliverables.
 
-Two hard stops protect the user's money from compounding mistakes:
-planning errors are cheap to fix as text and expensive to fix as media,
-and a wrong character design silently poisons every storyboard and video
-built on top of it.
-
-- ``plan``:   confirmed before *any* visual generation. Cuts, shot lists
-  and prompts are reviewable as text at this point.
-- ``design``: confirmed after character/scene design images exist but
-  before storyboards and videos consume them, so the user judges the
-  designs with their eyes rather than from a description.
-
-The gate is deterministic: it lives in tool admission, not in a prompt,
-so an agent cannot skip a checkpoint by forgetting to ask. Approvals are
-persisted as ordinary execution authorizations, which already own the
-token CAS, idempotent decisions and the blocking decision-tray card.
+The old generic plan phase had no independent document to review. It is
+retired, including pending records, without granting any media spending
+authorization. Structure, script and design reviews retain their gates.
 """
 
 from __future__ import annotations
@@ -66,27 +54,11 @@ def required_checkpoint_phases(  # pylint: disable=too-many-return-statements  #
     *,
     timeline_count: int | None = None,
 ) -> tuple[str, ...]:
-    """Return the checkpoints a media tool call must clear, in order.
+    """Return reviews of actual deliverables; billing is a separate gate.
 
-    Character/scene design images only need the plan checkpoint — they
-    are the very artifacts the design checkpoint later reviews, so
-    requiring it here would deadlock the workflow.
-
-    The execution mode scales the set (upstream three governance modes):
-    ``delegated`` drops the pit stops entirely (billing authorizations
-    are a separate gate and stay); ``fine_tuning`` keeps one plan-phase
-    scope confirmation; ``co_creation`` keeps the full ladder. The
-    creative direction gate itself is conversational (the editing
-    director proposes three cards and blocks for the user's pick), not a
-    tool-admission phase — see the editing-director prompt.
-
-    Blueprint ladder (方案 3.1)：``timeline_count`` 由调用方从 project
-    传入（本函数拿不到 project，只拿工具名与角色）。多集/分支项目
-    （timeline_count > 1）在计划之前先确认叙事结构与剧本；单 timeline
-    项目 structure/script 恒静默（None 视同单 timeline，保证旧调用点
-    行为不变）。``creation_checkpoints.mode=skip``（yolo）已由
-    get_execution_mode() 强制折算为 ``delegated``，因此 skip 下这里
-    对全部 phase 静默——沿用既有 skip 语义路径。
+    Design images cannot wait for their own design review. Multi-episode
+    projects retain structure/script review; delegated and fine-tuning
+    modes do not add a generic plan confirmation.
     """
 
     from models.config import (
@@ -96,7 +68,10 @@ def required_checkpoint_phases(  # pylint: disable=too-many-return-statements  #
     )
 
     execution_mode = get_execution_mode()
-    if execution_mode == EXECUTION_MODE_DELEGATED:
+    if execution_mode in (
+        EXECUTION_MODE_DELEGATED,
+        EXECUTION_MODE_FINE_TUNING,
+    ):
         return ()
     script_flow = timeline_count is not None and timeline_count > 1
     if tool_name == "image_generation":
@@ -105,22 +80,52 @@ def required_checkpoint_phases(  # pylint: disable=too-many-return-statements  #
                 # 多集项目的角色/场景设计基于已确认的结构；剧本检查点
                 # 在分镜/视频（storyboard 消费方）之前生效即可，设计图
                 # 可与剧本审阅并行推进。
-                return (CHECKPOINT_STRUCTURE, CHECKPOINT_PLAN)
-            return (CHECKPOINT_PLAN,)
+                return (CHECKPOINT_STRUCTURE,)
+            return ()
     elif tool_name != "r2v_generation":
         return ()
-    if execution_mode == EXECUTION_MODE_FINE_TUNING:
-        # One scope confirmation for iterations on a delivered cut.
-        return (CHECKPOINT_PLAN,)
     # Storyboard images consume the approved designs.
     if script_flow:
         return (
             CHECKPOINT_STRUCTURE,
             CHECKPOINT_SCRIPT,
-            CHECKPOINT_PLAN,
             CHECKPOINT_DESIGN,
         )
-    return (CHECKPOINT_PLAN, CHECKPOINT_DESIGN)
+    return (CHECKPOINT_DESIGN,)
+
+
+def retire_legacy_plan_checkpoints(executions, project_id: str) -> int:
+    """Expire only pending, non-billing plan records using the store's CAS.
+
+    Preserve terminal history and concurrent user decisions. EXPIRED is
+    deliberately not APPROVED: retiring a UI checkpoint grants no money.
+    """
+    from services.runtime_files.execution_models import (
+        ExecutionAuthorizationStatus,
+    )
+    from services.runtime_files.execution_store import ExecutionStateConflict
+
+    retired = 0
+    for record in executions.list_execution_authorizations(project_id):
+        if (
+            record.status is not ExecutionAuthorizationStatus.PENDING
+            or record.operation != checkpoint_operation(CHECKPOINT_PLAN)
+            or record.requested_provider != CHECKPOINT_PROVIDER
+        ):
+            continue
+        try:
+            executions.decide_execution_authorization(
+                project_id,
+                record.authorization_id,
+                authorization_token=record.authorization_token,
+                status=ExecutionAuthorizationStatus.EXPIRED,
+                metadata={"retiredReason": "plan_checkpoint_removed"},
+            )
+            retired += 1
+        except ExecutionStateConflict:
+            # A decision that won the CAS remains the durable authority.
+            continue
+    return retired
 
 
 def checkpoint_operation(phase: str) -> str:
@@ -172,9 +177,7 @@ def checkpoint_recovery(phase: str) -> str:
 
     if phase == CHECKPOINT_PLAN:
         return (
-            "用户尚未确认创作计划。请不要重试生成：向用户说明当前的分镜切分、"
-            "镜头安排与关键 prompt，等待用户在决策托盘中确认计划检查点，"
-            "或按用户的修改意见先更新计划。"
+            "旧的计划确认关卡已移除，无需用户确认。读取剧集蓝图中的真实剧情与" "剧本，补齐缺失内容后继续当前任务；实际媒体生成授权仍须遵守。"
         )
     if phase == CHECKPOINT_DESIGN:
         return (

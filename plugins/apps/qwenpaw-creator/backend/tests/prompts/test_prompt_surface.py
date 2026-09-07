@@ -201,16 +201,37 @@ def test_creator_duration_is_injected_from_the_active_video_model(
     assert "30 秒长段" in prompt
 
 
-def test_active_surfaces_never_mention_the_retired_r2v_specialist() -> None:
+@pytest.mark.parametrize(
+    ("role", "retired_terms"),
+    [
+        (
+            SpecialistRole.R2V_GENERATION_DIRECTOR,
+            (
+                "R2V Specialist",
+                "r2v_generation_director",
+                "Specialist 兜底",
+                "为媒体执行委派",
+            ),
+        ),
+        (
+            SpecialistRole.VISUAL_DEVELOPMENT,
+            (
+                "visual_development_agent",
+                "视觉开发 Specialist",
+                "委派视觉开发",
+            ),
+        ),
+    ],
+)
+def test_retired_specialists_have_no_delegation_or_prompt_surface(
+    role,
+    retired_terms,
+) -> None:
+    with pytest.raises(ValueError, match="no active prompt"):
+        _specialist_prompt(role)
     combined = "\n".join(_active_prompt_texts())
-    assert "R2V Specialist" not in combined
-    assert "r2v_generation_director" not in combined
-    assert "不可委派" not in combined
-    assert "已停用" not in combined
-    # Media execution belongs to the scheduler, not any specialist; text
-    # implying such a specialist exists is retired-R2V residue.
-    assert "Specialist 兜底" not in combined
-    assert "为媒体执行委派" not in combined
+    for term in (*retired_terms, "不可委派", "已停用"):
+        assert term not in combined
 
 
 def test_source_prompt_requires_outer_vlm_timeline_and_controlled_commit() -> (
@@ -330,23 +351,6 @@ def test_video_model_guidance_switches_on_configured_model(
     )
     assert "Wan3.0" in delegator
     assert "2–30 秒" in delegator
-
-
-def test_r2v_specialist_is_not_an_active_delegation_surface() -> None:
-    with pytest.raises(ValueError, match="no active prompt"):
-        _specialist_prompt(SpecialistRole.R2V_GENERATION_DIRECTOR)
-
-
-def test_visual_development_is_not_an_active_delegation_surface() -> None:
-    with pytest.raises(ValueError, match="no active prompt"):
-        _specialist_prompt(SpecialistRole.VISUAL_DEVELOPMENT)
-
-
-def test_active_surfaces_never_mention_the_retired_visual_specialist() -> None:
-    combined = "\n".join(_active_prompt_texts())
-    assert "visual_development_agent" not in combined
-    assert "视觉开发 Specialist" not in combined
-    assert "委派视觉开发" not in combined
 
 
 def _tts(monkeypatch, *, model: str, configured: bool = True) -> None:

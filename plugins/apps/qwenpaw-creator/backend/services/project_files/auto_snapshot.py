@@ -15,6 +15,7 @@ from typing import Any
 
 from . import snapshot_restore_hold
 from .json_pointer import diff_json
+from .prompt_sync import is_prompt_sync_pointer
 
 _SNAPSHOT_PREFIX = "snapshot:"
 _ELEMENT_POINTER_RE = re.compile(
@@ -25,11 +26,15 @@ _ELEMENT_POINTER_RE = re.compile(
 def _timeline_element_changes(
     base_data: dict[str, Any],
     candidate_data: dict[str, Any],
+    *,
+    include_prompt_sync: bool = True,
 ) -> set[str]:
     """Return timeline IDs with element changes between base and candidate."""
     changed_ids: set[str] = set()
     for change in diff_json(base_data, candidate_data):
         pointer = change.pointer or ""
+        if not include_prompt_sync and is_prompt_sync_pointer(pointer):
+            continue
         match = _ELEMENT_POINTER_RE.match(pointer)
         if match:
             changed_ids.add(match.group(1))
@@ -272,7 +277,13 @@ def auto_snapshot_timelines(
     is published; settling earlier would lose the mark whenever the commit
     then fails.
     """
-    changed_ids = _timeline_element_changes(base_data, candidate_data)
+    # Provenance maintenance is not a new creative version. Frozen snapshot
+    # validation still examines every field via the default above.
+    changed_ids = _timeline_element_changes(
+        base_data,
+        candidate_data,
+        include_prompt_sync=False,
+    )
     if not changed_ids:
         return []
 

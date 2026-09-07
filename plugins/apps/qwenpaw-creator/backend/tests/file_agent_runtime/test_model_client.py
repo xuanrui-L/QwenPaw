@@ -89,44 +89,30 @@ def test_default_client_constructs_real_agentscope_dashscope_model(
     assert isinstance(configured, DashScopeChatModel)
 
 
-def test_anthropic_protocol_constructs_anthropic_chat_model(
+@pytest.mark.parametrize(
+    ("protocol", "base_url"),
+    [
+        ("Anthropic Claude", "https://api.anthropic.com"),
+        ("MiniMax", "https://api.minimaxi.com/anthropic"),
+    ],
+)
+def test_anthropic_compatible_protocol_constructs_anthropic_chat_model(
     monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    base_url: str,
 ) -> None:
     from agentscope.model import AnthropicChatModel
 
-    _configure_text_model(
-        monkeypatch,
-        protocol="Anthropic Claude",
-    )
+    _configure_text_model(monkeypatch, protocol=protocol)
     monkeypatch.setattr(
         model_client.model_config,
         "get_text_base_url",
-        lambda: "https://api.anthropic.com",
+        lambda: base_url,
     )
-
-    configured = AgentScopeAgentChatClient()._configured_model()
-
-    assert isinstance(configured, AnthropicChatModel)
-
-
-def test_minimax_protocol_constructs_anthropic_chat_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agentscope.model import AnthropicChatModel
-
-    _configure_text_model(
-        monkeypatch,
-        protocol="MiniMax",
+    assert isinstance(
+        AgentScopeAgentChatClient()._configured_model(),
+        AnthropicChatModel,
     )
-    monkeypatch.setattr(
-        model_client.model_config,
-        "get_text_base_url",
-        lambda: "https://api.minimaxi.com/anthropic",
-    )
-
-    configured = AgentScopeAgentChatClient()._configured_model()
-
-    assert isinstance(configured, AnthropicChatModel)
 
 
 def test_gemini_protocol_constructs_gemini_chat_model(
@@ -588,6 +574,143 @@ def test_callback_client_keeps_stream_callback_failures_outside_model_errors() -
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        (
+            "Error code: 400 input length should be [1, 983616]; request_id 96f7-4294abf",
+            False,
+        ),
+        ("request_id 4294abf: invalid input", False),
+        (
+            '{"status_code":400,"message":"see rate limit documentation"}',
+            False,
+        ),
+        ("Error code: 401 rate limit documentation", False),
+        ("<429> Throttling.RateQuota", True),
+        ("HTTP 429 Too Many Requests", True),
+        ("429 Too Many Requests", True),
+        ("Throttling.RateQuota", True),
+        ("<503> ServiceUnavailable", False),
+    ],
+)
+def test_rate_limit_text_requires_an_actual_error_signal(message, expected):
+    assert model_client.is_rate_limit_error_text(message) is expected
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_permanent_400_is_never_retried_as_throttling(monkeypatch, structured):
+    from types import SimpleNamespace
+
+    notices = []
+    sleeps = []
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(model_client.asyncio, "sleep", sleep)
+
+    class RejectingModel:
+        calls = 0
+
+        async def __call__(self, messages, *, tools=None):
+            self.calls += 1
+            exc = RuntimeError(
+                "Error code: 400 input length should be [1, 983616]; "
+                "request_id 96f7-4294abf"
+                if not structured
+                else "429 Too Many Requests; connection timeout",
+            )
+            if structured:
+                exc.response = SimpleNamespace(status_code=400)
+            raise exc
+
+    async def notice(item):
+        notices.append(item)
+
+    provider = RejectingModel()
+    with pytest.raises(model_client.AgentModelError):
+        asyncio.run(
+            AgentScopeAgentChatClient(provider).complete(
+                messages=[{"role": "user", "content": "继续"}],
+                tools=[],
+                on_rate_limit_retry=notice,
+            ),
+        )
+    assert provider.calls == 1
+    assert sleeps == []
+    assert notices == []
+
+
+def test_context_400_recovers_once_only_with_smaller_input():
+    notices = []
+
+    class ContextLimitedModel:
+        seen = []
+
+        async def __call__(self, messages, *, tools=None):
+            self.seen.append(messages)
+            if len(self.seen) == 1:
+                raise RuntimeError(
+                    "Error code: 400 input length should be [1, 983616]; request_id 4294abf",
+                )
+            return ChatResponse(
+                id="recovered",
+                content=[TextBlock(text="继续制作")],
+                is_last=True,
+            )
+
+    messages = [
+        {"role": "system", "content": "任务规则"},
+        {"role": "user", "content": "保留对白，继续短剧"},
+    ]
+    for i in range(6):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": str(i),
+                            "type": "function",
+                            "function": {
+                                "name": "jq_project",
+                                "arguments": json.dumps(
+                                    {"program": ".", "text": "x" * 20000},
+                                ),
+                            },
+                        },
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": str(i),
+                    "name": "jq_project",
+                    "content": '{"ok":true}',
+                },
+            ],
+        )
+
+    async def notice(value):
+        notices.append(value)
+
+    provider = ContextLimitedModel()
+    result = asyncio.run(
+        AgentScopeAgentChatClient(provider).complete(
+            messages=messages,
+            tools=[],
+            on_rate_limit_retry=notice,
+        ),
+    )
+    assert result.content == "继续制作"
+    assert len(provider.seen) == 2
+    assert len(provider.seen[1]) < len(provider.seen[0])
+    assert [
+        (item.reason, item.attempt, item.max_attempts, item.delay_seconds)
+        for item in notices
+    ] == [("context_recovery", 1, 1, 0)]
+
+
 def test_agentscope_client_retries_rate_limited_turns_until_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -636,49 +759,59 @@ def test_agentscope_client_retries_rate_limited_turns_until_exhausted(
     ]
 
 
-def test_agentscope_client_recovers_after_rate_limited_turns(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        model_client,
-        "_rate_limit_retry_delay",
-        lambda _attempt: 0.0,
-    )
+@pytest.mark.parametrize(
+    "failure, delays, reason",
+    [
+        ("429 Too Many Requests", [2, 4], "rate_limit"),
+        ("Connection reset by peer", [1], "transient"),
+        ("empty", [0], "empty_response"),
+    ],
+    ids=["rate-limit", "connection-reset", "empty-response"],
+)
+def test_model_retry_recovery_reports_real_cause_and_backoff(
+    monkeypatch,
+    failure,
+    delays,
+    reason,
+):
+    notices = []
+    sleeps = []
 
-    class ThrottledThenHealthyModel:
-        model = "qwen3.7-plus"
+    async def sleep(seconds):
+        sleeps.append(seconds)
 
-        def __init__(self) -> None:
-            self.calls = 0
+    monkeypatch.setattr(model_client.asyncio, "sleep", sleep)
+
+    class RecoveringModel:
+        model = "test-model"
+        calls = 0
 
         async def __call__(self, messages, *, tools=None):
-            del messages, tools
             self.calls += 1
-            if self.calls <= 2:
-                raise RuntimeError("429 Too Many Requests")
+            if self.calls <= len(delays):
+                if failure == "empty":
+                    return ChatResponse(id="empty", content=[], is_last=True)
+                raise RuntimeError(failure)
             return ChatResponse(
-                id="response-rate-limit-recover",
-                content=[TextBlock(text="恢复完成")],
+                id="recovered",
+                content=[TextBlock(text="继续生成")],
                 is_last=True,
             )
 
-    notices: list[RateLimitRetryNotice] = []
-
-    async def on_retry(notice: RateLimitRetryNotice) -> None:
+    async def on_retry(notice):
         notices.append(notice)
 
-    async def scenario():
-        provider = ThrottledThenHealthyModel()
-        client = AgentScopeAgentChatClient(provider)  # type: ignore[arg-type]
-        turn = await client.complete(
-            messages=[{"role": "user", "content": "开始"}],
+    provider = RecoveringModel()
+    result = asyncio.run(
+        AgentScopeAgentChatClient(provider).complete(
+            messages=[{"role": "user", "content": "继续"}],
             tools=_tools(),
             on_rate_limit_retry=on_retry,
-        )
-        return provider, turn
-
-    provider, turn = asyncio.run(scenario())
-
-    assert provider.calls == 3
-    assert turn.content == "恢复完成"
-    assert [notice.attempt for notice in notices] == [1, 2]
+        ),
+    )
+    assert result.content == "继续生成"
+    assert provider.calls == len(delays) + 1
+    assert [(n.reason, n.attempt, n.delay_seconds) for n in notices] == [
+        (reason, attempt, delay) for attempt, delay in enumerate(delays, 1)
+    ]
+    assert sleeps == [delay for delay in delays if delay]

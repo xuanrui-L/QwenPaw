@@ -1,4 +1,4 @@
-import { AutoComplete, Button, InputNumber, Input, Popconfirm } from "antd";
+import { Select, Button, InputNumber, Input, Popconfirm } from "antd";
 import { DeleteOutlined, PlusOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import type {
@@ -7,36 +7,32 @@ import type {
 } from "@/contracts/creator";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
+import { shotContentText } from "@/lib/shotContent";
 
 const { TextArea } = Input;
 
-// ShotDocument.camera / framing are free strings in the schema; these are
-// presentation-only presets — any custom text still writes straight back.
+// Values match backend ShotCamera / ShotFraming. Custom direction belongs
+// in the complete description rather than an unsupported enum value.
 const CAMERA_PRESETS = [
   "⊙ 静止",
-  "→ 横移跟拍",
-  "← 横移",
-  "↗ 上摇",
-  "↘ 下摇",
-  "⇢ 推近",
-  "⇠ 拉远",
+  "↑ 推近",
+  "↓ 拉远",
+  "→ 横摇右",
+  "← 横摇左",
+  "↕ 升降",
   "◎ 环绕",
-  "〰 手持晃动",
+  "～ 手持晃动",
 ];
-const FRAMING_PRESETS = [
-  "远景",
-  "全景",
-  "中景",
-  "近景",
-  "特写",
-  "仰拍近景",
-  "俯拍",
-  "过肩",
-];
+const FRAMING_PRESETS = ["全景", "中景", "近景", "特写"];
 const CAMERA_OPTIONS = CAMERA_PRESETS.map((value) => ({ value }));
 const FRAMING_OPTIONS = FRAMING_PRESETS.map((value) => ({ value }));
 
-type ShotField = "description" | "camera" | "framing" | "duration_seconds";
+type ShotField =
+  | "description"
+  | "camera"
+  | "framing"
+  | "duration_seconds"
+  | "dialogue";
 
 interface ShotListProps {
   shots: ProjectEntityCollection<ShotDocument>;
@@ -48,7 +44,7 @@ interface ShotListProps {
   onDelete: (shot: ShotDocument) => void;
 }
 
-/** Controlled Shot editor; the parent stages fields before one explicit Apply. */
+/** A single content plan; the parent separately prepares both media instructions. */
 export default function ShotList({
   shots,
   elementId,
@@ -81,36 +77,13 @@ export default function ShotList({
             data-creator-module-id={shotId}
             data-creator-module-ref={`element:${elementId}`}
             data-shot-index={index}
-            className="space-y-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-2.5 transition-colors"
+            className="r2v-plan-shot"
           >
-            <div className="flex items-start gap-1">
-              <span className="mt-[7px] w-4 shrink-0 text-right text-[10px] font-bold leading-3 text-[var(--color-text-tertiary)]">
-                {index + 1}
+            <div className="r2v-plan-shot-heading">
+              <span>{t("r2v.plan.shot", { index: index + 1 })}</span>
+              <span title={t("r2v.plan.actionLabel")}>
+                {t("r2v.plan.actionLabel")}
               </span>
-              <div
-                className="min-w-0 flex-1"
-                data-creator-field={`element:${elementId}/shot:${shotId}/description`}
-                data-creator-path={shotPointer(shotId, "description")}
-                data-creator-field-label={t("lib.shotDescription", {
-                  index: index + 1,
-                })}
-              >
-                <TextArea
-                  value={shot.description}
-                  disabled={disabled}
-                  onChange={(event) =>
-                    onChangeField(shotId, "description", event.target.value)
-                  }
-                  onFocus={() => trackShotFocus(shotId, "description")}
-                  onBlur={releaseShotFocus}
-                  autoSize={{ minRows: 1, maxRows: 6 }}
-                  placeholder={t("workbench.shotDesc")}
-                  className="!rounded-md !border-transparent !bg-transparent !p-1 !text-xs hover:!border-[var(--color-border)] focus:!border-[var(--color-accent)]"
-                />
-                <InlineReviewDiff
-                  pointer={shotPointer(shotId, "description")}
-                />
-              </div>
               <Popconfirm
                 title={t("workbench.deleteShot")}
                 onConfirm={() => onDelete(shot)}
@@ -120,13 +93,39 @@ export default function ShotList({
                 <Button
                   type="text"
                   size="small"
-                  disabled={disabled}
+                  disabled={disabled || shots.order.length <= 1}
+                  aria-label={t("r2v.plan.remove", { index: index + 1 })}
                   icon={<DeleteOutlined />}
-                  className="!text-[var(--color-text-tertiary)] hover:!text-[var(--color-danger)]"
+                  className="!ml-auto !h-6 !w-6 !min-w-6 !shrink-0 !p-0 !text-[var(--color-text-tertiary)] hover:!text-[var(--color-danger)]"
                 />
               </Popconfirm>
             </div>
-            <div className="grid grid-cols-[1.25fr_1fr_0.85fr] gap-1.5">
+            <div
+              className="min-w-0"
+              data-creator-field={`element:${elementId}/shot:${shotId}/description`}
+              data-creator-path={shotPointer(shotId, "description")}
+              data-review-field={shotPointer(shotId, "dialogue")}
+              data-creator-field-label={t("lib.shotDescription", {
+                index: index + 1,
+              })}
+            >
+              <TextArea
+                value={shotContentText(shot, t("r2v.plan.dialogueLabel"))}
+                aria-label={t("r2v.plan.actionAria", { index: index + 1 })}
+                disabled={disabled}
+                onChange={(event) =>
+                  onChangeField(shotId, "description", event.target.value)
+                }
+                onFocus={() => trackShotFocus(shotId, "description")}
+                onBlur={releaseShotFocus}
+                autoSize={{ minRows: 3, maxRows: 10 }}
+                placeholder={t("r2v.plan.contentHint")}
+                className="!rounded-md !border-transparent !bg-transparent !p-1 !text-[13px] !leading-6 hover:!border-[var(--color-border)] focus:!border-[var(--color-accent)]"
+              />
+              <InlineReviewDiff pointer={shotPointer(shotId, "description")} />
+              <InlineReviewDiff pointer={shotPointer(shotId, "dialogue")} />
+            </div>
+            <div className="r2v-plan-shot-controls grid gap-1.5">
               <label
                 data-creator-field={`element:${elementId}/shot:${shotId}/camera`}
                 data-creator-path={shotPointer(shotId, "camera")}
@@ -138,7 +137,7 @@ export default function ShotList({
                 <span className="mb-0.5 block text-[10px] leading-3 text-[var(--color-text-tertiary)]">
                   {t("workbench.shotCameraLabel")}
                 </span>
-                <AutoComplete
+                <Select
                   value={shot.camera ?? ""}
                   disabled={disabled}
                   options={CAMERA_OPTIONS}
@@ -163,7 +162,7 @@ export default function ShotList({
                 <span className="mb-0.5 block text-[10px] leading-3 text-[var(--color-text-tertiary)]">
                   {t("workbench.shotFraming")}
                 </span>
-                <AutoComplete
+                <Select
                   value={shot.framing ?? ""}
                   disabled={disabled}
                   options={FRAMING_OPTIONS}
@@ -190,7 +189,6 @@ export default function ShotList({
                 </span>
                 <InputNumber
                   min={1}
-                  max={15}
                   value={shot.duration_seconds}
                   disabled={disabled}
                   onChange={(value) =>

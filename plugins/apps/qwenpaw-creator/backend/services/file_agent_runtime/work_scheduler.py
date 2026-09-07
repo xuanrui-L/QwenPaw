@@ -22,7 +22,6 @@ Safety posture:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
@@ -43,6 +42,8 @@ from services.media_files.transient_errors import is_transient_error_message
 from services.file_agent_runtime.notifications import RuntimeEventKind
 from services.file_agent_runtime.work_graph import (
     dispatch_key_predates_digest_ledger,
+    dispatch_ledger_fingerprint,
+    dispatch_slot,
     WorkGraph,
     WorkNode,
     WorkNodeStatus,
@@ -270,31 +271,20 @@ class WorkGraphScheduler:
         # [A-Za-z0-9._:-] segment alphabet. Model names are opaque and may
         # carry "/" or other unsafe characters, so digest them rather than
         # interpolating them.
-        models = hashlib.sha256(
-            "\x1f".join(
-                (
-                    get_image_model_name().strip(),
-                    get_video_model_name().strip(),
-                ),
-            ).encode("utf-8"),
-        ).hexdigest()[:16]
-        return f"{base}-m{models}"
+        fingerprint = dispatch_ledger_fingerprint(
+            base,
+            (get_image_model_name(), get_video_model_name()),
+        )
+        if getattr(node, "regeneration_of", None):
+            # Replacing the same obsolete selection replays across ticks and
+            # restarts. A later revision of a new selection gets a new slot,
+            # even if the author deliberately reverted to an earlier prompt.
+            fingerprint += f"-regen-{dispatch_slot(node.regeneration_of)}"
+        return fingerprint
 
     @staticmethod
     def _dispatch_slot(fingerprint: str) -> str:
-        """Safe-segment slot id for one ledger fingerprint.
-
-        The ledger fingerprint embeds the configured media model names
-        ("...|img:<model>|vid:<model>") and "|" is not a safe Runtime
-        path segment character. Media executors persist the dispatch
-        idempotency key verbatim as Task idempotency_key /
-        caused_by_request_id, so the raw fingerprint must never leak
-        into the key — every store write would reject it and no media
-        node could dispatch. Hash it down to a stable hex slot instead
-        (same shape work_graph fingerprints already use).
-        """
-
-        return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:16]
+        return dispatch_slot(fingerprint)
 
     # -- lifecycle -----------------------------------------------------
 
@@ -421,6 +411,27 @@ class WorkGraphScheduler:
             == EXECUTION_AUTHORIZATION_ALLOW_ALL
         )
 
+    def prompt_preparation_status(
+        self,
+        project_id: str,
+        node_id: str,
+    ) -> dict[str, str]:
+        """Actual scheduler activity for the public progress projection."""
+        if node_id in self._inflight.get(project_id, set()):
+            return {"state": "running"}
+        for (
+            pid,
+            nid,
+            fingerprint,
+        ), error in self._deterministic_failure_nodes.items():
+            if (
+                pid == project_id
+                and nid == node_id
+                and fingerprint.startswith("prepare-")
+            ):
+                return {"state": "failed", "error": error}
+        return {"state": "waiting"}
+
     def deterministic_failure_nodes_for_project(
         self,
         project_id: str,
@@ -473,13 +484,42 @@ class WorkGraphScheduler:
             tasks,
         )
 
-        graph = derive_work_graph(snapshot.project, tasks=tasks)
+        graph = derive_work_graph(
+            snapshot.project,
+            tasks=tasks,
+            media_models=(get_image_model_name(), get_video_model_name()),
+        )
         from services.run_review import admission
         from services.run_review.media_review import active_media_review_slots
+        from .workgraph_execution import _publication_artifacts
 
-        reviewing_slots = active_media_review_slots(project_id)
+        pending_reviews = await asyncio.to_thread(
+            self.services.reviews.all_pending,
+            project_id,
+        )
+        publications = [
+            _publication_artifacts(review) for review in pending_reviews
+        ]
+        if any(items is None for items in publications):
+            # A creative revision is still under human review. Admission must
+            # not turn an obsolete output into paid work before it settles.
+            await self._emit_graph_transitions(
+                project_id,
+                graph,
+                snapshot.generation,
+            )
+            return graph
+        pending_artifacts = [
+            artifact for items in publications if items for artifact in items
+        ]
+
+        reviewing_slots = active_media_review_slots(project_id) | frozenset(
+            artifact.slot_id for artifact in pending_artifacts
+        )
         slots_by_id = snapshot.project.assets.artifact_slots_by_id
         reviewing_owners = frozenset(
+            artifact.owner_ref for artifact in pending_artifacts
+        ) | frozenset(
             slot.owner_ref
             for slot_id in reviewing_slots
             if (slot := slots_by_id.get(slot_id)) is not None
@@ -535,7 +575,7 @@ class WorkGraphScheduler:
             if target_ref.startswith("element:"):
                 held_for = frontend_edit_hold.hold_remaining(
                     project_id,
-                    target_ref[len("element:") :],
+                    target_ref.removeprefix("element:"),
                 )
                 if held_for > 0:
                     held_recheck = (
@@ -594,12 +634,171 @@ class WorkGraphScheduler:
         if held_recheck is not None:
             # Same one-shot wake mechanics as the sync-gate recheck timer.
             self._schedule_sync_gate_recheck(project_id, held_recheck)
+        await self._prepare_changed_prompts(project_id, graph)
         await self._emit_graph_transitions(
             project_id,
             graph,
             snapshot.generation,
         )
         return graph
+
+    # Keep all admission and publication gates around one proposal.
+    # pylint: disable-next=too-many-branches
+    async def _prepare_changed_prompts(
+        self,
+        project_id: str,
+        graph: WorkGraph,
+    ) -> None:
+        """Prepare one edited R2V representation before automatic media work.
+
+        Uses the same source-preserving, CAS-checked service as a workbench
+        regeneration click. Existing review/authorization/edit/budget gates
+        are checked before the model call and again before publication.
+        """
+        from domain.errors import ConflictError
+        from services.prompt_sync_service import PromptSyncService
+        from .workgraph_execution import ready_request_context
+
+        self._deterministic_failure_nodes = {
+            key: value
+            for key, value in self._deterministic_failure_nodes.items()
+            if key[0] != project_id
+            or not key[2].startswith("prepare-")
+            or (
+                key[1] in graph.by_id
+                and graph.by_id[key[1]].prompt_sync_required
+            )
+        }
+        for node in graph.nodes:
+            if (
+                # pylint: disable-next=too-many-boolean-expressions
+                node.kind != "storyboard"
+                or not getattr(node, "prompt_sync_required", False)
+                or not node.timeline_id
+                or not node.target_ref
+                or node.node_id in self._inflight.get(project_id, set())
+                or any(
+                    dep not in graph.by_id
+                    or graph.by_id[dep].status is not WorkNodeStatus.DONE
+                    for dep in node.deps
+                )
+                or any(
+                    other.target_ref == node.target_ref
+                    and other.status is WorkNodeStatus.RUNNING
+                    for other in graph.nodes
+                )
+            ):
+                continue
+            if not await asyncio.to_thread(self.enabled):
+                return
+            _, _, fresh_graph, blocked = await ready_request_context(
+                self.services,
+                self.executions,
+                project_id,
+            )
+            fresh = fresh_graph.by_id.get(node.node_id)
+            if blocked.get(node.node_id) == "EDIT_IN_PROGRESS":
+                self._schedule_sync_gate_recheck(
+                    project_id,
+                    max(
+                        0.1,
+                        frontend_edit_hold.hold_remaining(
+                            project_id,
+                            node.target_ref.removeprefix("element:"),
+                        ),
+                    ),
+                )
+            if (
+                fresh is None
+                or not fresh.prompt_sync_required
+                or blocked.get(node.node_id) != "GATED"
+                or any(
+                    dep not in fresh_graph.by_id
+                    or fresh_graph.by_id[dep].status is not WorkNodeStatus.DONE
+                    for dep in fresh.deps
+                )
+            ):
+                continue
+            element_id = node.target_ref.removeprefix("element:")
+            service = PromptSyncService(self.services)
+            status = await asyncio.to_thread(
+                service.status,
+                project_id,
+                node.timeline_id,
+                element_id,
+            )
+            if status["status"] not in {"needs_update", "needs_confirmation"}:
+                continue
+            fingerprint = "prepare-" + status["baselineToken"]
+            ledger_key = (project_id, node.node_id, fingerprint)
+            if ledger_key in self._deterministic_failure_nodes:
+                continue
+            self._deterministic_failure_nodes = {
+                key: value
+                for key, value in self._deterministic_failure_nodes.items()
+                if key[:2] != ledger_key[:2]
+                or not key[2].startswith("prepare-")
+            }
+            self._inflight.setdefault(project_id, set()).add(node.node_id)
+            try:
+                if status.get("validationMessage"):
+                    raise ValueError(status["validationMessage"])
+                await self._notify(
+                    project_id,
+                    kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
+                    request_id=f"{fingerprint}-{node.node_id}",
+                    text=f"正在准备生成内容：{node.label}",
+                    node=node,
+                )
+                proposal = await service.propose(
+                    project_id,
+                    node.timeline_id,
+                    element_id,
+                    source=status.get("suggestedSource") or "storyboardPrompt",
+                )
+                if not await asyncio.to_thread(self.enabled):
+                    return
+                (
+                    _,
+                    _,
+                    latest_graph,
+                    latest_blocked,
+                ) = await ready_request_context(
+                    self.services,
+                    self.executions,
+                    project_id,
+                )
+                if latest_blocked.get(node.node_id) != "GATED" or any(
+                    other.target_ref == node.target_ref
+                    and other.status is WorkNodeStatus.RUNNING
+                    for other in latest_graph.nodes
+                ):
+                    return
+                await service.accept(
+                    project_id,
+                    node.timeline_id,
+                    element_id,
+                    proposal["proposalId"],
+                )
+            except ConflictError:
+                # A concurrent edit invalidated the proposal. The next wake
+                # reads that edit; never publish the older generated plan.
+                pass
+            except Exception as exc:
+                self._deterministic_failure_nodes[ledger_key] = str(exc)[:200]
+                await self._notify(
+                    project_id,
+                    kind=RuntimeEventKind.NODE_DETERMINISTIC_FAILURE,
+                    request_id=f"failed-{fingerprint}-{node.node_id}",
+                    text=f"生成准备需要调整：{node.label}。{str(exc)[:200]}",
+                    node=node,
+                    error_code="PROMPT_PREPARATION_FAILED",
+                )
+            finally:
+                self._inflight.get(project_id, set()).discard(node.node_id)
+                if project_id not in self._cancelled_projects:
+                    self.wake(project_id)
+            return
 
     async def _rereview_stale_scenes(
         self,
@@ -706,7 +905,7 @@ class WorkGraphScheduler:
         validation) never re-enter.
         """
 
-        candidates = list(graph.ready_media_nodes())
+        candidates = [*graph.ready_media_nodes(), *graph.regeneration_nodes()]
         rescuable = _quarantined_stale_targets(tasks)
         inflight = self._inflight.get(project_id, set())
         if rescuable:
@@ -989,7 +1188,7 @@ class WorkGraphScheduler:
             project_id,
             kind=RuntimeEventKind.NODE_DISPATCH_STARTED,
             request_id=f"node_dispatch_started-{node.node_id}-{fingerprint}",
-            text=f"已开始生成：{node.label}",
+            text=f"正在提交制作请求：{node.label}",
             node=node,
         )
         try:
@@ -1101,6 +1300,8 @@ class WorkGraphScheduler:
         project_id: str,
         node: WorkNode,
         fingerprint: str | None = None,
+        *,
+        expected_object_versions: Sequence[str] = (),
     ) -> Any:
         """Execute one node through the shared media executors."""
 
@@ -1143,6 +1344,11 @@ class WorkGraphScheduler:
             target_ref=node.target_ref,
             arguments=dict(node.dispatch_arguments),
             idempotency_key=idempotency_key,
+            **(
+                {"expected_object_versions": expected_object_versions}
+                if expected_object_versions
+                else {}
+            ),
         )
 
 
@@ -1154,6 +1360,7 @@ async def _default_image_dispatch(
     target_ref: str,
     arguments: dict[str, Any],
     idempotency_key: str,
+    expected_object_versions: Sequence[str] = (),
 ) -> Any:
     # Imported lazily: media executors pull heavy provider dependencies.
     # pylint: disable=import-outside-toplevel
@@ -1168,6 +1375,7 @@ async def _default_image_dispatch(
         target_ref=target_ref,
         arguments=arguments,
         idempotency_key=idempotency_key,
+        expected_object_versions=expected_object_versions,
     )
 
 
@@ -1206,6 +1414,7 @@ async def _default_r2v_dispatch(
     target_ref: str,
     arguments: dict[str, Any],
     idempotency_key: str,
+    expected_object_versions: Sequence[str] = (),
 ) -> Any:
     # pylint: disable=import-outside-toplevel
     from services.media_files.r2v_execution import (
@@ -1220,6 +1429,7 @@ async def _default_r2v_dispatch(
         target_ref=target_ref,
         arguments=arguments,
         idempotency_key=idempotency_key,
+        expected_object_versions=expected_object_versions,
     )
 
 
@@ -1231,6 +1441,7 @@ async def _default_s2v_dispatch(
     target_ref: str,
     arguments: dict[str, Any],
     idempotency_key: str,
+    expected_object_versions: Sequence[str] = (),
 ) -> Any:
     # pylint: disable=import-outside-toplevel
     from services.media_files.r2v_execution import (
@@ -1251,6 +1462,7 @@ async def _default_s2v_dispatch(
         target_ref=target_ref,
         arguments=arguments,
         idempotency_key=idempotency_key,
+        expected_object_versions=expected_object_versions,
     )
 
 

@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
+# Pytest fixtures and contract probes retain exact types and private seams.
+# pylint: disable=protected-access
+# pylint: disable=use-implicit-booleaness-not-comparison
 """Work graph derivation: the production DAG projected from durable facts.
 
 Every status is recomputed from project.json plus task records — the
 graph is a view, never a second authority. These tests pin the node
 identities, dependency edges and all seven states.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -30,7 +34,6 @@ from services.project_files.models import (
     VisualEntity,
     VisualVariant,
 )
-
 
 pytestmark = pytest.mark.unit
 
@@ -89,6 +92,83 @@ def _add_element(project: Project, element: TimelineElement) -> None:
     ] = element
 
 
+@pytest.mark.parametrize("shot_count", [1, 6])
+def test_keyframe_rule_upgrade_preserves_existing_storyboard_identity(
+    monkeypatch,
+    shot_count,
+):
+    from dataclasses import replace
+    from services.file_agent_runtime import work_graph, work_scheduler
+
+    models = ("qwen-image-3.0-pro", "wan3.0-video-prime")
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_image_model_name",
+        lambda: models[0],
+    )
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_video_model_name",
+        lambda: models[1],
+    )
+    project = _project()
+    element = _element(
+        "e-keyframes",
+        storyboard_prompt="3列×3行，共9个等尺寸分镜格，每格9:16",
+    )
+    first_shot = element.creation.shots.items[element.creation.shots.order[0]]
+    for index in range(1, shot_count):
+        shot = first_shot.model_copy(update={"shot_id": f"shot-{index}"})
+        element.creation.shots.items[shot.shot_id] = shot
+        element.creation.shots.order.append(shot.shot_id)
+    _add_element(project, element)
+    node_id = "storyboard:e-keyframes"
+    node = derive_work_graph(project, media_models=models).by_id[node_id]
+    # Construct the actual old scheduler key: it recorded shot count even
+    # when authored prose declared nine panels. A code upgrade must not mark
+    # this accepted artifact stale or make an unchanged project spend again.
+    old_fingerprint = work_graph._fingerprint(
+        node_id,
+        element.creation.storyboard_prompt,
+        project.settings.aspect_ratio,
+        shot_count,
+        [],
+    )
+    scheduler = work_scheduler.WorkGraphScheduler
+    old_slot = scheduler._dispatch_slot(
+        scheduler._ledger_fingerprint(
+            replace(node, dispatch_fingerprint=old_fingerprint),
+        ),
+    )
+    task = _task(
+        "image_generation",
+        "element:e-keyframes",
+        TaskStatus.SUCCEEDED,
+        idempotency_key=f"dag-{node_id}-{old_slot}",
+    )
+    _select_slot(
+        project,
+        slot_id="element:e-keyframes:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:e-keyframes",
+        version_id="art:legacy-grid",
+        task_id=task.task_id,
+    )
+    assert (
+        derive_work_graph(project, [task], media_models=models)
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.DONE
+    )
+    element.creation.storyboard_prompt = "2列×2行，共4个等尺寸分镜格，每格9:16"
+    assert (
+        derive_work_graph(project, [task], media_models=models)
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.STALE
+    )
+
+
 def _select_slot(
     project: Project,
     *,
@@ -143,6 +223,233 @@ def _task(kind: str, target: str, status: TaskStatus, **extra):
         updated_at=extra.pop("updated_at", "2026-08-05T00:00:00Z"),
         idempotency_key=extra.pop("idempotency_key", None),
     )
+
+
+def _obsolete_r2v_project(count=1):
+    project = _project()
+    for i in range(count):
+        element_id = f"e{i}"
+        _add_element(project, _element(element_id))
+        for output, kind in (
+            ("storyboard", "r2v_storyboard_image"),
+            ("main", "element_video"),
+        ):
+            _select_slot(
+                project,
+                slot_id=f"element:{element_id}:{output}",
+                kind=kind,
+                owner_ref=f"element:{element_id}",
+                version_id=f"old-{element_id}-{output}",
+            )
+            project.assets.artifact_versions_by_id[
+                f"old-{element_id}-{output}"
+            ].stale = True
+    return project
+
+
+def test_actual_prompt_revision_produces_schedulable_regeneration():
+    from copy import deepcopy
+    from services.project_files.edit_impact import apply_frontend_edit_impacts
+
+    project = _obsolete_r2v_project()
+    for version in project.assets.artifact_versions_by_id.values():
+        version.stale = False
+    base = project.model_dump(mode="json")
+    candidate = deepcopy(base)
+    candidate["timelines"]["items"]["timeline:main"]["elements_by_id"]["e0"][
+        "creation"
+    ]["storyboard_prompt"] = "返修后的详细分镜提示词"
+    revised, impact = apply_frontend_edit_impacts(
+        candidate,
+        [
+            "/timelines/items/timeline:main/elements_by_id/e0"
+            "/creation/storyboard_prompt",
+        ],
+        base=base,
+    )
+    graph = derive_work_graph(Project.model_validate(revised))
+    assert impact.regeneration_required
+    assert [node.node_id for node in graph.regeneration_nodes()] == [
+        "storyboard:e0",
+    ]
+    assert graph.by_id["video:e0"].status is WorkNodeStatus.STALE
+    assert graph.by_id["video:e0"].missing == ("storyboard:e0",)
+
+
+def test_regeneration_waits_for_fresh_dependency_and_keeps_old_output():
+    project = _obsolete_r2v_project()
+    graph = derive_work_graph(project)
+    assert [node.node_id for node in graph.regeneration_nodes()] == [
+        "storyboard:e0",
+    ]
+    assert graph.by_id["video:e0"].missing == ("storyboard:e0",)
+    assert graph.model_required_nodes(automatic_regeneration=True) == ()
+    assert graph.by_id["storyboard:e0"] in graph.model_required_nodes()
+    assert graph.by_id["storyboard:e0"] not in graph.ready_media_nodes()
+    assert project.assets.artifact_versions_by_id["old-e0-storyboard"].stale
+    _select_slot(
+        project,
+        slot_id="element:e0:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:e0",
+        version_id="fresh-storyboard",
+    )
+    graph = derive_work_graph(project)
+    assert [node.node_id for node in graph.regeneration_nodes()] == [
+        "video:e0",
+    ]
+    _select_slot(
+        project,
+        slot_id="element:e0:main",
+        kind="element_video",
+        owner_ref="element:e0",
+        version_id="fresh-video",
+        provenance=["fresh-storyboard"],
+    )
+    graph = derive_work_graph(project)
+    assert graph.by_id["compose:timeline:main"] in graph.ready_media_nodes()
+    assert not graph.regeneration_nodes()
+
+
+def test_regeneration_slot_replays_across_restart_without_restaling_new_image(
+    monkeypatch,
+):
+    from services.file_agent_runtime import work_scheduler
+
+    models = ("image-test", "video-test")
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_image_model_name",
+        lambda: models[0],
+    )
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_video_model_name",
+        lambda: models[1],
+    )
+    project = _obsolete_r2v_project()
+    node = derive_work_graph(project, media_models=models).by_id[
+        "storyboard:e0"
+    ]
+    scheduler = work_scheduler.WorkGraphScheduler
+    identity = scheduler._ledger_fingerprint(node)
+    assert "-regen-" in identity
+    key = f"dag-{node.node_id}-{scheduler._dispatch_slot(identity)}"
+    again = derive_work_graph(project, media_models=models).by_id[node.node_id]
+    assert scheduler._ledger_fingerprint(again) == identity
+    task = _task(
+        "image_generation",
+        "element:e0",
+        TaskStatus.SUCCEEDED,
+        idempotency_key=key,
+    )
+    _select_slot(
+        project,
+        slot_id="element:e0:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:e0",
+        version_id="fresh-storyboard",
+        task_id=task.task_id,
+    )
+    assert (
+        derive_work_graph(project, [task], media_models=models)
+        .by_id[node.node_id]
+        .status
+        is WorkNodeStatus.DONE
+    )
+    project.assets.artifact_versions_by_id["fresh-storyboard"].stale = True
+    revised = derive_work_graph(project, [task], media_models=models).by_id[
+        node.node_id
+    ]
+    assert scheduler._ledger_fingerprint(revised) != identity
+    task.status = TaskStatus.FAILED
+    task.error = {"message": "invalid input"}
+    failed = derive_work_graph(project, [task], media_models=models)
+    assert failed.by_id[node.node_id].status is WorkNodeStatus.FAILED
+    assert failed.regeneration_nodes() == ()
+
+
+@pytest.mark.parametrize(
+    "authorized, held, expected",
+    [(False, False, 0), (True, True, 0), (True, False, 4)],
+)
+def test_scheduler_regenerates_fanout_only_after_authorization_and_edit_hold(
+    tmp_path,
+    monkeypatch,
+    authorized,
+    held,
+    expected,
+):
+    import asyncio
+    from services.file_agent_runtime import work_scheduler
+    from services.project_files.facade import CreatorFileServices
+
+    project = _obsolete_r2v_project(4)
+    services = CreatorFileServices.create(tmp_path.resolve())
+    services.projects.create(
+        Project.new(
+            project_id=project.project_id,
+            name="Isolated regeneration test",
+        ),
+    )
+    monkeypatch.setattr(
+        services.projects,
+        "read",
+        lambda _: SimpleNamespace(project=project, generation=1),
+    )
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_execution_authorization_mode",
+        lambda: "allow_all" if authorized else "require_approval",
+    )
+    monkeypatch.setattr(work_scheduler, "get_media_parallelism", lambda: 8)
+    monkeypatch.setattr(
+        work_scheduler.frontend_edit_hold,
+        "hold_remaining",
+        lambda *_: 10 if held else 0,
+    )
+    calls = []
+    records = []
+
+    async def dispatch(_services, **kwargs):
+        calls.append(kwargs)
+        records.append(
+            _task(
+                "image_generation",
+                kwargs["target_ref"],
+                TaskStatus.RUNNING,
+                idempotency_key=kwargs["idempotency_key"],
+            ),
+        )
+        return {"taskId": records[-1].task_id}
+
+    async def run():
+        scheduler = work_scheduler.WorkGraphScheduler(
+            services,
+            image_dispatch=dispatch,
+        )
+        monkeypatch.setattr(
+            scheduler.executions,
+            "list_tasks",
+            lambda _: records,
+        )
+        monkeypatch.setattr(scheduler, "wake", lambda _: None)
+        for _ in range(2):
+            await scheduler.tick(project.project_id)
+            for _ in range(6):
+                await asyncio.sleep(0)
+        assert len(calls) == expected
+        assert all(
+            call["command"] == "GENERATE_STORYBOARD_IMAGE" for call in calls
+        )
+        assert all("-regen-" in call["idempotency_key"] for call in calls)
+        assert all(
+            version.stale
+            for version in project.assets.artifact_versions_by_id.values()
+        )
+        await scheduler.shutdown()
+
+    asyncio.run(run())
 
 
 def test_variant_nodes_cover_ready_running_failed_done() -> None:
@@ -537,7 +844,13 @@ def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
         task_id=task.task_id,
     )
     assert (
-        derive_work_graph(project, tasks=[task]).by_id[node_id].status
+        derive_work_graph(
+            project,
+            tasks=[task],
+            media_models=("image", "video"),
+        )
+        .by_id[node_id]
+        .status
         is WorkNodeStatus.DONE
     )
 
@@ -560,7 +873,13 @@ def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
         creation.shots.order.append(second.shot_id)
 
     assert (
-        derive_work_graph(project, tasks=[task]).by_id[node_id].status
+        derive_work_graph(
+            project,
+            tasks=[task],
+            media_models=("image", "video"),
+        )
+        .by_id[node_id]
+        .status
         is WorkNodeStatus.STALE
     )
 
@@ -578,13 +897,25 @@ def test_failed_storyboard_reopens_when_aspect_ratio_changes() -> None:
         idempotency_key=f"dag-{node_id}-{original}",
     )
     assert (
-        derive_work_graph(project, tasks=[failed]).by_id[node_id].status
+        derive_work_graph(
+            project,
+            tasks=[failed],
+            media_models=("image", "video"),
+        )
+        .by_id[node_id]
+        .status
         is WorkNodeStatus.FAILED
     )
 
     project.settings.aspect_ratio = "9:16"
     assert (
-        derive_work_graph(project, tasks=[failed]).by_id[node_id].status
+        derive_work_graph(
+            project,
+            tasks=[failed],
+            media_models=("image", "video"),
+        )
+        .by_id[node_id]
+        .status
         is WorkNodeStatus.READY
     )
 
@@ -668,6 +999,60 @@ def test_stale_final_render_reopens_compose() -> None:
     compose = graph.by_id["compose:timeline:main"]
     assert compose.status is WorkNodeStatus.READY
     assert compose in graph.ready_media_nodes()
+
+
+def test_compose_waits_only_for_its_own_timeline_clips() -> None:
+    project = _project()
+    _add_second_timeline(project)
+    _add_element(project, _element("elem:one"))
+    project.timelines.items["timeline:ep2"].elements_by_id[
+        "elem:two"
+    ] = _element("elem:two")
+    _select_slot(
+        project,
+        slot_id="element:elem:one:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:one",
+        version_id="art:sb",
+    )
+    _select_slot(
+        project,
+        slot_id="element:elem:one:main",
+        kind="element_video",
+        owner_ref="element:elem:one",
+        version_id="art:vid",
+    )
+    _append_snapshot(project)
+
+    graph = derive_work_graph(project)
+    main = graph.by_id["compose:timeline:main"]
+    other = graph.by_id["compose:timeline:ep2"]
+    assert main.deps == ("video:elem:one",)
+    assert main.missing == ()
+    assert main.status is WorkNodeStatus.READY
+    assert main in graph.ready_media_nodes()
+    assert other.deps == ("video:elem:two",)
+    assert other.missing == ("video:elem:two",)
+    assert other.status is WorkNodeStatus.GATED
+    assert other not in graph.ready_media_nodes()
+
+    # Updating an existing final cut remains automatic and scoped to the
+    # same timeline; a changed clip in that timeline still blocks dispatch.
+    _select_slot(
+        project,
+        slot_id="timeline:timeline:main:render",
+        kind="final_video",
+        owner_ref="timeline:timeline:main",
+        version_id="art:final",
+    )
+    project.assets.artifact_versions_by_id["art:final"].stale = True
+    graph = derive_work_graph(project)
+    assert graph.by_id[main.node_id] in graph.ready_media_nodes()
+    project.assets.artifact_versions_by_id["art:vid"].stale = True
+    graph = derive_work_graph(project)
+    assert graph.by_id[main.node_id].status is WorkNodeStatus.GATED
+    assert graph.by_id[main.node_id].missing == ("video:elem:one",)
+    assert graph.by_id[main.node_id] not in graph.ready_media_nodes()
 
 
 def test_superseded_render_source_reopens_compose_without_stale_flag() -> None:
@@ -824,6 +1209,7 @@ def test_upgrade_does_not_restale_artifacts_from_the_old_ledger() -> None:
         node_id=node_id,
         dispatch_fingerprint="9f8e7d6c5b4a3210",
         tasks=[new_task],
+        media_models=("image", "video"),
     )
 
 
@@ -1262,3 +1648,152 @@ def test_snapshot_does_not_count_toward_script_flow() -> None:
         node.node_id for node in graph.nodes if node.kind == "script"
     )
     assert script_nodes == ["script:timeline:ep2", "script:timeline:main"]
+
+
+@pytest.mark.parametrize(
+    "changed_input",
+    ["prompt", "aspect_ratio", "references", "model"],
+)
+@pytest.mark.parametrize("suffix", ["", ":transient-retry-1", "-r17"])
+def test_real_scheduler_storyboard_slot_stays_done_until_inputs_change(
+    monkeypatch,
+    changed_input,
+    suffix,
+) -> None:
+    from services.file_agent_runtime import work_scheduler
+
+    models = ("qwen-image-3.0-pro", "wan3.0-video-prime")
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_image_model_name",
+        lambda: models[0],
+    )
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_video_model_name",
+        lambda: models[1],
+    )
+    project = _project()
+    element = _element("elem:one")
+    _add_element(project, element)
+    node_id = "storyboard:elem:one"
+    node = derive_work_graph(project, media_models=models).by_id[node_id]
+    scheduler = work_scheduler.WorkGraphScheduler
+    slot = scheduler._dispatch_slot(scheduler._ledger_fingerprint(node))
+    key = f"dag-{node_id}-{slot}{suffix}"
+    task = _task(
+        "image_generation",
+        "element:elem:one",
+        TaskStatus.SUCCEEDED,
+        idempotency_key=key,
+    )
+    _select_slot(
+        project,
+        slot_id="element:elem:one:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:one",
+        version_id="art:sb",
+        task_id=task.task_id,
+    )
+    assert (
+        derive_work_graph(
+            project,
+            [task],
+            media_models=models,
+        )
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.DONE
+    )
+    # Model-free inspection cannot disprove an opaque durable slot.
+    assert (
+        derive_work_graph(project, [task]).by_id[node_id].status
+        is WorkNodeStatus.DONE
+    )
+
+    if changed_input == "prompt":
+        element.creation.storyboard_prompt += " updated"
+    elif changed_input == "aspect_ratio":
+        project.settings.aspect_ratio = "9:16"
+    elif changed_input == "references":
+        element.creation.storyboard_reference_version_ids = ["new-reference"]
+    else:
+        models = ("different-image-model", models[1])
+    assert (
+        derive_work_graph(
+            project,
+            [task],
+            media_models=models,
+        )
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.STALE
+    )
+
+
+def test_real_scheduler_failed_slot_does_not_reopen_without_input_change(
+    monkeypatch,
+):
+    from services.file_agent_runtime import work_scheduler
+
+    models = ("image-model", "video-model")
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_image_model_name",
+        lambda: models[0],
+    )
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_video_model_name",
+        lambda: models[1],
+    )
+    project = _project()
+    element = _element("elem:one")
+    _add_element(project, element)
+    node_id = "storyboard:elem:one"
+    node = derive_work_graph(project, media_models=models).by_id[node_id]
+    scheduler = work_scheduler.WorkGraphScheduler
+    task = _task(
+        "image_generation",
+        "element:elem:one",
+        TaskStatus.FAILED,
+        idempotency_key=(
+            f"dag-{node_id}-"
+            f"{scheduler._dispatch_slot(scheduler._ledger_fingerprint(node))}"
+        ),
+    )
+    assert (
+        derive_work_graph(
+            project,
+            [task],
+            media_models=models,
+        )
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.FAILED
+    )
+    assert (
+        derive_work_graph(project, [task]).by_id[node_id].status
+        is WorkNodeStatus.FAILED
+    )
+    assert (
+        derive_work_graph(
+            project,
+            [task],
+            media_models=("changed-image", models[1]),
+        )
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.READY
+    )
+    element.creation.storyboard_prompt += " changed"
+    assert (
+        derive_work_graph(
+            project,
+            [task],
+            media_models=models,
+        )
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.READY
+    )

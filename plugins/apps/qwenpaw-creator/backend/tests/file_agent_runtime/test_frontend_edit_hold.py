@@ -119,7 +119,7 @@ def _scheduler_env(
     monkeypatch.setattr(
         work_scheduler,
         "derive_work_graph",
-        lambda project, tasks=(): _element_graph(),
+        lambda project, tasks=(), *, media_models=None: _element_graph(),
     )
     dispatch = _RecordingDispatch()
     scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)

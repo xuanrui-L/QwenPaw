@@ -87,8 +87,11 @@ from services.media_files.transient_errors import (
     is_transient_task_error,
     transient_retry_slot_key,
 )
+from services.media_files.prompt_labels import media_prompt_entity_names
+from services.project_files.prompt_sync import assert_r2v_prompt_sync
 from services.media_files.visual_reference_resolution import (
     resolve_r2v_visual_reference_version_ids,
+    video_reference_plan,
 )
 from services.observability import report_error
 from services.project_files.remote_cache import public_source_url
@@ -428,7 +431,9 @@ class FileR2VDispatch:
 
 
 class _R2VClaimLost(RuntimeError):
-    """A stale supervisor lost durable ownership; it must never fail the Task."""
+    """
+    A stale supervisor lost durable ownership; it must never fail the Task.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,7 +620,8 @@ def _resolve_reference_versions(
         if version is None:
             raise NotFoundError(f"R2V reference version 不存在: {version_id}")
         # Check for source_url stored by Token Plan image generation.
-        # Stored at metadata["provider"]["source_url"] by _materialize_and_publish.
+        # Stored at metadata["provider"]["source_url"] by
+        # _materialize_and_publish.
         source_url = ""
         if artifact is not None and isinstance(
             getattr(artifact, "metadata", None),
@@ -1240,6 +1246,8 @@ def _resolve_request(
     element_id = _target_element_id(target_ref)
     timeline, element = find_timeline_element(project, element_id)
     creation = element.creation
+    if isinstance(creation, R2VCreation):
+        assert_r2v_prompt_sync(project, timeline.timeline_id, element_id)
     mode = _validated_request_mode(arguments)
     # Each creation type declares exactly one generation mode; the request
     # mode must match it so a t2v element can never be submitted as r2v.
@@ -1325,18 +1333,7 @@ def _resolve_request(
         raise ValidationError("R2V watermark/generateAudio 必须是 boolean")
 
     if mode == "r2v":
-        version_ids = tuple(
-            dict.fromkeys(
-                [
-                    storyboard_id,
-                    *resolve_r2v_visual_reference_version_ids(
-                        project,
-                        creation,
-                        creation.video_reference_version_ids,
-                    ),
-                ],
-            ),
-        )
+        version_ids = video_reference_plan(project, element)
         _assert_r2v_reference_budget(
             project,
             version_ids,
@@ -1361,7 +1358,9 @@ def _resolve_request(
             version_ids,
             storyboard_id=storyboard_id,
         )
-    prompt = _render_reference_markers(prompt)
+    prompt = _render_reference_markers(
+        media_prompt_entity_names(prompt, project),
+    )
     if mode != "r2v":
         version_ids = ()
         urls, checksums, provenance, read_set = [], [], [], []
@@ -1796,7 +1795,9 @@ class FileR2VExecutionService:
             return existing
 
     def _ensure_task_scratch_sync(self, task: TaskRecord) -> Path:
-        """Create and validate the durable scratch owned by one active R2V Task."""
+        """
+        Create and validate the durable scratch owned by one active R2V Task.
+        """
 
         with self.services.projects.lifecycle_lock(
             task.project_id,
@@ -2421,7 +2422,9 @@ class FileR2VExecutionService:
         project_id: str,
         task_id: str,
     ) -> asyncio.Task[None]:
-        """Keep a deferred terminal Task live until its critical lease settles."""
+        """
+        Keep a deferred terminal Task live until its critical lease settles.
+        """
 
         key = (project_id, task_id)
         current = self._terminal_recovery_jobs.get(key)
@@ -2660,7 +2663,9 @@ class FileR2VExecutionService:
         task: TaskRecord,
         state: R2VTaskState,
     ) -> None:
-        """Repair the crash gap between a quarantined Attempt and its record."""
+        """
+        Repair the crash gap between a quarantined Attempt and its record.
+        """
 
         result = task.result
         if not isinstance(result, Mapping):
@@ -4189,7 +4194,8 @@ class FileR2VExecutionService:
         except ValidationError as error:
             # A dead owner may have already removed its private scratch file.
             # Only genuine absence falls through to the provider URL; unsafe
-            # paths, links, MIME mismatches and other integrity failures do not.
+            # paths, links, MIME mismatches and other integrity failures do
+            # not.
             if isinstance(error.__cause__, FileNotFoundError):
                 return None
             raise
@@ -4509,7 +4515,14 @@ class FileR2VExecutionService:
             storyboard_id = selected[1] if selected is not None else None
             if not storyboard_id:
                 return False
-            current_refs = list(
+            current_refs = list(video_reference_plan(project, element))
+            if current_refs == [str(item) for item in frozen_refs]:
+                return True
+            # Already-paid requests retain their original exact inputs,
+            # including the historical explicit-storyboard duplication.
+            # This comparison never recompiles or resubmits that request;
+            # a changed current storyboard still invalidates its first ID.
+            legacy_refs = list(
                 dict.fromkeys(
                     [
                         storyboard_id,
@@ -4521,7 +4534,7 @@ class FileR2VExecutionService:
                     ],
                 ),
             )
-            return current_refs == [str(item) for item in frozen_refs]
+            return legacy_refs == [str(item) for item in frozen_refs]
         elif creation_type == "t2v":
             if not isinstance(creation, T2VCreation):
                 return False

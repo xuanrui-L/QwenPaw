@@ -753,7 +753,16 @@ class ProjectExecutionStore:
                         "Runtime tasks directory contains an unsafe entry",
                     )
                 task_id = self._safe(child.name, "task_id")
-                record = self._task_store(project_id, task_id).read()
+                if (child / "task.json").is_symlink():
+                    raise UnsafeExecutionPath(
+                        "Runtime Task head must be a real file",
+                    )
+                # Atomic admission creates the directory before publishing
+                # task.json. A lock-free listing may see that directory while
+                # the writer is still syncing its temporary file.
+                record = self._task_store(project_id, task_id).read_or_none()
+                if record is None:
+                    continue
                 self._assert_task_identity(record, project_id, task_id)
                 records.append(record)
             return sorted(

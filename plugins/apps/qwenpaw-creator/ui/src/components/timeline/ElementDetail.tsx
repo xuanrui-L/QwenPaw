@@ -35,6 +35,7 @@ import {
   resolveElementVisualMeta,
 } from "@/selectors/timelineElementSelectors";
 import { outputLabel } from "@/lib/creatorPresentation";
+import { presentPromptEntityNames } from "@/lib/promptEntityNames";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
 import { storyboardOfOwner } from "@/components/workbench/referenceThumbs";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
@@ -620,15 +621,15 @@ export default function ElementDetail({
             <div data-element-overview-lead className="space-y-0.5 pt-0.5">
               {lead?.intent && (
                 <p className="text-xs leading-[1.7] text-[var(--color-text-primary)]">
-                  {lead.intent}
+                  {presentPromptEntityNames(lead.intent, project)}
                 </p>
               )}
               {lead?.continuity && (
                 <p
-                  title={lead.continuity}
+                  title={presentPromptEntityNames(lead.continuity, project)}
                   className="truncate text-xs leading-[1.7] text-[var(--color-text-tertiary)]"
                 >
-                  ↳ {lead.continuity}
+                  ↳ {presentPromptEntityNames(lead.continuity, project)}
                 </p>
               )}
             </div>
@@ -747,7 +748,7 @@ export default function ElementDetail({
               {t("r2v.videoPrompt")}
             </span>
             <div className="max-h-[135px] overflow-y-auto rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-3 text-xs leading-[1.6] text-[var(--color-text-primary)]">
-              {creation.video_prompt}
+              {presentPromptEntityNames(creation.video_prompt, project)}
             </div>
           </div>
         )}
@@ -794,7 +795,7 @@ export default function ElementDetail({
                 {t("r2v.videoPrompt")}
               </span>
               <div className="max-h-[135px] overflow-y-auto rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-3 text-xs leading-[1.6] text-[var(--color-text-primary)]">
-                {creation.video_prompt}
+                {presentPromptEntityNames(creation.video_prompt, project)}
               </div>
             </div>
           )}

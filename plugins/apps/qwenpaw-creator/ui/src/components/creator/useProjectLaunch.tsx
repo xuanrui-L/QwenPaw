@@ -572,7 +572,7 @@ export function useProjectLaunch(options?: {
         : committedUrlAttachments;
 
       if (projectPayload.initialGoal) {
-        router.push(`/project/${project.projectId}/plan`);
+        router.push(`/project/${project.projectId}`);
         onLaunched?.();
         projectRequest.current = { signature: "", id: "" };
         initialMessageRequests.current.clear();
@@ -586,7 +586,7 @@ export function useProjectLaunch(options?: {
       // launch-upload store for the workspace progress card, and sends
       // the durable first message once every ingest settled — so a
       // torn-down composer can no longer strand a Goal-less Project.
-      router.push(`/project/${project.projectId}/plan`);
+      router.push(`/project/${project.projectId}`);
       onLaunched?.();
       projectRequest.current = { signature: "", id: "" };
       initialMessageRequests.current.clear();

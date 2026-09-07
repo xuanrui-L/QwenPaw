@@ -47,7 +47,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
-from models.reference_markers import canonical_marker
+from models.reference_markers import canonical_marker, canonical_marker_indices
 from models.image.base import (
     image_reference_capability,
     image_reference_limit,
@@ -82,9 +82,12 @@ from services.media_files.transient_errors import (
     is_transient_task_error,
     transient_retry_slot_key,
 )
+from services.media_files.prompt_labels import media_prompt_entity_names
+from services.storyboard_layout import declared_storyboard_panel_count
 from services.media_files.visual_reference_resolution import (
-    resolve_r2v_visual_reference_version_ids,
+    storyboard_reference_plan,
 )
+from services.project_files.prompt_sync import assert_r2v_prompt_sync
 from services.media_files.visual_design_readiness import (
     assert_visual_design_ready_for_storyboards,
 )
@@ -312,6 +315,11 @@ def _storyboard_panel_aspect_contract(
         "show exactly one visual instance of each named character in that "
         "panel; the same character recurring across sequential panels must "
         "never be duplicated or cloned inside one panel."
+        " Panels depict the explicitly planned keyframes, not the number of "
+        "video shots. One continuous shot may need several panels to show its "
+        "start, intermediate action, turning point, ending and next-shot "
+        "handoff. Preserve an explicitly requested single static frame; do "
+        "not invent additional events or split a continuous shot into cuts."
     )
 
 
@@ -620,7 +628,8 @@ def _resolve_version_references(
         if version is None:
             raise NotFoundError(f"引用版本不存在: {version_id}")
         # Check for source_url stored by Token Plan image generation.
-        # Stored at metadata["provider"]["source_url"] by _materialize_and_publish.
+        # Stored at metadata["provider"]["source_url"] by
+        # _materialize_and_publish.
         source_url = ""
         if artifact is not None and isinstance(
             getattr(artifact, "metadata", None),
@@ -663,7 +672,9 @@ def _resolve_version_references(
                 },
             )
             continue
-        indexed = project.assets.files_by_id[version.file_id]
+        indexed = project.assets.files_by_id.get(version.file_id)
+        if indexed is None:
+            raise NotFoundError(f"引用图片文件不存在: {version_id}")
         if not indexed.media_type.casefold().startswith("image/"):
             raise ValidationError(f"引用版本不是图片: {version_id}")
         inspection = files.inspect(indexed)
@@ -785,15 +796,21 @@ def _resolve_request(
         *reference_image_ref_ids,
     ]
 
+    planned_dropped_version_ids: tuple[str, ...] = ()
+    authored_storyboard_version_ids: tuple[str, ...] = ()
     if command is CreatorCommandType.GENERATE_STORYBOARD_IMAGE:
         element_id = target_element_id(
             target_ref,
             command=CreatorCommandType.GENERATE_STORYBOARD_IMAGE.value,
         )
-        _, element = find_timeline_element(project, element_id)
+        timeline, element = find_timeline_element(project, element_id)
         creation = element.creation
         if not isinstance(creation, R2VCreation):
             raise ValidationError("仅 R2V Element 可以生成分镜图")
+        authored_storyboard_version_ids = tuple(
+            creation.storyboard_reference_version_ids,
+        )
+        assert_r2v_prompt_sync(project, timeline.timeline_id, element_id)
         assert_visual_design_ready_for_storyboards(project)
         prompt = explicit_prompt or creation.storyboard_prompt.strip()
         if not prompt:
@@ -818,17 +835,16 @@ def _resolve_request(
         prompt = _append_storyboard_panel_aspect_contract(
             prompt,
             project.settings.aspect_ratio,
-            len(creation.shots.order),
+            declared_storyboard_panel_count(prompt),
         )
-        version_ids = list(
-            resolve_r2v_visual_reference_version_ids(
-                project,
-                creation,
-                [
-                    *creation.storyboard_reference_version_ids,
-                    *explicit_version_ids,
-                ],
-            ),
+        version_ids, planned_dropped_version_ids = storyboard_reference_plan(
+            project,
+            creation,
+            additional_version_ids=explicit_version_ids,
+            image_model_name=image_model_name,
+            max_reference_images=max_reference_images,
+            prompt=prompt,
+            has_explicit_urls=bool(explicit_urls),
         )
         resolved = _ResolvedRequest(
             command=command,
@@ -964,17 +980,17 @@ def _resolve_request(
         project_root=project_root,
         version_ids=active_version_ids,
     )
+    # Distinct exact versions can share bytes/URLs. Their positions are still
+    # distinct [Image N] inputs and must survive into the provider payload.
     urls = tuple(
-        dict.fromkeys(
-            [*local_urls, *([] if mode == "translate" else explicit_urls)],
-        ),
+        [*local_urls, *([] if mode == "translate" else explicit_urls)],
     )
     capability_model_name = image_model_name or (
         "qwen-mt-image"
         if mode == "translate"
         else ("qwen-image-2.0-pro" if mode == "edit" else "")
     )
-    budget_dropped_version_ids: tuple[str, ...] = ()
+    budget_dropped_version_ids = planned_dropped_version_ids
     capability = image_reference_capability(capability_model_name)
     reference_limit = (
         image_reference_limit(capability_model_name)
@@ -999,11 +1015,14 @@ def _resolve_request(
             },
         )
     if (
+        # pylint: disable-next=too-many-boolean-expressions
         reference_limit is not None
         and len(urls) > reference_limit
         and mode != "translate"
         and not explicit_version_ids
         and not explicit_urls
+        and command is not CreatorCommandType.GENERATE_STORYBOARD_IMAGE
+        and not canonical_marker_indices(resolved.prompt)
     ):
         # Nobody wrote this list: the runtime assembled it from the Element's
         # entity bindings, so there is no author intent to preserve and
@@ -1019,7 +1038,7 @@ def _resolve_request(
             project_root=project_root,
             version_ids=active_version_ids,
         )
-        urls = tuple(dict.fromkeys(local_urls))
+        urls = tuple(local_urls)
         logger.warning(
             "automatic reference chain exceeded the model budget; kept the "
             "highest-priority %d of %d for %s and dropped %s",
@@ -1032,7 +1051,9 @@ def _resolve_request(
             ],
         )
     if reference_limit is not None and len(urls) > reference_limit:
-        explicit_id_set = frozenset(explicit_version_ids)
+        explicit_id_set = frozenset(
+            [*explicit_version_ids, *authored_storyboard_version_ids],
+        )
         automatic_ids = [
             item for item in active_version_ids if item not in explicit_id_set
         ]
@@ -1043,11 +1064,9 @@ def _resolve_request(
         raise ImageReferenceBudgetError(
             f"IMAGE_REFERENCE_BUDGET_EXCEEDED: 本次解析后共 {len(urls)} 张"
             f"参考图，但模型 {model_label} 单次最多接受 {reference_limit} 张。"
-            "这是你显式指定的参考列表（referenceVersionIds / "
-            "storyboard_reference_version_ids），执行层不会替你截断，也没有"
-            "调用 provider：请直接把显式列表缩减到上限内（多角色同框优先"
-            "保留阵容图）。自动引用链超限不会走到这里——那种情况执行层会按"
-            "优先级保留上限内的参考并记录被丢弃的版本。",
+            "显式指定的参考列表或提示词中的 [Image N] 固定了图片职责，"
+            "执行层不会替你截断，也没有调用 provider：请把参考列表缩减到"
+            "上限内，并同步检查提示词编号（多角色同框优先保留阵容图）。",
             details={
                 "modelName": model_label,
                 "limit": reference_limit,
@@ -1062,6 +1081,17 @@ def _resolve_request(
                 ),
             },
         )
+    invalid_indices = sorted(
+        {
+            index
+            for index in canonical_marker_indices(resolved.prompt)
+            if not 1 <= index <= len(urls)
+        },
+    )
+    if invalid_indices:
+        raise ValidationError(
+            "参考图编号超出本次实际图片序列；请核对 [Image N] 与参考图片列表，本次未调用图片模型。",
+        )
     if mode == "edit" and (
         reference_limit is None or not 1 <= len(urls) <= reference_limit
     ):
@@ -1073,12 +1103,15 @@ def _resolve_request(
     return _ResolvedRequest(
         command=resolved.command,
         target_ref=resolved.target_ref,
-        prompt=_labelled_reference_prompt(
-            resolved.prompt,
+        prompt=media_prompt_entity_names(
+            _labelled_reference_prompt(
+                resolved.prompt,
+                project,
+                active_version_ids,
+                image_model_name=capability_model_name,
+                has_explicit_urls=bool(explicit_urls),
+            ),
             project,
-            active_version_ids,
-            image_model_name=capability_model_name,
-            has_explicit_urls=bool(explicit_urls),
         ),
         aspect_ratio=resolved.aspect_ratio,
         reference_image_urls=urls,
@@ -1135,7 +1168,9 @@ async def _read_controlled_local(
     try:
         relative = path.relative_to(allowed_root)
     except ValueError as exc:
-        raise ValidationError("provider 输出不属于当前 Task work 目录") from exc
+        raise ValidationError(
+            "provider 输出不属于当前 Task work 目录",
+        ) from exc
     if not relative.parts or any(
         part in {"", ".", ".."} for part in relative.parts
     ):
@@ -1476,7 +1511,9 @@ class FileImageExecutionService:
     ) -> FileImageExecutionResult:
         command_value = CreatorCommandType(command)
         if command_value not in _IMAGE_COMMANDS:
-            raise ValidationError(f"不支持的文件图片命令: {command_value.value}")
+            raise ValidationError(
+                f"不支持的文件图片命令: {command_value.value}",
+            )
         ids = self._ids(project_id, idempotency_key)
         command_request_hash = _fingerprint(
             {
@@ -1538,6 +1575,17 @@ class FileImageExecutionService:
             )
 
         base = await asyncio.to_thread(self.services.projects.read, project_id)
+        if command_value is CreatorCommandType.GENERATE_ASSET:
+            from services.project_files.blueprint_readiness import (
+                STORY_BEFORE_VISUAL_MESSAGE,
+                visual_story_missing,
+            )
+
+            if visual_story_missing(
+                base.project,
+                target_ref.removeprefix("asset:"),
+            ):
+                raise ValidationError(STORY_BEFORE_VISUAL_MESSAGE)
         conflicts = [
             value
             for value in expected_object_versions
@@ -3143,7 +3191,9 @@ class FileImageExecutionService:
             project_etag = str(result["projectEtag"])
             project_generation = int(result["projectGeneration"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise StorageIntegrityError("SUCCEEDED 图片 Task 缺少可重放结果") from exc
+            raise StorageIntegrityError(
+                "SUCCEEDED 图片 Task 缺少可重放结果",
+            ) from exc
         # Run-review hook: every successful convergence (fresh generation,
         # idempotent replay, crash recovery) flows through this single
         # point. Scheduling is advisory and idempotent: the switch, the

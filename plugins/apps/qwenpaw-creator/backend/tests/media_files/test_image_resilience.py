@@ -6,6 +6,7 @@ Reproduces the 2026-08 production deadlock: a network blip failed the image
 Task terminally, and because identical retries derive the same durable slot,
 every same-argument resend hit "图片 Task 已终止: FAILED" forever.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +34,6 @@ from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 from utils.exceptions import ModelError
 
 from .conftest import make_r2v_element, r2v_project_services
-
 
 pytestmark = pytest.mark.unit
 
@@ -108,6 +108,41 @@ def test_storyboard_resolution_appends_project_panel_ratio_before_spend(
     assert "columns by" not in resolved.prompt
     assert "placeholder panel" not in resolved.prompt
     assert resolved.aspect_ratio == "9:16"
+
+
+@pytest.mark.parametrize("panels", [1, 9])
+def test_one_continuous_shot_uses_its_authored_keyframe_layout(
+    tmp_path,
+    monkeypatch,
+    panels,
+):
+    services = _services(tmp_path, monkeypatch)
+    snapshot = services.projects.read(PROJECT_ID)
+    creation = (
+        snapshot.project.timelines.items["timeline:main"]
+        .elements_by_id[ELEMENT_ID]
+        .creation
+    )
+    assert len(creation.shots.order) == 1
+    creation.storyboard_prompt = (
+        f"输出一张9:16画布，共{panels}个关键帧，" "每格内部9:16。保持一个连续镜头，依次展示动作中间过程。"
+    )
+    snapshot.project.settings.aspect_ratio = "9:16"
+    before = snapshot.project.model_dump_json()
+    resolved = _resolve_request(
+        snapshot=snapshot,
+        project_root=services.projects.project_root(PROJECT_ID),
+        command=CreatorCommandType.GENERATE_STORYBOARD_IMAGE,
+        target_ref=f"element:{ELEMENT_ID}",
+        arguments={},
+    )
+    if panels == 9:
+        assert "3 columns by 3 rows" in resolved.prompt
+        assert "Place exactly 9 story panels" in resolved.prompt
+    else:
+        assert "columns by" not in resolved.prompt
+    assert "One continuous shot may need several panels" in resolved.prompt
+    assert snapshot.project.model_dump_json() == before
 
 
 class _CountingProvider:
@@ -634,7 +669,7 @@ def test_over_budget_automatic_chain_truncates_instead_of_stalling(
 
 
 def test_image_reference_marker_spec_follows_provider_docs() -> None:
-    """Only the qwen families document addressing an input image in-prompt."""
+    """Verified image guides drive wording, never video dialect guesses."""
     from models.image.base import image_reference_marker_spec
 
     for model in (
@@ -654,8 +689,10 @@ def test_image_reference_marker_spec_follows_provider_docs() -> None:
     # Nothing to disambiguate at zero or one reference.
     assert image_reference_marker_spec("qwen-image") is None
     assert image_reference_marker_spec("qwen-mt-image") is None
-    # Unverified families stay fail-closed rather than guessing.
-    assert image_reference_marker_spec("gemini-3-pro-image") is None
+    assert (
+        image_reference_marker_spec("gemini-3-pro-image").render_index(2)
+        == "image 2"
+    )
     assert image_reference_marker_spec("unknown-alias") is None
 
 

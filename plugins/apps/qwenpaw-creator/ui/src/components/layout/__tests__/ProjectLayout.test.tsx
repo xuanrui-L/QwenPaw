@@ -86,6 +86,19 @@ function commonRoutes(review?: FileProjectReviewRecord) {
       match: "/projects/p1/session",
       response: { json: { session: sessionState, agentStatusBar: status } },
     },
+    {
+      match: "/projects/p1/work-graph",
+      response: {
+        json: {
+          projectId: "p1",
+          counts: {},
+          nodes: [],
+          generation: 0,
+          mediaCalls: 0,
+          mediaCallBudget: 0,
+        },
+      },
+    },
     { match: "/models/config", response: { json: configuredModelConfig } },
   ];
 }

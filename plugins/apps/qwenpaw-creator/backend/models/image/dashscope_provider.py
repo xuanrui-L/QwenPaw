@@ -437,12 +437,13 @@ class DashScopeImageModel(BaseImageModel):
                 )
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
+    # Keep the provider body interface compatible across operation modes.
     async def _build_body(
         self,
         prompt: str,
         aspect_ratio: str,
         clean_reference_urls: list[str],
-        mode: str = "generate",
+        mode: str = "generate",  # pylint: disable=unused-argument
     ) -> dict:
         # Official qwen-image content order: reference image blocks first, then
         # the single text instruction last (see qwen-image / qwen-image-edit
@@ -450,21 +451,16 @@ class DashScopeImageModel(BaseImageModel):
         # with references it becomes an image-editing request on the same
         # multimodal-generation endpoint.
         content: list[dict] = []
-        for raw_url in dict.fromkeys(clean_reference_urls):
+        for raw_url in clean_reference_urls:
             public_url = await self._public_reference_url(raw_url)
             if public_url is None:
-                if mode == "edit":
-                    # An edit was authorized: silently dropping its input
-                    # would bill a text-to-image render of something else.
-                    raise ModelError(
-                        "Image edit reference cannot be read or is not a "
-                        f"decodable image: {raw_url[:120]}",
-                        model_name=self.model_name,
-                    )
-                # A stale or corrupt project reference must not fail the
-                # whole generation. Continue with the remaining references,
-                # or as text-to-image when none are usable.
-                continue
+                # Dropping even a middle input changes every later 图N. A
+                # generate call with references has the same identity
+                # obligation as edit; neither may degrade to text-to-image.
+                raise ModelError(
+                    "Image reference cannot be read or is not a decodable image",
+                    model_name=self.model_name,
+                )
             content.append({"image": public_url})
         content.append({"text": prompt})
 

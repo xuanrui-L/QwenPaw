@@ -63,6 +63,52 @@ describe("useReviewFieldFocus", () => {
 
   afterEach(() => vi.useRealTimers());
 
+  it("普通操作定位不需要审阅模式，且不消费其他项目或重复的旧 pulse", () => {
+    function OperationHarness() {
+      useReviewFieldFocus({
+        path: PATH,
+        field: FIELD,
+        enabled: false,
+        pulse: "operation-url",
+      });
+      return (
+        <main data-creator-workspace-root>
+          <div data-creator-field={FIELD}>提示词</div>
+        </main>
+      );
+    }
+    const first = render(<OperationHarness />);
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+    act(() =>
+      useNavigationStore.getState().setReviewFocus({
+        path: "/project/other/plan",
+        ref: "",
+        query: {
+          focusField: "1",
+          field: FIELD,
+          reviewPulse: "operation-wrong-project",
+        },
+      }),
+    );
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+    act(() =>
+      useNavigationStore.getState().setReviewFocus({
+        path: PATH,
+        ref: "",
+        query: {
+          focusField: "1",
+          field: FIELD,
+          reviewPulse: "operation-current",
+        },
+      }),
+    );
+    expect(q(first.container)).toHaveClass("review-flash");
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+    first.unmount();
+    render(<OperationHarness />);
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
   it("URL 审阅定位会滚动并闪烁字段", () => {
     const { container } = render(<Harness pulse="pulse-url" />);
     const target = q(container);

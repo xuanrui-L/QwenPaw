@@ -2,6 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import i18n from "@/i18n";
 import type { PromptRichToken } from "./PromptRichBlock";
+import { promptTokenAt } from "./promptReferenceTokens";
 
 export interface PromptTokenEditorHandle {
   insertToken: (index: number) => void;
@@ -42,6 +43,21 @@ function createTokenPill(token: PromptRichToken): HTMLSpanElement {
   return pill;
 }
 
+function createMissingTokenPill(
+  literal: string,
+  index: string,
+): HTMLSpanElement {
+  const pill = document.createElement("span");
+  pill.contentEditable = "false";
+  pill.dataset.imageIndex = index;
+  pill.dataset.imageLiteral = literal;
+  pill.dataset.imageMissing = "true";
+  pill.className =
+    "mx-0.5 inline-flex rounded border border-dashed border-[var(--color-danger)] px-1 text-[var(--color-danger)]";
+  pill.textContent = i18n.t("r2v.tokenMissing", { index });
+  return pill;
+}
+
 /** Editor DOM → prompt text: pills serialize back to [Image N] literals. */
 function serialize(root: HTMLElement): string {
   let text = "";
@@ -54,7 +70,9 @@ function serialize(root: HTMLElement): string {
       if (child.nodeType !== Node.ELEMENT_NODE) return;
       const element = child as HTMLElement;
       if (element.dataset.imageIndex) {
-        text += `[Image ${element.dataset.imageIndex}]`;
+        text +=
+          element.dataset.imageLiteral ??
+          `[Image ${element.dataset.imageIndex}]`;
         return;
       }
       if (element.tagName === "BR") {
@@ -102,13 +120,13 @@ const PromptTokenEditor = forwardRef<
     for (const part of initialValue.split(/(\[Image \d+\])/)) {
       const match = /^\[Image (\d+)\]$/.exec(part);
       if (match) {
-        const token = tokensRef.current.find(
-          (item) => item.index === Number(match[1]),
+        const token = promptTokenAt(tokensRef.current, Number(match[1]));
+        editor.append(
+          token
+            ? createTokenPill(token)
+            : createMissingTokenPill(part, match[1]),
         );
-        if (token) {
-          editor.append(createTokenPill(token));
-          continue;
-        }
+        continue;
       }
       if (part) editor.append(document.createTextNode(part));
     }
@@ -153,7 +171,7 @@ const PromptTokenEditor = forwardRef<
 
   useImperativeHandle(ref, () => ({
     insertToken: (index: number) => {
-      const token = tokensRef.current.find((item) => item.index === index);
+      const token = promptTokenAt(tokensRef.current, index);
       if (!token) return;
       const range = insertionRange();
       if (!range) return;

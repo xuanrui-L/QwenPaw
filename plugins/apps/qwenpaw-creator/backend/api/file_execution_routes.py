@@ -657,6 +657,15 @@ async def list_execution_authorizations(
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
     try:
+        from services.file_agent_runtime.checkpoints import (
+            retire_legacy_plan_checkpoints,
+        )
+
+        await asyncio.to_thread(
+            retire_legacy_plan_checkpoints,
+            _store(services),
+            project_id,
+        )
         records = await asyncio.to_thread(
             _store(services).list_execution_authorizations,
             project_id,

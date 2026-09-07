@@ -11,11 +11,13 @@ import { usePathname, useRouter } from "@/routing/navigation";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import {
   roughCutFrameForElement,
+  hasBlueprintContent,
   selectTimelineSummaries,
   type TimelineSummary,
 } from "@/selectors/blueprintSelectors";
 import { orderedTimelineElements } from "@/selectors/timelineElementSelectors";
 import { TONE_DOT, type BlueprintTone } from "./tones";
+import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
 
 function summaryTone(summary: TimelineSummary): BlueprintTone {
   if (summary.renderReady) return "done";
@@ -68,6 +70,19 @@ export default function EpisodeListPanel() {
     [project],
   );
   if (!project) return null;
+  if (!hasBlueprintContent(project))
+    return (
+      <div
+        className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
+        data-episode-list-panel
+      >
+        <WorkspaceEmptyState
+          projectId={project.project_id}
+          area="episodes"
+          compact
+        />
+      </div>
+    );
   const activeTimelineId = activeTimelineIdFromPath(pathname);
 
   return (

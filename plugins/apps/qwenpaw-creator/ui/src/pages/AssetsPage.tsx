@@ -61,10 +61,13 @@ import SourceCacheGate from "@/components/creator/SourceCacheGate";
 import { useSourceCache } from "@/lib/sourceCache";
 import PageLoadError from "@/components/PageLoadError";
 import PageSkeleton from "@/components/PageSkeleton";
+import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import { isVoiceOnlyVisualEntity } from "@/selectors/blueprintSelectors";
 import { visualVariantLabel } from "@/lib/visualVariants";
 import { useTranslation } from "react-i18next";
+import { projectJsonPointer } from "@/lib/projectJsonPointer";
+import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
 
 type FilterKey = "all" | "character" | "scene" | "prop" | "video" | "audio";
 
@@ -1000,13 +1003,30 @@ export function visualEntityPromptTarget(
   const variant = variantId ? entity.variants.items[variantId] : null;
   if (!variant) return null;
   return {
-    pointer: `/visual/entities/items/${entity.entity_id}/variants/items/${variant.variant_id}/prompt`,
+    pointer: projectJsonPointer(
+      "visual",
+      "entities",
+      "items",
+      entity.entity_id,
+      "variants",
+      "items",
+      variant.variant_id,
+      "prompt",
+    ),
     value: variant.prompt,
     label: i18n.t("assets.generationPrompt"),
     tokens: variantReferenceTokens(project, variant),
     candidates: variantReferenceCandidates(project, variant),
     referenceBinding: {
-      base: `/visual/entities/items/${entity.entity_id}/variants/items/${variant.variant_id}`,
+      base: projectJsonPointer(
+        "visual",
+        "entities",
+        "items",
+        entity.entity_id,
+        "variants",
+        "items",
+        variant.variant_id,
+      ),
       assetIds: variant.reference_asset_version_ids,
       artifactIds: variant.reference_artifact_version_ids,
     },
@@ -1201,6 +1221,7 @@ export function GenerationPromptEditor({
         open={editOpen}
         label={target.label}
         initialValue={target.value}
+        sourceKey={target.pointer}
         tokens={target.tokens ?? []}
         candidates={target.candidates ?? []}
         disabled={saving}
@@ -1363,6 +1384,7 @@ export default function AssetsPage() {
   const [inputName, setInputName] = useState("");
   const [inputValue, setInputValue] = useState("");
   const selectedId = query.get("asset");
+  const requestedVariantId = query.get("variant");
   const reviewMode = query.get("review") === "1";
   const reviewField = query.get("field");
   const reviewPulse = query.get("reviewPulse");
@@ -1444,14 +1466,76 @@ export default function AssetsPage() {
     return groups;
   }, [filter, items, project]);
   const selected =
-    allItems.find((item) => item.id === selectedId) ||
-    allItems.find(
-      (item) =>
-        item.kind === "visual" &&
-        item.entityId === selectedId &&
-        item.variantState === "active",
-    ) ||
+    (requestedVariantId
+      ? allItems.find(
+          (item) =>
+            item.kind === "visual" &&
+            item.entityId === selectedId &&
+            item.variantId === requestedVariantId,
+        )
+      : allItems.find((item) => item.id === selectedId)) ||
+    (!requestedVariantId &&
+      (allItems.find(
+        (item) =>
+          item.kind === "visual" &&
+          item.entityId === selectedId &&
+          item.variantState === "active",
+      ) ||
+        allItems.find(
+          (item) => item.kind === "visual" && item.entityId === selectedId,
+        ))) ||
     null;
+  const reviewedVisualField = (() => {
+    if (
+      !reviewMode ||
+      !reviewField ||
+      selected?.kind !== "visual" ||
+      !selected.entityId
+    )
+      return null;
+    const entity = project?.visual.entities.items[selected.entityId];
+    if (!entity) return null;
+    const entityBase = projectJsonPointer(
+      "visual",
+      "entities",
+      "items",
+      entity.entity_id,
+    );
+    const variant = selected.variantId
+      ? entity.variants.items[selected.variantId]
+      : null;
+    const candidates = [
+      {
+        pointer: `${entityBase}/description`,
+        value: entity.description,
+        label: t("fileReview.description"),
+      },
+      {
+        pointer: `${entityBase}/continuity`,
+        value: entity.continuity,
+        label: t("blueprint.continuity"),
+      },
+      ...(variant
+        ? [
+            {
+              pointer: projectJsonPointer(
+                "visual",
+                "entities",
+                "items",
+                entity.entity_id,
+                "variants",
+                "items",
+                variant.variant_id,
+                "requirements",
+              ),
+              value: variant.requirements,
+              label: t("fileReview.content"),
+            },
+          ]
+        : []),
+    ];
+    return candidates.find((item) => item.pointer === reviewField) ?? null;
+  })();
   const selectedOriginalGate =
     selected?.kind === "source" &&
     sourceCache.versions.some(
@@ -1879,6 +1963,11 @@ export default function AssetsPage() {
                   </Fragment>
                 ))}
               </div>
+            ) : allItems.length === 0 &&
+              !search.trim() &&
+              filter === "all" &&
+              origin === "any" ? (
+              <WorkspaceEmptyState projectId={id} area="assets" />
             ) : (
               <div className="flex h-full min-h-64 flex-col items-center justify-center text-center text-[var(--color-text-tertiary)]">
                 <Paperclip className="mb-3 h-8 w-8 opacity-50" />
@@ -1967,6 +2056,22 @@ export default function AssetsPage() {
                           {selected.description}
                         </p>
                       </div>
+                      {reviewedVisualField && (
+                        <section
+                          data-creator-path={reviewedVisualField.pointer}
+                          className="space-y-2 rounded-lg border border-[var(--color-border)] p-3"
+                        >
+                          <h4 className="text-xs font-semibold">
+                            {reviewedVisualField.label}
+                          </h4>
+                          <p className="whitespace-pre-wrap text-xs leading-5">
+                            {reviewedVisualField.value || "—"}
+                          </p>
+                          <InlineReviewDiff
+                            pointer={reviewedVisualField.pointer}
+                          />
+                        </section>
+                      )}
                       {/* 字段行 (design 84:81503): 时长 / 创建时间. */}
                       <div className="space-y-1.5">
                         {[

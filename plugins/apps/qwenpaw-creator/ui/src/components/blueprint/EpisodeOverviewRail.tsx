@@ -8,10 +8,12 @@ import type {
 } from "@/contracts/creator";
 import { getArtifactVersionMediaUrl } from "@/api/creator";
 import {
+  isVoiceOnlyVisualEntity,
   selectTimelineRenderSlot,
   type TimelineSummary,
 } from "@/selectors/blueprintSelectors";
 import { TONE_CHIP } from "./tones";
+import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
 
 function entitySelectedVersionId(entity: VisualEntityDocument): string | null {
   if (entity.selected_artifact_version_id)
@@ -40,10 +42,13 @@ export function referencedEntities(
       referenced.add(creation.character_ref);
     }
   }
+  // Single-episode visual development exists before any shot references do.
+  // Multi-episode rails must still show only their own referenced cast.
+  const singleEpisode = selectLiveTimelineIds(project).length === 1;
   return project.visual.entities.order
-    .filter((entityId) => referenced.has(entityId))
+    .filter((entityId) => singleEpisode || referenced.has(entityId))
     .map((entityId) => project.visual.entities.items[entityId])
-    .filter(Boolean);
+    .filter((entity) => Boolean(entity) && !isVoiceOnlyVisualEntity(entity));
 }
 
 export function SectionLabel({ text }: { text: string }) {
@@ -178,20 +183,22 @@ export default function EpisodeOverviewRail({
         </span>
       </div>
       <div className="min-h-0 flex-1 space-y-5 px-4 py-4">
-        <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-black">
-          {renderVersionId ? (
-            <video
-              src={getArtifactVersionMediaUrl(renderVersionId)}
-              controls
-              preload="metadata"
-              className="aspect-video w-full"
-            />
-          ) : (
-            <div className="flex aspect-video w-full items-center justify-center bg-[var(--color-bg-secondary)] text-[11px] text-[var(--color-text-tertiary)]">
-              {t("blueprint.noFinalCut")}
-            </div>
-          )}
-        </div>
+        {(renderVersionId || summary.videoTotal > 0) && (
+          <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-black">
+            {renderVersionId ? (
+              <video
+                src={getArtifactVersionMediaUrl(renderVersionId)}
+                controls
+                preload="metadata"
+                className="aspect-video w-full"
+              />
+            ) : (
+              <div className="flex aspect-video w-full items-center justify-center bg-[var(--color-bg-secondary)] text-[11px] text-[var(--color-text-tertiary)]">
+                {t("blueprint.noFinalCut")}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="space-y-2">
           <SectionLabel text={t("blueprint.stageStatus")} />

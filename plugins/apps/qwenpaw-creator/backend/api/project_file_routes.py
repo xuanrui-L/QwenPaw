@@ -22,6 +22,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from models.config import get_image_model_name
 from schemas.common import StrictModel
 from services.file_agent_runtime import notify_creator_agent_runtime
 from services.file_agent_runtime.notifications import RuntimeEventKind
@@ -482,6 +483,7 @@ async def _persist_idempotent_failure(
 async def get_r2v_reference_order(
     project_id: str,
     element_id: str,
+    stage: Literal["video", "storyboard"] = "video",
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
     """Authoritative ``[Image N]`` reference order for one r2v Element."""
@@ -495,6 +497,9 @@ async def get_r2v_reference_order(
         preview_r2v_reference_order,
         snapshot.project,
         element_id,
+        stage=stage,
+        image_model_name=get_image_model_name(),
+        project_root=services.projects.project_root(project_id),
     )
 
 
@@ -1060,7 +1065,10 @@ async def active_project_reviews(
             services,
             project_id,
         )
-        reviews = await services.active_reviews(project_id)
+        reviews = await services.active_reviews(
+            project_id,
+            _lifecycle_lock_held=True,
+        )
     except Exception as exc:
         _translate_storage_error(exc)
         raise

@@ -782,6 +782,14 @@ RenderSource = Annotated[
 ]
 
 
+class R2VPromptSync(StrictModel):
+    """Creative input provenance, not task or provider runtime state."""
+
+    plan_fingerprint: Sha256
+    storyboard_prompt_fingerprint: Sha256
+    video_prompt_fingerprint: Sha256
+
+
 class R2VCreation(StrictModel):
     """Declarative R2V creative facts, independent of the executing Agent."""
 
@@ -806,6 +814,7 @@ class R2VCreation(StrictModel):
         default_factory=list,
     )
     video_prompt: str = ""
+    prompt_sync: R2VPromptSync | None = None
     video_reference_version_ids: list[EntityId] = Field(default_factory=list)
     # Minimum fraction of shots that must carry dialogue when the element
     # has character appearances. Default 0.3 (≈1 line per 2–3 shots);
@@ -1114,7 +1123,9 @@ ElementCreation = Annotated[
 
 
 class TimelineElement(StrictModel):
-    """The only persisted time/layer entity; no Track or Content indirection."""
+    """
+    The only persisted time/layer entity; no Track or Content indirection.
+    """
 
     element_id: EntityId
     label: str = ""

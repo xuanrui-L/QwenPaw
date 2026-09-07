@@ -1,8 +1,9 @@
+import { CreatorHttpError } from "@/api/creator/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Image, Input, Modal, Select, message } from "antd";
 import {
-  AlertTriangle,
   ArrowLeft,
+  Loader2,
   Image as LucideImageIcon,
   Plus,
   X,
@@ -29,13 +30,21 @@ import {
   getR2VReferenceOrder,
 } from "@/api/creator";
 import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
+import {
+  acceptPromptProposal,
+  createPromptProposal,
+  getPromptSync,
+} from "@/api/creator/promptSync";
+import { useWorkGraphStore } from "@/store/workGraphStore";
+import { startVisiblePolling } from "@/lib/visiblePolling";
+import { taskProgressPercent } from "@/lib/taskPresentation";
 import { projectJsonPointer } from "@/lib/projectJsonPointer";
+import { presentPromptEntityNames } from "@/lib/promptEntityNames";
 import { useProjectDraft } from "@/lib/useProjectDraft";
 import { visualVariantLabel } from "@/lib/visualVariants";
 import PageSkeleton from "@/components/PageSkeleton";
 import PageLoadError from "@/components/PageLoadError";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
-import ShotList from "@/components/workbench/ShotList";
 import ArtifactVersionChips from "@/components/workbench/ArtifactVersionChips";
 import PromptRichBlock, {
   RegeneratePill,
@@ -55,24 +64,15 @@ import type {
   ArtifactVersionDocument,
   ProjectDocument,
   R2VReferenceOrderResponse,
-  ShotDocument,
   TaskView,
   TimelineElementDocument,
   VideoCreationDocument,
   VideoGenerationMode,
 } from "@/contracts/creator";
 import { useTranslation } from "react-i18next";
+import "./R2VWorkbenchPage.css";
 
 const { TextArea } = Input;
-
-type ReferenceField = "scene" | "characters" | "props" | "sources";
-
-const FIELD_LABEL_KEYS: Record<ReferenceField, string> = {
-  scene: "r2v.fieldLabels.scene",
-  characters: "r2v.fieldLabels.characters",
-  props: "r2v.fieldLabels.props",
-  sources: "r2v.fieldLabels.sources",
-};
 
 // Mode-specific workbench copy: the page serves every video generation
 // mode, so its title, hints and reference surfaces must not read as
@@ -239,11 +239,6 @@ function mediaUrlOf(
     : null;
 }
 
-function visualEntityName(project: ProjectDocument, ref: string): string {
-  const entityId = ref.replace(/^visual-entity:/, "");
-  return project.visual.entities.items[entityId]?.name ?? ref;
-}
-
 function referenceVersionName(
   project: ProjectDocument,
   versionId: string,
@@ -304,13 +299,6 @@ export function WorkbenchSurface({
     enabled: reviewMode && !embedded,
     pulse: reviewPulse,
   });
-  // "View generation detail" for media reviews has no field pointer; flash the
-  // preview block anchored by the version awaiting review.
-  useReviewMediaFocus({
-    versionId: versionFromUrl,
-    enabled: reviewMode && !reviewField && !embedded,
-    pulse: reviewPulse,
-  });
   const project = useProjectSnapshotStore((state) =>
     state.projectId === projectId ? state.project : null,
   );
@@ -322,8 +310,20 @@ export function WorkbenchSurface({
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const [regeneratingNode, setRegeneratingNode] = useState<string | null>(null);
-  // 设计已移除页头「应用修改」：草稿在停止编辑 800ms 后自动落盘（notify:false
-  // 静默；校验不过时静默挂起，等待下一次编辑或「再次生成」的显式校验）。
+  const [synchronizing, setSynchronizing] = useState(false);
+  const [regenerationError, setRegenerationError] = useState("");
+  const [preparationSeconds, setPreparationSeconds] = useState(0);
+  useEffect(() => {
+    setPreparationSeconds(0);
+    if (!synchronizing) return;
+    const started = Date.now();
+    const timer = window.setInterval(
+      () => setPreparationSeconds(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [synchronizing]);
+  // Drafts persist at an editing boundary, before preparing instructions.
   // applyDraft 定义在守卫分支之后，这里经 ref 引用最新实现。
   const applyDraftRef = useRef<
     ((options?: { notify?: boolean }) => Promise<boolean>) | null
@@ -336,6 +336,32 @@ export function WorkbenchSurface({
         : selectPrimaryTimeline(project, activeTimelineId),
     [project, timelineId, activeTimelineId],
   );
+  const promptSyncScope = `${projectId}:${
+    timeline?.timeline_id ?? "missing"
+  }:${elementId}`;
+  const workbenchEpoch = useRef(0);
+  const editRevision = useRef(0);
+  const regenerationRequest = useRef<symbol | null>(null);
+  const regenerationMonitor = useRef<{ stop: () => void } | null>(null);
+  const candidateSelectionRevision = useRef({ storyboard: 0, video: 0 });
+  const candidateFollow = useRef<
+    Partial<
+      Record<"storyboard" | "video", { epoch: number; known: Set<string> }>
+    >
+  >({});
+  useEffect(() => {
+    workbenchEpoch.current += 1;
+    regenerationRequest.current = null;
+    candidateFollow.current = {};
+    setRegeneratingNode(null);
+    setSynchronizing(false);
+    setRegenerationError("");
+    return () => {
+      workbenchEpoch.current += 1;
+      regenerationMonitor.current?.stop();
+      regenerationMonitor.current = null;
+    };
+  }, [promptSyncScope]);
   const authorityElement = timeline?.elements_by_id[elementId] ?? null;
   const elementDraft = useProjectDraft<TimelineElementDocument | null>(
     authorityElement,
@@ -370,7 +396,27 @@ export function WorkbenchSurface({
   }, []);
   const [viewedSbId, setViewedSbId] = useState<string | null>(null);
   const [viewedVideoId, setViewedVideoId] = useState<string | null>(null);
+  const viewCandidate = (kind: "storyboard" | "video", id: string) => {
+    candidateSelectionRevision.current[kind] += 1;
+    delete candidateFollow.current[kind];
+    (kind === "storyboard" ? setViewedSbId : setViewedVideoId)(id);
+  };
   const [stage, setStage] = useState<"sb" | "vd">("sb");
+  const requestedVersion = versionFromUrl
+    ? project?.assets.artifact_versions_by_id[versionFromUrl]
+    : null;
+  const requestedMediaType = requestedVersion
+    ? project?.assets.files_by_id[requestedVersion.file_id]?.media_type
+    : null;
+  const requestedVersionStage =
+    requestedVersion?.owner_ref !== `element:${elementId}`
+      ? null
+      : requestedMediaType?.startsWith("video/")
+      ? "vd"
+      : requestedVersion.kind === "r2v_storyboard_image" ||
+        requestedVersion.slot_id.endsWith(":storyboard")
+      ? "sb"
+      : null;
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   // Authoritative [Image N] order from the backend: entity binding and
@@ -381,21 +427,72 @@ export function WorkbenchSurface({
   );
   const [referenceOrder, setReferenceOrder] =
     useState<R2VReferenceOrderResponse | null>(null);
+  const [storyboardReferenceOrder, setStoryboardReferenceOrder] =
+    useState<R2VReferenceOrderResponse | null>(null);
+  const authorityCreation = authorityElement?.creation;
+  const referenceIdentity = JSON.stringify(
+    authorityCreation?.type === "r2v" && project
+      ? [
+          projectId,
+          elementId,
+          authorityCreation.storyboard_reference_version_ids,
+          authorityCreation.video_reference_version_ids,
+          authorityCreation.character_refs,
+          authorityCreation.scene_ref,
+          authorityCreation.prop_refs,
+          authorityCreation.visual_variant_refs,
+          authorityCreation.cast_lineup_refs,
+          Object.values(project.assets.artifact_slots_by_id).map((slot) => [
+            slot.slot_id,
+            slot.selected_version_id,
+          ]),
+          project.visual.entities.order.map((id) => {
+            const entity = project.visual.entities.items[id];
+            return [
+              id,
+              entity?.selected_artifact_version_id,
+              entity?.variants.order.map((variant) => [
+                variant,
+                entity.variants.items[variant]?.selected_artifact_version_id,
+              ]),
+            ];
+          }),
+        ]
+      : null,
+  );
+  const previousReferenceIdentity = useRef(referenceIdentity);
   useEffect(() => {
     if (!projectId || !elementId || generationMode !== "r2v") {
       setReferenceOrder(null);
+      setStoryboardReferenceOrder(null);
       return;
     }
     let cancelled = false;
-    // Drop the previous snapshot's numbering while the refresh is in
-    // flight so a just-applied draft never renders stale indices.
-    setReferenceOrder(null);
-    getR2VReferenceOrder(projectId, elementId)
-      .then((order) => {
-        // Older backends (or generic test mocks) may answer without the
-        // references payload; treat that as "no authoritative order".
-        if (!cancelled)
-          setReferenceOrder(Array.isArray(order?.references) ? order : null);
+    // Prompt-only edits do not change reference identities. Keep their
+    // verified images during refresh; actual binding changes clear them.
+    if (previousReferenceIdentity.current !== referenceIdentity) {
+      setReferenceOrder(null);
+      setStoryboardReferenceOrder(null);
+      previousReferenceIdentity.current = referenceIdentity;
+    }
+    Promise.allSettled([
+      getR2VReferenceOrder(projectId, elementId),
+      getR2VReferenceOrder(projectId, elementId, "storyboard"),
+    ])
+      .then(([video, storyboard]) => {
+        if (cancelled) return;
+        setReferenceOrder(
+          video.status === "fulfilled" && Array.isArray(video.value?.references)
+            ? video.value
+            : null,
+        );
+        setStoryboardReferenceOrder(
+          storyboard.status === "fulfilled" &&
+            storyboard.value?.stage === "storyboard" &&
+            Array.isArray(storyboard.value.references)
+            ? storyboard.value
+            : null,
+        );
       })
       .catch(() => {
         if (!cancelled) setReferenceOrder(null);
@@ -403,39 +500,98 @@ export function WorkbenchSurface({
     return () => {
       cancelled = true;
     };
-  }, [projectId, elementId, generationMode, generation]);
+  }, [projectId, elementId, generationMode, generation, referenceIdentity]);
+
+  // Reset object-local selection before applying the URL's review/version
+  // intent. Otherwise this mount effect hides a video field just opened by
+  // the review effect in the same commit.
+  useEffect(() => {
+    setViewedSbId(null);
+    setViewedVideoId(null);
+    setStage("sb");
+  }, [projectId, elementId, timeline?.timeline_id]);
 
   useEffect(() => {
-    if (!versionFromUrl || !project) return;
-    const version = project.assets.artifact_versions_by_id[versionFromUrl];
-    if (!version || version.owner_ref !== `element:${elementId}`) return;
-    if (
-      version.kind === "r2v_storyboard_image" ||
-      version.slot_id.endsWith(":storyboard")
-    ) {
+    if (!versionFromUrl || !requestedVersionStage) return;
+    if (requestedVersionStage === "sb") {
+      candidateSelectionRevision.current.storyboard += 1;
+      delete candidateFollow.current.storyboard;
       setViewedSbId(versionFromUrl);
       setStage("sb");
       return;
     }
+    candidateSelectionRevision.current.video += 1;
+    delete candidateFollow.current.video;
     setViewedVideoId(versionFromUrl);
-  }, [versionFromUrl, project, elementId]);
+    setStage("vd");
+    // A new review click reopens its stage. Snapshot polling must not undo a
+    // subsequent manual tab switch or repeatedly scroll away from an edit.
+  }, [
+    versionFromUrl,
+    requestedVersionStage,
+    projectId,
+    elementId,
+    reviewPulse,
+  ]);
+
+  useEffect(() => {
+    if (!project || !authorityElement) return;
+    for (const kind of ["storyboard", "video"] as const) {
+      const follow = candidateFollow.current[kind];
+      if (!follow || follow.epoch !== workbenchEpoch.current) continue;
+      const output =
+        kind === "storyboard"
+          ? authorityElement.outputs.storyboard
+          : authorityElement.outputs.video ?? authorityElement.outputs.main;
+      const slot = output
+        ? project.assets.artifact_slots_by_id[output.slot_id]
+        : null;
+      const candidate = versionsOfSlot(project, slot ?? null)
+        .filter((version) => !follow.known.has(version.version_id))
+        .at(-1);
+      if (!candidate) continue;
+      delete candidateFollow.current[kind];
+      (kind === "storyboard" ? setViewedSbId : setViewedVideoId)(
+        candidate.version_id,
+      );
+    }
+  }, [project, authorityElement]);
 
   // A review pointing at the video prompt lives in the hidden ② tab;
   // switch there so the focus flash lands on a visible field.
   useEffect(() => {
-    if (reviewField?.includes("video_prompt")) setStage("vd");
+    if (
+      reviewField?.includes("video_prompt") ||
+      reviewField?.includes("/video_reference_version_ids")
+    )
+      setStage("vd");
+    else if (
+      reviewField?.includes("/storyboard_prompt") ||
+      reviewField?.includes("/storyboard_reference_version_ids") ||
+      reviewField?.includes("/creation/shots")
+    )
+      setStage("sb");
   }, [reviewField, reviewPulse]);
+
+  // Wait for the requested version and its stage to commit before scrolling.
+  // In the stacked layout changing tabs moves the results vertically, so a
+  // scroll from the initial storyboard render would land at an obsolete spot.
+  useReviewMediaFocus({
+    versionId: versionFromUrl,
+    enabled:
+      reviewMode &&
+      !reviewField &&
+      !embedded &&
+      requestedVersionStage === stage &&
+      (stage === "vd" ? viewedVideoId : viewedSbId) === versionFromUrl,
+    pulse: reviewPulse,
+  });
 
   useEffect(() => {
     useCreatorInteractionStore
       .getState()
       .select(element ? `element:${element.element_id}` : null);
   }, [element]);
-  useEffect(() => {
-    setViewedSbId(null);
-    setViewedVideoId(null);
-    setStage("sb");
-  }, [elementId]);
   useEffect(() => {
     onDirtyChange?.(elementDraft.dirty);
   }, [elementDraft.dirty, onDirtyChange]);
@@ -544,31 +700,21 @@ export function WorkbenchSurface({
       message.error((error as Error).message);
       throw error;
     });
-  const updateElement = (mutator: (draft: TimelineElementDocument) => void) =>
+  const updateElement = (mutator: (draft: TimelineElementDocument) => void) => {
+    setRegenerationError("");
+    editRevision.current += 1;
     elementDraft.update((draft) => {
       if (draft) mutator(draft);
     });
+  };
   const applyDraft = async ({
     notify = true,
   }: { notify?: boolean } = {}): Promise<boolean> => {
-    if (!elementDraft.operations.length) return true;
-    if (creation.type === "r2v") {
-      const invalidShot = creation.shots.order
-        .map((shotId) => creation.shots.items[shotId])
-        .find(
-          (shot) =>
-            !shot ||
-            !shot.description.trim() ||
-            !shot.camera?.trim() ||
-            !shot.framing?.trim() ||
-            shot.duration_seconds == null ||
-            shot.duration_seconds <= 0,
-        );
-      if (invalidShot) {
-        if (notify) message.error(t("r2v.eachShotNeeds"));
-        return false;
-      }
+    if (elementDraft.conflictPaths.length) {
+      if (notify) message.warning(t("r2v.conflictTitle"));
+      return false;
     }
+    if (!elementDraft.operations.length) return true;
     try {
       await patchProject(projectId, elementDraft.operations);
       elementDraft.markApplied();
@@ -588,25 +734,186 @@ export function WorkbenchSurface({
       50,
     );
 
-  // 设计契约：提示词卡底部的「再次生成」= 先应用当前草稿（新 prompt 持久化，
-  // 相关产物指纹随之失效），再手动派发对应 work-graph 节点。DONE/RUNNING 由
-  // 后端幂等跳过（dispatched:false），此时提示用户先修改 Prompt。
+  // Apply the draft and verify its synchronization before dispatching. The
+  // response distinguishes an existing running task from an up-to-date result;
+  // a newly dispatched request can finish only after provider execution.
   const regenerateNode = async (kind: "storyboard" | "video") => {
+    if (regenerationRequest.current) {
+      message.info(t("r2v.regenRunning"));
+      return;
+    }
+    const request = Symbol("regeneration");
+    regenerationRequest.current = request;
     const nodeId = `${kind}:${element.element_id}`;
+    const epoch = workbenchEpoch.current;
+    const revision = editRevision.current;
+    const selectionRevision = candidateSelectionRevision.current[kind];
+    const isCurrent = () =>
+      epoch === workbenchEpoch.current &&
+      revision === editRevision.current &&
+      regenerationRequest.current === request;
+    const inputSignature = () => {
+      const latest = useProjectSnapshotStore.getState();
+      if (latest.projectId !== projectId) return null;
+      const target =
+        latest.project?.timelines.items[timeline.timeline_id]?.elements_by_id[
+          element.element_id
+        ];
+      return target ? JSON.stringify([target.creation, target.span]) : null;
+    };
+    let finishMonitor: (() => Promise<void>) | null = null;
     setRegeneratingNode(nodeId);
+    setRegenerationError("");
     try {
       if (elementDraft.dirty && !(await applyDraft())) return;
-      const result = await dispatchWorkGraphNode(projectId, nodeId);
+      if (!isCurrent()) return;
+      let submittedInput = inputSignature();
+      if (creation.type === "r2v") {
+        const scope = {
+          projectId,
+          timelineId: timeline.timeline_id,
+          elementId: element.element_id,
+        };
+        let sync = await getPromptSync(scope);
+        if (!isCurrent() || submittedInput !== inputSignature()) return;
+        if (sync.validationMessage) throw new Error(sync.validationMessage);
+        if (
+          sync.status === "needs_update" ||
+          sync.status === "needs_confirmation"
+        ) {
+          setSynchronizing(true);
+          const proposal = await createPromptProposal(
+            scope,
+            sync.suggestedSource ?? "currentPlan",
+          );
+          // A new edit or route change cancels this generation intent before
+          // the proposal can publish. The backend also checks its saved baseline.
+          if (!isCurrent() || submittedInput !== inputSignature()) return;
+          await acceptPromptProposal(scope, proposal.proposalId);
+          if (!isCurrent()) return;
+          await pollOnce(projectId);
+          if (!isCurrent()) return;
+          submittedInput = inputSignature();
+          sync = await getPromptSync(scope);
+          if (!isCurrent() || submittedInput !== inputSignature()) return;
+          // Dispatch only the exact synchronized content returned by this
+          // operation; an unrelated concurrent edit must not inherit its click.
+          if (
+            sync.status !== "current" ||
+            sync.storyboardPrompt !== proposal.storyboardPrompt ||
+            sync.videoPrompt !== proposal.videoPrompt ||
+            JSON.stringify(sync.shots) !== JSON.stringify(proposal.shots)
+          )
+            throw new Error(t("r2v.sync.changedBeforeGeneration"));
+          setSynchronizing(false);
+        }
+      }
+      // This endpoint can remain pending through the provider execution.
+      // Discover real durable activity immediately; once discovered, the
+      // project shell's active poll takes over, including after navigation.
+      let disposed = false;
+      let inFlight: Promise<void> | null = null;
+      const sameScope = () => !disposed && epoch === workbenchEpoch.current;
+      const readProgress = (force = false): Promise<void> => {
+        if (!sameScope()) return Promise.resolve();
+        if (inFlight) return inFlight;
+        const taskStore = useCreatorTaskViewStore.getState();
+        const graphStore = useWorkGraphStore.getState();
+        inFlight = Promise.allSettled([
+          force || !taskStore.loading
+            ? refreshTasks(projectId)
+            : Promise.resolve(),
+          force || !graphStore.loading
+            ? graphStore.refresh(projectId)
+            : Promise.resolve(),
+          pollOnce(projectId),
+        ])
+          .then(() => undefined)
+          .finally(() => {
+            inFlight = null;
+          });
+        return inFlight;
+      };
+      const stopTicks = startVisiblePolling(() => {
+        if (!sameScope()) return;
+        const taskStore = useCreatorTaskViewStore.getState();
+        const graphStore = useWorkGraphStore.getState();
+        const active =
+          taskStore.projectId === projectId &&
+          taskStore.tasks.some(
+            (task) => task.status === "RUNNING" || task.status === "QUEUED",
+          );
+        if (
+          active ||
+          (graphStore.projectId === projectId &&
+            (graphStore.graph?.counts?.running ?? 0) > 0)
+        ) {
+          stopTicks();
+          return;
+        }
+        void readProgress();
+      }, 3_000);
+      const monitor = {
+        stop: () => {
+          disposed = true;
+          stopTicks();
+        },
+      };
+      regenerationMonitor.current = monitor;
+      finishMonitor = async () => {
+        stopTicks();
+        if (inFlight) await inFlight;
+        if (sameScope()) await readProgress(true);
+        monitor.stop();
+        if (regenerationMonitor.current === monitor)
+          regenerationMonitor.current = null;
+      };
+      // A manual version choice during save/sync preflight also takes
+      // precedence over automatic result following once dispatch begins.
+      if (candidateSelectionRevision.current[kind] === selectionRevision)
+        candidateFollow.current[kind] = {
+          epoch,
+          known: new Set(
+            (kind === "storyboard" ? storyboardVersions : videoVersions).map(
+              (version) => version.version_id,
+            ),
+          ),
+        };
+      const dispatched = dispatchWorkGraphNode(projectId, nodeId);
+      void readProgress();
+      const result = await dispatched;
+      if (epoch !== workbenchEpoch.current) return;
+      await finishMonitor();
+      finishMonitor = null;
+      if (epoch !== workbenchEpoch.current) return;
       if (result.dispatched) {
-        message.success(t("r2v.regenQueued"));
+        message.success(t("r2v.regenProcessed"));
+      } else if (result.status === "running") {
+        message.info(t("r2v.regenRunning"));
       } else {
+        delete candidateFollow.current[kind];
         message.info(t("r2v.regenUpToDate"));
       }
-      await Promise.all([refreshTasks(projectId), pollOnce(projectId)]);
     } catch (error) {
-      message.error((error as Error).message);
+      if (epoch === workbenchEpoch.current)
+        delete candidateFollow.current[kind];
+      if (isCurrent()) {
+        const detail =
+          error instanceof CreatorHttpError
+            ? error.userMessage
+            : (error as Error).message;
+        setRegenerationError(detail);
+        message.error(detail);
+      }
     } finally {
-      setRegeneratingNode(null);
+      await finishMonitor?.();
+      if (regenerationRequest.current === request) {
+        regenerationRequest.current = null;
+        if (epoch === workbenchEpoch.current) {
+          setRegeneratingNode(null);
+          setSynchronizing(false);
+        }
+      }
     }
   };
 
@@ -649,8 +956,12 @@ export function WorkbenchSurface({
   const setCurrentVersion = (
     slot: ArtifactSlotDocument,
     version: ArtifactVersionDocument,
-  ) =>
-    patchOps([
+  ) => {
+    const kind =
+      slot.slot_id === storyboardSlot?.slot_id ? "storyboard" : "video";
+    candidateSelectionRevision.current[kind] += 1;
+    delete candidateFollow.current[kind];
+    return patchOps([
       {
         op: "replace",
         path: projectJsonPointer(
@@ -663,15 +974,24 @@ export function WorkbenchSurface({
         value: version.version_id,
       },
     ]);
+  };
 
   const elementRef = `element:${element.element_id}`;
-  const videoTask = [...tasks]
-    .filter((task: TaskView) => task.targetRef === elementRef)
-    .sort(
-      (left, right) =>
-        Date.parse(right.updatedAt || right.createdAt || "") -
-        Date.parse(left.updatedAt || left.createdAt || ""),
-    )[0];
+  const latestStageTask = (kind: TaskView["kind"]) =>
+    [...tasks]
+      .filter(
+        (task: TaskView) =>
+          task.projectId === projectId &&
+          task.targetRef === elementRef &&
+          task.kind === kind,
+      )
+      .sort(
+        (left, right) =>
+          Date.parse(right.createdAt || right.updatedAt || "") -
+          Date.parse(left.createdAt || left.updatedAt || ""),
+      )[0];
+  const videoTask = latestStageTask("r2v_generation");
+  const storyboardTask = latestStageTask("image_generation");
   const videoGenerating =
     videoTask?.status === "RUNNING" || videoTask?.status === "QUEUED";
   const videoFailed =
@@ -679,15 +999,32 @@ export function WorkbenchSurface({
     ["FAILED", "CANCELLED", "QUARANTINED"].includes(videoTask.status);
   const videoTaskMessage = (() => {
     if (!videoTask) return "";
-    if (videoGenerating) return t("r2v.taskSubmitted");
-    const detail =
-      videoTask.error?.message ||
-      videoTask.error?.detail ||
-      videoTask.error?.code;
-    return typeof detail === "string" && detail
-      ? detail
-      : t("r2v.videoGenFailed");
+    return t(`r2v.stageTask.video.${videoTask.status}`);
   })();
+  const stageTaskStatus = (
+    kind: "storyboard" | "video",
+    task: TaskView | undefined,
+  ) => {
+    if (!task || task.status === "SUCCEEDED") return null;
+    const active = task.status === "QUEUED" || task.status === "RUNNING";
+    const progress =
+      task.status === "RUNNING" ? taskProgressPercent(task.progress) : null;
+    return (
+      <p
+        data-stage-task={kind}
+        data-task-status={task.status}
+        role="status"
+        className={`text-xs leading-5 ${
+          active
+            ? "text-[var(--color-text-secondary)]"
+            : "text-[var(--color-error)]"
+        }`}
+      >
+        {t(`r2v.stageTask.${kind}.${task.status}`)}
+        {progress != null && progress > 0 ? ` · ${progress}%` : ""}
+      </p>
+    );
+  };
 
   const spanSeconds = element.span.duration_tick / timeline.ticks_per_second;
 
@@ -741,9 +1078,14 @@ export function WorkbenchSurface({
   );
   // creation.intent / creation.continuity are global coherence anchors;
   // read-only, hidden entirely when both are empty.
-  const contextIntent = creation.intent?.trim() ?? "";
-  const contextContinuity =
-    (creation.type === "s2v" ? "" : creation.continuity?.trim()) ?? "";
+  const contextIntent = presentPromptEntityNames(
+    creation.intent?.trim() ?? "",
+    project,
+  );
+  const contextContinuity = presentPromptEntityNames(
+    (creation.type === "s2v" ? "" : creation.continuity?.trim()) ?? "",
+    project,
+  );
   const contextCard = (contextIntent || contextContinuity) && (
     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-lg border border-dashed border-[var(--color-border-strong)] bg-[var(--color-bg-secondary)]/45 px-2.5 py-1.5 text-[10.5px] leading-relaxed text-[var(--color-text-secondary)]">
       {contextIntent && (
@@ -971,11 +1313,14 @@ export function WorkbenchSurface({
                     versions={videoVersions}
                     currentId={videoSlot?.selected_version_id}
                     viewingId={effectiveVideoId}
-                    onView={setViewedVideoId}
+                    onView={(id) => viewCandidate("video", id)}
                   />
                 </div>
                 {videoUrl ? (
-                  <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[#141210]">
+                  <div
+                    data-review-media-anchor={viewedVideo?.version_id}
+                    className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[#141210]"
+                  >
                     <video
                       src={videoUrl}
                       controls
@@ -1037,18 +1382,6 @@ export function WorkbenchSurface({
     );
   }
 
-  const totalDuration = creation.shots.order.length
-    ? creation.shots.order.reduce(
-        (total, shotId) =>
-          total + (creation.shots.items[shotId]?.duration_seconds ?? 0),
-        0,
-      )
-    : spanSeconds;
-  const overLimit = totalDuration > spanSeconds;
-  const shotDocuments = creation.shots.order
-    .map((shotId) => creation.shots.items[shotId])
-    .filter((shot): shot is ShotDocument => Boolean(shot));
-
   // Input references: aggregated from the R2V creation's reference fields,
   // matching origin/main's resolvedRefs. If a material version is itself the
   // generated image of an already-referenced visual entity (scene/character/
@@ -1059,12 +1392,10 @@ export function WorkbenchSurface({
       .filter((ref): ref is string => Boolean(ref))
       .map((ref) => ref.replace(/^visual-entity:/, "")),
   );
-  const materialVersionIds = [
-    ...new Set([
-      ...creation.storyboard_reference_version_ids,
-      ...creation.video_reference_version_ids,
-    ]),
-  ];
+  const materialVersionIds =
+    stage === "sb"
+      ? creation.storyboard_reference_version_ids
+      : creation.video_reference_version_ids;
   // Historical data carries entity ownership under several prefixes
   // (visual-entity: / asset: / bare); if the normalized ID hits a visual
   // entity, treat the artifact as that entity's output.
@@ -1078,36 +1409,6 @@ export function WorkbenchSurface({
     const entityId = ownerEntityId(owner);
     return entityId !== null && referencedEntityIds.has(entityId);
   };
-  const inputRefs: Array<{ ref: string; field: ReferenceField; name: string }> =
-    [
-      ...(creation.scene_ref
-        ? [
-            {
-              ref: creation.scene_ref,
-              field: "scene" as const,
-              name: visualEntityName(project, creation.scene_ref),
-            },
-          ]
-        : []),
-      ...creation.character_refs.map((ref) => ({
-        ref,
-        field: "characters" as const,
-        name: visualEntityName(project, ref),
-      })),
-      ...creation.prop_refs.map((ref) => ({
-        ref,
-        field: "props" as const,
-        name: visualEntityName(project, ref),
-      })),
-      ...materialVersionIds
-        .filter((versionId) => !isReferencedEntityArtifact(versionId))
-        .map((versionId) => ({
-          ref: `artifact-version:${versionId}`,
-          field: "sources" as const,
-          name: referenceVersionName(project, versionId),
-        })),
-    ];
-
   // ── 相关资产 rail editing ────────────────────────────────────────────
   // Only assets bound here feed the prompt reference tokens (sbTokens /
   // vdTokens below aggregate from these same creation fields), so adding or
@@ -1161,8 +1462,9 @@ export function WorkbenchSurface({
   const changeMaterialReferences = (next: string[]) =>
     updateElement((draft) => {
       if (draft.creation.type !== "r2v") return;
-      draft.creation.storyboard_reference_version_ids = next;
-      draft.creation.video_reference_version_ids = next;
+      if (stage === "sb")
+        draft.creation.storyboard_reference_version_ids = next;
+      else draft.creation.video_reference_version_ids = next;
     });
   const entityKindRefs = (kind: "character" | "scene" | "prop"): string[] =>
     kind === "character"
@@ -1187,10 +1489,25 @@ export function WorkbenchSurface({
         ),
       );
     });
+  const isAutomaticStoryboardReference = (versionId: string) =>
+    stage === "vd" &&
+    Boolean(
+      storyboardSlot &&
+        (storyboardSlot.version_ids.includes(versionId) ||
+          project.assets.artifact_versions_by_id[versionId]?.slot_id ===
+            storyboardSlot.slot_id),
+    );
+  // Video inputs bind the current image from this exact storyboard slot.
+  // Historical self references are not extra materials; keep other shots'
+  // storyboard versions available as explicit references.
   // Materials (素材): loose image/video versions referenced alongside the
   // entities. Cards hide versions already represented by an entity above.
   const materialCards = materialVersionIds
-    .filter((versionId) => !isReferencedEntityArtifact(versionId))
+    .filter(
+      (versionId) =>
+        !isReferencedEntityArtifact(versionId) &&
+        !isAutomaticStoryboardReference(versionId),
+    )
     .map((versionId) => ({
       versionId,
       name: referenceVersionName(project, versionId),
@@ -1322,15 +1639,13 @@ export function WorkbenchSurface({
     setAssetPickerOpen(false);
   };
 
-  // The authoritative [Image N] order is computed from the last committed
-  // snapshot. While the local draft is dirty (materials / entity / Variant
-  // edits not yet applied) the server cannot see those fields, so showing
-  // the stale numbering would invite prompts that cite the wrong images —
-  // fall back to the client-side aggregate until the user applies changes.
-  const authoritativeReferences =
-    !elementDraft.dirty && referenceOrder?.references.length
-      ? referenceOrder.references
-      : null;
+  // A dirty reference binding has no verified provider order yet. Prompt
+  // Prompt edits keep the current reference mapping intact.
+  const referenceDraftChanged = elementDraft.dirtyPaths.some((path) =>
+    /\/creation\/(?:storyboard_reference_version_ids|video_reference_version_ids|scene_ref|character_refs|prop_refs|visual_variant_refs|cast_lineup_refs)(?:\/|$)/.test(
+      path,
+    ),
+  );
 
   // The storyboard the backend will lock as [Image 1] is the *selected*
   // version, not whichever one is being viewed.
@@ -1343,79 +1658,46 @@ export function WorkbenchSurface({
     ? `v${storyboardVersions.indexOf(currentStoryboard) + 1}`
     : "";
 
-  // Prompt token maps ([Image N] → thumbnail + name). Storyboard prompt
-  // numbering never includes the storyboard itself; the video prompt uses
-  // the authoritative order when available, otherwise a best-effort local
-  // numbering (storyboard first when one is selected).
-  const sbTokens: PromptRichToken[] = inputRefs.map((item, index) => ({
-    index: index + 1,
-    name: item.name,
-    kind: item.field === "sources" ? "artifact" : "entity",
-    thumbUrl: refImageThumbUrl(project, creation, item.ref),
-  }));
-  const vdTokens: PromptRichToken[] = authoritativeReferences
-    ? authoritativeReferences.map((item) => ({
+  const tokensForOrder = (
+    order: R2VReferenceOrderResponse | null,
+  ): PromptRichToken[] => {
+    if (
+      referenceDraftChanged ||
+      !order ||
+      order.elementId !== element.element_id
+    )
+      return [];
+    return order.references.map((item) => {
+      const artifact = project.assets.artifact_versions_by_id[item.versionId];
+      const source = project.assets.source_versions_by_id[item.versionId];
+      const available =
+        item.available !== false &&
+        (source?.media_kind === "image" ||
+          Boolean(
+            artifact &&
+              project.assets.files_by_id[
+                artifact.file_id
+              ]?.media_type.startsWith("image/"),
+          ));
+      return {
         index: item.index,
+        referenceId: item.versionId,
         name: item.name,
         kind: item.kind,
-        thumbUrl:
-          item.kind === "storyboard"
-            ? currentStoryboardUrl
-            : refImageThumbUrl(
-                project,
-                creation,
-                item.kind === "source"
-                  ? `asset-version:${item.versionId}`
-                  : `artifact-version:${item.versionId}`,
-              ),
-      }))
-    : [
-        ...(currentStoryboard
-          ? [
-              {
-                index: 1,
-                name: t("r2v.refKind.storyboard"),
-                kind: "storyboard" as const,
-                thumbUrl: currentStoryboardUrl,
-              },
-            ]
-          : []),
-        ...inputRefs.map((item, index) => ({
-          index: index + (currentStoryboard ? 2 : 1),
-          name: item.name,
-          kind:
-            item.field === "sources"
-              ? ("artifact" as const)
-              : ("entity" as const),
-          thumbUrl: refImageThumbUrl(project, creation, item.ref),
-        })),
-      ];
-
-  const addShot = () => {
-    const shotId = `shot-${Date.now()}`;
-    updateElement((draft) => {
-      if (draft.creation.type !== "r2v") return;
-      draft.creation.shots.items[shotId] = {
-        shot_id: shotId,
-        description: "",
-        camera: t("r2v.defaultCamera"),
-        framing: t("r2v.defaultFraming"),
-        duration_seconds: 3,
+        missing: !available,
+        thumbUrl: !available
+          ? null
+          : source
+          ? getAssetVersionMediaUrl(item.versionId)
+          : getArtifactVersionMediaUrl(item.versionId),
       };
-      draft.creation.shots.order.push(shotId);
     });
   };
-  const deleteShot = (shot: { shot_id: string }) =>
-    updateElement((draft) => {
-      if (draft.creation.type !== "r2v") return;
-      delete draft.creation.shots.items[shot.shot_id];
-      draft.creation.shots.order = draft.creation.shots.order.filter(
-        (item) => item !== shot.shot_id,
-      );
-    });
+  const sbTokens = tokensForOrder(storyboardReferenceOrder);
+  const vdTokens = tokensForOrder(referenceOrder);
 
   const stageTabs = (
-    <div className="flex shrink-0 gap-0.5 border-b border-[var(--color-border)] px-3">
+    <div className="flex shrink-0 flex-wrap gap-0.5 border-b border-[var(--color-border)] px-3">
       {[
         {
           key: "sb" as const,
@@ -1466,63 +1748,93 @@ export function WorkbenchSurface({
     <div
       data-r2v-workbench={element.element_id}
       onBlurCapture={handleFieldBlurCapture}
-      className="flex h-full flex-col overflow-hidden bg-[var(--color-bg-layout)]"
+      className="r2v-workbench-root flex h-full min-w-0 flex-col overflow-hidden bg-[var(--color-bg-layout)]"
     >
       {topBar}
       {conflictBanner}
 
-      <div className="grid min-h-0 flex-1 gap-3.5 p-4 lg:grid-cols-[280px_minmax(0,1fr)_300px]">
-        {/* ── Left: Shot list ─────────────────────────────────────────── */}
-        <div className="min-h-0 space-y-3 overflow-y-auto pr-0.5">
-          <Panel
-            title={t("r2v.shotList", { count: creation.shots.order.length })}
-            badge={
-              <span
-                className={`flex items-center gap-1 text-[11px] font-medium ${
-                  overLimit
-                    ? "text-[var(--color-danger)]"
-                    : "text-[var(--color-text-tertiary)]"
-                }`}
-              >
-                {overLimit && <AlertTriangle className="h-3 w-3" />}
-                {t("r2v.totalDuration", {
-                  total: totalDuration,
-                  span: spanSeconds,
-                })}
-              </span>
-            }
-          >
-            <ShotList
-              shots={creation.shots}
-              elementId={element.element_id}
-              disabled={patching}
-              shotPointer={(shotId, field) =>
-                elementPointer("creation", "shots", "items", shotId, field)
-              }
-              onChangeField={(shotId, field, value) =>
-                updateElement((draft) => {
-                  if (draft.creation.type !== "r2v") return;
-                  const shot = draft.creation.shots.items[shotId];
-                  if (shot) Object.assign(shot, { [field]: value });
-                })
-              }
-              onAdd={addShot}
-              onDelete={deleteShot}
-            />
-          </Panel>
-        </div>
-
-        {/* ── Middle: stage-focused panel ─────────────────────────────── */}
-        <div className="flex min-h-0 flex-col overflow-hidden">
+      <div data-workbench-layout className="r2v-workbench-layout">
+        {/* Prompt and storyboard workspace */}
+        <div
+          data-workbench-pane="prompt"
+          className="r2v-workbench-prompt flex min-w-0 flex-col"
+        >
           <section className="flex min-h-0 flex-1 flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-card)]">
             {stageTabs}
+            {synchronizing && (
+              <div className="r2v-generation-preparing" role="status">
+                <Loader2
+                  size={14}
+                  className="motion-safe:animate-spin"
+                  aria-hidden
+                />
+                <span>
+                  {t("r2v.sync.automaticWaiting", {
+                    seconds: preparationSeconds,
+                  })}
+                </span>
+              </div>
+            )}
+            {regenerationError && (
+              <Alert
+                className="mx-3 mt-2"
+                type="warning"
+                showIcon
+                message={regenerationError}
+              />
+            )}
             {contextCard && <div className="px-3.5 pt-2.5">{contextCard}</div>}
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+            <div className="r2v-workbench-prompt-body min-w-0 flex-1 p-4">
               {/* Stage ①: storyboard prompt + versions. Both stages stay
                   mounted (hidden attr) so field anchors and review focus
                   keep resolving regardless of the visible tab. */}
               <div hidden={stage !== "sb"} data-stage-panel="sb">
                 <div className="space-y-3">
+                  {/* Older reviews can still own shot fields. Keep their
+                      exact decision target inspectable without restoring
+                      the internal shot editor in the everyday workspace. */}
+                  {reviewMode &&
+                    reviewField &&
+                    (reviewField === elementPointer("creation", "shots") ||
+                      reviewField.startsWith(
+                        `${elementPointer("creation", "shots")}/`,
+                      )) && (
+                      <section
+                        data-legacy-shot-review
+                        data-creator-path={reviewField}
+                        data-creator-field-label={t("r2v.plan.title")}
+                        className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3"
+                      >
+                        <h4 className="text-xs font-medium text-[var(--color-text-secondary)]">
+                          {t("r2v.plan.title")}
+                        </h4>
+                        <InlineReviewDiff pointer={reviewField} />
+                      </section>
+                    )}
+                  {reviewMode &&
+                    reviewField ===
+                      elementPointer(
+                        "creation",
+                        "storyboard_reference_version_ids",
+                      ) && (
+                      <section
+                        data-creator-path={elementPointer(
+                          "creation",
+                          "storyboard_reference_version_ids",
+                        )}
+                        data-review-reference-field="storyboard"
+                      >
+                        <SectionLabel
+                          text={t("fileReview.public.referenceImages")}
+                        />
+                        <InlineReviewDiff
+                          pointer={elementPointer(
+                            "creation",
+                            "storyboard_reference_version_ids",
+                          )}
+                        />
+                      </section>
+                    )}
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[10px] text-[var(--color-text-tertiary)]">
                       {t("r2v.storyboardVersions")}
@@ -1531,7 +1843,7 @@ export function WorkbenchSurface({
                       versions={storyboardVersions}
                       currentId={storyboardSlot?.selected_version_id}
                       viewingId={effectiveSbId}
-                      onView={setViewedSbId}
+                      onView={(id) => viewCandidate("storyboard", id)}
                     />
                   </div>
                   {storyboardUrl ? (
@@ -1575,6 +1887,13 @@ export function WorkbenchSurface({
                         </Button>
                       </div>
                     )}
+                  {storyboardReferenceOrder?.ready === false && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message={t("r2v.referencesNeedReview")}
+                    />
+                  )}
                   <PromptRichBlock
                     label={t("r2v.storyboardPrompt")}
                     value={creation.storyboard_prompt}
@@ -1582,7 +1901,10 @@ export function WorkbenchSurface({
                     path={elementPointer("creation", "storyboard_prompt")}
                     disabled={patching}
                     tokens={sbTokens}
-                    shots={shotDocuments}
+                    regenerateDisabled={
+                      referenceDraftChanged ||
+                      storyboardReferenceOrder?.ready === false
+                    }
                     collapseHeight={230}
                     onRegenerate={() => void regenerateNode("storyboard")}
                     regenerating={
@@ -1603,6 +1925,30 @@ export function WorkbenchSurface({
               {/* Stage ②: video prompt with a compact storyboard context bar. */}
               <div hidden={stage !== "vd"} data-stage-panel="vd">
                 <div className="space-y-3">
+                  {reviewMode &&
+                    reviewField ===
+                      elementPointer(
+                        "creation",
+                        "video_reference_version_ids",
+                      ) && (
+                      <section
+                        data-creator-path={elementPointer(
+                          "creation",
+                          "video_reference_version_ids",
+                        )}
+                        data-review-reference-field="video"
+                      >
+                        <SectionLabel
+                          text={t("fileReview.public.referenceImages")}
+                        />
+                        <InlineReviewDiff
+                          pointer={elementPointer(
+                            "creation",
+                            "video_reference_version_ids",
+                          )}
+                        />
+                      </section>
+                    )}
                   {currentStoryboardUrl && (
                     <button
                       type="button"
@@ -1632,7 +1978,6 @@ export function WorkbenchSurface({
                     path={elementPointer("creation", "video_prompt")}
                     disabled={patching}
                     tokens={vdTokens}
-                    shots={shotDocuments}
                     collapseHeight={460}
                     onRegenerate={() => void regenerateNode("video")}
                     regenerating={
@@ -1656,18 +2001,24 @@ export function WorkbenchSurface({
         {/* ── Right rail: generation results, then 相关资产 ─────────────── */}
         <aside
           data-workbench-overview
-          className="min-h-0 space-y-5 overflow-y-auto pr-0.5"
+          data-workbench-pane="results"
+          className="r2v-workbench-results flex min-w-0 flex-col gap-5 pr-0.5"
         >
-          <div className="space-y-2">
+          <div
+            data-result-stage="video"
+            className="space-y-2"
+            style={{ order: stage === "vd" ? 0 : 1 }}
+          >
             <div className="flex items-center justify-between gap-2">
               <SectionLabel text={t("r2v.videoGenResult")} />
               <ArtifactVersionChips
                 versions={videoVersions}
                 currentId={videoSlot?.selected_version_id}
                 viewingId={effectiveVideoId}
-                onView={setViewedVideoId}
+                onView={(id) => viewCandidate("video", id)}
               />
             </div>
+            {stageTaskStatus("video", videoTask)}
             {videoUrl && viewedVideo ? (
               // <video> can't host ::after; put the review flash anchor on the wrapper.
               <div
@@ -1738,16 +2089,21 @@ export function WorkbenchSurface({
             )}
           </div>
 
-          <div className="space-y-2">
+          <div
+            data-result-stage="storyboard"
+            className="space-y-2"
+            style={{ order: stage === "sb" ? 0 : 1 }}
+          >
             <div className="flex items-center justify-between gap-2">
               <SectionLabel text={t("r2v.sbGenResult")} />
               <ArtifactVersionChips
                 versions={storyboardVersions}
                 currentId={storyboardSlot?.selected_version_id}
                 viewingId={effectiveSbId}
-                onView={setViewedSbId}
+                onView={(id) => viewCandidate("storyboard", id)}
               />
             </div>
+            {stageTaskStatus("storyboard", storyboardTask)}
             {storyboardUrl ? (
               <button
                 type="button"
@@ -1814,7 +2170,11 @@ export function WorkbenchSurface({
               <SectionLabel text={t("r2v.fieldLabels.sources")} />
               <div className="grid grid-cols-2 gap-2.5">
                 {materialCards.map((card) => (
-                  <div key={card.versionId} className="group/card relative">
+                  <div
+                    key={card.versionId}
+                    data-material-version={card.versionId}
+                    className="group/card relative"
+                  >
                     <span
                       className={`relative block aspect-video w-full overflow-hidden rounded-lg border ${
                         card.thumbUrl

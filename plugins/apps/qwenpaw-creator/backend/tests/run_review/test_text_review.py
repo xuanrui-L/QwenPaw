@@ -620,8 +620,25 @@ def test_borderless_outer_whitespace_is_not_a_panel_border_conflict(
     assert report["passed"] is True
 
 
-def test_prompt_contract_normalizes_dialogue_plan_annotations(
+@pytest.mark.parametrize(
+    ("video_prompt", "dialogue"),
+    [
+        pytest.param(
+            "阿穆低声说：“灯塔，亮起来！”",
+            "阿穆：（喘息）灯 塔，亮 起 来！",
+            id="annotations",
+        ),
+        pytest.param(
+            '阿穆低声说:"灯塔,亮起来!"',
+            "阿穆：“灯塔，亮起来！”",
+            id="punctuation-width",
+        ),
+    ],
+)
+def test_prompt_contract_normalizes_dialogue_without_blocking_generation(
     monkeypatch,
+    video_prompt,
+    dialogue,
 ) -> None:
     monkeypatch.setattr(
         model_config,
@@ -630,16 +647,14 @@ def test_prompt_contract_normalizes_dialogue_plan_annotations(
     )
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
     project = _r2v_contract_project(
-        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
-        video_prompt=("[Image 1] 仅提供分镜动作顺序。阿穆低声说：“灯塔，亮起来！”"),
-        dialogues=("阿穆：（喘息）灯 塔，亮 起 来！",),
+        storyboard_prompt="16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。",
+        video_prompt=f"[Image 1] 仅提供分镜动作顺序。{video_prompt}",
+        dialogues=(dialogue,),
     )
-
     report = check_changed_r2v_prompt_contracts(
         project,
         ["/timelines/items/t/elements_by_id/e"],
     )
-
     assert report["passed"] is True
 
 
@@ -666,45 +681,20 @@ def test_panel_count_requires_an_explicit_panel_noun(monkeypatch) -> None:
     ]
 
 
-def test_dialogue_match_tolerates_punctuation_width_variants(
-    monkeypatch,
-) -> None:
-    """Full-width vs half-width punctuation must not gate a paid call."""
-
+def test_keyframe_count_is_independent_of_shots(monkeypatch) -> None:
     monkeypatch.setattr(
         model_config,
         "get_video_model_name",
         lambda: "happyhorse-1.1",
     )
     monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
-    project = _r2v_contract_project(
-        storyboard_prompt=("16:9 故事板，1 个分镜格；每一个分镜格内部均为 16:9。"),
-        video_prompt=('[Image 1] 仅提供分镜动作顺序。阿穆低声说:"灯塔,亮起来!"'),
-        dialogues=("阿穆：“灯塔，亮起来！”",),
-    )
-
-    report = check_changed_r2v_prompt_contracts(
-        project,
-        ["/timelines/items/t/elements_by_id/e"],
-    )
-
-    assert report["passed"] is True
-
-
-def test_panel_count_accepts_chinese_numerals(monkeypatch) -> None:
-    monkeypatch.setattr(
-        model_config,
-        "get_video_model_name",
-        lambda: "happyhorse-1.1",
-    )
-    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
-    dialogues = ("",) * 6  # six shots pad to a 3x3 grid of nine cells
+    dialogues = ("",)  # one continuous shot can have many reference frames
     declared = _r2v_contract_project(
         storyboard_prompt=("16:9 故事板，九宫格布局；" "每一个分镜格内部均为 16:9。"),
         video_prompt="[Image 1] 仅提供分镜动作顺序。",
         dialogues=dialogues,
     )
-    mismatched = _r2v_contract_project(
+    more_keyframes = _r2v_contract_project(
         storyboard_prompt=("16:9 故事板，十六宫格布局；" "每一个分镜格内部均为 16:9。"),
         video_prompt="[Image 1] 仅提供分镜动作顺序。",
         dialogues=dialogues,
@@ -714,14 +704,35 @@ def test_panel_count_accepts_chinese_numerals(monkeypatch) -> None:
         declared,
         ["/timelines/items/t/elements_by_id/e"],
     )
-    mismatched_report = check_changed_r2v_prompt_contracts(
-        mismatched,
+    more_keyframes_report = check_changed_r2v_prompt_contracts(
+        more_keyframes,
         ["/timelines/items/t/elements_by_id/e"],
     )
 
     assert declared_report["passed"] is True
-    assert [item["code"] for item in mismatched_report["findings"]] == [
-        "STORYBOARD_PANEL_COUNT_MISSING",
+    assert more_keyframes_report["passed"] is True
+
+
+def test_multiframe_single_shot_still_checks_panel_border_contract(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    project = _r2v_contract_project(
+        storyboard_prompt="9个关键帧，每格16:9，no borders",
+        video_prompt="[Image 1] 仅提供分镜动作顺序。",
+        dialogues=("",),
+    )
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+    assert [item["code"] for item in report["findings"]] == [
+        "STORYBOARD_BORDER_CONTRADICTION",
     ]
 
 

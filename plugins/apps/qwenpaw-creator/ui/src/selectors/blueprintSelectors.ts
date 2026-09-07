@@ -50,6 +50,27 @@ export function selectTimelineScriptSlot(
   return resolveSlot(project, scanned);
 }
 
+/** A default empty timeline is not a published blueprint. History snapshots
+ * and the initial user brief also must not hide the first-output placeholder. */
+export function hasBlueprintContent(project: ProjectDocument): boolean {
+  if (
+    project.visual.entities.order.some(
+      (id) => project.visual.entities.items[id],
+    )
+  )
+    return true;
+  return selectLiveTimelineIds(project).some((id) => {
+    const timeline = project.timelines.items[id];
+    return Boolean(
+      timeline.title?.trim() ||
+        timeline.synopsis?.trim() ||
+        timeline.description?.trim() ||
+        orderedTimelineElements(timeline).some((element) => element.enabled) ||
+        selectTimelineScriptSlot(project, id)?.selected,
+    );
+  });
+}
+
 /** All research_report slots of the project (blueprint research tab). */
 export function selectResearchSlots(
   project: ProjectDocument | null | undefined,
@@ -361,7 +382,7 @@ export function summarizeTimeline(
     elementCount: elements.length,
     videoTotal: videoElements.length,
     videoReady,
-    hasScript: Boolean(script?.selected),
+    hasScript: Boolean(script?.selected || timeline.description?.trim()),
     scriptStale: Boolean(script?.selected?.stale),
     renderReady: Boolean(render?.selected && !render.selected.stale),
     durationSeconds: duration,

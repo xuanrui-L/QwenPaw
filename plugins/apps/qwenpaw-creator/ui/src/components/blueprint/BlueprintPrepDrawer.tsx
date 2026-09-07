@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { message } from "antd";
 import { ArrowLeft } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
 import type {
   ProjectDocument,
   VisualEntityDocument,
@@ -571,9 +572,9 @@ export default function BlueprintPrepDrawer({
           );
         })}
         {kindEntities.length === 0 && (
-          <p className="col-span-full py-10 text-center text-xs text-[var(--color-text-tertiary)]">
-            {t("blueprint.kindEmpty")}
-          </p>
+          <div className="col-span-full">
+            <WorkspaceEmptyState projectId={projectId} area="visual" />
+          </div>
         )}
       </div>
     ) : (
@@ -616,9 +617,9 @@ export default function BlueprintPrepDrawer({
           );
         })}
         {kindEntities.length === 0 && (
-          <p className="col-span-full py-10 text-center text-xs text-[var(--color-text-tertiary)]">
-            {t("blueprint.kindEmpty")}
-          </p>
+          <div className="col-span-full">
+            <WorkspaceEmptyState projectId={projectId} area="visual" />
+          </div>
         )}
       </div>
     );
@@ -693,9 +694,7 @@ export default function BlueprintPrepDrawer({
         </button>
       ))}
       {!research.length && !sources.length && (
-        <p className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">
-          {t("blueprint.researchEmpty")}
-        </p>
+        <WorkspaceEmptyState projectId={projectId} area="research" />
       )}
     </div>
   );

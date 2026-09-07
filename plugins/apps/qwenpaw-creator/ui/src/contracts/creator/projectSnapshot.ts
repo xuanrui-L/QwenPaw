@@ -219,6 +219,12 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   storyboard_reference_version_ids: string[];
   video_prompt: string;
   video_reference_version_ids: string[];
+  /** Server-owned provenance. Presentation consumes the prompt-sync API. */
+  prompt_sync?: {
+    plan_fingerprint: string;
+    storyboard_prompt_fingerprint: string;
+    video_prompt_fingerprint: string;
+  } | null;
 }
 
 export interface T2VCreationDocument extends ProjectJsonRecord {
@@ -508,12 +514,18 @@ export interface R2VReferenceOrderItem {
   versionId: string;
   kind: "storyboard" | "source" | "artifact";
   name: string;
+  available?: boolean;
 }
 
 export interface R2VReferenceOrderResponse {
   elementId: string;
   storyboardSelected: boolean;
   references: R2VReferenceOrderItem[];
+  stage?: "storyboard" | "video";
+  ready?: boolean;
+  referenceLimit?: number | null;
+  invalidMarkerIndices?: number[];
+  budgetDroppedVersionIds?: string[];
 }
 
 export interface ProjectPatchResponse {

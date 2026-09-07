@@ -662,7 +662,6 @@ export default function PlanPage() {
       {syncStatus === "degraded" && (
         <div className="shrink-0 border-b border-[var(--color-warning)]/20 bg-[var(--color-warning-soft)] px-5 py-1.5 text-[11px] text-[var(--color-warning)]">
           {t("plan.syncDegraded")}
-          {syncError ? ` ${syncError}` : ""}
         </div>
       )}
 

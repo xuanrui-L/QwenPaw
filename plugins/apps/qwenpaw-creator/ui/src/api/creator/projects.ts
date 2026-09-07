@@ -287,10 +287,11 @@ export function patchProject(
 export function getR2VReferenceOrder(
   projectId: string,
   elementId: string,
+  stage: "video" | "storyboard" = "video",
 ): Promise<R2VReferenceOrderResponse> {
   return creatorRequest(
     `/projects/${encodeURIComponent(projectId)}/elements/${encodeURIComponent(
       elementId,
-    )}/r2v-references`,
+    )}/r2v-references${stage === "storyboard" ? "?stage=storyboard" : ""}`,
   );
 }

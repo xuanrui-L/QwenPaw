@@ -347,10 +347,11 @@ export function useReviewFieldFocus({
   // Cross-page focus requests are consumed per pulse too, so stale store
   // requests never replay on remount.
   useEffect(() => {
-    if (!enabled) return;
     if (!reviewFocusRequest || reviewFocusRequest.path !== path) return;
+    const operationFocus = reviewFocusRequest.query.focusField === "1";
+    if (!enabled && !operationFocus) return;
     if (
-      reviewFocusRequest.query.review !== "1" ||
+      (!operationFocus && reviewFocusRequest.query.review !== "1") ||
       !reviewFocusRequest.query.field
     )
       return;
@@ -367,9 +368,9 @@ export function useReviewFieldFocus({
       query: Record<string, string>;
     }) => {
       if (
-        !enabled ||
+        (!enabled && request.query.focusField !== "1") ||
         request.path !== path ||
-        request.query.review !== "1" ||
+        (request.query.review !== "1" && request.query.focusField !== "1") ||
         !request.query.field
       )
         return;

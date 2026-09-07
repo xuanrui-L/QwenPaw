@@ -95,6 +95,7 @@ from services.project_files.models import (
     SourceAssetVersion,
 )
 from services.project_files.remote_cache import public_source_url
+from services.project_files.model_view import project_snapshot_view
 from services.runtime_files.models import (
     ChangeOrigin,
     CreatorMessageRecord,
@@ -173,6 +174,7 @@ from .checkpoints import (
     checkpoint_label,
     checkpoint_operation,
     checkpoint_recovery,
+    retire_legacy_plan_checkpoints,
     checkpoint_summary,
     required_checkpoint_phases,
 )
@@ -207,7 +209,17 @@ from .notifications import (
 )
 from .prompts import render_creator_system_prompt
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
-from .work_graph import derive_work_graph
+from .work_graph import WorkNodeStatus, derive_work_graph
+from .model_context import compact_conversation_history
+from .workgraph_execution import (
+    REQUEST_WORKGRAPH_EXECUTION,
+    parse_request_targets,
+    ready_request_context,
+    requested_work_node,
+    request_workgraph_tool_manifest,
+    summarize_workgraph_results,
+    workgraph_waits_only_for_review,
+)
 from .work_scheduler import WorkGraphScheduler
 from .subagents import (
     DELEGATE_TOOL_NAME,
@@ -475,7 +487,9 @@ class _ToolArgumentProgressState:
 
 
 class _ToolArgumentProgressReporter:
-    """Collapse provider fragments into bounded, content-free progress events."""
+    """
+    Collapse provider fragments into bounded, content-free progress events.
+    """
 
     def __init__(self, emit: Any) -> None:
         self._emit = emit
@@ -603,7 +617,7 @@ def _agent_waiting_review_summary(
 ) -> str:
     summary = (specialist_summary or "").strip()
     if not summary:
-        summary = "当前产物已生成，后续步骤尚未开始。请先完成审阅；审阅通过后主线需重新委派同一目标以继续。"
+        summary = "有内容等待您审阅，请先完成当前审阅。"
     return f"{summary}\n\n无需另行发送消息。"
 
 
@@ -957,6 +971,7 @@ def _creator_agent_tool_manifest(
     external_skills: list[LoadedSkill] | None = None,
 ) -> list[dict[str, Any]]:
     manifest = [*agent_project_tool_manifest()]
+    manifest.append(request_workgraph_tool_manifest())
     if get_web_grounding_enabled():
         manifest.append(_ground_prompt_context_tool_manifest())
     manifest.append(_object_grounding_tool_manifest())
@@ -1594,6 +1609,19 @@ class FileCreatorAgentRuntime:
             except Exception:  # noqa: BLE001 - sweep must never block startup
                 summaries = []
             for summary in summaries:
+                # Retire obsolete, non-billing waits before recovering a run.
+                # Keep the audit records; never auto-approve media execution.
+                try:
+                    await asyncio.to_thread(
+                        retire_legacy_plan_checkpoints,
+                        self.executions,
+                        summary.project_id,
+                    )
+                except Exception:  # pylint: disable=broad-except
+                    logger.exception(
+                        "startup plan checkpoint retirement failed for %s",
+                        summary.project_id,
+                    )
                 self.work_scheduler.wake(summary.project_id)
                 try:
                     # Any surviving INJECTED record belongs to a run that
@@ -1946,7 +1974,9 @@ class FileCreatorAgentRuntime:
         self._loop = None
 
     def notify(self, project_id: str) -> None:
-        """Wake the coordinator after a Project/message is durably published."""
+        """
+        Wake the coordinator after a Project/message is durably published.
+        """
 
         self._blocked_heads.pop(project_id, None)
         loop = self._loop
@@ -2159,16 +2189,19 @@ class FileCreatorAgentRuntime:
                 try:
                     # Reconciliation only needs Project identities, not their
                     # loaded data.  ``list()`` fully reads every Project
-                    # (parse + validate + canonicalize + deepcopy + resolve every
+                    # (parse + validate + canonicalize + deepcopy + resolve
+                    # every
                     # indexed asset path) on each tick; with several Projects
                     # that pinned a core constantly.  ``discover_project_ids``
-                    # is a directory scan with no payload load.  Per-Project load
+                    # is a directory scan with no payload load.  Per-Project
+                    # load
                     # errors are handled inside ``_reconcile_project``.
                     project_ids = await asyncio.to_thread(
                         self.services.projects.discover_project_ids,
                     )
                 except Exception:
-                    # Storage integrity remains visible through health/recovery;
+                    # Storage integrity remains visible through
+                    # health/recovery;
                     # one failed scan must not terminate the process driver.
                     continue
                 for project_id in project_ids:
@@ -2177,7 +2210,8 @@ class FileCreatorAgentRuntime:
                     try:
                         await self._reconcile_project(project_id)
                     except Exception:
-                        # A per-Project failure is persisted by its run whenever
+                        # A per-Project failure is persisted by its run
+                        # whenever
                         # possible and must not starve unrelated Projects.
                         continue
                 logger.debug(
@@ -2358,7 +2392,8 @@ class FileCreatorAgentRuntime:
         user_messages = [item for item in pending if item.role == "user"]
 
         # The durable Session, not this process-local coordinator, owns the
-        # cross-process run lease. A second QwenPaw process may observe the same
+        # cross-process run lease. A second QwenPaw process may observe the
+        # same
         # filesystem, but it must not start a duplicate Agent run. An explicit
         # AgentDock interruption is the sole exception: it supersedes the old
         # lease before the replacement request is admitted.
@@ -3139,14 +3174,22 @@ class FileCreatorAgentRuntime:
                 persist_tool_progress,
             )
 
+            model_retried = False
+
             async def report_rate_limit_retry(
                 notice: RateLimitRetryNotice,
             ) -> None:
+                nonlocal model_retried
                 self._assert_epoch(project_id, run_id, epoch)
+                model_retried = True
                 await self._event(
                     project_id,
                     session_id,
-                    "agent.model.rate_limit_retry",
+                    (
+                        "agent.model.rate_limit_retry"
+                        if notice.reason == "rate_limit"
+                        else "agent.model.retry"
+                    ),
                     run_id,
                     request,
                     {
@@ -3154,6 +3197,7 @@ class FileCreatorAgentRuntime:
                         "attempt": notice.attempt,
                         "maxAttempts": notice.max_attempts,
                         "delaySeconds": notice.delay_seconds,
+                        "reason": notice.reason,
                     },
                 )
 
@@ -3167,6 +3211,16 @@ class FileCreatorAgentRuntime:
                 on_tool_call_delta=tool_progress.feed,
                 on_rate_limit_retry=report_rate_limit_retry,
             )
+            if model_retried:
+                self._assert_epoch(project_id, run_id, epoch)
+                await self._event(
+                    project_id,
+                    session_id,
+                    "agent.model.retry_recovered",
+                    run_id,
+                    request,
+                    {"runId": run_id},
+                )
             await tool_progress.finish(turn.tool_calls)
             self._assert_epoch(project_id, run_id, epoch)
             if len(turn.tool_calls) > 1:
@@ -3329,6 +3383,17 @@ class FileCreatorAgentRuntime:
                             call_id=call.call_id,
                             arguments=call.arguments,
                         )
+                    elif call.name == REQUEST_WORKGRAPH_EXECUTION:
+                        result = await self._run_mainline_workgraph_execution(
+                            project_id=project_id,
+                            session_id=session_id,
+                            run_id=run_id,
+                            epoch=epoch,
+                            request=request,
+                            tools=tools,
+                            call_id=call.call_id,
+                            arguments=call.arguments,
+                        )
                     elif call.name == GROUND_PROMPT_CONTEXT_TOOL_NAME:
                         result = await self._run_ground_prompt_context(
                             request=request,
@@ -3456,6 +3521,46 @@ class FileCreatorAgentRuntime:
                         "failed": tool_failed,
                     },
                 )
+                if (
+                    call.name == REQUEST_WORKGRAPH_EXECUTION
+                    and not tool_failed
+                    and workgraph_waits_only_for_review(result)
+                ):
+                    # A known pre-dispatch review pause needs no model
+                    # interpretation. Join only real pending reviews and let
+                    # the existing review-decision continuation resume later.
+                    pending = await asyncio.to_thread(
+                        self.services.reviews.all_pending,
+                        project_id,
+                    )
+                    if pending:
+                        self._assert_epoch(project_id, run_id, epoch)
+                        summary = "当前制作尚未开始。" + _agent_waiting_review_summary(
+                            None,
+                        )
+                        assistant_message_id = f"message-{uuid4().hex}"
+                        delta_index = 0
+                        await persist_message_delta("text", summary)
+                        await self._persist_assistant_turn(
+                            project_id,
+                            session_id,
+                            run_id,
+                            request,
+                            AgentModelTurn(content=summary),
+                            message_id=assistant_message_id,
+                        )
+                        return _LoopResult(
+                            summary=summary,
+                            tool_call_count=tool_call_count,
+                            review_ids=tuple(
+                                dict.fromkeys(
+                                    [
+                                        *review_ids,
+                                        *(item.review_id for item in pending),
+                                    ],
+                                ),
+                            ),
+                        )
                 if malformed_budget_exhausted:
                     raise RepeatedDeterministicToolFailure(
                         "jq_project produced structurally corrupted tool "
@@ -3494,6 +3599,333 @@ class FileCreatorAgentRuntime:
         raise AgentModelError(
             f"Creator Agent exceeded {effective_max_turns} model turns",
         )
+
+    async def _run_mainline_workgraph_execution(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        run_id: str,
+        epoch: int,
+        request: CreatorMessageRecord,
+        tools: AgentProjectTools,
+        call_id: str,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """User-triggered, authorization-gated execution of explicit targets.
+
+        The global scheduler stays unchanged. All independent targets enter
+        the durable approval wait concurrently; no provider call precedes
+        its own approved, freshly revalidated request.
+        """
+        targets, kinds = parse_request_targets(arguments, project_id)
+        fence = _EpochFence(self, project_id, run_id, epoch)
+        fence.assert_alive()
+        snapshot, _, graph, blocked = await ready_request_context(
+            self.services,
+            self.executions,
+            project_id,
+            check_media_budget=False,
+        )
+        selected = [
+            node
+            for node in graph.nodes
+            if node.target_ref in targets and node.kind in kinds
+        ]
+        items = [
+            {
+                "targetRef": target,
+                "status": "BLOCKED",
+                "reason": "TARGET_NOT_FOUND",
+            }
+            for target in sorted(
+                targets - {node.target_ref for node in selected},
+            )
+        ]
+        plans = []
+        running_composes = []
+        for node in selected:
+            if node.status.value == "done":
+                items.append(
+                    {
+                        "nodeId": node.node_id,
+                        "targetRef": node.target_ref,
+                        "status": "SUCCEEDED",
+                        "taskId": node.task_id,
+                        "replayed": True,
+                    },
+                )
+            elif (
+                node.kind == "compose"
+                and node.status.value == "running"
+                and node.task_id
+            ):
+                running_composes.append(node)
+            elif node.node_id in blocked:
+                items.append(
+                    {
+                        "nodeId": node.node_id,
+                        "targetRef": node.target_ref,
+                        "status": "BLOCKED",
+                        "reason": blocked[node.node_id],
+                    },
+                )
+            else:
+                plans.append(requested_work_node(snapshot, node))
+        if any(plan.node.kind != "compose" for plan in plans):
+            await asyncio.to_thread(
+                ensure_media_call_budget,
+                self.services,
+                project_id,
+            )
+        common = {
+            "runId": run_id,
+            "parentRunId": run_id,
+            "role": "creator_agent",
+            "targetRefs": sorted(targets),
+        }
+        round_id = tools.context.round_id or f"agent-round-{run_id}"
+        # One shared plan/design checkpoint per required policy, before the
+        # independent per-node billing requests. No fake SpecialistRun.
+        checked = set()
+        for plan in plans:
+            if plan.node.kind == "compose":
+                continue
+            gate = (plan.spec.name, plan.checkpoint_role)
+            if gate in checked:
+                continue
+            await self._require_creation_checkpoints(
+                project_id=project_id,
+                session_id=session_id,
+                parent_run_id=run_id,
+                specialist_run_id=run_id,
+                round_id=round_id,
+                fence=fence,
+                request=request,
+                common=common,
+                call_id=call_id,
+                spec=plan.spec,
+                role=plan.checkpoint_role,
+                tools=tools,
+                park_specialist_run=False,
+            )
+            checked.add(gate)
+
+        async def execute_one(plan):
+            node = plan.node
+            is_compose = node.kind == "compose"
+            identity = {"nodeId": node.node_id, "targetRef": node.target_ref}
+            provider, model = (
+                ("local", "deterministic")
+                if is_compose
+                else _execution_provider_model(plan.spec, plan.parameters)
+            )
+            dispatch_fingerprint = self.work_scheduler._ledger_fingerprint(
+                node,
+            )
+            key = (
+                f"dag-{node.node_id}-"
+                f"{self.work_scheduler._dispatch_slot(dispatch_fingerprint)}"
+            )
+            authorization_id = None
+            try:
+                fence.assert_alive()
+                # Identity includes all approved terms, even settings that a
+                # visual node's ordinary graph fingerprint does not contain.
+                approval_arguments = {
+                    "targetRef": node.target_ref,
+                    "arguments": plan.parameters,
+                    "workGraph": {
+                        "fingerprint": plan.fingerprint,
+                        "provider": provider,
+                        "model": model,
+                    },
+                }
+                if (
+                    not is_compose
+                    and get_execution_authorization_mode()
+                    != EXECUTION_AUTHORIZATION_ALLOW_ALL
+                ):
+                    authorization_id = (
+                        await self._await_execution_authorization(
+                            project_id=project_id,
+                            session_id=session_id,
+                            parent_run_id=run_id,
+                            specialist_run_id=run_id,
+                            round_id=round_id,
+                            fence=fence,
+                            request=request,
+                            common=common,
+                            call_id=call_id,
+                            spec=plan.spec,
+                            arguments=approval_arguments,
+                            tools=tools,
+                            park_specialist_run=False,
+                            reopen_terminal=False,
+                        )
+                    )
+                fence.assert_alive()
+                (
+                    fresh,
+                    tasks,
+                    current_graph,
+                    current_blocked,
+                ) = await ready_request_context(
+                    self.services,
+                    self.executions,
+                    project_id,
+                    check_media_budget=not is_compose,
+                )
+                # An already admitted slot must never enter the image
+                # executor's paid transient-retry slot search a second time.
+                existing = next(
+                    (
+                        task
+                        for task in tasks
+                        if key
+                        in (task.idempotency_key, task.caused_by_request_id)
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.status in {
+                        TaskStatus.QUEUED,
+                        TaskStatus.RUNNING,
+                    }:
+                        existing = await self._await_specialist_task(
+                            project_id=project_id,
+                            parent_run_id=run_id,
+                            fence=fence,
+                            task_id=existing.task_id,
+                        )
+                    return {
+                        **identity,
+                        "status": existing.status.value,
+                        "taskId": existing.task_id,
+                        "replayed": True,
+                    }
+                current_node = current_graph.by_id.get(node.node_id)
+                if current_node is None or node.node_id in current_blocked:
+                    return {
+                        **identity,
+                        "status": "BLOCKED",
+                        "reason": "INPUTS_NOT_READY",
+                    }
+                current_plan = requested_work_node(fresh, current_node)
+                if (
+                    current_plan.fingerprint != plan.fingerprint
+                    or (
+                        not is_compose
+                        and _execution_provider_model(
+                            plan.spec,
+                            current_plan.parameters,
+                        )
+                        != (provider, model)
+                    )
+                    or self.work_scheduler._ledger_fingerprint(current_node)
+                    != dispatch_fingerprint
+                ):
+                    return {
+                        **identity,
+                        "status": "BLOCKED",
+                        "reason": "APPROVED_INPUTS_CHANGED",
+                    }
+                fence.assert_alive()
+                if is_compose:
+                    from services.media_files.local_execution import (
+                        execute_file_local_media_command,
+                    )
+
+                    # Deliberately bypass the unattended adapter's optional
+                    # motion-design model call; all local admission remains.
+                    result = await execute_file_local_media_command(
+                        self.services,
+                        project_id=project_id,
+                        command=current_node.command,
+                        target_ref=current_node.target_ref,
+                        arguments=dict(current_node.dispatch_arguments),
+                        idempotency_key=key,
+                        expected_object_versions=(
+                            f"project:{fresh.etag}:work-graph",
+                        ),
+                    )
+                else:
+                    result = await self.work_scheduler.dispatch_node(
+                        project_id,
+                        current_node,
+                        dispatch_fingerprint,
+                        expected_object_versions=(
+                            f"project:{fresh.etag}:work-graph",
+                        ),
+                    )
+                task_id = getattr(result, "task_id", None)
+                if task_id is None and isinstance(result, Mapping):
+                    task_id = result.get("taskId")
+                if not isinstance(task_id, str) or not task_id:
+                    raise FileAgentRuntimeError("制作请求没有返回真实任务标识")
+                task = await self._await_specialist_task(
+                    project_id=project_id,
+                    parent_run_id=run_id,
+                    fence=fence,
+                    task_id=task_id,
+                )
+                return {
+                    **identity,
+                    "status": task.status.value,
+                    "taskId": task_id,
+                    "executionAuthorizationId": authorization_id,
+                    "outputRefs": list(task.output_refs),
+                }
+            except (asyncio.CancelledError, StaleAgentRun):
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "requested work-graph execution stopped for %s: %s",
+                    node.node_id,
+                    exc,
+                )
+                return {
+                    **identity,
+                    "status": "BLOCKED",
+                    "reason": "EXECUTION_NOT_COMPLETED",
+                    "executionAuthorizationId": authorization_id,
+                }
+
+        async def await_running_compose(node):
+            task = await self._await_specialist_task(
+                project_id=project_id,
+                parent_run_id=run_id,
+                fence=fence,
+                task_id=node.task_id,
+            )
+            return {
+                "nodeId": node.node_id,
+                "targetRef": node.target_ref,
+                "status": task.status.value,
+                "taskId": task.task_id,
+                "outputRefs": list(task.output_refs),
+                "replayed": True,
+            }
+
+        items.extend(
+            await asyncio.gather(
+                *(execute_one(plan) for plan in plans),
+                *(await_running_compose(node) for node in running_composes),
+            ),
+        )
+        completed = sum(item["status"] == "SUCCEEDED" for item in items)
+        return {
+            "ok": completed == len(items) and bool(items),
+            "status": (
+                "COMPLETED"
+                if completed == len(items) and items
+                else "PARTIAL"
+                if completed
+                else "BLOCKED"
+            ),
+            "items": items,
+            "summary": summarize_workgraph_results(items),
+        }
 
     async def _run_mainline_character_voice(
         self,
@@ -5093,6 +5525,29 @@ class FileCreatorAgentRuntime:
                 tool_progress = _ToolArgumentProgressReporter(
                     subagent_tool_progress,
                 )
+                specialist_model_retried = False
+
+                async def specialist_model_retry(
+                    notice: RateLimitRetryNotice,
+                ) -> None:
+                    nonlocal specialist_model_retried
+                    fence.assert_alive()
+                    specialist_model_retried = True
+                    await self._event(
+                        project_id,
+                        session_id,
+                        "subagent.model.retry",
+                        parent_run_id,
+                        request,
+                        {
+                            **common,
+                            "attempt": notice.attempt,
+                            "maxAttempts": notice.max_attempts,
+                            "delaySeconds": notice.delay_seconds,
+                            "reason": notice.reason,
+                        },
+                    )
+
                 turn = await self._complete_model_turn(
                     model_client,
                     label=role_name,
@@ -5101,7 +5556,18 @@ class FileCreatorAgentRuntime:
                     on_text_delta=text_delta,
                     on_thinking_delta=thinking_delta,
                     on_tool_call_delta=tool_progress.feed,
+                    on_rate_limit_retry=specialist_model_retry,
                 )
+                if specialist_model_retried:
+                    fence.assert_alive()
+                    await self._event(
+                        project_id,
+                        session_id,
+                        "subagent.model.retry_recovered",
+                        parent_run_id,
+                        request,
+                        dict(common),
+                    )
                 await tool_progress.finish(turn.tool_calls)
                 if len(turn.tool_calls) > 1:
                     raise AgentModelError(
@@ -6125,6 +6591,7 @@ class FileCreatorAgentRuntime:
         spec: SpecialistToolSpec,
         role: SpecialistRole,
         tools: AgentProjectTools,
+        park_specialist_run: bool = True,
     ) -> None:
         """Block costly generation until the user cleared each pit stop.
 
@@ -6214,6 +6681,7 @@ class FileCreatorAgentRuntime:
                     authorization=authorization,
                     decided_event="creation.checkpoint_decided",
                     decided_payload={"checkpointPhase": phase},
+                    park_specialist_run=park_specialist_run,
                 )
                 logger.info(
                     "approval decided: project=%s run=%s role=%s "
@@ -6470,6 +6938,7 @@ class FileCreatorAgentRuntime:
         arguments: Mapping[str, Any],
         tools: AgentProjectTools,
         park_specialist_run: bool = True,
+        reopen_terminal: bool = True,
     ) -> str:
         execution_request_id = _specialist_tool_request_id(
             specialist_run_id,
@@ -6521,6 +6990,10 @@ class FileCreatorAgentRuntime:
                 ExecutionAuthorizationStatus.REJECTED,
                 ExecutionAuthorizationStatus.EXPIRED,
             ):
+                if not reopen_terminal:
+                    raise FileAgentRuntimeError(
+                        "该制作请求未获授权；不要重复提交相同输入。",
+                    )
                 attempt += 1
                 continue
             existing = record
@@ -7007,11 +7480,18 @@ class FileCreatorAgentRuntime:
             )
         except Exception:  # pylint: disable=broad-except
             records = []
-        graph = derive_work_graph(snapshot.project, tasks=records)
+        graph = derive_work_graph(
+            snapshot.project,
+            tasks=records,
+            media_models=(get_image_model_name(), get_video_model_name()),
+        )
         unfinished_nodes = graph.unfinished()
         if not unfinished_nodes and not after_failure:
             return
-        model_required = graph.model_required_nodes()
+        automatic_regeneration = auto_approve and self.work_scheduler.enabled()
+        model_required = graph.model_required_nodes(
+            automatic_regeneration=automatic_regeneration,
+        )
         prompt_required = tuple(
             node
             for node in model_required
@@ -7132,17 +7612,26 @@ class FileCreatorAgentRuntime:
                 text += (
                     "\n以下环节尚未完成："
                     + "、".join(unfinished[:8])
-                    + "。可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派。"
+                    + "。Runtime 会按授权与审阅条件派发可执行任务；只有真实任务回执才表示已提交。"
                 )
         else:
             reasons = []
             for node in feedback_nodes[:8]:
-                why = node.error or "、".join(node.missing[:3]) or "待处理"
+                why = (
+                    node.error
+                    or "、".join(node.missing[:3])
+                    or (
+                        "已有产物需更新；按当前执行方式请求重新生成，不要清除旧产物的 stale 标志"
+                        if node.status is WorkNodeStatus.STALE
+                        else "待处理"
+                    )
+                )
                 reasons.append(f"{node.label}（{why}）")
             if auto_approve:
                 text = (
                     "【系统自动消息 · YOLO 持续执行】主线回合已结束，但以下环节需要"
-                    "你处理（可自动派发的媒体生成已由 Runtime 并行执行，无需重复委派）：\n"
+                    "你处理（Runtime 会按授权、审阅和依赖条件派发可执行任务，"
+                    "本消息不代表任务已经提交）：\n"
                     + "\n".join(f"- {reason}" for reason in reasons)
                     + "\n请针对上述环节修复结构、补全 prompt 或调整参数；不要重复已完成的工作。"
                 )
@@ -8318,6 +8807,15 @@ def _elide_stale_snapshots(
             tool_name=tool_name,
             metadata=item.metadata,
         )
+    if snapshots:
+        item, snapshot, _ = snapshots[-1]
+        view = project_snapshot_view(snapshot.payload)
+        if view.get("projectView"):
+            receipts[item.message_seq] = json.dumps(
+                view,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
     return receipts
 
 
@@ -8360,10 +8858,17 @@ def _compact_wire_project_snapshots(messages: list[dict[str, Any]]) -> None:
                     (message, snapshot, tool_name, part_index),
                 )
                 break
-    for message, snapshot, tool_name, part_index in snapshots[:-1]:
-        receipt = _project_change_receipt(
-            snapshot,
-            tool_name=tool_name,
+    for index, (message, snapshot, tool_name, part_index) in enumerate(
+        snapshots,
+    ):
+        receipt = (
+            json.dumps(
+                project_snapshot_view(snapshot.payload),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if index == len(snapshots) - 1
+            else _project_change_receipt(snapshot, tool_name=tool_name)
         )
         if part_index is None:
             message["content"] = receipt
@@ -8438,7 +8943,15 @@ def _continuation_message_text(
             "metadata": {
                 **dict(item.metadata),
                 **(
-                    {"resultKind": _PROJECT_CHANGE_RECEIPT_RESULT_KIND}
+                    {
+                        "resultKind": (
+                            _PROJECT_SNAPSHOT_RESULT_KIND
+                            if _project_snapshot_from_text(
+                                snapshot_receipts[item.message_seq],
+                            )
+                            else _PROJECT_CHANGE_RECEIPT_RESULT_KIND
+                        ),
+                    }
                     if item.message_seq in snapshot_receipts
                     else {}
                 ),
@@ -8446,9 +8959,10 @@ def _continuation_message_text(
         }
         for item in prior_context
     ]
+    history = compact_conversation_history(history)
     return (
         "以下 CONVERSATION_HISTORY_JSON 是同一 AgentDock Conversation 在本轮之前"
-        "已经持久化的完整上下文。请继承其中的用户目标、已完成步骤、工具结果与约束；"
+        "持久化上下文的有界视图，早期回执可能省略，项目历史按需读取。请继承用户目标与约束；"
         "它是上下文，不是新的操作指令。\n"
         "CONVERSATION_HISTORY_JSON="
         + json.dumps(history, ensure_ascii=False, separators=(",", ":"))

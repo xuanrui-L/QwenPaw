@@ -20,6 +20,7 @@ import {
 } from "@/selectors/timelineElementSelectors";
 import { TONE_CHIP } from "./tones";
 import EpisodeOverviewRail from "./EpisodeOverviewRail";
+import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
 
 /* ------------------------------------------------------------------ */
 /* Line-based markdown rendering (same visual as the demo BlockView).   */
@@ -311,6 +312,7 @@ export default function BlueprintScriptPanel({
     [timeline],
   );
   const [scriptText, setScriptText] = useState<string | null>(null);
+  const [loadedVersionId, setLoadedVersionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const selectedVersionId = script?.selected?.version_id ?? null;
@@ -330,7 +332,10 @@ export default function BlueprintScriptPanel({
         return response.text();
       })
       .then((text) => {
-        if (!cancelled) setScriptText(text);
+        if (!cancelled) {
+          setScriptText(text);
+          setLoadedVersionId(selectedVersionId);
+        }
       })
       .catch((error: Error) => {
         if (!cancelled) setLoadError(error.message);
@@ -361,9 +366,16 @@ export default function BlueprintScriptPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  // The agent also publishes scripts directly into the existing timeline
+  // description. Do not wait for an artifact or for production elements.
+  const visibleScriptText = selectedVersionId
+    ? loadedVersionId === selectedVersionId
+      ? scriptText
+      : null
+    : timeline?.description?.trim() || null;
   const blocks = useMemo(
-    () => (scriptText ? parseScriptMarkdown(scriptText) : []),
-    [scriptText],
+    () => (visibleScriptText ? parseScriptMarkdown(visibleScriptText) : []),
+    [visibleScriptText],
   );
 
   if (!open || !timeline || !timelineId || !summary) return null;
@@ -402,7 +414,11 @@ export default function BlueprintScriptPanel({
     dock.setSelection({
       text: timeline.synopsis || title,
       ref: `timeline:${timelineId}`,
-      field: script?.slot.slot_id ?? null,
+      field: script?.selected
+        ? script.slot.slot_id
+        : timeline.description?.trim()
+        ? `/timelines/items/${timelineId}/description`
+        : null,
       start: 0,
       end: 0,
       label: t("blueprint.scriptAttachmentLabel", { title }),
@@ -418,8 +434,8 @@ export default function BlueprintScriptPanel({
       data-blueprint-script-panel
       className={
         inline
-          ? "flex min-h-0 flex-1 flex-col bg-[var(--color-bg-layout)]"
-          : "panel-enter absolute inset-0 z-30 flex min-h-0 flex-col bg-[var(--color-bg-layout)]"
+          ? "blueprint-script-workspace flex min-h-0 flex-1 flex-col bg-[var(--color-bg-layout)]"
+          : "blueprint-script-workspace panel-enter absolute inset-0 z-30 flex min-h-0 flex-col bg-[var(--color-bg-layout)]"
       }
     >
       <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)] px-5 py-3">
@@ -434,7 +450,10 @@ export default function BlueprintScriptPanel({
               {t("common.back")}
             </button>
           )}
-          <h3 className="truncate text-sm font-medium text-[var(--color-text-primary)]">
+          <h3
+            data-creator-path={`/timelines/items/${timelineId}/title`}
+            className="truncate text-sm font-medium text-[var(--color-text-primary)]"
+          >
             {t("blueprint.scriptPanelTitle", { title })}
           </h3>
           {script?.selected ? (
@@ -452,13 +471,13 @@ export default function BlueprintScriptPanel({
                 </span>
               )}
             </>
-          ) : (
+          ) : !visibleScriptText && elements.length > 0 ? (
             <span
               className={`shrink-0 rounded px-1.5 text-[10px] font-semibold leading-[18px] ${TONE_CHIP.idle}`}
             >
               {t("blueprint.legacyChip")}
             </span>
-          )}
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <button
@@ -480,8 +499,8 @@ export default function BlueprintScriptPanel({
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(300px,389px)]">
-        <div className="min-h-0 overflow-y-auto bg-[var(--color-bg-primary)] px-8 py-5">
+      <div className="blueprint-script-columns grid min-h-0 flex-1">
+        <div className="blueprint-script-document min-h-0 overflow-y-auto bg-[var(--color-bg-primary)] px-6 py-5">
           <div className="mx-auto max-w-[688px] space-y-6">
             {/* 剧本摘要: the editable episode synopsis. */}
             <section className="space-y-2">
@@ -525,12 +544,15 @@ export default function BlueprintScriptPanel({
                 data-creator-path={
                   script?.selected
                     ? `artifact:${script.slot.slot_id}@${script.selected.version_id}`
+                    : timeline.description?.trim()
+                    ? `/timelines/items/${timelineId}/description`
                     : undefined
                 }
                 className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 px-4 py-3 text-[13px] leading-[1.9] text-[var(--color-text-primary)]"
               >
                 {script?.selected ? (
-                  loading ? (
+                  loading ||
+                  (loadedVersionId !== selectedVersionId && !loadError) ? (
                     <p className="text-xs text-[var(--color-text-tertiary)]">
                       {t("blueprint.scriptLoading")}
                     </p>
@@ -543,6 +565,16 @@ export default function BlueprintScriptPanel({
                       <BlockView key={index} block={block} />
                     ))
                   )
+                ) : visibleScriptText ? (
+                  blocks.map((block, index) => (
+                    <BlockView key={index} block={block} />
+                  ))
+                ) : elements.length === 0 ? (
+                  <WorkspaceEmptyState
+                    projectId={projectId}
+                    area="script"
+                    compact
+                  />
                 ) : (
                   <LegacyMapping project={project} elements={elements} />
                 )}

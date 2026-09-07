@@ -219,6 +219,25 @@ function configRoutes(json: unknown, testJson?: Record<string, unknown>) {
 }
 
 describe("ModelConfigModal configuration lifecycle", () => {
+  it("loads the saved execution mode and preserves the masked key while switching sections", async () => {
+    mountModal({ ...speechBaseConfig, mediaReview: { mode: "auto_approve" } });
+    fireEvent.click(await screen.findByRole("button", { name: /执行模式/ }));
+    expect(screen.getByRole("radio", { name: /YOLO/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("radio", { name: /全程确认/ }));
+    expect(screen.getByRole("radio", { name: /全程确认/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /语言与理解/ }));
+    const key = screen.getByPlaceholderText("sk-...");
+    fireEvent.focus(key);
+    expect(key).toHaveValue("saved-secret");
+    expect(key).toHaveAttribute("type", "password");
+  });
+
   it("keeps a VLM that reuses the LLM enabled after an LLM connectivity test", async () => {
     // A successful test flips llm.enabled via updateItem; that update must
     // not cascade into vlm.use_llm/enabled=false before a save.

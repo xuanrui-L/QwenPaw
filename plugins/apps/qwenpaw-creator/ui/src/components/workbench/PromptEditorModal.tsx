@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Modal } from "antd";
+import { Alert, Button, Modal } from "antd";
 import { Plus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import PromptTokenEditor, {
   type PromptTokenEditorHandle,
 } from "@/components/workbench/PromptTokenEditor";
 import type { PromptRichToken } from "@/components/workbench/PromptRichBlock";
+import {
+  promptReferenceSignature,
+  promptTokenAt,
+} from "./promptReferenceTokens";
 import RelatedAssetPicker, {
   type PickerKind,
 } from "@/components/workbench/RelatedAssetPicker";
@@ -33,6 +37,8 @@ export default function PromptEditorModal({
   open,
   label,
   initialValue,
+  sourceValue = initialValue,
+  sourceKey = "",
   tokens,
   candidates = [],
   disabled = false,
@@ -42,6 +48,10 @@ export default function PromptEditorModal({
   open: boolean;
   label: string;
   initialValue: string;
+  /** Raw persisted/draft text when initialValue is a public presentation. */
+  sourceValue?: string;
+  /** Owning field; an open draft must not silently move to another target. */
+  sourceKey?: string;
   tokens: PromptRichToken[];
   candidates?: PromptRefCandidate[];
   disabled?: boolean;
@@ -55,16 +65,58 @@ export default function PromptEditorModal({
     Array<PromptRichToken & { candidateId: string }>
   >([]);
   const editorRef = useRef<PromptTokenEditorHandle>(null);
-  useEffect(() => {
-    if (!open) return;
+  const [baseline, setBaseline] = useState(() => ({
+    sourceValue,
+    sourceKey,
+    presentedValue: initialValue,
+    references: promptReferenceSignature(tokens),
+    tokens,
+  }));
+  const [editorSeed, setEditorSeed] = useState(initialValue);
+  const [editorRevision, setEditorRevision] = useState(0);
+  const reload = () => {
+    setBaseline({
+      sourceValue,
+      sourceKey,
+      presentedValue: initialValue,
+      references: promptReferenceSignature(tokens),
+      tokens,
+    });
     setDraft(initialValue);
+    setEditorSeed(initialValue);
+    setEditorRevision((revision) => revision + 1);
     setAdded([]);
     setPickerOpen(false);
-    // initialValue is sampled when the modal opens; edits stay local.
+  };
+  useEffect(() => {
+    if (!open) return;
+    reload();
+    // Sample once per opening. Background updates are compared below, never
+    // assigned over an in-progress edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const allTokens = [...tokens, ...added];
+  const referencesChanged =
+    baseline.references !== promptReferenceSignature(tokens);
+  const scopeChanged = baseline.sourceKey !== sourceKey;
+  const textChanged = baseline.sourceValue !== sourceValue;
+  const conflict = open && (referencesChanged || scopeChanged || textChanged);
+  const finish = () => {
+    if (disabled || conflict) return;
+    // Public names can refresh while raw text and reference identity stay
+    // unchanged. An untouched editor still accepts the current presentation
+    // so its host can preserve the exact raw source text.
+    onDone(
+      draft === baseline.presentedValue && added.length === 0
+        ? initialValue
+        : draft,
+      added.map((token) => token.candidateId),
+    );
+  };
+  // Keep the editor's original image bindings visible while conflicts are
+  // resolved. Reinterpreting its existing [Image N] against a new list would
+  // silently point the user's draft at a different asset.
+  const allTokens = [...baseline.tokens, ...added];
   const addedIds = new Set(added.map((token) => token.candidateId));
   const openCandidates = candidates.filter(
     (candidate) => !addedIds.has(candidate.id),
@@ -76,7 +128,13 @@ export default function PromptEditorModal({
         Boolean(candidate),
       );
     if (picked.length === 0) return;
-    let index = allTokens.reduce((max, token) => Math.max(max, token.index), 0);
+    let index = allTokens.reduce(
+      (max, token) =>
+        Number.isSafeInteger(token.index) && token.index > 0
+          ? Math.max(max, token.index)
+          : max,
+      0,
+    );
     const newTokens = picked.map((candidate) => {
       index += 1;
       return {
@@ -85,6 +143,7 @@ export default function PromptEditorModal({
         name: candidate.name,
         kind: "artifact" as const,
         thumbUrl: candidate.thumbUrl,
+        referenceId: candidate.id,
       };
     });
     setAdded((previous) => [...previous, ...newTokens]);
@@ -120,14 +179,9 @@ export default function PromptEditorModal({
           <Button
             size="small"
             type="primary"
-            disabled={disabled}
+            disabled={disabled || conflict}
             data-prompt-editor-done
-            onClick={() =>
-              onDone(
-                draft,
-                added.map((token) => token.candidateId),
-              )
-            }
+            onClick={finish}
           >
             {t("r2v.fullscreenDone")}
           </Button>
@@ -135,12 +189,56 @@ export default function PromptEditorModal({
       }
       destroyOnHidden
     >
+      {conflict && (
+        <Alert
+          className="mb-3"
+          type="warning"
+          showIcon
+          message={t("r2v.editorChangedTitle", {
+            defaultValue: "提示词已在其他位置更新",
+          })}
+          description={
+            referencesChanged || scopeChanged
+              ? t("r2v.editorReferencesChanged", {
+                  defaultValue:
+                    "引用图片或编辑对象已变化。为避免引用到错误图片，请重新载入后继续编辑。当前编辑暂时保留。",
+                })
+              : t("r2v.editorChangedDescription", {
+                  defaultValue:
+                    "当前编辑暂时保留。请选择重新载入最新内容，或明确保留您的编辑后再完成。",
+                })
+          }
+          action={
+            <div className="flex flex-wrap gap-2">
+              <Button size="small" data-prompt-editor-reload onClick={reload}>
+                {t("r2v.editorReload", { defaultValue: "重新载入最新内容" })}
+              </Button>
+              <Button
+                size="small"
+                data-prompt-editor-keep
+                disabled={referencesChanged || scopeChanged}
+                onClick={() => {
+                  if (referencesChanged || scopeChanged) return;
+                  setBaseline((current) => ({
+                    ...current,
+                    sourceValue,
+                    presentedValue: initialValue,
+                  }));
+                }}
+              >
+                {t("r2v.editorKeep", { defaultValue: "保留我的编辑" })}
+              </Button>
+            </div>
+          }
+        />
+      )}
       {/* Constant editor height: neither the prompt length nor the number of
           addable assets may grow the modal. */}
       <div className="flex h-[min(62vh,600px)] min-h-[400px] gap-3">
         <PromptTokenEditor
+          key={editorRevision}
           ref={editorRef}
-          initialValue={initialValue}
+          initialValue={editorSeed}
           tokens={allTokens}
           disabled={disabled}
           onChange={setDraft}
@@ -156,12 +254,17 @@ export default function PromptEditorModal({
             <div className="min-h-0 flex-1 overflow-y-auto">
               {allTokens.map((token) => (
                 <button
-                  key={`token-${token.index}`}
+                  key={`token-${token.index}-${allTokens.indexOf(token)}`}
                   type="button"
+                  disabled={
+                    disabled ||
+                    conflict ||
+                    !promptTokenAt(allTokens, token.index)
+                  }
                   onClick={() => editorRef.current?.insertToken(token.index)}
                   className="mb-1.5 flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-1.5 text-left transition-colors hover:border-[var(--color-accent)]"
                 >
-                  {token.thumbUrl ? (
+                  {promptTokenAt(allTokens, token.index)?.thumbUrl ? (
                     <img
                       src={token.thumbUrl}
                       alt=""
@@ -176,7 +279,9 @@ export default function PromptEditorModal({
                     <b className="font-mono text-[9px] text-[var(--color-accent)]">
                       {`[${token.index}]`}
                     </b>{" "}
-                    {token.name}
+                    {promptTokenAt(allTokens, token.index)
+                      ? token.name
+                      : t("r2v.tokenMissing", { index: token.index })}
                   </span>
                 </button>
               ))}
@@ -185,6 +290,7 @@ export default function PromptEditorModal({
               <button
                 type="button"
                 data-prompt-add-reference
+                disabled={disabled || conflict}
                 onClick={() => setPickerOpen(true)}
                 className="mt-2 flex w-full shrink-0 items-center justify-center gap-1 rounded-lg border border-dashed border-[var(--color-border-strong)] px-2 py-1.5 text-[10.5px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
               >

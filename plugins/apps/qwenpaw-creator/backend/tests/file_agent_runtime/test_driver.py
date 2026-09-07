@@ -599,8 +599,10 @@ def _edit_client(*, description: str):
             "browser_use",
             "elements_at",
             "delegate_to_agent",
+            "request_workgraph_execution",
         }
-        # The role prompt and static Pydantic schema form one stable system prompt.
+        # The role prompt and static Pydantic schema form one stable system
+        # prompt.
         assert messages[0]["content"] == render_creator_system_prompt(
             project_id=PROJECT_ID,
         )
@@ -892,7 +894,10 @@ def test_specialist_model_turn_has_a_wall_clock_timeout(tmp_path) -> None:
         return AgentModelTurn(content="剪辑模型超时，当前运行已结束。")
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="生成角色图",
+        )
         driver = _driver(
             services,
             callback,
@@ -934,7 +939,9 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
         names = {item["function"]["name"] for item in tools}
         if "delegate_to_agent" not in names:
             specialist_turns += 1
-            return AgentModelTurn(content="[SUCCESS] 修复产物已写入 selected output。")
+            return AgentModelTurn(
+                content="[SUCCESS] 修复产物已写入 selected output。",
+            )
         parent_turn += 1
         if parent_turn == 1:
             return _delegate_call(
@@ -945,7 +952,9 @@ def test_run_review_feedback_allows_one_successful_repair_delegation(
             )
         if parent_turn == 2:
             assert '"status":"ACCEPTED"' in messages[-1]["content"]
-            return AgentModelTurn(content="已委派修复，等待 Specialist 终态通知。")
+            return AgentModelTurn(
+                content="已委派修复，等待 Specialist 终态通知。",
+            )
         if parent_turn == 3:
             # The terminal-notification run: a misbehaving model retries the
             # same feedback target — the repair identity must follow the
@@ -1292,7 +1301,10 @@ def test_initial_creation_runs_auto_fix_tool_loop_without_review(
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="请完善项目说明")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="请完善项目说明",
+        )
         driver = _driver(services, _edit_client(description="由初始任务生成"))
         await _run_to_idle(driver, services)
         project = services.projects.read(PROJECT_ID)
@@ -1526,7 +1538,10 @@ def test_stream_persistence_failure_is_not_reported_as_a_model_failure(
         return AgentModelTurn(content="完整结果")
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="请生成结果")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="请生成结果",
+        )
         driver = _driver(services, callback)
         original_append_event = driver.sessions.append_event
 
@@ -1851,7 +1866,10 @@ def test_startup_sweep_never_resumes_interrupted_run(
 
 def test_interrupt_revokes_stale_run_before_late_tool_commit(tmp_path) -> None:
     async def scenario():
-        services, snapshot = _create_project(tmp_path, initial_goal="请修改项目")
+        services, snapshot = _create_project(
+            tmp_path,
+            initial_goal="请修改项目",
+        )
         started = asyncio.Event()
 
         async def stubborn_model(_messages, _tools):
@@ -1894,7 +1912,10 @@ def test_interrupt_revokes_stale_run_before_late_tool_commit(tmp_path) -> None:
 
 def test_interrupt_returns_before_slow_task_cleanup_finishes(tmp_path) -> None:
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="请修改项目")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="请修改项目",
+        )
         started = asyncio.Event()
         cleanup_started = asyncio.Event()
         release_cleanup = asyncio.Event()
@@ -1950,7 +1971,10 @@ def test_specialist_cancel_emits_terminal_event(
         _authorization_gate_modes(monkeypatch, authorization="allow_all")
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="生成角色图",
+        )
         blocked = asyncio.Event()
         cancel_entered = asyncio.Event()
 
@@ -2029,7 +2053,10 @@ def test_durable_interrupt_stops_remote_owner_without_restarting_message(
     tmp_path,
 ) -> None:
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="请修改项目")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="请修改项目",
+        )
         started = asyncio.Event()
         cancelled = asyncio.Event()
 
@@ -2116,7 +2143,10 @@ def test_failed_run_is_not_relaunched_after_restart_or_notify(
         return AgentModelTurn(content="不应被调用")
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="请修改项目")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="请修改项目",
+        )
         first = _driver(services, failing)
         if legacy_unconsumed_head:
             # Model the legacy failure path that never consumed the request.
@@ -2194,7 +2224,10 @@ def test_costly_specialist_tool_waits_for_file_authorization(
         return AgentModelTurn(content="AI 剪辑 Specialist 已完成。")
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="生成角色图",
+        )
         driver = _driver(services, callback)
 
         driver.specialist_tools.invoke = _succeeded_invoke  # type: ignore[method-assign]
@@ -2258,7 +2291,10 @@ def test_retired_r2v_specialist_cannot_request_paid_authorization(
         return AgentModelTurn(content="R2V prompt 改由主 Agent 直接负责。")
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="生成视频")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="生成视频",
+        )
         driver = _driver(services, callback)
 
         await _run_to_idle(driver, services)
@@ -2292,10 +2328,15 @@ def test_retired_visual_specialist_cannot_be_delegated(
                 target_refs=["asset:char:hero"],
                 task="为角色生成设计图",
             )
-        return AgentModelTurn(content="视觉资产 prompt 改由主 Agent 直接编写。")
+        return AgentModelTurn(
+            content="视觉资产 prompt 改由主 Agent 直接编写。",
+        )
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="生成角色图")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="生成角色图",
+        )
         driver = _driver(services, callback)
 
         await _run_to_idle(driver, services)
@@ -2370,6 +2411,49 @@ def test_mainline_character_voice_waits_for_authorization(
     assert specialists == []
 
 
+def test_yolo_stale_regeneration_is_owned_by_scheduler_without_empty_model_resumes(
+    tmp_path,
+    monkeypatch,
+):
+    services, _ = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    node = WorkNode(
+        node_id="storyboard:one",
+        kind="storyboard",
+        label="第一场分镜",
+        status=WorkNodeStatus.STALE,
+        command="GENERATE_STORYBOARD_IMAGE",
+        target_ref="element:one",
+        regeneration_of="old-storyboard",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "auto_approve",
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *args, **kwargs: WorkGraph(nodes=(node,), generation=1),
+    )
+    monkeypatch.setattr(driver.work_scheduler, "enabled", lambda: True)
+    wakes = []
+    monkeypatch.setattr(driver.work_scheduler, "wake", wakes.append)
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="stale-resume",
+        ),
+    )
+    assert wakes == [PROJECT_ID]
+    assert all(
+        message.source != driver.YOLO_RESUME_SOURCE
+        for message in services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    )
+
+
 def test_prompt_gap_feedback_is_queued_outside_auto_approve(
     tmp_path,
     monkeypatch,
@@ -2394,7 +2478,10 @@ def test_prompt_gap_feedback_is_queued_outside_auto_approve(
     monkeypatch.setattr(
         driver_module,
         "derive_work_graph",
-        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+        lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(node,),
+            generation=1,
+        ),
     )
     wakes: list[str] = []
     monkeypatch.setattr(driver.work_scheduler, "wake", wakes.append)
@@ -2441,7 +2528,10 @@ def test_prompt_gap_repair_survives_retryable_failure_outside_auto_approve(
     monkeypatch.setattr(
         driver_module,
         "derive_work_graph",
-        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+        lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(node,),
+            generation=1,
+        ),
     )
     wakes: list[str] = []
     monkeypatch.setattr(driver.work_scheduler, "wake", wakes.append)
@@ -2487,7 +2577,10 @@ def test_manual_mode_failure_without_prompt_gap_waits_for_a_human(
     monkeypatch.setattr(
         driver_module,
         "derive_work_graph",
-        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+        lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(node,),
+            generation=1,
+        ),
     )
 
     asyncio.run(
@@ -2546,7 +2639,10 @@ def test_prompt_repair_fuse_is_independent_from_previous_yolo_mode(
     monkeypatch.setattr(
         driver_module,
         "derive_work_graph",
-        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+        lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(node,),
+            generation=1,
+        ),
     )
 
     asyncio.run(
@@ -2591,7 +2687,10 @@ def test_prompt_gap_feedback_does_not_depend_on_gap_wording(
     monkeypatch.setattr(
         driver_module,
         "derive_work_graph",
-        lambda _project, tasks: WorkGraph(nodes=(reworded,), generation=1),
+        lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(reworded,),
+            generation=1,
+        ),
     )
 
     asyncio.run(
@@ -2612,7 +2711,9 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """A specialist may stop after creating a review without calling downstream."""
+    """
+    A specialist may stop after creating a review without calling downstream.
+    """
 
     monkeypatch.setenv("TTS_API_KEY", "sk-test")
 
@@ -2661,7 +2762,7 @@ def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
         monkeypatch.setattr(
             services.reviews,
             "all_pending",
-            lambda _project_id: list(pending_reviews),
+            lambda _project_id, **_kwargs: list(pending_reviews),
         )
         driver = _driver(services, callback)
 
@@ -2813,7 +2914,10 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
     monkeypatch.setattr(
         driver_module,
         "derive_work_graph",
-        lambda _project, tasks: WorkGraph(nodes=(node,), generation=1),
+        lambda _project, tasks, *, media_models=None: WorkGraph(
+            nodes=(node,),
+            generation=1,
+        ),
     )
 
     async def scenario():
@@ -2913,7 +3017,10 @@ def test_idle_session_flushes_parked_notification_and_consumes_it(
         return AgentModelTurn(content="收到。")
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="完成短剧",
+        )
         driver = _driver(services, callback)
         await _run_to_idle(driver, services)
         driver._specialist_tasks[PROJECT_ID] = {"spec-1": object()}
@@ -3048,7 +3155,10 @@ def test_batch_merges_notifications_but_stops_at_non_batchable(
     received: list[str] = []
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="初始目标")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="初始目标",
+        )
         services.sessions.mark_messages_consumed(
             PROJECT_ID,
             SESSION_ID,
@@ -3506,7 +3616,10 @@ def test_subagent_terminal_notification_is_never_batched(tmp_path) -> None:
     received: list[str] = []
 
     async def scenario():
-        services, _snapshot = _create_project(tmp_path, initial_goal="初始目标")
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="初始目标",
+        )
         services.sessions.mark_messages_consumed(
             PROJECT_ID,
             SESSION_ID,
@@ -3518,7 +3631,10 @@ def test_subagent_terminal_notification_is_never_batched(tmp_path) -> None:
             CONVERSATION_ID,
             role="user",
             content_parts=[
-                {"type": "text", "text": "【系统自动消息 · Runtime 通知】普通进度"},
+                {
+                    "type": "text",
+                    "text": "【系统自动消息 · Runtime 通知】普通进度",
+                },
             ],
             source=NOTIFICATION_SOURCE,
             channel=MessageChannel.RUNTIME,
@@ -3691,3 +3807,246 @@ def test_review_gate_read_failure_holds_queued_message(tmp_path) -> None:
     assert held == 0, "the queued message must stay unconsumed while unknown"
     assert turns_while_broken == 0, "no model turn may run while unknown"
     assert turns["count"] >= 1, "recovery must consume the message normally"
+
+
+def test_plain_text_review_uses_neutral_runtime_summary(tmp_path, monkeypatch):
+    """A real text-only review must not invent a completed media artifact."""
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="准备初稿",
+        )
+
+        async def initial_reply(_messages, _tools):
+            return AgentModelTurn(content="初稿已就绪。")
+
+        initial_driver = _driver(services, initial_reply)
+        await _run_to_idle(initial_driver, services)
+        await initial_driver.stop()
+        _write_runtime_state(services, _snapshot)
+        admitted = _admit_agentdock_request(
+            services,
+            request_id="text-review-request",
+            client_message_id="text-review-message",
+            text="请修改项目说明",
+        )
+        driver = _driver(services, _edit_client(description="文字说明待审阅"))
+        try:
+            await _run_to_idle(
+                driver,
+                services,
+                seq=admitted.message.message_seq,
+            )
+            review = services.reviews.active(PROJECT_ID)
+            messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+            tasks = driver.executions.list_tasks(PROJECT_ID)
+            return review, messages, tasks
+        finally:
+            await driver.stop()
+
+    review, messages, tasks = asyncio.run(scenario())
+    assert review is not None
+    assert {op.json_pointer for op in review.operations} == {"/description"}
+    assert not tasks
+    final = next(
+        item for item in reversed(messages) if item.role == "assistant"
+    )
+    text = "".join(
+        part.text for part in final.content_parts if part.type == "text"
+    )
+    assert text == "有内容等待您审阅，请先完成当前审阅。\n\n无需另行发送消息。"
+    assert "已生成" not in text
+    assert "自动生产" not in text
+
+
+def test_review_summary_preserves_confirmed_specific_result():
+    assert (
+        driver_module._agent_waiting_review_summary(
+            "人物设计图已生成，请审阅人物外观。",
+        )
+        == "人物设计图已生成，请审阅人物外观。\n\n无需另行发送消息。"
+    )
+
+
+def test_real_workgraph_review_block_ends_before_model_can_invent_progress(
+    tmp_path,
+    monkeypatch,
+):
+    """
+    Text commit -> actual review -> actual graph refusal -> neutral final.
+    """
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+    turns = 0
+
+    async def callback(messages, tools):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            return _read_call("read-for-design")
+        if turns == 2:
+            snapshot = json.loads(messages[-1]["content"])
+            return _tool_turn(
+                call_id="write-design",
+                name="jq_project",
+                arguments={
+                    "projectId": PROJECT_ID,
+                    "baseEtag": snapshot["etag"],
+                    "program": (
+                        '.visual.entities.items.hero.required_variant_ids = ["default"]'
+                        " | .visual.entities.items.hero.variants = $variants"
+                    ),
+                    "jsonArgs": {
+                        "variants": {
+                            "order": ["default"],
+                            "items": {
+                                "default": {
+                                    "variant_id": "default",
+                                    "prompt": "人物设计",
+                                },
+                            },
+                        },
+                    },
+                },
+            )
+        if turns == 3:
+            assert json.loads(messages[-1]["content"])["reviewId"]
+            return _tool_turn(
+                call_id="request-design",
+                name="request_workgraph_execution",
+                arguments={
+                    "projectId": PROJECT_ID,
+                    "targetRefs": ["asset:hero"],
+                    "kinds": ["visual"],
+                },
+            )
+        pytest.fail(
+            "A wholly review-blocked request must not ask the model for another turn",
+        )
+
+    async def scenario():
+        services, snapshot = _create_project(tmp_path, initial_goal="准备初稿")
+
+        async def initial_reply(_messages, _tools):
+            return AgentModelTurn(content="初稿已就绪。")
+
+        initial = _driver(services, initial_reply)
+        await _run_to_idle(initial, services)
+        await initial.stop()
+        _write_runtime_state(services, snapshot)
+        admitted = _admit_agentdock_request(
+            services,
+            request_id="review-stop-request",
+            client_message_id="review-stop-message",
+            text="补充人物设计并生成",
+        )
+        driver = _driver(services, callback)
+        try:
+            await _run_to_idle(
+                driver,
+                services,
+                seq=admitted.message.message_seq,
+            )
+            assert (
+                services.sessions.get_project_session(PROJECT_ID).status.value
+                == "PENDING_REVIEW"
+            )
+            assert services.reviews.all_pending(PROJECT_ID)
+            assert not driver.executions.list_tasks(PROJECT_ID)
+            assert not driver.executions.list_execution_authorizations(
+                PROJECT_ID,
+            )
+            return (
+                services.sessions.list_messages(PROJECT_ID, SESSION_ID),
+                services.sessions.list_events(PROJECT_ID, SESSION_ID),
+            )
+        finally:
+            await driver.stop()
+
+    messages, events = asyncio.run(scenario())
+    assert turns == 3
+    tool = next(
+        item
+        for item in messages
+        if item.metadata.get("toolCallId") == "request-design"
+        and item.role == "tool"
+    )
+    result = json.loads(tool.content_parts[0].text)
+    assert result["status"] == "BLOCKED"
+    assert result["items"][0]["reason"] == "WAITING_REVIEW"
+    final = next(
+        item for item in reversed(messages) if item.role == "assistant"
+    )
+    assert "当前制作尚未开始" in final.content_parts[0].text
+    assert "已生成" not in final.content_parts[0].text
+
+    final_events = [
+        event
+        for event in events
+        if event.payload.get("messageId") == final.message_id
+    ]
+    delta_seq = next(
+        event.event_seq
+        for event in final_events
+        if event.event_type == "agent.message_delta"
+    )
+    completed_seq = next(
+        event.event_seq
+        for event in final_events
+        if event.event_type == "message.completed"
+    )
+    assert delta_seq < completed_seq
+
+
+@pytest.mark.parametrize(
+    "reason,event_type",
+    [
+        ("rate_limit", "agent.model.rate_limit_retry"),
+        ("transient", "agent.model.retry"),
+    ],
+)
+def test_model_retry_and_recovery_are_durable_public_events(
+    tmp_path,
+    reason,
+    event_type,
+):
+    from services.file_agent_runtime.model_client import RateLimitRetryNotice
+
+    async def callback(messages, tools):
+        return AgentModelTurn(content="已恢复，可以继续。")
+
+    class RetryingClient(CallbackAgentChatClient):
+        async def complete(self, **kwargs):
+            await kwargs["on_rate_limit_retry"](
+                RateLimitRetryNotice(
+                    attempt=1,
+                    max_attempts=3,
+                    delay_seconds=2,
+                    reason=reason,
+                ),
+            )
+            # Forward the production call unchanged through this test spy.
+            # pylint: disable-next=missing-kwoa
+            return await super().complete(**kwargs)
+
+    async def run():
+        services, _ = _create_project(tmp_path, initial_goal="继续")
+        runtime = _driver(services, RetryingClient(callback))
+        await _run_to_idle(runtime, services)
+        events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+        await runtime.stop()
+        return events
+
+    events = asyncio.run(run())
+    notice = next(event for event in events if event.event_type == event_type)
+    recovered = next(
+        event
+        for event in events
+        if event.event_type == "agent.model.retry_recovered"
+    )
+    assert notice.payload["reason"] == reason
+    assert notice.payload["delaySeconds"] == 2
+    assert notice.payload["attempt"] == 1
+    assert recovered.payload["runId"] == notice.payload["runId"]
+    assert not any("error" in key.casefold() for key in notice.payload)

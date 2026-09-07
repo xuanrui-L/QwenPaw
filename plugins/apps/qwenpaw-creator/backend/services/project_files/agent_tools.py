@@ -228,6 +228,10 @@ class _ToolModel(BaseModel):
 
 class ReadProjectToolInput(_ToolModel):
     project_id: str = Field(alias="projectId", min_length=1)
+    pointer: str | None = None
+    offset: int = Field(default=0, ge=0)
+    max_bytes: int = Field(default=16_384, alias="maxBytes", ge=4, le=32_768)
+    expected_etag: str | None = Field(default=None, alias="expectedEtag")
 
 
 class ReadProjectFileToolInput(_ToolModel):
@@ -460,7 +464,10 @@ class AgentElementsAtResult(_ToolModel):
 AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     READ_PROJECT_TOOL_NAME: {
         "description": (
-            "读取 project.json 的完整已验证快照，"
+            "读取当前 Project 的已验证模型视图（历史快照只列索引，大内容会标明省略）。"
+            "可传 pointer 读取任意 JSON Pointer（包括历史快照），按 UTF-8 字节 offset/maxBytes 分页；"
+            "下一页携带返回的 etag 作为 expectedEtag，避免混合不同版本。"
+            "部分视图不能用于整体替换集合，应按稳定 ID 修改；Runtime 始终保有完整提交基线。"
             "并返回 generation 与 ETag。修改前先调用此工具了解当前结构；"
             "jq_project 会自动基于你最近一次读到的快照提交，无需回传 ETag。"
         ),
@@ -468,6 +475,18 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "projectId": {"type": "string", "minLength": 1},
+                "pointer": {
+                    "type": "string",
+                    "description": "JSON Pointer；空字符串代表整个 Project。",
+                },
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "maxBytes": {
+                    "type": "integer",
+                    "minimum": 4,
+                    "maximum": 32768,
+                    "default": 16384,
+                },
+                "expectedEtag": {"type": "string"},
             },
             "required": ["projectId"],
             "additionalProperties": False,
@@ -822,7 +841,9 @@ def _translate_project_schema_error(error: ValidationError) -> str:
                     )
         lines.append(f"- {path}: {message}{hint}")
     if len(items) > _MAX_SCHEMA_ERROR_LINES:
-        lines.append(f"- ...另有 {len(items) - _MAX_SCHEMA_ERROR_LINES} 处错误")
+        lines.append(
+            f"- ...另有 {len(items) - _MAX_SCHEMA_ERROR_LINES} 处错误",
+        )
     return (
         "jq 输出未通过 Project Schema 校验，项目未被修改：\n"
         + "\n".join(lines)
@@ -893,6 +914,67 @@ class AgentProjectTools:
         snapshot = self.store.read(request.project_id)
         self._remember(snapshot)
         return self._snapshot_result(snapshot)
+
+    def read_project_page(
+        self,
+        request: ReadProjectToolInput,
+    ) -> dict[str, Any]:
+        from .json_pointer import MISSING, value_at
+        from .model_view import json_text
+
+        snapshot = self.store.read(request.project_id)
+        if request.offset and request.expected_etag is None:
+            raise AgentProjectToolError(
+                "Pass the first page etag as expectedEtag when reading later pages.",
+                code="PROJECT_READ_PAGE_ETAG_REQUIRED",
+            )
+        if (
+            request.expected_etag is not None
+            and request.expected_etag != snapshot.etag
+        ):
+            raise AgentProjectToolError(
+                "Project changed between pages; restart this pointer read at offset 0.",
+                code="PROJECT_READ_PAGE_CHANGED",
+            )
+        self._remember(snapshot)
+        value = value_at(
+            snapshot.project.model_dump(mode="json"),
+            request.pointer or "",
+        )
+        if value is MISSING:
+            raise AgentProjectToolError(
+                "Project pointer does not exist",
+                code="PROJECT_POINTER_NOT_FOUND",
+            )
+        raw = json_text(value).encode("utf-8")
+        if request.offset > len(raw):
+            raise AgentProjectToolError(
+                "Project page offset exceeds value length",
+            )
+        page = raw[request.offset : request.offset + request.max_bytes]
+        while True:
+            try:
+                content = page.decode("utf-8")
+                break
+            except UnicodeDecodeError as exc:
+                if exc.reason != "unexpected end of data":
+                    raise AgentProjectToolError(
+                        "Project page offset is not a UTF-8 boundary",
+                    ) from exc
+                page = page[: exc.start]
+        next_offset = request.offset + len(page)
+        return {
+            "resultKind": "project_value_page",
+            "projectId": request.project_id,
+            "generation": snapshot.generation,
+            "etag": snapshot.etag,
+            "pointer": request.pointer,
+            "offset": request.offset,
+            "nextOffset": next_offset,
+            "eof": next_offset >= len(raw),
+            "totalBytes": len(raw),
+            "content": content,
+        }
 
     def read_project_file(
         self,
@@ -1042,9 +1124,11 @@ class AgentProjectTools:
                     if change.json_pointer is not None
                 ],
                 normalizedPointers=normalized_pointers,
-                reviewId=result.review.review_id
-                if result.review is not None
-                else None,
+                reviewId=(
+                    result.review.review_id
+                    if result.review is not None
+                    else None
+                ),
             )
             advisory = self._sync_review_advisory(
                 commit_result,
@@ -1439,9 +1523,11 @@ class AgentProjectTools:
                     if change.json_pointer is not None
                 ],
                 normalizedPointers=normalized_pointers,
-                reviewId=result.review.review_id
-                if result.review is not None
-                else None,
+                reviewId=(
+                    result.review.review_id
+                    if result.review is not None
+                    else None
+                ),
             )
             advisory = self._sync_review_advisory(
                 commit_result,
@@ -1496,6 +1582,8 @@ class AgentProjectTools:
             ),
         )
 
+    # Dispatch each supported tool explicitly through its own validation.
+    # pylint: disable-next=too-many-branches
     def invoke(
         self,
         tool_name: str,
@@ -1505,6 +1593,8 @@ class AgentProjectTools:
 
         if tool_name == READ_PROJECT_TOOL_NAME:
             request = ReadProjectToolInput.model_validate(dict(arguments))
+            if request.pointer is not None:
+                return self.read_project_page(request)
             result: BaseModel = self.read_project(request.project_id)
         elif tool_name == READ_PROJECT_FILE_TOOL_NAME:
             request = ReadProjectFileToolInput.model_validate(dict(arguments))

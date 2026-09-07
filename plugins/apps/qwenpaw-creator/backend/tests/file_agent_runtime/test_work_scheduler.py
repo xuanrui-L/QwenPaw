@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+# Pytest fixtures and contract probes retain exact types and private seams.
+# pylint: disable=unused-argument
 # pylint: disable=protected-access
 """Work-graph scheduler: parallel fan-out with fuses, not a retry cannon."""
 from __future__ import annotations
@@ -1120,7 +1122,7 @@ def test_transient_hard_cap_emits_steer_once(tmp_path, monkeypatch):
 def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     state = {"index": 0}
 
-    def fake_derive(_project, tasks=()):
+    def fake_derive(_project, tasks=(), *, media_models=None):
         del tasks
         index = min(state["index"], len(graphs) - 1)
         state["index"] += 1

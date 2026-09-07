@@ -7,9 +7,13 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useWorkGraphStore } from "@/store/workGraphStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
-import { selectNarrativeShape } from "@/selectors/timelineElementSelectors";
+import {
+  selectLiveTimelineIds,
+  selectNarrativeShape,
+} from "@/selectors/timelineElementSelectors";
 import {
   isVoiceOnlyVisualEntity,
+  hasBlueprintContent,
   selectResearchSlots,
   selectTimelineSummaries,
 } from "@/selectors/blueprintSelectors";
@@ -23,6 +27,11 @@ import BlueprintPrepDrawer, {
 } from "@/components/blueprint/BlueprintPrepDrawer";
 import PageLoadError from "@/components/PageLoadError";
 import PageSkeleton from "@/components/PageSkeleton";
+import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
+import AgentActivityIndicator from "@/components/agent/AgentActivityIndicator";
+import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
+import { creatorWorkNodeLabel } from "@/lib/creatorPresentation";
+import { useReviewFieldFocus } from "@/routing/reviewFocus";
 
 /**
  * Project blueprint — the project's default landing view (plan §4.2).
@@ -33,10 +42,20 @@ import PageSkeleton from "@/components/PageSkeleton";
 export default function BlueprintPage() {
   const { t } = useTranslation();
   const { id = "" } = useParams();
+  const activity = useAgentWorkingState(id);
   const query = useSearchParams();
   const project = useProjectSnapshotStore((state) =>
     state.projectId === id ? state.project : null,
   );
+  useReviewFieldFocus({
+    path: `/project/${id}`,
+    field: query.get("field"),
+    enabled: Boolean(
+      project &&
+        (query.get("review") === "1" || query.get("focusField") === "1"),
+    ),
+    pulse: query.get("reviewPulse"),
+  });
   const syncStatus = useProjectSnapshotStore((state) => state.syncStatus);
   const syncError = useProjectSnapshotStore((state) => state.syncError);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
@@ -124,19 +143,13 @@ export default function BlueprintPage() {
   }
 
   const sourceCount = project.sources.sources.order.length;
-  const pendingVisual = project.visual.entities.order.filter((entityId) => {
+  const visualCount = project.visual.entities.order.filter((entityId) => {
     const entity = project.visual.entities.items[entityId];
     if (!entity) return false;
     // Voice-only roles (enrolled voice, no visual variants) have no
     // portrait to confirm.
     if (isVoiceOnlyVisualEntity(entity)) return false;
-    return !(
-      entity.selected_artifact_version_id ||
-      entity.variants.order.some(
-        (variantId) =>
-          entity.variants.items[variantId]?.selected_artifact_version_id,
-      )
-    );
+    return true;
   }).length;
   const runningNodes = (workGraph?.nodes ?? []).filter(
     (node) => node.status === "running",
@@ -196,9 +209,9 @@ export default function BlueprintPage() {
           >
             <Palette className="h-3.5 w-3.5" />
             {t("blueprint.visualDev")}
-            {pendingVisual > 0 && (
-              <span className="rounded-full bg-[var(--color-warning-soft)] px-2 py-0.5 text-[10px] font-bold text-[var(--color-warning)]">
-                {t("blueprint.pendingCount", { count: pendingVisual })}
+            {visualCount > 0 && (
+              <span className="rounded-full bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] font-medium tabular-nums text-[var(--color-text-secondary)]">
+                {visualCount}
               </span>
             )}
           </button>
@@ -210,11 +223,18 @@ export default function BlueprintPage() {
 
       {/* First screen: single projects read as the script document itself
           (design 84:37778); multi-episode / branching keep the structure. */}
-      {shape === "single" ? (
+      {!hasBlueprintContent(project) ? (
+        <div
+          className="workspace-decor-grid flex min-h-0 flex-1 overflow-y-auto p-4"
+          data-blueprint-initial
+        >
+          <WorkspaceEmptyState projectId={id} area="blueprint" />
+        </div>
+      ) : shape === "single" ? (
         <BlueprintScriptPanel
           project={project}
           projectId={id}
-          timelineId={project.timelines.order[0] ?? null}
+          timelineId={selectLiveTimelineIds(project)[0] ?? null}
           open
           inline
           onClose={() => {}}
@@ -248,24 +268,35 @@ export default function BlueprintPage() {
               key={node.id}
               className="inline-flex items-center gap-2 rounded-full border border-[rgba(59,130,246,.3)] bg-[rgba(59,130,246,.06)] px-3 py-1 text-[11px] font-medium text-[var(--color-text-secondary)]"
             >
-              {node.label}
-              {node.progress != null && (
-                <>
-                  <span className="h-1 w-16 overflow-hidden rounded-full bg-[var(--color-bg-secondary)]">
-                    <span
-                      className="block h-full rounded-full bg-[var(--color-primary,#3b82f6)] transition-[width] duration-500"
-                      style={{
-                        width: `${Math.round(node.progress * 100)}%`,
-                      }}
-                    />
-                  </span>
-                  <span className="tabular-nums text-[var(--color-primary,#3b82f6)]">
-                    {Math.round(node.progress * 100)}%
-                  </span>
-                </>
-              )}
+              {creatorWorkNodeLabel(node, project)}
+              {node.progress != null &&
+                Number.isFinite(node.progress) &&
+                node.progress >= 0 &&
+                node.progress <= 1 && (
+                  <>
+                    <span className="h-1 w-16 overflow-hidden rounded-full bg-[var(--color-bg-secondary)]">
+                      <span
+                        className="block h-full rounded-full bg-[var(--color-primary,#3b82f6)] transition-[width] duration-500"
+                        style={{
+                          width: `${Math.round(node.progress * 100)}%`,
+                        }}
+                      />
+                    </span>
+                    <span className="tabular-nums text-[var(--color-primary,#3b82f6)]">
+                      {Math.round(node.progress * 100)}%
+                    </span>
+                  </>
+                )}
             </span>
           ))
+        ) : activity.state !== "idle" ? (
+          <span
+            className="inline-flex min-w-0 items-center gap-2 text-xs text-[var(--color-text-secondary)]"
+            data-blueprint-activity
+          >
+            <AgentActivityIndicator phase={activity.indicatorPhase} />
+            <span>{activity.hint}</span>
+          </span>
         ) : (
           <span className="text-xs text-[var(--color-text-tertiary)]">
             {t("blueprint.runningEmpty")}
