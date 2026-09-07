@@ -1169,6 +1169,26 @@ class AgentScopeAgentChatClient:
                 f"Creator AgentScope model request failed: {exc}",
             ) from exc
 
+        finish_reason = str(
+            getattr(
+                getattr(response, "finished_reason", None),
+                "value",
+                getattr(response, "finished_reason", "completed"),
+            ),
+        )
+        if finish_reason == "interrupted":
+            # AgentScope catches CancelledError and returns its accumulated
+            # stream. Restore cancellation so wait_for still enforces the
+            # driver's deadline, and never repair/execute partial calls.
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                raise asyncio.CancelledError
+            raise AgentModelError(
+                "Creator model response was interrupted; "
+                "no tool calls from this response were executed. Retry "
+                "with a smaller, complete project change.",
+            )
+
         text_parts: list[str] = []
         thinking_parts: list[str] = []
         calls: list[AgentToolCall] = []
@@ -1320,13 +1340,7 @@ class AgentScopeAgentChatClient:
             provider_message_id=(
                 str(response.id) if getattr(response, "id", None) else None
             ),
-            finish_reason=str(
-                getattr(
-                    getattr(response, "finished_reason", None),
-                    "value",
-                    getattr(response, "finished_reason", "completed"),
-                ),
-            ),
+            finish_reason=finish_reason,
             usage=_usage_payload(getattr(response, "usage", None)),
         )
 

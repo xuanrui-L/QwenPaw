@@ -768,12 +768,25 @@ def _object_grounding_version_ref(value: str) -> tuple[str, str] | None:
         if ref.startswith(prefix):
             version_id = ref.removeprefix(prefix).strip()
             return (kind, version_id) if version_id else None
+        # Project reads and media tools expose these exact version IDs.
+        # They remain scoped by the current Project lookup below.
+        if ref.startswith(prefix.replace(":", "-")):
+            return kind, ref
     parsed = urlparse(ref)
     if parsed.scheme not in {"asset", "artifact"} or not parsed.netloc:
         return None
     identity = unquote(parsed.netloc)
     if "@" not in identity:
-        return None
+        expected_prefix = (
+            "asset-version-"
+            if parsed.scheme == "asset"
+            else "artifact-version-"
+        )
+        return (
+            (parsed.scheme, identity)
+            if identity.startswith(expected_prefix) and not parsed.path
+            else None
+        )
     version_id = identity.rsplit("@", 1)[-1].strip()
     return (parsed.scheme, version_id) if version_id else None
 
@@ -846,7 +859,8 @@ def _object_grounding_tool_manifest() -> dict[str, Any]:
                         "minLength": 1,
                         "description": (
                             "要检测的 exact AssetVersion/ArtifactVersion workspace "
-                            "ref、安全公网图片 URL，或当前 Project 的 /generated URL。"
+                            "ref（如 artifact-version:artifact-version-...）、原始版本 ID、"
+                            "安全公网图片 URL，或当前 Project 的 /generated URL。"
                         ),
                     },
                     "prompt": {
@@ -4106,12 +4120,17 @@ class FileCreatorAgentRuntime:
             raise FileAgentRuntimeError(
                 f"ground_image_objects image version does not exist: {version_id}",
             )
-        if not str(version.media_type or "").casefold().startswith("image/"):
+        indexed = snapshot.project.assets.files_by_id.get(version.file_id)
+        media_type = (
+            indexed.media_type
+            if indexed is not None
+            else getattr(version, "media_type", None)
+        )
+        if not str(media_type or "").casefold().startswith("image/"):
             raise FileAgentRuntimeError(
                 f"ground_image_objects imageRef is not an image: {version_id}",
             )
         if version.file_id:
-            indexed = snapshot.project.assets.files_by_id.get(version.file_id)
             if indexed is None:
                 raise FileAgentRuntimeError(
                     f"ground_image_objects image file is missing from the index: {version_id}",

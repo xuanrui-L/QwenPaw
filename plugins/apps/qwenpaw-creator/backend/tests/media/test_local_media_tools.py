@@ -436,9 +436,17 @@ def test_delivery_loudness_failures_keep_the_unnormalized_film(
     assert spec.output_path.read_bytes() == b"video"
 
 
+@pytest.mark.parametrize(
+    "trailing_log",
+    [
+        "",
+        "[out#0/null @ 0x600] video:98KiB audio:6008KiB\nframe=240 speed=25x\n",
+    ],
+)
 def test_measure_loudness_parses_the_loudnorm_json_tail(
     monkeypatch,
     tmp_path,
+    trailing_log,
 ) -> None:
     from services.media_files import local_execution as local_execution_mod
 
@@ -452,7 +460,7 @@ def test_measure_loudness_parses_the_loudnorm_json_tail(
         '    "input_thresh" : "-33.50",\n'
         '    "output_i" : "-16.00",\n'
         '    "target_offset" : "0.30"\n'
-        "}\n"
+        "}\n" + trailing_log
     )
 
     class _Measured:

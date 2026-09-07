@@ -691,7 +691,35 @@ def _supports_dashscope_native_search(item: ModelConfigItem) -> bool:
     )
 
 
-def _ensure_grounding_model_configured(data: ModelConfigData) -> None:
+def _grounding_config_inputs(data: ModelConfigData) -> tuple[dict, ...]:
+    connection_fields = {
+        "model_name",
+        "api_key",
+        "base_url",
+        "protocol",
+        "custom_protocol",
+    }
+    return (
+        data.grounding.model_dump(),
+        _grounding_validation_model(data).model_dump(
+            include=connection_fields,
+        ),
+        _grounding_search_model(data).model_dump(include=connection_fields),
+    )
+
+
+def _ensure_grounding_model_configured(
+    data: ModelConfigData,
+    *,
+    previous: ModelConfigData | None = None,
+) -> None:
+    # Legacy search settings must not prevent unrelated media-model repairs.
+    # Compare resolved secrets and dependencies under the config write lock;
+    # first-time setup and actual grounding edits still require validation.
+    if previous is not None and (
+        _grounding_config_inputs(data) == _grounding_config_inputs(previous)
+    ):
+        return
     grounding = data.grounding
     if not grounding.enabled:
         return
@@ -1164,6 +1192,15 @@ async def update_model_config(
     payload = data.model_dump(mode="json", by_alias=True)
     request_hash = records.request_hash(payload)
 
+    def mutate(current: ModelConfigData) -> ModelConfigData:
+        resolved = _resolve_secret_masks(data, current)
+        resolved.llm.enabled = True
+        _ensure_grounding_model_configured(
+            resolved,
+            previous=current if _config_paths().is_file() else None,
+        )
+        return resolved
+
     def transaction() -> bool:
         with records.operation_lock(
             owner_id="creator-model-config",
@@ -1183,9 +1220,7 @@ async def update_model_config(
                 raise StorageIntegrityError(
                     "上一次模型配置写入失败，请使用新的 Idempotency-Key 重试",
                 )
-            data.llm.enabled = True
-            _ensure_grounding_model_configured(data)
-            save_model_config(data)
+            mutate_model_config(mutate)
             _notify_agent_model_config_changed()
             records.complete(
                 owner_id="creator-model-config",
@@ -1477,7 +1512,10 @@ async def patch_model_config_section(
             field = ".".join(str(loc) for loc in first_error.get("loc", []))
             message = first_error.get("msg", str(exc))
             raise ValidationError(f"模型配置校验失败: {field} {message}") from exc
-        _ensure_grounding_model_configured(resolved)
+        _ensure_grounding_model_configured(
+            resolved,
+            previous=current if _config_paths().is_file() else None,
+        )
         return resolved
 
     def transaction() -> None:

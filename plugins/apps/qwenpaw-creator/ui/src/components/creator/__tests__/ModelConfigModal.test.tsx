@@ -238,6 +238,58 @@ describe("ModelConfigModal configuration lifecycle", () => {
     expect(key).toHaveAttribute("type", "password");
   });
 
+  it("saves a video model change without blocking on unchanged legacy grounding", async () => {
+    const onClose = vi.fn();
+    const config = {
+      ...speechBaseConfig,
+      grounding: { ...groundingDefaults },
+      video: {
+        ...speechBaseConfig.video,
+        enabled: true,
+        model_name: "wan3.0-video",
+        base_url: DASH,
+      },
+    };
+    const { calls } = installMockFetch([
+      ...configRoutes(config, { ok: true, ms: 8 }),
+      {
+        match: "/models/real-api-key/llm",
+        method: "GET",
+        response: { json: { apiKey: "saved-secret" } },
+      },
+    ]);
+    render(<ModelConfigModal open onClose={onClose} />);
+    await waitFor(() =>
+      expect(screen.getAllByText(/qwen3.7-plus/).length).toBeGreaterThan(0),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /媒体生成/ }));
+    fireEvent.click(await screen.findByText("视频生成模型"));
+    const modelInput = await waitFor(() => {
+      const input = screen
+        .getAllByText("模型名称")
+        .map((node) => node.parentElement?.querySelector("input"))
+        .find((item) => item?.value === "wan3.0-video");
+      expect(input).toBeTruthy();
+      return input as HTMLInputElement;
+    });
+    fireEvent.change(modelInput, { target: { value: "wan3.0-video-prime" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存配置/ }));
+    await waitFor(() => {
+      const saved = calls.find(
+        (call) => call.method === "POST" && call.url.endsWith("/models/config"),
+      );
+      expect(saved?.body).toMatchObject({
+        video: { model_name: "wan3.0-video-prime" },
+        grounding: {
+          enabled: true,
+          tavily_api_key: "",
+          native_search_enabled: true,
+        },
+      });
+      expect(onClose).toHaveBeenCalledOnce();
+    });
+  });
+
   it("keeps a VLM that reuses the LLM enabled after an LLM connectivity test", async () => {
     // A successful test flips llm.enabled via updateItem; that update must
     // not cascade into vlm.use_llm/enabled=false before a save.

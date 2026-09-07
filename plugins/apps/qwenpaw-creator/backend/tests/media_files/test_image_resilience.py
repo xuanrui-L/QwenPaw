@@ -31,6 +31,7 @@ from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
 from services.project_files.store import ProjectSnapshot
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
+from services.runtime_files.errors import LockTimeoutError
 from utils.exceptions import ModelError
 
 from .conftest import make_r2v_element, r2v_project_services
@@ -203,6 +204,73 @@ def test_transient_failure_reopens_a_retry_slot(tmp_path, monkeypatch):
     # The identical retry must run again instead of hitting the wall.
     result = _execute(services, _CountingProvider())
     assert result.replayed is False and result.artifact_version_id
+
+
+def test_publication_lock_retry_does_not_regenerate_image(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path, monkeypatch)
+    provider = _CountingProvider()
+    original_commit = services.commits.commit
+    attempts = 0
+
+    def contended_commit(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise LockTimeoutError(tmp_path / "project.lock", 10.0)
+        return original_commit(**kwargs)
+
+    monkeypatch.setattr(services.commits, "commit", contended_commit)
+    result = _execute(services, provider)
+
+    assert attempts == 2
+    assert provider.calls == 1
+    assert result.artifact_version_id
+    assert result.artifact_version_id in (
+        services.projects.read(
+            PROJECT_ID,
+        ).project.assets.artifact_versions_by_id
+    )
+
+
+def test_publication_retry_rechecks_durable_cancellation(
+    tmp_path,
+    monkeypatch,
+):
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    services = _services(tmp_path, monkeypatch)
+    provider = _CountingProvider()
+    executions = ProjectExecutionStore(services.root)
+    attempts = 0
+
+    def cancel_before_retry(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        versions = kwargs["candidate"]["assets"]["artifact_versions_by_id"]
+        task_id = next(iter(versions.values()))["metadata"]["taskId"]
+        executions.transition_task(
+            PROJECT_ID,
+            task_id,
+            expected_status="RUNNING",
+            status="CANCELLED",
+            _lifecycle_lock_held=True,
+        )
+        raise LockTimeoutError(tmp_path / "project.lock", 10.0)
+
+    monkeypatch.setattr(services.commits, "commit", cancel_before_retry)
+    with pytest.raises(ConflictError, match="已取消"):
+        _execute(services, provider)
+
+    assert attempts == 1
+    assert provider.calls == 1
+    assert not (
+        services.projects.read(
+            PROJECT_ID,
+        ).project.assets.artifact_versions_by_id
+    )
 
 
 def test_deterministic_rejection_keeps_the_terminal_wall(

@@ -70,6 +70,7 @@ from services.project_files.models import (
     T2VCreation,
 )
 from services.media_files.call_budget import ensure_media_call_budget
+from services.media_files.publication_retry import commit_with_lock_retry
 from services.media_files.element_adapter import (
     bind_candidate_output,
     find_timeline_element,
@@ -4653,7 +4654,11 @@ class FileR2VExecutionService:
                 return "SUCCEEDED", latest, snapshot
 
         try:
-            outcome, latest, snapshot = await asyncio.to_thread(commit_if_live)
+            outcome, latest, snapshot = await commit_with_lock_retry(
+                commit_if_live,
+                project_id=task.project_id,
+                task_id=task.task_id,
+            )
         except BaseException:
             release_media_review_reservation(review_reservation)
             raise

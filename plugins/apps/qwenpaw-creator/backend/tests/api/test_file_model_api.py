@@ -463,6 +463,62 @@ def test_model_config_is_single_file_native_and_idempotent(
     assert not config_path.with_name("model_config.secrets.json").exists()
 
 
+@pytest.mark.parametrize("method", ["POST", "PATCH"])
+@pytest.mark.parametrize("section", ["video", "llm", "grounding"])
+def test_unrelated_model_save_preserves_legacy_grounding(
+    config_path,
+    run_scenario,
+    method,
+    section,
+) -> None:
+    payload = _config("qwen3.8-max")
+    payload["grounding"].update(tavily_api_key="", serper_api_key="")
+    payload["video"].update(model_name="wan3.0-video")
+    _write(config_path, payload)
+    original = config_path.read_bytes()
+
+    async def scenario(client):
+        loaded = (await client.get("/models/config")).json()
+        change = (
+            {"native_search_enabled": False}
+            if section == "grounding"
+            else {
+                "model_name": (
+                    "wan3.0-video-prime"
+                    if section == "video"
+                    else "other-model"
+                ),
+            }
+        )
+        loaded[section].update(change)
+        url = (
+            "/models/config"
+            if method == "POST"
+            else f"/models/config/{section}"
+        )
+        body = loaded if method == "POST" else change
+        response = await client.request(
+            method,
+            url,
+            json=body,
+            headers={"Idempotency-Key": "legacy-save"},
+        )
+        return response
+
+    response = run_scenario(_model_app(), scenario)
+    if section == "video":
+        assert response.status_code == 200, response.text
+        saved = model_routes.load_model_config(include_environment=False)
+        assert saved.video.model_name == "wan3.0-video-prime"
+        assert saved.llm.api_key == "secret"
+        assert saved.grounding.enabled is True
+        assert saved.grounding.tavily_api_key == ""
+        assert saved.grounding.native_search_enabled is True
+    else:
+        assert response.status_code == 422
+        assert config_path.read_bytes() == original
+
+
 def test_concurrent_single_file_save_is_atomic_and_last_writer_wins(
     config_path,
     monkeypatch,

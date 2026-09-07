@@ -319,6 +319,64 @@ describe("PlanPage Timeline/Element frontend", () => {
     }
   });
 
+  it("does not auto-compose a fresh final whose publication advanced the project generation", async () => {
+    vi.useFakeTimers();
+    try {
+      const project = cloneProject();
+      project.generation = 4;
+      project.assets.artifact_versions_by_id[
+        "final-v1"
+      ].based_on_generation = 3;
+      seedProject(project);
+      const { calls } = installMockFetch(pollRoutes());
+      const { unmount } = renderPage();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(
+        calls.filter(
+          (call) => call.method === "POST" && call.url.includes("/render"),
+        ),
+      ).toHaveLength(0);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears a dispatch failure when polling later discovers the completed final", async () => {
+    seedWithoutFinal();
+    installMockFetch([
+      {
+        match: "/timelines/timeline%3Amain/render",
+        method: "POST",
+        response: {
+          ok: false,
+          status: 408,
+          json: { message: "dispatch timed out" },
+        },
+      },
+      ...pollRoutes(),
+    ]);
+    const { unmount } = renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "合成成片" }));
+    await screen.findByRole("button", { name: "重试合成" });
+    const completed = cloneProject();
+    completed.generation = 4;
+    completed.assets.artifact_versions_by_id[
+      "final-v1"
+    ].based_on_generation = 3;
+    act(() => {
+      useProjectSnapshotStore.setState({ project: completed, generation: 4 });
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "重试合成" }),
+      ).not.toBeInTheDocument(),
+    );
+    unmount();
+  });
+
   it("adopts an existing compose task and shows verified Element counts without inventing a percentage", async () => {
     seedWithoutFinal();
     const task = composeTask(0, "RUNNING", { completed: 0, total: 10 });

@@ -90,7 +90,7 @@ describe("Blueprint before the first agent output", () => {
       container.querySelector("[data-blueprint-activity]"),
     ).toBeInTheDocument();
     expect(screen.queryByText("暂无进行中的生产任务")).not.toBeInTheDocument();
-    expect(container).not.toHaveTextContent("本项目创建于剧本功能之前");
+    expect(container).not.toHaveTextContent("当前没有独立剧本");
 
     const published = structuredClone(project);
     published.timelines.items["timeline:main"].title = "雨夜来信";
@@ -106,7 +106,7 @@ describe("Blueprint before the first agent output", () => {
     expect(
       container.querySelector('[data-workspace-empty="script"]'),
     ).toHaveAttribute("data-state", "working");
-    expect(container).not.toHaveTextContent("本项目创建于剧本功能之前");
+    expect(container).not.toHaveTextContent("当前没有独立剧本");
   });
 
   it("does not mistake a history snapshot or the initial user brief for the first output", () => {
@@ -208,7 +208,7 @@ describe("BlueprintPage narrative shapes", () => {
     ).not.toBeInTheDocument();
     // Legacy read-only mapping (project predates timeline_script).
     expect(
-      screen.getAllByText("本项目创建于剧本功能之前，以下为既有信息的只读映射")
+      screen.getAllByText("当前没有独立剧本，以下为项目现有内容的只读映射")
         .length,
     ).toBeGreaterThan(0);
     // Overview rail keeps the referenced visual entity reachable.
@@ -331,9 +331,9 @@ describe("BlueprintPage narrative shapes", () => {
     expect(
       first.container.querySelector('[data-blueprint-shape="single"]'),
     ).not.toBeInTheDocument();
-    // Legacy read-only mapping (no timeline_script slot on this path).
+    // Read-only content mapping (no timeline_script slot on this path).
     expect(
-      screen.getAllByText("本项目创建于剧本功能之前，以下为既有信息的只读映射")
+      screen.getAllByText("当前没有独立剧本，以下为项目现有内容的只读映射")
         .length,
     ).toBeGreaterThan(0);
     // Rough-cut strip: the render_source clip counts as a final frame.

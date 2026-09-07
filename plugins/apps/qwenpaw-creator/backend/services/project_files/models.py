@@ -1254,7 +1254,11 @@ class Timeline(StrictModel):
     # (warm_bright / clean_cool / cinematic) — free-form colour
     # descriptions are rejected at commit time so a typo can never
     # silently skip the grade pass.
-    color_grade: str = ""
+    color_grade: str = Field(
+        default="",
+        description="Named colour-grade preset; empty string disables grading.",
+        json_schema_extra={"enum": ["", *COLOR_GRADE_PRESETS]},
+    )
     edit_plan: EditPlan | None = None
     elements_by_id: dict[EntityId, TimelineElement] = Field(
         default_factory=dict,

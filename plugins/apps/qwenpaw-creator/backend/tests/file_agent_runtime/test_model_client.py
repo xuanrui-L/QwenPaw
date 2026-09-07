@@ -14,7 +14,7 @@ from agentscope.message import (
     ToolResultState,
 )
 from agentscope.model import DashScopeChatModel
-from agentscope.model._model_response import ChatResponse
+from agentscope.model._model_response import ChatResponse, FinishedReason
 import pytest
 
 from services.file_agent_runtime.model_client import (
@@ -411,6 +411,74 @@ def _final_tool_call_model(raw_input: str):
             return chunks()
 
     return FinalToolCallModel()
+
+
+@pytest.mark.parametrize(
+    "raw_input",
+    [
+        '{"projectId":"project-1","ops":',
+        '{"projectId":"project-1","ops":[{"op":"remove","path":"/name"}]}',
+    ],
+)
+def test_interrupted_response_never_returns_executable_calls(raw_input):
+    class InterruptedModel:
+        async def __call__(self, messages, *, tools=None):
+            return ChatResponse(
+                content=[
+                    ToolCallBlock(
+                        id="call-interrupted",
+                        name="patch_project",
+                        input=raw_input,
+                    ),
+                ],
+                is_last=True,
+                finished_reason=FinishedReason.INTERRUPTED,
+            )
+
+    async def scenario():
+        client = AgentScopeAgentChatClient(InterruptedModel())
+        with pytest.raises(AgentModelError, match="interrupted"):
+            await client.complete(messages=[], tools=_tools())
+
+    asyncio.run(scenario())
+
+
+def test_provider_cannot_swallow_model_turn_timeout_with_partial_response():
+    class CancellationSwallowingModel:
+        async def __call__(self, messages, *, tools=None):
+            async def chunks():
+                yield ChatResponse(
+                    content=[TextBlock(text="Preparing the edit")],
+                    is_last=False,
+                )
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # AgentScope returns the accumulated partial response
+                    # after cancellation of its stream wrapper.
+                    yield ChatResponse(
+                        content=[
+                            ToolCallBlock(
+                                id="call-timeout",
+                                name="patch_project",
+                                input='{"projectId":"project-1","ops":',
+                            ),
+                        ],
+                        is_last=True,
+                        finished_reason=FinishedReason.INTERRUPTED,
+                    )
+
+            return chunks()
+
+    async def scenario():
+        client = AgentScopeAgentChatClient(CancellationSwallowingModel())
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                client.complete(messages=[], tools=_tools()),
+                timeout=0.05,
+            )
+
+    asyncio.run(scenario())
 
 
 def test_unrecoverable_tool_arguments_degrade_to_parse_error() -> None:

@@ -774,6 +774,21 @@ function groundingSearchModel(config: ModelConfigData): ModelConfigItem {
   };
 }
 
+function groundingConfigInputs(config: ModelConfigData): string {
+  const connection = (item: ModelConfigItem) => ({
+    model_name: item.model_name,
+    api_key: item.api_key,
+    base_url: item.base_url,
+    protocol: item.protocol,
+    custom_protocol: item.custom_protocol,
+  });
+  return JSON.stringify([
+    config.grounding,
+    connection(groundingValidationModel(config)),
+    connection(groundingSearchModel(config)),
+  ]);
+}
+
 /**
  * Check whether a model's protocol/host indicates DashScope/Qwen native
  * search capability. Mirrors the backend ``dashscope_native_search_unavailable_reason``
@@ -1728,7 +1743,12 @@ export default function ModelConfigModal({ open, onClose }: Props) {
       const prev = snapshotRef.current;
       if (!prev) throw new Error(t("modelConfig.snapshotLost"));
 
-      if (config.grounding.enabled) {
+      // An unchanged legacy search setup must not block a video/image
+      // model update. Keep validation for search and its model dependencies.
+      if (
+        config.grounding.enabled &&
+        groundingConfigInputs(config) !== groundingConfigInputs(prev)
+      ) {
         const groundingModel = groundingValidationModel(config);
         const groundingFree = isFreeTierProtocol(
           groundingModel.protocol,

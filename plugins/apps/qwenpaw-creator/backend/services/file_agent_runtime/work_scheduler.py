@@ -25,7 +25,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
-from domain.enums import CreatorCommandType
+from domain.enums import CreatorCommandType, CreatorSessionStatus
 from models.config import (
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
     get_execution_authorization_mode,
@@ -52,6 +52,7 @@ from services.file_agent_runtime.work_graph import (
 from services.project_files import frontend_edit_hold
 from services.project_files.facade import CreatorFileServices
 from services.runtime_files.execution_store import ProjectExecutionStore
+from services.runtime_files.session_store import RuntimeSessionNotFound
 from utils.logger import setup_logger
 
 logger = setup_logger("creator.work_scheduler")
@@ -291,9 +292,9 @@ class WorkGraphScheduler:
     def wake(self, project_id: str) -> None:
         """Signal that durable state changed; start the loop if needed."""
 
-        # A real post-stop Project change/new run explicitly re-arms the
-        # scheduler. Cancelled dispatch finalizers do not call this method (see
-        # _dispatch), so they cannot resurrect a stopped project by themselves.
+        # A wake is a state-change signal, not authorization to resume. tick()
+        # checks the durable Session stop even for startup/late-commit wakes.
+        # This local set only suppresses cancelled dispatch finalizers.
         self._cancelled_projects.discard(project_id)
         event = self._wakes.setdefault(project_id, asyncio.Event())
         event.set()
@@ -462,6 +463,24 @@ class WorkGraphScheduler:
         if not await asyncio.to_thread(self.enabled):
             return None
         try:
+            try:
+                session = await asyncio.to_thread(
+                    self.services.sessions.get_project_session_snapshot,
+                    project_id,
+                )
+            except RuntimeSessionNotFound:
+                # Imported/programmatically authored Projects can have no
+                # Agent Session yet and therefore no durable stop to honor.
+                session = None
+            if session is not None and session.status in {
+                CreatorSessionStatus.INTERRUPT_REQUESTED,
+                CreatorSessionStatus.CANCELLED,
+            }:
+                # Stops survive reload and delayed worker commits. A newly
+                # admitted Agent run changes this status before planning and
+                # waking the graph again; notifications alone cannot resume
+                # paid media execution for an explicitly stopped Session.
+                return None
             snapshot = await asyncio.to_thread(
                 self.services.projects.read,
                 project_id,

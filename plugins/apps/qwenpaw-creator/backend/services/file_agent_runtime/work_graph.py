@@ -1072,6 +1072,18 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             video_text_gap = False
             if task is not None:
                 status = WorkNodeStatus.RUNNING
+            elif creation_type in {"i2v", "s2v"} and (
+                input_gaps := _video_readiness_gates(
+                    creation_type,
+                    creation,
+                    project,
+                )
+            ):
+                # Removing a required input is an unfinished revision even
+                # when an old clip remains selected. Empty upstream refs
+                # cannot prove that clip current or authorize a new compose.
+                status = WorkNodeStatus.GATED
+                video_missing = input_gaps
             elif video_slot:
                 # T2V has no upstream references (upstream_selected is []),
                 # so _artifact_is_stale always returns False for T2V.
@@ -1299,10 +1311,10 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 final_slot = None
         if task is not None:
             status = WorkNodeStatus.RUNNING
-        elif final_slot:
-            status = WorkNodeStatus.DONE
         elif missing:
             status = WorkNodeStatus.GATED
+        elif final_slot:
+            status = WorkNodeStatus.DONE
         else:
             status = WorkNodeStatus.READY
         add(

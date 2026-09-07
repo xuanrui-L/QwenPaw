@@ -42,6 +42,7 @@ Project
 - 生成任何分镜图前，所有启用 R2V Element 引用实体的必需 Variant 必须已建立并选中真实视觉产物；无 Variant 的实体必须有实体级选中产物；多 Variant 引用必须显式绑定。后端会确定性拒绝未完成的视觉计划。
 - `schema_version`、`project_id`、`generation`、`created_at` 和 `updated_at` 是受保护字段。
 - Element ID 在全部 Timeline 中唯一；时间区间统一使用整数 tick 和半开区间。
+- Timeline 的 `color_grade` 只能填写 Schema 列出的命名调色预设；空字符串表示不调色。暖金晨光等自由文本风格描述写入视觉或视频 prompt，不得写入 `color_grade`。
 - `location.x/y` 是内容框锚点在归一化成片画面中的位置，`anchor_x/anchor_y` 指定框内哪个点对齐到该位置并作为旋转基点；全画面内容使用 `x=0.5, y=0.5, width=1, height=1, anchor_x=0.5, anchor_y=0.5`。
 - Edit 的 `span.duration_tick` 必须等于 `round((source_out_tick-source_in_tick)/playback_rate)`。
 - Project 不持久化额外的内容分组、轨道、独立 Content、ProductionFlow 或顺序 Composition。

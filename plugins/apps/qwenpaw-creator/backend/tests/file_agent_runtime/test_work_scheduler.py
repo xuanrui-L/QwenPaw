@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from domain.enums import TaskStatus
+from domain.enums import CreatorSessionStatus, TaskStatus
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
     WorkNode,
@@ -651,6 +651,53 @@ def test_cancel_project_does_not_resurrect_dispatch_and_wake_rearms(
         assert PROJECT_ID not in scheduler._cancelled_projects
         scheduler.cancel_project(PROJECT_ID)
         await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "stopped_status",
+    [CreatorSessionStatus.INTERRUPT_REQUESTED, CreatorSessionStatus.CANCELLED],
+)
+def test_durable_stop_blocks_fresh_scheduler_until_session_resumes(
+    tmp_path,
+    monkeypatch,
+    stopped_status,
+) -> None:
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    session = services.sessions.create_project_runtime(PROJECT_ID).session
+    services.sessions.set_session_status(
+        PROJECT_ID,
+        session.session_id,
+        stopped_status,
+    )
+    dispatch = _RecordingDispatch()
+    # A new instance has no process-local cancellation guard, as after reload.
+    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
+
+    async def scenario():
+        try:
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+            assert not dispatch.calls
+            # A late commit/startup wake must also respect the durable stop.
+            scheduler.wake(PROJECT_ID)
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+            assert not dispatch.calls
+
+            # A newly admitted run re-opens normal automatic execution.
+            services.sessions.set_session_status(
+                PROJECT_ID,
+                session.session_id,
+                CreatorSessionStatus.RUNNING,
+            )
+            await scheduler.tick(PROJECT_ID)
+            await asyncio.wait_for(dispatch.started.wait(), timeout=1)
+            assert len(dispatch.calls) == 1
+        finally:
+            await scheduler.shutdown()
 
     asyncio.run(scenario())
 

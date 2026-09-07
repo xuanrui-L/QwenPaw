@@ -1315,6 +1315,57 @@ def test_i2v_element_gated_without_first_frame() -> None:
     assert "first_frame_version_id 缺失" in video_node.missing
 
 
+@pytest.mark.parametrize("existing_final", [False, True])
+def test_unbinding_i2v_first_frame_gates_old_video_and_compose(
+    existing_final: bool,
+) -> None:
+    """Removing a required frame must also gate the old clip and final cut."""
+    from services.project_files.models import I2VCreation
+
+    project = _project()
+    element = TimelineElement(
+        element_id="elem:i2v",
+        label="Cartoon revision",
+        span=TimelineSpan(start_tick=0, duration_tick=8_000),
+        location=ElementLocation(),
+        creation=I2VCreation(
+            video_prompt="The corrected cartoon character",
+            first_frame_version_id="img:old-frame",
+        ),
+    )
+    _add_element(project, element)
+    _select_slot(
+        project,
+        slot_id="element:elem:i2v:main",
+        kind="element_video",
+        owner_ref="element:elem:i2v",
+        version_id="art:old-video",
+        provenance=["artifact-version:img:old-frame"],
+    )
+    if existing_final:
+        _select_slot(
+            project,
+            slot_id="timeline:timeline:main:render",
+            kind="final_video",
+            owner_ref="timeline:timeline:main",
+            version_id="art:old-final",
+        )
+    assert (
+        derive_work_graph(project).by_id["video:elem:i2v"].status
+        is WorkNodeStatus.DONE
+    )
+
+    element.creation.first_frame_version_id = None
+    graph = derive_work_graph(project)
+    video = graph.by_id["video:elem:i2v"]
+    compose = graph.by_id["compose:timeline:main"]
+    assert video.status is WorkNodeStatus.GATED
+    assert "first_frame_version_id 缺失" in video.missing
+    assert compose.status is WorkNodeStatus.GATED
+    assert "video:elem:i2v" in compose.missing
+    assert compose not in graph.ready_media_nodes()
+
+
 def test_s2v_element_produces_only_video_node() -> None:
     """S2V elements skip storyboard and depend on portrait + audio."""
     from services.project_files.models import S2VCreation

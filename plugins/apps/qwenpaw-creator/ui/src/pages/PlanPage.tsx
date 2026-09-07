@@ -316,9 +316,16 @@ export default function PlanPage() {
     renderOutput?.selected && !renderOutput.selected.stale
       ? renderOutput.selected
       : null;
-  const renderIsCurrent =
-    freshRender !== null &&
-    (generation === null || freshRender.based_on_generation >= generation);
+  // Publishing a render advances Project.generation; based_on_generation
+  // records its input revision. The backend invalidates the artifact when
+  // render inputs change, so comparing these counters re-composes fresh cuts.
+  const renderIsCurrent = freshRender !== null;
+  const freshRenderVersionId = freshRender?.version_id ?? null;
+  useEffect(() => {
+    // A timed-out dispatch can finish later without its Task ever appearing
+    // in the active-task poll. Reconcile the local error with that final cut.
+    if (freshRenderVersionId !== null) setComposeFailed(false);
+  }, [freshRenderVersionId]);
   const allReady = readiness.total > 0 && readiness.notReady === 0;
   const timelineTargetRef = timeline
     ? `timeline:${timeline.timeline_id}`
@@ -397,7 +404,7 @@ export default function PlanPage() {
       setRequestedComposeTaskId(dispatch.taskId);
       await Promise.allSettled([refreshTasks(id), pollOnce(id)]);
     } catch (error) {
-      await refreshTasks(id).catch(() => undefined);
+      await Promise.allSettled([refreshTasks(id), pollOnce(id)]);
       const adopted = useCreatorTaskViewStore
         .getState()
         .tasks.find(
@@ -409,10 +416,20 @@ export default function PlanPage() {
       if (adopted) {
         setRequestedComposeTaskId(adopted.id);
       } else {
-        setComposeFailed(true);
-        message.error(
-          t("plan.composeFailed", { detail: (error as Error).message }),
-        );
+        const latest = useProjectSnapshotStore.getState().project;
+        const latestTimeline = latest?.timelines.items[timeline.timeline_id];
+        const completed =
+          latest && latestTimeline
+            ? resolveTimelineRender(latest, latestTimeline)?.selected
+            : null;
+        if (completed && !completed.stale) {
+          setComposeFailed(false);
+        } else {
+          setComposeFailed(true);
+          message.error(
+            t("plan.composeFailed", { detail: (error as Error).message }),
+          );
+        }
       }
     } finally {
       setComposing(false);

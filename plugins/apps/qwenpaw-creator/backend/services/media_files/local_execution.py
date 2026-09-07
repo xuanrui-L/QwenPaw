@@ -2154,7 +2154,9 @@ class FfmpegLocalMediaRunner:
             return None
         tail = process.stderr[process.stderr.rfind("{") :]
         try:
-            measured = json.loads(tail)
+            # Recent ffmpeg versions print muxer/progress lines after the
+            # loudnorm object. Parse the object without consuming that log.
+            measured, _ = json.JSONDecoder().raw_decode(tail)
         except ValueError:
             return None
         keys = (
@@ -2225,7 +2227,7 @@ class FfmpegLocalMediaRunner:
         # the true-peak ceiling. Make that observable.
         tail = (stderr or "")[max((stderr or "").rfind("{"), 0) :]
         try:
-            applied = json.loads(tail)
+            applied, _ = json.JSONDecoder().raw_decode(tail)
         except ValueError:
             applied = {}
         if applied.get("normalization_type", "").lower() != "linear":
@@ -3371,7 +3373,9 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # across overlays with very different box dimensions.
             # v9: Edit playback_rate retimes both picture and source sound;
             # segment and transition durations now stay on Timeline time.
-            "rendererVersion": 9,
+            # v10: loudnorm accepts FFmpeg progress logs after its JSON;
+            # old unnormalized deliveries must not be reused after the fix.
+            "rendererVersion": 10,
             "targetRef": resolved.target_ref,
             "inputs": [
                 {
