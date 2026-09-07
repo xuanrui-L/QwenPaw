@@ -1000,11 +1000,6 @@ function WorkspacePanel() {
           {t("agent.currentTask")}
         </p>
         <p className="text-[var(--color-text-tertiary)]">
-          {t("agent.phase")}{" "}
-          <b className="text-[var(--color-text-primary)]">
-            {creatorStatusLabel(session?.status)}
-          </b>
-          {" · "}
           {t("agent.statusLabel")}{" "}
           <b className="text-[var(--color-text-primary)]">
             {creatorStatusLabel(session?.status)}

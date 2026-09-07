@@ -321,6 +321,10 @@ class PromptSyncService:
         sync = prompt_sync_status(document, timeline_id, element_id)
         if len(sync["changedSources"]) > 1:
             source = "mixed"
+        if source != "mixed" and not set(sync["changedSources"]).issubset(
+            {source},
+        ):
+            raise ValidationError("同步来源与本次修改不一致，请使用最新修改的内容同步")
         if source == "currentPlan" or (
             source == "mixed" and "currentPlan" in sync["changedSources"]
         ):
@@ -651,7 +655,7 @@ class PromptSyncService:
                         "generation": snapshot.generation,
                         "replayed": True,
                     }
-            raise ConflictError("片段内容或提示词已更新，请重新起草或审阅")
+            raise ConflictError("片段内容或提示词已更新，请按最新内容重新生成")
         if (
             digest(references) != proposal.reference_fingerprint
             or model_fingerprint != proposal.model_fingerprint
@@ -676,6 +680,8 @@ class PromptSyncService:
             if proposal.source == "mixed"
             else [proposal.source]
         )
+        if not set(status["changedSources"]).issubset(sources):
+            raise ConflictError("同步草稿遗漏了本次修改，请重新同步")
         if any(
             creation[fields[key]] != before_creation[fields[key]]
             for key in sources
@@ -694,52 +700,7 @@ class PromptSyncService:
             document,
             timeline_id,
             element_id,
-            proposal.baseline_token,
-            edit=True,
-        )
-
-    async def confirm(
-        self,
-        project_id: str,
-        timeline_id: str,
-        element_id: str,
-        token: str,
-    ) -> dict:
-        snapshot, document = await asyncio.to_thread(
-            self._read,
-            project_id,
-            timeline_id,
-            element_id,
-        )
-        status = prompt_sync_status(document, timeline_id, element_id)
-        references = _references(snapshot.project, element_id)
-        if (
-            _context_token(
-                document,
-                timeline_id,
-                element_id,
-                references,
-                _model_fingerprint(),
-            )
-            != token
-        ):
-            raise ConflictError("提示词已更新，请重新打开最新内容审阅")
-        if status["status"] == "current":
-            return {
-                "ok": True,
-                "generation": snapshot.generation,
-                "replayed": True,
-            }
-        if status["status"] not in ("legacy", "needs_confirmation"):
-            raise ValidationError("片段内容变更后需要先更新两份提示词")
-        _validate_prompts(document, timeline_id, element_id, references)
-        return await self._commit(
-            snapshot,
-            document,
-            timeline_id,
-            element_id,
-            token,
-            edit=False,
+            model_fingerprint=model_fingerprint,
         )
 
     async def _commit(
@@ -748,24 +709,16 @@ class PromptSyncService:
         document,
         timeline_id,
         element_id,
-        token,
         *,
-        edit: bool,
+        model_fingerprint,
     ):
-        def validate_context(latest: dict) -> None:
-            project = Project.model_validate(latest)
-            if (
-                _context_token(
-                    latest,
-                    timeline_id,
-                    element_id,
-                    _references(project, element_id),
-                    _model_fingerprint(),
-                )
-                != token
-            ):
+        def validate_context(_latest: dict) -> None:
+            # The commit's exact ETag guard already proves the entire Project
+            # (including references) unchanged. Only external model settings
+            # remain to recheck under the write lock.
+            if _model_fingerprint() != model_fingerprint:
                 raise ConflictError(
-                    "参考图、模型或片段内容已更新，请重新打开最新内容审阅",
+                    "参考图、模型或片段内容已更新，请按最新内容重新生成",
                 )
 
         source_token = prompt_sync_status(
@@ -773,17 +726,23 @@ class PromptSyncService:
             timeline_id,
             element_id,
         )["baselineToken"]
-        if edit:
-            path = _pointer(timeline_id, element_id)
-            document, _ = apply_frontend_edit_impacts(
-                document,
-                [
-                    path + "/narrative",
-                    path + "/storyboard_prompt",
-                    path + "/video_prompt",
-                ],
-                base=snapshot.project.model_dump(mode="json"),
-            )
+        path = _pointer(timeline_id, element_id)
+        document, _ = apply_frontend_edit_impacts(
+            document,
+            [
+                path + "/narrative",
+                path + "/storyboard_prompt",
+                path + "/video_prompt",
+            ],
+            base=snapshot.project.model_dump(mode="json"),
+        )
+        from services.project_files import frontend_edit_hold
+
+        # Commit listeners may immediately wake unattended dispatch.
+        frontend_edit_hold.note_frontend_edit(
+            snapshot.project.project_id,
+            (element_id,),
+        )
         result = await self.services.commit_candidate(
             base=snapshot,
             candidate=document,

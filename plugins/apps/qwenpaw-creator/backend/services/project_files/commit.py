@@ -570,7 +570,7 @@ class ProjectCommitBoundary:
                 ):
                     from domain.errors import ConflictError
 
-                    raise ConflictError("项目在接受生成说明时已更新，请重新审阅")
+                    raise ConflictError("项目在保存同步结果时已更新，请按最新内容重新生成")
                 latest_data = _json(latest.project)
                 if prompt_sync_context_validator is not None:
                     prompt_sync_context_validator(latest_data)
@@ -585,6 +585,9 @@ class ProjectCommitBoundary:
                     latest_data,
                     merged,
                     confirmation=prompt_sync_confirmation,
+                    changed_pointers=(
+                        change.pointer for change in _requested_changes
+                    ),
                 )
                 actual_changes = diff_json(latest_data, merged)
                 if not actual_changes:

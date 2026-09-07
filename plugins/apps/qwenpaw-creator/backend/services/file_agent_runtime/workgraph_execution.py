@@ -334,6 +334,57 @@ def _design_reference_versions(project: Any, node: WorkNode) -> list[str]:
     return []
 
 
+def workgraph_blocking_reviews(
+    services: Any,
+    project_id: str,
+    result: Mapping[str, Any],
+) -> list:
+    """Join the same review fences used by admission, scoped to this request.
+
+    Creative/mixed reviews and heavy production retain their project fence.
+    Independent visual work waits only for its own outputs or input images.
+    Run on a worker thread: both snapshot and review discovery read files.
+    """
+    project = services.projects.read(project_id).project
+    graph = derive_work_graph(project)
+    requested = {
+        item.get("nodeId")
+        for item in result.get("items", [])
+        if item.get("reason") == "WAITING_REVIEW"
+    }
+    nodes = [node for node in graph.nodes if node.node_id in requested]
+    if not nodes:
+        return []
+    joined = []
+    for review in services.reviews.all_pending(project_id):
+        artifacts = _publication_artifacts(review)
+        if artifacts is None:
+            joined.append(review)
+            continue
+        slots = frozenset(artifact.slot_id for artifact in artifacts)
+        owners = frozenset(artifact.owner_ref for artifact in artifacts)
+        for node in nodes:
+            if _blocked_by_active_media_review(node, slots, owners):
+                joined.append(review)
+                break
+            if node.kind in {"visual", "lineup"}:
+                try:
+                    assert_media_review_admission(
+                        reviews=[review],
+                        command_type=node.command or "",
+                        target_ref=node.target_ref or "",
+                        reference_version_ids=_design_reference_versions(
+                            project,
+                            node,
+                        ),
+                        variant_id=node.dispatch_arguments.get("variantId"),
+                    )
+                except ReviewPendingError:
+                    joined.append(review)
+                    break
+    return joined
+
+
 # Freeze each work kind using its actual executor input contract.
 # pylint: disable-next=too-many-branches
 def requested_work_node(snapshot: Any, node: WorkNode) -> RequestedWorkNode:

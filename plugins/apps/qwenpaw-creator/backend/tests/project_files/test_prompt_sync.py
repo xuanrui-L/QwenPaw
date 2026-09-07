@@ -438,66 +438,6 @@ def test_compare_is_repeated_under_commit_lock(services, monkeypatch):
     asyncio.run(run())
 
 
-def test_manual_confirmation_requires_current_text_and_cannot_skip_plan_update(
-    services,
-):
-    service = PromptSyncService(services)
-    plan_edit(services)
-
-    async def run():
-        with pytest.raises(ValidationError, match="需要先更新"):
-            await service.confirm(
-                PID,
-                TID,
-                EID,
-                state(services)["baselineToken"],
-            )
-        old_token = state(services)["baselineToken"]
-        edit(
-            services,
-            lambda c: c.update(
-                storyboard_prompt=SB + "更新动作。",
-                video_prompt=VD + "更新动作。",
-            ),
-        )
-        assert state(services)["status"] == "needs_confirmation"
-        with pytest.raises(ConflictError):
-            await service.confirm(PID, TID, EID, old_token)
-        token = state(services)["baselineToken"]
-        result = await service.confirm(PID, TID, EID, token)
-        assert state(services)["status"] == "current"
-        repeated = await service.confirm(PID, TID, EID, token)
-        assert repeated == {
-            "ok": True,
-            "generation": result["generation"],
-            "replayed": True,
-        }
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize(
-    "invalid",
-    ["unknown_reference", "empty"],
-)
-def test_manual_confirmation_checks_actual_prompt_contracts(services, invalid):
-    value = {
-        "missing_dialogue": "[Image 1]分镜。女子微笑。",
-        "unknown_reference": VD + " [Image 9]提供人物。",
-        "empty": "",
-    }[invalid]
-    edit(services, lambda c: c.update(video_prompt=value))
-    with pytest.raises(ValidationError):
-        asyncio.run(
-            PromptSyncService(services).confirm(
-                PID,
-                TID,
-                EID,
-                state(services)["baselineToken"],
-            ),
-        )
-
-
 def test_ordinary_writer_cannot_forge_current_sync_stamp(services):
     base = services.projects.read(PID)
     candidate = base.project.model_dump(mode="json")
@@ -673,7 +613,6 @@ def test_frozen_image_and_video_replays_survive_later_plan_edits(
     images = FileImageExecutionService(services, provider=image_provider)
 
     async def run():
-        old_review_token = state(services)["baselineToken"]
         first = await images.execute(
             project_id=PID,
             command="GENERATE_STORYBOARD_IMAGE",
@@ -682,13 +621,6 @@ def test_frozen_image_and_video_replays_survive_later_plan_edits(
             idempotency_key="old-image",
         )
         accept_pending_reviews(services, PID)
-        with pytest.raises(ConflictError):
-            await PromptSyncService(services).confirm(
-                PID,
-                TID,
-                EID,
-                old_review_token,
-            )
         project = services.projects.read(PID).project
         assert state(services)["status"] == "legacy"
         assert (
@@ -746,19 +678,6 @@ def test_frozen_image_and_video_replays_survive_later_plan_edits(
     asyncio.run(run())
 
 
-def test_manual_review_token_binds_model_settings(services, monkeypatch):
-    token = state(services)["baselineToken"]
-    monkeypatch.setattr(
-        model_config,
-        "get_image_model_name",
-        lambda: "gpt-image-2",
-    )
-    with pytest.raises(ConflictError):
-        asyncio.run(PromptSyncService(services).confirm(PID, TID, EID, token))
-    assert services.projects.read(PID).generation == 0
-    assert state(services)["status"] == "legacy"
-
-
 def test_late_draft_does_not_reappear_in_recreated_project(services):
     def recreate():
         project = services.projects.read(PID).project.model_copy(deep=True)
@@ -781,11 +700,9 @@ def test_late_draft_does_not_reappear_in_recreated_project(services):
     ).exists()
 
 
-@pytest.mark.parametrize("action", ["accept", "confirm"])
 def test_model_settings_are_rechecked_inside_commit_lock(
     services,
     monkeypatch,
-    action,
 ):
     service = PromptSyncService(services, client=client())
 
@@ -809,10 +726,7 @@ def test_model_settings_are_rechecked_inside_commit_lock(
             lambda _self, **kwargs: racing(**kwargs),
         )
         with pytest.raises(ConflictError, match="参考图、模型"):
-            if action == "accept":
-                await service.accept(PID, TID, EID, proposal["proposalId"])
-            else:
-                await service.confirm(PID, TID, EID, proposal["baselineToken"])
+            await service.accept(PID, TID, EID, proposal["proposalId"])
         assert services.projects.read(PID).generation == 0
         assert state(services)["videoPrompt"] == VD
 
@@ -1363,3 +1277,131 @@ def test_read_and_noop_commit_leave_legacy_project_and_generation_untouched(
     result = edit(services, lambda c: None)
     assert result.snapshot.generation == 0
     assert path.read_text() == raw
+
+
+@pytest.mark.parametrize("source", ["currentPlan", "storyboardPrompt"])
+def test_wrong_source_cannot_replace_a_user_video_edit(services, source):
+    edit(services, lambda c: c.update(video_prompt=VD + "用户新加的停顿。"))
+    before = services.projects.read(PID)
+
+    def unexpected():
+        raise AssertionError("Wrong source must fail before a model call")
+
+    service = PromptSyncService(services, client=client(unexpected))
+    with pytest.raises(ValidationError, match="同步来源"):
+        asyncio.run(service.propose(PID, TID, EID, source=source))
+    assert services.projects.read(PID).etag == before.etag
+    assert ProjectExecutionStore(services.root).list_tasks(PID) == []
+
+
+def test_accept_also_rejects_a_proposal_omitting_changed_source(services):
+    edit(services, lambda c: c.update(video_prompt=VD + "用户新加的停顿。"))
+    service = PromptSyncService(services, client=client())
+
+    async def run():
+        proposal = await service.propose(PID, TID, EID, source="videoPrompt")
+        record = service._record(PID, proposal["proposalId"])
+        record.write(
+            record.read().model_copy(update={"source": "storyboardPrompt"}),
+        )
+        etag = services.projects.read(PID).etag
+        with pytest.raises(ConflictError, match="遗漏了本次修改"):
+            await service.accept(PID, TID, EID, proposal["proposalId"])
+        assert services.projects.read(PID).etag == etag
+
+    asyncio.run(run())
+
+
+def test_sync_opens_edit_grace_before_commit_listeners_can_wake(
+    services,
+    monkeypatch,
+):
+    from services.project_files import frontend_edit_hold
+
+    plan_edit(services)
+    frontend_edit_hold.clear(PID)
+    commit = services.commit_candidate
+    observed = []
+
+    async def guarded(_self, **kwargs):
+        observed.append(frontend_edit_hold.hold_remaining(PID, EID))
+        return await commit(**kwargs)
+
+    monkeypatch.setattr(CreatorFileServices, "commit_candidate", guarded)
+    service = PromptSyncService(services, client=client())
+
+    async def run():
+        draft = await service.propose(PID, TID, EID)
+        await service.accept(PID, TID, EID, draft["proposalId"])
+
+    try:
+        asyncio.run(run())
+        assert len(observed) == 1 and observed[0] > 0
+    finally:
+        frontend_edit_hold.clear(PID)
+
+
+def test_valid_single_poster_remains_generatable_after_sync(services):
+    poster = "输出一张9:16竖向单幅海报，女子手持钥匙，无文字。"
+    edit(services, lambda c: c.update(storyboard_prompt=poster))
+    assert not state(services).get("validationMessage")
+    service = PromptSyncService(services, client=client())
+
+    async def run():
+        draft = await service.propose(PID, TID, EID, source="storyboardPrompt")
+        await service.accept(PID, TID, EID, draft["proposalId"])
+
+    asyncio.run(run())
+    current = state(services)
+    assert current["status"] == "current"
+    assert current["storyboardPrompt"] == poster
+    assert not current.get("validationMessage")
+
+
+def test_commit_hashes_only_touched_units_but_global_format_reaches_all(
+    services,
+    monkeypatch,
+):
+    from services.project_files import prompt_sync
+
+    base = services.projects.read(PID)
+    project = base.project.model_copy(deep=True)
+    elements = project.timelines.items[TID].elements_by_id
+    for index in range(40):
+        eid = f"unit-{index}"
+        elements[eid] = elements[EID].model_copy(
+            deep=True,
+            update={"element_id": eid},
+        )
+    project.generation += 1
+    services.projects.replace(PID, project, base.etag)
+    original = prompt_sync.sync_stamp
+    seen = []
+
+    def count(document, timeline_id, element_id):
+        seen.append(element_id)
+        return original(document, timeline_id, element_id)
+
+    monkeypatch.setattr(prompt_sync, "sync_stamp", count)
+    plan_edit(services)
+    assert set(seen) == {EID}
+    seen.clear()
+    base = services.projects.read(PID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["strategy"]["creative_brief"] = "Unrelated project note"
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin="frontend_edit",
+    )
+    assert seen == []
+    base = services.projects.read(PID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["settings"]["aspect_ratio"] = "16:9"
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin="frontend_edit",
+    )
+    assert set(seen) == set(elements) - {EID}
+    assert state(services)["status"] == "needs_update"

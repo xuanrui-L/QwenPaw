@@ -380,14 +380,14 @@ def test_redispatch_rescues_quarantined_stale_result(
 
 
 def _execute_safety(service, *, key, reference_urls=()):
-    arguments = {}
+    arguments = {"variantId": "default"}
     if reference_urls:
         arguments["referenceImageUrls"] = list(reference_urls)
     return asyncio.run(
         service.execute(
             project_id=PROJECT_ID,
-            command="GENERATE_STORYBOARD_IMAGE",
-            target_ref=f"element:{ELEMENT_ID}",
+            command="GENERATE_ASSET",
+            target_ref="asset:illustration",
             arguments=arguments,
             idempotency_key=key,
         ),
@@ -402,6 +402,36 @@ def test_safety_rejection_blocks_verbatim_refs_until_dropped(
     intercepted locally, and dropping them unblocks generation."""
 
     services = _services(tmp_path, monkeypatch)
+    # Exercise the generic image safety fence. Storyboard references now
+    # belong to the persisted project order and reject inline overrides.
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["visual"]["entities"] = {
+        "order": ["illustration"],
+        "items": {
+            "illustration": {
+                "entity_id": "illustration",
+                "kind": "character",
+                "name": "角色",
+                "required_variant_ids": ["default"],
+                "variants": {
+                    "order": ["default"],
+                    "items": {
+                        "default": {
+                            "variant_id": "default",
+                            "prompt": "动画角色身份板",
+                        },
+                    },
+                },
+            },
+        },
+    }
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.FRONTEND_EDIT,
+        review_policy=ReviewPolicy.AUTO_FIX,
+    )
     provider = _CountingProvider(fail_with=_SAFETY_MESSAGE)
     service = FileImageExecutionService(services, provider=provider)
 

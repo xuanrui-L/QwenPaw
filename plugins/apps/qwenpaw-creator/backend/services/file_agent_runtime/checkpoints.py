@@ -68,10 +68,7 @@ def required_checkpoint_phases(  # pylint: disable=too-many-return-statements  #
     )
 
     execution_mode = get_execution_mode()
-    if execution_mode in (
-        EXECUTION_MODE_DELEGATED,
-        EXECUTION_MODE_FINE_TUNING,
-    ):
+    if execution_mode == EXECUTION_MODE_DELEGATED:
         return ()
     script_flow = timeline_count is not None and timeline_count > 1
     if tool_name == "image_generation":
@@ -83,6 +80,8 @@ def required_checkpoint_phases(  # pylint: disable=too-many-return-statements  #
                 return (CHECKPOINT_STRUCTURE,)
             return ()
     elif tool_name != "r2v_generation":
+        return ()
+    if execution_mode == EXECUTION_MODE_FINE_TUNING:
         return ()
     # Storyboard images consume the approved designs.
     if script_flow:

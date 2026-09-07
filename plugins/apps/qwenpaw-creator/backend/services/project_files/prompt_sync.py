@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from domain.errors import ConflictError, NotFoundError, ValidationError
 
@@ -269,6 +269,7 @@ def derive_prompt_sync_changes(
     after: dict[str, Any],
     *,
     confirmation: tuple[str, str, str] | None = None,
+    changed_pointers: Iterable[str] | None = None,
 ) -> None:
     """Called under the Project CAS lock for every writer, including agents.
 
@@ -283,7 +284,30 @@ def derive_prompt_sync_changes(
             ]
             != token
         ):
-            raise ConflictError("镜头计划或提示词已更新，请重新审阅最新内容")
+            raise ConflictError("片段内容或提示词已更新，请按最新内容重新生成")
+    paths = (
+        [split_pointer(pointer) for pointer in changed_pointers]
+        if changed_pointers is not None
+        else None
+    )
+
+    def affected(timeline_id: str, element_id: str) -> bool:
+        if paths is None or (
+            confirmation and confirmation[:2] == (timeline_id, element_id)
+        ):
+            return True
+        roots = (
+            ("settings", "aspect_ratio"),
+            ("settings", "resolution"),
+            ("timelines", "items", timeline_id, "ticks_per_second"),
+            ("timelines", "items", timeline_id, "elements_by_id", element_id),
+        )
+        return any(
+            path[: len(root)] == root or root[: len(path)] == path
+            for path in paths
+            for root in roots
+        )
+
     old_timelines = before.get("timelines", {}).get("items", {})
     for timeline_id, timeline in (
         after.get("timelines", {}).get("items", {}).items()
@@ -293,7 +317,8 @@ def derive_prompt_sync_changes(
         for element_id, element in timeline.get("elements_by_id", {}).items():
             creation = element.get("creation", {})
             if (
-                element_id.startswith("snapshot:")
+                not affected(timeline_id, element_id)
+                or element_id.startswith("snapshot:")
                 or creation.get("type") != "r2v"
             ):
                 continue
@@ -312,11 +337,16 @@ def derive_prompt_sync_changes(
                     timeline_id,
                     element_id,
                 )
-            elif old_sync and _only_redundant_storyboard_refs_changed(
-                before,
-                after,
-                timeline_id,
-                element_id,
+            elif (
+                old_sync
+                and old["creation"].get("video_reference_version_ids")
+                != creation.get("video_reference_version_ids")
+                and _only_redundant_storyboard_refs_changed(
+                    before,
+                    after,
+                    timeline_id,
+                    element_id,
+                )
             ):
                 creation["prompt_sync"] = sync_stamp(
                     after,

@@ -24,10 +24,15 @@ _INACTIVE_STATE_WORDS = {"已取消", "已禁用", "已删除", "review-disabled
 
 
 def _active_prompt_texts() -> list[str]:
+    from services.file_agent_runtime.workgraph_execution import (
+        request_workgraph_tool_manifest,
+    )
+
     project = Project.new(project_id="project-prompt-test", name="Prompt Test")
     texts = [
         render_creator_system_prompt(project_id=project.project_id),
         json.dumps(delegate_tool_manifest(), ensure_ascii=False),
+        json.dumps(request_workgraph_tool_manifest(), ensure_ascii=False),
     ]
     texts.extend(
         specialist_system_prompt(

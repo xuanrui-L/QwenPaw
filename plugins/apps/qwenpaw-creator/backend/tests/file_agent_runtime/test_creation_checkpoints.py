@@ -274,3 +274,40 @@ def test_concurrent_user_decision_wins_retirement_cas(
         ).status
         is ExecutionAuthorizationStatus.REJECTED
     )
+
+
+@pytest.mark.parametrize("mode", ["delegated", "fine_tuning", "co_creation"])
+@pytest.mark.parametrize("count", [1, 3])
+def test_visual_structure_gate_survives_plan_retirement(
+    monkeypatch,
+    mode,
+    count,
+):
+    from models import config as model_config
+
+    monkeypatch.setattr(model_config, "get_execution_mode", lambda: mode)
+    expected = (
+        (CHECKPOINT_STRUCTURE,) if count > 1 and mode != "delegated" else ()
+    )
+    assert (
+        required_checkpoint_phases(
+            "image_generation",
+            SpecialistRole.VISUAL_DEVELOPMENT,
+            timeline_count=count,
+        )
+        == expected
+    )
+    expected_r2v = ()
+    if mode == "co_creation":
+        expected_r2v = (
+            (CHECKPOINT_STRUCTURE, CHECKPOINT_SCRIPT) if count > 1 else ()
+        ) + (CHECKPOINT_DESIGN,)
+    for tool in ("image_generation", "r2v_generation"):
+        assert (
+            required_checkpoint_phases(
+                tool,
+                SpecialistRole.R2V_GENERATION_DIRECTOR,
+                timeline_count=count,
+            )
+            == expected_r2v
+        )

@@ -131,6 +131,7 @@ def test_legacy_history_retires_without_approval_or_project_rewrite(
     before = project_path.read_bytes()
     accepted = read_state(store).accepted_generation
     service = ProjectReviewService(store)
+    service.recover_project(PID)
     pending = service.all_pending(PID)
     updated = service.get(PID, record.review_id)
     assert all(
@@ -188,8 +189,9 @@ def test_system_decision_recovers_after_review_write_failure(
 
     monkeypatch.setattr(service, "_write_review", fail)
     with pytest.raises(OSError, match="controlled"):
-        service.all_pending(PID)
+        service.retire_internal_operations(PID)
     monkeypatch.setattr(service, "_write_review", original)
+    service.recover_project(PID)
     assert service.all_pending(PID) == []
     events = (
         (
@@ -279,6 +281,7 @@ def test_legacy_shot_review_retires_but_current_content_still_needs_decision(
     project_path = store.project_root(PID) / "project.json"
     before = project_path.read_bytes()
     service = ProjectReviewService(store)
+    service.recover_project(PID)
     pending = service.all_pending(PID)
     assert bool(pending) is not content_accepted
     updated = service.get(PID, record.review_id)
@@ -287,3 +290,24 @@ def test_legacy_shot_review_retires_but_current_content_still_needs_decision(
     )
     assert retired.decision is ReviewOperationDecision.ACCEPTED
     assert project_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("content_accepted", [False, True])
+def test_pending_read_under_lifecycle_lock_never_writes(
+    tmp_path,
+    monkeypatch,
+    content_accepted,
+):
+    store, base, result = _commit(tmp_path)
+    _, path = _legacy(store, base, result, content_accepted=content_accepted)
+    before = path.read_bytes()
+    service = ProjectReviewService(store)
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("A read must not settle review records")
+
+    monkeypatch.setattr(service, "_settle_internal_operations", unexpected)
+    with store.lifecycle_lock(PID):
+        pending = service.all_pending(PID)
+    assert bool(pending) is not content_accepted
+    assert path.read_bytes() == before

@@ -110,25 +110,17 @@ def test_professional_media_prompt_skill_is_builtin(
 
     loaded = {skill.entry.name: skill for skill in load_skills()}
     skill = loaded["professional-media-prompts"]
-    assert "正方形网格（N 列×N 行）" in skill.skill_md
-    assert "只有列数等于行数时单格才等于外层画幅" in skill.skill_md
-    assert "2–4 格→2×2，5–9 格→3×3" in skill.skill_md
-    assert "同一格内每个已命名角色只能" in skill.skill_md
-    assert "`clear spatial labels` 和 `no text`" in skill.skill_md
-    # One authored convention replaced the per-provider dialect table.
-    assert "引用参考图统一写 `[Image 1]`" in skill.skill_md
-    assert "不编写供应商原生图片标记" in skill.skill_md
     assert skill.available
     parsed = external_skills.parse_skill_md(skill.skill_md)
-    assert "角色身份板/设定图" in parsed["description"]
-    assert "电影分镜图" in parsed["body"]
-    assert "参考资产职责映射" in parsed["body"]
-    assert "Seedance 2.5" in parsed["body"]
-    # The per-provider dialect table is gone: one authored convention, with
-    # the runtime rendering it to each provider's documented syntax.
-    assert "引用参考图统一写 `[Image 1]`" in parsed["body"]
-    assert "统一写" in parsed["body"]
-    assert "每一个独立面板内部画框" in parsed["body"]
+    assert parsed["description"] and parsed["body"]
+    # Keep the interoperable reference convention covered; layout semantics
+    # belong to executable layout tests, not exact prose-copy assertions.
+    assert "[Image 1]" in parsed["body"]
+    viewed = external_skills.view_skill(
+        skill_name="professional-media-prompts",
+    )
+    assert viewed["ok"] is True
+    assert viewed["content"] == skill.skill_md
 
 
 def test_visual_asset_design_skill_is_builtin(

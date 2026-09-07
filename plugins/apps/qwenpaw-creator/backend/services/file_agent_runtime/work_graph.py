@@ -697,6 +697,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             status = WorkNodeStatus.FAILED
         else:
             status = WorkNodeStatus.READY
+        story_missing = any(
+            visual_story_missing(project, ref) for ref in lineup.character_refs
+        )
+        if status is WorkNodeStatus.READY and story_missing:
+            status = WorkNodeStatus.GATED
+            missing = (STORY_BEFORE_VISUAL_MESSAGE,)
         add(
             WorkNode(
                 node_id=node_id,
@@ -713,6 +719,8 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     else None
                 ),
                 missing=missing,
+                authored_text_gap=story_missing
+                and status is WorkNodeStatus.GATED,
                 locator={"page": "assets"},
                 command="GENERATE_CAST_LINEUP_IMAGE",
                 target_ref=f"lineup:{lineup_id}",

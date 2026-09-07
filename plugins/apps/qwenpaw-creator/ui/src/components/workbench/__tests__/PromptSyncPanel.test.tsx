@@ -66,7 +66,7 @@ describe("automatic synchronization context", () => {
     );
     const p = props();
     const view = render(<PromptSyncPanel {...p} />);
-    await screen.findByText("生成时会重新检查镜头与提示词");
+    await screen.findByText("生成时会重新检查片段内容与提示词");
     vi.useFakeTimers();
     view.rerender(<PromptSyncPanel {...p} working />);
     await act(() => vi.advanceTimersByTimeAsync(5000));

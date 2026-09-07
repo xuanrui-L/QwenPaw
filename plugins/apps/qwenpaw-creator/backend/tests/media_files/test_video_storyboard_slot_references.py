@@ -244,3 +244,34 @@ def test_publication_preserves_frozen_inputs_without_recompilation(
         snapshot.project,
         task,
     )
+
+
+@pytest.mark.parametrize("index", [0, 5, 99])
+def test_video_marker_out_of_range_stops_before_media_resolution(
+    tmp_path,
+    monkeypatch,
+    index,
+):
+    from domain.errors import ValidationError
+    from services.media_files import r2v_execution
+
+    snapshot, element, _ = _renewed(tmp_path, monkeypatch)
+    element.creation.video_prompt = f"参照 [Image {index}] 生成连续动作。"
+
+    def unexpected(**kwargs):
+        raise AssertionError(
+            "Invalid marker must not resolve or dispatch media",
+        )
+
+    monkeypatch.setattr(
+        r2v_execution,
+        "_resolve_reference_versions",
+        unexpected,
+    )
+    with pytest.raises(ValidationError, match="参考图编号"):
+        _resolve_request(
+            snapshot=snapshot,
+            project_root=tmp_path,
+            target_ref=f"element:{element.element_id}",
+            arguments={},
+        )

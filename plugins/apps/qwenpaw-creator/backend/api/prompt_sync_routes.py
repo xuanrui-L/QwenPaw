@@ -25,14 +25,6 @@ class PromptProposalRequest(StrictModel):
     source: PromptSyncSource = "currentPlan"
 
 
-class PromptConfirmRequest(StrictModel):
-    baseline_token: str = Field(
-        alias="baselineToken",
-        min_length=64,
-        max_length=64,
-    )
-
-
 @router.get("/prompt-sync")
 async def prompt_status(
     project_id: str,
@@ -78,20 +70,4 @@ async def accept_prompts(
         timeline_id,
         element_id,
         proposal_id,
-    )
-
-
-@router.post("/prompt-sync/confirm")
-async def confirm_prompts(
-    project_id: str,
-    timeline_id: str,
-    element_id: str,
-    request: PromptConfirmRequest,
-    services=Depends(project_file_services),
-):
-    return await PromptSyncService(services).confirm(
-        project_id,
-        timeline_id,
-        element_id,
-        request.baseline_token,
     )

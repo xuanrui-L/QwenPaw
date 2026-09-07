@@ -218,6 +218,7 @@ from .workgraph_execution import (
     requested_work_node,
     request_workgraph_tool_manifest,
     summarize_workgraph_results,
+    workgraph_blocking_reviews,
     workgraph_waits_only_for_review,
 )
 from .work_scheduler import WorkGraphScheduler
@@ -3544,8 +3545,10 @@ class FileCreatorAgentRuntime:
                     # interpretation. Join only real pending reviews and let
                     # the existing review-decision continuation resume later.
                     pending = await asyncio.to_thread(
-                        self.services.reviews.all_pending,
+                        workgraph_blocking_reviews,
+                        self.services,
                         project_id,
+                        result,
                     )
                     if pending:
                         self._assert_epoch(project_id, run_id, epoch)

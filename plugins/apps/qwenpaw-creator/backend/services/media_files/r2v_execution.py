@@ -52,6 +52,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from models.reference_markers import canonical_marker_indices
 from schemas.common import StrictModel
 from services.project_files.assets import (
     AssetAlreadyExists,
@@ -1335,6 +1336,13 @@ def _resolve_request(
 
     if mode == "r2v":
         version_ids = video_reference_plan(project, element)
+        if any(
+            not 1 <= index <= len(version_ids)
+            for index in canonical_marker_indices(prompt)
+        ):
+            raise ValidationError(
+                "参考图编号超出本次实际图片序列；请核对 [Image N] 与参考图片列表，本次未调用视频模型。",
+            )
         _assert_r2v_reference_budget(
             project,
             version_ids,

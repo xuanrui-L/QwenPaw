@@ -710,7 +710,8 @@ def test_permanent_400_is_never_retried_as_throttling(monkeypatch, structured):
     assert notices == []
 
 
-def test_context_400_recovers_once_only_with_smaller_input():
+@pytest.mark.parametrize("persistent", [False, True])
+def test_context_400_recovers_once_only_with_smaller_input(persistent):
     notices = []
 
     class ContextLimitedModel:
@@ -718,7 +719,7 @@ def test_context_400_recovers_once_only_with_smaller_input():
 
         async def __call__(self, messages, *, tools=None):
             self.seen.append(messages)
-            if len(self.seen) == 1:
+            if persistent or len(self.seen) == 1:
                 raise RuntimeError(
                     "Error code: 400 input length should be [1, 983616]; request_id 4294abf",
                 )
@@ -763,14 +764,16 @@ def test_context_400_recovers_once_only_with_smaller_input():
         notices.append(value)
 
     provider = ContextLimitedModel()
-    result = asyncio.run(
-        AgentScopeAgentChatClient(provider).complete(
-            messages=messages,
-            tools=[],
-            on_rate_limit_retry=notice,
-        ),
+    request = AgentScopeAgentChatClient(provider).complete(
+        messages=messages,
+        tools=[],
+        on_rate_limit_retry=notice,
     )
-    assert result.content == "继续制作"
+    if persistent:
+        with pytest.raises(model_client.AgentModelError):
+            asyncio.run(request)
+    else:
+        assert asyncio.run(request).content == "继续制作"
     assert len(provider.seen) == 2
     assert len(provider.seen[1]) < len(provider.seen[0])
     assert [
@@ -883,3 +886,34 @@ def test_model_retry_recovery_reports_real_cause_and_backoff(
         (reason, attempt, delay) for attempt, delay in enumerate(delays, 1)
     ]
     assert sleeps == [delay for delay in delays if delay]
+
+
+def test_context_400_without_smaller_valid_context_never_retries():
+    notices = []
+
+    class Provider:
+        calls = 0
+
+        async def __call__(self, messages, *, tools=None):
+            self.calls += 1
+            raise RuntimeError(
+                "Error code: 400 input length should be [1, 983616]",
+            )
+
+    async def notice(value):
+        notices.append(value)
+
+    provider = Provider()
+    with pytest.raises(model_client.AgentModelError):
+        asyncio.run(
+            AgentScopeAgentChatClient(provider).complete(
+                messages=[
+                    {"role": "system", "content": "不可省略的任务规则" * 100},
+                    {"role": "user", "content": "当前请求必须保留" * 100},
+                ],
+                tools=[],
+                on_rate_limit_retry=notice,
+            ),
+        )
+    assert provider.calls == 1
+    assert notices == []

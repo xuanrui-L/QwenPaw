@@ -36,6 +36,11 @@ function NodeRow({
   const dispatching = useWorkGraphStore((state) =>
     Boolean(state.dispatching[node.id]),
   );
+  const actionLabel = t(
+    `workGraph.actions.${node.kind}.${
+      node.status === "failed" ? "retry" : "generate"
+    }`,
+  );
   const showAction =
     node.dispatchable &&
     node.missing.length === 0 &&
@@ -90,6 +95,7 @@ function NodeRow({
         <button
           type="button"
           disabled={dispatching}
+          aria-label={`${actionLabel} · ${publicLabel}`}
           className="agent-work-action"
           onClick={() =>
             void dispatch(projectId, node.id).catch(() =>
@@ -100,11 +106,7 @@ function NodeRow({
           {dispatching ? (
             <Loader2 className="h-3 w-3 animate-spin" />
           ) : (
-            t(
-              node.status === "failed"
-                ? "workGraph.retry"
-                : "workGraph.generate",
-            )
+            actionLabel
           )}
         </button>
       )}

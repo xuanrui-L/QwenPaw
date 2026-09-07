@@ -398,6 +398,19 @@ class ProjectReviewService:
         *,
         _lifecycle_lock_held: bool = False,
     ) -> list[ReviewRecord]:
+        """Read pending creative decisions without acquiring write locks."""
+        del _lifecycle_lock_held  # Retained for existing read callers.
+        return [
+            review
+            for review in self._pending_records(project_id)
+            if any(
+                operation.decision is ReviewOperationDecision.PENDING
+                and is_human_review_change(operation)
+                for operation in review.operations
+            )
+        ]
+
+    def _pending_records(self, project_id: str) -> list[ReviewRecord]:
         runtime_root = self.store.project_root(project_id) / "runtime"
         reviews_root = runtime_root / "reviews"
         if not reviews_root.is_dir():
@@ -411,14 +424,22 @@ class ProjectReviewService:
                 ReviewRecord,
             ).read_or_none()
             if review is not None and review.status is ReviewStatus.PENDING:
-                review = self._settle_internal_operations(
-                    project_id,
-                    review,
-                    _lifecycle_lock_held=_lifecycle_lock_held,
-                )
-                if review.status is ReviewStatus.PENDING:
-                    candidates.append(review)
+                candidates.append(review)
         return sorted(candidates, key=lambda item: item.created_at)
+
+    def retire_internal_operations(
+        self,
+        project_id: str,
+        *,
+        _lifecycle_lock_held: bool = False,
+    ) -> None:
+        """Explicit recovery mutation; ordinary review reads stay lock-free."""
+        for review in self._pending_records(project_id):
+            self._settle_internal_operations(
+                project_id,
+                review,
+                _lifecycle_lock_held=_lifecycle_lock_held,
+            )
 
     def _settle_internal_operations(
         self,
@@ -666,6 +687,10 @@ class ProjectReviewService:
                             detail=f"{type(exc).__name__}: {exc}",
                         ),
                     )
+            self.retire_internal_operations(
+                project_id,
+                _lifecycle_lock_held=True,
+            )
         return ProjectReviewRecoveryReport(
             project_id=project_id,
             outcomes=tuple(outcomes),

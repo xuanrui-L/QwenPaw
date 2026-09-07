@@ -184,7 +184,7 @@ export default function ProjectLayout() {
     if (state.projectId !== id || state.graph?.projectId !== id) return false;
     const counts = state.graph?.counts;
     if (!counts) return false;
-    return (counts.running ?? 0) > 0 || (counts.ready ?? 0) > 0;
+    return (counts.running ?? 0) > 0;
   });
   const startProjectSnapshotPolling = useProjectSnapshotStore(
     (state) => state.startPolling,

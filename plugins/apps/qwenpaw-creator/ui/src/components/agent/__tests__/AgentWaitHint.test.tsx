@@ -82,3 +82,19 @@ it("shows all affected roles without inventing missing timing or exposing identi
   expect(document.body.textContent).toContain("分镜师 · 模型限流");
   expect(document.body.textContent).not.toMatch(/private-|秒后|%/);
 });
+
+it("changes the long wait hint from elapsed time and resets for a different project", async () => {
+  const view = render(<AgentWaitHint projectId="p1" active retrying={false} />);
+  const initial = view.container.textContent;
+  await act(() => vi.advanceTimersByTimeAsync(29_999));
+  expect(view.container.textContent).toBe(initial);
+  await act(() => vi.advanceTimersByTimeAsync(1));
+  expect(view.container.textContent).not.toBe(initial);
+  expect(view.container.textContent).not.toMatch(/%|秒后完成|剩余/);
+  view.rerender(<AgentWaitHint projectId="p2" active retrying={false} />);
+  expect(view.container.textContent).toBe(initial);
+  view.rerender(
+    <AgentWaitHint projectId="p2" active={false} retrying={false} />,
+  );
+  expect(view.container).toBeEmptyDOMElement();
+});

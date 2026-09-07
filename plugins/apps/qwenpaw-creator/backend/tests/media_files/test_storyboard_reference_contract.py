@@ -392,3 +392,55 @@ def test_storyboard_legacy_auto_budget_plan_matches_preview(tmp_path):
     )
     assert [ref["versionId"] for ref in pinned["references"]] == ids
     assert pinned["budgetDroppedVersionIds"] == [] and not pinned["ready"]
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "referenceVersionIds",
+        "referenceAssetVersionIds",
+        "referenceImageRefs",
+        "referenceImageUrls",
+    ],
+)
+@pytest.mark.parametrize("authored", [True, False])
+def test_inline_storyboard_references_cannot_bypass_project_preview(
+    tmp_path,
+    argument,
+    authored,
+):
+    snapshot = _snapshot()
+    if not authored:
+        snapshot.project.timelines.items["timeline:main"].elements_by_id[
+            "shot:one"
+        ].creation.storyboard_reference_version_ids = []
+    with pytest.raises(
+        ValidationError,
+        match="storyboard_reference_version_ids",
+    ):
+        _resolve_request(
+            snapshot=snapshot,
+            project_root=tmp_path,
+            command=CreatorCommandType.GENERATE_STORYBOARD_IMAGE,
+            target_ref="element:shot:one",
+            arguments={
+                argument: ["https://images.example/override.png"]
+                if argument == "referenceImageUrls"
+                else ["src:m-prop"],
+            },
+            image_model_name="qwen-image-3.0-pro",
+        )
+
+
+@pytest.mark.parametrize(
+    "grid,count",
+    [("2x2宫格", 4), ("3×3宫格", 9), ("4行4列宫格", 16)],
+)
+def test_resolved_storyboard_request_keeps_authored_grid_contract(
+    tmp_path,
+    grid,
+    count,
+):
+    request = _resolve(_snapshot(f"9:16画布，{grid}，完整展示动作。"), tmp_path)
+    assert f"exactly {count}" in request.prompt
+    assert "row-major" in request.prompt

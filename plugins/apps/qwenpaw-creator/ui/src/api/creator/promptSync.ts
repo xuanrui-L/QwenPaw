@@ -112,12 +112,3 @@ export function acceptPromptProposal(
     { method: "POST", body: jsonBody({}) },
   );
 }
-export function confirmPromptSync(
-  scope: PromptSyncScope,
-  baselineToken: string,
-) {
-  return creatorRequest(`${scopePath(scope)}/prompt-sync/confirm`, {
-    method: "POST",
-    body: jsonBody({ baselineToken }),
-  });
-}

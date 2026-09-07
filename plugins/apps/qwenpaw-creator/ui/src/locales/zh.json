@@ -780,70 +780,22 @@
     "assetPickerConfirm": "确认（{{count}}）",
     "assetPickerEmpty": "暂无可添加的资产",
     "relatedAssets": "相关资产",
-    "plan": {
-      "title": "镜头内容",
-      "summary": "{{count}} 个镜头 · {{seconds}} 秒",
-      "edit": "编辑内容",
-      "collapse": "收起",
-      "hint": "画面、动作、对白、旁白与声音写在同一段描述中。",
-      "shot": "镜头 {{index}}",
-      "actionLabel": "画面、动作与声音",
-      "actionAria": "镜头 {{index}} 的完整内容",
-      "remove": "删除镜头 {{index}}",
-      "noRoom": "当前时长不足以再拆分镜头，请先调整时间线中的片段时长。",
-      "durationHint": "镜头安排超出片段时长，请调整分配后再同步提示词。",
-      "dialogueLabel": "对白",
-      "contentHint": "描述画面与动作；如有对白、旁白、环境声或静默要求，也请写在这里。台词请逐字填写。",
-      "expandPane": "展开镜头内容",
-      "collapsePane": "收起镜头内容",
-      "resizePane": "调整镜头栏宽度"
-    },
     "sync": {
       "status": {
-        "legacy": "镜头与提示词可查看",
-        "current": "镜头与提示词已同步",
-        "needs_update": "镜头与提示词待同步",
+        "legacy": "片段内容与提示词可查看",
+        "current": "片段内容与提示词已同步",
+        "needs_update": "片段内容与提示词待同步",
         "needs_confirmation": "提示词修改待同步",
         "draft": "内容编辑中",
-        "checking": "正在核对镜头与提示词"
+        "checking": "正在读取片段内容与提示词"
       },
-      "description": "镜头内容、分镜图与视频提示词相互同步，修改后一起检查。",
-      "planChanged": "镜头内容已变化，请同步提示词后再生成图片或视频。",
-      "manualChanged": "提示词已修改，请同步镜头内容与另一份提示词。",
-      "update": "同步镜头与提示词",
-      "reviewExisting": "核对现有内容",
-      "preparing": "正在准备生成",
-      "waiting": "已等待 {{seconds}} 秒 · 完成后可检查具体修改",
-      "reviewTitle": "检查镜头与提示词的修改",
-      "confirmTitle": "核对镜头与提示词",
-      "reviewHint": "查看三项内容的差异，接受后一起保存。图片与视频由您另行生成。",
-      "confirmHint": "请核对镜头内容与两份提示词的画面、动作、对白、旁白及声音要求一致。确认后保留现有内容。",
-      "reviewBoth": "请查看三项内容后再接受",
-      "storyboard": "分镜图提示词",
-      "video": "视频提示词",
-      "accept": "接受全部修改",
-      "confirm": "确认与内容一致",
-      "outdated": "镜头内容或提示词已变化，请关闭并重新检查，避免覆盖新的修改。",
-      "beforeGeneration": "请先同步或核对镜头与提示词，再继续生成。",
-      "checkFailed": "暂时无法核对镜头与提示词，请重试。",
-      "retry": "重新核对",
-      "overviewAttention": "提示词待处理",
       "preparationWaiting": "准备生成内容",
       "preparationRunning": "正在准备生成内容",
       "preparationFailed": "生成准备遇到问题",
-      "reviewAll": "请查看三项内容后再接受",
-      "source": {
-        "currentPlan": "根据镜头内容同步两份提示词",
-        "storyboardPrompt": "根据分镜图提示词同步镜头与视频提示词",
-        "videoPrompt": "根据视频提示词同步镜头与分镜图提示词",
-        "mixed": "根据当前修改同步三项内容"
-      },
       "automaticWaiting": "正在准备生成 · 已等待 {{seconds}} 秒",
-      "checkOnGenerate": "生成时会重新检查镜头与提示词",
+      "checkOnGenerate": "生成时会重新检查片段内容与提示词",
       "savedNextGenerate": "修改已保存，重新生成时会同步关联内容",
-      "changedBeforeGeneration": "内容在同步后又有变化，请按最新内容重新生成。",
-      "regenerateImage": "同步并重新生成分镜图",
-      "regenerateVideo": "同步并重新生成视频"
+      "changedBeforeGeneration": "内容在同步后又有变化，请按最新内容重新生成。"
     },
     "editorChangedTitle": "提示词已在其他位置更新",
     "editorChangedDescription": "当前编辑暂时保留。请选择重新载入最新内容，或明确保留您的编辑后再完成。",
@@ -1092,7 +1044,33 @@
     "mediaCalls": "媒体调用 {{used}}/{{budget}}",
     "progress": "进度 {{done}}/{{total}}",
     "failed": "失败 {{count}}",
-    "listSeparator": "、"
+    "listSeparator": "、",
+    "actions": {
+      "script": {
+        "generate": "生成剧本",
+        "retry": "重新生成剧本"
+      },
+      "visual": {
+        "generate": "生成设定图",
+        "retry": "重新生成设定图"
+      },
+      "lineup": {
+        "generate": "生成阵容图",
+        "retry": "重新生成阵容图"
+      },
+      "storyboard": {
+        "generate": "生成分镜图",
+        "retry": "重新生成分镜图"
+      },
+      "video": {
+        "generate": "生成视频",
+        "retry": "重新生成视频"
+      },
+      "compose": {
+        "generate": "合成成片",
+        "retry": "重新合成成片"
+      }
+    }
   },
   "decisionTray": {
     "productionConfirm": "生产确认 · ",

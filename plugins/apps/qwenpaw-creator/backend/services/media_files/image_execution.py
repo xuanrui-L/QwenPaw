@@ -437,7 +437,7 @@ def _safety_rejection_note(resolved: _ResolvedRequest) -> str:
         listed = ", ".join(refs[:6])
         return (
             f"本次调用携带了图片参考 [{listed}]。safety 拒绝通常由含真人照片的"
-            "参考图触发：在移除这些参考（置空 referenceVersionIds 改用纯文本，"
+            "参考图触发：在移除这些参考（先更新项目中的参考图选择，"
             "或改用已生成的风格化 artifact-version id）之前，仅修改 prompt 的"
             "重试不会成功。"
         )
@@ -755,6 +755,20 @@ def _resolve_request(
     max_reference_images: int | None = None,
 ) -> _ResolvedRequest:
     project = snapshot.project
+    if command is CreatorCommandType.GENERATE_STORYBOARD_IMAGE:
+        if any(
+            key in arguments
+            for key in (
+                "referenceVersionIds",
+                "referenceAssetVersionIds",
+                "referenceImageRefs",
+                "referenceImageUrls",
+            )
+        ):
+            raise ValidationError(
+                "分镜图参考图必须来自项目中的 storyboard_reference_version_ids；"
+                "请先保存参考图选择，再生成分镜图，以保持预览与模型输入顺序一致",
+            )
     explicit_prompt = str(arguments.get("prompt") or "").strip()
     mode = (
         str(arguments.get("mode") or "generate").strip().casefold()
@@ -1570,15 +1584,25 @@ class FileImageExecutionService:
             )
 
         base = await asyncio.to_thread(self.services.projects.read, project_id)
-        if command_value is CreatorCommandType.GENERATE_ASSET:
+        if command_value in (
+            CreatorCommandType.GENERATE_ASSET,
+            CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE,
+        ):
             from services.project_files.blueprint_readiness import (
                 STORY_BEFORE_VISUAL_MESSAGE,
                 visual_story_missing,
             )
 
-            if visual_story_missing(
-                base.project,
-                target_ref.removeprefix("asset:"),
+            if command_value is CreatorCommandType.GENERATE_ASSET:
+                story_targets = (target_ref.removeprefix("asset:"),)
+            else:
+                lineup = base.project.visual.cast_lineups.items.get(
+                    target_ref.removeprefix("lineup:"),
+                )
+                story_targets = lineup.character_refs if lineup else ()
+            if any(
+                visual_story_missing(base.project, target)
+                for target in story_targets
             ):
                 raise ValidationError(STORY_BEFORE_VISUAL_MESSAGE)
         conflicts = [

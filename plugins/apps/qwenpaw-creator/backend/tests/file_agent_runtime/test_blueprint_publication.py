@@ -107,3 +107,63 @@ def test_direct_visual_command_cannot_bypass_story_publication(tmp_path):
         )
     assert not provider.mock_calls
     assert service.executions.list_tasks(project.project_id) == []
+
+
+def test_uploaded_character_anchors_do_not_bypass_lineup_story_gate(tmp_path):
+    from services.project_files.models import VisualCastLineup
+    from test_work_graph import _select_slot
+
+    project = unpublished_project()
+    project.visual.entities.items["char:puppy"] = _entity(
+        "char:puppy",
+        {"default": "uploaded-anchor"},
+    )
+    project.visual.entities.items["char:friend"] = _entity(
+        "char:friend",
+        {"default": "uploaded-friend"},
+    )
+    project.visual.entities.order.append("char:friend")
+    project.visual.cast_lineups.items["cast"] = VisualCastLineup(
+        lineup_id="cast",
+        name="小狗合影",
+        character_refs=["char:puppy", "char:friend"],
+    )
+    project.visual.cast_lineups.order.append("cast")
+    for owner, version_id in (
+        ("char:puppy", "uploaded-anchor"),
+        ("char:friend", "uploaded-friend"),
+    ):
+        project.visual.entities.items[owner].variants.items[
+            "default"
+        ].generated_artifact_version_ids = [version_id]
+        _select_slot(
+            project,
+            slot_id=f"asset:{owner}:default",
+            kind="visual_asset_image",
+            owner_ref=f"asset:{owner}",
+            version_id=version_id,
+        )
+    node = derive_work_graph(project).by_id["lineup:cast"]
+    assert node.status is WorkNodeStatus.GATED and node.authored_text_gap
+    services = CreatorFileServices.create(tmp_path.resolve())
+    services.projects.create(project)
+    provider = AsyncMock()
+    service = FileImageExecutionService(services, provider=provider)
+    provider.reset_mock()
+    with pytest.raises(ValidationError, match="先在剧集蓝图"):
+        asyncio.run(
+            service.execute(
+                project_id=project.project_id,
+                command="GENERATE_CAST_LINEUP_IMAGE",
+                target_ref="lineup:cast",
+                arguments={},
+                idempotency_key="no-lineup-before-story",
+            ),
+        )
+    assert not provider.mock_calls
+    assert service.executions.list_tasks(project.project_id) == []
+    project.timelines.items["timeline:main"].synopsis = "小狗们相遇，互相打招呼并合影。"
+    assert (
+        derive_work_graph(project).by_id["lineup:cast"].status
+        is WorkNodeStatus.READY
+    )

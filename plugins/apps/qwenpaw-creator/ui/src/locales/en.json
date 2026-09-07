@@ -780,70 +780,22 @@
     "assetPickerConfirm": "Confirm ({{count}})",
     "assetPickerEmpty": "No assets available",
     "relatedAssets": "Related Assets",
-    "plan": {
-      "title": "Shot content",
-      "summary": "{{count}} shots · {{seconds}} seconds",
-      "edit": "Edit content",
-      "collapse": "Collapse",
-      "hint": "Describe the action, dialogue, narration and sound together.",
-      "shot": "Shot {{index}}",
-      "actionLabel": "Visuals, action and sound",
-      "actionAria": "Full content of shot {{index}}",
-      "remove": "Delete shot {{index}}",
-      "noRoom": "There is not enough time for another shot. Adjust the clip duration in the timeline first.",
-      "durationHint": "The shot plan exceeds the clip duration. Adjust timing before synchronizing prompts.",
-      "dialogueLabel": "Dialogue",
-      "contentHint": "Describe the visuals and action, including any dialogue, narration, ambience or silence. Write spoken lines verbatim.",
-      "expandPane": "Expand shot content",
-      "collapsePane": "Collapse shot content",
-      "resizePane": "Resize shot content"
-    },
     "sync": {
       "status": {
-        "legacy": "Shots and prompts available",
-        "current": "Shots and prompts synchronized",
-        "needs_update": "Shots and prompts need synchronization",
+        "legacy": "Content and prompts available",
+        "current": "Content and prompts synchronized",
+        "needs_update": "Content and prompts need synchronization",
         "needs_confirmation": "Prompt changes need synchronization",
         "draft": "Editing content",
-        "checking": "Checking shots and prompts"
+        "checking": "Loading content and prompts"
       },
-      "description": "Keep shot content, the storyboard prompt and the video prompt in sync. Review changes together.",
-      "planChanged": "Shot content changed. Synchronize prompts before generating images or video.",
-      "manualChanged": "A prompt changed. Synchronize shot content and the other prompt.",
-      "update": "Sync shots and prompts",
-      "reviewExisting": "Review current content",
-      "preparing": "Preparing generation",
-      "waiting": "Waiting {{seconds}} seconds · Review the changes when ready",
-      "reviewTitle": "Review shot and prompt changes",
-      "confirmTitle": "Review shots and prompts",
-      "reviewHint": "Review the changes to all three items, then save them together. Generate images and video separately.",
-      "confirmHint": "Check that shot content and both prompts agree on visuals, action, dialogue, narration and sound. Confirmation keeps the current content.",
-      "reviewBoth": "Review all three items before accepting",
-      "storyboard": "Storyboard prompt",
-      "video": "Video prompt",
-      "accept": "Accept all changes",
-      "confirm": "Confirm instructions match",
-      "outdated": "The content or prompts have changed. Close this review and check again to preserve newer edits.",
-      "beforeGeneration": "Synchronize or review shots and prompts before generating.",
-      "checkFailed": "Could not check shots and prompts. Please retry.",
-      "retry": "Check again",
-      "overviewAttention": "Prompts need attention",
       "preparationWaiting": "Preparing generation content",
       "preparationRunning": "Preparing generation content now",
       "preparationFailed": "Generation preparation needs attention",
-      "reviewAll": "Review all three items before accepting",
-      "source": {
-        "currentPlan": "Update both prompts from shot content",
-        "storyboardPrompt": "Update shots and video prompt from the storyboard prompt",
-        "videoPrompt": "Update shots and storyboard prompt from the video prompt",
-        "mixed": "Synchronize all three from the current changes"
-      },
       "automaticWaiting": "Preparing generation · {{seconds}}s elapsed",
-      "checkOnGenerate": "Shots and prompts will be checked before generation",
+      "checkOnGenerate": "Content and prompts will be checked before generation",
       "savedNextGenerate": "Changes saved. Related content will update when you regenerate.",
-      "changedBeforeGeneration": "Content changed after synchronization. Regenerate with the latest edits.",
-      "regenerateImage": "Sync and regenerate storyboard",
-      "regenerateVideo": "Sync and regenerate video"
+      "changedBeforeGeneration": "Content changed after synchronization. Regenerate with the latest edits."
     },
     "editorChangedTitle": "The prompt was updated elsewhere",
     "editorChangedDescription": "Your edits are preserved. Reload the latest text, or explicitly keep your edits before completing.",
@@ -1092,7 +1044,33 @@
     "mediaCalls": "Media calls {{used}}/{{budget}}",
     "progress": "Progress {{done}}/{{total}}",
     "failed": "Failed {{count}}",
-    "listSeparator": ", "
+    "listSeparator": ", ",
+    "actions": {
+      "script": {
+        "generate": "Generate script",
+        "retry": "Regenerate script"
+      },
+      "visual": {
+        "generate": "Generate visual design",
+        "retry": "Regenerate visual design"
+      },
+      "lineup": {
+        "generate": "Generate lineup",
+        "retry": "Regenerate lineup"
+      },
+      "storyboard": {
+        "generate": "Generate storyboard",
+        "retry": "Regenerate storyboard"
+      },
+      "video": {
+        "generate": "Generate video",
+        "retry": "Regenerate video"
+      },
+      "compose": {
+        "generate": "Compose final film",
+        "retry": "Recompose final film"
+      }
+    }
   },
   "decisionTray": {
     "productionConfirm": "Production Confirm · ",

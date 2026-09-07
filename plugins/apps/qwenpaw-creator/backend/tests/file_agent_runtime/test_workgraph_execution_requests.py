@@ -1102,3 +1102,241 @@ def test_local_compose_joins_existing_running_task(tmp_path, monkeypatch):
         assert len(calls) == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["visual", "video"])
+@pytest.mark.parametrize("change", ["provider", "model"])
+def test_real_model_resolver_rechecks_approved_identity_before_dispatch(
+    tmp_path,
+    monkeypatch,
+    kind,
+    change,
+):
+    from models import image as image_models
+    from services.project_files.models import TimelineElement
+
+    resolver = dm._execution_provider_model
+    pin(monkeypatch)
+    monkeypatch.setattr(dm, "_execution_provider_model", resolver)
+    configured = {
+        "provider": "dashscope" if kind == "visual" else "wan",
+        "model": "qwen-image-3.0-pro"
+        if kind == "visual"
+        else "wan3.0-video-prime",
+    }
+    monkeypatch.setattr(
+        image_models,
+        "get_image_backend",
+        lambda: configured["provider"],
+    )
+    monkeypatch.setattr(
+        dm,
+        "get_image_model_name",
+        lambda: configured["model"],
+    )
+    monkeypatch.setattr(
+        dm,
+        "get_video_backend",
+        lambda: configured["provider"],
+    )
+    monkeypatch.setattr(
+        dm,
+        "get_video_model_name",
+        lambda: configured["model"],
+    )
+
+    async def run():
+        services = create(tmp_path, count=1 if kind == "visual" else 0)
+        target = "asset:hero"
+        if kind == "video":
+            target = "element:video-one"
+            element = TimelineElement.model_validate(
+                {
+                    "element_id": "video-one",
+                    "label": "窗边",
+                    "location": {},
+                    "span": {"start_tick": 0, "duration_tick": 5000},
+                    "creation": {
+                        "type": "t2v",
+                        "narrative": "窗边雨滴",
+                        "video_prompt": "雨滴沿窗玻璃滑落",
+                    },
+                },
+            )
+            change_project(
+                services,
+                lambda p: p.timelines.items[
+                    "timeline:main"
+                ].elements_by_id.update({element.element_id: element}),
+            )
+        runtime = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(lambda *_: None),
+            poll_interval_seconds=0.01,
+        )
+        calls = []
+        fake_dispatch(runtime, calls)
+        pending = asyncio.create_task(
+            direct_request(runtime, [target], kinds=(kind,)),
+        )
+        await wait_for(
+            lambda: bool(
+                runtime.executions.list_execution_authorizations(
+                    "probe-project",
+                ),
+            ),
+        )
+        record = runtime.executions.list_execution_authorizations(
+            "probe-project",
+        )[0]
+        assert record.requested_provider == configured["provider"]
+        assert (
+            record.requested_model and record.requested_model != "probe-model"
+        )
+        approve(runtime, record)
+        configured[change] = (
+            ("openai" if kind == "visual" else "volcengine")
+            if change == "provider"
+            else ("gpt-image-2" if kind == "visual" else "wan2.6-t2v")
+        )
+        result = await asyncio.wait_for(pending, 5)
+        assert result["status"] == "BLOCKED"
+        assert result["items"][0]["reason"] == "APPROVED_INPUTS_CHANGED"
+        assert (
+            calls == []
+            and runtime.executions.list_tasks("probe-project") == []
+        )
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_wait_continuation_joins_only_blocking_publication_reviews(
+    tmp_path,
+    monkeypatch,
+):
+    from services.media_files import image_execution
+    from services.file_agent_runtime.workgraph_execution import (
+        workgraph_blocking_reviews,
+    )
+    from services.runtime_files.models import (
+        ReviewPolicy,
+        ReviewOperation,
+        ProjectChangeKind,
+        ReviewRecord,
+    )
+    from services.runtime_files.atomic_store import AtomicJsonRecordStore
+    from media_files.conftest import make_r2v_element
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        image_execution,
+        "media_review_policy",
+        lambda: ReviewPolicy.REQUIRE_REVIEW,
+    )
+    monkeypatch.setattr(
+        image_execution,
+        "reserve_media_review",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        image_execution,
+        "schedule_media_review",
+        lambda *args, **kwargs: None,
+    )
+
+    class Provider:
+        async def generate(self, **_kwargs):
+            return {
+                "content": b"\x89PNG\r\n\x1a\n" + b"publication-fixture" * 32,
+                "media_type": "image/png",
+            }
+
+    async def run():
+        services = create(tmp_path, count=3)
+        worker = image_execution.FileImageExecutionService(
+            services,
+            provider=Provider(),
+        )
+        outputs = []
+        for owner in ("hero", "hero-1"):
+            outputs.append(
+                await worker.execute(
+                    project_id="probe-project",
+                    command="GENERATE_ASSET",
+                    target_ref=f"asset:{owner}",
+                    arguments={"variantId": "base"},
+                    idempotency_key=f"review-{owner}",
+                ),
+            )
+        reviews = services.reviews.all_pending("probe-project")
+        assert len(reviews) == 2
+
+        def joined(node_id):
+            result = {
+                "items": [{"nodeId": node_id, "reason": "WAITING_REVIEW"}],
+            }
+            return [
+                r.review_id
+                for r in workgraph_blocking_reviews(
+                    services,
+                    "probe-project",
+                    result,
+                )
+            ]
+
+        by_owner = {
+            next(
+                op.after["owner_ref"]
+                for op in r.operations
+                if op.json_pointer.startswith(
+                    "/assets/artifact_versions_by_id/",
+                )
+            ): r.review_id
+            for r in reviews
+        }
+        assert joined("visual:hero:base") == [by_owner["asset:hero"]]
+        assert joined("visual:hero-1:base") == [by_owner["asset:hero-1"]]
+        assert joined("visual:hero-2:base") == []
+        change_project(
+            services,
+            lambda p: setattr(
+                p.visual.entities.items["hero-2"].variants.items["base"],
+                "reference_artifact_version_ids",
+                [outputs[0].artifact_version_id],
+            ),
+        )
+        assert joined("visual:hero-2:base") == [by_owner["asset:hero"]]
+        change_project(
+            services,
+            lambda p: p.timelines.items["timeline:main"].elements_by_id.update(
+                {"unit": make_r2v_element("unit")},
+            ),
+        )
+        assert set(joined("storyboard:unit")) == set(by_owner.values())
+        # A mixed authored-content review remains a global fence.
+        mixed = next(
+            r for r in reviews if r.review_id == by_owner["asset:hero-1"]
+        ).model_copy(deep=True)
+        mixed.operations.append(
+            ReviewOperation(
+                operation_id="creative-change",
+                kind=ProjectChangeKind.UPDATE,
+                json_pointer="/description",
+                before_hash="a",
+                after_hash="b",
+                before="before",
+                after="after",
+            ),
+        )
+        AtomicJsonRecordStore(
+            services.projects.project_root("probe-project")
+            / "runtime/reviews"
+            / mixed.review_id
+            / "review.json",
+            ReviewRecord,
+        ).write(mixed)
+        assert set(joined("visual:hero:base")) == set(by_owner.values())
+        assert len(worker.executions.list_tasks("probe-project")) == 2
+
+    asyncio.run(run())

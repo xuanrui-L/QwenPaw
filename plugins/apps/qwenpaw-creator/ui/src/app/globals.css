@@ -1164,6 +1164,27 @@ a {
 .agent-activity-indicator[data-phase="running"] > span:nth-child(3) {
   animation-delay: -0.7s;
 }
+.agent-activity-indicator[data-phase="waiting"] {
+  color: var(--color-warning);
+}
+.agent-activity-indicator[data-phase="waiting"] > span {
+  width: 4px;
+  height: 4px;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  animation: agent-activity-wait 2.4s ease-in-out infinite;
+}
+.agent-activity-indicator[data-phase="waiting"] > span:nth-child(2) {
+  animation-delay: 0.3s;
+}
+.agent-activity-indicator[data-phase="waiting"] > span:nth-child(3) {
+  animation-delay: 0.6s;
+}
+@keyframes agent-activity-wait {
+  0%, 100% { opacity: 0.45; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-1px); }
+}
 .agent-activity-indicator[data-phase="completed"] > span:first-child {
   width: 6px;
   height: 6px;
@@ -1724,7 +1745,7 @@ button.agent-work-group-name:hover {
   [data-agent-dock] .agent-live-dot {
     animation: none;
   }
-  .agent-activity-indicator > span,
+  .agent-activity-indicator[data-phase] > span,
   .agent-assistant-message[data-streaming="true"]::after,
   .agent-specialist-response[data-streaming="true"]::after {
     animation: none;
