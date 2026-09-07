@@ -42,20 +42,19 @@ _TEXT_MODEL_TIMEOUT_SECONDS = 120.0
 _VALUE_CHAR_LIMIT = 2000
 _PAYLOAD_CHAR_LIMIT = 12000
 _PERSISTENT_MEDIA_GATE_GROUPS = frozenset(
-    {"shots", "overlay_text", "motion"},
+    {"generation_content", "overlay_text", "motion"},
 )
 
 # Pointer classification: (group, stage, substring patterns). The first
 # matching group in this order wins when one commit spans several groups.
-# Generation-driving shot/prompt text must win over the broader strategy
+# Generation-driving narrative/prompt text must win over the broader strategy
 # fields: it is the content the pre-generation fence is specifically meant
 # to validate before storyboard/R2V spend begins.
 _POINTER_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
-        "shots",
+        "generation_content",
         "text",
         (
-            "/creation/shots",
             "/creation/intent",
             "/creation/narrative",
             "/creation/continuity",
@@ -291,14 +290,14 @@ async def _review_and_script(
     stage: str,
     payload_text: str,
     strategy_payload: str,
-    shots_payload: str,
+    content_payload: str,
 ) -> tuple[str, dict[str, Any] | None]:
-    """Appeal review plus (for shots commits) the script-to-shots check.
+    """Appeal review plus script alignment for changed generation content.
 
     The two calls run concurrently on the worker's private loop; the
     script check is fail-open internally and never raises.
     """
-    if not strategy_payload or not shots_payload:
+    if not strategy_payload or not content_payload:
         return await _review_async(stage, payload_text), None
     from services.run_review.script_review import run_script_check
 
@@ -306,7 +305,7 @@ async def _review_and_script(
         _review_async(stage, payload_text),
         run_script_check(
             strategy_payload=strategy_payload,
-            shots_payload=shots_payload,
+            content_payload=content_payload,
         ),
     )
     return response, script_check
@@ -519,7 +518,7 @@ def _prompt_contract_advisory(
     project_id: str,
     reports_root: Path,
     transaction_id: str,
-    shots_job_admitted: bool,
+    content_job_admitted: bool,
 ) -> dict[str, Any] | None:
     """Persist and gate deterministic R2V prompt findings.
 
@@ -533,26 +532,26 @@ def _prompt_contract_advisory(
     findings = prompt_check.get("findings") or []
     reviewed_pointers = list(prompt_check.get("reviewed_pointers") or [])
     if not findings:
-        # When an LLM shots job exists, its settlement owns the blocker. If
+        # When an LLM content job exists, its settlement owns the blocker. If
         # admission skipped/capped that job, a clean deterministic repair
         # must still release a blocker created by an earlier empty prompt.
-        if not shots_job_admitted:
+        if not content_job_admitted:
             admission.clear_sync_blocker(
                 reports_root,
-                pointer_group="shots",
+                pointer_group="generation_content",
             )
         return None
 
     admission.hold_sync_blocker(
         reports_root,
         project_id=project_id,
-        pointer_group="shots",
+        pointer_group="generation_content",
         reviewed_pointers=reviewed_pointers,
         round_number=1,
     )
     advisory = SyncReviewAdvisory(
         transaction_id=transaction_id,
-        pointer_group="shots",
+        pointer_group="generation_content",
         reviewed_pointers=reviewed_pointers,
         round=1,
         scores=[],
@@ -630,7 +629,7 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
                 project_id=project_id,
                 reports_root=reports_root,
                 transaction_id=transaction_id,
-                shots_job_admitted=False,
+                content_job_admitted=False,
             )
 
         jobs = _admit_sync_review_jobs(
@@ -639,25 +638,41 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
             reports_root=reports_root,
             failed_groups=failed_groups,
         )
-        shots_job_admitted = any(job["group"] == "shots" for job in jobs)
+        content_job_admitted = any(
+            job["group"] == "generation_content" for job in jobs
+        )
         if not jobs:
             return _prompt_contract_advisory(
                 prompt_check,
                 project_id=project_id,
                 reports_root=reports_root,
                 transaction_id=transaction_id,
-                shots_job_admitted=False,
+                content_job_admitted=False,
             )
 
-        shots_pointers = [
+        content_pointers = [
             pointer
             for pointer in changed_pointers
-            if "/creation/shots" in pointer
+            if any(
+                field in pointer
+                for field in (
+                    "/creation/narrative",
+                    "/creation/storyboard_prompt",
+                    "/creation/video_prompt",
+                )
+            )
         ]
-        shots_payload = _payload_text(project_json, shots_pointers)
+        content_pointers = list(
+            dict.fromkeys(
+                pointer.split("/creation/")[0] + "/creation/" + field
+                for pointer in content_pointers
+                for field in ("narrative", "storyboard_prompt", "video_prompt")
+            ),
+        )
+        content_payload = _payload_text(project_json, content_pointers)
         script_strategy = (
             _strategy_payload(project_json)
-            if shots_payload and _script_check_enabled()
+            if content_payload and _script_check_enabled()
             else ""
         )
 
@@ -672,8 +687,12 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
                         _review_and_script(
                             str(job["stage"]),
                             str(job["payload_text"]),
-                            script_strategy if job["group"] == "shots" else "",
-                            shots_payload if job["group"] == "shots" else "",
+                            script_strategy
+                            if job["group"] == "generation_content"
+                            else "",
+                            content_payload
+                            if job["group"] == "generation_content"
+                            else "",
                         )
                         for job in jobs
                     ),
@@ -704,7 +723,7 @@ def maybe_sync_review(  # pylint: disable=too-many-locals,too-many-statements
             project_id=project_id,
             reports_root=reports_root,
             transaction_id=transaction_id,
-            shots_job_admitted=shots_job_admitted,
+            content_job_admitted=content_job_admitted,
         )
         if prompt_payload is not None:
             delivered.append(prompt_payload)

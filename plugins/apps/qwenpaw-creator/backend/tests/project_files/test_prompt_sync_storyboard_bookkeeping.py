@@ -127,9 +127,9 @@ def test_creative_or_effective_input_changes_are_not_reconfirmed(change):
     elif change == "other_storyboard":
         refs.append("other-board")
     elif change == "shot_description":
-        c["shots"]["items"]["shot"]["description"] = "抬右手"
+        c["narrative"] = "抬右手"
     elif change == "shot_dialogue":
-        c["shots"]["items"]["shot"]["dialogue"] = "一句新对白"
+        c["narrative"] = "一句新对白"
     elif change in {"storyboard_prompt", "video_prompt"}:
         c[change] += "改变动作"
     elif change == "duration":
@@ -158,7 +158,7 @@ def test_stale_or_untracked_baseline_cannot_be_washed_current(previous):
     if previous == "legacy":
         _creation(before)["prompt_sync"] = None
     elif previous == "needs_update":
-        _creation(before)["shots"]["items"]["shot"]["description"] = "未审阅动作"
+        _creation(before)["narrative"] = "未审阅动作"
     else:
         _creation(before)["video_prompt"] += "未审阅提示词"
     # Give the candidate the same creative inputs as before; only own refs

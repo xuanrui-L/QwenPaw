@@ -27,7 +27,6 @@ from services.project_files.models import (
     IndexedFile,
     Project,
     R2VCreation,
-    Shot,
     TimelineElement,
     TimelineSpan,
     VisualCastLineup,
@@ -59,18 +58,10 @@ def _entity(entity_id: str, variants: dict[str, str | None]) -> VisualEntity:
 
 
 def _element(element_id: str, **creation_kwargs) -> TimelineElement:
-    shot = Shot(
-        shot_id=f"{element_id}-shot",
-        description="镜头",
-        camera="⊙ 静止",
-        framing="全景",
-        duration_seconds=4,
-    )
     defaults = {
         "narrative": "叙事",
         "storyboard_prompt": "分镜 prompt",
         "video_prompt": "视频 prompt",
-        "shots": {"items": {shot.shot_id: shot}, "order": [shot.shot_id]},
     }
     defaults.update(creation_kwargs)
     return TimelineElement(
@@ -116,11 +107,6 @@ def test_keyframe_rule_upgrade_preserves_existing_storyboard_identity(
         "e-keyframes",
         storyboard_prompt="3列×3行，共9个等尺寸分镜格，每格9:16",
     )
-    first_shot = element.creation.shots.items[element.creation.shots.order[0]]
-    for index in range(1, shot_count):
-        shot = first_shot.model_copy(update={"shot_id": f"shot-{index}"})
-        element.creation.shots.items[shot.shot_id] = shot
-        element.creation.shots.order.append(shot.shot_id)
     _add_element(project, element)
     node_id = "storyboard:e-keyframes"
     node = derive_work_graph(project, media_models=models).by_id[node_id]
@@ -145,6 +131,7 @@ def test_keyframe_rule_upgrade_preserves_existing_storyboard_identity(
         "element:e-keyframes",
         TaskStatus.SUCCEEDED,
         idempotency_key=f"dag-{node_id}-{old_slot}",
+        metadata={"storyboardInputContract": 1},
     )
     _select_slot(
         project,
@@ -161,6 +148,8 @@ def test_keyframe_rule_upgrade_preserves_existing_storyboard_identity(
         is WorkNodeStatus.DONE
     )
     element.creation.storyboard_prompt = "2列×2行，共4个等尺寸分镜格，每格9:16"
+    # Existing artifact invalidation from a real edit remains authoritative.
+    project.assets.artifact_versions_by_id["art:legacy-grid"].stale = True
     assert (
         derive_work_graph(project, [task], media_models=models)
         .by_id[node_id]
@@ -217,7 +206,11 @@ def _task(kind: str, target: str, status: TaskStatus, **extra):
         kind=kind,
         status=status,
         input_refs=[target],
-        metadata={"targetRef": target, **extra.pop("metadata", {})},
+        metadata={
+            "targetRef": target,
+            "storyboardInputContract": 2,
+            **extra.pop("metadata", {}),
+        },
         progress=extra.pop("progress", None),
         error=extra.pop("error", None),
         updated_at=extra.pop("updated_at", "2026-08-05T00:00:00Z"),
@@ -663,57 +656,6 @@ def _element_with_landed_storyboard(
     )
 
 
-def test_video_gates_until_prompt_quotes_planned_dialogue() -> None:
-    """Field run 2026-08-12 (f5ac): planned dialogue never reached veo3.
-
-    The mainline wrote per-shot dialogue, committed a mood summary as
-    video_prompt, and the scheduler dispatched the summary verbatim — the
-    finished film was silent. The graph now refuses to dispatch a video
-    whose prompt drops any planned line.
-    """
-    project = _project()
-    spoken = Shot(
-        shot_id="shot:reunion-2",
-        description="重逢对话",
-        camera="⊙ 静止",
-        framing="近景",
-        dialogue="林薇，这么多年了，有句话我一直想对你说。",
-        duration_seconds=3,
-    )
-    silent = Shot(
-        shot_id="shot:reunion-1",
-        description="环境建立",
-        camera="↑ 推近",
-        framing="全景",
-        duration_seconds=2,
-    )
-    _element_with_landed_storyboard(
-        project,
-        shots={
-            "items": {s.shot_id: s for s in (silent, spoken)},
-            "order": [silent.shot_id, spoken.shot_id],
-        },
-        video_prompt="Emotional reunion, intimate conversation.",
-    )
-
-    graph = derive_work_graph(project)
-    video = graph.by_id["video:elem:one"]
-    assert video.status is WorkNodeStatus.GATED
-    assert video.missing == ("video_prompt 缺台词原文：shot:reunion-2",)
-    assert video in graph.model_required_nodes()
-
-    # Quoting the line verbatim releases the gate; line wrapping inside
-    # the prompt must not re-trigger it.
-    element = project.timelines.items["timeline:main"].elements_by_id[
-        "elem:one"
-    ]
-    element.creation.video_prompt = (
-        "镜头二：他凝视她，轻声说：“林薇，这么多年了，\n" + "有句话我一直想对你说。”语气哽咽而坚定。"
-    )
-    graph = derive_work_graph(project)
-    assert graph.by_id["video:elem:one"].status is WorkNodeStatus.READY
-
-
 def test_declared_pending_lineup_gates_every_storyboard() -> None:
     """Field run 2026-08-12 (27dc): a single-character closing scene
     derived READY while another element's declared lineup was pending;
@@ -821,7 +763,10 @@ def test_stale_manual_storyboard_is_visible_but_not_dispatched() -> None:
     assert node not in graph.ready_media_nodes()
 
 
-@pytest.mark.parametrize("changed_input", ["aspect_ratio", "shot_count"])
+@pytest.mark.parametrize(
+    "changed_input",
+    ["aspect_ratio", "storyboard_prompt"],
+)
 def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
     changed_input,
 ) -> None:
@@ -862,15 +807,7 @@ def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
             .elements_by_id["elem:one"]
             .creation
         )
-        second = Shot(
-            shot_id="elem:one-shot-2",
-            description="第二镜头",
-            camera="⊙ 静止",
-            framing="近景",
-            duration_seconds=2,
-        )
-        creation.shots.items[second.shot_id] = second
-        creation.shots.order.append(second.shot_id)
+        creation.storyboard_prompt += "主角挥手。"
 
     assert (
         derive_work_graph(
@@ -1200,6 +1137,7 @@ def test_upgrade_does_not_restale_artifacts_from_the_old_ledger() -> None:
     )
     new_task = SimpleNamespace(
         task_id="task-new",
+        metadata={"storyboardInputContract": 2},
         idempotency_key=f"dag-{node_id}-a1b2c3d4e5f60718-mdeadbeefdeadbeef",
     )
     assert _artifact_is_stale(

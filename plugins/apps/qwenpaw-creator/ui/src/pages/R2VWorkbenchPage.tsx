@@ -568,7 +568,7 @@ export function WorkbenchSurface({
     else if (
       reviewField?.includes("/storyboard_prompt") ||
       reviewField?.includes("/storyboard_reference_version_ids") ||
-      reviewField?.includes("/creation/shots")
+      reviewField?.includes("/creation/narrative")
     )
       setStage("sb");
   }, [reviewField, reviewPulse]);
@@ -784,7 +784,8 @@ export function WorkbenchSurface({
           setSynchronizing(true);
           const proposal = await createPromptProposal(
             scope,
-            sync.suggestedSource ?? "currentPlan",
+            sync.suggestedSource ??
+              (sync.narrative.trim() ? "currentPlan" : "videoPrompt"),
           );
           // A new edit or route change cancels this generation intent before
           // the proposal can publish. The backend also checks its saved baseline.
@@ -802,7 +803,7 @@ export function WorkbenchSurface({
             sync.status !== "current" ||
             sync.storyboardPrompt !== proposal.storyboardPrompt ||
             sync.videoPrompt !== proposal.videoPrompt ||
-            JSON.stringify(sync.shots) !== JSON.stringify(proposal.shots)
+            sync.narrative !== proposal.narrative
           )
             throw new Error(t("r2v.sync.changedBeforeGeneration"));
           setSynchronizing(false);
@@ -1784,33 +1785,41 @@ export function WorkbenchSurface({
               />
             )}
             {contextCard && <div className="px-3.5 pt-2.5">{contextCard}</div>}
+            <details
+              className="r2v-narrative mx-3.5 mt-2.5"
+              open={reviewField?.includes("/creation/narrative") || undefined}
+            >
+              <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-secondary)]">
+                {t("r2v.narrativeTitle")}
+                <span className="ml-2 font-normal text-[var(--color-text-tertiary)]">
+                  {t("r2v.narrativeHint")}
+                </span>
+              </summary>
+              <div className="mt-2">
+                <PromptRichBlock
+                  label={t("r2v.narrativeTitle")}
+                  value={creation.narrative}
+                  field={`element:${element.element_id}/creation/narrative`}
+                  path={elementPointer("creation", "narrative")}
+                  disabled={patching}
+                  tokens={[]}
+                  collapseHeight={150}
+                  onEditComplete={scheduleSilentApply}
+                  onChange={(value) =>
+                    updateElement((draft) => {
+                      if (draft.creation.type === "r2v")
+                        draft.creation.narrative = value;
+                    })
+                  }
+                />
+              </div>
+            </details>
             <div className="r2v-workbench-prompt-body min-w-0 flex-1 p-4">
               {/* Stage ①: storyboard prompt + versions. Both stages stay
                   mounted (hidden attr) so field anchors and review focus
                   keep resolving regardless of the visible tab. */}
               <div hidden={stage !== "sb"} data-stage-panel="sb">
                 <div className="space-y-3">
-                  {/* Older reviews can still own shot fields. Keep their
-                      exact decision target inspectable without restoring
-                      the internal shot editor in the everyday workspace. */}
-                  {reviewMode &&
-                    reviewField &&
-                    (reviewField === elementPointer("creation", "shots") ||
-                      reviewField.startsWith(
-                        `${elementPointer("creation", "shots")}/`,
-                      )) && (
-                      <section
-                        data-legacy-shot-review
-                        data-creator-path={reviewField}
-                        data-creator-field-label={t("r2v.plan.title")}
-                        className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3"
-                      >
-                        <h4 className="text-xs font-medium text-[var(--color-text-secondary)]">
-                          {t("r2v.plan.title")}
-                        </h4>
-                        <InlineReviewDiff pointer={reviewField} />
-                      </section>
-                    )}
                   {reviewMode &&
                     reviewField ===
                       elementPointer(

@@ -1,0 +1,132 @@
+{
+  "assets": {
+    "artifact_slots_by_id": {},
+    "artifact_versions_by_id": {},
+    "files_by_id": {},
+    "intelligence_versions_by_id": {},
+    "source_versions_by_id": {}
+  },
+  "created_at": "2026-09-01T00:00:00Z",
+  "description": "",
+  "generation": 0,
+  "name": "Legacy narrative",
+  "project_id": "legacy-r2v-contract",
+  "scenario": "general",
+  "schema_version": 9,
+  "settings": {
+    "aspect_ratio": "16:9",
+    "content_type": null,
+    "execution_preauthorization": null,
+    "language": "zh-CN",
+    "platform": "",
+    "resolution": "720P",
+    "target_duration_seconds": null
+  },
+  "sources": {
+    "sources": {
+      "items": {},
+      "order": []
+    }
+  },
+  "strategy": {
+    "audience": "",
+    "constraints": "",
+    "creative_brief": "",
+    "creative_direction": "",
+    "success_criteria": ""
+  },
+  "timelines": {
+    "items": {
+      "timeline:main": {
+        "color_grade": "",
+        "description": "",
+        "edit_plan": null,
+        "elements_by_id": {
+          "clip": {
+            "creation": {
+              "cast_lineup_refs": [],
+              "character_refs": [],
+              "continuity": "",
+              "intent": "",
+              "min_dialogue_ratio": 0.3,
+              "narrative": "Paper boat drifts.",
+              "prompt_sync": null,
+              "prop_refs": [],
+              "recipe": null,
+              "scene_ref": null,
+              "shots": {
+                "items": {
+                  "legacy": {
+                    "camera": "⊙ 静止",
+                    "camera_description": "",
+                    "character_refs": [],
+                    "description": "Paper boat drifts",
+                    "dialogue": "",
+                    "duration_seconds": 6.0,
+                    "framing": "全景",
+                    "prop_refs": [],
+                    "scene_ref": null,
+                    "shot_id": "legacy"
+                  }
+                },
+                "order": [
+                  "legacy"
+                ]
+              },
+              "storyboard_prompt": "3x3 storyboard",
+              "storyboard_reference_version_ids": [],
+              "type": "r2v",
+              "video_prompt": "Paper boat drifts for six seconds.",
+              "video_reference_version_ids": [],
+              "visual_variant_refs": {}
+            },
+            "element_id": "clip",
+            "enabled": true,
+            "label": "Paper boat",
+            "location": {
+              "anchor_x": 0.5,
+              "anchor_y": 0.5,
+              "coordinate_space": "normalized_canvas",
+              "height": 1.0,
+              "opacity": 1.0,
+              "rotation_degrees": 0.0,
+              "width": 1.0,
+              "x": 0.5,
+              "y": 0.5
+            },
+            "outputs": {},
+            "provenance_refs": [],
+            "render_source": null,
+            "span": {
+              "duration_tick": 6000,
+              "start_tick": 0
+            },
+            "z_index": 0
+          }
+        },
+        "name": "",
+        "planned_duration_seconds": null,
+        "synopsis": "",
+        "ticks_per_second": 1000,
+        "timeline_id": "timeline:main",
+        "title": ""
+      }
+    },
+    "order": [
+      "timeline:main"
+    ]
+  },
+  "updated_at": "2026-09-01T00:00:00Z",
+  "visual": {
+    "cast_lineups": {
+      "items": {},
+      "order": []
+    },
+    "entities": {
+      "items": {},
+      "order": []
+    },
+    "style": "",
+    "visual_bible": ""
+  }
+}

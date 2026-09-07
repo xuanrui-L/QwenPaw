@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from .prompt_sync import is_prompt_sync_pointer
+from .json_pointer import split_pointer
 
 
 def is_version_bookkeeping(change: Any) -> bool:
@@ -42,8 +43,20 @@ def is_version_bookkeeping(change: Any) -> bool:
     )
 
 
+def is_retired_shot_pointer(pointer: str) -> bool:
+    tokens = split_pointer(pointer)
+    return (
+        len(tokens) >= 7
+        and tokens[:2] == ("timelines", "items")
+        and tokens[3] == "elements_by_id"
+        and tokens[5] == "creation"
+        and tokens[6] in ("shots", "min_dialogue_ratio")
+    )
+
+
 def is_human_review_change(change: Any) -> bool:
     return not (
-        is_prompt_sync_pointer(change.json_pointer or "")
+        is_retired_shot_pointer(change.json_pointer or "")
+        or is_prompt_sync_pointer(change.json_pointer or "")
         or is_version_bookkeeping(change)
     )

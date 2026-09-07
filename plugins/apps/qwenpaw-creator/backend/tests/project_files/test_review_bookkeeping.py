@@ -246,3 +246,44 @@ def test_snapshot_looking_content_is_not_implicitly_accepted(
             after={"timeline_id": tid, "description": description},
         ),
     )
+
+
+@pytest.mark.parametrize("content_accepted", [False, True])
+def test_legacy_shot_review_retires_but_current_content_still_needs_decision(
+    tmp_path,
+    content_accepted,
+):
+    store, base, result = _commit(tmp_path)
+    record, path = _legacy(
+        store,
+        base,
+        result,
+        content_accepted=content_accepted,
+    )
+    legacy = record.operations[0].model_copy(
+        update={
+            "operation_id": "retired-shots",
+            "json_pointer": (
+                "/timelines/items/timeline:main/elements_by_id/shot-one"
+                "/creation/shots"
+            ),
+            "before": {"invalid": True},
+            "after": {"invalid": False},
+            "decision": ReviewOperationDecision.PENDING,
+        },
+    )
+    record = record.model_copy(
+        update={"operations": [*record.operations, legacy]},
+    )
+    AtomicJsonRecordStore(path, ReviewRecord).write(record)
+    project_path = store.project_root(PID) / "project.json"
+    before = project_path.read_bytes()
+    service = ProjectReviewService(store)
+    pending = service.all_pending(PID)
+    assert bool(pending) is not content_accepted
+    updated = service.get(PID, record.review_id)
+    retired = next(
+        op for op in updated.operations if op.operation_id == "retired-shots"
+    )
+    assert retired.decision is ReviewOperationDecision.ACCEPTED
+    assert project_path.read_bytes() == before

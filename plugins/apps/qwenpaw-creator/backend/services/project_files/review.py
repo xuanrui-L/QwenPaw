@@ -46,7 +46,7 @@ from .json_pointer import (
 from .store import ProjectSnapshot, ProjectStore
 from .models import Project
 from .serialization import project_etag
-from .review_bookkeeping import is_version_bookkeeping
+from .review_bookkeeping import is_human_review_change
 
 
 ReviewDecisionValue = Literal["ACCEPT", "REJECT"]
@@ -411,7 +411,7 @@ class ProjectReviewService:
                 ReviewRecord,
             ).read_or_none()
             if review is not None and review.status is ReviewStatus.PENDING:
-                review = self._settle_version_bookkeeping(
+                review = self._settle_internal_operations(
                     project_id,
                     review,
                     _lifecycle_lock_held=_lifecycle_lock_held,
@@ -420,14 +420,14 @@ class ProjectReviewService:
                     candidates.append(review)
         return sorted(candidates, key=lambda item: item.created_at)
 
-    def _settle_version_bookkeeping(
+    def _settle_internal_operations(
         self,
         project_id: str,
         review: ReviewRecord,
         *,
         _lifecycle_lock_held: bool,
     ) -> ReviewRecord:
-        """Retire legacy automatic history decisions without changing Project.
+        """Retire internal and obsolete decisions without changing Project.
 
         Reuse the durable decision journal, token rotation and recovery path.
         The system decision identity makes this distinct from a user's Keep;
@@ -436,7 +436,7 @@ class ProjectReviewService:
         """
         if not any(
             operation.decision is ReviewOperationDecision.PENDING
-            and is_version_bookkeeping(operation)
+            and not is_human_review_change(operation)
             for operation in review.operations
         ):
             return review
@@ -473,7 +473,7 @@ class ProjectReviewService:
                     )
                     for operation in current.operations
                     if operation.decision is ReviewOperationDecision.PENDING
-                    and is_version_bookkeeping(operation)
+                    and not is_human_review_change(operation)
                 ]
                 if not decisions:
                     return current

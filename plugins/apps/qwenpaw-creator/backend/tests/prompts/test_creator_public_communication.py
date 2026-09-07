@@ -125,9 +125,9 @@ def test_media_prompt_authoring_separates_names_from_exact_reference_fields():
 
 def test_storyboard_guidance_separates_keyframes_and_continuous_shots():
     prompt = _render()
-    assert "一个完整的 6 秒连续镜头可以保持 1 Shot" in prompt
+    assert "一个连续动作也需要用多格展示起始、中间过程" in prompt
     assert "几列几行、每格内部比例" in prompt
-    assert "不为了凑网格扩增 Shot" in prompt
+    assert "不要为了凑网格增加剧情或改变片段时长" in prompt
     assert "这是按本段动作需要选择的例子，不是所有项目固定九格" in prompt
     assert "首格必须承接上一镜头末态" in prompt
     assert "不把每格变成一次切镜" in prompt

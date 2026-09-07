@@ -39,7 +39,7 @@ export function resolveCreatorLocator(
         [
           "storyboard_prompt",
           "video_prompt",
-          "shots",
+          "narrative",
           "storyboard_reference_version_ids",
           "video_reference_version_ids",
         ].includes(tokens[6])

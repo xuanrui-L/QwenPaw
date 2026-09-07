@@ -142,11 +142,11 @@ function modelRoutes(model: string): Parameters<typeof installMockFetch>[0] {
         json: {
           status: "current",
           baselineToken: "verified-current",
-          shots: (
+          narrative: (
             projectDocument.timelines.items["timeline:main"].elements_by_id[
               "r2v-window"
-            ].creation as { shots: unknown }
-          ).shots,
+            ].creation as { narrative: string }
+          ).narrative,
           changedSources: [],
           suggestedSource: null,
           storyboardPrompt: "暖色餐厅窗外的橘猫",
@@ -788,7 +788,11 @@ describe("R2V Workbench page", () => {
           .creation;
       if (creation.type !== "r2v") throw new Error("fixture");
       if (plan === "empty") creation.shots = { order: [], items: {} };
-      else creation.shots.items["shot:window"].duration_seconds = 300;
+      else
+        creation.shots = {
+          order: ["old"],
+          items: { old: { duration_seconds: 300 } },
+        };
       seedProject(project);
       const updated = structuredClone(project);
       if (
@@ -823,7 +827,7 @@ describe("R2V Workbench page", () => {
       project.timelines.items["timeline:main"].elements_by_id["r2v-window"]
         .creation;
     if (creation.type === "r2v")
-      creation.shots.items["shot:window"].dialogue = "";
+      creation.shots = { items: { old: { dialogue: "旧台词" } } };
     seedProject(project);
     const { calls, fetchMock } = installMockFetch(modelRoutes("wan2.7-r2v"));
     const original = fetchMock.getMockImplementation()!;
@@ -1442,20 +1446,19 @@ describe("R2V Workbench page", () => {
     const before: promptApi.PromptSyncState = {
       status: "needs_confirmation",
       baselineToken: "before",
-      shots: creation.shots,
+      narrative: creation.narrative,
       storyboardPrompt: creation.storyboard_prompt,
       videoPrompt: creation.video_prompt,
       changedSources: ["storyboardPrompt"],
       suggestedSource: "storyboardPrompt",
     };
-    const shots = structuredClone(creation.shots);
-    shots.items[shots.order[0]].description += "，尾巴缓缓放下";
+    const narrative = creation.narrative + "，尾巴缓缓放下";
     const proposal: promptApi.PromptProposal = {
       proposalId: "sync-1",
       baselineToken: "before",
       source: "storyboardPrompt",
-      beforeShots: creation.shots,
-      shots,
+      beforeNarrative: creation.narrative,
+      narrative,
       beforeStoryboardPrompt: creation.storyboard_prompt,
       storyboardPrompt: creation.storyboard_prompt,
       beforeVideoPrompt: creation.video_prompt,
@@ -1495,7 +1498,7 @@ describe("R2V Workbench page", () => {
           project.timelines.items["timeline:main"].elements_by_id["r2v-window"]
             .creation,
           {
-            shots,
+            narrative,
             storyboard_prompt: proposal.storyboardPrompt,
             video_prompt: proposal.videoPrompt,
           },
@@ -1534,8 +1537,8 @@ describe("R2V Workbench page", () => {
       useProjectSnapshotStore.getState().project!.timelines.items[
         "timeline:main"
       ].elements_by_id["r2v-window"].creation;
-    expect(saved.type === "r2v" && saved.shots).toEqual(
-      scenario.proposal.shots,
+    expect(saved.type === "r2v" && saved.narrative).toEqual(
+      scenario.proposal.narrative,
     );
     expect(saved.type === "r2v" && saved.video_prompt).toEqual(
       scenario.proposal.videoPrompt,

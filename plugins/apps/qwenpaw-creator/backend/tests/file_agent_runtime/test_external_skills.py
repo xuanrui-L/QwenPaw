@@ -117,7 +117,7 @@ def test_professional_media_prompt_skill_is_builtin(
     assert "`clear spatial labels` 和 `no text`" in skill.skill_md
     # One authored convention replaced the per-provider dialect table.
     assert "引用参考图统一写 `[Image 1]`" in skill.skill_md
-    assert "不要写任何模型的原生语法" in skill.skill_md
+    assert "不编写供应商原生图片标记" in skill.skill_md
     assert skill.available
     parsed = external_skills.parse_skill_md(skill.skill_md)
     assert "角色身份板/设定图" in parsed["description"]
@@ -127,7 +127,7 @@ def test_professional_media_prompt_skill_is_builtin(
     # The per-provider dialect table is gone: one authored convention, with
     # the runtime rendering it to each provider's documented syntax.
     assert "引用参考图统一写 `[Image 1]`" in parsed["body"]
-    assert "Runtime 在提交前" in parsed["body"]
+    assert "统一写" in parsed["body"]
     assert "每一个独立面板内部画框" in parsed["body"]
 
 

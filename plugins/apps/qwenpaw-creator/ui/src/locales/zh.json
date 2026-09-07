@@ -832,7 +832,6 @@
       "preparationRunning": "正在准备生成内容",
       "preparationFailed": "生成准备遇到问题",
       "reviewAll": "请查看三项内容后再接受",
-      "shots": "镜头内容",
       "source": {
         "currentPlan": "根据镜头内容同步两份提示词",
         "storyboardPrompt": "根据分镜图提示词同步镜头与视频提示词",
@@ -851,7 +850,9 @@
     "editorReferencesChanged": "引用图片或编辑对象已变化。为避免引用到错误图片，请重新载入后继续编辑。当前编辑暂时保留。",
     "editorReload": "重新载入最新内容",
     "editorKeep": "保留我的编辑",
-    "referencesNeedReview": "参考图缺失、数量超限或引用编号不匹配，请检查提示词中的图片。"
+    "referencesNeedReview": "参考图缺失、数量超限或引用编号不匹配，请检查提示词中的图片。",
+    "narrativeTitle": "片段内容",
+    "narrativeHint": "完整叙述 · 编辑后生成时自动同步提示词"
   },
   "elementDetail": {
     "selectElement": "选择一项时间线内容",

@@ -832,7 +832,6 @@
       "preparationRunning": "Preparing generation content now",
       "preparationFailed": "Generation preparation needs attention",
       "reviewAll": "Review all three items before accepting",
-      "shots": "Shot content",
       "source": {
         "currentPlan": "Update both prompts from shot content",
         "storyboardPrompt": "Update shots and video prompt from the storyboard prompt",
@@ -851,7 +850,9 @@
     "editorReferencesChanged": "The reference images or editing target have changed. Reload before continuing so image references stay accurate. Your current draft is preserved.",
     "editorReload": "Reload latest",
     "editorKeep": "Keep my edits",
-    "referencesNeedReview": "A reference image is unavailable, exceeds the model limit, or has an invalid index. Check the images in these instructions."
+    "referencesNeedReview": "A reference image is unavailable, exceeds the model limit, or has an invalid index. Check the images in these instructions.",
+    "narrativeTitle": "Clip narrative",
+    "narrativeHint": "Edits synchronize with prompts on generation"
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",

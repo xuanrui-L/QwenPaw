@@ -49,7 +49,7 @@ def delegator_guidance() -> str:
         "系统自动重新合成。旁白/配音需求直接委派它到 timeline:<timelineId>，"
         "在任务中写明旁白文案要求，并要求按镜头/语义分段生成、每段 span 对齐"
         "对应画面；自带人声的区间（creation.type=s2v 的数字人口播、"
-        "shots.dialogue 非空的 R2V Element）不安排旁白；不需要用户提供音频文件。",
+        "已经安排视频原生人声的 R2V 区间）不安排旁白；不需要用户提供音频文件。",
     ]
     if capability.has_system_voices:
         lines.append(
@@ -121,7 +121,7 @@ def _editing_guidance(capability, scenario: str) -> str:
     )
     lines.append(
         "- 自带人声的区间不安排旁白：数字人口播（creation.type=s2v）的"
-        " span 内视频自身就是人声，任何 shots.dialogue 非空的 R2V Element "
+        " span 内视频自身就是人声，任何 已经安排视频原生人声的 R2V 区间 "
         "同理（生成视频会原生说出台词）；旁白 Element 的 span 不得与这些"
         "区间重叠，系统会直接拒绝这类写入。",
     )

@@ -613,21 +613,12 @@ def _snapshot_app(tmp_path):
     # pylint: disable=import-outside-toplevel
     from services.project_files.models import (
         ElementLocation,
-        EntityCollection,
         R2VCreation,
-        Shot,
         TimelineElement,
         TimelineSpan,
     )
 
     services = CreatorFileServices.create(tmp_path.resolve())
-    shot = Shot(
-        shot_id="el-1-shot",
-        description="猫追逐老鼠",
-        camera="→ 横摇右",
-        framing="全景",
-        duration_seconds=4,
-    )
     element = TimelineElement(
         element_id="el-1",
         label="原始",
@@ -637,10 +628,6 @@ def _snapshot_app(tmp_path):
             narrative="猫发现老鼠后追逐",
             storyboard_prompt="动画分镜：猫发现并追逐老鼠",
             video_prompt="动画，猫从左向右追逐老鼠",
-            shots=EntityCollection(
-                items={shot.shot_id: shot},
-                order=[shot.shot_id],
-            ),
         ),
     )
     project = Project.new(project_id="project-1", name="Snapshot")

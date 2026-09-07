@@ -210,7 +210,7 @@ function LegacyMapping({
           "narrative" in creation && typeof creation.narrative === "string"
             ? creation.narrative
             : "";
-        if (!intent && !narrative && creation.type !== "r2v") return null;
+        if (!intent && !narrative) return null;
         return (
           <div key={element.element_id}>
             <span className="mb-1.5 inline-block rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-0.5 text-[11px] font-bold tracking-wide text-[var(--color-text-secondary)]">
@@ -220,35 +220,6 @@ function LegacyMapping({
               <p className="text-[var(--color-text-secondary)]">
                 {narrative || intent}
               </p>
-            )}
-            {creation.type === "r2v" && creation.shots.order.length > 0 && (
-              <table className="mt-1.5 w-full border-collapse text-xs">
-                <tbody>
-                  {creation.shots.order.map((shotId) => {
-                    const shot = creation.shots.items[shotId];
-                    if (!shot) return null;
-                    return (
-                      <tr
-                        key={shotId}
-                        className="border-b border-dashed border-[var(--color-border)] last:border-b-0"
-                      >
-                        <td className="py-1 pr-2 text-[var(--color-text-tertiary)]">
-                          {shot.camera || shot.framing || "—"}
-                        </td>
-                        <td className="py-1 text-[var(--color-text-secondary)]">
-                          {shot.description}
-                          {shot.dialogue ? ` · ${shot.dialogue}` : ""}
-                        </td>
-                        <td className="py-1 pl-2 text-right tabular-nums text-[var(--color-text-tertiary)]">
-                          {shot.duration_seconds != null
-                            ? `${shot.duration_seconds}s`
-                            : ""}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
             )}
           </div>
         );

@@ -192,15 +192,6 @@ export interface GenerationRecipeDocument extends ProjectJsonRecord {
   candidate_count: number;
 }
 
-export interface ShotDocument extends ProjectJsonRecord {
-  shot_id: string;
-  description: string;
-  camera: string | null;
-  framing: string | null;
-  duration_seconds: number | null;
-  dialogue?: string;
-}
-
 export type VideoGenerationMode = "r2v" | "t2v" | "i2v" | "s2v";
 
 export interface R2VCreationDocument extends ProjectJsonRecord {
@@ -213,7 +204,6 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   prop_refs: string[];
   visual_variant_refs: Record<string, string>;
   cast_lineup_refs?: string[];
-  shots: ProjectEntityCollection<ShotDocument>;
   recipe: GenerationRecipeDocument | null;
   storyboard_prompt: string;
   storyboard_reference_version_ids: string[];
@@ -221,6 +211,7 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   video_reference_version_ids: string[];
   /** Server-owned provenance. Presentation consumes the prompt-sync API. */
   prompt_sync?: {
+    contract_version: 2;
     plan_fingerprint: string;
     storyboard_prompt_fingerprint: string;
     video_prompt_fingerprint: string;

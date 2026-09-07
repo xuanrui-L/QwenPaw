@@ -16,7 +16,7 @@ const state = (
   baselineToken: "private-baseline",
   changedSources: ["storyboardPrompt"],
   suggestedSource: "storyboardPrompt",
-  shots: { items: {}, order: [] },
+  narrative: "private-narrative",
   storyboardPrompt: "private-prompt",
   videoPrompt: "private-video",
 });

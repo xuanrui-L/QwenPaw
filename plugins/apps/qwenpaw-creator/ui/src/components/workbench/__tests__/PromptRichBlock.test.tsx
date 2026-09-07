@@ -236,7 +236,7 @@ describe("unchanged editor preserves canonical prompt text", () => {
 });
 
 describe("legacy authored shot labels", () => {
-  it("uses a public mirror of the authored marker without pretending a detached plan link is active", () => {
+  it("renders old authored labels as plain text without an obsolete link", () => {
     const { container } = render(
       <PromptRichBlock
         label="分镜提示词"
@@ -247,10 +247,7 @@ describe("legacy authored shot labels", () => {
         tokens={[]}
       />,
     );
-    const marker = container.querySelector('[data-shot-link="1"]')!;
-    expect(marker).toHaveTextContent("镜头 1");
-    expect(marker).toBeDisabled();
-    expect(marker).not.toHaveAttribute("title");
+    expect(container.querySelector("[data-shot-link]")).toBeNull();
     expect(container).toHaveTextContent("原始分镜描述");
   });
 });

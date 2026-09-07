@@ -4,7 +4,6 @@ import { Loader2, SquarePen, Wand2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
 import PromptEditorModal from "@/components/workbench/PromptEditorModal";
-import type { ShotDocument } from "@/contracts/creator";
 import { presentPromptEntityNames } from "@/lib/promptEntityNames";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { promptTokenAt } from "./promptReferenceTokens";
@@ -56,52 +55,7 @@ export interface PromptRichToken {
   missing?: boolean;
 }
 
-interface PromptSegment {
-  /** null = unmarked prompt (single block); 0 = overview; N = 【Shot N】 */
-  shotNumber: number | null;
-  text: string;
-}
-
-const SHOT_HL_CLASS = "workbench-shot-hl";
-
-/** 【Shot N】 is a text convention, not schema; prompts without it degrade to one block. */
-function splitSegments(value: string): {
-  marked: boolean;
-  segments: PromptSegment[];
-} {
-  const parts = value.split(/【Shot (\d+)】/);
-  if (parts.length === 1) {
-    return { marked: false, segments: [{ shotNumber: null, text: value }] };
-  }
-  const segments: PromptSegment[] = [];
-  const overview = parts[0].trim();
-  if (overview) segments.push({ shotNumber: 0, text: overview });
-  for (let i = 1; i < parts.length; i += 2) {
-    segments.push({
-      shotNumber: Number(parts[i]),
-      text: (parts[i + 1] ?? "").trim(),
-    });
-  }
-  return { marked: true, segments };
-}
-
-function shotRowElement(shotId: string): HTMLElement | null {
-  const escaped =
-    typeof CSS !== "undefined" && CSS.escape
-      ? CSS.escape(shotId)
-      : shotId.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
-  return document.querySelector<HTMLElement>(
-    `[data-creator-module="shot-row"][data-creator-module-id="${escaped}"]`,
-  );
-}
-
-/**
- * Prompt surface: the reference preview (with [Image N] citation tokens and
- * 【Shot N】 badges linked to the Shot list) is the only display mode; edits
- * go through the fullscreen editor opened from the 编辑 pill. A hidden
- * TextArea stays mounted so data-creator-* anchors, review focus and
- * controlled edits keep working.
- */
+/** Prompt text with actual reference previews and a full-screen editor. */
 export default function PromptRichBlock({
   label,
   value,
@@ -110,7 +64,6 @@ export default function PromptRichBlock({
   field,
   path,
   tokens,
-  shots,
   collapseHeight = 230,
   placeholder,
   onRegenerate,
@@ -126,7 +79,6 @@ export default function PromptRichBlock({
   field: string;
   path: string;
   tokens: PromptRichToken[];
-  shots?: ShotDocument[];
   collapseHeight?: number;
   placeholder?: string;
   /** Design contract: the prompt card foots with one explicit regenerate
@@ -151,12 +103,6 @@ export default function PromptRichBlock({
   const [fullOpen, setFullOpen] = useState(false);
 
   const charCount = presentedValue.replace(/\s/g, "").length;
-  const { marked, segments } = splitSegments(presentedValue);
-  const shotSegmentCount = segments.filter(
-    (segment) => (segment.shotNumber ?? 0) > 0,
-  ).length;
-  const segMismatch =
-    marked && shots && shots.length > 0 && shotSegmentCount !== shots.length;
   const collapsed = overflowing && !expanded;
 
   // Measure after render (and when a hidden tab becomes visible) to decide
@@ -174,27 +120,6 @@ export default function PromptRichBlock({
     observer.observe(element);
     return () => observer.disconnect();
   }, [presentedValue, collapseHeight]);
-
-  const clearShotHighlight = () => {
-    document
-      .querySelectorAll(`.${SHOT_HL_CLASS}`)
-      .forEach((el) => el.classList.remove(SHOT_HL_CLASS));
-  };
-  const shotOf = (shotNumber: number): ShotDocument | null =>
-    shots?.[shotNumber - 1] ?? null;
-  const highlightShot = (shotNumber: number) => {
-    const shot = shotOf(shotNumber);
-    if (shot) shotRowElement(shot.shot_id)?.classList.add(SHOT_HL_CLASS);
-  };
-  const scrollToShot = (shotNumber: number) => {
-    const shot = shotOf(shotNumber);
-    if (!shot) return;
-    shotRowElement(shot.shot_id)?.scrollIntoView({
-      behavior: "smooth",
-      block: "center",
-    });
-  };
-  useEffect(() => clearShotHighlight, []);
 
   const renderInline = (text: string) =>
     text.split(/(\[Image \d+\])/).map((part, partIndex) => {
@@ -283,54 +208,12 @@ export default function PromptRichBlock({
           style={collapsed ? { maxHeight: collapseHeight } : undefined}
         >
           {value.trim() ? (
-            segments.map((segment, segmentIndex) => {
-              const shotNumber = segment.shotNumber;
-              const shot =
-                shotNumber && shotNumber > 0 ? shotOf(shotNumber) : null;
-              return (
-                <div
-                  key={segmentIndex}
-                  data-prompt-segment={shotNumber ?? "all"}
-                  className={`whitespace-pre-wrap break-words rounded-sm border-l-2 border-transparent ${
-                    marked ? "pl-2.5" : ""
-                  } ${segmentIndex > 0 ? "mt-1.5" : ""}`}
-                >
-                  {marked && shotNumber === 0 && (
-                    <span className="mr-1.5 inline-flex items-center rounded-full border border-dashed border-[var(--color-border-strong)] bg-[var(--color-bg-primary)] px-2 py-px align-[-2px] text-[10px] font-bold leading-normal text-[var(--color-text-secondary)]">
-                      {t("r2v.segOverview")}
-                    </span>
-                  )}
-                  {marked && shotNumber !== null && shotNumber > 0 && (
-                    <button
-                      type="button"
-                      data-shot-link={shotNumber}
-                      title={shot ? t("r2v.shotBadgeTitle") : undefined}
-                      disabled={!shot}
-                      onMouseEnter={() => highlightShot(shotNumber)}
-                      onMouseLeave={clearShotHighlight}
-                      onClick={() => scrollToShot(shotNumber)}
-                      className="mr-1.5 inline-flex items-center gap-1 rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-primary)] px-2 py-px align-[-2px] text-[10px] font-bold leading-normal text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-                    >
-                      {t("r2v.plan.shot", { index: shotNumber })}
-                      {shot && (
-                        <span className="font-medium text-[var(--color-text-tertiary)]">
-                          {[
-                            shot.framing?.trim(),
-                            shot.duration_seconds != null
-                              ? `${shot.duration_seconds}s`
-                              : null,
-                          ]
-                            .filter(Boolean)
-                            .map((meta) => `· ${meta}`)
-                            .join(" ")}
-                        </span>
-                      )}
-                    </button>
-                  )}
-                  {renderInline(segment.text)}
-                </div>
-              );
-            })
+            <div
+              data-prompt-segment="all"
+              className="whitespace-pre-wrap break-words"
+            >
+              {renderInline(presentedValue)}
+            </div>
           ) : (
             <span className="text-[var(--color-text-tertiary)]">
               {placeholder ?? t("r2v.generateAndEdit", { label })}
@@ -390,14 +273,6 @@ export default function PromptRichBlock({
             ? t("r2v.collapse")
             : t("r2v.expandAll", { count: charCount })}
         </button>
-      )}
-      {segMismatch && (
-        <p className="mt-1.5 text-[10px] text-[var(--color-warning)]">
-          {t("r2v.segMismatch", {
-            segments: shotSegmentCount,
-            shots: shots?.length ?? 0,
-          })}
-        </p>
       )}
       <InlineReviewDiff pointer={path} />
 

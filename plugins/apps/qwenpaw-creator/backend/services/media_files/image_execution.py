@@ -815,17 +815,11 @@ def _resolve_request(
         assert_visual_design_ready_for_storyboards(project)
         prompt = explicit_prompt or creation.storyboard_prompt.strip()
         if not prompt:
-            shot_text = "；".join(
-                shot.description.strip()
-                for shot in creation.shots.items.values()
-                if shot.description.strip()
-            )
             prompt = "，".join(
                 item
                 for item in (
                     element.label.strip(),
                     creation.narrative.strip(),
-                    shot_text,
                 )
                 if item
             )
@@ -2147,6 +2141,7 @@ class FileImageExecutionService:
                 # Frozen publish inputs, so an interrupted provider task can
                 # be resumed and published after a restart without
                 # re-resolving (and possibly re-billing) anything.
+                "storyboardInputContract": 2,
                 "requestSnapshot": _publish_snapshot(resolved),
             },
         )

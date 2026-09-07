@@ -122,7 +122,6 @@ def _r2v_contract_project(
     character_refs: tuple[str, ...] = (),
     scene_ref: str | None = None,
 ) -> dict:
-    shot_ids = tuple(f"shot:{index}" for index in range(1, len(dialogues) + 1))
     return {
         "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
         "timelines": {
@@ -134,17 +133,7 @@ def _r2v_contract_project(
                                 "type": "r2v",
                                 "character_refs": list(character_refs),
                                 "scene_ref": scene_ref,
-                                "shots": {
-                                    "items": {
-                                        shot_id: {"dialogue": dialogue}
-                                        for shot_id, dialogue in zip(
-                                            shot_ids,
-                                            dialogues,
-                                            strict=True,
-                                        )
-                                    },
-                                    "order": list(shot_ids),
-                                },
+                                "narrative": "。".join(dialogues),
                                 "storyboard_prompt": storyboard_prompt,
                                 "video_prompt": video_prompt,
                             },
@@ -213,9 +202,9 @@ def test_mixed_strategy_and_shots_commit_still_runs_script_check(
     )
     observed: dict[str, str] = {}
 
-    async def fake_script_check(*, strategy_payload, shots_payload):
+    async def fake_script_check(*, strategy_payload, content_payload):
         observed["strategy"] = strategy_payload
-        observed["shots"] = shots_payload
+        observed["shots"] = content_payload
         return {
             "coverage_missing": [
                 {"source_quote": "雨天独白", "note": "分镜未承接"},
@@ -237,11 +226,7 @@ def test_mixed_strategy_and_shots_commit_still_runs_script_check(
                     "elements_by_id": {
                         "e": {
                             "creation": {
-                                "shots": {
-                                    "items": {
-                                        "s1": {"description": "猫看向窗外"},
-                                    },
-                                },
+                                "narrative": "猫看向窗外",
                             },
                         },
                     },
@@ -255,12 +240,12 @@ def test_mixed_strategy_and_shots_commit_still_runs_script_check(
         project_json=project,
         changed_pointers=[
             "/strategy/creative_brief",
-            "/timelines/items/t/elements_by_id/e/creation/shots",
+            "/timelines/items/t/elements_by_id/e/creation/narrative",
         ],
         transaction_id="txn-mixed",
     )
     assert result is not None
-    assert result["pointer_group"] == "shots"
+    assert result["pointer_group"] == "generation_content"
     assert len(calls) == 2, "strategy and shots are both reviewed"
     assert result["script_check"]["coverage_missing"]
     assert "雨天独白" in observed["strategy"]
@@ -311,7 +296,7 @@ def test_mixed_pointer_groups_review_concurrently(
         transaction_id="txn-concurrent-groups",
     )
     assert result is None
-    assert max_active == 2
+    assert max_active == 3  # Strategy, content taste and script alignment.
 
 
 def test_generation_text_blocker_survives_repair_turn_but_not_hard_cap(
@@ -347,7 +332,7 @@ def test_generation_text_blocker_survives_repair_turn_but_not_hard_cap(
     assert review("纸船缓慢驶入晨雾", "txn-shots-1") is not None
     blockers = admission.active_sync_fences(reports_root)
     assert len(blockers) == 1
-    assert blockers[0]["pointer_group"] == "shots"
+    assert blockers[0]["pointer_group"] == "generation_content"
     assert review("纸船穿过金色倒影驶入晨雾", "txn-shots-2") is not None
     assert not admission.active_sync_fences(reports_root)
 
@@ -362,14 +347,7 @@ def test_whole_element_create_expands_nested_generation_text() -> None:
                             "creation": {
                                 "type": "r2v",
                                 "intent": "纸船驶向晨雾",
-                                "shots": {
-                                    "items": {
-                                        "shot:1": {
-                                            "description": "纸船随涟漪前进",
-                                        },
-                                    },
-                                    "order": ["shot:1"],
-                                },
+                                "narrative": "纸船随涟漪前进",
                                 "storyboard_prompt": "晨雾湖面与白色纸船",
                                 "video_prompt": "纸船缓慢向前漂移",
                             },
@@ -381,12 +359,12 @@ def test_whole_element_create_expands_nested_generation_text() -> None:
     }
     root = "/timelines/items/timeline:main/elements_by_id/elem:one"
     expanded = reviewable_changed_pointers(project, [root])
-    assert f"{root}/creation/shots" in expanded
+    assert f"{root}/creation/narrative" in expanded
     assert f"{root}/creation/storyboard_prompt" in expanded
     assert f"{root}/creation/video_prompt" in expanded
     groups = classify_pointer_groups(expanded)
     assert groups
-    assert groups[0][0] == "shots"
+    assert groups[0][0] == "generation_content"
 
 
 def test_empty_r2v_prompt_is_reported_without_calling_review_model(
@@ -415,14 +393,7 @@ def test_empty_r2v_prompt_is_reported_without_calling_review_model(
                             "enabled": True,
                             "creation": {
                                 "type": "r2v",
-                                "shots": {
-                                    "items": {
-                                        "shot:1": {
-                                            "dialogue": "我们出发。",
-                                        },
-                                    },
-                                    "order": ["shot:1"],
-                                },
+                                "narrative": "我们出发。",
                                 "storyboard_prompt": (
                                     "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
                                 ),
@@ -452,7 +423,9 @@ def test_empty_r2v_prompt_is_reported_without_calling_review_model(
     blockers = admission.active_sync_fences(
         tmp_path / "runtime" / "run-review",
     )
-    assert [item["pointer_group"] for item in blockers] == ["shots"]
+    assert [item["pointer_group"] for item in blockers] == [
+        "generation_content",
+    ]
 
 
 def test_clean_r2v_prompt_repair_releases_contract_blocker(
@@ -478,14 +451,7 @@ def test_clean_r2v_prompt_repair_releases_contract_blocker(
                             "enabled": True,
                             "creation": {
                                 "type": "r2v",
-                                "shots": {
-                                    "items": {
-                                        "shot:1": {
-                                            "dialogue": "我们出发。",
-                                        },
-                                    },
-                                    "order": ["shot:1"],
-                                },
+                                "narrative": "我们出发。",
                                 "storyboard_prompt": (
                                     "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
                                 ),
@@ -503,7 +469,7 @@ def test_clean_r2v_prompt_repair_releases_contract_blocker(
     admission.hold_sync_blocker(
         reports_root,
         project_id="project-run-review",
-        pointer_group="shots",
+        pointer_group="generation_content",
         reviewed_pointers=[f"{base}/creation/video_prompt"],
         round_number=1,
     )
@@ -543,10 +509,7 @@ def test_happyhorse_explicit_reference_roles_follow_runtime_order(
                                 "character_refs": ["char:hero"],
                                 "scene_ref": "scene:room",
                                 "prop_refs": ["prop:lamp"],
-                                "shots": {
-                                    "items": {"s": {"dialogue": ""}},
-                                    "order": ["s"],
-                                },
+                                "narrative": "",
                                 "storyboard_prompt": (
                                     "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
                                 ),
@@ -593,14 +556,7 @@ def test_borderless_outer_whitespace_is_not_a_panel_border_conflict(
                         "e": {
                             "creation": {
                                 "type": "r2v",
-                                "shots": {
-                                    "items": {
-                                        "s1": {"dialogue": ""},
-                                        "s2": {"dialogue": ""},
-                                        "s3": {"dialogue": ""},
-                                    },
-                                    "order": ["s1", "s2", "s3"],
-                                },
+                                "narrative": "",
                                 "storyboard_prompt": (
                                     "16:9 故事板，3 个分镜格；每一个分镜格内部均为 "
                                     "16:9，并有完整清晰边界。末行居中，剩余面积只作"

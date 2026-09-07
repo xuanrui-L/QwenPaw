@@ -7,7 +7,6 @@
 """Real commits and frozen text proposals; no media or live model calls."""
 
 import asyncio
-import copy
 import hashlib
 import json
 from datetime import timedelta
@@ -35,7 +34,6 @@ from services.project_files.models import (
     IndexedFile,
     Project,
     R2VCreation,
-    Shot,
     TimelineElement,
     TimelineSpan,
     VisualEntity,
@@ -72,25 +70,13 @@ def services(tmp_path, monkeypatch):
     services = CreatorFileServices.create(tmp_path)
     project = Project.new(project_id=PID, name="找钥匙")
     project.settings.aspect_ratio = "9:16"
-    shot = Shot(
-        shot_id="shot-one",
-        description="左手持钥匙，右手停包边。对白：原来在这儿。",
-        camera="→ 横摇右",
-        framing="中景",
-        duration_seconds=6,
-        dialogue="原来在这儿。",
-    )
     element = TimelineElement(
         element_id=EID,
         label="发现钥匙",
         location=ElementLocation(),
         span=TimelineSpan(start_tick=0, duration_tick=6000),
         creation=R2VCreation(
-            narrative="发现左手钥匙",
-            shots=EntityCollection(
-                items={shot.shot_id: shot},
-                order=[shot.shot_id],
-            ),
+            narrative="左手持钥匙，右手停包边。对白：原来在这儿。",
             storyboard_prompt=SB,
             video_prompt=VD,
         ),
@@ -121,8 +107,8 @@ def edit(services, mutator, **kwargs):
 def plan_edit(services):
     return edit(
         services,
-        lambda c: c["shots"]["items"]["shot-one"].update(
-            description="右手停包边，只有左前臂抬钥匙至胸前。对白：原来在这儿。",
+        lambda c: c.update(
+            narrative="右手停包边，只有左前臂抬钥匙至胸前。对白：原来在这儿。",
         ),
     )
 
@@ -146,14 +132,8 @@ def input_value(payload, source):
     )[source]
 
 
-def model_shots(payload):
-    shots = copy.deepcopy(
-        input_value(payload, "currentPlan")["creation"]["shots"],
-    )
-    for shot in shots["items"].values():
-        if shot["dialogue"] and shot["dialogue"] not in shot["description"]:
-            shot["description"] += "\n对白：" + shot["dialogue"]
-    return shots
+def model_narrative(payload):
+    return input_value(payload, "currentPlan")
 
 
 def client(callback=None):
@@ -165,7 +145,7 @@ def client(callback=None):
         return AgentModelTurn(
             content=json.dumps(
                 {
-                    "shots": model_shots(payload),
+                    "narrative": model_narrative(payload),
                     "storyboardPrompt": SB + "左手抬钥匙。",
                     "videoPrompt": VD + "右手停包边。",
                 },
@@ -197,7 +177,7 @@ def test_plan_edit_gates_graph_and_fresh_video_resolution(services):
         node = graph.by_id[node_id]
         assert node.status.value == "gated"
         assert "镜头与提示词待同步" in node.missing[0]
-    with pytest.raises(ValidationError, match="镜头计划"):
+    with pytest.raises(ValidationError, match="片段内容"):
         _resolve_request(
             snapshot=snapshot,
             project_root=services.projects.project_root(PID),
@@ -214,7 +194,7 @@ def test_proposal_is_text_only_then_accepts_both_prompts_atomically(services):
         proposal = await service.propose(PID, TID, EID)
         assert proposal["beforeStoryboardPrompt"] == SB
         assert proposal["beforeVideoPrompt"] == VD
-        assert proposal["beforeShots"] == state(services)["shots"]
+        assert proposal["beforeNarrative"] == state(services)["narrative"]
         assert proposal["baselineToken"] == state(services)["baselineToken"]
         assert state(services)["storyboardPrompt"] == SB
         assert ProjectExecutionStore(services.root).list_tasks(PID) == []
@@ -226,70 +206,13 @@ def test_proposal_is_text_only_then_accepts_both_prompts_atomically(services):
             state(services)["storyboardPrompt"] == proposal["storyboardPrompt"]
         )
         assert state(services)["videoPrompt"] == proposal["videoPrompt"]
-        assert state(services)["shots"] == proposal["shots"]
+        assert state(services)["narrative"] == proposal["narrative"]
         assert ProjectExecutionStore(services.root).list_tasks(PID) == []
         repeated = await service.accept(PID, TID, EID, proposal["proposalId"])
         assert repeated == {"ok": True, "generation": 2, "replayed": True}
         assert services.projects.read(PID).generation == 2
 
     asyncio.run(run())
-
-
-def test_model_preserves_authoritative_shot_details_and_paragraphs(
-    services,
-):
-    constraint = "抬左手时保持身体朝向不变，动作只发生一次。"
-    edit(
-        services,
-        lambda c: c["shots"]["items"]["shot-one"].update(
-            description=constraint,
-        ),
-    )
-    seen = []
-
-    async def complete(messages, tools):
-        assert tools == []
-        system = messages[0]["content"]
-        payload = model_payload(messages)
-        shot = input_value(payload, "currentPlan")["creation"]["shots"][
-            "items"
-        ]["shot-one"]
-        assert shot["description"] == constraint
-        assert shot["camera"] == "→ 横摇右"
-        assert shot["framing"] == "中景"
-        assert shot["duration_seconds"] == 6
-        assert shot["dialogue"] == "原来在这儿。"
-        assert payload["referenceOnly"]["storyboardPrompt"] == SB
-        assert payload["referenceOnly"]["videoPrompt"] == VD
-        assert payload["source"] == "currentPlan"
-        assert "currentPlan以当前镜头内容为准更新两份提示词" in system
-        assert "三份正文中分别明确表达" in system
-        assert "动作次数、身体朝向、动作先后顺序、起始状态和结束状态" in system
-        assert "仍与本轮权威来源一致的用户细节和禁止事项" in system
-        assert "每个关键帧或动作阶段独立一段" in system
-        seen.append(payload)
-        return AgentModelTurn(
-            content=json.dumps(
-                {
-                    "shots": model_shots(payload),
-                    "storyboardPrompt": SB + "\n\n关键帧动作：" + constraint,
-                    "videoPrompt": VD + "\n\n连续动作：" + constraint,
-                },
-                ensure_ascii=False,
-            ),
-        )
-
-    proposal = asyncio.run(
-        PromptSyncService(
-            services,
-            client=CallbackAgentChatClient(complete),
-        ).propose(PID, TID, EID),
-    )
-    assert len(seen) == 1
-    assert "\n\n" in proposal["storyboardPrompt"]
-    assert "\n\n" in proposal["videoPrompt"]
-    assert state(services)["storyboardPrompt"] == SB
-    assert ProjectExecutionStore(services.root).list_tasks(PID) == []
 
 
 @pytest.mark.parametrize("source", ["storyboardPrompt", "videoPrompt"])
@@ -319,7 +242,7 @@ def test_prompt_source_updates_shot_and_other_prompt_in_one_replayable_commit(
         assert payload["authoritativeInputs"] == {source: text}
         assert source not in payload["referenceOnly"]
         assert payload["targetFields"] == [
-            "shots",
+            "narrative",
             (
                 "videoPrompt"
                 if source == "storyboardPrompt"
@@ -332,16 +255,13 @@ def test_prompt_source_updates_shot_and_other_prompt_in_one_replayable_commit(
             json.loads(messages[-1]["content"])["authoritativeInputs"][source]
             == text
         )
-        assert "不得恢复权威来源已删除的旧台词" in messages[0]["content"]
-        shots = model_shots(payload)
-        shots["items"]["shot-one"].update(
-            description=new_description,
-            dialogue=new_line,
-        )
+        assert "不恢复已删除的台词" in messages[0]["content"]
+        shots = model_narrative(payload)
+        shots = new_description
         return AgentModelTurn(
             content=json.dumps(
                 {
-                    "shots": shots,
+                    "narrative": shots,
                     "storyboardPrompt": new_sb,
                     "videoPrompt": new_vd,
                 },
@@ -357,7 +277,7 @@ def test_prompt_source_updates_shot_and_other_prompt_in_one_replayable_commit(
     async def run():
         draft = await service.propose(PID, TID, EID, source=source)
         assert draft["source"] == source
-        assert draft["beforeShots"] == before["shots"]
+        assert draft["beforeNarrative"] == before["narrative"]
         assert state(services) == before
         result = await service.accept(PID, TID, EID, draft["proposalId"])
         current = state(services)
@@ -366,15 +286,12 @@ def test_prompt_source_updates_shot_and_other_prompt_in_one_replayable_commit(
             current["changedSources"] == []
             and current["suggestedSource"] is None
         )
-        assert (
-            current["shots"]["items"]["shot-one"]["description"]
-            == new_description
-        )
-        assert current["shots"]["items"]["shot-one"]["dialogue"] == new_line
+        assert current["narrative"] == new_description
+        assert new_line in current["narrative"]
         assert current["storyboardPrompt"] == new_sb
         assert current["videoPrompt"] == new_vd
         assert "原来在这儿。" not in json.dumps(
-            [current["shots"], new_sb, new_vd],
+            [current["narrative"], new_sb, new_vd],
             ensure_ascii=False,
         )
         replay = await service.accept(PID, TID, EID, draft["proposalId"])
@@ -396,21 +313,13 @@ def test_reverse_prompt_can_remove_old_speech_without_hidden_fallback(
 
     async def complete(messages, tools):
         payload = model_payload(messages)
-        assert (
-            input_value(payload, "currentPlan")["creation"]["shots"]["items"][
-                "shot-one"
-            ]["dialogue"]
-            == "原来在这儿。"
-        )
-        shots = model_shots(payload)
-        shots["items"]["shot-one"].update(
-            description="女子只抬一次左手，右手停在包边。有意静默：无对白或画外旁白。",
-            dialogue="",
-        )
+        assert "原来在这儿。" in input_value(payload, "currentPlan")
+        shots = model_narrative(payload)
+        shots = "女子只抬一次左手，右手停在包边。无对白或画外旁白。"
         return AgentModelTurn(
             content=json.dumps(
                 {
-                    "shots": shots,
+                    "narrative": shots,
                     "storyboardPrompt": SB + "有意静默。",
                     "videoPrompt": silent_video,
                 },
@@ -427,71 +336,9 @@ def test_reverse_prompt_can_remove_old_speech_without_hidden_fallback(
         draft = await service.propose(PID, TID, EID, source="videoPrompt")
         await service.accept(PID, TID, EID, draft["proposalId"])
         current = state(services)
-        assert current["shots"]["items"]["shot-one"]["dialogue"] == ""
+        assert "原来在这儿" not in current["narrative"]
         assert current["videoPrompt"] == silent_video
         assert current["status"] == "current"
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("source", ["storyboardPrompt", "videoPrompt"])
-@pytest.mark.parametrize("unchanged_target", ["shots", "otherPrompt"])
-def test_reverse_update_rejects_unchanged_targets_but_keeps_manual_review_path(
-    services,
-    source,
-    unchanged_target,
-):
-    field = (
-        "storyboard_prompt" if source == "storyboardPrompt" else "video_prompt"
-    )
-    edit(
-        services,
-        lambda c: c.update(
-            {field: c[field] + "保持衣领平整，先停顿再抬左手。"},
-        ),
-    )
-    before = state(services)
-
-    async def complete(messages, tools):
-        payload = model_payload(messages)
-        shots = model_shots(payload)
-        if unchanged_target != "shots":
-            shots["items"]["shot-one"]["description"] += "先停顿再抬左手。"
-        result = {
-            "shots": shots,
-            "storyboardPrompt": input_value(payload, "storyboardPrompt"),
-            "videoPrompt": input_value(payload, "videoPrompt"),
-        }
-        if unchanged_target != "otherPrompt":
-            other = (
-                "videoPrompt"
-                if source == "storyboardPrompt"
-                else "storyboardPrompt"
-            )
-            result[other] += "先停顿再抬左手。"
-        return AgentModelTurn(content=json.dumps(result, ensure_ascii=False))
-
-    async def run():
-        service = PromptSyncService(
-            services,
-            client=CallbackAgentChatClient(complete),
-        )
-        with pytest.raises(ValidationError, match="请重试同步"):
-            await service.propose(PID, TID, EID, source=source)
-        assert state(services) == before
-        assert not (
-            services.projects.project_root(PID) / "runtime/prompt-proposals"
-        ).exists()
-        # A wording-only edit may intentionally retain both other documents.
-        confirmed = await service.confirm(
-            PID,
-            TID,
-            EID,
-            before["baselineToken"],
-        )
-        assert confirmed["ok"] and state(services)["status"] == "current"
-        assert state(services)["shots"] == before["shots"]
-        assert ProjectExecutionStore(services.root).list_tasks(PID) == []
 
     asyncio.run(run())
 
@@ -512,12 +359,7 @@ def test_mixed_edits_are_all_authoritative_and_conflict_creates_no_draft(
         payload = model_payload(messages)
         assert payload["source"] == "mixed"
         assert payload["changedSources"] == ["currentPlan", "videoPrompt"]
-        assert (
-            "只有左前臂"
-            in input_value(payload, "currentPlan")["creation"]["shots"][
-                "items"
-            ]["shot-one"]["description"]
-        )
+        assert "只有左前臂" in input_value(payload, "currentPlan")
         assert "只抬右手" in payload["authoritativeInputs"]["videoPrompt"]
         return AgentModelTurn(
             content=json.dumps(
@@ -539,35 +381,6 @@ def test_mixed_edits_are_all_authoritative_and_conflict_creates_no_draft(
     assert not (
         services.projects.project_root(PID) / "runtime/prompt-proposals"
     ).exists()
-
-
-@pytest.mark.parametrize("bad_audio", ["omitted", "hidden_old_line"])
-def test_proposal_must_explicitly_project_voice_from_visible_description(
-    services,
-    bad_audio,
-):
-    async def complete(messages, tools):
-        shots = model_shots(model_payload(messages))
-        shot = shots["items"]["shot-one"]
-        if bad_audio == "omitted":
-            del shot["dialogue"]
-        else:
-            shot["description"] = "女子抬左手，有意静默。"
-        return AgentModelTurn(
-            content=json.dumps(
-                {"shots": shots, "storyboardPrompt": SB, "videoPrompt": VD},
-                ensure_ascii=False,
-            ),
-        )
-
-    with pytest.raises(ValidationError, match="声音内容|隐藏的旧台词"):
-        asyncio.run(
-            PromptSyncService(
-                services,
-                client=CallbackAgentChatClient(complete),
-            ).propose(PID, TID, EID),
-        )
-    assert services.projects.read(PID).generation == 0
 
 
 @pytest.mark.parametrize("change", ["plan", "storyboard", "video"])
@@ -665,7 +478,7 @@ def test_manual_confirmation_requires_current_text_and_cannot_skip_plan_update(
 
 @pytest.mark.parametrize(
     "invalid",
-    ["missing_dialogue", "unknown_reference", "empty"],
+    ["unknown_reference", "empty"],
 )
 def test_manual_confirmation_checks_actual_prompt_contracts(services, invalid):
     value = {
@@ -688,7 +501,7 @@ def test_manual_confirmation_checks_actual_prompt_contracts(services, invalid):
 def test_ordinary_writer_cannot_forge_current_sync_stamp(services):
     base = services.projects.read(PID)
     candidate = base.project.model_dump(mode="json")
-    creation(candidate)["shots"]["items"]["shot-one"]["description"] = "不同动作"
+    creation(candidate)["narrative"] = "不同动作"
     creation(candidate)["prompt_sync"] = sync_stamp(candidate, TID, EID)
     result = services.commits.commit(
         base=base,
@@ -707,7 +520,7 @@ def test_both_new_prompts_and_plan_need_review_not_automatic_alignment(
     edit(
         services,
         lambda c: (
-            c["shots"]["items"]["shot-one"].update(description="新动作"),
+            c.update(narrative="新动作"),
             c.update(
                 storyboard_prompt=SB + "新动作",
                 video_prompt=VD + "新动作",
@@ -746,13 +559,13 @@ def test_get_route_returns_one_consistent_baseline_and_rejects_snapshots(
     asyncio.run(run())
 
 
-def test_oversized_shot_plan_is_rejected_before_text_model_call(services):
+def test_empty_narrative_is_rejected_before_text_model_call(services):
     edit(
         services,
-        lambda c: c["shots"]["items"]["shot-one"].update(duration_seconds=7),
+        lambda c: c.update(narrative=""),
     )
     called = []
-    with pytest.raises(ValidationError, match="总时长"):
+    with pytest.raises(ValidationError, match="片段内容"):
         asyncio.run(
             PromptSyncService(
                 services,
@@ -797,7 +610,7 @@ def test_derived_hashes_excluded_from_full_and_partial_review(
     base = services.projects.read(PID)
     candidate = base.project.model_dump(mode="json")
     c = creation(candidate)
-    c["shots"]["items"]["shot-one"]["description"] = "新动作只抬左手"
+    c["narrative"] = "新动作只抬左手"
     c.update(storyboard_prompt=SB + "新动作。", video_prompt=VD + "新动作。")
     result = services.commits.commit(
         base=base,
@@ -920,7 +733,7 @@ def test_frozen_image_and_video_replays_survive_later_plan_edits(
             == frozen
         )
         assert image_provider.calls == 1
-        with pytest.raises(ValidationError, match="镜头计划"):
+        with pytest.raises(ValidationError, match="片段内容"):
             await images.execute(
                 project_id=PID,
                 command="GENERATE_STORYBOARD_IMAGE",
@@ -1121,8 +934,8 @@ def test_http_propose_accept_and_retry_use_one_text_call_no_media(
             assert draft.status_code == 200, draft.text
             value = draft.json()
             assert value["source"] == "videoPrompt"
-            assert value["beforeShots"]["order"] == ["shot-one"]
-            assert value["shots"]["items"]["shot-one"]["dialogue"] == "原来在这儿。"
+            assert "左手" in value["beforeNarrative"]
+            assert "原来在这儿。" in value["narrative"]
             assert value["beforeStoryboardPrompt"] == SB
             endpoint = (
                 prefix + f"/prompt-proposals/{value['proposalId']}/accept"
@@ -1169,12 +982,12 @@ def test_synchronization_preserves_authoritative_user_content_exactly(
 
     async def complete(messages, tools):
         payload = model_payload(messages)
-        shots = model_shots(payload)
-        shots["items"]["shot-one"]["description"] += "左手抬起钥匙。模型改写。"
+        shots = model_narrative(payload)
+        shots += "左手抬起钥匙。模型改写。"
         return AgentModelTurn(
             content=json.dumps(
                 {
-                    "shots": shots,
+                    "narrative": shots,
                     "storyboardPrompt": SB + "左手抬起钥匙。模型改写。",
                     "videoPrompt": VD + "左手抬起钥匙。模型改写。",
                 },
@@ -1190,7 +1003,7 @@ def test_synchronization_preserves_authoritative_user_content_exactly(
     async def run():
         proposal = await service.propose(PID, TID, EID, source=source)
         for key in before["changedSources"]:
-            field = "shots" if key == "currentPlan" else key
+            field = "narrative" if key == "currentPlan" else key
             assert proposal[field] == before[field]
         await service.accept(PID, TID, EID, proposal["proposalId"])
         assert state(services)["status"] == "current"
@@ -1253,7 +1066,7 @@ def test_accept_rejects_old_proposal_that_rewrites_edited_source(services):
             / (proposal["proposalId"] + ".json")
         )
         data = json.loads(file.read_text())
-        data["shots"]["items"]["shot-one"]["description"] += "旧草稿擅自改写。"
+        data["narrative"] += "旧草稿擅自改写。"
         file.write_text(json.dumps(data, ensure_ascii=False))
         generation = services.projects.read(PID).generation
         with pytest.raises(ConflictError, match="修改了本次编辑"):
@@ -1298,8 +1111,8 @@ def test_scheduler_prepares_changed_content_before_media(
         if mode == "late_edit":
             edit(
                 services,
-                lambda c: c["shots"]["items"]["shot-one"].update(
-                    description="用户的新修改必须保留。对白：原来在这儿。",
+                lambda c: c.update(
+                    narrative="用户的新修改必须保留。对白：原来在这儿。",
                 ),
             )
         if mode == "invalid":
@@ -1350,8 +1163,10 @@ def test_scheduler_prepares_changed_content_before_media(
             ), scheduler.deterministic_failure_nodes_for_project(PID)
             assert state(services)["status"] == "current"
             assert (
-                state(services)["shots"]
-                == creation(before.project.model_dump(mode="json"))["shots"]
+                state(services)["narrative"]
+                == creation(before.project.model_dump(mode="json"))[
+                    "narrative"
+                ]
             )
             assert len(dispatched) == 1
             assert dispatched[0]["command"] == "GENERATE_STORYBOARD_IMAGE"
@@ -1370,12 +1185,7 @@ def test_scheduler_prepares_changed_content_before_media(
                     len(prepared) == 1
                 ), scheduler.deterministic_failure_nodes_for_project(PID)
                 if mode == "late_edit":
-                    assert (
-                        "用户的新修改必须保留"
-                        in state(services)["shots"]["items"]["shot-one"][
-                            "description"
-                        ]
-                    )
+                    assert "用户的新修改必须保留" in state(services)["narrative"]
                 else:
                     assert scheduler.deterministic_failure_nodes_for_project(
                         PID,
@@ -1444,12 +1254,13 @@ def test_committed_revision_prepares_and_replaces_stale_image(
             f"element:{EID}:storyboard"
         ].selected_version_id
         candidate = base.project.model_dump(mode="json")
-        creation(candidate)["shots"]["items"]["shot-one"][
-            "description"
-        ] = "右手停包边，只有左前臂抬钥匙至胸前。对白：原来在这儿。"
+        creation(candidate)["narrative"] = "右手停包边，只有左前臂抬钥匙至胸前。对白：原来在这儿。"
         candidate, impact = apply_frontend_edit_impacts(
             candidate,
-            [f"/timelines/items/{TID}/elements_by_id/{EID}/creation/shots"],
+            [
+                f"/timelines/items/{TID}/elements_by_id/{EID}"
+                "/creation/narrative",
+            ],
             base=base.project.model_dump(mode="json"),
         )
         services.commits.commit(
@@ -1489,3 +1300,66 @@ def test_committed_revision_prepares_and_replaces_stale_image(
         await scheduler.shutdown()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("source", ["storyboardPrompt", "videoPrompt"])
+def test_technical_wording_edit_can_preserve_already_aligned_targets(
+    services,
+    source,
+):
+    field = (
+        "storyboard_prompt" if source == "storyboardPrompt" else "video_prompt"
+    )
+    edit(services, lambda c: c.update({field: c[field] + "高质量细节。"}))
+    before = state(services)
+
+    async def complete(messages, tools):
+        payload = model_payload(messages)
+        assert "narrative" not in payload["fixedScope"]["creation"]
+        assert "保留已正确的叙述和另一份提示词" in messages[0]["content"]
+        return AgentModelTurn(
+            content=json.dumps(
+                {
+                    "narrative": input_value(payload, "currentPlan"),
+                    "storyboardPrompt": input_value(
+                        payload,
+                        "storyboardPrompt",
+                    ),
+                    "videoPrompt": input_value(payload, "videoPrompt"),
+                },
+            ),
+        )
+
+    async def run():
+        service = PromptSyncService(
+            services,
+            client=CallbackAgentChatClient(complete),
+        )
+        proposal = await service.propose(PID, TID, EID, source=source)
+        await service.accept(PID, TID, EID, proposal["proposalId"])
+        after = state(services)
+        assert after["status"] == "current"
+        assert after["narrative"] == before["narrative"]
+        assert after["storyboardPrompt"] == before["storyboardPrompt"]
+        assert after["videoPrompt"] == before["videoPrompt"]
+
+    asyncio.run(run())
+
+
+def test_read_and_noop_commit_leave_legacy_project_and_generation_untouched(
+    services,
+):
+    path = services.projects.project_root(PID) / "project.json"
+    document = json.loads(path.read_text())
+    creation(document).update(
+        shots={"items": {"bad": {"dialogue": "废弃台词", "duration_seconds": -3}}},
+        min_dialogue_ratio=900,
+    )
+    raw = json.dumps(document, ensure_ascii=False)
+    path.write_text(raw)
+    loaded = services.projects.read(PID)
+    assert "shots" not in creation(loaded.project.model_dump(mode="json"))
+    assert loaded.generation == 0
+    result = edit(services, lambda c: None)
+    assert result.snapshot.generation == 0
+    assert path.read_text() == raw

@@ -198,7 +198,7 @@ _DUCK_VOLUME = 0.35
 # BGM plays as one continuous low bed under the whole mix; the fixed bed
 # gain keeps music from competing with native dialogue and ambience.
 _BGM_BED_GAIN_DB = -12.0
-# BGM volume while any speech window (shot dialogue, s2v, narration) plays.
+# BGM volume during explicit speech windows (s2v, narration).
 _BGM_DUCK_VOLUME = 0.4
 # Unset bgm fades default to min(this, span/4): musical edges for a long
 # bed without swallowing a short segment. Explicit creation fades win.
@@ -264,7 +264,7 @@ class LocalMediaExecutionSpec:
     canvas_size: tuple[int, int]
     on_element_done: Callable[[int, int], None] | None = None
     audio_tracks: tuple[Mapping[str, Any], ...] = ()
-    # [start, end) seconds where clips natively speak (shot dialogue, s2v);
+    # [start, end) seconds where clips have explicit driving voice (s2v);
     # BGM ducks itself inside these windows.
     speech_windows: tuple[tuple[float, float], ...] = ()
     color_grade: str = ""
@@ -708,7 +708,7 @@ class FfmpegLocalMediaRunner:
         composed video's own audio (when present) without renormalization.
         Roles keep the three sound layers apart: narration ducks the footage
         audio under it, bgm plays as one continuous low bed that ducks itself
-        under every speech window (native dialogue, s2v, narration), and sfx
+        under explicit speech windows (s2v, narration), and sfx
         mixes verbatim.
         """
 
@@ -3232,15 +3232,10 @@ def _timeline_execution(
 def _timeline_speech_windows(
     timeline: Timeline,
 ) -> tuple[tuple[float, float], ...]:
-    """[start, end) seconds where clips natively speak.
+    """Explicit S2V voice intervals; free-form narrative is not time data.
 
-    Shot-granular for R2V: only the dialogue-bearing shots count, so BGM
-    keeps its bed level through the silent shots of the same element.
-    Shots are placed by scaling their declared durations onto the element
-    span (the provider renders the shot list into exactly the span, so
-    relative durations are the trustworthy signal); the whole element
-    span is the safe fallback when any duration is unusable. s2v digital
-    humans speak for their entire span.
+    Other generated clips are mixed from their produced audio, not invented
+    speech timing based on text or retired authoring structures.
     """
 
     windows: list[tuple[float, float]] = []
@@ -3253,30 +3248,6 @@ def _timeline_speech_windows(
         if isinstance(creation, S2VCreation):
             windows.append((element_start, element_end))
             continue
-        if not isinstance(creation, R2VCreation):
-            continue
-        shots = [
-            creation.shots.items[shot_id] for shot_id in creation.shots.order
-        ]
-        if not any(shot.dialogue.strip() for shot in shots):
-            continue
-        total_seconds = sum(shot.duration_seconds for shot in shots)
-        if (
-            any(shot.duration_seconds <= 0 for shot in shots)
-            or total_seconds <= 0
-        ):
-            windows.append((element_start, element_end))
-            continue
-        scale = (element_end - element_start) / total_seconds
-        cursor = element_start
-        for shot in shots:
-            shot_start = cursor
-            cursor = min(
-                cursor + shot.duration_seconds * scale,
-                element_end,
-            )
-            if shot.dialogue.strip() and cursor > shot_start:
-                windows.append((shot_start, cursor))
     return tuple(sorted(windows))
 
 

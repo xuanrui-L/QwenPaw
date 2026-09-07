@@ -149,18 +149,6 @@ export const projectDocument: ProjectDocument = {
               visual_variant_refs: {
                 cat: "variant:cat:default",
               },
-              shots: {
-                order: ["shot:window"],
-                items: {
-                  "shot:window": {
-                    shot_id: "shot:window",
-                    description: "橘猫隔窗看向午饭",
-                    camera: "↑ 推近",
-                    framing: "中景",
-                    duration_seconds: 10,
-                  },
-                },
-              },
               recipe: {
                 provider: "dashscope",
                 model: "wan2.7-r2v",

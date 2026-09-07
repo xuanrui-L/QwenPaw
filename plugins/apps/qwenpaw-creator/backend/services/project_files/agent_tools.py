@@ -578,8 +578,8 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             'add/replace/remove 用 RFC 6901 path（如 "/timelines/items/'
             'timeline:main/elements_by_id/elem:x"，数组末尾用 "-"）；'
             "upsert_entity 用于 EntityCollection（如 visual.entities 或某实体的 "
-            "variants），Runtime 自动同步 items 与 order。创建带 shots 的 "
-            "Element 时先用一个 op 建骨架（shots 空集合），再逐个 op 补 shot。"
+            "variants），Runtime 自动同步 items 与 order。生成单元在 creation.narrative "
+            "中写完整叙述，并用 storyboard_prompt/video_prompt 表达生成要求。"
             "整个 ops 列表原子提交：全部成功或全部不生效，失败时报告出错的 "
             "op 序号与 path。禁止触碰 Runtime 保护字段与媒体写回区。"
         ),

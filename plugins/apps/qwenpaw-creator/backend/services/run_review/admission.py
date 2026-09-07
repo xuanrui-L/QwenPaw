@@ -443,6 +443,10 @@ def active_sync_fences(reports_root: Path) -> tuple[dict[str, Any], ...]:
     therefore carry a longer TTL.
     """
 
+    from services.project_files.review_bookkeeping import (
+        is_retired_shot_pointer,
+    )
+
     now = datetime.now(UTC)
     active: list[dict[str, Any]] = []
     try:
@@ -460,6 +464,12 @@ def active_sync_fences(reports_root: Path) -> tuple[dict[str, Any], ...]:
         return ()
     for path, ttl_seconds in candidates:
         payload = read_json(path)
+        if (payload or {}).get("pointer_group") == "shots":
+            # Retired reviewers cannot keep current generation blocked.
+            continue
+        pointers = (payload or {}).get("reviewed_pointers") or []
+        if pointers and all(is_retired_shot_pointer(p) for p in pointers):
+            continue
         raw_created = str((payload or {}).get("created_at") or "")
         try:
             created = datetime.fromisoformat(raw_created)

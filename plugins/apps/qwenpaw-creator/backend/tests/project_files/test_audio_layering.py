@@ -245,7 +245,7 @@ def test_v8_migration_stamps_roles_and_the_result_stays_loadable() -> None:
     elements = migrated["timelines"]["items"]["timeline:main"][
         "elements_by_id"
     ]
-    assert elements["audio-overlapping"]["creation"]["role"] == "sfx"
+    assert elements["audio-overlapping"]["creation"]["role"] == "narration"
     assert elements["audio-clear"]["creation"]["role"] == "narration"
     assert elements["audio-explicit"]["creation"]["role"] == "bgm"
     assert "role" not in elements["r2v-1"]["creation"]
@@ -293,7 +293,7 @@ def test_pre_merge_v9_document_missing_roles_is_repaired_on_load() -> None:
     project = load_project_json(json.dumps(raw))
 
     elements = project.timelines.items["timeline:main"].elements_by_id
-    assert elements["audio-overlapping"].creation.role == "sfx"
+    assert elements["audio-overlapping"].creation.role == "narration"
     assert elements["audio-clear"].creation.role == "narration"
     assert elements["audio-explicit"].creation.role == "bgm"
 
@@ -328,7 +328,7 @@ def test_v9_document_with_roles_is_not_altered_by_the_repair() -> None:
     assert migrate_project_document(raw) == raw
 
 
-def test_narration_overlapping_dialogue_element_is_rejected() -> None:
+def test_legacy_dialogue_rows_do_not_gate_narration() -> None:
     raw = _with_elements(
         _r2v_element(
             "r2v-1",
@@ -343,8 +343,7 @@ def test_narration_overlapping_dialogue_element_is_rejected() -> None:
             role="narration",
         ),
     )
-    with pytest.raises(ValidationError, match="overlaps the voiced"):
-        Project.model_validate(raw)
+    Project.model_validate(raw)
 
 
 def test_gate_accepts_non_conflicting_audio_layouts() -> None:
@@ -432,7 +431,7 @@ def test_narration_may_cover_the_silent_shots_of_an_element() -> None:
     Project.model_validate(raw)
 
 
-def test_narration_over_the_voiced_shot_interval_is_rejected() -> None:
+def test_legacy_shot_timing_does_not_gate_narration() -> None:
     raw = _with_elements(
         _two_shot_r2v_element(),
         _audio_element(
@@ -442,22 +441,18 @@ def test_narration_over_the_voiced_shot_interval_is_rejected() -> None:
             role="narration",
         ),
     )
-    with pytest.raises(ValidationError, match="overlaps the voiced"):
-        Project.model_validate(raw)
+    Project.model_validate(raw)
 
 
-def test_shot_placement_scales_declared_durations_onto_the_span() -> None:
-    """Declared shot durations rarely sum to the span exactly; the
-    provider renders the shot list into the span, so placement must
-    scale. Field probe: a 10s element with two 8s shots and dialogue in
-    the second voices roughly 5-10s, not 8-10s."""
+def test_legacy_durations_do_not_create_speech_windows() -> None:
+    """Retired duration/dialogue rows cannot supply real speech timing."""
 
     drifting = _two_shot_r2v_element(
         duration_tick=10_000,
         shot_seconds=(8.0, 8.0),
         dialogues=("", "后半段才开口"),
     )
-    # Narration over the true speaking interval (5s onward) is rejected …
+    # Neither former interval imposes a narrative-based audio gate.
     raw = _with_elements(
         drifting,
         _audio_element(
@@ -467,10 +462,8 @@ def test_shot_placement_scales_declared_durations_onto_the_span() -> None:
             role="narration",
         ),
     )
-    with pytest.raises(ValidationError, match="overlaps the voiced"):
-        Project.model_validate(raw)
-    # … narration inside the truly silent first half is accepted, and the
-    # mixer's ducking windows agree with the gate.
+    Project.model_validate(raw)
+    # No speech windows are invented from the discarded rows.
     raw = _with_elements(
         drifting,
         _audio_element(
@@ -482,7 +475,7 @@ def test_shot_placement_scales_declared_durations_onto_the_span() -> None:
     )
     project = Project.model_validate(raw)
     timeline = project.timelines.items["timeline:main"]
-    assert _timeline_speech_windows(timeline) == ((5.0, 10.0),)
+    assert not _timeline_speech_windows(timeline)
 
 
 def test_s2v_element_gates_narration_over_its_whole_span() -> None:

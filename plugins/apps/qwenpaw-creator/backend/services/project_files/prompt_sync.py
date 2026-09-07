@@ -16,7 +16,6 @@ from domain.errors import ConflictError, NotFoundError, ValidationError
 from .json_pointer import split_pointer
 
 _PLAN_FIELDS = (
-    "shots",
     "intent",
     "narrative",
     "continuity",
@@ -104,6 +103,7 @@ def sync_stamp(
     _, element = live_element(document, timeline_id, element_id)
     creation = element["creation"]
     return {
+        "contract_version": 2,
         "plan_fingerprint": digest(
             plan_input(document, timeline_id, element_id),
         ),
@@ -126,7 +126,7 @@ def prompt_sync_status(
     previous = creation.get("prompt_sync")
     status, reason = "legacy", "untracked"
     changed = []
-    if previous:
+    if previous and previous.get("contract_version") == 2:
         changed = [key for key in current if current[key] != previous.get(key)]
         if not changed:
             status, reason = "current", "aligned"
@@ -180,9 +180,9 @@ def assert_r2v_prompt_sync(
 ) -> None:
     status = prompt_sync_status(project, timeline_id, element_id)["status"]
     if status == "needs_update":
-        raise ValidationError("镜头计划已修改，请先更新并审阅分镜和视频提示词")
+        raise ValidationError("片段内容已修改，请先同步分镜图和视频提示词")
     if status == "needs_confirmation":
-        raise ValidationError("提示词已手动修改，请先审阅并确认与当前镜头计划一致")
+        raise ValidationError("提示词已修改，请先同步片段内容和另一份提示词")
 
 
 def _only_redundant_storyboard_refs_changed(
@@ -193,9 +193,9 @@ def _only_redundant_storyboard_refs_changed(
 ) -> bool:
     """Recognize explicit own-storyboard bookkeeping, not creative edits.
 
-    The stored fingerprint formula stays unchanged for legacy documents.
-    Callers may refresh it only from an already-current baseline. Compare
-    raw external references exactly, including duplicates and order; never
+    Callers may refresh provenance only from an already-current baseline.
+    Compare raw external references exactly, including duplicates and order;
+    never
     turn an explicit list into the automatic-reference fallback here.
     """
     _, old_element = live_element(before, timeline_id, element_id)

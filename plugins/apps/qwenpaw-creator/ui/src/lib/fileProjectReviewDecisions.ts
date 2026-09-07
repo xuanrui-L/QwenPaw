@@ -20,6 +20,15 @@ export function isSystemVersionReviewOperation(
     .slice(1)
     .map((token) => token.replace(/~1/gu, "/").replace(/~0/gu, "~"));
   if (
+    tokens.length >= 7 &&
+    tokens[0] === "timelines" &&
+    tokens[1] === "items" &&
+    tokens[3] === "elements_by_id" &&
+    tokens[5] === "creation" &&
+    ["shots", "min_dialogue_ratio", "prompt_sync"].includes(tokens[6])
+  )
+    return true;
+  if (
     tokens.length === 3 &&
     tokens[0] === "timelines" &&
     tokens[1] === "items" &&

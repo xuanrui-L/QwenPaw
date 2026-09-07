@@ -6,24 +6,6 @@ from __future__ import annotations
 from enum import StrEnum
 
 
-class ShotCamera(StrEnum):
-    STATIC = "⊙ 静止"
-    PUSH_IN = "↑ 推近"
-    PULL_OUT = "↓ 拉远"
-    PAN_RIGHT = "→ 横摇右"
-    PAN_LEFT = "← 横摇左"
-    CRANE = "↕ 升降"
-    ORBIT = "◎ 环绕"
-    HANDHELD = "～ 手持晃动"
-
-
-class ShotFraming(StrEnum):
-    WIDE = "全景"
-    MEDIUM = "中景"
-    CLOSE = "近景"
-    CLOSE_UP = "特写"
-
-
 class SpecialistRole(StrEnum):
     SOURCE_INTELLIGENCE = "source_intelligence_agent"
     VISUAL_DEVELOPMENT = "visual_development_agent"

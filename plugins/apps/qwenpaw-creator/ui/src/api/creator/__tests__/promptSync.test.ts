@@ -12,22 +12,11 @@ const scope = {
   timelineId: "timeline:main",
   elementId: "shot:one",
 };
-const shots = {
-  order: ["shot:one"],
-  items: {
-    "shot:one": {
-      shot_id: "shot:one",
-      description: "女子看向背包，轻声说：钥匙在这里。",
-      camera: "静止",
-      framing: "近景",
-      duration_seconds: 6,
-    },
-  },
-};
+const narrative = "女子看向背包，轻声说：钥匙在这里。";
 const state: PromptSyncState = {
   status: "needs_update",
   baselineToken: "baseline",
-  shots,
+  narrative,
   storyboardPrompt: "分镜正文",
   videoPrompt: "视频正文",
   changedSources: ["currentPlan", "videoPrompt"],
@@ -37,8 +26,8 @@ const proposal: PromptProposal = {
   proposalId: "proposal-1",
   baselineToken: "baseline",
   source: "mixed",
-  beforeShots: shots,
-  shots,
+  beforeNarrative: narrative,
+  narrative,
   beforeStoryboardPrompt: "原分镜正文",
   beforeVideoPrompt: "原视频正文",
   storyboardPrompt: "分镜正文",
@@ -67,7 +56,7 @@ describe("bidirectional prompt synchronization API contract", () => {
   });
 
   it.each([
-    { shots: undefined },
+    { narrative: undefined },
     { storyboardPrompt: undefined },
     { changedSources: undefined },
     { suggestedSource: null },
@@ -84,7 +73,12 @@ describe("bidirectional prompt synchronization API contract", () => {
     },
   );
 
-  it.each(["shots", "beforeShots", "beforeVideoPrompt", "source"] as const)(
+  it.each([
+    "narrative",
+    "beforeNarrative",
+    "beforeVideoPrompt",
+    "source",
+  ] as const)(
     "rejects a proposal missing %s rather than allowing partial review",
     async (field) => {
       installMockFetch([

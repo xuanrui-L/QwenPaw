@@ -124,7 +124,7 @@ def test_one_continuous_shot_uses_its_authored_keyframe_layout(
         .elements_by_id[ELEMENT_ID]
         .creation
     )
-    assert len(creation.shots.order) == 1
+    assert "shots" not in creation.model_dump()
     creation.storyboard_prompt = (
         f"输出一张9:16画布，共{panels}个关键帧，" "每格内部9:16。保持一个连续镜头，依次展示动作中间过程。"
     )
@@ -172,7 +172,6 @@ def _services(tmp_path, monkeypatch) -> CreatorFileServices:
             make_r2v_element(
                 ELEMENT_ID,
                 label="并肩入场",
-                description="两位球员并肩走向球场",
                 narrative="两位球员并肩走向球场",
                 storyboard_prompt="动画分镜：两位球员并肩入场",
             ),

@@ -147,14 +147,14 @@ def test_creator_compiles_dense_action_nodes_without_uniform_timestamps() -> (
 ):
     prompt = load_file_agent_prompt("creator_agent.system")
     assert "professional-media-prompts" in prompt
-    assert "动作密集、蒙太奇" in prompt
-    assert "6–15 个短动作节点" in prompt
-    assert "3–6 个核心电影段落" in prompt
+    assert "动作链可按准备 → 执行 → 完成 → 反应展开" in prompt
+    assert "完整的 `creation.narrative`" in prompt
+    assert "不要把面板数当成切镜数" in prompt
     assert "10 秒内的 12 个节点" in prompt
     assert "机械分配 12 个小数时间戳" in prompt
-    assert "不为每格/每个 Shot 设置 2–4 秒建议区间或 5 秒硬上限" in prompt
+    assert "不要为了凑网格增加剧情或改变片段时长" in prompt
     assert "单个常规 Shot 不超过 5 秒" not in prompt
-    assert "3–4 秒极短段通常只承载一个占主导的连续微动作" in prompt
+    assert "3–4 秒极短段通常承载一个主导微动作" in prompt
     assert "专业完整不等于重复冗长" in prompt
     assert "每一个分镜格内部画框" in prompt
     assert "正方形网格（N 列×N 行）" in prompt
@@ -183,8 +183,8 @@ def test_creator_duration_is_injected_from_the_active_video_model(
     assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
     assert "你负责编写和维护 `video_prompt`" in prompt
     assert "R2V Specialist" not in prompt
-    assert "禁止套用“每段固定 5 Shot”" in prompt
-    assert "不设统一的 7 秒 Shot 上限" in prompt
+    assert "不得把整片机械改成固定时长" in prompt
+    assert "不设统一的 7 秒镜头上限" in prompt
     assert "`ops` 必须直接传原生 JSON 数组" in prompt
 
     monkeypatch.setattr(

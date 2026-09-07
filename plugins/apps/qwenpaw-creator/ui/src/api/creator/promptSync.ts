@@ -1,9 +1,4 @@
 import { creatorRequest, jsonBody } from "./client";
-import type {
-  ProjectEntityCollection,
-  ShotDocument,
-} from "@/contracts/creator";
-
 export type PromptSyncStatus =
   | "legacy"
   | "current"
@@ -14,12 +9,11 @@ export type PromptSyncChangedSource =
   | "storyboardPrompt"
   | "videoPrompt";
 export type PromptSyncSource = PromptSyncChangedSource | "mixed";
-export type PromptSyncShots = ProjectEntityCollection<ShotDocument>;
 export interface PromptSyncState {
   validationMessage?: string | null;
   status: PromptSyncStatus;
   baselineToken: string;
-  shots: PromptSyncShots;
+  narrative: string;
   storyboardPrompt: string;
   videoPrompt: string;
   changedSources: PromptSyncChangedSource[];
@@ -29,8 +23,8 @@ export interface PromptProposal {
   proposalId: string;
   baselineToken: string;
   source: PromptSyncSource;
-  beforeShots: PromptSyncShots;
-  shots: PromptSyncShots;
+  beforeNarrative: string;
+  narrative: string;
   storyboardPrompt: string;
   videoPrompt: string;
   beforeStoryboardPrompt: string;
@@ -42,19 +36,6 @@ const CHANGED_SOURCES: PromptSyncChangedSource[] = [
   "videoPrompt",
 ];
 const SOURCES: PromptSyncSource[] = [...CHANGED_SOURCES, "mixed"];
-function validShots(value: unknown): value is PromptSyncShots {
-  if (!value || typeof value !== "object") return false;
-  const collection = value as PromptSyncShots;
-  return (
-    Array.isArray(collection.order) &&
-    Boolean(collection.items) &&
-    collection.order.every(
-      (id) =>
-        typeof id === "string" &&
-        typeof collection.items[id]?.description === "string",
-    )
-  );
-}
 export interface PromptSyncScope {
   projectId: string;
   timelineId: string;
@@ -80,7 +61,7 @@ export async function getPromptSync(
     !["legacy", "current", "needs_update", "needs_confirmation"].includes(
       result.status,
     ) ||
-    !validShots(result.shots) ||
+    typeof result.narrative !== "string" ||
     typeof result.storyboardPrompt !== "string" ||
     typeof result.videoPrompt !== "string" ||
     !Array.isArray(result.changedSources) ||
@@ -91,7 +72,7 @@ export async function getPromptSync(
     (result.changedSources.length === 1 &&
       result.suggestedSource !== result.changedSources[0])
   ) {
-    throw new Error("The shot content and prompts could not be checked.");
+    throw new Error("The generation content and prompts could not be checked.");
   }
   return result;
 }
@@ -107,8 +88,8 @@ export async function createPromptProposal(
     !result?.proposalId ||
     !result.baselineToken ||
     !SOURCES.includes(result.source) ||
-    !validShots(result.beforeShots) ||
-    !validShots(result.shots) ||
+    typeof result.beforeNarrative !== "string" ||
+    typeof result.narrative !== "string" ||
     [
       result.beforeStoryboardPrompt,
       result.beforeVideoPrompt,
@@ -116,7 +97,7 @@ export async function createPromptProposal(
       result.videoPrompt,
     ].some((text) => typeof text !== "string")
   ) {
-    throw new Error("The shot content and prompt preview is incomplete.");
+    throw new Error("The generation content and prompt preview is incomplete.");
   }
   return result;
 }

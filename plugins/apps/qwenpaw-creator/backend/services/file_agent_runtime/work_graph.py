@@ -20,7 +20,6 @@ from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, TaskKind, TaskStatus
-from services.prompt_text import dialogue_match_key, dialogue_spoken_lines
 from services.project_files.prompt_sync import prompt_sync_status
 from services.project_files.blueprint_readiness import (
     STORY_BEFORE_VISUAL_MESSAGE,
@@ -320,6 +319,17 @@ def _task_error_summary(task: Any) -> str | None:
     return None
 
 
+def _legacy_storyboard_task(node_id: str, task: Any) -> bool:
+    return bool(
+        task is not None
+        and node_id.startswith("storyboard:")
+        and (getattr(task, "metadata", {}) or {}).get(
+            "storyboardInputContract",
+        )
+        != 2,
+    )
+
+
 def _failure_inputs_changed(
     failure: Any,
     node_id: str,
@@ -343,6 +353,8 @@ def _failure_inputs_changed(
     and stay parked.
     """
 
+    if _legacy_storyboard_task(node_id, failure):
+        return False
     key = str(getattr(failure, "idempotency_key", "") or "")
     return _dispatch_inputs_changed(
         key,
@@ -382,92 +394,6 @@ def _upstream_missing(
     return tuple(
         dep for dep in dep_ids if statuses.get(dep) is not WorkNodeStatus.DONE
     )
-
-
-def _video_prompt_dialogue_gaps(creation: R2VCreation) -> tuple[str, ...]:
-    """Shots whose spoken lines never reached the committed video prompt.
-
-    Field run 2026-08-12 (project f5ac): the mainline planned per-shot
-    dialogue in the shot list, then committed a two-sentence mood summary
-    as ``video_prompt``. The scheduler dispatched that summary verbatim and
-    the dialogue never reached the video provider — a silent film with a
-    written script. R2V doctrine requires quoting the spoken lines 原文
-    inside the video prompt, so the graph enforces it deterministically:
-    the video node stays GATED (naming the offending shots) until the
-    prompt quotes every planned line. Matching ignores whitespace, speaker
-    prefixes and stage directions so natural prompt phrasing never causes
-    a false gap.
-    """
-    prompt = dialogue_match_key(creation.video_prompt or "")
-    gaps: list[str] = []
-    for shot_id in creation.shots.order:
-        shot = creation.shots.items.get(shot_id)
-        if shot is None:
-            continue
-        for line in dialogue_spoken_lines(shot.dialogue or ""):
-            if dialogue_match_key(line) not in prompt:
-                gaps.append(f"video_prompt 缺台词原文：{shot_id}")
-                break
-    return tuple(gaps)
-
-
-def _element_dialogue_density_gap(
-    creation: R2VCreation,
-    scenario: str,
-) -> str | None:
-    """Element dialogue density below min_dialogue_ratio — gate the video.
-
-    Field run 2026-08-12 (project 4cd, amodei love story): the story
-    theme was "unspoken love" and the model interpreted it as "no one
-    speaks anywhere" — 6 elements, 26 shots, only 1 dialogue line.
-    The dialogue-coverage gate (_video_prompt_dialogue_gaps) only fires
-    when dialogue *exists* and is not quoted; it silently passes when
-    shot.dialogue is empty. This gate catches the other failure mode:
-    characters appear but the model wrote a silent film.
-
-    The threshold is per-element (``creation.min_dialogue_ratio``,
-    default 0.3 ≈ 1 line per 2–3 shots); the review UI may override it
-    per element for fine-grained control.
-
-    Exemptions:
-    - Non-narrative scenarios (video_edit, general) — no story doctrine.
-    - Elements without character_refs — nothing to speak.
-    - Elements whose narrative contains the explicit directorial note
-      "有意静默" — a deliberate silence choice, not an oversight.
-    - A Shot's complete description may carry the same explicit note. Only
-      that Shot is omitted from the density denominator; it must not excuse
-      unplanned silence in the remaining Shots of the Element.
-    - min_dialogue_ratio == 0 — the model (or user) explicitly opted out.
-    """
-    gap: str | None = None
-    if (
-        scenario == "short_drama"
-        and creation.character_refs
-        and creation.min_dialogue_ratio > 0
-        and "有意静默" not in (creation.narrative or "")
-    ):
-        shots = [creation.shots.items.get(sid) for sid in creation.shots.order]
-        shots = [s for s in shots if s is not None]
-        shots = [
-            shot
-            for shot in shots
-            if (shot.dialogue or "").strip()
-            or "有意静默" not in (shot.description or "")
-        ]
-        if shots:
-            dialogue_count = sum(
-                1 for s in shots if (s.dialogue or "").strip()
-            )
-            ratio = dialogue_count / len(shots)
-            if ratio < creation.min_dialogue_ratio:
-                gap = (
-                    f"element 对白密度 {dialogue_count}/{len(shots)}"
-                    f" ({ratio:.0%}) 低于目标"
-                    f" {creation.min_dialogue_ratio:.0%}；"
-                    "如确需静默请在相应镜头完整描述或整体叙事中写明「有意静默」"
-                    "或将 min_dialogue_ratio 调低"
-                )
-    return gap
 
 
 def _slot_selected(project: Project, slot_id: str) -> str | None:
@@ -604,7 +530,11 @@ def _artifact_is_stale(
             None,
         )
         key = str(getattr(task, "idempotency_key", "") or "")
-        if _dispatch_inputs_changed(
+        # Retired hashes alone cannot invalidate a completed artifact.
+        if not _legacy_storyboard_task(
+            node_id,
+            task,
+        ) and _dispatch_inputs_changed(
             key,
             node_id,
             dispatch_fingerprint,
@@ -898,7 +828,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 # no shots, storyboard prompt or reference stacks).
                 deps: list[str] = []
                 # 剧本流下分镜等待本 timeline 的剧本节点（方案 3.3：
-                # script 通过 → 该 timeline 的 shots/分镜/生成）。
+                # script 通过 → 该 timeline 的内容/分镜/生成）。
                 if script_node is not None:
                     deps.append(script_node)
                 for ref in creation.cast_lineup_refs:
@@ -944,10 +874,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     storyboard_id,
                     creation.storyboard_prompt,
                     project.settings.aspect_ratio,
-                    # Preserve the existing creative-structure identity for
-                    # historical artifacts. This is NOT a panel instruction:
-                    # image layout comes from storyboard_prompt above.
-                    len(creation.shots.order),
+                    "narrative-v1",
                     sorted(
                         selected for selected in storyboard_refs if selected
                     ),
@@ -1076,7 +1003,6 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 input_gaps := _video_readiness_gates(
                     creation_type,
                     creation,
-                    project,
                 )
             ):
                 # Removing a required input is an unfinished revision even
@@ -1125,14 +1051,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 gates = _video_readiness_gates(
                     creation_type,
                     creation,
-                    project,
                 )
                 if gates is not None:
                     status = WorkNodeStatus.GATED
                     video_missing = gates
-                    # R2V gates are prompt-authoring gaps (dialogue coverage
-                    # and density); S2V/I2V gates are missing asset inputs.
-                    video_text_gap = creation_type == "r2v"
+                    # S2V/I2V gates identify missing asset inputs.
                 else:
                     status = WorkNodeStatus.READY
 
@@ -1152,12 +1075,10 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     gates = _video_readiness_gates(
                         creation_type,
                         creation,
-                        project,
                     )
                     if gates:
                         status = WorkNodeStatus.GATED
                         video_missing = (*video_missing, *gates)
-                        video_text_gap = creation_type == "r2v"
                     elif (
                         not video_missing
                         and failure is not None
@@ -1592,7 +1513,6 @@ def _video_upstream_refs(
 def _video_readiness_gates(
     creation_type: str,
     creation: R2VCreation | T2VCreation | I2VCreation | S2VCreation,
-    project: Project,
 ) -> tuple[str, ...] | None:
     """Return missing reasons if the video node is gated, else None.
 
@@ -1608,21 +1528,6 @@ def _video_readiness_gates(
         if not creation.audio_version_id:
             gaps.append("audio_version_id 缺失")
         return tuple(gaps) if gaps else None
-    if creation_type == "r2v":
-        assert isinstance(creation, R2VCreation)
-        if dialogue_gaps := _video_prompt_dialogue_gaps(creation):
-            # Planned dialogue must be quoted verbatim in the video
-            # prompt before dispatch — see _video_prompt_dialogue_gaps.
-            return dialogue_gaps
-        if absence_gap := _element_dialogue_density_gap(
-            creation,
-            project.scenario,
-        ):
-            # Element dialogue density below min_dialogue_ratio — the
-            # model wrote a silent film or too-sparse dialogue. See
-            # _element_dialogue_density_gap.
-            return (absence_gap,)
-        return None
     if creation_type == "i2v":
         assert isinstance(creation, I2VCreation)
         if not creation.first_frame_version_id:

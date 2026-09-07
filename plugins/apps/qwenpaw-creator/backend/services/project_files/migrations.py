@@ -518,11 +518,9 @@ def _element_span_ticks(element: Mapping[str, Any]) -> tuple[int, int] | None:
 def _voiced_spans_v8(
     elements: Mapping[str, Any],
 ) -> list[tuple[int, int]]:
-    """Whole-span voiced intervals of a raw v8 timeline.
+    """Explicit driving-voice intervals of an old timeline.
 
-    Whole spans are a superset of the shot-granular intervals the v9
-    narration gate rejects, so any audio clear of these is guaranteed to
-    load as narration.
+    Retired authoring rows cannot infer R2V sound intent or audio roles.
     """
 
     spans: list[tuple[int, int]] = []
@@ -535,16 +533,6 @@ def _voiced_spans_v8(
         voiced = False
         if creation.get("type") == "s2v":
             voiced = True
-        elif creation.get("type") == "r2v":
-            shots = creation.get("shots")
-            items = shots.get("items") if isinstance(shots, Mapping) else None
-            if isinstance(items, Mapping):
-                voiced = any(
-                    isinstance(shot, Mapping)
-                    and isinstance(shot.get("dialogue"), str)
-                    and shot["dialogue"].strip()
-                    for shot in items.values()
-                )
         if not voiced:
             continue
         ticks = _element_span_ticks(element)

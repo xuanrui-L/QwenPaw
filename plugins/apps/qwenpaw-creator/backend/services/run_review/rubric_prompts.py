@@ -178,8 +178,8 @@ def render_taste_principles(role: str) -> str:
     if role in {"creator_agent", "ai_editing_director"}:
         rhythm_principle = (
             "开场是否尽快建立关注点？能量是否有快慢变化？需要停留的时刻是否"
-            "真正停住？长镜头只在叙事和可执行动作支持时使用，不设统一的 7 秒 "
-            "Shot 上限。"
+            "真正停住？长镜头只在叙事和可执行动作支持时使用，不设统一的 7 秒"
+            "镜头上限。"
             if role == "creator_agent"
             else rhythm.anchor_questions
         )

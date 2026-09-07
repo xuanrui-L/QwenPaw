@@ -17,10 +17,8 @@ from services.file_agent_runtime.driver import _unfinished_video_element_ids
 from services.project_files.models import (
     ArtifactSlot,
     ElementLocation,
-    EntityCollection,
     Project,
     R2VCreation,
-    Shot,
     TimelineElement,
     TimelineSpan,
 )
@@ -64,13 +62,6 @@ def test_trailing_real_content_still_goes_through_repair():
 
 
 def _element(element_id: str, start_tick: int = 0) -> TimelineElement:
-    shot = Shot(
-        shot_id=f"{element_id}-shot",
-        description="测试镜头",
-        camera="⊙ 静止",
-        framing="全景",
-        duration_seconds=4,
-    )
     return TimelineElement(
         element_id=element_id,
         label=element_id,
@@ -79,10 +70,6 @@ def _element(element_id: str, start_tick: int = 0) -> TimelineElement:
         creation=R2VCreation(
             narrative="测试叙事",
             storyboard_prompt="测试分镜",
-            shots=EntityCollection(
-                items={shot.shot_id: shot},
-                order=[shot.shot_id],
-            ),
         ),
     )
 

@@ -41,7 +41,7 @@ describe("durable review and object locator ownership", () => {
     "video_prompt",
     "storyboard_reference_version_ids",
     "video_reference_version_ids",
-    "shots/items/s1_shot1/description",
+    "narrative",
   ])(
     "routes %s to the generation workbench for the exact owning timeline",
     (suffix) => {
@@ -61,17 +61,14 @@ describe("durable review and object locator ownership", () => {
     },
   );
 
-  it.each(["intent", "narrative"])(
-    "keeps %s in the existing Plan detail",
-    (suffix) => {
-      const field = `/timelines/items/timeline:main/elements_by_id/shot1_search/creation/${suffix}`;
-      expect(resolveCreatorLocator({ page: "plan", field })).toMatchObject({
-        page: "plan",
-        timelineId: "timeline:main",
-        elementId: "shot1_search",
-      });
-    },
-  );
+  it.each(["intent"])("keeps %s in the existing Plan detail", (suffix) => {
+    const field = `/timelines/items/timeline:main/elements_by_id/shot1_search/creation/${suffix}`;
+    expect(resolveCreatorLocator({ page: "plan", field })).toMatchObject({
+      page: "plan",
+      timelineId: "timeline:main",
+      elementId: "shot1_search",
+    });
+  });
 
   it("decodes JSON pointer tokens once and does not interpret malformed escaping", () => {
     const field =

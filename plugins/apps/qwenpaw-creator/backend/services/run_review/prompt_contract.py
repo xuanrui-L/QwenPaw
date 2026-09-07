@@ -19,7 +19,6 @@ from models.video_capabilities import (
     video_prompt_image_reference_markers,
     video_prompt_storyboard_reference_violation,
 )
-from services.prompt_text import dialogue_match_key, dialogue_spoken_lines
 from services.storyboard_layout import declared_storyboard_panel_count
 
 _BORDER_CONTRADICTION = re.compile(
@@ -223,30 +222,9 @@ def check_changed_r2v_prompt_contracts(
                 continue
             checked_elements.append(str(element_id))
 
-            shots = creation.get("shots")
-            shots = shots if isinstance(shots, Mapping) else {}
-            order = shots.get("order")
-            order = order if isinstance(order, list) else []
-            items = shots.get("items")
-            items = items if isinstance(items, Mapping) else {}
-            shot_count = len(order)
-            shots_pointer = f"{base}/creation/shots"
             storyboard_pointer = f"{base}/creation/storyboard_prompt"
             video_pointer = f"{base}/creation/video_prompt"
-            reviewed_pointers.extend(
-                [shots_pointer, storyboard_pointer, video_pointer],
-            )
-
-            if shot_count == 0:
-                findings.append(
-                    _finding(
-                        code="R2V_SHOTS_EMPTY",
-                        pointer=shots_pointer,
-                        element_id=str(element_id),
-                        message="R2V Element 没有任何 Shot，无法编译连续分镜。",
-                        suggestion="先按可观察状态变化创建有序 Shot；数量由内容决定。",
-                    ),
-                )
+            reviewed_pointers.extend([storyboard_pointer, video_pointer])
 
             storyboard_prompt = str(creation.get("storyboard_prompt") or "")
             if not storyboard_prompt.strip():
@@ -323,7 +301,7 @@ def check_changed_r2v_prompt_contracts(
                         pointer=video_pointer,
                         element_id=str(element_id),
                         message="video_prompt 为空，调度器不会提交付费视频任务。",
-                        suggestion="按 Shot 顺序、模型引用协议和明确结束状态完成编译。",
+                        suggestion="按片段叙述的动作顺序、模型引用协议和明确结束状态完成编译。",
                     ),
                 )
             else:
@@ -370,33 +348,6 @@ def check_changed_r2v_prompt_contracts(
                             ),
                         ),
                     )
-                prompt_key = dialogue_match_key(video_prompt)
-                for shot_id in order:
-                    shot = items.get(shot_id)
-                    if not isinstance(shot, Mapping):
-                        continue
-                    dialogue = str(shot.get("dialogue") or "").strip()
-                    missing_line = next(
-                        (
-                            line
-                            for line in dialogue_spoken_lines(dialogue)
-                            if dialogue_match_key(line) not in prompt_key
-                        ),
-                        None,
-                    )
-                    if missing_line is not None:
-                        findings.append(
-                            _finding(
-                                code="VIDEO_DIALOGUE_MISSING",
-                                pointer=video_pointer,
-                                element_id=str(element_id),
-                                message=(
-                                    f"video_prompt 未逐字包含 Shot {shot_id} 的台词："
-                                    f"{missing_line}"
-                                ),
-                                suggestion="补入台词原文、说话者与表演语气。",
-                            ),
-                        )
 
     return {
         "passed": not findings,

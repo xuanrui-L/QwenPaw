@@ -201,7 +201,7 @@ describe("real review View reaches the authored field", () => {
     const fields = [
       `${base}/video_prompt`,
       `${base}/storyboard_prompt`,
-      `${base}/shots/items/shot:window/description`,
+      `${base}/narrative`,
     ];
     const { container } = renderReviews(fields);
     for (const [index, field] of fields.entries()) {
@@ -225,25 +225,15 @@ describe("real review View reaches the authored field", () => {
         ).not.toHaveAttribute("hidden"),
       );
       if (index === 2) {
-        const legacyReview = container.querySelector(
-          "[data-legacy-shot-review]",
-        )!;
-        expect(legacyReview).toHaveTextContent("修改前");
-        expect(legacyReview).toHaveTextContent("修改后");
         expect(
-          within(legacyReview as HTMLElement).getByRole("button", {
-            name: "保留该修改",
-          }),
-        ).toBeEnabled();
-        expect(legacyReview.querySelector("textarea, input")).toBeNull();
-        expect(
-          container.querySelector('[data-workbench-pane="shots"]'),
-        ).toBeNull();
+          container.querySelector("details.r2v-narrative"),
+        ).toHaveAttribute("open");
+        expect(container.querySelector("[data-legacy-shot-review]")).toBeNull();
       }
     }
   });
 
-  it("keeps narrative review on Plan and opens the selected element's real text field", async () => {
+  it("opens narrative review in the workbench and opens the selected element's real text field", async () => {
     const field =
       "/timelines/items/timeline:main/elements_by_id/r2v-window/creation/narrative";
     const { container } = renderReviews([field]);
@@ -254,7 +244,7 @@ describe("real review View reaches the authored field", () => {
       ).not.toBeNull(),
     );
     expect(useNavigationStore.getState().reviewFocus?.path).toBe(
-      "/project/p1/t/timeline%3Amain/plan",
+      "/project/p1/t/timeline%3Amain/plan/element/r2v-window",
     );
   });
 
