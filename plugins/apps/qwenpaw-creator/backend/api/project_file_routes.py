@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Literal
+import re
+from typing import Any, Literal, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, Header, Response, status
 from fastapi.responses import JSONResponse
@@ -23,6 +24,8 @@ from domain.errors import (
 )
 from schemas.common import StrictModel
 from services.file_agent_runtime import notify_creator_agent_runtime
+from services.file_agent_runtime.notifications import RuntimeEventKind
+from services.file_agent_runtime.registry import get_creator_agent_runtime
 from services.media_files.visual_reference_resolution import (
     preview_r2v_reference_order,
 )
@@ -33,7 +36,8 @@ from services.project_files.commit import (
     ProtectedFieldError,
     is_protected_pointer,
 )
-from services.project_files import frontend_edit_hold
+from services.project_files import frontend_edit_hold, snapshot_restore_hold
+from services.project_files.auto_snapshot import restored_snapshot_timelines
 from services.project_files.edit_impact import (
     apply_frontend_edit_impacts,
     summarize_committed_edit_impact,
@@ -621,6 +625,73 @@ def _build_patch_candidate(
     return current, document
 
 
+_LIVE_ELEMENTS_POINTER = re.compile(
+    r"^/timelines/items/(?!snapshot:)([^/]+)/elements_by_id$",
+)
+
+
+def _replaces_live_elements_wholesale(
+    operations: Sequence[ProjectPatchOperation],
+) -> bool:
+    """Whether any operation swaps a live timeline's whole element map.
+
+    Necessary condition for a snapshot rollback, and cheap: the detector
+    itself compares the live elements against every snapshot (~400ms on a
+    30-snapshot timeline) while this route holds the exclusive lifecycle
+    lock, so ordinary field edits — which address deeper pointers — must
+    never pay for it.
+    """
+
+    return any(
+        operation.op == "replace"
+        and _LIVE_ELEMENTS_POINTER.match(operation.path or "")
+        for operation in operations
+    )
+
+
+async def _notify_snapshot_restored(
+    project_id: str,
+    generation: int,
+    restored: Mapping[str, str],
+) -> None:
+    """Tell the Agent the user replaced live timeline content by rollback.
+
+    Steer, not quiet: the Agent's in-context Project snapshot is now stale
+    in a way that changes intent, and nothing else would bring it back to
+    re-read the workspace before its next write.
+    """
+
+    runtime = get_creator_agent_runtime()
+    if runtime is None:
+        return
+    pairs = "；".join(
+        f"{timeline_id} ← {snapshot_id}"
+        for timeline_id, snapshot_id in sorted(restored.items())
+    )
+    try:
+        await runtime.notifications.notify(
+            project_id,
+            kind=RuntimeEventKind.TIMELINE_SNAPSHOT_RESTORED,
+            request_id=f"snapshot-restored-{project_id}-{generation}",
+            text=(
+                f"用户已把时间线回滚到历史快照（{pairs}）。"
+                f"当前 Project 已是 generation {generation}，"
+                "你上下文里的时间线内容已过期：继续工作前请重新读取 Project，"
+                "不要把用户刚回滚掉的内容改回去。"
+                "这是状态同步，不是新的用户指令。"
+            ),
+            payload={
+                "generation": generation,
+                "restoredTimelines": dict(sorted(restored.items())),
+            },
+        )
+    except Exception:  # noqa: BLE001 - the edit is already published
+        logger.exception(
+            "snapshot rollback notification failed for %s",
+            project_id,
+        )
+
+
 @router.patch("/project")
 async def patch_project(
     project_id: str,
@@ -640,6 +711,8 @@ async def patch_project(
         raise
 
     scope = _PATCH_IDEMPOTENCY_SCOPE
+    restored_snapshots: dict[str, str] = {}
+    restore_notice: tuple[int, dict[str, str]] | None = None
     payload = request.model_dump(mode="json", by_alias=True)
     idempotency = IdempotencyRecordStore(
         services.projects.project_root(project_id)
@@ -743,6 +816,14 @@ async def patch_project(
                     [operation.path for operation in request.operations],
                     base=base.project.model_dump(mode="json"),
                 )
+                restored_snapshots = (
+                    restored_snapshot_timelines(
+                        base.project.model_dump(mode="json"),
+                        candidate,
+                    )
+                    if _replaces_live_elements_wholesale(request.operations)
+                    else {}
+                )
                 # The commit below wakes the work scheduler; the grace
                 # window must exist before that wake derives the graph, or
                 # an auto-saved half-finished prompt could dispatch paid
@@ -765,6 +846,15 @@ async def patch_project(
                     block_token=request.block_token,
                     _lifecycle_lock_held=True,
                 )
+                if restored_snapshots:
+                    snapshot_restore_hold.note_snapshot_restore(
+                        project_id,
+                        restored_snapshots,
+                    )
+                    restore_notice = (
+                        result.snapshot.generation,
+                        dict(restored_snapshots),
+                    )
                 project_data = result.snapshot.project.model_dump(mode="json")
                 changed_pointers = [
                     item.json_pointer
@@ -842,10 +932,15 @@ async def patch_project(
         _patch_response_headers(response, body)
         if recovered or not reservation.created:
             response.headers["X-Idempotent-Replay"] = "true"
-        return body
+        response_body = body
     finally:
         operation_lock.release()
         lifecycle_lock.release()
+    if restore_notice is not None:
+        # Outside the lifecycle lock on purpose: delivery appends a session
+        # message, which takes the same lock on its shared side.
+        await _notify_snapshot_restored(project_id, *restore_notice)
+    return response_body
 
 
 @router.post("/runtime/blocks", status_code=status.HTTP_201_CREATED)

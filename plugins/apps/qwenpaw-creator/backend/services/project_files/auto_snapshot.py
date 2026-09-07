@@ -13,6 +13,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from . import snapshot_restore_hold
 from .json_pointer import diff_json
 
 _SNAPSHOT_PREFIX = "snapshot:"
@@ -150,6 +151,71 @@ def _remap_snapshot_elements(
                 ]
 
 
+def _live_matches_frozen(
+    live_elements: dict[str, Any],
+    frozen: dict[str, Any],
+    snapshot_id: str,
+) -> bool:
+    """Whether *live_elements* is the pre-remap form of *frozen*.
+
+    Compares element by element and stops at the first mismatch: a
+    project may hold dozens of snapshots and this runs under the Project
+    lifecycle lock, so copying the whole map once per snapshot was
+    measurably expensive (~400ms on a 30-snapshot timeline).
+    """
+    for live_id, live_element in live_elements.items():
+        frozen_element = frozen.get(_remap_element_id(live_id, snapshot_id))
+        if frozen_element is None:
+            return False
+        probe = {
+            "elements_by_id": {live_id: copy.deepcopy(live_element)},
+            "edit_plan": None,
+        }
+        _remap_snapshot_elements(probe, snapshot_id)
+        remapped = probe["elements_by_id"][
+            _remap_element_id(live_id, snapshot_id)
+        ]
+        if remapped != frozen_element:
+            return False
+    return True
+
+
+def restored_snapshot_timelines(
+    base_data: dict[str, Any],
+    candidate_data: dict[str, Any],
+) -> dict[str, str]:
+    """Live timelines the candidate rolls back onto an existing snapshot.
+
+    Returns ``{timeline_id: snapshot_id}``. A rollback replaces the live
+    elements wholesale with a frozen copy, so equality against a snapshot
+    identifies it — the same content check the frontend derives its
+    "已应用" badge from. Creating a snapshot leaves the live elements
+    untouched and therefore never matches here.
+    """
+    candidate_items = candidate_data.get("timelines", {}).get("items", {})
+    restored: dict[str, str] = {}
+    for timeline_id in _timeline_element_changes(base_data, candidate_data):
+        if timeline_id.startswith(_SNAPSHOT_PREFIX):
+            continue
+        live = candidate_items.get(timeline_id)
+        if not isinstance(live, dict) or not live.get("elements_by_id"):
+            continue
+        live_elements = live["elements_by_id"]
+        prefix = f"{_SNAPSHOT_PREFIX}{timeline_id}:"
+        for snapshot_id, snapshot in candidate_items.items():
+            if not snapshot_id.startswith(prefix):
+                continue
+            frozen = snapshot.get("elements_by_id")
+            if not isinstance(frozen, dict) or len(frozen) != len(
+                live_elements,
+            ):
+                continue
+            if _live_matches_frozen(live_elements, frozen, snapshot_id):
+                restored[timeline_id] = snapshot_id
+                break
+    return restored
+
+
 _AUTO_SNAPSHOT_DESCRIPTION = "自动快照：修改前的时间轴副本"
 _SNAPSHOT_STAMP_FORMAT = "%Y-%m-%d %H:%M"
 _AUTO_SNAPSHOT_DEDUPE_WINDOW_SECONDS = 10 * 60
@@ -183,10 +249,11 @@ def _latest_auto_snapshot_age_seconds(
 def auto_snapshot_timelines(
     base_data: dict[str, Any],
     candidate_data: dict[str, Any],
-) -> None:
+) -> list[str]:
     """Inject snapshot timelines into *candidate_data* for changed timelines.
 
-    Mutates *candidate_data* in place. For each timeline whose elements
+    Mutates *candidate_data* in place and returns the ids of the timelines
+    that were frozen. For each timeline whose elements
     changed between *base_data* and *candidate_data*, a frozen copy of the
     **base** (pre-change) timeline is inserted into the candidate with a
     versioned name, so the user can compare against and roll back to the
@@ -199,10 +266,15 @@ def auto_snapshot_timelines(
     auto-snapshot is younger than ten minutes is not snapshotted again, so
     an editing session leaves one pre-session baseline instead of one
     snapshot per commit.
+
+    The returned ids let the caller settle pending rollback marks with
+    :func:`snapshot_restore_hold.settle_snapshot_restore` *after* the commit
+    is published; settling earlier would lose the mark whenever the commit
+    then fails.
     """
     changed_ids = _timeline_element_changes(base_data, candidate_data)
     if not changed_ids:
-        return
+        return []
 
     candidate_timelines = candidate_data.setdefault(
         "timelines",
@@ -219,6 +291,7 @@ def auto_snapshot_timelines(
     now = datetime.now()
     stamp = now.strftime(_SNAPSHOT_STAMP_FORMAT)
 
+    snapshotted: list[str] = []
     for timeline_id in sorted(changed_ids):
         # Snapshots are frozen copies: re-snapshotting one would mint
         # "snapshot:snapshot:..." ids, and since every nested id is new the
@@ -236,7 +309,20 @@ def auto_snapshot_timelines(
             timeline_id,
             now,
         )
-        if age is not None and age < _AUTO_SNAPSHOT_DEDUPE_WINDOW_SECONDS:
+        # A rollback makes the newest auto-snapshot describe the branch the
+        # user just abandoned, so the window must not suppress a fresh
+        # baseline. Only peeked here: the mark is settled by the writer once
+        # the baseline is published, so a failed commit followed by an agent
+        # retry still leaves one.
+        forced = snapshot_restore_hold.is_restore_pending(
+            str(base_data.get("project_id") or ""),
+            timeline_id,
+        )
+        if (
+            not forced
+            and age is not None
+            and age < _AUTO_SNAPSHOT_DEDUPE_WINDOW_SECONDS
+        ):
             continue
 
         snapshot_id = _next_snapshot_id(candidate_items, timeline_id)
@@ -255,3 +341,5 @@ def auto_snapshot_timelines(
         candidate_items[snapshot_id] = snapshot_timeline
         if snapshot_id not in candidate_order:
             candidate_order.append(snapshot_id)
+        snapshotted.append(timeline_id)
+    return snapshotted

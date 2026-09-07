@@ -99,6 +99,8 @@ class RuntimeEventKind(StrEnum):
     # Direct (HTTP, no agent turn) character-voice enrollment completed.
     VOICE_ENROLLED = "voice_enrolled"
     NARRATION_REGENERATED = "narration_regenerated"
+    # The user rolled a timeline back onto one of its snapshots.
+    TIMELINE_SNAPSHOT_RESTORED = "timeline_snapshot_restored"
 
 
 class NotificationLevel(StrEnum):
@@ -119,6 +121,10 @@ EVENT_LEVELS: dict[RuntimeEventKind, NotificationLevel] = {
     RuntimeEventKind.NODE_GATED: NotificationLevel.QUIET,
     RuntimeEventKind.VOICE_ENROLLED: NotificationLevel.QUIET,
     RuntimeEventKind.NARRATION_REGENERATED: NotificationLevel.QUIET,
+    # Not quiet: a rollback invalidates the timeline content the Agent is
+    # reasoning about, and a staged record would only surface if some other
+    # delivery happened to follow.
+    RuntimeEventKind.TIMELINE_SNAPSHOT_RESTORED: NotificationLevel.NEXT_STEP,
 }
 
 

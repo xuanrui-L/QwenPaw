@@ -5,16 +5,20 @@ import copy
 
 import pytest
 
+from services.project_files import snapshot_restore_hold
 from services.project_files.auto_snapshot import (
     _next_snapshot_id,
     _timeline_element_changes,
     auto_snapshot_timelines,
+    restored_snapshot_timelines,
 )
 
 pytestmark = pytest.mark.unit
 
 TL = "timeline:main"
 ELEM = "elem:1"
+SNAP1 = "snapshot:timeline:main:1"
+SNAP2 = "snapshot:timeline:main:2"
 
 
 def _minimal_project(
@@ -252,6 +256,138 @@ class TestAutoSnapshotTimelines:
         items = c2["timelines"]["items"]
         assert "snapshot:timeline:main:1" in items
         assert "snapshot:timeline:main:2" in items
+
+
+class TestSnapshotRollback:
+    """回滚判定与"回滚后强制留底"（去重窗口对回滚失效）。"""
+
+    PROJECT = "project-rollback"
+
+    def setup_method(self) -> None:
+        snapshot_restore_hold.clear()
+
+    def teardown_method(self) -> None:
+        snapshot_restore_hold.clear()
+
+    def _rolled_back(self) -> tuple[dict, dict]:
+        """建快照 → 改 live → 回滚：返回 (回滚前 base, 回滚后 candidate)。"""
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        base["project_id"] = self.PROJECT
+        with_snapshot = copy.deepcopy(base)
+        _elems(with_snapshot)[ELEM]["label"] = "V2"
+        auto_snapshot_timelines(base, with_snapshot)
+        assert SNAP1 in with_snapshot["timelines"]["items"]
+
+        rollback = copy.deepcopy(with_snapshot)
+        frozen = rollback["timelines"]["items"][SNAP1]["elements_by_id"]
+        _elems(rollback).clear()
+        for snap_id, element in copy.deepcopy(frozen).items():
+            original = snap_id[len(f"{SNAP1}:") :]
+            element["element_id"] = original
+            _elems(rollback)[original] = element
+        return with_snapshot, rollback
+
+    def test_rollback_is_detected_but_creation_and_edits_are_not(self):
+        before, rollback = self._rolled_back()
+        assert restored_snapshot_timelines(before, rollback) == {TL: SNAP1}
+
+        # 建快照只新增 timeline，live 元素没动 —— 不算回滚。
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        base["project_id"] = self.PROJECT
+        created = copy.deepcopy(base)
+        _elems(created)[ELEM]["label"] = "V2"
+        auto_snapshot_timelines(base, created)
+        assert not restored_snapshot_timelines(base, created)
+
+        # 普通编辑（内容不等于任何快照）也不算回滚。
+        edited = copy.deepcopy(rollback)
+        _elems(edited)[ELEM]["label"] = "手工微调"
+        assert not restored_snapshot_timelines(rollback, edited)
+
+    def test_rollback_mark_forces_one_fresh_baseline_inside_the_window(self):
+        _before, rollback = self._rolled_back()
+        snapshot_restore_hold.note_snapshot_restore(self.PROJECT, [TL])
+
+        # 窗口内本应抑制留底，但回滚使旧快照不再是当前会话基线。
+        first = copy.deepcopy(rollback)
+        _elems(first)[ELEM]["label"] = "agent 回滚后首次改写"
+        assert auto_snapshot_timelines(rollback, first) == [TL]
+        assert SNAP2 in first["timelines"]["items"]
+
+        # 该次提交失败（未 settle）：重试必须仍然留底，否则修复形同虚设。
+        retry = copy.deepcopy(rollback)
+        _elems(retry)[ELEM]["label"] = "agent 重试"
+        assert auto_snapshot_timelines(rollback, retry) == [TL]
+        assert SNAP2 in retry["timelines"]["items"]
+
+        # 提交成功后 settle：回到正常窗口抑制，不会每次 commit 都留底。
+        snapshot_restore_hold.settle_snapshot_restore(self.PROJECT, [TL])
+        second = copy.deepcopy(first)
+        _elems(second)[ELEM]["label"] = "agent 第二次改写"
+        assert not auto_snapshot_timelines(first, second)
+        assert "snapshot:timeline:main:3" not in second["timelines"]["items"]
+
+    def test_rollback_is_detected_for_elements_carrying_remapped_refs(self):
+        """带 outputs / render_source / scene_ledger 的元素也要认得出回滚。
+
+        这些正是 _remap_snapshot_elements 会改写的字段；若比对漏掉任一
+        条，真实项目（元素几乎都有 outputs）就会静默失去通知与留底。
+        """
+        first = _element(ELEM)
+        first["outputs"] = {
+            "storyboard": {"slot_id": f"element:{ELEM}:storyboard"},
+            "video": {"slot_id": f"element:{ELEM}:video"},
+        }
+        second = _element("elem:2")
+        second["render_source"] = {
+            "type": "element_output",
+            "element_id": ELEM,
+        }
+        base = _minimal_project(
+            elements={ELEM: first, "elem:2": second},
+        )
+        base["project_id"] = self.PROJECT
+        base["timelines"]["items"][TL]["edit_plan"] = {
+            "scene_ledger": [{"element_ids": [ELEM, "elem:2"]}],
+        }
+
+        with_snapshot = copy.deepcopy(base)
+        _elems(with_snapshot)[ELEM]["label"] = "V2"
+        auto_snapshot_timelines(base, with_snapshot)
+        frozen = with_snapshot["timelines"]["items"][SNAP1]["elements_by_id"]
+        # 前置断言：快照确实重映射了引用，比对不是在拿两份相同结构对撞。
+        assert f"{SNAP1}:{ELEM}" in frozen
+        assert frozen[f"{SNAP1}:{ELEM}"]["outputs"]["video"]["slot_id"] == (
+            f"element:{SNAP1}:{ELEM}:video"
+        )
+
+        rollback = copy.deepcopy(with_snapshot)
+        _elems(rollback).clear()
+        for snap_id, element in copy.deepcopy(frozen).items():
+            original = snap_id[len(f"{SNAP1}:") :]
+            element["element_id"] = original
+            for output in element.get("outputs", {}).values():
+                output["slot_id"] = output["slot_id"].replace(
+                    f"element:{SNAP1}:",
+                    "element:",
+                )
+            render_source = element.get("render_source")
+            if render_source and "element_id" in render_source:
+                render_source["element_id"] = render_source[
+                    "element_id"
+                ].removeprefix(f"{SNAP1}:")
+            _elems(rollback)[original] = element
+
+        assert restored_snapshot_timelines(with_snapshot, rollback) == {
+            TL: SNAP1,
+        }
+
+    def test_without_a_mark_the_window_still_suppresses_after_rollback(self):
+        _before, rollback = self._rolled_back()
+        candidate = copy.deepcopy(rollback)
+        _elems(candidate)[ELEM]["label"] = "agent 改写"
+        auto_snapshot_timelines(rollback, candidate)
+        assert SNAP2 not in candidate["timelines"]["items"]
 
 
 class TestSnapshotProjectValidation:

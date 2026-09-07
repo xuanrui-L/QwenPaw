@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from services.file_agent_runtime.notifications import (
 )
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
+from services.runtime_files import MessageChannel
 from services.runtime_files.notification_store import NotificationOutboxStore
 
 pytestmark = pytest.mark.unit
@@ -764,3 +766,63 @@ def test_outbox_write_after_delete_cannot_recreate_project(
     assert (
         not project_root.exists()
     ), "a write racing DELETE must not recreate the project directory"
+
+
+def test_snapshot_rollback_steers_into_the_session_inbox(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """回滚是 next_step：必须落 session inbox，而不是只进 quiet outbox。"""
+
+    # pylint: disable=import-outside-toplevel
+    from api import project_file_routes
+
+    services = _services(tmp_path, monkeypatch)
+    bus, wakes = _bus(services)
+    monkeypatch.setattr(
+        project_file_routes,
+        "get_creator_agent_runtime",
+        lambda: SimpleNamespace(notifications=bus),
+    )
+    restored = {"timeline:main": "snapshot:timeline:main:1"}
+
+    asyncio.run(
+        project_file_routes._notify_snapshot_restored(
+            PROJECT_ID,
+            7,
+            restored,
+        ),
+    )
+
+    message = _user_messages(services)[-1]
+    assert message.source == NOTIFICATION_SOURCE
+    assert message.channel is MessageChannel.RUNTIME
+    assert message.metadata["notificationKind"] == (
+        RuntimeEventKind.TIMELINE_SNAPSHOT_RESTORED.value
+    )
+    assert message.metadata["restoredTimelines"] == restored
+    text = message.content_parts[0].text
+    assert "timeline:main ← snapshot:timeline:main:1" in text
+    assert "重新读取 Project" in text
+    assert wakes.calls == [PROJECT_ID]
+    # Delivered, not parked: nothing may stay staged in the outbox.
+    assert bus.store.undelivered_records(PROJECT_ID) == []
+
+    # The generation anchors delivery identity: replaying one commit's
+    # rollback must not append a second message.
+    asyncio.run(
+        project_file_routes._notify_snapshot_restored(
+            PROJECT_ID,
+            7,
+            restored,
+        ),
+    )
+    assert (
+        sum(
+            1
+            for item in _user_messages(services)
+            if item.metadata.get("notificationKind")
+            == RuntimeEventKind.TIMELINE_SNAPSHOT_RESTORED.value
+        )
+        == 1
+    )

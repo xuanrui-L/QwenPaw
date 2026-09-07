@@ -35,6 +35,7 @@ from services.runtime_files.models import (
 )
 from utils.logger import setup_logger
 
+from . import snapshot_restore_hold
 from .assets import AssetFileStore
 from .auto_snapshot import auto_snapshot_timelines, frozen_snapshot_edits
 from .candidate_normalization import normalize_project_candidate
@@ -996,7 +997,7 @@ class AgentProjectTools:
         )
         self._reject_frozen_snapshot_edits(base, candidate)
         candidate = self._apply_agent_edit_impacts(base, candidate)
-        auto_snapshot_timelines(
+        auto_snapshotted = auto_snapshot_timelines(
             base.project.model_dump(mode="json"),
             candidate,
         )
@@ -1025,6 +1026,10 @@ class AgentProjectTools:
                 base=base,
                 candidate=candidate,
                 **self.context.commit_metadata(),
+            )
+            snapshot_restore_hold.settle_snapshot_restore(
+                request.project_id,
+                auto_snapshotted,
             )
             self._remember(result.snapshot)
             snapshot = self._snapshot_result(result.snapshot)
@@ -1404,7 +1409,7 @@ class AgentProjectTools:
         apply_patch_ops(candidate, request.ops)
         self._reject_frozen_snapshot_edits(base, candidate)
         candidate = self._apply_agent_edit_impacts(base, candidate)
-        auto_snapshot_timelines(
+        auto_snapshotted = auto_snapshot_timelines(
             base.project.model_dump(mode="json"),
             candidate,
         )
@@ -1418,6 +1423,10 @@ class AgentProjectTools:
                 base=base,
                 candidate=candidate,
                 **self.context.commit_metadata(),
+            )
+            snapshot_restore_hold.settle_snapshot_restore(
+                request.project_id,
+                auto_snapshotted,
             )
             self._remember(result.snapshot)
             snapshot = self._snapshot_result(result.snapshot)
