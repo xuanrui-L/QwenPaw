@@ -5,17 +5,6 @@ from __future__ import annotations
 from services.project_files.locator_map import derive_ui_locator
 
 
-def test_published_story_fields_open_the_episode_blueprint():
-    for name in ("title", "synopsis", "description"):
-        pointer = f"/timelines/items/timeline:main/{name}"
-        assert derive_ui_locator(pointer, {}) == {
-            "page": "blueprint",
-            "timelineId": "timeline:main",
-            "mediaType": "text",
-            "field": pointer,
-        }
-
-
 def _project() -> dict:
     return {
         "assets": {

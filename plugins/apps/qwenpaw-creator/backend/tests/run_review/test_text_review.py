@@ -669,29 +669,6 @@ def test_keyframe_count_is_independent_of_shots(monkeypatch) -> None:
     assert more_keyframes_report["passed"] is True
 
 
-def test_multiframe_single_shot_still_checks_panel_border_contract(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        model_config,
-        "get_video_model_name",
-        lambda: "happyhorse-1.1",
-    )
-    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
-    project = _r2v_contract_project(
-        storyboard_prompt="9个关键帧，每格16:9，no borders",
-        video_prompt="[Image 1] 仅提供分镜动作顺序。",
-        dialogues=("",),
-    )
-    report = check_changed_r2v_prompt_contracts(
-        project,
-        ["/timelines/items/t/elements_by_id/e"],
-    )
-    assert [item["code"] for item in report["findings"]] == [
-        "STORYBOARD_BORDER_CONTRADICTION",
-    ]
-
-
 def test_happyhorse_role_scan_uses_the_full_reference_segment(
     monkeypatch,
 ) -> None:

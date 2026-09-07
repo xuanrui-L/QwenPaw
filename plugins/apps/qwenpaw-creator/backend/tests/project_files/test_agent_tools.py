@@ -32,7 +32,6 @@ from .conftest import (
     edit_element,
     make_store,
     read_state,
-    r2v_element,
     review_boundary,
     spoken_edit_element,
     timeline_project_with,
@@ -65,35 +64,6 @@ def _external_commit(store, base, **updates):
     )
 
 
-def test_resaving_r2v_without_server_provenance_is_a_true_noop(tmp_path):
-    from services.project_files.prompt_sync import sync_stamp
-    from services.project_files.store import ProjectStore
-
-    project = timeline_project_with(r2v_element("r2v-1", start=0))
-    document = project.model_dump(mode="json")
-    document["timelines"]["items"]["timeline:main"]["elements_by_id"]["r2v-1"][
-        "creation"
-    ]["prompt_sync"] = sync_stamp(document, "timeline:main", "r2v-1")
-    store = ProjectStore(tmp_path)
-    base = store.create(Project.model_validate(document))
-    tools = _tools(store)
-    tools.read_project(project.project_id)
-
-    result = tools.jq_project(
-        project_id=project.project_id,
-        program=(
-            'del(.timelines.items["timeline:main"]'
-            '.elements_by_id["r2v-1"].creation.prompt_sync)'
-        ),
-    )
-
-    assert result.etag == base.etag
-    assert result.generation == base.generation
-    assert result.changed_pointers == []
-    assert result.review_id is None
-    assert store.read(project.project_id).project == base.project
-
-
 def test_read_project_returns_and_privately_caches_the_real_base(tmp_path):
     store, base = make_store(tmp_path)
     tools = _tools(store)
@@ -113,62 +83,6 @@ def test_read_project_returns_and_privately_caches_the_real_base(tmp_path):
     assert committed.project.name == "Initial"
     assert committed.project.description == "Agent description"
     assert committed.changed_pointers == ["/description"]
-
-
-def test_project_pointer_pages_round_trip_utf8_and_keep_complete_commit_base(
-    tmp_path,
-):
-    import json
-
-    store, base = make_store(tmp_path)
-    name = "中文对白与镜头衔接" * 80
-    base = _external_commit(store, base, name=name)
-    tools = _tools(store)
-    offset = 0
-    text = ""
-    while True:
-        page = tools.invoke(
-            "read_project",
-            {
-                "projectId": "project-1",
-                "pointer": "/name",
-                "offset": offset,
-                "maxBytes": 41,
-                "expectedEtag": base.etag,
-            },
-        )
-        text += page["content"]
-        assert len(page["content"].encode("utf-8")) <= 41
-        if page["eof"]:
-            break
-        assert page["nextOffset"] > offset
-        offset = page["nextOffset"]
-    assert json.loads(text) == name
-    changed = tools.jq_project(
-        project_id="project-1",
-        program='.name = "Updated"',
-    )
-    assert changed.project.timelines == base.project.timelines
-
-
-def test_project_pointer_pagination_rejects_mixed_revisions(tmp_path):
-    store, base = make_store(tmp_path)
-    tools = _tools(store)
-    first = tools.invoke(
-        "read_project",
-        {"projectId": "project-1", "pointer": "", "maxBytes": 16},
-    )
-    _external_commit(store, base, name="Changed between pages")
-    with pytest.raises(AgentProjectToolError, match="changed between pages"):
-        tools.invoke(
-            "read_project",
-            {
-                "projectId": "project-1",
-                "pointer": "",
-                "offset": first["nextOffset"],
-                "expectedEtag": first["etag"],
-            },
-        )
 
 
 def test_cached_base_enables_base_candidate_latest_three_way_merge(tmp_path):

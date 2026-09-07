@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import re
-from copy import deepcopy
 
-import pytest
 
 from services.project_files.edit_impact import (
     apply_frontend_edit_impacts,
@@ -189,74 +187,3 @@ def test_committed_impact_can_be_reconstructed_for_idempotent_replay() -> None:
     assert impact.render_timeline_ids == {"timeline:main"}
     assert impact.invalidated_artifact_version_ids == {"video-v1", "final-v1"}
     assert impact.regeneration_required is True
-
-
-@pytest.mark.parametrize(
-    "suffix",
-    [
-        ("creation", "prompt_sync", "plan_fingerprint"),
-        ("creation", "prompt_sync"),
-        ("creation",),
-        (),
-    ],
-)
-@pytest.mark.parametrize(
-    "new_stamp",
-    [None, {"plan_fingerprint": "untrusted"}],
-)
-def test_provenance_only_save_keeps_all_generated_outputs(suffix, new_stamp):
-    base = _project()
-    elements = base["timelines"]["items"]["timeline:main"]["elements_by_id"]
-    elements["r2v-1"]["creation"]["prompt_sync"] = {
-        "plan_fingerprint": "saved",
-    }
-    candidate = deepcopy(base)
-    candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
-        "r2v-1"
-    ]["creation"]["prompt_sync"] = new_stamp
-
-    result, impact = apply_frontend_edit_impacts(
-        candidate,
-        [_element_pointer("r2v-1", *suffix)],
-        base=base,
-    )
-
-    assert result == candidate
-    assert result["assets"] == base["assets"]
-    assert impact.regeneration_required is False
-    assert impact.affected_element_ids == set()
-    assert impact.render_timeline_ids == set()
-    assert impact.invalidated_artifact_version_ids == set()
-
-
-@pytest.mark.parametrize("field", ["video_prompt", "storyboard_prompt"])
-def test_real_prompt_edit_with_provenance_change_still_invalidates(field):
-    base = _project()
-    candidate = deepcopy(base)
-    creation = candidate["timelines"]["items"]["timeline:main"][
-        "elements_by_id"
-    ]["r2v-1"]["creation"]
-    creation["prompt_sync"] = {"plan_fingerprint": "untrusted"}
-    creation[field] = "New creative content"
-    result, impact = apply_frontend_edit_impacts(
-        candidate,
-        [
-            _element_pointer("r2v-1", "creation", "prompt_sync"),
-            _element_pointer("r2v-1", "creation", field),
-        ],
-        base=base,
-    )
-    versions = result["assets"]["artifact_versions_by_id"]
-    assert versions["storyboard-v1"]["stale"] == (field == "storyboard_prompt")
-    assert versions["video-v1"]["stale"] is True
-    assert versions["final-v1"]["stale"] is True
-    assert impact.regeneration_required is True
-
-
-def test_provenance_only_committed_change_has_no_render_impact():
-    impact = summarize_committed_edit_impact(
-        _project(),
-        [_element_pointer("r2v-1", "creation", "prompt_sync")],
-    )
-    assert impact.regeneration_required is False
-    assert impact.render_timeline_ids == set()

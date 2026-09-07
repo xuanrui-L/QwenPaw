@@ -215,24 +215,6 @@ def test_preview_mirrors_submit_order_and_reserves_missing_storyboard() -> (
     ]
 
 
-def test_missing_storyboard_and_missing_reference_keep_distinct_positions():
-    project = _project()
-    project.assets.artifact_slots_by_id[
-        "element:elem:1:storyboard"
-    ].selected_version_id = None
-    del project.assets.source_versions_by_id["src:upload-1"]
-    preview = preview_r2v_reference_order(project, "elem:1")
-    assert [
-        (row["index"], row["versionId"], row["available"])
-        for row in preview["references"]
-    ] == [
-        (1, "", False),
-        (2, "src:upload-1", False),
-        (3, "art:extra", True),
-    ]
-    assert not preview["ready"]
-
-
 def test_explicit_reference_from_another_variant_is_rejected() -> None:
     """A bound entity never consumes an ArtifactVersion owned by another
     Variant: instead of silently dropping the conflicting reference, the

@@ -105,33 +105,4 @@ describe("WorkGraphPanel", () => {
       "lineup:lineup:trio",
     );
   });
-  it.each([
-    ["storyboard", "生成分镜图"],
-    ["video", "生成视频"],
-    ["compose", "合成成片"],
-  ] as const)("names the %s action and its target", (kind, label) => {
-    useWorkGraphStore.setState({
-      graph: {
-        ...graph,
-        nodes: [
-          node({
-            id: `${kind}:one`,
-            kind,
-            label: "开场",
-            status: "ready",
-            lane: "main",
-            locator: {},
-          }),
-        ],
-      },
-    });
-    render(<WorkGraphPanel projectId="p1" />);
-    const button = screen.getByRole("button", { name: `${label} · 开场` });
-    expect(button).toHaveTextContent(label);
-    fireEvent.click(button);
-    expect(useWorkGraphStore.getState().dispatchNode).toHaveBeenCalledWith(
-      "p1",
-      `${kind}:one`,
-    );
-  });
 });

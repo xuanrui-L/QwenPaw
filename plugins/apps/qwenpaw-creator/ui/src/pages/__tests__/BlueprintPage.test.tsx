@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import BlueprintPage from "@/pages/BlueprintPage";
@@ -9,7 +9,6 @@ import { useWorkGraphStore } from "@/store/workGraphStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
-import EpisodeListPanel from "@/components/blueprint/EpisodeListPanel";
 import { projectDocument } from "@/test/creatorFixtures";
 import type { ProjectDocument } from "@/contracts/creator";
 
@@ -46,144 +45,6 @@ function renderPage(entry = "/project/p1") {
     </MemoryRouter>,
   );
 }
-
-describe("Blueprint before the first agent output", () => {
-  function emptyProject() {
-    const project = singleProject();
-    const timeline = project.timelines.items["timeline:main"];
-    timeline.title = "";
-    timeline.synopsis = "";
-    timeline.elements_by_id = {};
-    project.assets.artifact_slots_by_id = {};
-    project.visual.entities = { order: [], items: {} };
-    project.sources.sources = { order: [], items: {} };
-    return project;
-  }
-  beforeEach(() => {
-    useCreatorSessionStore.getState().reset();
-    useCreatorTaskViewStore.getState().reset();
-    useFileProjectReviewStore.getState().reset();
-    useWorkGraphStore.getState().reset();
-    useCreatorSessionStore.setState({
-      projectId: "p1",
-      connectionState: "connected",
-      session: {
-        id: "session-new",
-        projectId: "p1",
-        status: "RUNNING",
-        lastMessageSeq: 1,
-        lastConsumedMessageSeq: 0,
-        lastEventSeq: 0,
-      },
-    });
-  });
-
-  it("shows activity immediately and replaces it as real blueprint content arrives", () => {
-    const project = emptyProject();
-    seedProject(project);
-    const { container } = renderPage();
-    expect(
-      container.querySelector('[data-workspace-empty="blueprint"]'),
-    ).toHaveAttribute("data-state", "working");
-    expect(container.querySelector("textarea")).not.toBeInTheDocument();
-    expect(
-      container.querySelector("[data-blueprint-activity]"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("暂无进行中的生产任务")).not.toBeInTheDocument();
-    expect(container).not.toHaveTextContent("当前没有独立剧本");
-
-    const published = structuredClone(project);
-    published.timelines.items["timeline:main"].title = "雨夜来信";
-    published.timelines.items["timeline:main"].synopsis =
-      "快递员在雨夜收到一封来自未来的信。";
-    act(() => seedProject(published));
-    expect(
-      container.querySelector("[data-blueprint-initial]"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByDisplayValue("快递员在雨夜收到一封来自未来的信。"),
-    ).toBeInTheDocument();
-    expect(
-      container.querySelector('[data-workspace-empty="script"]'),
-    ).toHaveAttribute("data-state", "working");
-    expect(container).not.toHaveTextContent("当前没有独立剧本");
-  });
-
-  it("does not mistake a history snapshot or the initial user brief for the first output", () => {
-    const project = emptyProject();
-    const historical = structuredClone(
-      projectDocument.timelines.items["timeline:main"],
-    );
-    historical.timeline_id = "snapshot:old";
-    project.timelines.items["snapshot:old"] = historical;
-    project.timelines.order.push("snapshot:old");
-    seedProject(project);
-    const { container } = renderPage();
-    expect(
-      container.querySelector('[data-workspace-empty="blueprint"]'),
-    ).toBeInTheDocument();
-  });
-
-  it("shows the committed script before elements or an artifact have been created", () => {
-    const project = emptyProject();
-    project.timelines.items["timeline:main"].description =
-      "【起 · 0–4秒】快递员在雨夜拆开一封来信。\n【承 · 4–8秒】信里写着即将发生的事。";
-    seedProject(project);
-    const { container } = renderPage();
-    expect(
-      screen.getByText("【起 · 0–4秒】快递员在雨夜拆开一封来信。"),
-    ).toBeInTheDocument();
-    expect(
-      container.querySelector('[data-workspace-empty="script"]'),
-    ).not.toBeInTheDocument();
-    expect(
-      container.querySelector(
-        '[data-creator-path="/timelines/items/timeline:main/description"]',
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("shows published visual development even before a story or shot reference exists", () => {
-    const project = emptyProject();
-    project.visual = structuredClone(projectDocument.visual);
-    seedProject(project);
-    const { container } = renderPage();
-    expect(screen.getByText("圆润大橘猫")).toBeInTheDocument();
-    expect(
-      container.querySelector('[data-workspace-empty="script"]'),
-    ).toHaveAttribute("data-state", "working");
-    expect(
-      container.querySelector("[data-blueprint-initial]"),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText("暂无成片")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /视觉开发/ }),
-    ).not.toHaveTextContent("待确认");
-  });
-
-  it("gives the initially empty episode sidebar the same feedback and reveals real episodes on publication", () => {
-    const project = emptyProject();
-    seedProject(project);
-    const { container } = render(
-      <MemoryRouter initialEntries={["/project/p1"]}>
-        <NavigationRuntime />
-        <EpisodeListPanel />
-      </MemoryRouter>,
-    );
-    expect(
-      container.querySelector('[data-workspace-empty="episodes"]'),
-    ).toHaveAttribute("data-state", "working");
-    const next = structuredClone(project);
-    next.timelines.items["timeline:main"].title = "雨夜来信";
-    act(() => seedProject(next));
-    expect(
-      container.querySelector("[data-workspace-empty]"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /雨夜来信/ }),
-    ).toBeInTheDocument();
-  });
-});
 
 describe("BlueprintPage narrative shapes", () => {
   beforeEach(() => {

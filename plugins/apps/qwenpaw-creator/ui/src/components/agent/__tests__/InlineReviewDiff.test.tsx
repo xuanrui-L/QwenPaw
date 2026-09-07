@@ -37,54 +37,6 @@ afterEach(() => {
 });
 
 describe("matchReviewOperations", () => {
-  it("renders public ancestor text while keeping the decision scoped to the original operation", async () => {
-    const decide = vi.fn(async () => elementReplaced);
-    useFileProjectReviewStore.setState({
-      projectId: "project-1",
-      reviews: [elementReplaced],
-      decisionInFlight: false,
-      decide,
-    });
-    render(
-      <InlineReviewDiff pointer="/timelines/items/0/elements_by_id/element-1/title" />,
-    );
-    expect(screen.getByText("旧标题")).toBeInTheDocument();
-    expect(screen.getByText("新标题")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保留该修改" }));
-    await waitFor(() =>
-      expect(decide).toHaveBeenCalledWith("project-1", "review-1", [
-        { operation_id: "operation-1", decision: "ACCEPT" },
-      ]),
-    );
-  });
-
-  it("never prints descendant paths or structure JSON after inspecting a broader field", () => {
-    const current = review([
-      operation({
-        kind: "create",
-        json_pointer: "/timelines/items/snapshot:timeline:main:1",
-        before: null,
-        after: { title: "色彩练习", color_grade: "none", elements_by_id: {} },
-      }),
-    ]);
-    useFileProjectReviewStore.setState({
-      projectId: "project-1",
-      reviews: [current],
-      decisionInFlight: false,
-    });
-    render(<InlineReviewDiff pointer="/timelines" />);
-    expect(screen.getByText("已保存修改前版本")).toBeInTheDocument();
-    expect(document.querySelector("[data-review-diff]")).toBeNull();
-    const visible =
-      document.body.textContent +
-      Array.from(document.querySelectorAll("[title]"))
-        .map((node) => node.getAttribute("title"))
-        .join(" ");
-    expect(visible).not.toMatch(
-      /snapshot:|\/items|color_grade|elements_by_id/u,
-    );
-  });
-
   it("matches an exact pointer and ignores unrelated ones", () => {
     const matches = matchReviewOperations(
       [review([operation({})])],

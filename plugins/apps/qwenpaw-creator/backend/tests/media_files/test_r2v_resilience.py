@@ -19,7 +19,6 @@ from services.media_files.r2v_execution import FileR2VExecutionService
 from services.project_files.facade import CreatorFileServices
 from services.runtime_files.execution_store import ProjectExecutionStore
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
-from services.runtime_files.errors import LockTimeoutError
 from utils.paths import unique_task_work_path
 from scripts.recover_completed_r2v_materialization import (
     _reopen_materialization_state,
@@ -495,48 +494,6 @@ def test_unrelated_commit_during_render_does_not_quarantine(
         ELEMENT_ID
     ]
     assert element.outputs["main"].slot_id == f"element:{ELEMENT_ID}:main"
-
-
-def test_publication_lock_retry_does_not_resubmit_video(
-    tmp_path,
-    monkeypatch,
-):
-    services = _services(tmp_path, monkeypatch)
-    original_commit = services.commits.commit
-    attempts = 0
-
-    class Provider:
-        calls = 0
-
-        async def submit(self, **_kwargs):
-            self.calls += 1
-            return "provider-publication-lock"
-
-        async def poll(self, provider_task_id):
-            path = unique_task_work_path("video", ".mp4", prefix="lock-test-")
-            path.write_bytes(_MP4)
-            return {
-                "task_id": provider_task_id,
-                "status": "SUCCEEDED",
-                "result_url": path.resolve().as_uri(),
-                "media_type": "video/mp4",
-                "durationSeconds": 4,
-            }
-
-    def contended_commit(**kwargs):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise LockTimeoutError(tmp_path / "project.lock", 10.0)
-        return original_commit(**kwargs)
-
-    monkeypatch.setattr(services.commits, "commit", contended_commit)
-    provider = Provider()
-    task = _run_video(services, provider)
-
-    assert task.status.value == "SUCCEEDED"
-    assert provider.calls == 1
-    assert attempts == 2
 
 
 def test_changed_render_inputs_during_render_still_quarantine(

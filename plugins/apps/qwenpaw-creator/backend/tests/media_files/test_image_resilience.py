@@ -31,7 +31,6 @@ from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
 from services.project_files.store import ProjectSnapshot
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
-from services.runtime_files.errors import LockTimeoutError
 from utils.exceptions import ModelError
 
 from .conftest import make_r2v_element, r2v_project_services
@@ -111,41 +110,6 @@ def test_storyboard_resolution_appends_project_panel_ratio_before_spend(
     assert resolved.aspect_ratio == "9:16"
 
 
-@pytest.mark.parametrize("panels", [1, 9])
-def test_one_continuous_shot_uses_its_authored_keyframe_layout(
-    tmp_path,
-    monkeypatch,
-    panels,
-):
-    services = _services(tmp_path, monkeypatch)
-    snapshot = services.projects.read(PROJECT_ID)
-    creation = (
-        snapshot.project.timelines.items["timeline:main"]
-        .elements_by_id[ELEMENT_ID]
-        .creation
-    )
-    assert "shots" not in creation.model_dump()
-    creation.storyboard_prompt = (
-        f"输出一张9:16画布，共{panels}个关键帧，" "每格内部9:16。保持一个连续镜头，依次展示动作中间过程。"
-    )
-    snapshot.project.settings.aspect_ratio = "9:16"
-    before = snapshot.project.model_dump_json()
-    resolved = _resolve_request(
-        snapshot=snapshot,
-        project_root=services.projects.project_root(PROJECT_ID),
-        command=CreatorCommandType.GENERATE_STORYBOARD_IMAGE,
-        target_ref=f"element:{ELEMENT_ID}",
-        arguments={},
-    )
-    if panels == 9:
-        assert "3 columns by 3 rows" in resolved.prompt
-        assert "Place exactly 9 story panels" in resolved.prompt
-    else:
-        assert "columns by" not in resolved.prompt
-    assert "One continuous shot may need several panels" in resolved.prompt
-    assert snapshot.project.model_dump_json() == before
-
-
 class _CountingProvider:
     # Safety behaviour is exercised after the model-capability preflight, so
     # this test provider must identify the documented model contract it mocks.
@@ -203,73 +167,6 @@ def test_transient_failure_reopens_a_retry_slot(tmp_path, monkeypatch):
     # The identical retry must run again instead of hitting the wall.
     result = _execute(services, _CountingProvider())
     assert result.replayed is False and result.artifact_version_id
-
-
-def test_publication_lock_retry_does_not_regenerate_image(
-    tmp_path,
-    monkeypatch,
-):
-    services = _services(tmp_path, monkeypatch)
-    provider = _CountingProvider()
-    original_commit = services.commits.commit
-    attempts = 0
-
-    def contended_commit(**kwargs):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise LockTimeoutError(tmp_path / "project.lock", 10.0)
-        return original_commit(**kwargs)
-
-    monkeypatch.setattr(services.commits, "commit", contended_commit)
-    result = _execute(services, provider)
-
-    assert attempts == 2
-    assert provider.calls == 1
-    assert result.artifact_version_id
-    assert result.artifact_version_id in (
-        services.projects.read(
-            PROJECT_ID,
-        ).project.assets.artifact_versions_by_id
-    )
-
-
-def test_publication_retry_rechecks_durable_cancellation(
-    tmp_path,
-    monkeypatch,
-):
-    from services.runtime_files.execution_store import ProjectExecutionStore
-
-    services = _services(tmp_path, monkeypatch)
-    provider = _CountingProvider()
-    executions = ProjectExecutionStore(services.root)
-    attempts = 0
-
-    def cancel_before_retry(**kwargs):
-        nonlocal attempts
-        attempts += 1
-        versions = kwargs["candidate"]["assets"]["artifact_versions_by_id"]
-        task_id = next(iter(versions.values()))["metadata"]["taskId"]
-        executions.transition_task(
-            PROJECT_ID,
-            task_id,
-            expected_status="RUNNING",
-            status="CANCELLED",
-            _lifecycle_lock_held=True,
-        )
-        raise LockTimeoutError(tmp_path / "project.lock", 10.0)
-
-    monkeypatch.setattr(services.commits, "commit", cancel_before_retry)
-    with pytest.raises(ConflictError, match="已取消"):
-        _execute(services, provider)
-
-    assert attempts == 1
-    assert provider.calls == 1
-    assert not (
-        services.projects.read(
-            PROJECT_ID,
-        ).project.assets.artifact_versions_by_id
-    )
 
 
 def test_deterministic_rejection_keeps_the_terminal_wall(

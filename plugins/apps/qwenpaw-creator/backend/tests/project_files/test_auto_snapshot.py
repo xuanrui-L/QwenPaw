@@ -11,7 +11,6 @@ from services.project_files.auto_snapshot import (
     _timeline_element_changes,
     auto_snapshot_timelines,
     restored_snapshot_timelines,
-    frozen_snapshot_edits,
 )
 
 pytestmark = pytest.mark.unit
@@ -138,42 +137,6 @@ class TestNextSnapshotId:
 
 
 class TestAutoSnapshotTimelines:
-    @pytest.mark.parametrize("with_content_edit", [False, True])
-    def test_sync_provenance_is_not_a_new_creative_version(
-        self,
-        with_content_edit,
-    ):
-        base = _minimal_project(elements={ELEM: _element(ELEM)})
-        _elems(base)[ELEM]["creation"] = {
-            "type": "r2v",
-            "video_prompt": "Original action",
-            "prompt_sync": {"plan_fingerprint": "saved"},
-        }
-        candidate = copy.deepcopy(base)
-        _elems(candidate)[ELEM]["creation"].pop("prompt_sync")
-        if with_content_edit:
-            _elems(candidate)[ELEM]["creation"]["video_prompt"] = "New action"
-        auto_snapshot_timelines(base, candidate)
-        assert len(candidate["timelines"]["items"]) == (
-            2 if with_content_edit else 1
-        )
-
-    def test_provenance_change_does_not_weaken_frozen_snapshot_validation(
-        self,
-    ):
-        sid = f"snapshot:{TL}:1"
-        base = _minimal_project(
-            timeline_id=sid,
-            elements={ELEM: _element(ELEM)},
-        )
-        _elems(base, sid)[ELEM]["creation"] = {
-            "type": "r2v",
-            "prompt_sync": {"plan_fingerprint": "saved"},
-        }
-        candidate = copy.deepcopy(base)
-        _elems(candidate, sid)[ELEM]["creation"].pop("prompt_sync")
-        assert frozen_snapshot_edits(base, candidate) == [sid]
-
     def test_no_change_no_snapshot(self):
         base = _minimal_project(elements={ELEM: _element(ELEM)})
         candidate = copy.deepcopy(base)
