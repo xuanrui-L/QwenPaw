@@ -631,7 +631,10 @@ class ProjectCommitBoundary:
                     merged["created_at"] = latest_data["created_at"]
                     merged["generation"] = latest.generation + 1
                     merged["updated_at"] = _now().isoformat()
-                    final_project = Project.model_validate(merged)
+                    final_project = Project.model_validate(
+                        merged,
+                        context={"reject_retired_authoring_fields": True},
+                    )
                     final_data = _json(final_project)
                     pre_publish_etag = latest.etag
                     expected_final_etag = project_etag(final_project)

@@ -10,7 +10,7 @@ import re
 _DIGITS = "零一二三四五六七八九"
 _NUMBER = r"(?:[1-9]\d?|[一二三四五六七八九十]{1,3})"
 _PANELS = re.compile(
-    rf"(?<![\d每第{_DIGITS}十])({_NUMBER})\s*(?:个\s*)?(?:等尺寸|等大)?\s*"
+    rf"(?<![\d每第{_DIGITS}十])({_NUMBER})\s*(?:[个张格]\s*)?(?:等尺寸|等大)?\s*"
     r"(?:分镜格|分镜面板|故事板面板|面板|(?:时间)?关键帧)"
     r"|(?<![\w\d])(\d{1,2})\s*[- ]?\s*"
     r"(?:story(?:board)?\s+)?(?:panels?|keyframes?)\b"

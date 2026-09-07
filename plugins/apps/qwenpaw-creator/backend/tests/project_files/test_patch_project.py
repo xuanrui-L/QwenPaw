@@ -199,7 +199,6 @@ def test_invoke_translates_schema_failures(tmp_path):
 
 
 def _r2v_element(element_id: str, narrative: str = "叙事") -> dict:
-    shot_id = f"{element_id}-shot"
     return {
         "element_id": element_id,
         "label": element_id,
@@ -210,18 +209,6 @@ def _r2v_element(element_id: str, narrative: str = "叙事") -> dict:
             "narrative": narrative,
             "storyboard_prompt": "分镜 prompt",
             "video_prompt": "视频 prompt",
-            "shots": {
-                "items": {
-                    shot_id: {
-                        "shot_id": shot_id,
-                        "description": "镜头",
-                        "camera": "⊙ 静止",
-                        "framing": "全景",
-                        "duration_seconds": 4,
-                    },
-                },
-                "order": [shot_id],
-            },
         },
     }
 

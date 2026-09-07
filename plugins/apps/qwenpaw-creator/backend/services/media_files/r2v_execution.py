@@ -54,6 +54,7 @@ from domain.errors import (
 )
 from models.reference_markers import canonical_marker_indices
 from schemas.common import StrictModel
+from services.prompt_text import missing_narrative_dialogue
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileStore,
@@ -1313,6 +1314,13 @@ def _resolve_request(
     prompt = str(arguments.get("prompt") or creation.video_prompt).strip()
     if not prompt:
         raise ValidationError("生成 R2V 视频需要 video prompt")
+    if isinstance(creation, R2VCreation) and missing_narrative_dialogue(
+        creation.narrative,
+        prompt,
+    ):
+        raise ValidationError(
+            "视频提示词遗漏了片段内容中的对白或旁白原文，请补齐后重新生成。",
+        )
     if "referenceImageUrls" in arguments or "referenceVersionIds" in arguments:
         raise ValidationError(
             "R2V reference 只能来自 project.json 的 exact version 列表",

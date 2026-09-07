@@ -56,9 +56,10 @@ def required_checkpoint_phases(  # pylint: disable=too-many-return-statements  #
 ) -> tuple[str, ...]:
     """Return reviews of actual deliverables; billing is a separate gate.
 
-    Design images cannot wait for their own design review. Multi-episode
-    projects retain structure/script review; delegated and fine-tuning
-    modes do not add a generic plan confirmation.
+    Design images cannot wait for their own review. Multi-episode visual
+    design retains structure review in co_creation and fine_tuning;
+    storyboard/video retain structure/script/design only in co_creation.
+    Delegated execution has no creation checkpoints.
     """
 
     from models.config import (

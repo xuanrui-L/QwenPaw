@@ -1791,9 +1791,6 @@ export function WorkbenchSurface({
             >
               <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-secondary)]">
                 {t("r2v.narrativeTitle")}
-                <span className="ml-2 font-normal text-[var(--color-text-tertiary)]">
-                  {t("r2v.narrativeHint")}
-                </span>
               </summary>
               <div className="mt-2">
                 <PromptRichBlock

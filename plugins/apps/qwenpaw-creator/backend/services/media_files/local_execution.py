@@ -708,7 +708,7 @@ class FfmpegLocalMediaRunner:
         composed video's own audio (when present) without renormalization.
         Roles keep the three sound layers apart: narration ducks the footage
         audio under it, bgm plays as one continuous low bed that ducks itself
-        under explicit speech windows (s2v, narration), and sfx
+        under explicit speech windows and the produced footage audio. Sfx
         mixes verbatim.
         """
 
@@ -717,6 +717,7 @@ class FfmpegLocalMediaRunner:
         arguments: list[str] = ["-y", "-i", os.fspath(premix)]
         filters: list[str] = []
         labels: list[str] = []
+        music_labels: list[str] = []
         narration_windows: list[tuple[float, float]] = []
         for track in spec.audio_tracks:
             # Tracks predating the role key always ducked the footage audio,
@@ -780,9 +781,42 @@ class FfmpegLocalMediaRunner:
                     )
             label = f"[mix{index}]"
             filters.append(",".join(chain) + label)
-            labels.append(label)
-        if self._probe_has_audio(premix):
-            base_chain = ["[0:a]aformat=channel_layouts=stereo"]
+            (music_labels if role == "bgm" else labels).append(label)
+        has_native_audio = self._probe_has_audio(premix)
+        if music_labels and has_native_audio:
+            # Read the already composed sound, so edits, retiming and
+            # transitions have the same clock as the final picture. This is
+            # audio-driven ducking, not inferred speech timestamps or ASR.
+            filters.append("[0:a]asplit=2[native][duck]")
+            detector = [
+                "[duck]aformat=channel_layouts=stereo",
+                "highpass=f=100",
+                "lowpass=f=4000",
+            ]
+            for start, end in bgm_duck_windows:
+                # These intervals already apply a fixed reduction above.
+                detector.append(
+                    f"volume=0:enable='between(t,{start:.3f},{end:.3f})'",
+                )
+            # A short native audio stream must not cut off the music bed.
+            filters.append(",".join(detector) + ",apad[ducking]")
+            music = music_labels[0]
+            if len(music_labels) > 1:
+                filters.append(
+                    f"{''.join(music_labels)}amix=inputs={len(music_labels)}"
+                    ":duration=longest:normalize=0[music]",
+                )
+                music = "[music]"
+            filters.append(
+                f"{music}[ducking]sidechaincompress=threshold=0.03:ratio=6"
+                ":attack=15:release=300:mix=0.65[bgm]",
+            )
+            labels.append("[bgm]")
+        else:
+            labels.extend(music_labels)
+        if has_native_audio:
+            native = "[native]" if music_labels else "[0:a]"
+            base_chain = [f"{native}aformat=channel_layouts=stereo"]
             for start, end in _merge_windows(narration_windows):
                 base_chain.append(
                     f"volume={_DUCK_VOLUME}:enable="
@@ -809,6 +843,11 @@ class FfmpegLocalMediaRunner:
         self._run(
             [
                 *arguments,
+                # Audio branches share their source with the sidechain.
+                # Serial scheduling avoids dropped tail samples when amix
+                # and sidechaincompress consume different frame sizes.
+                "-filter_complex_threads",
+                "1",
                 "-filter_complex",
                 ";".join(filters),
                 "-map",
@@ -3234,8 +3273,8 @@ def _timeline_speech_windows(
 ) -> tuple[tuple[float, float], ...]:
     """Explicit S2V voice intervals; free-form narrative is not time data.
 
-    Other generated clips are mixed from their produced audio, not invented
-    speech timing based on text or retired authoring structures.
+    The mixer separately ducks BGM from actual composed audio levels, so R2V
+    needs no inferred timestamps from text or retired authoring structures.
     """
 
     windows: list[tuple[float, float]] = []
@@ -3416,6 +3455,14 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
                     "speechWindows": [
                         list(window) for window in resolved.speech_windows
                     ],
+                    **(
+                        {"bgmDuckingVersion": 1}
+                        if any(
+                            track.role == "bgm"
+                            for track in resolved.audio_tracks
+                        )
+                        else {}
+                    ),
                 }
                 if resolved.audio_tracks
                 else {}

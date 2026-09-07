@@ -20,6 +20,7 @@ from models.video_capabilities import (
     video_prompt_storyboard_reference_violation,
 )
 from services.storyboard_layout import declared_storyboard_panel_count
+from services.prompt_text import missing_narrative_dialogue
 
 _BORDER_CONTRADICTION = re.compile(
     r"(?:\bno\s+(?:panel\s+)?borders?\b|无边框|不要边框|禁止边框|不画边框)",
@@ -305,6 +306,19 @@ def check_changed_r2v_prompt_contracts(
                     ),
                 )
             else:
+                for line in missing_narrative_dialogue(
+                    str(creation.get("narrative") or ""),
+                    video_prompt,
+                ):
+                    findings.append(
+                        _finding(
+                            code="VIDEO_DIALOGUE_MISSING",
+                            pointer=video_pointer,
+                            element_id=str(element_id),
+                            message=f"视频提示词遗漏片段叙述中的对白或旁白：{line}",
+                            suggestion="将已写明的台词原文、说话者和声音方式保留在视频提示词中。",
+                        ),
+                    )
                 reference_violation = (
                     video_prompt_storyboard_reference_violation(
                         video_prompt,

@@ -1125,9 +1125,9 @@ class FileSpecialistToolRegistry:
                     f"当前图片模型 {model_name or '未配置'} 的输入参考图，"
                     f"官方上限为 {reference_limit or 0} 张；只传 Project 中"
                     "已存在的 exact version id。未知模型别名按 0 张处理，"
-                    "不会套用通用猜测上限。显式传入即为最终参考列表（执行层"
-                    "不再自动注入阵容图或实体锚点），由你自控张数与顺序；"
-                    "不传时才使用自动引用链。"
+                    "不会套用通用猜测上限。仅视觉资产生成可显式传入最终参考列表，"
+                    "按所列顺序使用；不传时使用项目引用。分镜图生成不接受此参数，"
+                    "请使用目标 creation.storyboard_reference_version_ids。"
                 )
             business_tools.append(manifest)
         names = [

@@ -637,6 +637,23 @@ def test_panel_count_requires_an_explicit_panel_noun(monkeypatch) -> None:
     ]
 
 
+def test_narrative_speech_must_reach_video_prompt_but_sign_text_need_not():
+    project = _r2v_contract_project(
+        storyboard_prompt="16:9 故事板，1 个分镜格，每格 16:9。",
+        video_prompt="[Image 1]提供分镜顺序，女子回头。",
+        dialogues=("招牌写着“星光旅店”。女子说：“别走！”",),
+    )
+    pointer = "/timelines/items/t/elements_by_id/e"
+    report = check_changed_r2v_prompt_contracts(project, [pointer])
+    assert [item["code"] for item in report["findings"]] == [
+        "VIDEO_DIALOGUE_MISSING",
+    ]
+    project["timelines"]["items"]["t"]["elements_by_id"]["e"]["creation"][
+        "video_prompt"
+    ] += "女子低声说：‘别走!’"
+    assert check_changed_r2v_prompt_contracts(project, [pointer])["passed"]
+
+
 def test_keyframe_count_is_independent_of_shots(monkeypatch) -> None:
     monkeypatch.setattr(
         model_config,

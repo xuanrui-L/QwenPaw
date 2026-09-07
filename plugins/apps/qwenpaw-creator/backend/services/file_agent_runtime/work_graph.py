@@ -20,6 +20,7 @@ from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, TaskKind, TaskStatus
+from services.prompt_text import missing_narrative_dialogue
 from services.project_files.prompt_sync import prompt_sync_status
 from services.project_files.blueprint_readiness import (
     STORY_BEFORE_VISUAL_MESSAGE,
@@ -1103,6 +1104,18 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             if prompt_sync_gap and task is None:
                 status = WorkNodeStatus.GATED
                 video_missing = (prompt_sync_gap,)
+                video_text_gap = True
+            if (
+                task is None
+                and status in {WorkNodeStatus.READY, WorkNodeStatus.STALE}
+                and isinstance(creation, R2VCreation)
+                and missing_narrative_dialogue(
+                    creation.narrative,
+                    creation.video_prompt,
+                )
+            ):
+                status = WorkNodeStatus.GATED
+                video_missing = (*video_missing, "视频提示词遗漏了片段内容中的对白或旁白原文")
                 video_text_gap = True
             command, dispatch_arguments = _video_dispatch_command(
                 creation_type,

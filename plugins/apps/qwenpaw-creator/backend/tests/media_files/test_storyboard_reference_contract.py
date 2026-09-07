@@ -110,3 +110,11 @@ def test_invalid_indices_are_visible_and_rejected_before_provider(
     assert preview["ready"] is False
     with pytest.raises(ValidationError, match="参考图编号"):
         _resolve(snapshot, tmp_path)
+
+
+def test_layout_accepts_frame_classifiers_without_guessing_conflicts():
+    from services.storyboard_layout import declared_storyboard_panel_count
+
+    assert declared_storyboard_panel_count("1 张关键帧") == 1
+    assert declared_storyboard_panel_count("共 8 格分镜面板") == 8
+    assert declared_storyboard_panel_count("4个关键帧，9个分镜格") is None

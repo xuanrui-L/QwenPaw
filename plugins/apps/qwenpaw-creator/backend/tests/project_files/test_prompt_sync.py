@@ -8,6 +8,7 @@ import json
 import pytest
 
 from domain.errors import ConflictError
+from pydantic import ValidationError
 from models import config as model_config
 from services.file_agent_runtime.model_client import (
     AgentModelTurn,
@@ -136,7 +137,7 @@ def test_stale_sync_cannot_overwrite_later_edit(services):
     asyncio.run(run())
 
 
-def test_invalid_legacy_shots_are_ignored():
+def test_legacy_shots_can_be_read_but_cannot_be_written(services):
     creation = R2VCreation.model_validate(
         {
             "narrative": "当前片段内容",
@@ -148,3 +149,5 @@ def test_invalid_legacy_shots_are_ignored():
         },
     )
     assert creation == R2VCreation(narrative="当前片段内容")
+    with pytest.raises(ValidationError, match="不再支持写入"):
+        edit(services, "shots", {"items": {}, "order": []})

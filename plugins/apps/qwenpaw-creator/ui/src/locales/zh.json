@@ -781,20 +781,10 @@
     "assetPickerEmpty": "暂无可添加的资产",
     "relatedAssets": "相关资产",
     "sync": {
-      "status": {
-        "legacy": "片段内容与提示词可查看",
-        "current": "片段内容与提示词已同步",
-        "needs_update": "片段内容与提示词待同步",
-        "needs_confirmation": "提示词修改待同步",
-        "draft": "内容编辑中",
-        "checking": "正在读取片段内容与提示词"
-      },
       "preparationWaiting": "准备生成内容",
       "preparationRunning": "正在准备生成内容",
       "preparationFailed": "生成准备遇到问题",
       "automaticWaiting": "正在准备生成 · 已等待 {{seconds}} 秒",
-      "checkOnGenerate": "生成时会重新检查片段内容与提示词",
-      "savedNextGenerate": "修改已保存，重新生成时会同步关联内容",
       "changedBeforeGeneration": "内容在同步后又有变化，请按最新内容重新生成。"
     },
     "editorChangedTitle": "提示词已在其他位置更新",
@@ -803,8 +793,7 @@
     "editorReload": "重新载入最新内容",
     "editorKeep": "保留我的编辑",
     "referencesNeedReview": "参考图缺失、数量超限或引用编号不匹配，请检查提示词中的图片。",
-    "narrativeTitle": "片段内容",
-    "narrativeHint": "完整叙述 · 编辑后生成时自动同步提示词"
+    "narrativeTitle": "片段内容"
   },
   "elementDetail": {
     "selectElement": "选择一项时间线内容",

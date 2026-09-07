@@ -38,7 +38,7 @@ class SyncReviewAdvisory(RunReviewModel):
     round: int = Field(ge=1)
     scores: list[RubricScore] = Field(default_factory=list)
     summary: str = ""
-    # Script-to-shots reasoning check (tier-1, shots commits only):
+    # Script-to-generation-unit reasoning check (tier-1, narrative edits):
     # coverage_missing / hallucinated / unshootable evidence lists —
     # reasoning content, never a score (Creator review doctrine).
     script_check: dict[str, Any] | None = None

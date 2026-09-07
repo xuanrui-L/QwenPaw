@@ -141,9 +141,6 @@ def normalize_project_candidate(candidate: Any) -> list[str]:
                 element_pointer,
                 receipts,
             )
-            if not isinstance(element, dict):
-                continue
-
     return receipts
 
 

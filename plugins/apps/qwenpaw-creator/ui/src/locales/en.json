@@ -781,20 +781,10 @@
     "assetPickerEmpty": "No assets available",
     "relatedAssets": "Related Assets",
     "sync": {
-      "status": {
-        "legacy": "Content and prompts available",
-        "current": "Content and prompts synchronized",
-        "needs_update": "Content and prompts need synchronization",
-        "needs_confirmation": "Prompt changes need synchronization",
-        "draft": "Editing content",
-        "checking": "Loading content and prompts"
-      },
       "preparationWaiting": "Preparing generation content",
       "preparationRunning": "Preparing generation content now",
       "preparationFailed": "Generation preparation needs attention",
       "automaticWaiting": "Preparing generation · {{seconds}}s elapsed",
-      "checkOnGenerate": "Content and prompts will be checked before generation",
-      "savedNextGenerate": "Changes saved. Related content will update when you regenerate.",
       "changedBeforeGeneration": "Content changed after synchronization. Regenerate with the latest edits."
     },
     "editorChangedTitle": "The prompt was updated elsewhere",
@@ -803,8 +793,7 @@
     "editorReload": "Reload latest",
     "editorKeep": "Keep my edits",
     "referencesNeedReview": "A reference image is unavailable, exceeds the model limit, or has an invalid index. Check the images in these instructions.",
-    "narrativeTitle": "Clip narrative",
-    "narrativeHint": "Edits synchronize with prompts on generation"
+    "narrativeTitle": "Clip narrative"
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",

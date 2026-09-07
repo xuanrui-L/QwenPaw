@@ -26,6 +26,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -787,7 +788,11 @@ class R2VCreation(StrictModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _ignore_retired_authoring_fields(cls, value: Any) -> Any:
+    def _ignore_retired_authoring_fields(
+        cls,
+        value: Any,
+        info: ValidationInfo,
+    ) -> Any:
         """Old authoring rows are inert, including malformed legacy values.
 
         Do not derive narrative, references, timing or voice intent from them.
@@ -795,6 +800,13 @@ class R2VCreation(StrictModel):
         """
         if not isinstance(value, dict):
             return value
+        if (info.context or {}).get("reject_retired_authoring_fields") and (
+            "shots" in value or "min_dialogue_ratio" in value
+        ):
+            raise ValueError(
+                "不再支持写入 shots 或 min_dialogue_ratio；"
+                "请将片段内容写入 creation.narrative，并更新相关提示词。",
+            )
         value = dict(value)
         value.pop("shots", None)
         value.pop("min_dialogue_ratio", None)
