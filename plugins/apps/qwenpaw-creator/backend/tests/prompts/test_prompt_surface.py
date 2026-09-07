@@ -181,7 +181,7 @@ def test_creator_duration_is_injected_from_the_active_video_model(
     assert "不设置统一的 8–10 秒、10 秒或 15 秒默认值" in prompt
     assert "`[Image 1]`、`[Image 2]`" in prompt
     assert "storyboard 固定为第一张，因此是 `[Image 1]`" in prompt
-    assert "你是 `video_prompt` 的唯一作者" in prompt
+    assert "你负责编写和维护 `video_prompt`" in prompt
     assert "R2V Specialist" not in prompt
     assert "禁止套用“每段固定 5 Shot”" in prompt
     assert "不设统一的 7 秒 Shot 上限" in prompt

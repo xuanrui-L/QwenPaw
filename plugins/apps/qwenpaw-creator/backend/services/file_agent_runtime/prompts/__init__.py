@@ -145,16 +145,18 @@ def render_creator_system_prompt(
         == model_config.EXECUTION_AUTHORIZATION_ALLOW_ALL
     ):
         execution_guidance = (
-            "当前允许后台自动执行就绪的媒体节点，但审阅与依赖门禁仍有效。"
+            "当前允许自动制作。已提交的媒体目标在输入、审阅和依赖满足后开始执行；"
+            "已有运行中的任务时，等待结果通知，不重复请求相同制作。"
             "写入项目或通过审阅不证明任务已经开始；只依据真实任务和产物报告进展。"
         )
     else:
         execution_guidance = (
-            "当前媒体执行需要逐项授权，全局后台调度器不会自动启动制作。"
+            "当前媒体生成需要逐项授权。"
             "用户要求制作时，必须调用 request_workgraph_execution 提出真实请求；"
             "每项批准后才执行。若调用因现有审阅而返回阻塞，该请求已结束、未排队，"
             "审阅通过后须重新请求，不能声称会自动续跑。"
-            "本地合成也必须通过该工具的 compose 阶段明确提交，但不新增付费授权。"
+            "全部片段就绪后，用该工具的 compose 阶段提交本地成片合成；"
+            "合成复用已有片段，不新增付费生成授权。"
         )
     rendered = render_file_agent_prompt(
         "creator_agent.system",

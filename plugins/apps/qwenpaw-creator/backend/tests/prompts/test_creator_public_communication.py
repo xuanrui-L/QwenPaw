@@ -38,17 +38,25 @@ def test_public_narration_boundary_covers_intermediate_and_final_content():
         "不要输出思考、推理草稿",
         "普通正文不得列出内部 ID",
         "Schema 字段名、参数赋值、JSON",
-        "可展开详情",
         "剧情、表演、构图、时长和修改内容",
         "只有真实任务已开始，才说正在生成",
         "只有系统实际返回待审阅或待授权事项时",
-        "不虚构卡片、自动续跑、剩余时间或百分比",
+        "不虚构待办、自动续跑、剩余时间或百分比",
     ):
         assert contract in boundary
     assert prompt.index("# 面向用户的沟通边界") < prompt.index(
         "PROJECT_JSON_SCHEMA=",
     )
     assert "所有普通 assistant 正文是否遵守「面向用户的沟通边界」" in prompt
+    # Instructions must be actionable from messages, project data and tools.
+    # Retired UI controls are not part of that model-visible contract.
+    for obsolete_ui_rule in (
+        "没有额外的“计划确认”关卡",
+        "工作台支持从该项起草另两项并统一审阅、接受",
+        "提醒用户到对应镜头的工作台核对三项内容",
+        "让用户在工作台完成同步或核对",
+    ):
+        assert obsolete_ui_rule not in prompt
 
 
 def test_public_boundary_preserves_the_exact_machine_schema_and_skill_input():
@@ -144,9 +152,11 @@ def test_main_prompt_states_the_actual_authorization_mode(monkeypatch, mode):
     )
     actual = prompt.split("# 当前制作执行方式", 1)[1]
     if mode == "required":
-        assert "全局后台调度器不会自动启动制作" in actual
+        assert "当前媒体生成需要逐项授权" in actual
+        assert "调用 request_workgraph_execution 提出真实请求" in actual
         assert "该请求已结束、未排队" in actual
         assert "审阅通过后须重新请求" in actual
     else:
-        assert "允许后台自动执行就绪的媒体节点" in actual
+        assert "当前允许自动制作" in actual
+        assert "已有运行中的任务时，等待结果通知" in actual
         assert "只依据真实任务和产物报告进展" in actual
