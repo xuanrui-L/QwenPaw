@@ -20,6 +20,8 @@ from services.project_files.models import (
     ArtifactVersion,
     IndexedFile,
     Project,
+    VisualEntity,
+    VisualVariant,
 )
 from services.run_review import admission
 from services.run_review import media_review as media_module
@@ -90,6 +92,45 @@ def test_parse_media_report_evidence_discipline() -> None:
     payload["findings"] = payload["findings"][:2]
     with pytest.raises(ValueError):
         _parse(json.dumps(payload), kind="image")
+
+
+def test_image_review_uses_the_generated_variant_purpose_and_prompt(tmp_path):
+    services = CreatorFileServices.create(tmp_path.resolve())
+    project = Project.new(project_id=PROJECT_ID, name="有剧情的多集短剧")
+    project.description = "茶社里的温暖真人喜剧，有完整对白。"
+    entity = VisualEntity(
+        entity_id="hero",
+        kind="character",
+        name="尕梅",
+        required_variant_ids=["day", "night"],
+    )
+    for variant_id, prompt in (
+        ("day", "米白背景身份板，红裙、黑色低马尾，多视图分离，允许黑色轮廓。"),
+        ("night", "夜间服装的身份参考"),
+    ):
+        entity.variants.items[variant_id] = VisualVariant(
+            variant_id=variant_id,
+            requirements="人物多角度参考，不是剧情画面",
+            prompt=prompt,
+        )
+        entity.variants.order.append(variant_id)
+    entity.canonical_variant_id = "night"
+    project.visual.entities.items["hero"] = entity
+    project.visual.entities.order = ["hero"]
+    services.projects.create(project)
+    context = media_module._derive_plan_context(
+        services,
+        PROJECT_ID,
+        {
+            "commandType": "GENERATE_ASSET",
+            "targetRef": "asset:hero",
+            "artifactVersion": {"metadata": {"variantId": "day"}},
+        },
+    )
+    assert context["artifact_purpose"] == "character_reference"
+    assert context["generation_prompt"] == entity.variants.items["day"].prompt
+    assert context["variant_requirements"] == "人物多角度参考，不是剧情画面"
+    assert context["visual_identity"]["name"] == "尕梅"
 
 
 def _admit(root: Path, version: str, owner: str = "owner-a"):
