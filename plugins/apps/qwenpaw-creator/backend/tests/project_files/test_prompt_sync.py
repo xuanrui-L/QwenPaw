@@ -224,3 +224,69 @@ def test_all_authored_bodies_confirm_without_discarded_model_call(services):
         assert service.status(PID, TID, EID)["status"] == "current"
 
     asyncio.run(run())
+
+
+def test_first_prompt_pair_publishes_with_existing_narrative(services):
+    """Incremental creation is not an edit of a previously authored prompt."""
+    first_id = "first-publication"
+    base = services.projects.read(PID)
+    candidate = base.project.model_dump(mode="json")
+    element = candidate["timelines"]["items"][TID]["elements_by_id"][EID]
+    first = json.loads(json.dumps(element))
+    first["element_id"] = first_id
+    first["creation"].update(storyboard_prompt="", video_prompt="")
+    candidate["timelines"]["items"][TID]["elements_by_id"][first_id] = first
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin="agentdock_idle_goal",
+    )
+
+    base = services.projects.read(PID)
+    candidate = base.project.model_dump(mode="json")
+    creation = candidate["timelines"]["items"][TID]["elements_by_id"][
+        first_id
+    ]["creation"]
+    creation.update(storyboard_prompt=SB, video_prompt=VD)
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin="agentdock_idle_goal",
+    )
+    service = sync_service(services)
+    assert service.status(PID, TID, first_id)["status"] == "current"
+
+    # An actual subsequent prompt edit still needs reconciliation.
+    base = services.projects.read(PID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["timelines"]["items"][TID]["elements_by_id"][first_id][
+        "creation"
+    ]["video_prompt"] = UPDATED["videoPrompt"]
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin="frontend_edit",
+    )
+    current = service.status(PID, TID, first_id)
+    assert current["status"] == "needs_confirmation"
+    assert current["changedSources"] == ["videoPrompt"]
+
+    # Clearing old prompts cannot disguise a later rewrite as first creation.
+    for fields in (
+        {"storyboard_prompt": "", "video_prompt": ""},
+        {
+            "storyboard_prompt": UPDATED["storyboardPrompt"],
+            "video_prompt": UPDATED["videoPrompt"],
+        },
+    ):
+        base = services.projects.read(PID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["timelines"]["items"][TID]["elements_by_id"][first_id][
+            "creation"
+        ].update(fields)
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin="frontend_edit",
+        )
+    assert service.status(PID, TID, first_id)["status"] == "needs_confirmation"

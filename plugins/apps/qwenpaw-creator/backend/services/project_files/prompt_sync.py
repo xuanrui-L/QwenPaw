@@ -320,6 +320,7 @@ def _refresh_authored_stage_stamps(
     document,
     timeline_id,
     element_id,
+    *,
     creation,
     old_creation,
     confirmation,
@@ -342,6 +343,24 @@ def _refresh_authored_stage_stamps(
                 element_id,
                 stage,
             )
+
+
+def _first_prompt_pair(creation, old_creation):
+    """Both prompts first published against an already written narrative."""
+    previous = old_creation.get("prompt_sync")
+    return (
+        bool(creation.get("narrative", "").strip())
+        and creation.get("narrative") == old_creation.get("narrative")
+        and all(
+            not old_creation.get(field, "").strip()
+            and creation.get(field, "").strip()
+            and (
+                not previous
+                or previous.get(f"{field}_fingerprint") == digest("")
+            )
+            for field in _PROMPTS
+        )
+    )
 
 
 def derive_prompt_sync_changes(
@@ -411,7 +430,14 @@ def derive_prompt_sync_changes(
                 creation["prompt_sync"] = None
                 continue
             old_sync = old["creation"].get("prompt_sync")
-            if confirmation and confirmation[:2] == (timeline_id, element_id):
+            if (
+                confirmation and confirmation[:2] == (timeline_id, element_id)
+            ) or _first_prompt_pair(creation, old["creation"]):
+                # Incremental authoring commonly publishes the narrative,
+                # then both initial prompts. No older prompt meaning needs
+                # merging back into that unchanged narrative. Real edits and
+                # clearing/recreating previously authored prompts still use
+                # the regular synchronization boundary below.
                 creation["prompt_sync"] = sync_stamp(
                     after,
                     timeline_id,
@@ -451,7 +477,7 @@ def derive_prompt_sync_changes(
                 after,
                 timeline_id,
                 element_id,
-                creation,
-                old["creation"],
-                confirmation,
+                creation=creation,
+                old_creation=old["creation"],
+                confirmation=confirmation,
             )
