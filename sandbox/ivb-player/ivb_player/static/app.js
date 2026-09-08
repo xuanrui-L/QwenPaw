@@ -19,6 +19,7 @@
     "choice-overlay", "choice-question", "choice-timer", "choice-count",
     "timer-fill", "choice-cards", "choice-hint",
     "map-progress", "map-canvas", "map-links", "map-nodes", "btn-map-back",
+    "lg-tone",
     "ending-name", "ending-synopsis", "ending-unlock-note", "ending-review",
     "ending-review-head", "ending-coverage", "btn-replay", "btn-ending-map",
     "btn-ending-title", "toast", "fatal",
@@ -107,7 +108,8 @@
   function renderTitle() {
     const { meta, totals } = S.bundle;
     dom["title-name"].textContent = meta.title || "(未命名)";
-    dom["title-tagline"].textContent = meta.tagline || "";
+    // tagline 在 Creator 侧常被填成完整生成 prompt(几百字),放标题屏既难看
+    // 又泄露提示词。 synopsis 才是给人看的简介, tagline 不渲染。
     dom["title-synopsis"].textContent = meta.synopsis || "";
     dom["foot-bundle"].textContent =
       meta.bundle_id + " · schema v" + S.bundle.schema_version;
@@ -129,6 +131,8 @@
       dom["title-stats"].appendChild(wrap);
     });
     const hasHistory = seen > 0;
+    // 有进度时"开始游戏"改叫"从头开始",否则观众不知道这会丢掉进度。
+    dom["btn-start"].textContent = hasHistory ? "从头开始" : "开始游戏";
     dom["btn-resume"].classList.toggle("hidden", !hasHistory);
     dom["btn-reset"].classList.toggle("hidden", !hasHistory);
   }
@@ -205,6 +209,9 @@
   function hideChoice() {
     dom["choice-overlay"].classList.add("hidden");
     dom["choice-hint"].classList.add("hidden");
+    // 卡片抽掉再隐藏。只加 .hidden 的话旧卡还在 DOM 里,程序化点击能拿它
+    // 把同一个抉择点再记一次账(S.answered 进节点时会重置)。
+    dom["choice-cards"].innerHTML = "";
     stopCountdown();
   }
 
@@ -222,11 +229,13 @@
     if (first) first.focus();
   }
 
+  // tone 刻意不在这里出现。抉择那一刻就给观众"这条危险"的预期,等于替观众
+  // 做了判断(红色 = 别选),分支内容反而没人走 —— 那互动结构就白搭了。
+  // 它只在事后渲染:结局回顾 (renderReview) 与地图上真正走过的边 (renderMap)。
   function makeCard(point, option, index) {
     const card = document.createElement("button");
     card.type = "button";
-    card.className = "choice-card" + (option.tone ? " tone-" + option.tone : "");
-    const badge = S.bundle.badge_labels[option.tone] || "";
+    card.className = "choice-card";
 
     const idx = document.createElement("span");
     idx.className = "idx";
@@ -246,12 +255,6 @@
     }
 
     card.append(idx, body);
-    if (badge) {
-      const tag = document.createElement("span");
-      tag.className = "badge";
-      tag.textContent = badge;
-      card.appendChild(tag);
-    }
     card.addEventListener("click", () => pickChoice(point, option.edge_ref));
     return card;
   }
@@ -358,6 +361,18 @@
       "结局 " + got + " / " + total + " · 节点覆盖 " + coverage + "%";
   }
 
+  // path 是全历史的,而"你的路径"只该讲这一次。故事图是 DAG ⇒ 入口节点不可能
+  // 在一局内被二次访问,所以最后一次落在入口的那行就是本局起点。
+  function currentRunPath() {
+    const path = S.progress.path || [];
+    const entry = S.bundle.entry_timeline_id;
+    let start = 0;
+    path.forEach((row, index) => {
+      if (row.timeline_id === entry) start = index;
+    });
+    return path.slice(start);
+  }
+
   function renderReview() {
     dom["ending-review"].innerHTML = "";
     // show_review=false is an explicit "no recap" request from the bundle
@@ -369,7 +384,7 @@
       return;
     }
     dom["ending-review"].classList.remove("hidden");
-    const path = (S.progress.path || []).slice(-12);
+    const path = currentRunPath().slice(-12);
     const visible = path.filter((row) => row.choice_edge);
     dom["ending-review-head"].classList.toggle("hidden", visible.length === 0);
     visible.forEach((row) => {
@@ -440,19 +455,10 @@
 
   function revealSet() {
     const visited = new Set(S.progress.visited);
-    const revealed = new Set(visited);
-    const depth = S.bundle.screens && S.bundle.screens.map
-      ? (S.bundle.screens.map.reveal_depth ?? 1) : 1;
-    let frontier = new Set(visited);
-    for (let step = 0; step < depth; step += 1) {
-      const next = new Set();
-      frontier.forEach((id) => {
-        ((S.bundle.nodes[id] || {}).children || []).forEach((child) => {
-          if (!revealed.has(child)) { revealed.add(child); next.add(child); }
-        });
-      });
-      frontier = next;
-    }
+    // 方案 B:地图只长在观众踩过的地方。入口无条件在集合里(零进度时至少有个
+    // 起点,否则整张图是空白页);其余只有真看过才揭示。不再向下游展开。
+    const revealed = new Set([S.bundle.entry_timeline_id]);
+    visited.forEach((id) => revealed.add(id));
     return { revealed, visited };
   }
 
@@ -463,6 +469,16 @@
     dom["map-nodes"].innerHTML = "";
     dom["map-links"].innerHTML = "";
     dom["map-links"].setAttribute("viewBox", "0 0 1000 560");
+
+    // 走过的边才允许上风险色:地图会露出"可去未看"的分支,在那里给风险色就是
+    // 事前剧透。choice_edge 只在观众真的点过时才落库,拿它当"走过"的凭据。
+    const walked = new Set(
+      (S.progress.path || []).map((row) => row.choice_edge).filter(Boolean),
+    );
+    // 一条边也没标的包(Creator 旧版导出)不该挂着一排永远用不上的三色图例。
+    dom["lg-tone"].classList.toggle(
+      "hidden", !Object.values(S.bundle.edges).some((item) => item.tone),
+    );
 
     const seenCount = visited.size;
     const total = S.bundle.totals.nodes;
@@ -477,9 +493,19 @@
         const to = positions[child];
         if (!from || !to) return;
         const shown = revealed.has(id) && revealed.has(child);
-        const edge = Object.values(S.bundle.edges)
-          .find((item) => item.target_timeline_id === child
-            && isChildOf(item, id));
+        if (!shown) return;  // 方案 B:两端都没揭示的边不画,地图只长在踩过的地方
+        // 按 (来源, 目标) 精确认边。以前只判"child 在不在 id.children 里",于是
+        // 汇流节点的两个父节点会匹配到同一条已走过的边,没走过的那条也染绿。
+        const links = Object.values(S.bundle.edges).filter(
+          (item) => item.source_timeline_id === id
+            && item.target_timeline_id === child,
+        );
+        const walkedEdge = links.find((item) => walked.has(item.edge_ref));
+        // 线性跳转在包里可能根本没有边(走查包 5 条边只登了 3 条)。这时
+        // "父已看 + 子已看 + 父只有一个下游" 等价于这条路走过了。
+        const implied = !links.length
+          && (S.bundle.nodes[id].children || []).length === 1
+          && visited.has(id) && visited.has(child);
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
         const mid = (from.x + to.x) / 2;
         path.setAttribute("d",
@@ -488,8 +514,16 @@
           + "," + (mid * 10) + " " + (to.y * 5.6)
           + "," + (to.x * 10) + " " + (to.y * 5.6));
         path.setAttribute("vector-effect", "non-scaling-stroke");
-        path.setAttribute("class",
-          "map-link" + (shown ? " seen" : "") + (edge && edge.tone === "danger" ? " danger" : ""));
+        // seen = 这条边真走过;reachable = 两端已揭示但没走过。两者以前共用
+        // seen,于是从未走过的边也是荧光绿,"走过的路"在图上根本看不出来。
+        let linkClass = "map-link";
+        if (walkedEdge || implied) {
+          linkClass += " seen";
+          if (walkedEdge && walkedEdge.tone) linkClass += " tone-" + walkedEdge.tone;
+        } else if (shown) {
+          linkClass += " reachable";
+        }
+        path.setAttribute("class", linkClass);
         dom["map-links"].appendChild(path);
       });
     });
@@ -498,40 +532,38 @@
       const node = S.bundle.nodes[id];
       const place = positions[id];
       if (!place || depths[id] === undefined) return;
-      const box = document.createElement("div");
       const has = visited.has(id);
       const open = revealed.has(id);
+      if (!open) return;  // 方案 B:fog 节点不画,地图只含入口+已看节点
+      const isEntry = id === S.bundle.entry_timeline_id;
+      const box = document.createElement("div");
       box.className = "map-node"
-        + (has ? " seen" : open ? " locked" : " fog")
+        + (has ? " seen" : " locked")
         + (node.is_ending && has ? " ending" : "")
         + (id === current ? " current" : "")
-        + (open ? " clickable" : "");
+        + " clickable";
       box.style.left = place.x + "%";
       box.style.top = place.y + "%";
       const tag = document.createElement("span");
       tag.className = "tag";
       const label = document.createElement("span");
-      if (open) {
-        label.textContent = node.title;
-        tag.textContent = node.is_ending ? "结局" : has ? "已看" : "可去";
+      label.textContent = node.title;
+      // 入口没看过时显示"起点"而非"可去";其他已揭示未看的节点显示"可去"。
+      if (isEntry && !has) {
+        tag.textContent = "起点";
+      } else if (has) {
+        tag.textContent = node.is_ending ? "结局 · 已看" : "已看";
       } else {
-        label.textContent = "？";
-        tag.textContent = "未解锁";
+        tag.textContent = node.is_ending ? "结局 · 可去" : "可去";
       }
       box.append(label, tag);
-      if (open && !has) {
-        box.addEventListener("click", () => {
-          S.mapReturnTo = "play";
-          playNode(id, null);
-        });
-      }
+      // 入口即使没看过也能点(从头开始);其他节点只有看过才能跳回去。
+      box.addEventListener("click", () => {
+        S.mapReturnTo = "play";
+        playNode(id, null);
+      });
       dom["map-nodes"].appendChild(box);
     });
-  }
-
-  function isChildOf(edge, timelineId) {
-    const parent = S.bundle.nodes[timelineId];
-    return !!parent && parent.children.indexOf(edge.target_timeline_id) >= 0;
   }
 
   // ---------- 事件装配 ----------

@@ -114,6 +114,14 @@ def project_for_player(service: BundleService) -> dict[str, Any]:
         css_vars["--ivb-accent"] = bundle.meta.accent
         css_vars["--ivb-accent-rgb"] = hex_to_rgb_triplet(bundle.meta.accent)
 
+    #: IVB v1 的 `edge_index` 里没有来源字段,边的来源只能从抉择点的
+    #: `options[*].edge_ref` 反推。地图要按 (来源, 目标) 精确认边(否则汇流点
+    #: 会把两个父节点的边当成同一条),所以这层反推也在服务端 join 好。
+    edge_sources: dict[str, str] = {}
+    for point in bundle.interactions:
+        for option in point.options:
+            edge_sources.setdefault(option.edge_ref, point.source_timeline_id)
+
     def edge_view(edge_ref: str) -> dict[str, Any]:
         edge = bundle.edges.get(edge_ref)
         if edge is None:  # 校验阶段就会拦下,这里只防手工改包
@@ -123,6 +131,7 @@ def project_for_player(service: BundleService) -> dict[str, Any]:
                 "prompt": "",
                 "tone": None,
                 "target_timeline_id": "",
+                "source_timeline_id": "",
             }
         return {
             "edge_ref": edge.edge_id,
@@ -130,6 +139,7 @@ def project_for_player(service: BundleService) -> dict[str, Any]:
             "prompt": edge.prompt,
             "tone": edge.tone,
             "target_timeline_id": edge.target_timeline_id,
+            "source_timeline_id": edge_sources.get(edge_ref, ""),
         }
 
     interactions: list[dict[str, Any]] = []
@@ -271,6 +281,9 @@ def create_app(
 ) -> FastAPI:
     """按包路径建放映应用。包不合法直接抛 :class:`BundleError`。"""
 
+    # FastAPI 工厂天然在此集中注册十余个路由,每个 @app.* 都计入语句数,
+    # 与函数复杂度无关 —— 拆成 APIRouter 只为凑 R0915 反而更碎,故就地豁免。
+    # pylint: disable=too-many-statements
     path = Path(bundle_path).expanduser().resolve()
     inspection = inspect_bundle(path)
     if inspection.bundle is None:
@@ -295,7 +308,8 @@ def create_app(
         page = STATIC_DIR / "index.html"
         if not page.exists():
             raise HTTPException(
-                status_code=500, detail="缺少 static/index.html"
+                status_code=500,
+                detail="缺少 static/index.html",
             )
         return HTMLResponse(page.read_text(encoding="utf-8"))
 
@@ -346,7 +360,8 @@ def create_app(
         try:
             if relative not in source.names():
                 raise HTTPException(
-                    status_code=404, detail=f"包内没有 {relative!r}"
+                    status_code=404,
+                    detail=f"包内没有 {relative!r}",
                 )
             return Response(source.read_text(relative), media_type="text/css")
         finally:
@@ -407,7 +422,9 @@ def create_app(
     @app.post("/api/state/choice")
     def choice(body: ChoiceIn) -> dict[str, Any]:
         _require_known(
-            service.bundle, body.interaction_source, "interaction_source"
+            service.bundle,
+            body.interaction_source,
+            "interaction_source",
         )
         if body.edge_ref not in service.bundle.edges:
             raise HTTPException(

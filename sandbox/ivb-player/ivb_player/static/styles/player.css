@@ -47,8 +47,7 @@ body[data-screen="loading"] #screen-title{display:flex;opacity:.4}
   text-transform:uppercase;color:var(--ivb-text-dim)}
 #title-name,#ending-name{margin:.6rem 0 1rem;font-family:var(--ivb-serif);font-size:2.75rem;
   font-weight:600;letter-spacing:.06em;text-shadow:var(--ivb-glow)}
-.title-tagline{margin:0 0 1.5rem;color:var(--ivb-accent);font-family:var(--ivb-serif);
-  font-size:1.05rem;letter-spacing:.12em}
+.title-tagline{display:none}
 .title-synopsis{margin:0 auto 2rem;max-width:34rem;line-height:1.9;color:var(--ivb-text-dim);
   font-size:.92rem}
 .title-stats{display:flex;gap:2rem;justify-content:center;margin:0 0 2.5rem;
@@ -67,9 +66,10 @@ body[data-screen="loading"] #screen-title{display:flex;opacity:.4}
 .ghost:hover{color:var(--ivb-text);border-color:rgba(var(--ivb-accent-rgb), .5)}
 .ghost.danger:hover{color:var(--ivb-danger);border-color:rgba(var(--ivb-danger-rgb), .6)}
 
+/* 页脚也不能拿 --ivb-fog 当文字色:它与 #05070a 底几乎没对比,bundle id 会直接消失。 */
 .title-foot{position:absolute;bottom:1.2rem;left:0;right:0;display:flex;
   justify-content:space-between;padding:0 1.5rem;font-family:var(--ivb-mono);
-  font-size:.65rem;color:var(--ivb-fog)}
+  font-size:.65rem;color:var(--ivb-text-dim);opacity:.6}
 #foot-warnings{color:var(--ivb-warning)}
 
 /* ---------- ② 播放屏 ---------- */
@@ -99,7 +99,7 @@ body[data-screen="loading"] #screen-title{display:flex;opacity:.4}
 #choice-timer.expiring #timer-fill{background:var(--ivb-danger)}
 
 #choice-cards{display:flex;flex-direction:column;gap:.6rem}
-.choice-card{position:relative;display:grid;grid-template-columns:auto 1fr auto;
+.choice-card{position:relative;display:grid;grid-template-columns:auto 1fr;
   align-items:center;gap:1rem;width:100%;padding:1rem 1.3rem;text-align:left;
   background:rgba(10,13,17,.92);border:1px solid var(--ivb-line);
   border-left:3px solid var(--ivb-text-dim);transition:.15s}
@@ -109,28 +109,11 @@ body[data-screen="loading"] #screen-title{display:flex;opacity:.4}
 .choice-card .body{display:flex;flex-direction:column;gap:.3rem}
 .choice-card .label{font-size:1.02rem;letter-spacing:.03em}
 .choice-card .prompt{font-size:.78rem;color:var(--ivb-text-dim)}
-.choice-card .badge{font-family:var(--ivb-mono);font-size:.68rem;letter-spacing:.16em;
-  padding:.24rem .6rem;border:1px solid currentColor;white-space:nowrap}
 
-.choice-card.tone-safe{border-left-color:var(--ivb-success)}
-.choice-card.tone-safe .badge{color:var(--ivb-success)}
-.choice-card.tone-safe:hover{border-left-color:var(--ivb-success);
-  box-shadow:inset 0 0 32px rgba(var(--ivb-success-rgb), .12)}
-
-/* risky 是"赌一把":用斜切角 + 闪烁边框和另外两档拉开区分 */
-.choice-card.tone-risky{border-left-color:var(--ivb-warning)}
-.choice-card.tone-risky .badge{color:var(--ivb-warning)}
-.choice-card.tone-risky::after{content:"";position:absolute;inset:0;pointer-events:none;
-  background:repeating-linear-gradient(135deg,transparent 0 12px,
-    rgba(var(--ivb-warning-rgb), .07) 12px 24px)}
-.choice-card.tone-risky:hover{border-left-color:var(--ivb-warning);
-  box-shadow:inset 0 0 32px rgba(var(--ivb-warning-rgb), .14)}
-
-.choice-card.tone-danger{border-left-color:var(--ivb-danger)}
-.choice-card.tone-danger .badge{color:var(--ivb-danger)}
-.choice-card.tone-danger:hover{border-left-color:var(--ivb-danger);
-  box-shadow:inset 0 0 32px rgba(var(--ivb-danger-rgb), .18)}
-.choice-card.tone-danger .label::after{content:" ⚠";font-size:.8em;opacity:.8}
+/* 抉择卡刻意不给风险色与文案 —— 这里不是漏了样式,是不该有:tone 是事后
+   标注,抉择那一刻就标出风险等于替观众判断"别选",分支内容反而没人走。
+   三档色只出现在事后两处:结局回顾 (.review-list .tone-*) 与地图上真正走过
+   的边 (.map-link.tone-*)。tests/test_api.py 钉住了这个分界,别挪。 */
 
 .choice-hint{margin:.9rem 0 0;font-size:.75rem;color:var(--ivb-warning);
   font-family:var(--ivb-mono)}
@@ -157,23 +140,47 @@ body[data-screen="loading"] #screen-title{display:flex;opacity:.4}
   transform:translateX(-50%);color:var(--ivb-accent)}
 .map-node.locked{background:var(--ivb-surface-alt);border-style:dashed;color:var(--ivb-text-dim)}
 .map-node.locked:hover{border-color:rgba(var(--ivb-accent-rgb), .5);color:var(--ivb-text)}
-.map-node.fog{background:var(--ivb-fog);border-color:transparent;color:var(--ivb-fog)}
-.map-node.fog .tag{color:var(--ivb-fog)}
+/* fog 的底色与页面深色靠得很近,文字若也用 --ivb-fog 会彻底看不见:零进度
+   时整张图就是一排空格子。保留"看不出内容",但“？/未解锁”必须看得见。 */
+.map-node.fog{background:var(--ivb-fog);border-color:transparent;
+  color:var(--ivb-text-dim);opacity:.45}
+.map-node.fog .tag{color:var(--ivb-text-dim)}
 .map-node.clickable{cursor:pointer}
 
 .map-link{fill:none;stroke:var(--ivb-fog);stroke-width:1.5}
-.map-link.seen{stroke:rgba(var(--ivb-accent-rgb), .5)}
-.map-link.danger{stroke:rgba(var(--ivb-danger-rgb), .4)}
+/* 两端都已揭示但这条边还没走过:点线,只表达"这里有条路"。 */
+.map-link.reachable{stroke:var(--ivb-text-dim);stroke-width:1.5;
+  stroke-dasharray:2 5;opacity:.55}
+/* 真走过的边:加粗提亮,与 reachable 拉开。tone 三档色只叠加在这一档上
+   (见 app.js renderMap 的 walked),未走过的分支不给风险色。 */
+.map-link.seen{stroke:rgba(var(--ivb-accent-rgb), .75);stroke-width:2.5}
+.map-link.tone-safe{stroke:rgba(var(--ivb-success-rgb), .8)}
+.map-link.tone-risky{stroke:rgba(var(--ivb-warning-rgb), .85);stroke-dasharray:7 5}
+.map-link.tone-danger{stroke:rgba(var(--ivb-danger-rgb), .85)}
 
-.map-legend{display:flex;gap:1.5rem;justify-content:center;font-family:var(--ivb-mono);
-  font-size:.68rem;color:var(--ivb-text-dim)}
+.map-legend{display:flex;flex-wrap:wrap;gap:.6rem 1.5rem;justify-content:center;
+  font-family:var(--ivb-mono);font-size:.68rem;color:var(--ivb-text-dim)}
+/* tone 图例组的容器:包里一条风险档都没标时,app.js 给它的 .hidden 让整组消失。 */
+.lg-tone{display:flex;gap:1.5rem}
 .lg{padding-left:1rem;position:relative}
 .lg::before{content:"";position:absolute;left:0;top:.25rem;width:.6rem;height:.6rem;
   border:1px solid currentColor}
+/* 线状图例:边(map-link)是三档色描的线,用方框示意会对不上。 */
+.lg-line::before{top:.5rem;width:.95rem;height:0;border:0;border-top:2px solid currentColor}
+/* 色标的线型必须跟实体一致,否则图例在说谎:reachable 是点线,risky 是虚线。 */
+.lg-reachable::before{border-top-style:dotted}
+.lg-risky::before{border-top-style:dashed}
 .lg-seen{color:rgba(var(--ivb-accent-rgb), .8)}
+.lg-walked{color:rgba(var(--ivb-accent-rgb), .8)}
+.lg-reachable{color:var(--ivb-text-dim)}
 .lg-current{color:var(--ivb-accent)}
 .lg-locked{color:var(--ivb-text-dim)}
-.lg-fog{color:var(--ivb-fog)}
+.lg-locked::before{border-style:dashed}
+/* 图例里的"未解锁"也不能用 --ivb-fog 上色,否则字和色标一起隐身。 */
+.lg-fog{color:var(--ivb-text-dim);opacity:.55}
+.lg-safe{color:var(--ivb-success)}
+.lg-risky{color:var(--ivb-warning)}
+.lg-danger{color:var(--ivb-danger)}
 
 /* ---------- ④ 结局屏 ---------- */
 
@@ -197,7 +204,7 @@ body[data-screen="loading"] #screen-title{display:flex;opacity:.4}
 
 /* ---------- 通用反馈 ---------- */
 
-#toast{position:fixed;bottom:2rem;left:50%;transform:translateX(-50%);z-index:20;
+#toast{position:fixed;top:2rem;left:50%;transform:translateX(-50%);z-index:20;
   padding:.7rem 1.4rem;background:var(--ivb-surface-alt);border:1px solid var(--ivb-accent);
   color:var(--ivb-accent);font-size:.85rem;box-shadow:var(--ivb-glow)}
 #fatal{position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;
