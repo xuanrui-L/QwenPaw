@@ -3242,7 +3242,8 @@ def test_batch_merges_notifications_but_stops_at_non_batchable(
     blocking_source,
 ) -> None:
     """Consecutive notifications merge into one run (input-queue drain);
-    human and review-feedback messages keep one-message-per-run."""
+    automated repairs keep their own run, while later progress joins a human.
+    """
 
     from services.file_agent_runtime.notifications import NOTIFICATION_SOURCE
 
@@ -3276,7 +3277,13 @@ def test_batch_merges_notifications_but_stops_at_non_batchable(
             )
 
         async def callback(messages, _tools):
-            received.append(messages[1]["content"])
+            received.append(
+                "\n".join(
+                    str(item["content"])
+                    for item in messages
+                    if item["role"] == "user"
+                )
+            )
             return AgentModelTurn(content="处理完毕。")
 
         driver = _driver(services, callback)
@@ -3289,16 +3296,15 @@ def test_batch_merges_notifications_but_stops_at_non_batchable(
 
     services, driver = asyncio.run(scenario())
 
-    assert (
-        len(received) == 3
-    ), "notifications must merge and the batch must stop at a non-batchable"
+    expected_runs = 2 if blocking_source == "user" else 3
+    assert len(received) == expected_runs
     assert "RUNTIME_NOTIFICATIONS_BATCH" in received[0]
     assert "进度 0" in received[0]
     assert "进度 1" in received[0]
     assert "请修一下这个问题" in received[1]
     assert "RUNTIME_NOTIFICATIONS_BATCH" not in received[1]
-    assert "进度 B" in received[2]
-    assert len(driver.runs.list(PROJECT_ID)) == 3
+    assert "进度 B" in received[-1]
+    assert len(driver.runs.list(PROJECT_ID)) == expected_runs
     assert (
         services.sessions.get_project_session(
             PROJECT_ID,
@@ -3360,6 +3366,16 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
             )
             assert admitted.review_boundary is not None
             requests.append(admitted.message)
+            if request_id == "fix-room":
+                services.sessions.append_message(
+                    PROJECT_ID,
+                    SESSION_ID,
+                    CONVERSATION_ID,
+                    role="user",
+                    content_parts=[{"type": "text", "text": "旧分镜自动审阅结果"}],
+                    source="run_review_feedback",
+                    channel=MessageChannel.RUNTIME,
+                )
 
         async def callback(messages, _tools):
             received.append(messages[1]["content"])
@@ -3377,15 +3393,14 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
 
     runs, requests = asyncio.run(scenario())
     assert [run.caused_by_message_seq for run in runs] == [
-        request.message_seq for request in requests
+        requests[-1].message_seq,
     ]
-    assert len(received) == 2
-    assert "请修正茶社反向机位" in received[0].split("CURRENT_USER_REQUEST=")[-1]
-    assert "还要让酒瓶与张东身份图" in received[1].split("CURRENT_USER_REQUEST=")[-1]
+    assert len(received) == 1
+    assert "还要让酒瓶与张东身份图" in received[0].split("CURRENT_USER_REQUEST=")[-1]
     # Automated findings remain available as context, without an obsolete
     # paid repair being dispatched ahead of either human request.
     assert "run_review_feedback" in received[0]
-    assert "请修正茶社反向机位" in received[1]
+    assert "请修正茶社反向机位" in received[0]
 
 
 # -- asynchronous delegation ------------------------------------------------
@@ -3861,12 +3876,25 @@ def test_subagent_terminal_notification_is_never_batched(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    "notification_kind",
-    [None, "node_succeeded", "subagent_terminal"],
-)
-@pytest.mark.parametrize(
-    "source",
-    ["user", "review_rejection_feedback", "review_approval_resume"],
+    ("source", "notification_kind"),
+    [
+        (source, kind)
+        for source in (
+            "user",
+            "review_rejection_feedback",
+            "review_approval_resume",
+        )
+        for kind in (None, "node_succeeded", "subagent_terminal")
+    ]
+    + [
+        (source, kind)
+        for source in ("user", "review_rejection_feedback")
+        for kind in (
+            "foreign_subagent_terminal",
+            "run_review_feedback",
+            "render_review_feedback",
+        )
+    ],
 )
 def test_running_user_message_joins_current_run_once(
     tmp_path,
@@ -3894,7 +3922,10 @@ def test_running_user_message_joins_current_run_once(
             if len(received) == 1:
                 if notification_kind:
                     metadata = {"notificationKind": notification_kind}
-                    if notification_kind == "subagent_terminal":
+                    if notification_kind in {
+                        "subagent_terminal",
+                        "foreign_subagent_terminal",
+                    }:
                         head = services.sessions.list_messages(
                             PROJECT_ID,
                             SESSION_ID,
@@ -3911,9 +3942,15 @@ def test_running_user_message_joins_current_run_once(
                             caused_by_message_seq=head.message_seq,
                             metadata={
                                 "originSource": head.source,
-                                "originMessageId": head.message_id,
+                                "originMessageId": (
+                                    "older-review-message"
+                                    if notification_kind
+                                    == "foreign_subagent_terminal"
+                                    else head.message_id
+                                ),
                             },
                         )
+                        metadata["notificationKind"] = "subagent_terminal"
                         driver.executions.create_specialist_run(record)
                         for previous, status in (
                             (
@@ -3938,7 +3975,15 @@ def test_running_user_message_joins_current_run_once(
                         CONVERSATION_ID,
                         role="user",
                         content_parts=[{"type": "text", "text": notification}],
-                        source="runtime_notification",
+                        source=(
+                            notification_kind
+                            if notification_kind
+                            in {
+                                "run_review_feedback",
+                                "render_review_feedback",
+                            }
+                            else "runtime_notification"
+                        ),
                         channel=MessageChannel.RUNTIME,
                         metadata=metadata,
                     )
@@ -4012,6 +4057,60 @@ def test_running_user_message_joins_current_run_once(
             if item["role"] == "user" and notification in str(item["content"])
         ]
         assert runtime_messages == [notification]
+
+
+def test_feedback_queued_during_run_start_reaches_first_model_turn(tmp_path):
+    received = []
+    correction = "第八镜要改成两个人物的近景对话"
+
+    async def scenario():
+        services, _ = _create_project(tmp_path, initial_goal="六集短剧")
+
+        async def callback(messages, _tools):
+            received.append(messages)
+            return AgentModelTurn(content="已收到第八镜修改。")
+
+        driver = _driver(services, callback)
+
+        queued = False
+
+        async def starting(**_kwargs):
+            nonlocal queued
+            if queued:
+                return []
+            queued = True
+            message = services.sessions.append_message(
+                PROJECT_ID,
+                SESSION_ID,
+                CONVERSATION_ID,
+                role="user",
+                source="review_rejection_feedback",
+                channel=MessageChannel.AGENTDOCK,
+                content_parts=[{"type": "text", "text": correction}],
+            )
+            assert message.message.message_seq == 2
+            return []
+
+        driver._start_attached_source_understanding = starting
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await _wait_consumed(services, 2)
+            await driver.wait_until_idle(PROJECT_ID)
+            return driver.runs.list(PROJECT_ID)
+        finally:
+            await driver.stop()
+
+    runs = asyncio.run(scenario())
+    assert len(runs) == len(received) == 1
+    assert (
+        sum(
+            correction in str(message["content"])
+            for message in received[0]
+            if message["role"] == "user"
+        )
+        == 1
+    )
 
 
 def test_turn_boundary_digest_injected_once_across_turns(tmp_path) -> None:

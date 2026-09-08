@@ -2492,16 +2492,18 @@ class FileCreatorAgentRuntime:
         # in this conversation, including reviews of the now-rejected output.
         # Their evidence remains in conversation history; starting their old
         # repair requests first would hide the user's correction from the LLM.
-        # Without a human revision, automated repairs still keep separate run
-        # identities/budgets below. Never skip another conversation or an
-        # earlier human request.
+        # Coalesce queued revisions into the latest request: earlier human
+        # feedback and intervening evidence remain in chronological history.
+        # Without a human revision, automated repairs still keep their own
+        # run identities/budgets. Never cross another conversation.
         for candidate in user_messages:
             if candidate.conversation_id != message.conversation_id:
                 break
             if candidate.source in {"user", "review_rejection_feedback"}:
-                if candidate.review_boundary is not None:
-                    message = candidate
-                break
+                if candidate.review_boundary is None:
+                    break
+                message = candidate
+                continue
             if candidate.source not in BATCHABLE_NOTIFICATION_SOURCES | {
                 "run_review_feedback",
                 "render_review_feedback",
@@ -3266,12 +3268,15 @@ class FileCreatorAgentRuntime:
         while turn_number < effective_max_turns:
             turn_number += 1
             self._assert_epoch(project_id, run_id, epoch)
-            # Human input, including undo-and-redo feedback, joins the next
-            # model turn. The agent decides how to revise the work; automated
-            # review repairs retain their separate request identity below.
+            # Human feedback already waiting at run start must also reach
+            # the first model turn. An intervening automated finding cannot
+            # hide a newer human revision; it becomes evidence for that
+            # revision, just as it does in idle admission above.
             incoming = (
                 []
                 if turn_number == 1
+                and request.source
+                not in {"initial_goal", "user", "review_rejection_feedback"}
                 else await asyncio.to_thread(
                     self.sessions.list_messages,
                     project_id,
@@ -3280,21 +3285,33 @@ class FileCreatorAgentRuntime:
                     limit=None,
                 )
             )
+            revision_seq = input_cursor
             for item in incoming:
                 if item.role != "user":
                     continue
+                if item.conversation_id != request.conversation_id:
+                    break
                 if (
-                    item.conversation_id != request.conversation_id
-                    or item.review_boundary is not None
+                    item.review_boundary is not None
+                    and item.review_boundary.interrupted_run_id == run_id
+                ):
+                    break
+                if item.source in {"user", "review_rejection_feedback"}:
+                    revision_seq = item.message_seq
+            for item in incoming:
+                if item.role != "user":
+                    continue
+                if item.conversation_id != request.conversation_id:
+                    break
+                if item.message_seq > revision_seq and (
+                    item.review_boundary is not None
                     or item.source
-                    in {
-                        "run_review_feedback",
-                        "render_review_feedback",
-                    }
+                    in {"run_review_feedback", "render_review_feedback"}
                 ):
                     break
                 if (
-                    item.source == NOTIFICATION_SOURCE
+                    item.message_seq > revision_seq
+                    and item.source == NOTIFICATION_SOURCE
                     and item.metadata.get("notificationKind")
                     == RuntimeEventKind.SUBAGENT_TERMINAL.value
                     and await self._delegation_origin(project_id, item)
