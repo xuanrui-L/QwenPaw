@@ -3237,6 +3237,87 @@ def test_batch_merges_notifications_but_stops_at_non_batchable(
     )
 
 
+@pytest.mark.parametrize("source", ["user", "review_rejection_feedback"])
+def test_human_revisions_take_priority_over_queued_automated_reviews(
+    tmp_path,
+    source,
+):
+    """A real revision must not wait behind stale automated repair requests."""
+    received = []
+
+    async def scenario():
+        services, snapshot = _create_project(tmp_path, initial_goal="六集短剧")
+        _write_runtime_state(services, snapshot)
+        services.sessions.mark_messages_consumed(
+            PROJECT_ID,
+            SESSION_ID,
+            through_seq=1,
+        )
+        for automated_source in (
+            "review_approval_resume",
+            "run_review_feedback",
+            "render_review_feedback",
+            "runtime_notification",
+        ):
+            services.sessions.append_message(
+                PROJECT_ID,
+                SESSION_ID,
+                CONVERSATION_ID,
+                role="user",
+                content_parts=[{"type": "text", "text": automated_source}],
+                source=automated_source,
+                channel=MessageChannel.RUNTIME,
+                metadata={
+                    "notificationKind": "subagent_terminal",
+                    "originSource": "run_review_feedback",
+                },
+            )
+        requests = []
+        for request_id, text in (
+            ("fix-room", "请修正茶社反向机位的窗户方向"),
+            ("fix-bottle", "还要让酒瓶与张东身份图保持一致"),
+        ):
+            admitted = services.sessions.admit_user_request(
+                PROJECT_ID,
+                SESSION_ID,
+                CONVERSATION_ID,
+                request_id=request_id,
+                client_message_id=request_id,
+                content_parts=[{"type": "text", "text": text}],
+                source=source,
+                channel=MessageChannel.AGENTDOCK,
+                classification=MessageClassification.REVIEW_REVISE,
+            )
+            assert admitted.review_boundary is not None
+            requests.append(admitted.message)
+
+        async def callback(messages, _tools):
+            received.append(messages[1]["content"])
+            return AgentModelTurn(content="已收到反馈。")
+
+        driver = _driver(services, callback)
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await _wait_consumed(services, requests[-1].message_seq)
+            await driver.wait_until_idle(PROJECT_ID)
+            return driver.runs.list(PROJECT_ID), requests
+        finally:
+            await driver.stop()
+
+    runs, requests = asyncio.run(scenario())
+    assert [run.caused_by_message_seq for run in runs] == [
+        request.message_seq for request in requests
+    ]
+    assert len(received) == 2
+    assert "请修正茶社反向机位" in received[0].split("CURRENT_USER_REQUEST=")[-1]
+    assert "还要让酒瓶与张东身份图" in received[1].split("CURRENT_USER_REQUEST=")[-1]
+    # Automated findings remain available as context, without an obsolete
+    # paid repair being dispatched ahead of either human request.
+    assert "run_review_feedback" in received[0]
+    assert "请修正茶社反向机位" in received[1]
+
+
 # -- asynchronous delegation ------------------------------------------------
 
 
