@@ -26,6 +26,11 @@
   "qwenpaw_version": {
     "min": "2.1.0"
   },
+  "pack_requires": [
+    "backend/skills/edu-math-tutorial/SKILL.md",
+    "backend/skills/professional-media-prompts/SKILL.md",
+    "backend/skills/visual-asset-design/SKILL.md"
+  ],
   "pack_exclude": [
     "backend/tests",
     "backend/scripts",
