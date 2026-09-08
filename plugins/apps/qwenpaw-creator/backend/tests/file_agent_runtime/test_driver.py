@@ -3314,9 +3314,11 @@ def test_batch_merges_notifications_but_stops_at_non_batchable(
 
 
 @pytest.mark.parametrize("source", ["user", "review_rejection_feedback"])
+@pytest.mark.parametrize("review_pause", [None, "PENDING_REVIEW", "RESUMING"])
 def test_human_revisions_take_priority_over_queued_automated_reviews(
     tmp_path,
     source,
+    review_pause,
 ):
     """A real revision must not wait behind stale automated repair requests."""
     received = []
@@ -3324,6 +3326,26 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
     async def scenario():
         services, snapshot = _create_project(tmp_path, initial_goal="六集短剧")
         _write_runtime_state(services, snapshot)
+        if review_pause:
+            candidate = snapshot.project.model_dump(mode="json")
+            candidate["description"] = "第二集剧本仍待审阅"
+            review = services.commits.commit(
+                base=snapshot,
+                candidate=candidate,
+                round_id="round-draft",
+                origin="agentdock_interrupt",
+                review_policy="require_review",
+                review_boundary=ReviewBoundary(
+                    request_message_seq=1,
+                    request_id="draft-request",
+                    interrupted_run_id="previous-run",
+                    accepted_generation=snapshot.generation,
+                    accepted_etag=snapshot.etag,
+                ),
+                caused_by_request_id="draft-request",
+                caused_by_message_seq=1,
+            ).review
+            assert review is not None
         services.sessions.mark_messages_consumed(
             PROJECT_ID,
             SESSION_ID,
@@ -3348,6 +3370,21 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
                     "originSource": "run_review_feedback",
                 },
             )
+
+        async def callback(messages, _tools):
+            received.append(messages[1]["content"])
+            return AgentModelTurn(content="已收到反馈。")
+
+        driver = _driver(services, callback)
+        if review_pause:
+            services.sessions.set_session_status(
+                PROJECT_ID, SESSION_ID, review_pause
+            )
+            await driver._reconcile_project(PROJECT_ID)
+            assert PROJECT_ID not in driver._active
+            assert (
+                received == []
+            ), "automatic reviews still wait for human decisions"
         requests = []
         for request_id, text in (
             ("fix-room", "请修正茶社反向机位的窗户方向"),
@@ -3377,16 +3414,20 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
                     channel=MessageChannel.RUNTIME,
                 )
 
-        async def callback(messages, _tools):
-            received.append(messages[1]["content"])
-            return AgentModelTurn(content="已收到反馈。")
-
-        driver = _driver(services, callback)
         await driver.start()
         try:
             driver.notify(PROJECT_ID)
             await _wait_consumed(services, requests[-1].message_seq)
             await driver.wait_until_idle(PROJECT_ID)
+            if review_pause:
+                active = services.reviews.active(PROJECT_ID)
+                assert (
+                    active is not None and active.review_id == review.review_id
+                )
+                assert all(
+                    item.decision.value == "PENDING"
+                    for item in active.operations
+                )
             return driver.runs.list(PROJECT_ID), requests
         finally:
             await driver.stop()

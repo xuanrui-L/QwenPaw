@@ -2368,9 +2368,9 @@ class FileCreatorAgentRuntime:
     ) -> Any | None:
         """Settle durable pauses before reconcile may dispatch anything.
 
-        Returns the converged Session, or ``None`` while the Session is
-        paused — a durable interrupt is being served, or an active Review
-        keeps the mainline waiting for the user.
+        Returns the converged Session, or ``None`` during a durable stop.
+        Review admission depends on the queued message: an explicit human
+        revision must be readable while its draft is still under review.
         """
 
         if session.status is CreatorSessionStatus.INTERRUPT_REQUESTED:
@@ -2387,11 +2387,6 @@ class FileCreatorAgentRuntime:
                 )
             return None
         session = await self._converge_resolved_review(project_id, session)
-        # Pending Review is a durable, recoverable pause. Messages may be
-        # queued while the user decides, but none may start until every active
-        # Review is resolved and the Session projection has converged.
-        if session.status is CreatorSessionStatus.PENDING_REVIEW:
-            return None
         return session
 
     async def _reconcile_project(self, project_id: str) -> None:
@@ -2536,9 +2531,10 @@ class FileCreatorAgentRuntime:
             return
         # A detached specialist can create a Review after its mainline run
         # already finished, so the Session never transitioned to
-        # PENDING_REVIEW. Gate on the durable Review record itself
-        # (read-only, and only when a run is about to launch): queued
-        # messages wait and are consumed once the user decides.
+        # PENDING_REVIEW. Gate automated continuations on the durable record.
+        # Human feedback may revise a still-pending draft without accepting
+        # it first. Commits keep their review policy, and production retains
+        # its separate review and execution-authorization gates.
         try:
             active_review = await asyncio.to_thread(
                 self.services.reviews.active,
@@ -2553,7 +2549,10 @@ class FileCreatorAgentRuntime:
                 project_id,
             )
             return
-        if active_review is not None:
+        if active_review is not None and message.source not in {
+            "user",
+            "review_rejection_feedback",
+        }:
             return
         run_id = f"agent-run-{uuid4().hex}"
         epoch = self._begin_epoch(project_id, run_id)
