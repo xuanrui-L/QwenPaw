@@ -295,7 +295,7 @@ class WorkGraphScheduler:
         self._transient_retries: dict[tuple[str, str, str], int] = {}
         self._transient_last: dict[tuple[str, str, str], float] = {}
         self._inflight: dict[str, set[str]] = {}
-        self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._dispatch_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._preparation_tasks: dict[str, asyncio.Task[None]] = {}
         self._preparing: dict[str, set[str]] = {}
         self._closed = False
@@ -1430,6 +1430,36 @@ class WorkGraphScheduler:
             self._inflight.get(project_id, set()).discard(node.node_id)
             if project_id not in self._cancelled_projects:
                 self.wake(project_id)
+
+    async def await_admitted_execution(
+        self,
+        project_id: str,
+        node_id: str,
+        execution: Awaitable[Any],
+    ) -> Any:
+        """Own an approved request independently of its mainline waiter.
+
+        Approval and input checks must precede this call. A new message can
+        cancel the waiter, while hard-stop/shutdown still cancel this job.
+        """
+        task = asyncio.create_task(execution)
+        self._dispatch_tasks.setdefault(project_id, set()).add(task)
+        self._inflight.setdefault(project_id, set()).add(node_id)
+
+        def completed(done: asyncio.Task[Any]) -> None:
+            owned = self._dispatch_tasks.get(project_id)
+            if owned is not None:
+                owned.discard(done)
+                if not owned:
+                    self._dispatch_tasks.pop(project_id, None)
+            self._inflight.get(project_id, set()).discard(node_id)
+            if not done.cancelled():
+                done.exception()
+            if not self._closed and project_id not in self._cancelled_projects:
+                self.wake(project_id)
+
+        task.add_done_callback(completed)
+        return await asyncio.shield(task)
 
     async def dispatch_node(
         self,

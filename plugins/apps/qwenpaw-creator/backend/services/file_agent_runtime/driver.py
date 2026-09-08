@@ -4090,7 +4090,7 @@ class FileCreatorAgentRuntime:
 
                     # Deliberately bypass the unattended adapter's optional
                     # motion-design model call; all local admission remains.
-                    result = await execute_file_local_media_command(
+                    execution = execute_file_local_media_command(
                         self.services,
                         project_id=project_id,
                         command=current_node.command,
@@ -4102,7 +4102,7 @@ class FileCreatorAgentRuntime:
                         ),
                     )
                 else:
-                    result = await self.work_scheduler.dispatch_node(
+                    execution = self.work_scheduler.dispatch_node(
                         project_id,
                         current_node,
                         dispatch_fingerprint,
@@ -4110,6 +4110,11 @@ class FileCreatorAgentRuntime:
                             f"project:{fresh.etag}:work-graph",
                         ),
                     )
+                result = await self.work_scheduler.await_admitted_execution(
+                    project_id,
+                    current_node.node_id,
+                    execution,
+                )
                 task_id = getattr(result, "task_id", None)
                 if task_id is None and isinstance(result, Mapping):
                     task_id = result.get("taskId")
