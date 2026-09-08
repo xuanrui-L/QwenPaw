@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ivb_player.server.library import ProjectLibrary  # noqa: E402
-from ivb_player.testing import (  # noqa: E402
+from ivb.server.library import ProjectLibrary  # noqa: E402
+from ivb.testing import (  # noqa: E402
     BundleSpec,
     write_bundle_dir,
     write_bundle_zip,

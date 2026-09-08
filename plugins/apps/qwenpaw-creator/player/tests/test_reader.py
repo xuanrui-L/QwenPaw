@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ivb_player.format.reader import (
+from ivb.format.reader import (
     BundleError,
     DirBundleSource,
     ZipBundleSource,
@@ -17,7 +17,7 @@ from ivb_player.format.reader import (
     probe_mp4_duration,
     read_bundle,
 )
-from ivb_player.testing import BundleSpec, fake_mp4, write_bundle_zip
+from ivb.testing import BundleSpec, fake_mp4, write_bundle_zip
 
 
 def test_member_name_guard_rejects_escapes():
@@ -54,7 +54,7 @@ def test_both_entries_agree_on_a_clean_bundle(kind, tmp_path):
 
 
 def _dir(tmp_path: Path) -> Path:
-    from ivb_player.testing import write_bundle_dir
+    from ivb.testing import write_bundle_dir
 
     return write_bundle_dir(tmp_path / "b.dir", BundleSpec())
 

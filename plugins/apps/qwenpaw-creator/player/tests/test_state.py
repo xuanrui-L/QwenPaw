@@ -8,7 +8,7 @@ import sqlite3
 
 import pytest
 
-from ivb_player.state.store import (
+from ivb.state.store import (
     ANONYMOUS_USER_ID,
     ProgressStore,
     ProjectRecord,

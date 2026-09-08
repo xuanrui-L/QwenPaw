@@ -17,17 +17,17 @@ import json
 import sys
 from pathlib import Path
 
-if __package__ in (None, ""):  # 允许 `python ivb_player/cli.py`
+if __package__ in (None, ""):  # 允许 `python ivb/cli.py`
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from ivb_player.format.errors import Severity  # noqa: E402
-from ivb_player.format.reader import (  # noqa: E402
+from ivb.format.errors import Severity  # noqa: E402
+from ivb.format.reader import (  # noqa: E402
     BundleError,
     Inspection,
     inspect_bundle,
 )
-from ivb_player.format.validate import summarize  # noqa: E402
-from ivb_player.testing import write_demo_bundle  # noqa: E402
+from ivb.format.validate import summarize  # noqa: E402
+from ivb.testing import write_demo_bundle  # noqa: E402
 
 
 def _load(path: str) -> Inspection:
@@ -94,7 +94,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
-    from ivb_player.server.app import create_app
+    from ivb.server.app import create_app
 
     app = create_app(args.data, db_path=args.db)
     library = app.state.library
@@ -115,8 +115,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
     if not args.serve:
         return 0
 
-    from ivb_player.server.library import ProjectLibrary
-    from ivb_player.state.store import ANONYMOUS_USER_ID
+    from ivb.server.library import ProjectLibrary
+    from ivb.state.store import ANONYMOUS_USER_ID
 
     data_dir = Path(args.data).expanduser().resolve()
     library = ProjectLibrary(data_dir, db_path=args.db)

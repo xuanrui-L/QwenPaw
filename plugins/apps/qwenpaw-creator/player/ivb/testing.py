@@ -6,7 +6,7 @@
 2. ``ivb demo`` 命令行 —— 手边没有 Creator 导出时,也能立刻把放映端跑起来。
 
 生成的 ``.mp4`` 不是真视频,只带一个合法的 ``ftyp``/``moov``/``mvhd`` 头,
-足以让 :func:`ivb_player.format.reader.probe_mp4_duration` 读出时长。
+足以让 :func:`ivb.format.reader.probe_mp4_duration` 读出时长。
 """
 
 from __future__ import annotations

@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from ivb_player.format.reader import inspect_bundle, read_bundle
-from ivb_player.testing import BundleSpec, write_bundle_dir, write_bundle_zip
+from ivb.format.reader import inspect_bundle, read_bundle
+from ivb.testing import BundleSpec, write_bundle_dir, write_bundle_zip
 
 
 def codes(diagnostics) -> set[str]:

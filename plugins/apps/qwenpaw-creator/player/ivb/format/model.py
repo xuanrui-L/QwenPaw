@@ -2,7 +2,7 @@
 """内容层 / 表现层的解析结果模型。
 
 刻意不用 pydantic:本模块不承担"校验"职责,只做一层带默认值的结构化视图。
-校验规则全部在 :mod:`ivb_player.format.validate`,产出带点名的 Diagnostic,
+校验规则全部在 :mod:`ivb.format.validate`,产出带点名的 Diagnostic,
 而不是 pydantic 那种脱离业务语境的报错字符串。
 """
 

@@ -28,13 +28,13 @@ dependencies = [
 test = ["pytest>=8"]
 
 [project.scripts]
-ivb = "ivb_player.cli:main"
+ivb = "ivb.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["ivb_player*"]
+include = ["ivb*"]
 
 [tool.setuptools.package-data]
-ivb_player = ["static/**/*", "state/*.sql"]
+ivb = ["static/**/*", "state/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

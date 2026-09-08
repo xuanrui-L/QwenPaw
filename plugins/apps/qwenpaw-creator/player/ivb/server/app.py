@@ -3,7 +3,7 @@
 
 一个进程服务任意多包(见 docs/service-design.md §3):``create_app(data_dir)``
 不再启动期绑死一个包,而是每个 ``/api/projects/{pid}/…`` 请求按 pid 查目录表定位
-磁盘包(:class:`~ivb_player.server.library.ProjectLibrary` 缓存 inspect 结果)。
+磁盘包(:class:`~ivb.server.library.ProjectLibrary` 缓存 inspect 结果)。
 
 与 demo-server 的三点差异(都是刻意修正):
 

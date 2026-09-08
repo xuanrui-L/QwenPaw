@@ -3,7 +3,7 @@
 
 刻意不依赖 ``cli.py``(那是开发期工具);容器/打包只需::
 
-    uvicorn --factory ivb_player.serve:create_app_from_env \
+    uvicorn --factory ivb.serve:create_app_from_env \
         --host 0.0.0.0 --port 8080
 
 环境变量(都有缺省,零配置也能起):

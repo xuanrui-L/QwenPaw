@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ivb_player.format.reader import BundleError
-from ivb_player.server.app import create_app
-from ivb_player.state.store import ANONYMOUS_USER_ID
-from ivb_player.testing import BundleSpec, write_bundle_dir
+from ivb.format.reader import BundleError
+from ivb.server.app import create_app
+from ivb.state.store import ANONYMOUS_USER_ID
+from ivb.testing import BundleSpec, write_bundle_dir
 
 #: 默认 smoke 包的 project_id(= BundleSpec.bundle_id)。
 SMOKE_PID = "project-smoke-0001"
@@ -647,7 +647,7 @@ def test_create_app_from_env_reads_settings(
 ):
     """部署入口:env 驱动 data_dir 与 root_path(不依赖 cli.py)。"""
 
-    from ivb_player.serve import create_app_from_env
+    from ivb.serve import create_app_from_env
 
     data = tmp_path / "envdata"
     monkeypatch.setenv("IVB_DATA_DIR", str(data))

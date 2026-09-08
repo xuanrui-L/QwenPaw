@@ -1,5 +1,6 @@
 # 走查/演示产物：真实 mp4、state.db、临时 zip 都不该进版本库
 build/
+.e2e/
 *.staging
 .state.db
 .state.db-wal

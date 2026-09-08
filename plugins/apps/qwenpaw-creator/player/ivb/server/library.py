@@ -9,8 +9,8 @@
 - :meth:`ProjectLibrary.resolve` 按 ``project_id`` 查目录 → 定位磁盘包 →
   ``inspect_bundle``,结果按 ``(pid, mtime)`` 缓存,避免每请求重读包。
 
-本模块不含 SQL(那是 :class:`~ivb_player.state.store.ProgressStore` 的事),也
-不碰 HTTP(那是 :mod:`ivb_player.server.app` 的事)—— 只管"包 ↔ 目录表 ↔ 缓存"。
+本模块不含 SQL(那是 :class:`~ivb.state.store.ProgressStore` 的事),也
+不碰 HTTP(那是 :mod:`ivb.server.app` 的事)—— 只管"包 ↔ 目录表 ↔ 缓存"。
 """
 
 from __future__ import annotations

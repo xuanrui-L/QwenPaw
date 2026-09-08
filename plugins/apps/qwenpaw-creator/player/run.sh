@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # IVB 放映服务启动脚本(容器/打包用)。
 #
-# 配置全走环境变量,零配置也能起(详见 ivb_player/serve.py 文档):
+# 配置全走环境变量,零配置也能起(详见 ivb/serve.py 文档):
 #   IVB_DATA_DIR          持久卷根,默认 /data(存 ivb.db + bundles/)
 #   IVB_HOST / IVB_PORT   监听地址,默认 0.0.0.0:8080
 #   IVB_ROOT_PATH         网关子路径前缀(如 /ivb),默认空
@@ -21,5 +21,5 @@ export IVB_DATA_DIR="${IVB_DATA_DIR:-/data}"
 # 单实例部署(SQLite 单写者);多副本前必须先迁 PG(见 docs/service-design.md §8)。
 mkdir -p "$IVB_DATA_DIR"
 
-exec uvicorn --factory ivb_player.serve:create_app_from_env \
+exec uvicorn --factory ivb.serve:create_app_from_env \
   --host "$HOST" --port "$PORT" --log-level "${IVB_LOG_LEVEL:-info}"

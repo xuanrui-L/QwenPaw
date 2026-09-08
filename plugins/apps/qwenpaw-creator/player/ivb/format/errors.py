@@ -169,7 +169,7 @@ def make(
     except KeyError as exc:  # pragma: no cover - 开发期保护
         raise UnknownDiagnosticCode(
             f"diagnostic code {code!r} is not registered in CODEBOOK; "
-            "add it to ivb_player/format/errors.py and document it in "
+            "add it to ivb/format/errors.py and document it in "
             "docs/bundle-format.md",
         ) from exc
     message = blurb if not detail else f"{blurb}:{detail}"

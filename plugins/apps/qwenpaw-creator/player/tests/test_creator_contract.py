@@ -20,8 +20,9 @@ from pathlib import Path
 
 import pytest
 
+# 放映端已搬进 creator,player/ 与 backend/ 是同胞目录 -> 直接取父目录。
 ROOT = Path(__file__).resolve().parents[1]
-BACKEND = ROOT.parents[1] / "plugins" / "apps" / "qwenpaw-creator" / "backend"
+BACKEND = ROOT.parent / "backend"
 
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -37,14 +38,14 @@ except Exception as exc:  # pragma: no cover - 环境缺失时整模块跳过
         allow_module_level=True,
     )
 
-from ivb_player.format.reader import inspect_bundle  # noqa: E402
-from ivb_player.format.model import (  # noqa: E402
+from ivb.format.reader import inspect_bundle  # noqa: E402
+from ivb.format.model import (  # noqa: E402
     BUILTIN_THEME,
     DEFAULT_BADGE_LABELS,
 )
-from ivb_player.server.app import create_app  # noqa: E402
-from ivb_player.state.store import ANONYMOUS_USER_ID  # noqa: E402
-from ivb_player.testing import fake_mp4  # noqa: E402
+from ivb.server.app import create_app  # noqa: E402
+from ivb.state.store import ANONYMOUS_USER_ID  # noqa: E402
+from ivb.testing import fake_mp4  # noqa: E402
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
 

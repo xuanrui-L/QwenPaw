@@ -1,6 +1,6 @@
 # IVB 放映服务镜像。单实例部署(SQLite 单写者),持久卷挂 /data。
 #
-#   docker build -t ivb-player:latest sandbox/ivb-player
+#   docker build -t ivb-player:latest plugins/apps/qwenpaw-creator/player
 #   docker run -d -p 8080:8080 -v /host/data:/data ivb-player:latest
 #
 # 容器重建/滚动发布不丢数据:ivb.db(含 WAL 边车)与 bundles/ 都在 /data 卷上。
@@ -10,7 +10,7 @@ WORKDIR /app
 
 # 先装依赖再拷代码,利用构建层缓存。
 COPY pyproject.toml ./
-COPY ivb_player ./ivb_player
+COPY ivb ./ivb
 RUN pip install --no-cache-dir .
 
 COPY run.sh ./run.sh

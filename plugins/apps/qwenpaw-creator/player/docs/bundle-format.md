@@ -1,7 +1,7 @@
 # IVB — Interactive Video Bundle 格式规范 v1
 
 > 本文是**唯一权威**。它描述 Creator(生产端)导出的 zip 到底长什么样,以及放映端
-> (`sandbox/ivb-player`)解析时**必须**接受什么、**必须**拒绝什么。
+> (`plugins/apps/qwenpaw-creator/player`)解析时**必须**接受什么、**必须**拒绝什么。
 >
 > `sandbox/互动视频/schema.json` 是早期形式定义,与任何一份真实实现都不符
 > (它连 demo 自己的 manifest 都校验不过),保留仅作历史参考,**不再维护**。
@@ -319,6 +319,6 @@ interaction → 包无效。**
 `edge_index[*].tone` 是模型在起草 `narrative_edges` 时填的,不教就恒空,
 三档表现层形同不存在。
 
-跨端回归:`sandbox/ivb-player/tests/test_creator_contract.py` 直接调用 Creator
+跨端回归:`plugins/apps/qwenpaw-creator/player/tests/test_creator_contract.py` 直接调用 Creator
 导出器,把产物交给放映端 Reader / Server 验证零诊断。两侧字段名、默认值、
 badge 文案任何一处飘移都会在那里红 —— 这就是“校验规则只实现一份”的机制。
