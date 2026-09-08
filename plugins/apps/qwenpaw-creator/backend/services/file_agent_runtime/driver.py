@@ -2087,16 +2087,22 @@ class FileCreatorAgentRuntime:
                 handle.run_id,
                 handle.epoch,
             )
-            self.work_scheduler.cancel_project(project_id)
-            self._cancel_project_specialists(project_id, reason=reason)
+            if not superseded:
+                self.work_scheduler.cancel_project(project_id)
+                self._cancel_project_specialists(project_id, reason=reason)
             handle.task.cancel()
             self.notify(project_id)
             return True
         # Signal cancellation first. Revoke may need to wait behind an atomic
         # publication already holding the in-process commit boundary; stop and
         # delete must not keep the caller waiting for that completed decision.
-        self.work_scheduler.cancel_project(project_id)
-        self._cancel_project_specialists(project_id, reason=reason)
+        # Replacing the mainline with user feedback leaves already admitted
+        # media and specialists running. Their own input guards reject stale
+        # results; cancelling the scheduler here loses synchronous provider
+        # requests while leaving their durable Tasks RUNNING forever.
+        if not superseded:
+            self.work_scheduler.cancel_project(project_id)
+            self._cancel_project_specialists(project_id, reason=reason)
         handle.task.cancel()
         cleanup = asyncio.create_task(
             asyncio.to_thread(

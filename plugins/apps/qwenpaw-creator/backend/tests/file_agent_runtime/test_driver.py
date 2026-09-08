@@ -1955,6 +1955,76 @@ def test_interrupt_revokes_stale_run_before_late_tool_commit(tmp_path) -> None:
     assert session.last_consumed_message_seq == 1
 
 
+@pytest.mark.parametrize("superseded", [False, True])
+@pytest.mark.parametrize("reason", ["user_interrupt", "agentdock_message"])
+def test_feedback_keeps_admitted_media_alive_but_hard_stop_cancels_it(
+    tmp_path,
+    monkeypatch,
+    superseded,
+    reason,
+) -> None:
+    """A new user message must not abandon an unrelated paid image call."""
+
+    async def scenario():
+        services, _snapshot = _create_project(tmp_path, initial_goal="制作短剧")
+        model_started = asyncio.Event()
+        media_started = asyncio.Event()
+        release_media = asyncio.Event()
+        published: list[str] = []
+
+        async def model(_messages, _tools):
+            model_started.set()
+            await asyncio.Event().wait()
+
+        async def media_provider(_project_id, _node, _fingerprint):
+            media_started.set()
+            await release_media.wait()
+            published.append("existing-image-result")
+
+        driver = _driver(services, model)
+        scheduler = driver.work_scheduler
+        monkeypatch.setattr(scheduler, "dispatch_node", media_provider)
+        await driver.start()
+        driver.notify(PROJECT_ID)
+        await asyncio.wait_for(model_started.wait(), timeout=2)
+        node = WorkNode(
+            node_id="visual:unrelated",
+            kind="visual",
+            label="已授权的人物图",
+            status=WorkNodeStatus.READY,
+            command="GENERATE_ASSET",
+            target_ref="asset:hero",
+        )
+        media = asyncio.create_task(
+            scheduler._dispatch(PROJECT_ID, node, "fp")
+        )
+        scheduler._dispatch_tasks.setdefault(PROJECT_ID, set()).add(media)
+        scheduler._inflight.setdefault(PROJECT_ID, set()).add(node.node_id)
+        await asyncio.wait_for(media_started.wait(), timeout=2)
+        active = driver._active[PROJECT_ID]
+        try:
+            assert await driver.interrupt(
+                PROJECT_ID,
+                superseded=superseded,
+                reason=reason,
+                expected_run_id=active.run_id,
+            )
+            await asyncio.wait_for(
+                asyncio.gather(active.task, return_exceptions=True), timeout=2
+            )
+            release_media.set()
+            await asyncio.gather(media, return_exceptions=True)
+            assert media.cancelled() is not superseded
+            assert published == (
+                ["existing-image-result"] if superseded else []
+            )
+        finally:
+            release_media.set()
+            await driver.stop()
+
+    asyncio.run(scenario())
+
+
 def test_interrupt_returns_before_slow_task_cleanup_finishes(tmp_path) -> None:
     async def scenario():
         services, _snapshot = _create_project(
