@@ -623,15 +623,16 @@ async def stream_events(
         _translate_runtime_error(error)
 
     async def body() -> AsyncIterator[str]:
-        current = cursor
+        reader = store.event_reader(
+            project_id,
+            session.session_id,
+            after_seq=cursor,
+        )
         idle_ticks = 0
         while not await request.is_disconnected():
             try:
                 events = await asyncio.to_thread(
-                    store.list_events,
-                    project_id,
-                    session.session_id,
-                    after_seq=current,
+                    reader.read,
                     limit=200,
                 )
             except SessionStoreError:
@@ -639,7 +640,6 @@ async def stream_events(
             if events:
                 idle_ticks = 0
                 for event in events:
-                    current = event.event_seq
                     yield _sse(event)
                 continue
             idle_ticks += 1

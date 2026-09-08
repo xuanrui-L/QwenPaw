@@ -10,7 +10,7 @@ from fastapi import FastAPI
 
 from api.dependencies import creator_error_handler, project_file_services
 from api.file_execution_routes import router as execution_router
-from api.file_session_routes import router as session_router
+from api.file_session_routes import router as session_router, stream_events
 from domain.enums import SpecialistRole, TaskKind, TaskStatus
 from domain.errors import CreatorError
 from services.project_files.facade import CreatorFileServices
@@ -86,6 +86,47 @@ def test_file_session_message_is_idempotent_and_visible(
     refreshed = runtime.get_project_session("project-1")
     assert refreshed.active_goal_id is not None
     assert refreshed.last_event_seq == 1
+
+
+def test_event_stream_replays_pages_and_follows_live_append(tmp_path):
+    _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
+    store = services.sessions
+
+    def append(value):
+        store.append_event(
+            "project-1",
+            "session-1",
+            event_type="agent.message_delta",
+            actor="agent",
+            payload={"value": value},
+        )
+
+    for value in range(1, 206):
+        append(value)
+
+    class Connection:
+        polls = 0
+
+        async def is_disconnected(self):
+            self.polls += 1
+            return self.polls > 2
+
+    async def scenario():
+        response = await stream_events(
+            "project-1",
+            Connection(),
+            after=1,
+            last_event_id="3",
+            services=services,
+        )
+        ids = []
+        async for chunk in response.body_iterator:
+            ids.append(int(chunk.split("\n", 1)[0].removeprefix("id: ")))
+            if len(ids) == 1:
+                append(206)
+        return ids
+
+    assert asyncio.run(scenario()) == list(range(4, 207))
 
 
 def test_interrupt_is_persisted_before_process_local_cancellation(
