@@ -156,6 +156,20 @@ def test_sync_review_lifecycle_rounds_dedup_cap_and_reset(
     assert not (tmp_path / "runtime").exists()
 
     monkeypatch.setenv("CREATOR_SYNC_REVIEW_ENABLED", "1")
+    # Turning the switch on must not review unchanged historical content.
+    # A later no-op or unrelated commit still has no reviewable changes.
+    for pointers in ([], ["/name"]):
+        assert (
+            maybe_sync_review(
+                project_id="project-run-review",
+                project_root=tmp_path,
+                project_json=PROJECT_JSON,
+                changed_pointers=pointers,
+                transaction_id="txn-after-toggle",
+            )
+            is None
+        )
+    assert not (tmp_path / "runtime").exists()
     weak = _advisory_payload(weak_concept=True)
     clean = _advisory_payload(weak_concept=False)
     calls = _stub_model(monkeypatch, [weak, weak, clean])

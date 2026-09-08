@@ -47,6 +47,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from models.config import is_media_review_enabled
 from models.reference_markers import canonical_marker, canonical_marker_indices
 from models.image.base import (
     image_reference_capability,
@@ -2496,6 +2497,7 @@ class FileImageExecutionService:
             "runId": task.run_id,
             "transactionId": ids["transaction_id"],
             "commandType": resolved.command.value,
+            "selfReviewEnabled": is_media_review_enabled(),
             "targetRef": resolved.target_ref,
             "variantId": resolved.variant_id,
             "indexedFile": indexed.model_dump(mode="json"),

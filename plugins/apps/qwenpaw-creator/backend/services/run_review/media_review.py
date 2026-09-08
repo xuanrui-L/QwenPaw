@@ -141,7 +141,10 @@ def reserve_media_review(
     try:
         from models.config import is_media_review_enabled
 
-        if not is_media_review_enabled():
+        if (
+            published_result.get("selfReviewEnabled") is not True
+            or not is_media_review_enabled()
+        ):
             return None
         if (
             str(published_result.get("commandType") or "")
@@ -1061,6 +1064,9 @@ def schedule_media_review(
     Single idempotent scheduling point: every successful convergence path
     (fresh generation, idempotent replay, crash recovery) may call it; the
     review-side admission dedups already-reviewed versions.
+
+    Eligibility is frozen in the durable result before publication. Old
+    results without that decision stay unreviewed when settings change.
     """
     # A reservation always names a non-empty slot, so the empty pair reads as
     # "nothing reserved" and keeps the release path free of optional unpacking.
@@ -1073,7 +1079,10 @@ def schedule_media_review(
     try:
         from models.config import is_media_review_enabled
 
-        if not is_media_review_enabled():
+        if (
+            published_result.get("selfReviewEnabled") is not True
+            or not is_media_review_enabled()
+        ):
             return
         kind = REVIEWED_COMMANDS.get(
             str(published_result.get("commandType") or ""),

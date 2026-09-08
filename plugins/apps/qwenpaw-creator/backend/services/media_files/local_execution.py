@@ -49,6 +49,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from models.config import is_self_review_enabled
 from services.media_files.overlay import (
     PET_OS_VIBES,
     render_interview_summary_overlay,
@@ -4445,6 +4446,10 @@ class FileLocalMediaExecutionService:
             "runId": task.run_id,
             "transactionId": ids["transaction_id"],
             "commandType": resolved.command.value,
+            "selfReviewEnabled": (
+                resolved.command is CreatorCommandType.COMPOSE_FINAL_VIDEO
+                and is_self_review_enabled()
+            ),
             "targetRef": resolved.target_ref,
             "indexedFile": indexed.model_dump(mode="json"),
             "artifactVersion": artifact.model_dump(mode="json"),

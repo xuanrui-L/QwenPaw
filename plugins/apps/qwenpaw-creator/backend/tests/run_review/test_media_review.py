@@ -204,6 +204,7 @@ def test_legacy_media_history_migrates_to_physical_cap(tmp_path: Path) -> None:
 
 def _published(relative_uri: str) -> dict:
     return {
+        "selfReviewEnabled": True,
         "commandType": "GENERATE_STORYBOARD_IMAGE",
         "targetRef": "element:e1",
         "transactionId": "txn-img-1",
@@ -237,6 +238,23 @@ def test_schedule_respects_switch_and_filters(monkeypatch) -> None:
         _schedule(_published("assets/artifacts/a.png"))
         assert not media_module._ACTIVE_REVIEW_TASKS, "off means no task"
         monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "1")
+        # Enabling review must not backfill already completed or legacy media.
+        for eligibility in (False, None):
+            old = _published("assets/artifacts/old.png")
+            if eligibility is None:
+                old.pop("selfReviewEnabled")
+            else:
+                old["selfReviewEnabled"] = eligibility
+            _schedule(old)
+            assert (
+                media_module.reserve_media_review(
+                    SimpleNamespace(),
+                    project_id=PROJECT_ID,
+                    published_result=old,
+                )
+                is None
+            )
+            assert not media_module._ACTIVE_REVIEW_TASKS
         skipped = _published("assets/artifacts/a.png")
         skipped["commandType"] = "COMPOSE_FINAL_VIDEO"
         _schedule(skipped)

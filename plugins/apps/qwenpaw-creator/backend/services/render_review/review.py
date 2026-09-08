@@ -1047,11 +1047,17 @@ def schedule_render_review(
     convergence path (fresh render, idempotent replay, fingerprint reuse and
     crash recovery) may call it; the review-side round admission dedups
     already-reviewed and in-flight artifact versions.
+
+    Only a render that requested review when its result was created is
+    eligible. Replaying a completed or legacy result cannot opt it in.
     """
     try:
         from models.config import is_self_review_enabled
 
-        if not is_self_review_enabled():
+        if (
+            published_result.get("selfReviewEnabled") is not True
+            or not is_self_review_enabled()
+        ):
             return
         if str(published_result.get("commandType") or "") != (
             "COMPOSE_FINAL_VIDEO"

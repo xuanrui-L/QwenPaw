@@ -52,6 +52,7 @@ from domain.errors import (
     StorageIntegrityError,
     ValidationError,
 )
+from models.config import is_media_review_enabled
 from models.reference_markers import canonical_marker_indices
 from schemas.common import StrictModel
 from services.prompt_text import (
@@ -3984,6 +3985,7 @@ class FileR2VExecutionService:
             "runId": task.run_id,
             "transactionId": stable["transaction_id"],
             "commandType": CreatorCommandType.GENERATE_R2V_VIDEO.value,
+            "selfReviewEnabled": is_media_review_enabled(),
             "targetRef": request["targetRef"],
             "providerTaskId": state.provider_task_id,
             "indexedFile": indexed.model_dump(mode="json"),

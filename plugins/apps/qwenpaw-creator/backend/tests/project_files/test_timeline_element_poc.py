@@ -170,10 +170,22 @@ def test_named_element_output_requires_its_owned_artifact_slot():
         Project.model_validate(project.model_dump(mode="json"))
 
 
+@pytest.mark.parametrize("self_review", [False, True])
 def test_storyboard_and_r2v_publish_named_element_outputs(
     tmp_path,
     monkeypatch,
+    self_review,
 ):
+    monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", str(int(self_review)))
+    reviewed = []
+
+    async def record_review(_services, *, published, **_kwargs):
+        reviewed.append(published["artifactVersion"]["version_id"])
+
+    monkeypatch.setattr(
+        "services.run_review.media_review.run_media_review_loop",
+        record_review,
+    )
     monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
     services = CreatorFileServices.create(tmp_path.resolve())
     project = Project.new(project_id="r2v-project", name="R2V")
@@ -183,11 +195,12 @@ def test_storyboard_and_r2v_publish_named_element_outputs(
         Project.model_validate(project.model_dump(mode="json")),
     )
 
+    image_worker = FileImageExecutionService(
+        services,
+        provider=FakeImageProvider(),
+    )
     image = asyncio.run(
-        FileImageExecutionService(
-            services,
-            provider=FakeImageProvider(),
-        ).execute(
+        image_worker.execute(
             project_id="r2v-project",
             command="GENERATE_STORYBOARD_IMAGE",
             target_ref="element:r2v-1",
@@ -195,6 +208,8 @@ def test_storyboard_and_r2v_publish_named_element_outputs(
             idempotency_key="storyboard-1",
         ),
     )
+    image_task = image_worker.executions.get_task("r2v-project", image.task_id)
+    assert image_task.result["selfReviewEnabled"] is self_review
     after_image = services.projects.read("r2v-project").project
     element = after_image.timelines.items["timeline:main"].elements_by_id[
         "r2v-1"
@@ -241,6 +256,15 @@ def test_storyboard_and_r2v_publish_named_element_outputs(
 
     task = asyncio.run(generate())
     assert task.status.value == "SUCCEEDED"
+    assert task.result["selfReviewEnabled"] is self_review
+    assert set(reviewed) == (
+        {
+            image.artifact_version_id,
+            task.result["artifactVersion"]["version_id"],
+        }
+        if self_review
+        else set()
+    )
     finished = services.projects.read("r2v-project").project
     element = finished.timelines.items["timeline:main"].elements_by_id["r2v-1"]
     assert element.outputs["main"].slot_id == "element:r2v-1:main"

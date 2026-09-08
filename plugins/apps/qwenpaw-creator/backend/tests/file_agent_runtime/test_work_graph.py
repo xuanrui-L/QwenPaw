@@ -19,6 +19,8 @@ from domain.enums import TaskStatus
 from services.file_agent_runtime.work_graph import (
     WorkNodeStatus,
     derive_work_graph,
+    dispatch_ledger_fingerprint,
+    dispatch_slot,
 )
 from services.project_files.models import (
     ArtifactSlot,
@@ -476,7 +478,12 @@ def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
         "image_generation",
         "element:elem:one",
         TaskStatus.SUCCEEDED,
-        idempotency_key=f"dag-{node_id}-{original}",
+        idempotency_key=(
+            f"dag-{node_id}-"
+            + dispatch_slot(
+                dispatch_ledger_fingerprint(original, ("image", "video")),
+            )
+        ),
     )
     _select_slot(
         project,
@@ -517,6 +524,45 @@ def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
         .status
         is WorkNodeStatus.STALE
     )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_completed_storyboard_survives_global_model_changes(legacy) -> None:
+    import hashlib
+
+    project = _project()
+    _add_element(project, _element("elem:one"))
+    node_id = "storyboard:elem:one"
+    original = derive_work_graph(project).by_id[node_id].dispatch_fingerprint
+    ledger = dispatch_ledger_fingerprint(original, ("old-image", "old-video"))
+    slot = (
+        hashlib.sha256(ledger.encode()).hexdigest()[:16]
+        if legacy
+        else dispatch_slot(ledger)
+    )
+    task = _task(
+        "image_generation",
+        "element:elem:one",
+        TaskStatus.SUCCEEDED,
+        idempotency_key=f"dag-{node_id}-{slot}",
+    )
+    _select_slot(
+        project,
+        slot_id="element:elem:one:storyboard",
+        kind="r2v_storyboard_image",
+        owner_ref="element:elem:one",
+        version_id="art:sb",
+        task_id=task.task_id,
+    )
+    before = project.model_dump(mode="json")
+    graph = derive_work_graph(
+        project,
+        tasks=[task],
+        media_models=("new-image", "new-video"),
+    )
+    assert graph.by_id[node_id].status is WorkNodeStatus.DONE
+    assert node_id not in {node.node_id for node in graph.regeneration_nodes()}
+    assert project.model_dump(mode="json") == before
 
 
 def test_failed_storyboard_reopens_when_aspect_ratio_changes() -> None:

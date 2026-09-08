@@ -435,7 +435,14 @@ def dispatch_ledger_fingerprint(
 def dispatch_slot(fingerprint: str) -> str:
     """Filesystem-safe durable slot for a dispatch ledger identity."""
     base, separator, regeneration = fingerprint.partition("-regen-")
-    slot = hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+    # Preserve the content digest separately from the model digest. A single
+    # opaque hash cannot distinguish an authored edit from a settings change
+    # when projecting an already completed artifact.
+    slot = (
+        base
+        if re.fullmatch(r"[a-f0-9]{16}-m[a-f0-9]{16}", base)
+        else hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+    )
     return f"{slot}-regen-{regeneration}" if separator else slot
 
 
@@ -444,6 +451,8 @@ def _dispatch_inputs_changed(
     node_id: str,
     fingerprint: str,
     media_models: tuple[str, str] | None,
+    *,
+    completed: bool = False,
 ) -> bool:
     prefix = f"dag-{node_id}-"
     if not key.startswith(prefix) or dispatch_key_predates_digest_ledger(key):
@@ -458,6 +467,11 @@ def _dispatch_inputs_changed(
     )
     if identity == fingerprint:
         return False
+    if completed:
+        content = re.fullmatch(r"([a-f0-9]{16})-m[a-f0-9]{16}", identity)
+        # Legacy opaque hashes cannot prove content drift. Preserve their
+        # completed outputs; explicit stale flags and provenance still apply.
+        return content is not None and content.group(1) != fingerprint
     if media_models is None:
         # A bare 16-hex value may be either an old node digest or today's
         # opaque dispatch slot. Without model context a mismatch proves
@@ -466,7 +480,8 @@ def _dispatch_inputs_changed(
             return False
         return True
     ledger = dispatch_ledger_fingerprint(fingerprint, media_models)
-    return identity not in {ledger, dispatch_slot(ledger)}
+    legacy_slot = hashlib.sha256(ledger.encode("utf-8")).hexdigest()[:16]
+    return identity not in {ledger, dispatch_slot(ledger), legacy_slot}
 
 
 def _artifact_is_stale(
@@ -543,6 +558,7 @@ def _artifact_is_stale(
             node_id,
             dispatch_fingerprint,
             media_models,
+            completed=True,
         ):
             return True
     return False
