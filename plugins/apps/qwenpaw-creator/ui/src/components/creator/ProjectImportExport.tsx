@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { Modal, Progress, message } from "antd";
-import { X } from "lucide-react";
+import { LoaderCircle, X } from "lucide-react";
 import {
   creatorApiUrl,
   creatorFetch,
@@ -18,6 +18,7 @@ interface ProjectImportResponse {
 function importProject(
   file: File,
   onProgress?: (uploadedBytes: number, totalBytes: number) => void,
+  onUploaded?: () => void,
 ): Promise<ProjectImportResponse> {
   const form = new FormData();
   const requestId = newClientId("import-project");
@@ -37,6 +38,9 @@ function importProject(
         onProgress?.(event.loaded, event.total);
       }
     };
+    // Upload completion is only the end of transmission. The response
+    // arrives after the server has unpacked and validated the Project.
+    xhr.upload.onload = () => onUploaded?.();
 
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -80,14 +84,17 @@ export function ProjectImporter({
   onImported,
 }: ProjectImporterProps) {
   const { t } = useTranslation();
-  const [uploading, setUploading] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "uploading" | "processing">(
+    "idle",
+  );
+  const busy = phase !== "idle";
   const [fileName, setFileName] = useState<string | null>(null);
   const [percent, setPercent] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const reset = useCallback(() => {
-    setUploading(false);
+    setPhase("idle");
     setFileName(null);
     setPercent(0);
     setDragOver(false);
@@ -95,10 +102,10 @@ export function ProjectImporter({
   }, []);
 
   const handleClose = useCallback(() => {
-    if (uploading) return;
+    if (busy) return;
     reset();
     onClose();
-  }, [uploading, reset, onClose]);
+  }, [busy, reset, onClose]);
 
   const upload = useCallback(
     async (file: File) => {
@@ -108,11 +115,17 @@ export function ProjectImporter({
       }
       setFileName(file.name);
       setPercent(0);
-      setUploading(true);
+      setPhase("uploading");
       try {
-        const response = await importProject(file, (loaded, total) => {
-          setPercent(total > 0 ? Math.round((loaded / total) * 100) : 0);
-        });
+        const response = await importProject(
+          file,
+          (loaded, total) => {
+            setPercent(
+              total > 0 ? Math.min(99, Math.floor((loaded / total) * 100)) : 0,
+            );
+          },
+          () => setPhase("processing"),
+        );
         message.success(
           t("importExport.importSuccess", { projectId: response.projectId }),
           10,
@@ -152,7 +165,7 @@ export function ProjectImporter({
         <button
           type="button"
           onClick={handleClose}
-          disabled={uploading}
+          disabled={busy}
           aria-label={t("common.close")}
           className="flex h-10 w-10 cursor-pointer items-center justify-center rounded-lg text-[var(--color-text-secondary)] transition-colors hover:bg-[rgba(43,27,0,0.04)] disabled:cursor-not-allowed disabled:opacity-50"
         >
@@ -162,17 +175,32 @@ export function ProjectImporter({
 
       <div className="p-5">
         {fileName ? (
-          <div className="flex h-[134px] flex-col items-center justify-center gap-4 rounded-md bg-white px-4 dark:bg-[var(--color-bg-card)]">
+          <div className="flex min-h-[160px] flex-col items-center justify-center gap-3 rounded-md bg-white px-4 py-4 dark:bg-[var(--color-bg-card)]">
             <span className="max-w-full truncate text-base font-medium leading-7 text-[var(--color-text-primary)]">
               {fileName}
             </span>
-            <div className="w-[400px] max-w-full">
-              <Progress
-                percent={percent}
-                status={uploading ? "active" : undefined}
-                strokeColor="var(--color-accent)"
-              />
-            </div>
+            {phase === "processing" ? (
+              <div role="status" className="flex flex-col items-center gap-2">
+                <div className="flex items-center gap-2 text-sm text-[var(--color-text-primary)]">
+                  <LoaderCircle aria-hidden className="h-4 w-4 animate-spin" />
+                  {t("importExport.processing")}
+                </div>
+                <p className="text-center text-xs leading-5 text-[var(--color-text-secondary)]">
+                  {t("importExport.processingHint")}
+                </p>
+              </div>
+            ) : (
+              <div className="w-[400px] max-w-full">
+                <p className="mb-1 text-sm text-[var(--color-text-secondary)]">
+                  {t("importExport.uploading")}
+                </p>
+                <Progress
+                  percent={percent}
+                  status="active"
+                  strokeColor="var(--color-accent)"
+                />
+              </div>
+            )}
           </div>
         ) : (
           <button
@@ -207,6 +235,7 @@ export function ProjectImporter({
           ref={fileInputRef}
           type="file"
           accept=".zip"
+          aria-label={t("importExport.chooseArchive")}
           hidden
           onChange={(e) => {
             const file = e.target.files?.[0];

@@ -20,6 +20,7 @@ from api.project_routes import _extract_archive_sanitized
 from domain.errors import StorageIntegrityError
 from services.media_files import r2v_execution
 from services.runtime_files import ProjectRuntimeSessionStore
+from services.project_files.store import ProjectStore
 
 pytestmark = pytest.mark.unit
 
@@ -80,6 +81,55 @@ def test_export_import_round_trip_restores_the_project(
     assert [item["projectId"] for item in listed.json()["items"]] == [
         project_id,
     ]
+
+
+@pytest.mark.parametrize("invalid_config", [False, True])
+def test_archive_transfer_does_not_depend_on_current_model_settings(
+    app,
+    api_runtime_root,
+    monkeypatch,
+    run_scenario,
+    invalid_config,
+):
+    config_path = api_runtime_root / "config" / "model_config.json"
+    monkeypatch.setenv("CREATOR_MODEL_CONFIG_PATH", str(config_path))
+
+    async def scenario(client):
+        project_id = await _create_project(client)
+        store = ProjectStore(api_runtime_root)
+        before = store.read(project_id).project
+        sessions = ProjectRuntimeSessionStore(api_runtime_root)
+        session = sessions.get_project_session(project_id)
+        stopped = sessions.hard_stop_session(project_id, session.session_id)
+        exported = await _export(client, project_id)
+        assert exported.status_code == 200
+        await client.delete(
+            f"/projects/{project_id}",
+            headers={"Idempotency-Key": uuid4().hex},
+        )
+        config_path.parent.mkdir(exist_ok=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "self_review": {
+                        "sync_enabled": "legacy-invalid"
+                        if invalid_config
+                        else True,
+                    },
+                    "execution_authorization": {"mode": "allow_all"},
+                },
+            ),
+        )
+        config_before = config_path.read_bytes()
+        imported = await _import(client, "backup.zip", exported.content)
+        assert imported.status_code == 200, imported.text
+        assert store.read(project_id).project == before
+        assert sessions.get_project_session_snapshot(project_id) == stopped
+        assert config_path.read_bytes() == config_before
+        reexported = await _export(client, project_id)
+        assert reexported.status_code == 200, reexported.text
+
+    run_scenario(app, scenario)
 
 
 def test_export_does_not_cancel_sessions_or_consume_messages(

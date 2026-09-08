@@ -2119,8 +2119,8 @@ def test_failed_run_is_not_relaunched_after_restart_or_notify(
     """A failed request is a durable input boundary.
 
     Neither a process restart (which discards the in-memory blocked-head
-    guard) nor an unrelated ``notify`` (model config saves wake every
-    Project) may relaunch the Agent on the same failed message. Legacy
+    guard) nor an unrelated runtime state-change ``notify`` may relaunch
+    the Agent on the same failed message. Legacy
     sessions written before failures consumed their request must not
     auto-start the Agent either; reconciliation consumes the failed head
     based on the durable run record instead.

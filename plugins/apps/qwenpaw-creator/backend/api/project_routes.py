@@ -116,6 +116,11 @@ router = APIRouter(
     tags=["projects"],
     route_class=_RemovedProjectPutRoute,
 )
+archive_router = APIRouter(
+    prefix="/projects",
+    tags=["projects"],
+    route_class=CreatorErrorRoute,
+)
 
 
 def _stable_id(kind: str, identity: str) -> str:
@@ -767,7 +772,7 @@ async def copy_project(
 # pylint: enable=too-many-statements
 
 
-@router.get("/{project_id}/export")
+@archive_router.get("/{project_id}/export")
 async def export_project(
     project_id: str,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
@@ -996,7 +1001,12 @@ async def _run_import(upload) -> str:
                 f"failed to unpack zip file {saved_zip}: {str(e)}",
             ) from e
 
-        project_dir, project_id = _resolve_extracted_project(extract_dir)
+        # Large Project documents must not block the API event loop while
+        # the browser waits for server-side import after upload completes.
+        project_dir, project_id = await asyncio.to_thread(
+            _resolve_extracted_project,
+            extract_dir,
+        )
 
         target_project_dir = Path(data_root, project_dir.name)
         if target_project_dir.exists():
@@ -1011,15 +1021,15 @@ async def _run_import(upload) -> str:
         )
         return project_id
     finally:
-        saved_zip.unlink(missing_ok=True)
-        shutil.rmtree(extract_dir, ignore_errors=True)
+        await asyncio.to_thread(saved_zip.unlink, missing_ok=True)
+        await asyncio.to_thread(shutil.rmtree, extract_dir, ignore_errors=True)
         logger.info(
             "deleted temporary importing file and folder "
             f"{_log_safe(saved_zip)}, {extract_dir}",
         )
 
 
-@router.post("/import")
+@archive_router.post("/import")
 async def import_project(
     request: Request,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
