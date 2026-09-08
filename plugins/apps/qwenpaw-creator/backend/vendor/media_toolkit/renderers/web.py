@@ -50,10 +50,17 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
     label = os.path.basename(path)
 
     with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(headless=True, channel="chrome")
-        except Exception:  # pylint: disable=broad-except
-            browser = p.chromium.launch(headless=True)
+        executable = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+        if executable:
+            browser = p.chromium.launch(
+                headless=True,
+                executable_path=executable,
+            )
+        else:
+            try:
+                browser = p.chromium.launch(headless=True, channel="chrome")
+            except Exception:  # pylint: disable=broad-except
+                browser = p.chromium.launch(headless=True)
 
         page = browser.new_page(viewport={"width": vw, "height": vh})
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
