@@ -25,7 +25,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
-from domain.enums import CreatorCommandType, CreatorSessionStatus
+from domain.enums import CreatorCommandType, CreatorSessionStatus, TaskStatus
 from models.config import (
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
     get_execution_authorization_mode,
@@ -367,6 +367,30 @@ class WorkGraphScheduler:
     @staticmethod
     def _dispatch_slot(fingerprint: str) -> str:
         return dispatch_slot(fingerprint)
+
+    @classmethod
+    def manual_retry_fingerprint(cls, node: WorkNode, tasks: Sequence) -> str:
+        """A human retry may move beyond a durably cancelled execution.
+
+        The cancelled task determines the next identity, so concurrent clicks
+        converge on one new task. Automatic dispatch keeps its original slot;
+        failed tasks still require corrected inputs rather than paid loops.
+        """
+        base = fingerprint = cls._ledger_fingerprint(node)
+        by_key = {
+            key: task
+            for task in tasks
+            for key in (task.idempotency_key, task.caused_by_request_id)
+            if key
+        }
+        while True:
+            key = f"dag-{node.node_id}-{cls._dispatch_slot(fingerprint)}"
+            previous = by_key.get(key)
+            if previous is None or previous.status is not TaskStatus.CANCELLED:
+                return fingerprint
+            fingerprint = (
+                f"{base}-manual-retry-{cls._dispatch_slot(previous.task_id)}"
+            )
 
     # -- lifecycle -----------------------------------------------------
 
@@ -1654,7 +1678,6 @@ async def _default_compose_dispatch(
         execute_file_local_media_command,
     )
     from services.runtime_files.errors import RecordNotFoundError
-    from services.runtime_files.execution_models import TaskStatus
 
     # A master render is a free local pass, so a failed attempt must not
     # freeze the slot: probe the durable ledger and mint the next retry

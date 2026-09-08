@@ -169,6 +169,99 @@ def test_transient_failure_reopens_a_retry_slot(tmp_path, monkeypatch):
     assert result.replayed is False and result.artifact_version_id
 
 
+# pylint: disable-next=too-many-statements
+def test_manual_workgraph_retry_after_stop_reuses_one_new_media_task(
+    tmp_path,
+    monkeypatch,
+):
+    import httpx
+    from fastapi import FastAPI
+
+    from api import work_graph_routes
+    from api.file_session_routes import _cancel_active_project_tasks_sync
+    from domain.enums import TaskStatus
+    from services.file_agent_runtime.work_graph import derive_work_graph
+    from services.file_agent_runtime.work_scheduler import WorkGraphScheduler
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    services = _services(tmp_path, monkeypatch)
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        provider = _CountingProvider()
+        generate = provider.generate
+
+        async def controlled_generate(**kwargs):
+            started.set()
+            await release.wait()
+            return await generate(**kwargs)
+
+        provider.generate = controlled_generate
+        monkeypatch.setattr(
+            image_execution,
+            "ExistingImageProvider",
+            lambda: provider,
+        )
+        executions = ProjectExecutionStore(services.root)
+        snapshot = services.projects.read(PROJECT_ID)
+        node = next(
+            node
+            for node in derive_work_graph(snapshot.project).nodes
+            if node.kind == "storyboard"
+        )
+        first = asyncio.create_task(
+            WorkGraphScheduler(services).dispatch_node(PROJECT_ID, node),
+        )
+        await asyncio.wait_for(started.wait(), timeout=3)
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        _cancel_active_project_tasks_sync(services, PROJECT_ID)
+        cancelled = executions.list_tasks(PROJECT_ID)[0]
+        assert cancelled.status is TaskStatus.CANCELLED
+
+        app = FastAPI()
+        app.include_router(work_graph_routes.router)
+        app.dependency_overrides[
+            work_graph_routes.project_file_services
+        ] = lambda: services
+        started.clear()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            path = (
+                f"/projects/{PROJECT_ID}/work-graph/nodes/"
+                f"{node.node_id}/dispatch"
+            )
+            retry = asyncio.create_task(client.post(path))
+            await asyncio.wait_for(started.wait(), timeout=3)
+            repeated = await client.post(path)
+            assert repeated.status_code == 200
+            assert repeated.json()["dispatched"] is False
+            release.set()
+            response = await retry
+            assert response.status_code == 200
+            assert response.json()["dispatched"] is True
+            completed = await client.post(path)
+            assert completed.status_code == 200
+            assert completed.json()["dispatched"] is False
+        tasks = executions.list_tasks(PROJECT_ID)
+        assert len(tasks) == 2
+        assert provider.calls == 1
+        assert (
+            executions.get_task(
+                PROJECT_ID,
+                cancelled.task_id,
+            ).status
+            is TaskStatus.CANCELLED
+        )
+        assert sum(t.status is TaskStatus.SUCCEEDED for t in tasks) == 1
+
+    asyncio.run(scenario())
+
+
 def test_deterministic_rejection_keeps_the_terminal_wall(
     tmp_path,
     monkeypatch,
