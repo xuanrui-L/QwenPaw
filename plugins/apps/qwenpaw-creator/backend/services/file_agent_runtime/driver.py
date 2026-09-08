@@ -3799,8 +3799,8 @@ class FileCreatorAgentRuntime:
                     )
                     if pending:
                         self._assert_epoch(project_id, run_id, epoch)
-                        summary = "当前制作尚未开始。" + _agent_waiting_review_summary(
-                            None,
+                        summary = _agent_waiting_review_summary(
+                            "这项制作请求正在等待相关内容的审阅，请先完成审阅。",
                         )
                         assistant_message_id = f"message-{uuid4().hex}"
                         delta_index = 0
