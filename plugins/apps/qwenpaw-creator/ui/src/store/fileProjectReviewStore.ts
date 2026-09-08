@@ -273,7 +273,12 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
           });
         } catch (error) {
           const notFound =
-            error instanceof CreatorHttpError && error.status === 404;
+            error instanceof CreatorHttpError &&
+            error.status === 404 &&
+            error.code === "NOT_FOUND";
+          // A host can return an unstructured 404 while loading the Creator
+          // plugin. Only the API's explicit missing-project response is final;
+          // keep last-good decisions and retry temporary routing failures.
           set((state) => {
             if (epoch !== projectEpoch || state.projectId !== projectId)
               return {};

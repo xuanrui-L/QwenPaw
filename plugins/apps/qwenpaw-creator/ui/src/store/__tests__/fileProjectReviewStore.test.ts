@@ -79,6 +79,42 @@ const headerOf = (
 afterEach(() => store().reset());
 
 describe("file-native Project Review store", () => {
+  it("retries startup 404s with last-good reviews and stops only on API not-found", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(activeResponse(review()))
+        .mockResolvedValueOnce(response(404, { detail: "Not Found" }))
+        .mockResolvedValueOnce(activeResponse(review("token-2", 4)))
+        .mockResolvedValueOnce(response(404, { code: "NOT_FOUND" }));
+      vi.stubGlobal("fetch", fetchMock);
+      store().startPolling("p1", { jitterRatio: 0 });
+      await vi.advanceTimersByTimeAsync(0);
+      const lastGood = store().reviews;
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(store()).toMatchObject({
+        syncStatus: "degraded",
+        polling: true,
+      });
+      expect(store().reviews).toBe(lastGood);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(store().reviews[0].decision_token).toBe("token-2");
+      expect(store().syncStatus).toBe("healthy");
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(store()).toMatchObject({
+        syncStatus: "not_found",
+        polling: false,
+        reviews: [],
+      });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      store().reset();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps last-good on 304/errors and clears on 204/404 (fail-closed sync)", async () => {
     const fetchMock = vi
       .fn()
