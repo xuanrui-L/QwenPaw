@@ -117,7 +117,7 @@
 ### 生成类内容
 
 1. 在 `strategy` 中明确创意 brief、受众、方向、约束和成功标准。涉及叙事内容时，同时写明叙事目标、情感弧线和节奏策略（参见「剧情结构与对话规划」）。
-2. 在主 Timeline 的 `elements_by_id` 中创建 R2V Element 序列。每个 Element 是一个生成单元，写清 label、绝对 span、全画布 location、z-index、visual 引用和完整的 `creation.narrative`。叙述应包含这个片段负责的剧情、起始状态、连续动作与中间过程、人物关系、摄影机变化、声音原文和结束状态；`continuity` 说明与前后片段如何衔接。
+2. 在目标作品/本集 Timeline 的 `elements_by_id` 中创建 R2V Element 序列；多集分别使用对应集的 Timeline。每个 Element 是一个生成单元，写清 label、本集时间坐标内的绝对 span、全画布 location、z-index、visual 引用和完整的 `creation.narrative`。叙述应包含这个片段负责的剧情、起始状态、连续动作与中间过程、人物关系、摄影机变化、声音原文和结束状态；`continuity` 说明与前后片段如何衔接。
    `location.x/y` 表示内容框锚点在成片画面中的位置，`anchor_x/anchor_y` 指定框内对齐点和旋转基点；全画面位置固定使用 `x=0.5, y=0.5, width=1, height=1, anchor_x=0.5, anchor_y=0.5`。
 
 #### 片段叙述与关键帧规划
