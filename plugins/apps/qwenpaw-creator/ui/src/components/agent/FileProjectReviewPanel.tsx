@@ -57,7 +57,20 @@ export function reviewMediaLocator(
 ): Record<string, string> | null {
   for (const operation of userReviewOperations(review)) {
     const locator = operation.ui_locator;
+    // Editing a prompt also marks its old artifact stale. That derived
+    // metadata has a media locator, but is not a new media result: using it
+    // here would hide every script/reference edit behind the old thumbnail.
+    const publication =
+      operation.after != null &&
+      ((operation.kind === "create" &&
+        /^\/assets\/(?:files_by_id|artifact_versions_by_id)\/[^/]+$/u.test(
+          operation.json_pointer ?? "",
+        )) ||
+        /^\/assets\/artifact_slots_by_id\/[^/]+(?:\/selected_version_id)?$/u.test(
+          operation.json_pointer ?? "",
+        ));
     if (
+      publication &&
       locator &&
       (locator.mediaType === "image" || locator.mediaType === "video")
     ) {
@@ -171,8 +184,8 @@ export default function FileProjectReviewPanel({
         decision === "ACCEPT"
           ? t("fileReview.keptCount", { count: affectedUnits })
           : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
-          ? t("fileReview.undoneCount", { count: affectedUnits })
-          : t("fileReview.undoneCountSimple", { count: affectedUnits }),
+            ? t("fileReview.undoneCount", { count: affectedUnits })
+            : t("fileReview.undoneCountSimple", { count: affectedUnits }),
       );
       return true;
     } catch {
