@@ -20,6 +20,9 @@ from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, TaskKind, TaskStatus
+from services.media_files.visual_design_readiness import (
+    visual_design_readiness_issues,
+)
 from services.prompt_text import (
     missing_narrative_dialogue,
     video_prompt_time_error,
@@ -892,7 +895,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     deps.append(f"visual:{entity_id}:{variant_id}")
                 gate_missing = _storyboard_gate_dependencies(
                     project,
-                    creation,
+                    element_id,
                     deps,
                 )
 
@@ -1363,136 +1366,32 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
 def _storyboard_gate_dependencies(
     project: Project,
-    creation: R2VCreation,
+    element_id: str,
     deps: list[str],
 ) -> tuple[str, ...]:
-    """Mirror visual_design_readiness for one element's storyboard.
+    """Use the executor's target-scoped readiness contract for dispatch.
 
-    Machine-dispatchable gaps (unselected required variants) are appended
-    to ``deps`` as media node ids the scheduler can solve; model-only
-    gaps (undefined variants, missing multi-variant bindings, entities
-    with no variants at all — schema invariant: declared variants always
-    live in required_variant_ids) come back as plain-text reasons that
-    route to the completion resume.
-
-    A multi-character storyboard additionally waits for any *planned*
-    lineup covering ≥2 of its characters: the lineup image is the
-    pairwise-contrast anchor (relative height/build, kit discriminators),
-    and field runs showed identity drift — duplicated jersey numbers —
-    exactly when storyboards rendered while the lineup was still absent.
-    Projects that plan no lineup are unaffected.
-
-    Declared-but-unselected lineups gate *every* storyboard, not only the
-    covering ones: the execution gate
-    (assert_visual_design_ready_for_storyboards) is project-wide, and a
-    graph that reports READY for a node the executor refuses poisons the
-    dispatch ledger before any task record exists. Field run 2026-08-12
-    (project 27dc): a single-character closing scene derived READY while
-    the counter lineup was pending, its pre-spend dispatch was rejected,
-    and the node stalled READY-but-undispatchable for 25 minutes until a
-    restart cleared the ledger.
+    Missing selected artwork is a media dependency; missing definitions or
+    bindings need the agent. Unrelated episodes and unbound variants cannot
+    gate an otherwise executable storyboard.
     """
-
-    gate_missing: list[str] = []
-    referenced = dict.fromkeys(
-        [
-            *creation.character_refs,
-            *([creation.scene_ref] if creation.scene_ref is not None else []),
-            *creation.prop_refs,
-        ],
-    )
-    for ref in referenced:
-        entity = project.visual.entities.items.get(ref)
-        if entity is None:
-            continue
-        gate_missing.extend(_entity_gate_gaps(entity, ref, creation, deps))
-    for lineup_node in _covering_lineup_nodes(project, creation):
-        if lineup_node not in deps:
-            deps.append(lineup_node)
-    for lineup_node in _declared_pending_lineup_nodes(project):
-        if lineup_node not in deps:
-            deps.append(lineup_node)
-    return tuple(gate_missing)
-
-
-def _entity_gate_gaps(
-    entity: Any,
-    ref: str,
-    creation: R2VCreation,
-    deps: list[str],
-) -> list[str]:
-    """One referenced entity's model-only gaps; dispatchable ones → deps."""
 
     gaps: list[str] = []
-    if not entity.required_variant_ids:
-        if entity.selected_artifact_version_id is None:
-            gaps.append(f"{ref} 尚无使用中视觉产物")
-        return gaps
-    for required_id in entity.required_variant_ids:
-        variant = entity.variants.items.get(required_id)
-        node = f"visual:{ref}:{required_id}"
-        if variant is None:
-            gaps.append(f"{ref}/{required_id} 尚未定义")
-        elif variant.selected_artifact_version_id is None:
+    for issue in visual_design_readiness_issues(
+        project,
+        element_id=element_id,
+    ):
+        node = None
+        if issue.code == "MISSING_CAST_LINEUP_IMAGE":
+            node = f"lineup:{issue.entity_id}"
+        elif issue.code == "MISSING_SELECTED_ARTIFACT" and issue.variant_id:
+            node = f"visual:{issue.entity_id}:{issue.variant_id}"
+        if node is not None:
             if node not in deps:
                 deps.append(node)
-    if len(entity.required_variant_ids) > 1 and not (
-        creation.visual_variant_refs.get(ref)
-    ):
-        gaps.append(f"{ref} 缺少 variant 绑定")
-    return gaps
-
-
-def _declared_pending_lineup_nodes(project: Project) -> list[str]:
-    """Unselected lineups any enabled element declared, project-wide.
-
-    Mirrors _lineup_readiness_issues exactly: a declared
-    ``cast_lineup_refs`` blocks every storyboard in the project until the
-    lineup artwork is selected.
-    """
-
-    pending: list[str] = []
-    for timeline_id in narrative_timeline_ids(project):
-        timeline = project.timelines.items[timeline_id]
-        for element in timeline.elements_by_id.values():
-            creation = element.creation
-            if not element.enabled or not isinstance(creation, R2VCreation):
-                continue
-            for lineup_ref in creation.cast_lineup_refs:
-                lineup = project.visual.cast_lineups.items.get(lineup_ref)
-                node = f"lineup:{lineup_ref}"
-                if (
-                    lineup is None
-                    or lineup.selected_artifact_version_id is None
-                ) and node not in pending:
-                    pending.append(node)
-    return pending
-
-
-def _covering_lineup_nodes(
-    project: Project,
-    creation: R2VCreation,
-) -> list[str]:
-    """Planned-but-unselected lineups this storyboard should wait for.
-
-    Explicit ``cast_lineup_refs`` always count; otherwise any planned
-    lineup sharing ≥2 characters with the element covers it. Selected
-    lineups resolve to DONE nodes and never block.
-    """
-
-    if len(creation.character_refs) < 2:
-        return []
-    element_cast = set(creation.character_refs)
-    explicit = set(creation.cast_lineup_refs)
-    nodes: list[str] = []
-    for lineup_id in project.visual.cast_lineups.order:
-        lineup = project.visual.cast_lineups.items[lineup_id]
-        covering = lineup_id in explicit or (
-            len(element_cast & set(lineup.character_refs)) >= 2
-        )
-        if covering:
-            nodes.append(f"lineup:{lineup_id}")
-    return nodes
+        else:
+            gaps.append(issue.message())
+    return tuple(gaps)
 
 
 def _entity_has_artwork(entity: Any) -> bool:

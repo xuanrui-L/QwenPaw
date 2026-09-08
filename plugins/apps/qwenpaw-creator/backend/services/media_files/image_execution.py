@@ -832,7 +832,10 @@ def _resolve_request(
             element_id,
             stage="storyboard",
         )
-        assert_visual_design_ready_for_storyboards(project)
+        assert_visual_design_ready_for_storyboards(
+            project,
+            element_id=element_id,
+        )
         prompt = explicit_prompt or creation.storyboard_prompt.strip()
         if not prompt:
             prompt = "，".join(

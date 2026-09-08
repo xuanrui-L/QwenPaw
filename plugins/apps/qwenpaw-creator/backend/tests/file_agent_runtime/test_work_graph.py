@@ -267,7 +267,7 @@ def test_element_lane_storyboard_then_video() -> None:
     project = _project()
     project.visual.entities.items["char:a"] = _entity(
         "char:a",
-        {"var:x": "art:a"},
+        {"var:x": "art:a", "var:later-state": None},
     )
     project.visual.entities.order.append("char:a")
     _add_element(
@@ -372,11 +372,8 @@ def _element_with_landed_storyboard(
     )
 
 
-def test_declared_pending_lineup_gates_every_storyboard() -> None:
-    """Field run 2026-08-12 (27dc): a single-character closing scene
-    derived READY while another element's declared lineup was pending;
-    the executor's project-wide gate rejected the dispatch and the node
-    stalled READY-but-undispatchable until a restart."""
+def test_pending_lineup_only_gates_storyboards_that_reference_it() -> None:
+    """The graph and executor both scope readiness to actual shot inputs."""
 
     project = _project()
     for ref in ("char:a", "char:b"):
@@ -412,10 +409,11 @@ def test_declared_pending_lineup_gates_every_storyboard() -> None:
 
     graph = derive_work_graph(project)
     solo = graph.by_id["storyboard:elem:solo"]
-    assert solo.status is WorkNodeStatus.GATED
-    assert "lineup:lineup:duo" in solo.missing
+    assert solo.status is WorkNodeStatus.READY
+    assert "lineup:lineup:duo" not in solo.deps
+    assert graph.by_id["storyboard:elem:pair"].status is WorkNodeStatus.GATED
 
-    # The lineup lands: every storyboard unblocks together.
+    # Its consuming pair opens only after the required group anchor lands.
     project.visual.cast_lineups.items[
         "lineup:duo"
     ].selected_artifact_version_id = "art:lineup"
