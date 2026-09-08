@@ -764,7 +764,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         )
 
     # ---- Lane: timeline scripts (blueprint script flow) ---------------
-    # 每条 timeline 一个 kind="script" 节点：slot 无版本→READY，selected
+    # 每条 timeline 一个 kind="script" 节点：已发布正文或 selected
     # 版本存在且未 stale→DONE，版本 stale→STALE。剧本流仅在项目启用时
     # 生效（存在 timeline_script slot 或多 timeline）；旧项目（单
     # timeline 且无 script slot）不生成 script 节点，行为零回退。
@@ -792,6 +792,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             node_id,
             timeline.title,
             timeline.synopsis,
+            timeline.description,
             project.strategy.creative_brief,
         )
         if task is not None:
@@ -800,6 +801,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             status = (
                 WorkNodeStatus.STALE if version.stale else WorkNodeStatus.DONE
             )
+        elif slot is None and timeline.description.strip():
+            # The authoring prompt and review UI also publish scripts in
+            # Timeline.description. Do not regenerate an accepted inline
+            # script merely because this project has multiple episodes.
+            # An existing unselected/stale artifact slot remains a gate.
+            status = WorkNodeStatus.DONE
         elif failure is not None and not _failure_inputs_changed(
             failure,
             node_id,

@@ -1156,6 +1156,7 @@ def test_multi_timeline_project_derives_script_nodes_gating_elements() -> None:
 def test_stale_script_version_marks_script_node_stale() -> None:
     project = _project()
     _add_second_timeline(project)
+    project.timelines.items["timeline:ep2"].description = "已有旧正文"
     _select_slot(
         project,
         slot_id="script:timeline:ep2",
@@ -1170,6 +1171,33 @@ def test_stale_script_version_marks_script_node_stale() -> None:
     assert node.status is WorkNodeStatus.STALE
     # STALE is terminal for the scheduler: not READY, not dispatched.
     assert node not in graph.ready_media_nodes()
+
+
+@pytest.mark.parametrize("body", ["已发布正文：孙老四端茶，说完台词。", "", "  \n"])
+def test_authored_episode_body_satisfies_script_dependency(body: str) -> None:
+    project = _project()
+    _add_second_timeline(project)
+    project.timelines.items["timeline:main"].description = body
+    project.timelines.items["timeline:main"].synopsis = "仅梗概不足以制作"
+    _add_element(project, _element("elem:one"))
+
+    graph = derive_work_graph(project)
+    script = graph.by_id["script:timeline:main"]
+    storyboard = graph.by_id["storyboard:elem:one"]
+    assert (script.status is WorkNodeStatus.DONE) == bool(body.strip())
+    assert (storyboard.status is WorkNodeStatus.READY) == bool(body.strip())
+    assert graph.by_id["script:timeline:ep2"].status is WorkNodeStatus.READY
+
+    # Once artifact versioning is used, deselecting/rejecting its result
+    # must not silently fall back to an older inline body.
+    project.assets.artifact_slots_by_id["script:timeline:main"] = ArtifactSlot(
+        slot_id="script:timeline:main",
+        kind="timeline_script",
+        owner_ref="timeline:timeline:main",
+    )
+    graph = derive_work_graph(project)
+    assert graph.by_id["script:timeline:main"].status is WorkNodeStatus.READY
+    assert graph.by_id["storyboard:elem:one"].status is WorkNodeStatus.GATED
 
 
 def test_single_timeline_with_script_slot_opts_into_script_flow() -> None:
