@@ -2049,7 +2049,7 @@ def test_specialist_cancel_emits_terminal_event(
     assert cancelled_event.payload.get("cancelled") is True
 
 
-def test_durable_interrupt_stops_remote_owner_without_restarting_message(
+def test_durable_interrupt_stops_owner_without_restarting_message(
     tmp_path,
 ) -> None:
     async def scenario():
@@ -2073,28 +2073,20 @@ def test_durable_interrupt_stops_remote_owner_without_restarting_message(
         owner.notify(PROJECT_ID)
         await asyncio.wait_for(started.wait(), timeout=2.0)
 
-        # Simulate the stop request landing in another QwenPaw process.  The
-        # durable Session status is the cross-process signal; this coordinator
-        # deliberately has no local handle for the active run.
+        # Persist the stop as an independent request handler would. The owning
+        # runtime must observe it without a direct call to owner.interrupt().
+        # Starting a second runtime here would race its orphan-recovery sweep
+        # against this live owner, outside the supported single-backend model.
         services.sessions.set_session_status(
             PROJECT_ID,
             SESSION_ID,
             "INTERRUPT_REQUESTED",
         )
-        non_owner = _driver(services, blocking_model)
-        await non_owner.start()
-        interrupted_locally = await non_owner.interrupt(
-            PROJECT_ID,
-            reason="remote-stop",
-        )
-        assert interrupted_locally is False
-
         await asyncio.wait_for(cancelled.wait(), timeout=2.0)
         await owner.wait_until_idle(PROJECT_ID)
         await _wait_session_status(services, "CANCELLED")
         session = services.sessions.get_project_session(PROJECT_ID)
         runs = owner.runs.list(PROJECT_ID)
-        await non_owner.stop()
         await owner.stop()
         return session, runs
 
