@@ -38,11 +38,12 @@ FROM ${QWENPAW_BASE_IMAGE}
 
 ARG PYPI_INDEX_URL
 
-# Install geopandas system dependency (not included in official QwenPaw image).
+# Install Creator's jq editing tool and geopandas system dependency.
+# These are not included in the official QwenPaw image.
 # Replace default Debian mirror with Aliyun mirror for faster downloads in China.
 RUN sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
     sed -i 's|http://deb.debian.org|https://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null; \
-    apt-get update && apt-get install -y --fix-missing libgeos-dev \
+    apt-get update && apt-get install -y --fix-missing jq libgeos-dev \
   && rm -rf /var/lib/apt/lists/* \
   && apt-get clean
 
