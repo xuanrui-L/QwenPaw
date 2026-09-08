@@ -229,6 +229,7 @@ class _ToolModel(BaseModel):
 class ReadProjectToolInput(_ToolModel):
     project_id: str = Field(alias="projectId", min_length=1)
     pointer: str | None = None
+    fields: list[str] | None = Field(default=None, min_length=1, max_length=32)
     offset: int = Field(default=0, ge=0)
     max_bytes: int = Field(default=16_384, alias="maxBytes", ge=4, le=32_768)
     expected_etag: str | None = Field(default=None, alias="expectedEtag")
@@ -466,7 +467,9 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": (
             "读取当前 Project 的已验证模型视图（历史快照只列索引，大内容会标明省略）。"
             "可传 pointer 读取任意 JSON Pointer（包括历史快照），按 UTF-8 字节 offset/maxBytes 分页；"
-            "下一页携带返回的 etag 作为 expectedEtag，避免混合不同版本。"
+            "需要续读时直接使用返回的 nextPage 参数（包含 offset 与 expectedEtag），避免混合不同版本。"
+            "核对同一对象的多个字段时优先读取父对象，maxBytes 可取 32768，减少往返回合。"
+            "可用 fields 一次只读取该对象的指定字段，省去不需要的大段提示词或历史内容。"
             "部分视图不能用于整体替换集合，应按稳定 ID 修改；Runtime 始终保有完整提交基线。"
             "并返回 generation 与 ETag。修改前先调用此工具了解当前结构；"
             "jq_project 会自动基于你最近一次读到的快照提交，无需回传 ETag。"
@@ -478,6 +481,13 @@ AGENT_PROJECT_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "pointer": {
                     "type": "string",
                     "description": "JSON Pointer；空字符串代表整个 Project。",
+                },
+                "fields": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "description": "只读取 pointer 所指对象的这些字段；不传则读取完整对象。",
                 },
                 "offset": {"type": "integer", "minimum": 0, "default": 0},
                 "maxBytes": {
@@ -943,9 +953,24 @@ class AgentProjectTools:
         )
         if value is MISSING:
             raise AgentProjectToolError(
-                "Project pointer does not exist",
+                f"Project pointer does not exist: {request.pointer}. "
+                "If user review removed this target, recreate its intended "
+                "content instead of repeating the same read.",
                 code="PROJECT_POINTER_NOT_FOUND",
             )
+        if request.fields is not None:
+            if not isinstance(value, dict):
+                raise AgentProjectToolError(
+                    "fields requires a JSON object pointer",
+                    code="PROJECT_FIELDS_REQUIRE_OBJECT",
+                )
+            missing = [key for key in request.fields if key not in value]
+            if missing:
+                raise AgentProjectToolError(
+                    f"Fields do not exist at {request.pointer or '/'}: {missing}",
+                    code="PROJECT_FIELD_NOT_FOUND",
+                )
+            value = {key: value[key] for key in request.fields}
         raw = json_text(value).encode("utf-8")
         if request.offset > len(raw):
             raise AgentProjectToolError(
@@ -963,6 +988,18 @@ class AgentProjectTools:
                     ) from exc
                 page = page[: exc.start]
         next_offset = request.offset + len(page)
+        next_page = (
+            {
+                "projectId": request.project_id,
+                "pointer": request.pointer or "",
+                "offset": next_offset,
+                "maxBytes": request.max_bytes,
+                "expectedEtag": snapshot.etag,
+                **({"fields": request.fields} if request.fields else {}),
+            }
+            if next_offset < len(raw)
+            else None
+        )
         return {
             "resultKind": "project_value_page",
             "projectId": request.project_id,
@@ -971,6 +1008,7 @@ class AgentProjectTools:
             "pointer": request.pointer,
             "offset": request.offset,
             "nextOffset": next_offset,
+            "nextPage": next_page,
             "eof": next_offset >= len(raw),
             "totalBytes": len(raw),
             "content": content,
@@ -1593,7 +1631,7 @@ class AgentProjectTools:
 
         if tool_name == READ_PROJECT_TOOL_NAME:
             request = ReadProjectToolInput.model_validate(dict(arguments))
-            if request.pointer is not None:
+            if request.pointer is not None or request.fields is not None:
                 return self.read_project_page(request)
             result: BaseModel = self.read_project(request.project_id)
         elif tool_name == READ_PROJECT_FILE_TOOL_NAME:
