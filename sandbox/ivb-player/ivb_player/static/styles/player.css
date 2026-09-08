@@ -31,11 +31,40 @@ button{font-family:inherit;color:inherit;cursor:pointer}
 .hidden{display:none !important}
 
 .screen{position:fixed;inset:0;display:none;align-items:center;justify-content:center}
+body[data-screen="library"] #screen-library,
 body[data-screen="title"]   #screen-title,
 body[data-screen="play"]    #screen-play,
 body[data-screen="map"]     #screen-map,
 body[data-screen="ending"]  #screen-ending{display:flex}
 body[data-screen="loading"] #screen-title{display:flex;opacity:.4}
+
+/* ---------- ⓪ 库页(项目列表) ---------- */
+
+#screen-library{flex-direction:column;align-items:stretch;justify-content:flex-start;
+  padding:2rem 2.5rem;gap:1.4rem;overflow:auto;
+  background:radial-gradient(circle at 50% 0,rgba(var(--ivb-accent-rgb), .07),transparent 55%),var(--ivb-bg)}
+.lib-head{display:flex;align-items:baseline;gap:1.5rem}
+.lib-head h1{margin:0;font-family:var(--ivb-serif);font-size:1.6rem;letter-spacing:.14em}
+.lib-scope{margin-left:auto;display:flex;gap:.5rem}
+.scope-btn{padding:.4rem 1.1rem;font-size:.78rem;letter-spacing:.16em;background:transparent;
+  border:1px solid var(--ivb-line);color:var(--ivb-text-dim);transition:.15s}
+.scope-btn:hover{color:var(--ivb-text);border-color:rgba(var(--ivb-accent-rgb), .5)}
+.scope-btn.active{color:var(--ivb-accent);border-color:var(--ivb-accent);
+  background:rgba(var(--ivb-accent-rgb), .12)}
+.lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:1rem}
+.lib-card{display:flex;flex-direction:column;gap:.5rem;padding:1.1rem 1.2rem;text-align:left;
+  background:var(--ivb-surface);border:1px solid var(--ivb-line);
+  border-left:3px solid var(--ivb-text-dim);transition:.15s}
+.lib-card:hover,.lib-card:focus-visible{background:var(--ivb-surface-alt);
+  border-left-color:var(--ivb-accent);transform:translateY(-2px);outline:none;box-shadow:var(--ivb-glow)}
+.lib-card-title{margin:0;font-family:var(--ivb-serif);font-size:1.1rem;letter-spacing:.03em}
+.lib-card-synopsis{margin:0;font-size:.8rem;line-height:1.7;color:var(--ivb-text-dim);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.lib-card-meta{margin:0;font-family:var(--ivb-mono);font-size:.68rem;color:var(--ivb-text-dim)}
+.lib-card-owner{font-family:var(--ivb-mono);font-size:.62rem;letter-spacing:.1em;
+  color:var(--ivb-text-dim);opacity:.75}
+.lib-empty{margin:1rem 0;font-family:var(--ivb-mono);font-size:.8rem;
+  color:var(--ivb-text-dim);text-align:center}
 
 /* ---------- ① 标题屏 ---------- */
 

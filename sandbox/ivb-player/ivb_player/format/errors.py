@@ -179,7 +179,10 @@ def make(
         )
         message = f"{message}({rendered})"
     return Diagnostic(
-        code=code, severity=severity, where=where, message=message
+        code=code,
+        severity=severity,
+        where=where,
+        message=message,
     )
 
 

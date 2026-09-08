@@ -203,6 +203,8 @@ def _apply_breaches(
     manifest: dict[str, Any],
     spec: BundleSpec,
 ) -> dict[str, Any]:
+    # 每个 breach 一个分支,是破坏性开关表的固有形态。
+    # pylint: disable=too-many-branches
     #: 文件级破坏不碰 manifest,由 write_* 自己处理。
     file_level = {"missing_segment_file", "empty_segment"}
     for breach in (b for b in spec.breaches if b not in file_level):
@@ -214,7 +216,7 @@ def _apply_breaches(
             manifest["entry_timeline_id"] = "timeline:nowhere"
         elif breach == "cycle":
             manifest["nodes"]["timeline:counter"]["children"] = [
-                "timeline:open"
+                "timeline:open",
             ]
             manifest["nodes"]["timeline:counter"]["is_ending"] = False
         elif breach == "unreachable":
@@ -264,7 +266,7 @@ def write_bundle_dir(target: Path, spec: BundleSpec | None = None) -> Path:
     )
     for timeline_id, path in manifest["segments"].items():
         (target / path).write_bytes(
-            fake_mp4(spec.durations.get(timeline_id, 10.0))
+            fake_mp4(spec.durations.get(timeline_id, 10.0)),
         )
     if spec.presentation is not None:
         (target / "presentation.json").write_text(
@@ -322,7 +324,8 @@ def write_demo_bundle(target: Path) -> Path:
     write_bundle_dir(directory, spec)
     (directory / "styles").mkdir(exist_ok=True)
     (directory / "styles" / "demo.css").write_text(
-        DEMO_THEME_CSS, encoding="utf-8"
+        DEMO_THEME_CSS,
+        encoding="utf-8",
     )
     if target.suffix != ".zip":
         return directory

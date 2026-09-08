@@ -52,7 +52,7 @@ class BundleError(ValueError):
         self.diagnostics = diagnostics
         fatal = [d for d in diagnostics if d.is_fatal]
         super().__init__(
-            "; ".join(str(d) for d in fatal) or "bundle is invalid"
+            "; ".join(str(d) for d in fatal) or "bundle is invalid",
         )
 
 
@@ -155,6 +155,8 @@ class ZipBundleSource(BundleSource):
     """zip 入口。条目名按字面查表,不做路径运算。"""
 
     def __init__(self, path: Path) -> None:
+        # 归档句柄的生命周期由本类 close() 显式管理,不在此处 with。
+        # pylint: disable=consider-using-with
         self.path = path
         self.label = str(path)
         self._archive = zipfile.ZipFile(path)
@@ -225,7 +227,7 @@ def open_source(path: str | Path) -> BundleSource:
                     "BUNDLE_UNREADABLE",
                     str(target),
                     f"{type(exc).__name__}: {exc}",
-                )
+                ),
             ],
         ) from exc
 
@@ -242,6 +244,8 @@ def probe_mp4_duration(source: BundleSource, name: str) -> float | None:
     不一定),所以读失败只降级为警告。
     """
 
+    # 多处"读不到就 return None"是探测降级的自然形态,不强凑返回数。
+    # pylint: disable=too-many-return-statements
     try:
         blob = source.read_bytes(name)[: 2 * 1024 * 1024]
     except (KeyError, OSError):
@@ -329,7 +333,9 @@ def _check_top_level(
     if version is None:
         sink.append(
             errors.make(
-                "MANIFEST_FIELD_MISSING", where, field="schema_version"
+                "MANIFEST_FIELD_MISSING",
+                where,
+                field="schema_version",
             ),
         )
         ok = False
@@ -362,12 +368,12 @@ def _check_top_level(
     ):
         if key not in raw:
             sink.append(
-                errors.make("MANIFEST_FIELD_MISSING", where, field=key)
+                errors.make("MANIFEST_FIELD_MISSING", where, field=key),
             )
             ok = False
     if not isinstance(raw.get("segments"), dict):
         sink.append(
-            errors.make("MANIFEST_FIELD_TYPE", where, field="segments")
+            errors.make("MANIFEST_FIELD_TYPE", where, field="segments"),
         )
         ok = False
     if not isinstance(raw.get("nodes"), dict):
@@ -375,7 +381,7 @@ def _check_top_level(
         ok = False
     if not isinstance(raw.get("interactions"), list):
         sink.append(
-            errors.make("MANIFEST_FIELD_TYPE", where, field="interactions")
+            errors.make("MANIFEST_FIELD_TYPE", where, field="interactions"),
         )
         ok = False
     if not isinstance(raw.get("meta"), dict):
@@ -383,7 +389,7 @@ def _check_top_level(
         ok = False
     if not isinstance(raw.get("edge_index", {}), dict):
         sink.append(
-            errors.make("MANIFEST_FIELD_TYPE", where, field="edge_index")
+            errors.make("MANIFEST_FIELD_TYPE", where, field="edge_index"),
         )
         ok = False
     return ok
@@ -398,7 +404,7 @@ def _parse_meta(
     bundle_id = str(meta_raw.get("bundle_id") or "")
     if not bundle_id:
         sink.append(
-            errors.make("META_FIELD_MISSING", where, field="bundle_id")
+            errors.make("META_FIELD_MISSING", where, field="bundle_id"),
         )
     if bundle_id and not BundleMeta(bundle_id, "", "").is_path_safe:
         sink.append(errors.make("BUNDLE_ID_MALFORMED", where, value=bundle_id))
@@ -410,7 +416,7 @@ def _parse_meta(
         sink.append(
             errors.make("ACCENT_MALFORMED", where, value=accent or "(空)"),
         )
-        accent = Theme.accent
+        accent = BUILTIN_THEME.accent
     return BundleMeta(
         bundle_id=bundle_id,
         title=title,
@@ -437,7 +443,7 @@ def _parse_nodes(
         where = f"nodes[{timeline_id}]"
         if not isinstance(item, dict):
             sink.append(
-                errors.make("NODE_FIELD_MISSING", where, "节点不是对象")
+                errors.make("NODE_FIELD_MISSING", where, "节点不是对象"),
             )
             continue
         children_raw = item.get("children", [])
@@ -472,7 +478,9 @@ def _parse_edges(
         if not target:
             sink.append(
                 errors.make(
-                    "EDGE_FIELD_MISSING", where, field="target_timeline_id"
+                    "EDGE_FIELD_MISSING",
+                    where,
+                    field="target_timeline_id",
                 ),
             )
         tone = item.get("tone")
@@ -495,7 +503,7 @@ def _parse_interactions(
         where = f"interactions[{position}]"
         if not isinstance(item, dict):
             sink.append(
-                errors.make("MANIFEST_FIELD_TYPE", where, "抉择点不是对象")
+                errors.make("MANIFEST_FIELD_TYPE", where, "抉择点不是对象"),
             )
             continue
         options: list[OptionRef] = []
@@ -547,6 +555,8 @@ def _parse_presentation(
     source: BundleSource,
     sink: list[Diagnostic],
 ) -> Presentation:
+    # theme / screens / stylesheets 三段各自带校验分支,合并超限;拆开反割裂。
+    # pylint: disable=too-many-branches
     if not source.names() or PRESENTATION_NAME not in source.names():
         return Presentation()
     where = PRESENTATION_NAME
@@ -559,7 +569,7 @@ def _parse_presentation(
         return Presentation(present=True)
     if not isinstance(raw, dict):
         sink.append(
-            errors.make("PRESENTATION_UNREADABLE", where, "顶层不是对象")
+            errors.make("PRESENTATION_UNREADABLE", where, "顶层不是对象"),
         )
         return Presentation(present=True)
     version = raw.get("schema_version")
@@ -629,8 +639,10 @@ def _parse_presentation(
             if not name or not is_safe_member_name(name):
                 sink.append(
                     errors.make(
-                        "PATH_ESCAPE", f"{where}.stylesheets", value=name
-                    )
+                        "PATH_ESCAPE",
+                        f"{where}.stylesheets",
+                        value=name,
+                    ),
                 )
                 continue
             if name not in members:
@@ -639,7 +651,7 @@ def _parse_presentation(
                         "STYLESHEET_MISSING",
                         f"{where}.stylesheets",
                         value=name,
-                    )
+                    ),
                 )
                 continue
             stylesheets.append(name)
@@ -720,7 +732,7 @@ def inspect_bundle(path: str | Path) -> Inspection:
     for name in sorted(members):
         if not is_safe_member_name(name):
             diagnostics.append(
-                errors.make("PATH_ESCAPE", source.label, value=name)
+                errors.make("PATH_ESCAPE", source.label, value=name),
             )
 
     where = f"{source.label}/{MANIFEST_NAME}"
@@ -770,7 +782,7 @@ def inspect_bundle(path: str | Path) -> Inspection:
         bundle = Bundle(
             meta=meta,
             schema_version=int(
-                raw.get("schema_version", MIN_SUPPORTED_SCHEMA_VERSION)
+                raw.get("schema_version", MIN_SUPPORTED_SCHEMA_VERSION),
             ),
             entry_timeline_id=str(raw.get("entry_timeline_id") or ""),
             nodes=nodes,

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=wrong-import-position,redefined-outer-name
 """跨端契约:Creator 导出器产出的 zip 必须被放映端原样读通。
 
 本文件不复制 Creator 的逻辑,而是 **真的调用它的导出器**,再把字节流交给
@@ -42,6 +43,7 @@ from ivb_player.format.model import (  # noqa: E402
     DEFAULT_BADGE_LABELS,
 )
 from ivb_player.server.app import create_app  # noqa: E402
+from ivb_player.state.store import ANONYMOUS_USER_ID  # noqa: E402
 from ivb_player.testing import fake_mp4  # noqa: E402
 
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
@@ -73,18 +75,18 @@ def _attach_final_cut(project, timeline_id: str, payload: bytes) -> str:
         version_ids=[version_id],
         selected_version_id=version_id,
     )
-    project.assets.artifact_versions_by_id[version_id] = (
-        models.ArtifactVersion(
-            version_id=version_id,
-            slot_id=slot_id,
-            kind="final_video",
-            owner_ref=f"timeline:{timeline_id}",
-            name=f"{timeline_id} final",
-            file_id=file_id,
-            checksum=_sha(payload),
-            based_on_generation=0,
-            created_at=NOW,
-        )
+    project.assets.artifact_versions_by_id[
+        version_id
+    ] = models.ArtifactVersion(
+        version_id=version_id,
+        slot_id=slot_id,
+        kind="final_video",
+        owner_ref=f"timeline:{timeline_id}",
+        name=f"{timeline_id} final",
+        file_id=file_id,
+        checksum=_sha(payload),
+        based_on_generation=0,
+        created_at=NOW,
     )
     return file_id
 
@@ -124,7 +126,8 @@ def _export_creator_bundle(tmp_path: Path) -> Path:
             synopsis="真相大白，正义得到伸张。",
         ),
         "tl:ep4b": models.Timeline(
-            timeline_id="tl:ep4b", title="第4集B · 沉默代价"
+            timeline_id="tl:ep4b",
+            title="第4集B · 沉默代价",
         ),
     }
     project = models.Project(
@@ -232,13 +235,14 @@ def test_badge_labels_are_one_source_across_both_players():
     assert bundle_mod.TONE_BADGES == DEFAULT_BADGE_LABELS
 
 
-def test_player_server_boots_on_the_creator_export(exported):
+def test_player_server_boots_on_the_creator_export(exported, library):
     """放映端服务能直接吃下 Creator 的 zip,并且选项文案已 join 到位。"""
 
-    client = create_app(exported)
-    http = pytest.importorskip("fastapi.testclient").TestClient(client)
+    library.install(exported, owner_user_id=ANONYMOUS_USER_ID)
+    app = create_app(library.data_dir)
+    http = pytest.importorskip("fastapi.testclient").TestClient(app)
 
-    payload = http.get("/api/bundle").json()
+    payload = http.get("/api/projects/project-contract/bundle").json()
     assert payload["bundle_id"] == "project-contract"
     assert (
         payload["theme_css_vars"]["--ivb-accent"] == bundle_mod.DEFAULT_ACCENT
@@ -254,7 +258,8 @@ def test_player_server_boots_on_the_creator_export(exported):
     ]
 
     segment = http.get(
-        "/api/bundle/segments/tl_ep3.mp4", headers={"Range": "bytes=0-99"}
+        "/api/projects/project-contract/segments/tl_ep3.mp4",
+        headers={"Range": "bytes=0-99"},
     )
     assert segment.status_code == 206
     assert len(segment.content) == 100

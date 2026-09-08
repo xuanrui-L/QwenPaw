@@ -20,6 +20,8 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    # POST /api/projects 的 multipart 上传依赖它(Form/File)。
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

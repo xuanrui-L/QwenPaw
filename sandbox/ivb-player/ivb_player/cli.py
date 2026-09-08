@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=wrong-import-position
 """``ivb`` 命令行。
 
 ::
 
     ivb validate <包路径> [--json]     只跑校验,退出码反映结论
     ivb info     <包路径>              故事树摘要
-    ivb serve    <包路径> [--port]     起放映服务
+    ivb serve    <data_dir> [--port]   起多包放映服务
     ivb demo     [--out demo.zip]      产一个免 Creator 的开箱包
 """
 
@@ -95,23 +96,12 @@ def cmd_info(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     from ivb_player.server.app import create_app
 
-    try:
-        app = create_app(args.bundle, db_path=args.db)
-    except BundleError as exc:
-        print("包不可放映:", file=sys.stderr)
-        for diagnostic in exc.diagnostics:
-            print(f"  {diagnostic}", file=sys.stderr)
-        return 1
-    service = app.state.service
-    bundle = service.bundle
-    print(f"放映 {bundle.meta.title} ·  {bundle.bundle_id}")
-    print(f"  包   {service.path}")
-    print(f"  状态 {service.store.db_path}")
-    print(f"  http://127.0.0.1:{args.port}/")
-    if service.inspection.warnings:
-        print(
-            f"  {len(service.inspection.warnings)} 条告警,`ivb validate` 查看"
-        )
+    app = create_app(args.data, db_path=args.db)
+    library = app.state.library
+    print(f"放映库 {library.data_dir}")
+    print(f"  状态 {library.db_path}")
+    print(f"  项目 {len(library.list_projects())} 个")
+    print(f"  http://{args.host}:{args.port}/")
     import uvicorn
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
@@ -122,16 +112,30 @@ def cmd_demo(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser().resolve()
     write_demo_bundle(out)
     print(f"已生成开箱包 {out}")
-    if args.serve:
-        return cmd_serve(
-            argparse.Namespace(
-                bundle=str(out),
-                host=args.host,
-                port=args.port,
-                db=args.db,
-            ),
-        )
-    return 0
+    if not args.serve:
+        return 0
+
+    from ivb_player.server.library import ProjectLibrary
+    from ivb_player.state.store import ANONYMOUS_USER_ID
+
+    data_dir = Path(args.data).expanduser().resolve()
+    library = ProjectLibrary(data_dir, db_path=args.db)
+    try:
+        record = library.install(out, owner_user_id=ANONYMOUS_USER_ID)
+    except BundleError as exc:
+        print("开箱包校验失败:", file=sys.stderr)
+        for diagnostic in exc.diagnostics:
+            print(f"  {diagnostic}", file=sys.stderr)
+        return 1
+    print(f"已收编 {record.project_id} 进 {data_dir}")
+    return cmd_serve(
+        argparse.Namespace(
+            data=str(data_dir),
+            host=args.host,
+            port=args.port,
+            db=args.db,
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -150,22 +154,27 @@ def build_parser() -> argparse.ArgumentParser:
         spin.add_argument("--verbose", "-v", action="store_true")
         if name == "validate":
             spin.add_argument(
-                "--json", action="store_true", help="输出机器可读报告"
+                "--json",
+                action="store_true",
+                help="输出机器可读报告",
             )
         spin.set_defaults(func=handler)
 
-    serve = sub.add_parser("serve", help="起本地放映服务")
-    serve.add_argument("bundle")
+    serve = sub.add_parser("serve", help="起多包放映服务")
+    serve.add_argument("data", help="放映库目录 data_dir")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8766)
     serve.add_argument(
-        "--db", default=None, help="state.db 路径,默认与包同目录"
+        "--db",
+        default=None,
+        help="ivb.db 路径,默认 data_dir/ivb.db",
     )
     serve.set_defaults(func=cmd_serve)
 
     demo = sub.add_parser("demo", help="产一个免 Creator 的开箱包")
     demo.add_argument("--out", default="demo.ivb.zip")
     demo.add_argument("--serve", action="store_true", help="生成后直接起服务")
+    demo.add_argument("--data", default="ivb-data", help="放映库目录 data_dir")
     demo.add_argument("--host", default="127.0.0.1")
     demo.add_argument("--port", type=int, default=8766)
     demo.add_argument("--db", default=None)

@@ -11,9 +11,10 @@
   const el = (id) => document.getElementById(id);
   const dom = {};
   [
+    "screen-library", "lib-grid", "lib-empty", "lib-scope-all", "lib-scope-mine",
     "screen-title", "screen-play", "screen-map", "screen-ending",
     "title-name", "title-tagline", "title-synopsis", "title-stats",
-    "btn-start", "btn-resume", "btn-map-from-title", "btn-reset",
+    "btn-start", "btn-resume", "btn-map-from-title", "btn-library", "btn-reset",
     "foot-bundle", "foot-warnings",
     "stage", "hud-node", "btn-map", "btn-title",
     "choice-overlay", "choice-question", "choice-timer", "choice-count",
@@ -26,6 +27,7 @@
   ].forEach((id) => { dom[id] = el(id); });
 
   const S = {
+    pid: null,
     bundle: null,
     progress: { visited: [], endings: [], path: [], current_timeline: "" },
     current: null,
@@ -42,6 +44,10 @@
 
   function showScreen(name) {
     document.body.dataset.screen = name;
+    // 离开放映屏(map / title / ending)时暂停视频。包内只有 #stage 这一路内嵌
+    // 音轨,不暂停的话切到地图或标题后声音还在放;之前只有返回库靠整页刷新才
+    // 停。回到 play 由各自调用方重新 play(),这里只管暂停出口。
+    if (name !== "play" && dom.stage && !dom.stage.paused) dom.stage.pause();
   }
 
   let toastTimer = null;
@@ -71,7 +77,7 @@
 
   function segmentUrl(node) {
     if (!node.segment) return "";
-    return "/api/bundle/segments/" + node.segment.split("/").pop();
+    return global.Api.segmentUrl(S.pid, node.segment.split("/").pop());
   }
 
   function interactionsOf(timelineId) {
@@ -138,7 +144,7 @@
   }
 
   async function refreshProgress() {
-    S.progress = await global.Api.progress() || S.progress;
+    S.progress = await global.Api.progress(S.pid) || S.progress;
   }
 
   // ---------- ② 播放屏 ----------
@@ -148,7 +154,7 @@
     const seconds = S.watched;
     S.watched = 0;
     try {
-      await global.Api.watch(S.current, seconds);
+      await global.Api.watch(S.pid, S.current, seconds);
     } catch (error) {
       console.warn("回写观看秒数失败", error);
     }
@@ -169,8 +175,8 @@
     showScreen("play");
     dom["hud-node"].textContent = node.title;
     try {
-      await global.Api.visit(timelineId, viaEdge || null);
-      S.progress = await global.Api.progress();
+      await global.Api.visit(S.pid, timelineId, viaEdge || null);
+      S.progress = await global.Api.progress(S.pid);
     } catch (error) {
       console.warn("进度未落库", error);
     }
@@ -299,7 +305,7 @@
       return;
     }
     try {
-      await global.Api.choice(point.source_timeline_id, edgeRef);
+      await global.Api.choice(S.pid, point.source_timeline_id, edgeRef);
     } catch (error) {
       console.warn("抉择未落库", error);
     }
@@ -341,7 +347,7 @@
     await commitWatch();
     let firstTime = false;
     try {
-      const result = await global.Api.ending(timelineId);
+      const result = await global.Api.ending(S.pid, timelineId);
       firstTime = !!(result && result.first_time);
       await refreshProgress();
     } catch (error) {
@@ -578,11 +584,14 @@
     });
     dom["btn-reset"].addEventListener("click", async () => {
       if (!global.confirm("清空全部进度、结局与抉择统计?")) return;
-      const result = await global.Api.reset();
+      const result = await global.Api.reset(S.pid);
       await refreshProgress();
       renderTitle();
       const deleted = (result && result.deleted) || {};
       toast("已清空(删除 " + (deleted.visits || 0) + " 条访问记录)");
+    });
+    dom["btn-library"].addEventListener("click", () => {
+      global.location.search = "";
     });
     [["btn-map-from-title", "title"], ["btn-map", "play"], ["btn-ending-map", "ending"]]
       .forEach(([id, returnTo]) => {
@@ -630,9 +639,70 @@
     });
   }
 
-  async function boot() {
+  // ---------- ⓪ 库页 ----------
+
+  function currentPid() {
+    return new URLSearchParams(global.location.search).get("p");
+  }
+
+  function projectCard(project) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "lib-card";
+    const title = document.createElement("h2");
+    title.className = "lib-card-title";
+    title.textContent = project.title || project.project_id;
+    const synopsis = document.createElement("p");
+    synopsis.className = "lib-card-synopsis";
+    synopsis.textContent = project.synopsis || "";
+    const meta = document.createElement("p");
+    meta.className = "lib-card-meta";
+    meta.textContent = "节点 " + project.node_count
+      + " · 结局 " + project.ending_count
+      + " · 抉择 " + project.interaction_count;
+    const owner = document.createElement("span");
+    owner.className = "lib-card-owner";
+    owner.textContent = "上传者 " + project.owner_user_id;
+    card.append(title, synopsis, meta, owner);
+    // 点卡片 = 带 ?p={pid} 重新载入,进该项目放映页(可分享、可后退)。
+    card.addEventListener("click", () => {
+      global.location.search = "?p=" + encodeURIComponent(project.project_id);
+    });
+    return card;
+  }
+
+  async function renderLibrary(scope) {
+    dom["lib-scope-all"].classList.toggle("active", scope !== "mine");
+    dom["lib-scope-mine"].classList.toggle("active", scope === "mine");
+    let payload;
     try {
-      const bundle = await global.Api.bundle();
+      payload = await global.Api.projects(scope);
+    } catch (error) {
+      fail("库列表加载失败", [String(error && error.message ? error.message : error)]);
+      return;
+    }
+    const projects = (payload && payload.projects) || [];
+    dom["lib-grid"].innerHTML = "";
+    dom["lib-empty"].classList.toggle("hidden", projects.length > 0);
+    projects.forEach((project) => {
+      dom["lib-grid"].appendChild(projectCard(project));
+    });
+  }
+
+  function wireLibrary() {
+    dom["lib-scope-all"].addEventListener("click", () => renderLibrary("all"));
+    dom["lib-scope-mine"].addEventListener("click", () => renderLibrary("mine"));
+  }
+
+  async function bootLibrary() {
+    showScreen("library");
+    wireLibrary();
+    await renderLibrary("all");
+  }
+
+  async function bootPlayer(pid) {
+    try {
+      const bundle = await global.Api.bundle(pid);
       S.bundle = bundle;
       await applyPresentation(bundle);
       await refreshProgress();
@@ -643,6 +713,16 @@
       console.error(error);
       fail("包无法放映", [String(error && error.message ? error.message : error),
         "服务端可能没找到包,或包未通过结构校验。试试 ivb validate <包路径>"]);
+    }
+  }
+
+  async function boot() {
+    const pid = currentPid();
+    if (pid) {
+      S.pid = pid;
+      await bootPlayer(pid);
+    } else {
+      await bootLibrary();
     }
   }
 

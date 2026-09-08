@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# pylint: disable=wrong-import-position,redefined-outer-name
 from __future__ import annotations
 
 import sys
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from ivb_player.server.library import ProjectLibrary  # noqa: E402
 from ivb_player.testing import (  # noqa: E402
     BundleSpec,
     write_bundle_dir,
@@ -46,3 +48,15 @@ def make_dir(tmp_path):
         return write_bundle_dir(tmp_path / name, BundleSpec(**kwargs))
 
     return _make
+
+
+@pytest.fixture
+def data_dir(tmp_path):
+    return tmp_path / "data"
+
+
+@pytest.fixture
+def library(data_dir):
+    """一个空的多包库(data_dir 已建,尚未装包)。"""
+
+    return ProjectLibrary(data_dir)

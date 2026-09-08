@@ -83,7 +83,7 @@ def test_stream_matches_full_read_for_both_sources(tmp_path):
             whole = source.read_bytes(name)
             head = b"".join(source.stream(name, 0, 19))
             tail = b"".join(
-                source.stream(name, len(whole) - 8, len(whole) - 1)
+                source.stream(name, len(whole) - 8, len(whole) - 1),
             )
             mid = b"".join(source.stream(name, 30, 70))
         assert head == whole[:20]

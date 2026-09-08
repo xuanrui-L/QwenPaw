@@ -4,9 +4,22 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>IVB 放映</title>
-<link rel="stylesheet" href="/assets/styles/player.css"/>
+<link rel="stylesheet" href="assets/styles/player.css"/>
 </head>
 <body data-screen="loading">
+
+<!-- ⓪ 库页(项目列表) -->
+<section id="screen-library" class="screen">
+  <header class="lib-head">
+    <h1>互动视频库</h1>
+    <div class="lib-scope">
+      <button id="lib-scope-all" class="scope-btn" type="button">全部</button>
+      <button id="lib-scope-mine" class="scope-btn" type="button">我的</button>
+    </div>
+  </header>
+  <div id="lib-grid" class="lib-grid"></div>
+  <p id="lib-empty" class="lib-empty hidden">还没有项目。通过 POST /api/projects 上传 Creator 导出的互动视频包。</p>
+</section>
 
 <!-- ① 标题屏 -->
 <section id="screen-title" class="screen">
@@ -20,6 +33,7 @@
       <button id="btn-start" class="cta" type="button">开始游戏</button>
       <button id="btn-resume" class="ghost hidden" type="button">继续上次</button>
       <button id="btn-map-from-title" class="ghost" type="button">剧情地图</button>
+      <button id="btn-library" class="ghost" type="button">返回库</button>
       <button id="btn-reset" class="ghost danger hidden" type="button">重新开始</button>
     </div>
   </div>
@@ -98,7 +112,7 @@
 <div id="toast" class="hidden"></div>
 <div id="fatal" class="hidden"></div>
 
-<script src="/assets/state.js"></script>
-<script src="/assets/app.js"></script>
+<script src="assets/state.js"></script>
+<script src="assets/app.js"></script>
 </body>
 </html>

@@ -17,7 +17,7 @@ def codes(diagnostics) -> set[str]:
 
 def inspect_dir(tmp_path, name, **kwargs):
     return inspect_bundle(
-        write_bundle_dir(tmp_path / name, BundleSpec(**kwargs))
+        write_bundle_dir(tmp_path / name, BundleSpec(**kwargs)),
     )
 
 
@@ -66,7 +66,7 @@ def test_missing_segment_file_is_fatal(tmp_path, entry):
         inspect_bundle(write_bundle_dir(tmp_path / "m", BundleSpec(**kwargs)))
         if entry == "dir"
         else inspect_bundle(
-            write_bundle_zip(tmp_path / "m.zip", BundleSpec(**kwargs))
+            write_bundle_zip(tmp_path / "m.zip", BundleSpec(**kwargs)),
         )
     )
     assert "SEGMENT_MISSING" in codes(inspection.fatal)
@@ -80,7 +80,7 @@ def test_empty_segment_is_fatal(tmp_path, entry):
         inspect_bundle(write_bundle_dir(tmp_path / "e", BundleSpec(**kwargs)))
         if entry == "dir"
         else inspect_bundle(
-            write_bundle_zip(tmp_path / "e.zip", BundleSpec(**kwargs))
+            write_bundle_zip(tmp_path / "e.zip", BundleSpec(**kwargs)),
         )
     )
     assert "SEGMENT_EMPTY" in codes(inspection.fatal)
@@ -135,7 +135,9 @@ def test_at_seconds_overrun_does_not_kill_the_bundle(tmp_path):
     不能废包(Creator 真实包的 at_seconds 就是 88.0 这种大值)。"""
 
     inspection = inspect_dir(
-        tmp_path, "overrun", breaches=("at_seconds_overrun",)
+        tmp_path,
+        "overrun",
+        breaches=("at_seconds_overrun",),
     )
     assert "AT_SECONDS_OUT_OF_RANGE" in codes(inspection.warnings)
     assert not inspection.fatal

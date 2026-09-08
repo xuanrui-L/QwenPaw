@@ -84,7 +84,9 @@ def _check_shape(
         if len(set(node.children)) != len(node.children):
             sink.append(
                 errors.make(
-                    "UNKNOWN_CHILD", where, detail="children 含重复项"
+                    "UNKNOWN_CHILD",
+                    where,
+                    detail="children 含重复项",
                 ),
             )
 
@@ -133,6 +135,8 @@ def _check_interactions(
     sink: list[Diagnostic],
     durations: Mapping[str, float],
 ) -> None:
+    # 每条规则顺序 append 诊断,分支多是校验函数的固有形态。
+    # pylint: disable=too-many-branches
     seen_by_source: dict[str, list[float]] = {}
     for position, point in enumerate(bundle.interactions):
         where = f"interactions[{position}]"
@@ -157,7 +161,7 @@ def _check_interactions(
         refs = point.option_edges()
         if len(set(refs)) != len(refs):
             sink.append(
-                errors.make("DUPLICATE_OPTION", where, refs=list(refs))
+                errors.make("DUPLICATE_OPTION", where, refs=list(refs)),
             )
         for option in point.options:
             if option.edge_ref not in bundle.edges:
@@ -223,6 +227,8 @@ def _check_graph(
 ) -> None:
     """DAG 三约束:无环、单根、全可达。"""
 
+    # 三色 DFS + 入度 + 可达性三段各带分支,合起来超限;拆开会割裂语义。
+    # pylint: disable=too-many-branches
     adjacency = {
         timeline_id: [
             child for child in node.children if child in bundle.nodes

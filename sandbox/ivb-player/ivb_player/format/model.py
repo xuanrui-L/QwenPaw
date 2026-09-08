@@ -219,7 +219,8 @@ class Bundle:
         )
 
     def interactions_of(
-        self, timeline_id: str
+        self,
+        timeline_id: str,
     ) -> tuple[InteractionPoint, ...]:
         return tuple(
             point
