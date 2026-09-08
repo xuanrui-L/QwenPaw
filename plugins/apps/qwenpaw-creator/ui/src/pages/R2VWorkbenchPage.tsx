@@ -469,6 +469,8 @@ export function WorkbenchSurface({
       return;
     }
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryAttempt = 0;
     // Prompt-only edits do not change reference identities. Keep their
     // verified images during refresh; actual binding changes clear them.
     if (previousReferenceIdentity.current !== referenceIdentity) {
@@ -476,17 +478,28 @@ export function WorkbenchSurface({
       setStoryboardReferenceOrder(null);
       previousReferenceIdentity.current = referenceIdentity;
     }
-    Promise.allSettled([
-      getR2VReferenceOrder(projectId, elementId),
-      getR2VReferenceOrder(projectId, elementId, "storyboard"),
-    ])
-      .then(([video, storyboard]) => {
-        if (cancelled) return;
+    const refresh = async () => {
+      const [video, storyboard] = await Promise.allSettled([
+        getR2VReferenceOrder(projectId, elementId),
+        getR2VReferenceOrder(projectId, elementId, "storyboard"),
+      ]);
+      if (cancelled) return;
+      const retryable = (result: PromiseSettledResult<unknown>) =>
+        result.status === "rejected" &&
+        (!(result.reason instanceof CreatorHttpError) ||
+          result.reason.status >= 500 ||
+          result.reason.status === 429 ||
+          (result.reason.status === 404 &&
+            result.reason.code !== "NOT_FOUND"));
+      // A temporarily unavailable backend does not unbind verified media.
+      // Retry without requiring another project edit or reopening the page.
+      if (!retryable(video))
         setReferenceOrder(
           video.status === "fulfilled" && Array.isArray(video.value?.references)
             ? video.value
             : null,
         );
+      if (!retryable(storyboard))
         setStoryboardReferenceOrder(
           storyboard.status === "fulfilled" &&
             storyboard.value?.stage === "storyboard" &&
@@ -494,12 +507,19 @@ export function WorkbenchSurface({
             ? storyboard.value
             : null,
         );
-      })
-      .catch(() => {
-        if (!cancelled) setReferenceOrder(null);
-      });
+      if (
+        (retryable(video) || retryable(storyboard)) &&
+        retryAttempt < 8
+      )
+        retryTimer = setTimeout(
+          () => void refresh(),
+          Math.min(30_000, 1000 * 2 ** retryAttempt++),
+        );
+    };
+    void refresh();
     return () => {
       cancelled = true;
+      clearTimeout(retryTimer);
     };
   }, [projectId, elementId, generationMode, generation, referenceIdentity]);
 

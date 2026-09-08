@@ -2019,13 +2019,13 @@
     "episodeState": {
       "done": "已成片",
       "run": "生成中",
-      "wait": "剧本就绪",
+      "wait": "剧本已写入",
       "idle": "规划中"
     },
     "episodeStatus": {
       "done": "已成片",
       "run": "生成中",
-      "wait": "剧本待审",
+      "wait": "剧本已写入",
       "scriptStale": "剧本已过期",
       "idle": "待起草"
     },

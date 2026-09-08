@@ -2019,13 +2019,13 @@
     "episodeState": {
       "done": "Final cut ready",
       "run": "Generating",
-      "wait": "Script ready",
+      "wait": "Script written",
       "idle": "Planning"
     },
     "episodeStatus": {
       "done": "Final cut ready",
       "run": "Generating",
-      "wait": "Script in review",
+      "wait": "Script written",
       "scriptStale": "Script stale",
       "idle": "To draft"
     },
