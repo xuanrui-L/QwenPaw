@@ -439,6 +439,7 @@ def test_scenario_steers_how_the_voice_is_used(monkeypatch) -> None:
     )
     assert "短剧" in drama
     assert "角色台词" in drama
+    assert "不再叠加一份 TTS 台词" in drama
     edit = _specialist_prompt(
         SpecialistRole.AI_EDITING_DIRECTOR,
         _project("video_edit"),
@@ -448,3 +449,31 @@ def test_scenario_steers_how_the_voice_is_used(monkeypatch) -> None:
     # Roles outside the media pipeline never hear about TTS.
     other = _specialist_prompt(SpecialistRole.SOURCE_INTELLIGENCE)
     assert "tts_generation" not in other
+
+
+@pytest.mark.parametrize(
+    ("video_model", "backend", "supports_reference_voice"),
+    [
+        ("wan3.0-video-prime", "wan", True),
+        ("wan2.7-r2v", "wan", True),
+        ("happyhorse-1.1-r2v", "happyhorse", False),
+    ],
+)
+def test_native_dialogue_voice_guidance_matches_video_capability(
+    monkeypatch,
+    video_model,
+    backend,
+    supports_reference_voice,
+) -> None:
+    _tts(monkeypatch, model="qwen-audio-3.0-tts-flash")
+    monkeypatch.setattr(
+        model_config, "get_video_model_name", lambda: video_model
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: backend)
+    prompt = render_creator_system_prompt(project_id="project-guidance-test")
+    assert ("当前视频模型支持参考音色" in prompt) is supports_reference_voice
+    assert (
+        "voice.sample_source_version_id" in prompt
+    ) is supports_reference_voice
+    # Lack of a system TTS voice must not disable native video dialogue.
+    assert "通过 TTS 合成配音必须" in prompt
