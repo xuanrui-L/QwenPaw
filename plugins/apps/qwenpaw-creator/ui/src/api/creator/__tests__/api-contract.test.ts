@@ -249,6 +249,53 @@ const FILE_RUNTIME_EVENT_TYPES = [
 ] as const;
 
 describe("Creator event stream", () => {
+  it("recovers a closed stream from the delivered cursor and cancels retries on disposal", () => {
+    vi.useFakeTimers();
+    const onEvent = vi.fn();
+    const onError = vi.fn();
+    const onOpen = vi.fn();
+    const stream = openCreatorEvents("p1", 7, onEvent, onError, onOpen);
+    const sources = (
+      globalThis as unknown as {
+        __testEventSources: Array<{
+          url: string;
+          readyState: number;
+          emit(type: string, value: unknown): void;
+          onerror: () => void;
+          onopen: () => void;
+        }>;
+      }
+    ).__testEventSources;
+    try {
+      const first = sources.at(-1)!;
+      first.emit("agent.run.started", { eventId: "e8", seq: 8 });
+      // Native EventSource does not automatically retry a 404 response.
+      first.readyState = 2;
+      first.onerror();
+      first.onerror();
+      vi.advanceTimersByTime(1000);
+      const second = sources.at(-1)!;
+      expect(second).not.toBe(first);
+      expect(second.url).toContain("events?after=8");
+      expect(onError).toHaveBeenCalledTimes(1);
+      second.onopen();
+      expect(onOpen).toHaveBeenCalledTimes(1);
+      // Late callbacks from the disposed source cannot advance our cursor.
+      first.emit("agent.run.completed", { eventId: "old", seq: 100 });
+      second.emit("agent.run.started", { eventId: "e8", seq: 8 });
+      second.emit("agent.run.completed", { eventId: "e9", seq: 9 });
+      expect(onEvent.mock.calls.map(([event]) => event.seq)).toEqual([8, 9]);
+      second.onerror();
+      const count = sources.length;
+      stream.close();
+      vi.advanceTimersByTime(30000);
+      expect(sources).toHaveLength(count);
+    } finally {
+      stream.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("consumes every file-native Runtime event as a named SSE event", () => {
     const onEvent = vi.fn();
     const stream = openCreatorEvents("p1", 0, onEvent);
