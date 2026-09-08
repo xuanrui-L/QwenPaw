@@ -1626,6 +1626,14 @@ async def invoke_character_voice_tool(
         "voiceBound": True,
         "voiceOrigin": enrollment.origin,
         "sampleSourceVersionId": enrollment.sample_source_version_id,
+        "sampleReady": enrollment.sample_source_version_id is not None,
+        **(
+            {
+                "warning": "音色已创建，但试听样本尚未就绪；当前不能把它作为视频参考音频。请先补全试听绑定，不要重复设计已经创建的音色。",
+            }
+            if enrollment.sample_source_version_id is None
+            else {}
+        ),
         "generation": enrollment.project_generation,
         "etag": enrollment.project_etag,
         "replayed": enrollment.replayed,

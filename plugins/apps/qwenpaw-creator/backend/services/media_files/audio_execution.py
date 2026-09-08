@@ -545,6 +545,12 @@ def _attach_voice_sample(
         )
         if not voice_doc or voice_doc.get("voice_id") != voice_id:
             return None
+        if voice_doc.get("sample_source_version_id") is not None:
+            return (
+                base
+                if voice_doc["sample_source_version_id"] == sample_version_id
+                else None
+            )
         voice_doc["sample_source_version_id"] = sample_version_id
         commit = services.commits.commit(
             base=base,
@@ -555,18 +561,82 @@ def _attach_voice_sample(
             round_id=_stable_id(
                 "round",
                 project_id,
-                f"{idempotency_key}:preview",
+                f"{idempotency_key}:preview-binding",
             ),
             transaction_id=_stable_id(
                 "transaction",
                 project_id,
-                f"{idempotency_key}:preview",
+                f"{idempotency_key}:preview-binding",
             ),
             advance_accepted_baseline=True,
             _lifecycle_lock_held=True,
         )
         services.poller.note_commit(commit.snapshot)
         return commit.snapshot
+
+
+def _voice_preview_text(entity, arguments: Mapping[str, Any]) -> str:
+    text = str(arguments.get("previewText") or "").strip()
+    return (
+        text
+        if len(text) >= tts_model.VOICE_PREVIEW_MIN_CHARS
+        else _default_preview_text(entity)
+    )
+
+
+async def _ensure_voice_sample(
+    services: CreatorFileServices,
+    *,
+    project_id: str,
+    target_ref: str,
+    entity_id: str,
+    entity_name: str,
+    result: FileVoiceEnrollmentResult,
+    preview_text: str,
+    idempotency_key: str,
+) -> FileVoiceEnrollmentResult:
+    """Finish or retry audition binding, reusing already published TTS audio."""
+
+    if preview_text and result.sample_source_version_id is None:
+        try:
+            audition = await execute_file_tts_command(
+                services,
+                project_id=project_id,
+                target_ref=target_ref,
+                arguments={
+                    "text": preview_text,
+                    "characterRef": f"asset:{entity_id}",
+                    "label": f"Voice preview: {entity_name}"[:60],
+                },
+                idempotency_key=f"{idempotency_key}:preview",
+            )
+            attached = await asyncio.to_thread(
+                _attach_voice_sample,
+                services,
+                project_id=project_id,
+                entity_id=entity_id,
+                voice_id=result.voice_id,
+                sample_version_id=audition.source_asset_version_id,
+                idempotency_key=idempotency_key,
+            )
+            if attached is not None:
+                result = replace(
+                    result,
+                    sample_source_version_id=(
+                        audition.source_asset_version_id
+                    ),
+                    project_etag=attached.etag,
+                    project_generation=attached.generation,
+                )
+        except Exception:  # noqa: BLE001 - audition is a bonus, not a gate
+            logger.warning(
+                "voice design audition failed for %s/%s; binding kept "
+                "without a sample",
+                project_id,
+                entity_id,
+                exc_info=True,
+            )
+    return result
 
 
 async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-statements  # noqa: E501
@@ -589,7 +659,7 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
         entity.voice is not None
         and entity.voice.enrollment_key == idempotency_key
     ):
-        return FileVoiceEnrollmentResult(
+        result = FileVoiceEnrollmentResult(
             entity_id=entity_id,
             voice_id=entity.voice.voice_id,
             target_model=entity.voice.target_model,
@@ -597,11 +667,22 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
             project_etag=snapshot.etag,
             project_generation=snapshot.generation,
             replayed=True,
-            origin=(
-                "design"
-                if entity.voice.sample_source_version_id is None
-                else "clone"
+            origin=("design" if entity.voice.voice_prompt else "clone"),
+        )
+
+        return await _ensure_voice_sample(
+            services,
+            project_id=project_id,
+            target_ref=target_ref,
+            entity_id=entity_id,
+            entity_name=entity.name,
+            result=result,
+            preview_text=(
+                _voice_preview_text(entity, arguments)
+                if result.origin == "design"
+                else ""
             ),
+            idempotency_key=idempotency_key,
         )
 
     sample_version_id = str(
@@ -617,9 +698,7 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
     if voice_prompt:
         # Design path: no audio sample at all, the timbre comes from the
         # character's own description.
-        preview_text = str(arguments.get("previewText") or "").strip()
-        if len(preview_text) < tts_model.VOICE_PREVIEW_MIN_CHARS:
-            preview_text = _default_preview_text(entity)
+        preview_text = _voice_preview_text(entity, arguments)
         design_preview_text = preview_text
         enrollment = await tts_model.design_voice(
             voice_prompt=voice_prompt,
@@ -719,47 +798,16 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
         )
 
     result = await asyncio.to_thread(_commit_binding)
-    if design_preview_text and result.sample_source_version_id is None:
-        # 设计音色没有输入样本；用新音色朗读一遍试听文本落成音频资产，
-        # 资产库才有可播放的试听。失败只降级（绑定本身已成功）。
-        try:
-            audition = await execute_file_tts_command(
-                services,
-                project_id=project_id,
-                target_ref=target_ref,
-                arguments={
-                    "text": design_preview_text,
-                    "characterRef": f"asset:{entity_id}",
-                    "label": f"Voice preview: {entity.name}"[:60],
-                },
-                idempotency_key=f"{idempotency_key}:preview",
-            )
-            attached = await asyncio.to_thread(
-                _attach_voice_sample,
-                services,
-                project_id=project_id,
-                entity_id=entity_id,
-                voice_id=enrollment.voice_id,
-                sample_version_id=audition.source_asset_version_id,
-                idempotency_key=idempotency_key,
-            )
-            if attached is not None:
-                result = replace(
-                    result,
-                    sample_source_version_id=(
-                        audition.source_asset_version_id
-                    ),
-                    project_etag=attached.etag,
-                    project_generation=attached.generation,
-                )
-        except Exception:  # noqa: BLE001 - audition is a bonus, not a gate
-            logger.warning(
-                "voice design audition failed for %s/%s; binding kept "
-                "without a sample",
-                project_id,
-                entity_id,
-                exc_info=True,
-            )
+    result = await _ensure_voice_sample(
+        services,
+        project_id=project_id,
+        target_ref=target_ref,
+        entity_id=entity_id,
+        entity_name=entity.name,
+        result=result,
+        preview_text=design_preview_text,
+        idempotency_key=idempotency_key,
+    )
     previous = (
         entity.voice
         if entity.voice is not None
