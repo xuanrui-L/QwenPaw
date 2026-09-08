@@ -18,6 +18,21 @@ from services.project_files.model_view import (
 MODEL_INPUT_BYTES = 384 * 1024
 HISTORY_BYTES = 128 * 1024
 
+# These are runtime receipts carried in the provider's user role, not human
+# requirements. Keep durable messages intact, but let old receipts leave the
+# bounded history just like old tool results. Unknown sources fail closed.
+_AUTOMATED_HISTORY_SOURCES = frozenset(
+    {
+        "run_review_feedback",
+        "render_review_feedback",
+        "runtime_notification",
+        "mainline_resume",
+        "prompt_contract_resume",
+        "yolo_auto_resume",
+        "review_approval_resume",
+    },
+)
+
 
 class ModelContextBudgetError(ValueError):
     pass
@@ -70,11 +85,17 @@ def compact_conversation_history(
                 latest_snapshot = index
     if json_bytes(result) <= max_bytes:
         return result
-    # Preserve every user goal/constraint and the newest state. Older tool
-    # receipts/assistant narration are recoverable from durable history/state.
+    # Preserve every human goal/constraint and the newest state. Runtime
+    # feedback also uses the user role; retaining every old review would make
+    # a long production exceed the hard budget even after all tools are gone.
+    # The current request/notification batch is outside this history view.
     removed = 0
     for index, item in enumerate(result):
-        if item.get("role") == "user" or index == latest_snapshot:
+        human_input = (
+            item.get("role") == "user"
+            and item.get("source") not in _AUTOMATED_HISTORY_SOURCES
+        )
+        if human_input or index == latest_snapshot:
             continue
         if json_bytes(result) <= max_bytes - 256:
             break

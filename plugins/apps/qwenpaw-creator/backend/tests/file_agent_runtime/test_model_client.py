@@ -32,8 +32,89 @@ from services.file_agent_runtime.model_client import (
     records_to_agentscope_messages,
 )
 from services.file_agent_runtime import model_client
+from services.file_agent_runtime.model_context import (
+    ModelContextBudgetError,
+    prepare_model_messages,
+)
 
 pytestmark = pytest.mark.unit
+
+
+def test_long_production_compacts_automatic_history_but_keeps_human_input():
+    human_sources = [
+        "initial_goal",
+        "user",
+        "review_rejection_feedback",
+        "custom",
+    ]
+    history = [
+        {
+            "role": "user",
+            "source": source,
+            "content": [{"type": "text", "text": f"{source}: 保留全部六集与对白"}],
+        }
+        for source in human_sources
+    ]
+    human_input = json.dumps(history, ensure_ascii=False)
+    for index in range(80):
+        history.append(
+            {
+                "role": "user",
+                "source": (
+                    "run_review_feedback"
+                    if index % 2
+                    else "render_review_feedback"
+                ),
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"review-{index}:" + "自动审阅结果。" * 300,
+                    }
+                ],
+            },
+        )
+    original = json.dumps(history, ensure_ascii=False)
+    current = "继续第二集。不要重做已保留视频。"
+    continuation = (
+        "CONVERSATION_HISTORY_JSON="
+        + original
+        + "\n\nCURRENT_USER_REQUEST=\n"
+        + current
+    )
+    result = prepare_model_messages(
+        [
+            {"role": "system", "content": "项目创作契约"},
+            {"role": "user", "content": continuation},
+        ],
+        [],
+    )
+    assert len(json.dumps(result, ensure_ascii=False).encode()) < 384 * 1024
+    view, request = result[1]["content"].split("\n\nCURRENT_USER_REQUEST=\n")
+    retained = json.loads(view.split("CONVERSATION_HISTORY_JSON=", 1)[1])
+    assert request == current
+    assert [
+        item for item in retained if item.get("source") in human_sources
+    ] == [item | {"metadata": {}} for item in json.loads(human_input)]
+    assert retained[-1] == history[-1] | {"metadata": {}}
+    assert retained[0]["elidedMessageCount"] > 0
+    assert json.dumps(history, ensure_ascii=False) == original
+
+    # Genuine user requirements remain protected, even when they cannot fit.
+    for item in history:
+        item["source"] = "user"
+    with pytest.raises(ModelContextBudgetError):
+        prepare_model_messages(
+            [
+                {
+                    "role": "user",
+                    "content": "CONVERSATION_HISTORY_JSON="
+                    + json.dumps(history, ensure_ascii=False)
+                    + "\n\nCURRENT_USER_REQUEST=\n"
+                    + current,
+                }
+            ],
+            [],
+        )
 
 
 def _configure_text_model(
