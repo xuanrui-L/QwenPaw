@@ -56,33 +56,6 @@ async def _import(client, filename, archive):
     )
 
 
-def test_export_import_round_trip_restores_the_project(
-    app,
-    api_runtime_root,
-    run_scenario,
-):
-    async def scenario(client):
-        project_id = await _create_project(client)
-        exported = await _export(client, project_id)
-        assert exported.status_code == 200
-        deleted = await client.delete(
-            f"/projects/{project_id}",
-            headers={"Idempotency-Key": uuid4().hex},
-        )
-        assert deleted.status_code == 204
-        imported = await _import(client, "backup.zip", exported.content)
-        listed = await client.get("/projects")
-        return project_id, imported, listed
-
-    project_id, imported, listed = run_scenario(app, scenario)
-
-    assert imported.status_code == 200
-    assert imported.json()["projectId"] == project_id
-    assert [item["projectId"] for item in listed.json()["items"]] == [
-        project_id,
-    ]
-
-
 @pytest.mark.parametrize("invalid_config", [False, True])
 def test_archive_transfer_does_not_depend_on_current_model_settings(
     app,
@@ -103,10 +76,11 @@ def test_archive_transfer_does_not_depend_on_current_model_settings(
         stopped = sessions.hard_stop_session(project_id, session.session_id)
         exported = await _export(client, project_id)
         assert exported.status_code == 200
-        await client.delete(
+        deleted = await client.delete(
             f"/projects/{project_id}",
             headers={"Idempotency-Key": uuid4().hex},
         )
+        assert deleted.status_code == 204
         config_path.parent.mkdir(exist_ok=True)
         config_path.write_text(
             json.dumps(
@@ -123,11 +97,18 @@ def test_archive_transfer_does_not_depend_on_current_model_settings(
         config_before = config_path.read_bytes()
         imported = await _import(client, "backup.zip", exported.content)
         assert imported.status_code == 200, imported.text
+        assert imported.json()["projectId"] == project_id
         assert store.read(project_id).project == before
         assert sessions.get_project_session_snapshot(project_id) == stopped
         assert config_path.read_bytes() == config_before
         reexported = await _export(client, project_id)
         assert reexported.status_code == 200, reexported.text
+        if not invalid_config:
+            listed = await client.get("/projects")
+            assert listed.status_code == 200
+            assert [item["projectId"] for item in listed.json()["items"]] == [
+                project_id,
+            ]
 
     run_scenario(app, scenario)
 

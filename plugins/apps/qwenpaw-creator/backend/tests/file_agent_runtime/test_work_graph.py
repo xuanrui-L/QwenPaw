@@ -11,6 +11,7 @@ identities, dependency edges and all seven states.
 
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -464,77 +465,25 @@ def test_stale_manual_storyboard_is_visible_but_not_dispatched() -> None:
 
 
 @pytest.mark.parametrize(
-    "changed_input",
-    ["aspect_ratio", "storyboard_prompt"],
+    ("changed_input", "legacy", "expected"),
+    [
+        ("aspect_ratio", False, WorkNodeStatus.STALE),
+        ("storyboard_prompt", False, WorkNodeStatus.STALE),
+        ("media_models", False, WorkNodeStatus.DONE),
+        ("media_models", True, WorkNodeStatus.DONE),
+    ],
 )
-def test_completed_storyboard_stales_when_implicit_prompt_input_changes(
+def test_completed_storyboard_reacts_only_to_its_content_inputs(
     changed_input,
+    legacy,
+    expected,
 ) -> None:
     project = _project()
     _add_element(project, _element("elem:one"))
     node_id = "storyboard:elem:one"
     original = derive_work_graph(project).by_id[node_id].dispatch_fingerprint
-    task = _task(
-        "image_generation",
-        "element:elem:one",
-        TaskStatus.SUCCEEDED,
-        idempotency_key=(
-            f"dag-{node_id}-"
-            + dispatch_slot(
-                dispatch_ledger_fingerprint(original, ("image", "video")),
-            )
-        ),
-    )
-    _select_slot(
-        project,
-        slot_id="element:elem:one:storyboard",
-        kind="r2v_storyboard_image",
-        owner_ref="element:elem:one",
-        version_id="art:sb",
-        task_id=task.task_id,
-    )
-    assert (
-        derive_work_graph(
-            project,
-            tasks=[task],
-            media_models=("image", "video"),
-        )
-        .by_id[node_id]
-        .status
-        is WorkNodeStatus.DONE
-    )
-
-    if changed_input == "aspect_ratio":
-        project.settings.aspect_ratio = "9:16"
-    else:
-        creation = (
-            project.timelines.items["timeline:main"]
-            .elements_by_id["elem:one"]
-            .creation
-        )
-        creation.storyboard_prompt += "主角挥手。"
-
-    assert (
-        derive_work_graph(
-            project,
-            tasks=[task],
-            media_models=("image", "video"),
-        )
-        .by_id[node_id]
-        .status
-        is WorkNodeStatus.STALE
-    )
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-def test_completed_storyboard_survives_global_model_changes(legacy) -> None:
-    import hashlib
-
-    project = _project()
-    _add_element(project, _element("elem:one"))
-    node_id = "storyboard:elem:one"
-    original = derive_work_graph(project).by_id[node_id].dispatch_fingerprint
-    ledger = dispatch_ledger_fingerprint(original, ("old-image", "old-video"))
+    models = ("old-image", "old-video")
+    ledger = dispatch_ledger_fingerprint(original, models)
     slot = (
         hashlib.sha256(ledger.encode()).hexdigest()[:16]
         if legacy
@@ -554,14 +503,40 @@ def test_completed_storyboard_survives_global_model_changes(legacy) -> None:
         version_id="art:sb",
         task_id=task.task_id,
     )
+    assert (
+        derive_work_graph(
+            project,
+            tasks=[task],
+            media_models=models,
+        )
+        .by_id[node_id]
+        .status
+        is WorkNodeStatus.DONE
+    )
+
+    if changed_input == "aspect_ratio":
+        project.settings.aspect_ratio = "9:16"
+    elif changed_input == "storyboard_prompt":
+        creation = (
+            project.timelines.items["timeline:main"]
+            .elements_by_id["elem:one"]
+            .creation
+        )
+        creation.storyboard_prompt += "主角挥手。"
+    else:
+        models = ("new-image", "new-video")
+
     before = project.model_dump(mode="json")
     graph = derive_work_graph(
         project,
         tasks=[task],
-        media_models=("new-image", "new-video"),
+        media_models=models,
     )
-    assert graph.by_id[node_id].status is WorkNodeStatus.DONE
-    assert node_id not in {node.node_id for node in graph.regeneration_nodes()}
+    assert graph.by_id[node_id].status is expected
+    if expected is WorkNodeStatus.DONE:
+        assert node_id not in {
+            node.node_id for node in graph.regeneration_nodes()
+        }
     assert project.model_dump(mode="json") == before
 
 
