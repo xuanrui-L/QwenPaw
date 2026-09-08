@@ -3642,6 +3642,149 @@ def test_subagent_terminal_notification_is_never_batched(tmp_path) -> None:
     assert len(runs) == 2
 
 
+@pytest.mark.parametrize(
+    "notification_kind",
+    [None, "node_succeeded", "subagent_terminal"],
+)
+def test_running_user_message_joins_current_run_once(
+    tmp_path,
+    notification_kind,
+) -> None:
+    """Earlier progress/completion must not starve an ordinary correction."""
+    from services.runtime_files.execution_models import (
+        SpecialistRole,
+        SpecialistRunRecord,
+        SpecialistRunStatus,
+    )
+
+    correction = "我不希望水豚噜噜头顶着橘子了，我希望他头顶一个西瓜"
+    notification = "【系统自动消息 · Runtime 通知】素材理解完成"
+    received = []
+    correction_seq = 0
+
+    async def scenario():
+        services, _ = _create_project(tmp_path, initial_goal="制作噜噜视频")
+
+        async def callback(messages, _tools):
+            nonlocal correction_seq
+            received.append([dict(item) for item in messages])
+            if len(received) == 1:
+                if notification_kind:
+                    metadata = {"notificationKind": notification_kind}
+                    if notification_kind == "subagent_terminal":
+                        head = services.sessions.list_messages(
+                            PROJECT_ID,
+                            SESSION_ID,
+                        )[0]
+                        record = SpecialistRunRecord(
+                            run_id="specialist-run-source-intelligence",
+                            project_id=PROJECT_ID,
+                            round_id="source-round",
+                            role=SpecialistRole.SOURCE_INTELLIGENCE,
+                            input_generation=1,
+                            input_etag="initial-etag",
+                            prompt_spec_id="source-intelligence-test",
+                            caused_by_message_id=head.message_id,
+                            caused_by_message_seq=head.message_seq,
+                            metadata={
+                                "originSource": head.source,
+                                "originMessageId": head.message_id,
+                            },
+                        )
+                        driver.executions.create_specialist_run(record)
+                        for previous, status in (
+                            (
+                                SpecialistRunStatus.QUEUED,
+                                SpecialistRunStatus.RUNNING_MODEL,
+                            ),
+                            (
+                                SpecialistRunStatus.RUNNING_MODEL,
+                                SpecialistRunStatus.SUCCEEDED,
+                            ),
+                        ):
+                            driver.executions.transition_specialist_run(
+                                PROJECT_ID,
+                                record.run_id,
+                                expected_status=previous,
+                                status=status,
+                            )
+                        metadata["specialistRunId"] = record.run_id
+                    services.sessions.append_message(
+                        PROJECT_ID,
+                        SESSION_ID,
+                        CONVERSATION_ID,
+                        role="user",
+                        content_parts=[{"type": "text", "text": notification}],
+                        source="runtime_notification",
+                        channel=MessageChannel.RUNTIME,
+                        metadata=metadata,
+                    )
+                appended = services.sessions.append_message(
+                    PROJECT_ID,
+                    SESSION_ID,
+                    CONVERSATION_ID,
+                    role="user",
+                    content_parts=[{"type": "text", "text": correction}],
+                    client_message_id="running-correction",
+                    source="user",
+                    channel=MessageChannel.AGENTDOCK,
+                    classification=MessageClassification.MUTATION_INSTRUCTION,
+                    metadata={
+                        "context": {
+                            "panel": "assets",
+                            "selected": {
+                                "ref": "visual-variant:char:lulu@variant:lulu-id",
+                            },
+                        },
+                    },
+                )
+                correction_seq = appended.message.message_seq
+                return _read_call("read-before-correction")
+            if len(received) == 2:
+                return _read_call("read-after-correction")
+            return AgentModelTurn(content="已收到，把橘子换成西瓜。")
+
+        driver = _driver(services, callback)
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await _wait_for(lambda: correction_seq > 0)
+            await _wait_consumed(services, correction_seq)
+            await driver.wait_until_idle(PROJECT_ID)
+            return driver.runs.list(PROJECT_ID)
+        finally:
+            await driver.stop()
+
+    runs = asyncio.run(scenario())
+    assert len(received) == 3
+    assert len(runs) == 1
+    assert (
+        sum(
+            item["role"] == "user" and correction in str(item["content"])
+            for item in received[-1]
+        )
+        == 1
+    )
+    correction_message = next(
+        item["content"]
+        for item in received[1]
+        if item["role"] == "user" and correction in str(item["content"])
+    )
+    assert "请先用简短的公开回复确认" in correction_message
+    assert (
+        '"selected":{"ref":"visual-variant:char:lulu@variant:lulu-id"}'
+        in correction_message
+    )
+    assert runs[0].status is AgentRunStatus.SUCCEEDED
+    if notification_kind:
+        runtime_messages = [
+            item["content"]
+            for item in received[-1]
+            if item["role"] == "user" and notification in str(item["content"])
+        ]
+        assert runtime_messages == [notification]
+
+
 def test_turn_boundary_digest_injected_once_across_turns(tmp_path) -> None:
     """The same staged progress must not be re-appended on every model turn."""
 
@@ -3764,3 +3907,69 @@ def test_review_gate_read_failure_holds_queued_message(tmp_path) -> None:
     assert held == 0, "the queued message must stay unconsumed while unknown"
     assert turns_while_broken == 0, "no model turn may run while unknown"
     assert turns["count"] >= 1, "recovery must consume the message normally"
+
+
+def test_uploaded_image_understanding_starts_before_first_planning_turn(
+    tmp_path,
+    monkeypatch,
+):
+    async def scenario():
+        services, _ = _create_project(tmp_path, initial_goal=None)
+        ingested, _ = _ingest_many_sync(
+            services,
+            project_id=PROJECT_ID,
+            key="source-bootstrap-image",
+            inputs=[
+                _AssetInput(
+                    name="lulu.png",
+                    content=_png_bytes_for_grounding(),
+                    media_type="image/png",
+                ),
+            ],
+            attach_source=False,
+            scope="source-bootstrap-test",
+        )
+        version_id = ingested["items"][0]["assetVersionId"]
+        _append_initial_request(
+            services,
+            content_parts=[{"type": "text", "text": "按上传形象创作"}],
+            intent="制作",
+            metadata={"assetVersionRefs": [f"asset-version:{version_id}"]},
+        )
+        calls = []
+
+        async def delegate(**kwargs):
+            calls.append(kwargs["arguments"])
+            return {
+                "status": "ACCEPTED",
+                "targetRefs": kwargs["arguments"]["target_refs"],
+            }
+
+        async def model(messages, _tools):
+            assert len(calls) == 1
+            source = next(
+                iter(
+                    services.projects.read(
+                        PROJECT_ID,
+                    ).project.sources.sources.items.values(),
+                ),
+            )
+            assert source.selected_asset_version_id == version_id
+            assert "理解已启动" in str(messages)
+            return AgentModelTurn(content="先规划内容，等待素材理解结果。")
+
+        driver = _driver(services, model)
+        monkeypatch.setattr(driver, "_run_subagent", delegate)
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await _wait_consumed(services, 1)
+            await driver.wait_until_idle(PROJECT_ID)
+            assert (
+                driver.runs.list(PROJECT_ID)[0].status
+                is AgentRunStatus.SUCCEEDED
+            )
+        finally:
+            await driver.stop()
+
+    asyncio.run(scenario())

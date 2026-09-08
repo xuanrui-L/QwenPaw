@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { Modal, Progress, message } from "antd";
@@ -282,6 +283,7 @@ export interface ExportProgressState {
   receivedBytes: number;
   totalBytes: number | null;
   status: "running" | "done";
+  phase?: "packaging" | "downloading";
 }
 
 export function formatBytes(bytes: number): string {
@@ -313,7 +315,27 @@ export function ExportProgressCard({
   onDismiss,
 }: ExportProgressCardProps) {
   const { t } = useTranslation();
+  const [left, setLeft] = useState(20);
+  useEffect(() => {
+    const workspace = document.querySelector("[data-creator-workspace-root]");
+    const position = () => {
+      const start = (workspace?.getBoundingClientRect().left ?? 0) + 20;
+      setLeft(Math.max(20, Math.min(start, window.innerWidth - 340)));
+    };
+    position();
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(position);
+    if (workspace) observer?.observe(workspace);
+    window.addEventListener("resize", position);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", position);
+    };
+  }, []);
   const done = progress.status === "done";
+  const packaging = !done && progress.phase === "packaging";
   const percent = done
     ? 100
     : progress.totalBytes
@@ -327,18 +349,25 @@ export function ExportProgressCard({
         progress.totalBytes,
       )}`
     : formatBytes(progress.receivedBytes);
-  return (
+  return createPortal(
     <div
       data-export-progress
-      className="fixed bottom-5 left-5 z-50 w-[300px] rounded-lg border border-[#EAE9E7] bg-white px-4 py-3 shadow-[0_8px_24px_rgba(0,0,0,0.12)] dark:border-[var(--color-border)] dark:bg-[var(--color-bg-elevated)]"
+      role="status"
+      style={{ left }}
+      className="fixed bottom-5 z-50 w-[320px] max-w-[calc(100vw-40px)] rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-4 py-3 shadow-xl"
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium text-[var(--color-text-primary)]">
-          {done ? t("importExport.exportDone") : t("importExport.exporting")}
+          {done
+            ? t("importExport.exportDone")
+            : packaging
+            ? t("importExport.packaging")
+            : t("importExport.exporting")}
         </span>
         <button
           type="button"
           onClick={onDismiss}
+          disabled={!done}
           aria-label={t("importExport.closeExportProgress")}
           className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded text-[var(--color-text-secondary)] transition-colors hover:bg-[rgba(43,27,0,0.04)]"
         >
@@ -348,18 +377,28 @@ export function ExportProgressCard({
       <p className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]">
         {projectName}
       </p>
-      <Progress
-        percent={percent ?? 100}
-        status={done ? "success" : "active"}
-        showInfo={percent !== null}
-        strokeColor="var(--color-accent)"
-      />
+      {percent === null ? (
+        <div
+          className="my-3 h-1.5 overflow-hidden rounded-full bg-[var(--color-bg-secondary)]"
+          aria-label={t("importExport.working")}
+        >
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-[var(--color-accent)]" />
+        </div>
+      ) : (
+        <Progress
+          percent={percent}
+          status={done ? "success" : "active"}
+          showInfo={percent !== null}
+          strokeColor="var(--color-accent)"
+        />
+      )}
       <div
         data-export-progress-size
         className="text-xs text-[var(--color-text-secondary)]"
       >
-        {sizeText}
+        {packaging ? t("importExport.packagingHint") : sizeText}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

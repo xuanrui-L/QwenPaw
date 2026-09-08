@@ -1382,6 +1382,7 @@ class _LoopResult:
     summary: str
     tool_call_count: int
     review_ids: tuple[str, ...]
+    consumed_message_seq: int = 0
 
 
 class _RunFence(Protocol):
@@ -2751,6 +2752,14 @@ class FileCreatorAgentRuntime:
         )
         injected_settled = False
         try:
+            source_activity = await self._start_attached_source_understanding(
+                project_id=project_id,
+                session_id=session.session_id,
+                run_id=run_id,
+                epoch=epoch,
+                request=message,
+                tools=tools,
+            )
             result = await self._model_loop(
                 project_id=project_id,
                 session_id=session.session_id,
@@ -2759,6 +2768,7 @@ class FileCreatorAgentRuntime:
                 request=message,
                 tools=tools,
                 batch_tail=batch[1:],
+                source_activity=source_activity,
             )
             self._assert_epoch(project_id, run_id, epoch)
             await asyncio.to_thread(
@@ -2777,7 +2787,10 @@ class FileCreatorAgentRuntime:
                 self.sessions.mark_messages_consumed,
                 project_id,
                 session.session_id,
-                through_seq=batch[-1].message_seq,
+                through_seq=max(
+                    batch[-1].message_seq,
+                    result.consumed_message_seq,
+                ),
                 goal_id=goal.goal_id,
             )
             await self.notifications.settle_injected(
@@ -3001,6 +3014,107 @@ class FileCreatorAgentRuntime:
                     success=False,
                 )
 
+    async def _start_attached_source_understanding(
+        self,
+        *,
+        project_id,
+        session_id,
+        run_id,
+        epoch,
+        request,
+        tools,
+    ) -> list[dict[str, Any]]:
+        """Start exact uploaded-source work before creative planning begins."""
+        from .native_media import _version_id_from_ref
+
+        refs = request.metadata.get("assetVersionRefs") or []
+        if not isinstance(refs, list) or not refs:
+            return []
+        base = await asyncio.to_thread(tools.read_project, project_id)
+        project = base.project
+        targets = []
+        operations = []
+        active = {
+            ref
+            for handle in self._specialist_tasks.get(project_id, {}).values()
+            for ref in handle.target_refs
+        }
+        for ref in refs:
+            version_id = _version_id_from_ref(ref)
+            version = project.assets.source_versions_by_id.get(version_id)
+            if version is None or version.media_kind not in {
+                "image",
+                "video",
+                "audio",
+                "document",
+            }:
+                continue
+            target = f"asset:{version.logical_asset_id}"
+            if target in targets or target in active:
+                continue
+            source = next(
+                (
+                    item
+                    for item in project.sources.sources.items.values()
+                    if item.logical_asset_id == version.logical_asset_id
+                ),
+                None,
+            )
+            if source is not None:
+                # Choosing another existing source version is a creative edit
+                # for the agent; ingestion never silently changes that choice.
+                if source.selected_asset_version_id != version_id:
+                    continue
+                intelligence = project.assets.intelligence_versions_by_id.get(
+                    source.current_intelligence_version_id,
+                )
+                if (
+                    intelligence
+                    and intelligence.source_asset_version_id == version_id
+                ):
+                    continue
+            else:
+                source_id = f"source:{uuid4().hex}"
+                operations.append(
+                    {
+                        "op": "upsert_entity",
+                        "collection": "/sources/sources",
+                        "id": source_id,
+                        "value": {
+                            "source_id": source_id,
+                            "display_name": version.name,
+                            "logical_asset_id": version.logical_asset_id,
+                            "selected_asset_version_id": version_id,
+                        },
+                    },
+                )
+            targets.append(target)
+        if operations:
+            await asyncio.to_thread(
+                tools.patch_project,
+                project_id=project_id,
+                ops=operations,
+            )
+        activity = []
+        for offset in range(0, len(targets), 10):
+            activity.append(
+                await self._run_subagent(
+                    project_id=project_id,
+                    session_id=session_id,
+                    parent_run_id=run_id,
+                    parent_action_id=f"uploads-{offset}",
+                    epoch=epoch,
+                    request=request,
+                    tools=tools,
+                    arguments={
+                        "role": SpecialistRole.SOURCE_INTELLIGENCE.value,
+                        "target_refs": targets[offset : offset + 10],
+                        "task": "理解本轮上传素材，记录其真实外观、风格与内容，保存与当前版本匹配的结果。",
+                    },
+                ),
+            )
+        return activity
+
     async def _model_loop(
         self,
         *,
@@ -3011,6 +3125,7 @@ class FileCreatorAgentRuntime:
         request: CreatorMessageRecord,
         tools: AgentProjectTools,
         batch_tail: list[CreatorMessageRecord] | None = None,
+        source_activity: list[dict[str, Any]] | None = None,
     ) -> _LoopResult:
         # External skills never break the run: loading is isolated and a
         # broken configuration only yields an empty toolset/context block.
@@ -3067,6 +3182,16 @@ class FileCreatorAgentRuntime:
                 ),
             },
         ]
+        if source_activity:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "本轮上传素材的理解已启动："
+                    + json.dumps(source_activity, ensure_ascii=False)
+                    + "。可以先规划不依赖素材外观的内容；使用这些素材编写视觉设定前，"
+                    "先读取已保存的理解结果。不要重复委派。",
+                },
+            )
         tool_call_count = 0
         review_ids: list[str] = []
         waiting_review_summary: str | None = None
@@ -3095,15 +3220,73 @@ class FileCreatorAgentRuntime:
         effective_max_turns = turn_budget
         turn_number = 0
         finalization_turn_added = False
+        input_cursor = max(
+            [
+                request.message_seq,
+                *(item.message_seq for item in (batch_tail or [])),
+            ],
+        )
         while turn_number < effective_max_turns:
             turn_number += 1
             self._assert_epoch(project_id, run_id, epoch)
+            # Ordinary user input joins the next model turn. The agent decides
+            # what it means; delivering it does not cancel or redirect work.
+            incoming = (
+                []
+                if turn_number == 1
+                else await asyncio.to_thread(
+                    self.sessions.list_messages,
+                    project_id,
+                    session_id,
+                    after_seq=input_cursor,
+                    limit=None,
+                )
+            )
+            for item in incoming:
+                if item.role != "user":
+                    continue
+                if (
+                    item.conversation_id != request.conversation_id
+                    or item.review_boundary is not None
+                    or item.source
+                    in {
+                        "review_rejection_feedback",
+                        "run_review_feedback",
+                        "render_review_feedback",
+                    }
+                ):
+                    break
+                if (
+                    item.source == NOTIFICATION_SOURCE
+                    and item.metadata.get("notificationKind")
+                    == RuntimeEventKind.SUBAGENT_TERMINAL.value
+                    and await self._delegation_origin(project_id, item)
+                    != await self._delegation_origin(project_id, request)
+                ):
+                    # A completion from this request can join its live run.
+                    # A different origin needs its own run to retain repair
+                    # identity, target constraints and paid repair budgets.
+                    break
+                latest = await asyncio.to_thread(
+                    self.services.projects.read,
+                    project_id,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": _running_message_text(
+                            item,
+                            project=latest.project,
+                            project_root=self.services.projects.project_root(
+                                project_id,
+                            ),
+                        ),
+                    },
+                )
+                input_cursor = item.message_seq
             # Turn-boundary drain: quiet progress staged while this run is
             # working (e.g. a detached specialist finishing mid-run) joins
-            # the live conversation as a non-durable user turn instead of
-            # waiting for the run to end. Durable steer messages are NOT
-            # injected here — they queue in the inbox and would be
-            # double-delivered.
+            # the live conversation as a non-durable user turn.
             injected_digest = await self.notifications.inject_pending_into_run(
                 project_id,
                 run_id=run_id,
@@ -3280,6 +3463,7 @@ class FileCreatorAgentRuntime:
                     summary=turn.content,
                     tool_call_count=tool_call_count,
                     review_ids=tuple(review_ids),
+                    consumed_message_seq=input_cursor,
                 )
 
             for call in turn.tool_calls:
@@ -3569,6 +3753,7 @@ class FileCreatorAgentRuntime:
                         return _LoopResult(
                             summary=summary,
                             tool_call_count=tool_call_count,
+                            consumed_message_seq=input_cursor,
                             review_ids=tuple(
                                 dict.fromkeys(
                                     [
@@ -8594,6 +8779,26 @@ def _artifact_selection_notes(
         if note is not None:
             notes.append(note)
     return notes
+
+
+def _running_message_text(
+    message: CreatorMessageRecord,
+    *,
+    project: Project | None = None,
+    project_root: Path | None = None,
+) -> str:
+    content = _message_text(
+        message,
+        project=project,
+        project_root=project_root,
+    )
+    if message.source != "user":
+        return content
+    return (
+        "用户在任务运行期间补充了以下反馈。请先用简短的公开回复确认你对反馈"
+        "的理解，再结合当前任务进展，将反馈纳入后续计划；由你自行决定需要"
+        "调整的步骤。\n\n用户反馈如下：\n" + content
+    )
 
 
 def _message_text(

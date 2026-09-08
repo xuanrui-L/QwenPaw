@@ -151,3 +151,76 @@ def test_legacy_shots_can_be_read_but_cannot_be_written(services):
     assert creation == R2VCreation(narrative="当前片段内容")
     with pytest.raises(ValidationError, match="不再支持写入"):
         edit(services, "shots", {"items": {}, "order": []})
+
+
+def test_storyboard_readiness_does_not_wait_for_video_rewrite(services):
+    from services.project_files.prompt_sync import prompt_sync_status
+    from services.file_agent_runtime.work_graph import derive_work_graph
+
+    edit(services, "narrative", "女子把钥匙放入包内。")
+    before = services.projects.read(PID).project
+    assert (
+        prompt_sync_status(before, TID, EID, stage="storyboard")["status"]
+        == "needs_update"
+    )
+    edit(services, "storyboard_prompt", SB + "女子把钥匙放入包内。")
+    project = services.projects.read(PID).project
+    assert (
+        prompt_sync_status(project, TID, EID, stage="storyboard")["status"]
+        == "current"
+    )
+    assert (
+        prompt_sync_status(project, TID, EID, stage="video")["status"]
+        == "needs_update"
+    )
+    graph = derive_work_graph(project)
+    assert (
+        next(
+            node for node in graph.nodes if node.kind == "storyboard"
+        ).status.value
+        == "ready"
+    )
+
+    edit(services, "video_prompt", VD + "摄影机缓慢推进。")
+    project = services.projects.read(PID).project
+    assert all(
+        prompt_sync_status(project, TID, EID, stage=stage)["status"]
+        == "current"
+        for stage in ("storyboard", "video")
+    )
+    edit(services, "storyboard_prompt", SB + "结束时女子转身离开。")
+    project = services.projects.read(PID).project
+    assert (
+        prompt_sync_status(project, TID, EID, stage="storyboard")["status"]
+        == "current"
+    )
+    assert (
+        prompt_sync_status(project, TID, EID, stage="video")["status"]
+        == "needs_update"
+    )
+
+
+def test_all_authored_bodies_confirm_without_discarded_model_call(services):
+    for field, key in (
+        ("narrative", "narrative"),
+        ("storyboard_prompt", "storyboardPrompt"),
+        ("video_prompt", "videoPrompt"),
+    ):
+        edit(services, field, UPDATED[key])
+
+    async def forbidden(_messages, _tools):
+        raise AssertionError(
+            "Nothing needs generating when all bodies are authoritative",
+        )
+
+    service = PromptSyncService(
+        services,
+        client=CallbackAgentChatClient(forbidden),
+    )
+
+    async def run():
+        proposal = await service.propose(PID, TID, EID, source="mixed")
+        await service.accept(PID, TID, EID, proposal["proposalId"])
+        assert service.status(PID, TID, EID)["status"] == "current"
+
+    asyncio.run(run())

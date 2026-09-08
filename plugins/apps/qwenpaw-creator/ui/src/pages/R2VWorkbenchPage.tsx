@@ -1,6 +1,8 @@
 import { CreatorHttpError } from "@/api/creator/client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Image, Input, Modal, Select, message } from "antd";
+import { Alert, Button, Input, Modal, Select, message } from "antd";
+import ImageLightbox from "@/components/assets/ImageLightbox";
+import PreviewImage from "@/components/assets/PreviewImage";
 import {
   ArrowLeft,
   Loader2,
@@ -201,10 +203,9 @@ function MediaFrame({
       data-review-media-anchor={anchorVersionId}
       className="mx-auto w-fit max-w-full overflow-hidden rounded-lg border border-[var(--color-border)] bg-[#141210]"
     >
-      <Image
+      <PreviewImage
         src={src}
         alt={alt}
-        preview={{ src }}
         style={{
           display: "block",
           width: "auto",
@@ -1009,7 +1010,9 @@ export function WorkbenchSurface({
     if (!task || task.status === "SUCCEEDED") return null;
     const active = task.status === "QUEUED" || task.status === "RUNNING";
     const progress =
-      task.status === "RUNNING" ? taskProgressPercent(task.progress) : null;
+      task.status === "RUNNING"
+        ? taskProgressPercent(task.progress, task.kind)
+        : null;
     return (
       <p
         data-stage-task={kind}
@@ -1108,17 +1111,7 @@ export function WorkbenchSurface({
     </div>
   );
   const lightbox = lightboxSrc && (
-    <Image
-      style={{ display: "none" }}
-      src={lightboxSrc}
-      preview={{
-        visible: true,
-        src: lightboxSrc,
-        onVisibleChange: (visible) => {
-          if (!visible) setLightboxSrc(null);
-        },
-      }}
-    />
+    <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
   );
 
   // ── Mode-specific workbenches ─────────────────────────────────────────
@@ -1784,34 +1777,34 @@ export function WorkbenchSurface({
                 message={regenerationError}
               />
             )}
-            {contextCard && <div className="px-3.5 pt-2.5">{contextCard}</div>}
-            <details
-              className="r2v-narrative mx-3.5 mt-2.5"
-              open={reviewField?.includes("/creation/narrative") || undefined}
-            >
-              <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-secondary)]">
-                {t("r2v.narrativeTitle")}
-              </summary>
-              <div className="mt-2">
-                <PromptRichBlock
-                  label={t("r2v.narrativeTitle")}
-                  value={creation.narrative}
-                  field={`element:${element.element_id}/creation/narrative`}
-                  path={elementPointer("creation", "narrative")}
-                  disabled={patching}
-                  tokens={[]}
-                  collapseHeight={150}
-                  onEditComplete={scheduleSilentApply}
-                  onChange={(value) =>
-                    updateElement((draft) => {
-                      if (draft.creation.type === "r2v")
-                        draft.creation.narrative = value;
-                    })
-                  }
-                />
-              </div>
-            </details>
             <div className="r2v-workbench-prompt-body min-w-0 flex-1 p-4">
+              {contextCard && <div className="pb-2.5">{contextCard}</div>}
+              <details
+                className="r2v-narrative mb-4"
+                open={reviewField?.includes("/creation/narrative") || undefined}
+              >
+                <summary className="cursor-pointer text-xs font-medium text-[var(--color-text-secondary)]">
+                  {t("r2v.narrativeTitle")}
+                </summary>
+                <div className="mt-2">
+                  <PromptRichBlock
+                    label={t("r2v.narrativeTitle")}
+                    value={creation.narrative}
+                    field={`element:${element.element_id}/creation/narrative`}
+                    path={elementPointer("creation", "narrative")}
+                    disabled={patching}
+                    tokens={[]}
+                    collapseHeight={150}
+                    onEditComplete={scheduleSilentApply}
+                    onChange={(value) =>
+                      updateElement((draft) => {
+                        if (draft.creation.type === "r2v")
+                          draft.creation.narrative = value;
+                      })
+                    }
+                  />
+                </div>
+              </details>
               {/* Stage ①: storyboard prompt + versions. Both stages stay
                   mounted (hidden attr) so field anchors and review focus
                   keep resolving regardless of the visible tab. */}
@@ -1893,13 +1886,6 @@ export function WorkbenchSurface({
                         </Button>
                       </div>
                     )}
-                  {storyboardReferenceOrder?.ready === false && (
-                    <Alert
-                      type="warning"
-                      showIcon
-                      message={t("r2v.referencesNeedReview")}
-                    />
-                  )}
                   <PromptRichBlock
                     label={t("r2v.storyboardPrompt")}
                     value={creation.storyboard_prompt}
@@ -2153,6 +2139,9 @@ export function WorkbenchSurface({
             )}
             onOpen={openVisualEntity}
             onRemove={(entityId) => removeEntityRef("character", entityId)}
+            onPreview={(versionId) =>
+              setLightboxSrc(getArtifactVersionMediaUrl(versionId))
+            }
           />
           <EntityGroup
             label={t("blueprint.entityKinds.scene")}
@@ -2161,6 +2150,9 @@ export function WorkbenchSurface({
             )}
             onOpen={openVisualEntity}
             onRemove={(entityId) => removeEntityRef("scene", entityId)}
+            onPreview={(versionId) =>
+              setLightboxSrc(getArtifactVersionMediaUrl(versionId))
+            }
           />
           <EntityGroup
             label={t("blueprint.entityKinds.prop")}
@@ -2169,6 +2161,9 @@ export function WorkbenchSurface({
             )}
             onOpen={openVisualEntity}
             onRemove={(entityId) => removeEntityRef("prop", entityId)}
+            onPreview={(versionId) =>
+              setLightboxSrc(getArtifactVersionMediaUrl(versionId))
+            }
           />
 
           {materialCards.length > 0 && (
@@ -2193,6 +2188,27 @@ export function WorkbenchSurface({
                           src={card.thumbUrl}
                           alt=""
                           loading="lazy"
+                          onClick={() =>
+                            setLightboxSrc(
+                              project.assets.source_versions_by_id[
+                                card.versionId
+                              ]
+                                ? getAssetVersionMediaUrl(card.versionId)
+                                : getArtifactVersionMediaUrl(card.versionId),
+                            )
+                          }
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter")
+                              setLightboxSrc(
+                                project.assets.source_versions_by_id[
+                                  card.versionId
+                                ]
+                                  ? getAssetVersionMediaUrl(card.versionId)
+                                  : getArtifactVersionMediaUrl(card.versionId),
+                              );
+                          }}
                           className="h-full w-full object-cover"
                         />
                       ) : (

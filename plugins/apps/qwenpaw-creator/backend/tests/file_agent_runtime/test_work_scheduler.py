@@ -3,6 +3,7 @@
 # pylint: disable=unused-argument
 # pylint: disable=protected-access
 """Work-graph scheduler: parallel fan-out with fuses, not a retry cannon."""
+
 from __future__ import annotations
 
 import asyncio
@@ -1402,3 +1403,111 @@ def test_stuck_failed_node_emits_steer_even_on_baseline_tick(
         len(failures) == 1
     ), "baseline tick must report, later ticks must not"
     assert "provider call was interrupted" in failures[0].text
+
+
+def test_preparing_prompts_does_not_hold_media_dispatch_loop(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path, monkeypatch, ready_variants=2)
+    _enable_yolo(monkeypatch)
+    monkeypatch.setattr(work_scheduler, "get_media_parallelism", lambda: 1)
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def dispatch(_services, **kwargs):
+            calls.append(kwargs)
+            await release.wait()
+
+        async def prepare(_project_id, _graph):
+            started.set()
+            try:
+                await release.wait()
+            finally:
+                scheduler.wake(_project_id)
+
+        scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
+        monkeypatch.setattr(scheduler, "_prepare_changed_prompts", prepare)
+        try:
+            async with asyncio.timeout(3):
+                await scheduler.tick(PROJECT_ID)
+                await started.wait()
+                await _drain()
+                monkeypatch.setattr(
+                    work_scheduler,
+                    "get_media_parallelism",
+                    lambda: 2,
+                )
+                await scheduler.tick(PROJECT_ID)
+                await _drain()
+                assert len(calls) == 2
+                assert (
+                    len({call["arguments"]["variantId"] for call in calls})
+                    == 2
+                )
+                assert not release.is_set()
+        finally:
+            await scheduler.shutdown()
+        assert not scheduler._loops
+        assert not scheduler._preparation_tasks
+
+    asyncio.run(scenario())
+
+
+def test_review_scope_keeps_independent_sibling_running():
+    design = WorkNode(
+        "visual:a",
+        "visual",
+        "A",
+        WorkNodeStatus.DONE,
+        target_ref="asset:a",
+    )
+    board = WorkNode(
+        "storyboard:a",
+        "storyboard",
+        "A",
+        WorkNodeStatus.DONE,
+        deps=(design.node_id,),
+        target_ref="element:a",
+    )
+    video = WorkNode(
+        "video:a",
+        "video",
+        "A",
+        WorkNodeStatus.READY,
+        deps=(board.node_id,),
+        target_ref="element:a",
+    )
+    graph = WorkGraph(nodes=(design, board, video), generation=1)
+    assert not _blocked_by_active_media_review(
+        video,
+        frozenset({"slot:b"}),
+        frozenset({"element:b"}),
+        graph=graph,
+    )
+    assert _blocked_by_active_media_review(
+        video,
+        frozenset({"slot:a"}),
+        frozenset({"asset:a"}),
+        graph=graph,
+    )
+    for target, blocked in (("a", True), ("b", False)):
+        assert (
+            _blocked_by_active_sync_review(
+                video,
+                sync_review_pending=True,
+                fences=(
+                    {
+                        "reviewed_pointers": [
+                            "/timelines/items/timeline:main/elements_by_id/"
+                            f"{target}/creation",
+                        ],
+                    },
+                ),
+                graph=graph,
+            )
+            is blocked
+        )

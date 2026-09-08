@@ -155,7 +155,6 @@ describe("PlanPage Timeline/Element frontend", () => {
     // 总览层：分镜/视频 Prompt 的全量编辑迁往制作台悬浮窗，详情保留创作语境字段。
     expect(screen.getByText("创作意图")).toBeInTheDocument();
     expect(screen.queryByText("分镜描述")).not.toBeInTheDocument();
-
     // Detail edits stay local on blur and commit via CAS Patch on Apply.
     const name = screen.getByDisplayValue("午饭名场面");
     fireEvent.change(name, { target: { value: "新的午饭名场面" } });
@@ -240,7 +239,7 @@ describe("PlanPage Timeline/Element frontend", () => {
       screen.queryByRole("button", { name: "下载 / 导出" }),
     ).not.toBeInTheDocument();
     expect(container.querySelector("[data-open-blueprint]")).toHaveTextContent(
-      "脚本方案",
+      "返回视频脚本",
     );
     expect(
       screen.getByRole("button", { name: "合成成片" }),
@@ -384,7 +383,7 @@ describe("PlanPage Timeline/Element frontend", () => {
       screen.queryByRole("button", { name: "下载 / 导出" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /脚本方案/ }),
+      screen.getByRole("button", { name: /返回视频脚本/ }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "合成成片" }),

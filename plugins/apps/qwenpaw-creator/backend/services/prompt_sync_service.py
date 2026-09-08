@@ -194,6 +194,15 @@ def _validate_prompts(
 ) -> None:
     _, element = live_element(document, timeline_id, element_id)
     creation = element["creation"]
+    from services.prompt_text import video_prompt_time_error
+
+    time_error = video_prompt_time_error(
+        creation["video_prompt"],
+        element["span"]["duration_tick"]
+        / document["timelines"]["items"][timeline_id]["ticks_per_second"],
+    )
+    if time_error:
+        raise ValidationError(time_error)
     path = _pointer(timeline_id, element_id)
     report = check_changed_r2v_prompt_contracts(
         document,
@@ -231,6 +240,35 @@ def _validate_plan(document: dict, timeline_id: str, element_id: str) -> None:
     _, element = live_element(document, timeline_id, element_id)
     if not str(element["creation"].get("narrative") or "").strip():
         raise ValidationError("请先填写片段内容，或从已有提示词同步内容")
+
+
+def _parse_proposal_result(text: str) -> dict:
+    if text.startswith("```json") and text.endswith("```"):
+        text = text[7:-3].strip()
+    try:
+        result = json.loads(text)
+    except (ValueError, TypeError) as error:
+        raise ValidationError(
+            "模型未返回可用的提示词草稿，请重新起草",
+        ) from error
+    if isinstance(result, dict) and set(result) == {"conflict"}:
+        raise ValidationError(
+            "当前多处编辑存在冲突，请先统一片段内容和提示词后再同步",
+        )
+    if (
+        not isinstance(result, dict)
+        or set(result) != {"narrative", "storyboardPrompt", "videoPrompt"}
+        or not all(
+            isinstance(value, str) and value.strip() and len(value) <= 24000
+            for value in (
+                result.get("narrative"),
+                result.get("storyboardPrompt"),
+                result.get("videoPrompt"),
+            )
+        )
+    ):
+        raise ValidationError("模型返回的提示词格式不完整")
+    return result
 
 
 class PromptSyncService:
@@ -351,6 +389,7 @@ class PromptSyncService:
             "narrative聚焦发生什么、如何呈现、声音和衔接，"
             "不复制分辨率、画幅、分镜网格、参考编号或提示词格式禁令；这些保留在对应提示词中。"
             "片段时长、人物、场景、道具和引用以fixedScope为准，不新增未绑定引用。"
+            "视频动作时间必须从本生成单元0秒开始，到本单元时长结束，不使用全片时间码。"
             "source=currentPlan时，以当前片段内容和约束为准更新两份提示词；source=storyboardPrompt"
             "或videoPrompt时，"
             "以该提示词最新原文为准反向更新片段内容和另一份提示词。"
@@ -444,52 +483,38 @@ class PromptSyncService:
                 "多项权威内容互相冲突时请返回conflict，不要自行选边。"
             ),
         }
-        client = self.client or AgentScopeAgentChatClient(
-            max_tokens=7000,
-            temperature=0.2,
-        )
-        turn = await client.complete(
-            messages=[
-                {"role": "system", "content": system},
+        if not target_fields:
+            # All three bodies were authored together. There is no target for
+            # a model to rewrite; validate them below and confirm the exact CAS
+            # snapshot instead of paying for output we would discard.
+            text = json.dumps(
                 {
-                    "role": "user",
-                    "content": json.dumps(context, ensure_ascii=False),
+                    "narrative": inputs["currentPlan"],
+                    "storyboardPrompt": inputs["storyboardPrompt"],
+                    "videoPrompt": inputs["videoPrompt"],
                 },
-                {
-                    "role": "user",
-                    "content": json.dumps(authority, ensure_ascii=False),
-                },
-            ],
-            tools=[],
-        )
-        text = (turn.content or "").strip()
-        if text.startswith("```json") and text.endswith("```"):
-            text = text[7:-3].strip()
-        try:
-            result = json.loads(text)
-        except (ValueError, TypeError) as error:
-            raise ValidationError(
-                "模型未返回可用的提示词草稿，请重新起草",
-            ) from error
-        if isinstance(result, dict) and set(result) == {"conflict"}:
-            raise ValidationError(
-                "当前多处编辑存在冲突，请先统一片段内容和提示词后再同步",
             )
-        if (
-            not isinstance(result, dict)
-            or set(result) != {"narrative", "storyboardPrompt", "videoPrompt"}
-            or not all(
-                isinstance(value, str)
-                and value.strip()
-                and len(value) <= 24000
-                for value in (
-                    result.get("narrative"),
-                    result.get("storyboardPrompt"),
-                    result.get("videoPrompt"),
-                )
+        else:
+            client = self.client or AgentScopeAgentChatClient(
+                max_tokens=7000,
+                temperature=0.2,
             )
-        ):
-            raise ValidationError("模型返回的提示词格式不完整")
+            turn = await client.complete(
+                messages=[
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": json.dumps(context, ensure_ascii=False),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(authority, ensure_ascii=False),
+                    },
+                ],
+                tools=[],
+            )
+            text = (turn.content or "").strip()
+        result = _parse_proposal_result(text)
         storyboard_prompt = media_prompt_entity_names(
             result["storyboardPrompt"].strip(),
             snapshot.project,

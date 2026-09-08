@@ -31,7 +31,6 @@ from pydantic import (
     model_validator,
 )
 
-
 CURRENT_PROJECT_SCHEMA_VERSION = 9
 DEFAULT_TIMELINE_ID = "timeline:main"
 DEFAULT_TIMELINE_TICKS_PER_SECOND = 1_000
@@ -758,6 +757,8 @@ class R2VPromptSync(StrictModel):
     plan_fingerprint: Sha256
     storyboard_prompt_fingerprint: Sha256
     video_prompt_fingerprint: Sha256
+    storyboard_input_fingerprint: Sha256 | None = None
+    video_input_fingerprint: Sha256 | None = None
 
 
 class R2VCreation(StrictModel):

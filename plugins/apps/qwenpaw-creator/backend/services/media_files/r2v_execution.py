@@ -54,7 +54,10 @@ from domain.errors import (
 )
 from models.reference_markers import canonical_marker_indices
 from schemas.common import StrictModel
-from services.prompt_text import missing_narrative_dialogue
+from services.prompt_text import (
+    missing_narrative_dialogue,
+    video_prompt_time_error,
+)
 from services.project_files.assets import (
     AssetAlreadyExists,
     AssetFileStore,
@@ -217,9 +220,11 @@ def _provider_download_headers(result: Mapping[str, Any]) -> dict[str, str]:
     api_key = model_config.get_video_api_key()
     if not api_key:
         raise ValidationError(
-            "Veo 视频下载需要当前模型配置中的 API Key"
-            if auth == _GOOGLE_API_KEY_AUTH
-            else "受保护的自部署视频下载需要当前模型配置中的 API Key",
+            (
+                "Veo 视频下载需要当前模型配置中的 API Key"
+                if auth == _GOOGLE_API_KEY_AUTH
+                else "受保护的自部署视频下载需要当前模型配置中的 API Key"
+            ),
         )
     if auth == _BEARER_VIDEO_API_KEY_AUTH:
         return {"Authorization": f"Bearer {api_key}"}
@@ -1250,7 +1255,12 @@ def _resolve_request(
     timeline, element = find_timeline_element(project, element_id)
     creation = element.creation
     if isinstance(creation, R2VCreation):
-        assert_r2v_prompt_sync(project, timeline.timeline_id, element_id)
+        assert_r2v_prompt_sync(
+            project,
+            timeline.timeline_id,
+            element_id,
+            stage="video",
+        )
     mode = _validated_request_mode(arguments)
     # Each creation type declares exactly one generation mode; the request
     # mode must match it so a t2v element can never be submitted as r2v.
@@ -1328,6 +1338,9 @@ def _resolve_request(
     duration_seconds = _duration(
         element.span.duration_tick / timeline.ticks_per_second,
     )
+    time_error = video_prompt_time_error(prompt, duration_seconds)
+    if time_error:
+        raise ValidationError(time_error)
     ratio = str(
         arguments.get("ratio") or project.settings.aspect_ratio,
     ).strip()

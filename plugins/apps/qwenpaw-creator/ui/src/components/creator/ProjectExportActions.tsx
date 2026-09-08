@@ -74,10 +74,16 @@ export default function ProjectExportActions({
       receivedBytes: 0,
       totalBytes: null,
       status: "running",
+      phase: "packaging",
     });
     try {
       await saveExportFile(projectId, (receivedBytes, totalBytes) =>
-        setExportProgress({ receivedBytes, totalBytes, status: "running" }),
+        setExportProgress({
+          receivedBytes,
+          totalBytes,
+          status: "running",
+          phase: "downloading",
+        }),
       );
       setExportProgress((state) =>
         state ? { ...state, status: "done" } : state,

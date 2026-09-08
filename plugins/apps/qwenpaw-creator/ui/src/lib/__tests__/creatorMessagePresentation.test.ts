@@ -340,10 +340,12 @@ describe("Creator conversation presentation", () => {
 
 describe("durable Task presentation", () => {
   it("converts progress into bounded percentages and surfaces task errors", () => {
-    expect(taskProgressPercent(0)).toBe(0);
-    expect(taskProgressPercent(0.42)).toBe(42);
-    expect(taskProgressPercent(1)).toBe(100);
-    expect(taskProgressPercent(null)).toBeNull();
+    expect(taskProgressPercent(0, "asset_ingest")).toBe(0);
+    expect(taskProgressPercent(0.42, "asset_ingest")).toBe(42);
+    expect(taskProgressPercent(1, "asset_ingest")).toBe(100);
+    expect(taskProgressPercent(null, "asset_ingest")).toBeNull();
+    expect(taskProgressPercent(0.42, "r2v_generation")).toBeNull();
+    expect(taskProgressPercent(0.42, "video")).toBeNull();
 
     const perItem = {
       kind: "ASSET_INGEST_FAILED",

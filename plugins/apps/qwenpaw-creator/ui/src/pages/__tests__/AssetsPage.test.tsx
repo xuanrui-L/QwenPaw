@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
-import AssetsPage from "@/pages/AssetsPage";
+import AssetsPage, { VoiceGenerationModal } from "@/pages/AssetsPage";
 import { NavigationRuntime } from "@/routing/navigation";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -309,4 +309,60 @@ describe("AssetsPage Project projection", () => {
     expect(await screen.findByText("相对关系说明")).toBeInTheDocument();
     expect(screen.getAllByText(/左矮右高/).length).toBeGreaterThan(0);
   });
+});
+
+it("uses the uploaded audio picked by the user even after entering a voice description", async () => {
+  const project = cloneProject();
+  project.assets.source_versions_by_id["uploaded-voice"] = {
+    ...project.assets.source_versions_by_id["cat-video-v1"],
+    version_id: "uploaded-voice",
+    logical_asset_id: "user-audio",
+    name: "我的参考音频.wav",
+    media_kind: "audio",
+    media_type: "audio/wav",
+  };
+  seedProject(project);
+  const { calls } = installMockFetch([
+    {
+      match: "/voice-capabilities",
+      response: {
+        json: { configured: true, supportsDesign: true, model: "test" },
+      },
+    },
+    {
+      match: "/character-voice",
+      method: "POST",
+      response: { json: { ok: true } },
+    },
+    ...ingestRoutes(),
+  ]);
+  const { baseElement } = render(
+    <VoiceGenerationModal
+      open
+      projectId="p1"
+      entity={project.visual.entities.items.cat}
+      onClose={() => {}}
+    />,
+  );
+  const prompt = await screen.findByPlaceholderText(/描述想要的音色/);
+  fireEvent.change(prompt, { target: { value: "温柔的声音" } });
+  fireEvent.click(screen.getByRole("button", { name: /选择一段.*音频素材/ }));
+  fireEvent.click(
+    baseElement.querySelector('[data-picker-asset="uploaded-voice"]')!,
+  );
+  expect(
+    baseElement.querySelector('audio[aria-label="我的参考音频.wav"]'),
+  ).toHaveAttribute("src", expect.stringContaining("uploaded-voice"));
+  fireEvent.click(baseElement.querySelector("[data-picker-confirm]")!);
+  expect(prompt).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: /^生\s*成$/ }));
+  await waitFor(() =>
+    expect(
+      calls.find((call) => call.url.endsWith("/character-voice"))?.body,
+    ).toEqual({
+      characterRef: "asset:cat",
+      sampleSourceVersionId: "uploaded-voice",
+      preferredName: project.visual.entities.items.cat.name,
+    }),
+  );
 });

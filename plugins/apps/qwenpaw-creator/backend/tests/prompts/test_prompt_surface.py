@@ -72,7 +72,11 @@ def test_file_runtime_prompts_are_structured_files_with_workspace_schema() -> (
     for rendered in _active_prompt_texts():
         if rendered.startswith("# 定位"):
             assert "./project.json" in rendered
-            assert "PROJECT_JSON_SCHEMA=" in rendered
+            if "你是 Creator 的素材理解 Agent" in rendered:
+                assert "commit_source_intelligence 的工具 Schema" in rendered
+                assert "PROJECT_JSON_SCHEMA=" not in rendered
+            else:
+                assert "PROJECT_JSON_SCHEMA=" in rendered
 
 
 def test_creator_asset_flow_is_conditional_and_uses_visible_message_language() -> (

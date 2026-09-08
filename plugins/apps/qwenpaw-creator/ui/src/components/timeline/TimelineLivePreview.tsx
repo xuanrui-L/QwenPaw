@@ -24,6 +24,7 @@ import {
   ELEMENT_PLAYBACK_STATUS_LABEL,
   playbackLayersInWindow,
   transitionOpacityAtTick,
+  withRoughCutFallback,
 } from "@/selectors/elementPlaybackSelectors";
 import {
   overlayContentKind,
@@ -46,6 +47,7 @@ interface TimelineLivePreviewProps {
   tasks: TaskView[];
   onPlayheadChange: (tick: number) => void;
   onPlayingChange: (playing: boolean) => void;
+  draft?: boolean;
 }
 
 /** Max allowed drift (seconds) between a video layer and the playhead before pulling it back. */
@@ -542,6 +544,7 @@ export default function TimelineLivePreview({
   tasks,
   onPlayheadChange,
   onPlayingChange,
+  draft = false,
 }: TimelineLivePreviewProps) {
   const { t } = useTranslation();
   const ticksPerSecond = timeline.ticks_per_second || 1;
@@ -598,8 +601,11 @@ export default function TimelineLivePreview({
   // backend; the live preview plays them through hidden <audio> nodes
   // driven by the same playhead-following logic as video layers.
   const layers = useMemo(
-    () => playbackLayersInWindow(project, timeline, playheadTick, tasks),
-    [playheadTick, project, tasks, timeline],
+    () =>
+      playbackLayersInWindow(project, timeline, playheadTick, tasks).map(
+        (layer) => (draft ? withRoughCutFallback(project, layer) : layer),
+      ),
+    [playheadTick, project, tasks, timeline, draft],
   );
   const visibleLayers = useMemo(
     () =>
@@ -1012,7 +1018,7 @@ export default function TimelineLivePreview({
           }
           return <PlaceholderLayer key={elementId} layer={layer} />;
         })}
-        {showIncompleteNotice && (
+        {showIncompleteNotice && !draft && (
           <div
             data-live-preview-incomplete
             role="status"

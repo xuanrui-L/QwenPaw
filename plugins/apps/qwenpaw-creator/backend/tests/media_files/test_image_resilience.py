@@ -256,8 +256,7 @@ def test_redispatch_rescues_quarantined_stale_result(
         _execute(services, provider)
     assert provider.calls == 1
 
-    # The element comes back (same id), making the stored result valid
-    # again — the shape of the fan-out incident after its inputs settle.
+    # Restoring the identical input makes the paid result reusable.
     base = services.projects.read(PROJECT_ID)
     candidate = base.project.model_dump(mode="json")
     timeline = candidate["timelines"]["items"]["timeline:main"]
@@ -268,12 +267,217 @@ def test_redispatch_rescues_quarantined_stale_result(
         origin=ChangeOrigin.RUNTIME_TASK,
         review_policy=ReviewPolicy.AUTO_FIX,
     )
-
     result = _execute(services, provider)
-
     assert provider.calls == 1  # no second render, no second bill
     assert result.replayed is True
     assert result.artifact_version_id
+
+
+@pytest.mark.parametrize(
+    "field,stale",
+    [
+        ("storyboard_prompt", True),
+        ("narrative", True),
+        ("video_prompt", False),
+    ],
+)
+def test_storyboard_rechecks_its_own_inputs_at_publication(
+    tmp_path,
+    monkeypatch,
+    field,
+    stale,
+):
+    services = _services(tmp_path, monkeypatch)
+
+    def mutate(candidate):
+        candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+            ELEMENT_ID
+        ]["creation"][field] = "新的创作要求：头顶应改成蓝色帽子"
+
+    provider = _MutatingImageProvider(services, mutate)
+    if stale:
+        with pytest.raises(ConflictError, match="结果已隔离"):
+            _execute(services, provider)
+        element = (
+            services.projects.read(PROJECT_ID)
+            .project.timelines.items["timeline:main"]
+            .elements_by_id[ELEMENT_ID]
+        )
+        assert not element.outputs
+    else:
+        assert _execute(services, provider).artifact_version_id
+    assert provider.calls == 1
+
+
+@pytest.mark.parametrize("change", ["prompt", "references"])
+def test_asset_rechecks_variant_prompt_and_reference_order(
+    tmp_path,
+    monkeypatch,
+    change,
+):
+    services = _services(tmp_path, monkeypatch)
+    source = _with_remote_variant_refs(
+        _snapshot(
+            variants={
+                "items": {
+                    "var:hero": {
+                        "variant_id": "var:hero",
+                        "prompt": "头顶橘子的角色设定图",
+                    },
+                },
+                "order": ["var:hero"],
+            },
+        ),
+        "var:hero",
+        2,
+    )
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["visual"] = source.project.visual.model_dump(mode="json")
+    candidate["assets"]["source_versions_by_id"].update(
+        source.project.model_dump(mode="json")["assets"][
+            "source_versions_by_id"
+        ],
+    )
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+    )
+    monkeypatch.setattr(
+        image_execution,
+        "_validate_public_remote_url",
+        lambda value: value,
+    )
+
+    def mutate(raw):
+        variant = raw["visual"]["entities"]["items"]["char:haaland"][
+            "variants"
+        ]["items"]["var:hero"]
+        if change == "prompt":
+            variant["prompt"] = "头顶西瓜的角色设定图"
+        else:
+            variant["reference_asset_version_ids"].reverse()
+
+    provider = _MutatingImageProvider(services, mutate)
+    with pytest.raises(ConflictError, match="结果已隔离"):
+        asyncio.run(
+            FileImageExecutionService(
+                services,
+                provider=provider,
+                image_model_name="qwen-image-2.0-pro",
+            ).execute(
+                project_id=PROJECT_ID,
+                command="GENERATE_ASSET",
+                target_ref="asset:char:haaland",
+                arguments={"variantId": "var:hero"},
+                idempotency_key="asset-input-guard",
+            ),
+        )
+    current = services.projects.read(PROJECT_ID).project
+    assert (
+        current.visual.entities.items["char:haaland"]
+        .variants.items["var:hero"]
+        .selected_artifact_version_id
+        is None
+    )
+    # All frozen versions remain available: their mere existence is insufficient.
+    assert all(
+        version in current.assets.source_versions_by_id
+        for version in ("ref-1", "ref-2")
+    )
+    assert provider.calls == 1
+
+
+def test_storyboard_rejects_changed_selected_anchor_even_if_old_version_survives(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path, monkeypatch)
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["visual"] = _snapshot(
+        variants={
+            "items": {
+                "hero": {"variant_id": "hero", "prompt": "动画角色身份图"},
+            },
+            "order": ["hero"],
+        },
+    ).project.visual.model_dump(mode="json")
+    candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        ELEMENT_ID
+    ]["creation"]["character_refs"] = ["char:haaland"]
+    candidate["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        ELEMENT_ID
+    ]["creation"]["storyboard_prompt"] = "[Image 1] 提供角色身份，画出球员入场。"
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+    )
+    anchor = asyncio.run(
+        FileImageExecutionService(
+            services,
+            provider=_CountingProvider(),
+        ).execute(
+            project_id=PROJECT_ID,
+            command="GENERATE_ASSET",
+            target_ref="asset:char:haaland",
+            arguments={"variantId": "hero"},
+            idempotency_key="anchor",
+        ),
+    )
+    from .conftest import accept_pending_reviews
+
+    accept_pending_reviews(services, PROJECT_ID)
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    old_version = candidate["assets"]["artifact_versions_by_id"][
+        anchor.artifact_version_id
+    ]
+    candidate["assets"]["artifact_versions_by_id"]["anchor-alternative"] = {
+        **old_version,
+        "version_id": "anchor-alternative",
+    }
+    candidate["assets"]["artifact_slots_by_id"][old_version["slot_id"]][
+        "version_ids"
+    ].append("anchor-alternative")
+    candidate["visual"]["entities"]["items"]["char:haaland"]["variants"][
+        "items"
+    ]["hero"]["generated_artifact_version_ids"].append("anchor-alternative")
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+    )
+
+    def change_selection(raw):
+        entity = raw["visual"]["entities"]["items"]["char:haaland"]
+        entity["selected_artifact_version_id"] = "anchor-alternative"
+        entity["variants"]["items"]["hero"][
+            "selected_artifact_version_id"
+        ] = "anchor-alternative"
+        raw["assets"]["artifact_slots_by_id"][old_version["slot_id"]][
+            "selected_version_id"
+        ] = "anchor-alternative"
+
+    provider = _MutatingImageProvider(services, change_selection)
+    provider.model_name = "qwen-image-2.0-pro"
+    with pytest.raises(ConflictError, match="结果已隔离"):
+        _execute(services, provider)
+    current = services.projects.read(PROJECT_ID).project
+    assert anchor.artifact_version_id in current.assets.artifact_versions_by_id
+    assert (
+        current.assets.artifact_versions_by_id[
+            anchor.artifact_version_id
+        ].checksum
+        == old_version["checksum"]
+    )
+    assert (
+        not current.timelines.items["timeline:main"]
+        .elements_by_id[ELEMENT_ID]
+        .outputs
+    )
 
 
 def _execute_safety(service, *, key, reference_urls=()):

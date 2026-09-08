@@ -825,7 +825,12 @@ def _resolve_request(
         authored_storyboard_version_ids = tuple(
             creation.storyboard_reference_version_ids,
         )
-        assert_r2v_prompt_sync(project, timeline.timeline_id, element_id)
+        assert_r2v_prompt_sync(
+            project,
+            timeline.timeline_id,
+            element_id,
+            stage="storyboard",
+        )
         assert_visual_design_ready_for_storyboards(project)
         prompt = explicit_prompt or creation.storyboard_prompt.strip()
         if not prompt:
@@ -1444,6 +1449,99 @@ def _publish_snapshot(resolved: _ResolvedRequest) -> dict[str, Any]:
     }
 
 
+def _image_authoring_fingerprint(
+    project: Project,
+    snapshot: Mapping[str, Any],
+    image_model_name: str,
+) -> str:
+    """Project-owned inputs and selections, excluding unrelated outputs.
+
+    Exact reference versions remaining in the asset index is not evidence
+    that they are still the current choices. Resolve the current plan too.
+    This function does not read media files or call a provider.
+    """
+    command = CreatorCommandType(str(snapshot["command"]))
+    target_ref = str(snapshot["targetRef"])
+    inputs: dict[str, Any] = {"aspectRatio": project.settings.aspect_ratio}
+    if command is CreatorCommandType.GENERATE_STORYBOARD_IMAGE:
+        from services.project_files.prompt_sync import stage_input_fingerprint
+
+        element_id = target_element_id(target_ref, command=command.value)
+        timeline, element = find_timeline_element(project, element_id)
+        if not isinstance(element.creation, R2VCreation):
+            raise ValidationError("图片目标已不再是 R2V 元素")
+        references, _ = storyboard_reference_plan(
+            project,
+            element.creation,
+            image_model_name=image_model_name,
+            prompt=str(snapshot.get("prompt") or ""),
+        )
+        selected = selected_element_output(project, element, "storyboard")
+        inputs.update(
+            {
+                "plan": stage_input_fingerprint(
+                    project.model_dump(mode="json"),
+                    timeline.timeline_id,
+                    element_id,
+                    "storyboard",
+                ),
+                "references": list(references),
+                "selectedVersion": selected[1] if selected else None,
+            },
+        )
+    elif command is CreatorCommandType.GENERATE_ASSET:
+        entity_id = _target_id(target_ref, "asset")
+        entity = project.visual.entities.items.get(entity_id)
+        if entity is None:
+            raise NotFoundError("视觉资产已不存在")
+        variant_id = snapshot.get("variantId")
+        variant = (
+            entity.variants.items.get(str(variant_id)) if variant_id else None
+        )
+        if variant_id and variant is None:
+            raise NotFoundError("视觉变体已不存在")
+        inputs.update(
+            {
+                "prompt": variant.prompt if variant else "",
+                "referenceSources": (
+                    variant.reference_asset_version_ids if variant else []
+                ),
+                "referenceArtifacts": (
+                    variant.reference_artifact_version_ids if variant else []
+                ),
+                "selectedVersion": (
+                    variant.selected_artifact_version_id
+                    if variant
+                    else entity.selected_artifact_version_id
+                ),
+            },
+        )
+    elif command is CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE:
+        lineup = project.visual.cast_lineups.items.get(
+            _target_id(target_ref, "lineup"),
+        )
+        if lineup is None:
+            raise NotFoundError("阵容图已不存在")
+        anchors, missing = _lineup_character_reference_ids(project, lineup)
+        if missing:
+            raise ValidationError("阵容图的角色参考已变更")
+        inputs.update(
+            {
+                "description": lineup.description,
+                "relativeNotes": lineup.relative_notes,
+                "style": project.visual.style,
+                "characters": lineup.character_refs,
+                "anchors": anchors,
+                "referenceSources": lineup.reference_asset_version_ids,
+                "referenceArtifacts": lineup.reference_artifact_version_ids,
+                "selectedVersion": lineup.selected_artifact_version_id,
+            },
+        )
+    else:
+        raise ValidationError("不支持的图片输入保护类型")
+    return _fingerprint(inputs)
+
+
 def _resolved_from_publish_snapshot(
     snapshot: Mapping[str, Any],
 ) -> _ResolvedRequest:
@@ -1672,6 +1770,7 @@ class FileImageExecutionService:
             command_request_hash=command_request_hash,
             idempotency_key=idempotency_key,
             ids=ids,
+            image_model_name=image_model_name,
         )
         if task.status is TaskStatus.SUCCEEDED:
             return self._result_from_task(task, replayed=True)
@@ -2101,6 +2200,7 @@ class FileImageExecutionService:
         command_request_hash: str,
         idempotency_key: str,
         ids: Mapping[str, str],
+        image_model_name: str = "",
     ) -> tuple[SpecialistRunRecord, TaskRecord]:
         run_candidate = SpecialistRunRecord(
             run_id=ids["run_id"],
@@ -2167,6 +2267,15 @@ class FileImageExecutionService:
                 # re-resolving (and possibly re-billing) anything.
                 "storyboardInputContract": 2,
                 "requestSnapshot": _publish_snapshot(resolved),
+                "authoringInputGuard": {
+                    "contractVersion": 1,
+                    "imageModelName": image_model_name,
+                    "fingerprint": _image_authoring_fingerprint(
+                        base.project,
+                        _publish_snapshot(resolved),
+                        image_model_name,
+                    ),
+                },
             },
         )
         try:
@@ -2789,6 +2898,7 @@ class FileImageExecutionService:
         project: Project,
         task: TaskRecord,
     ) -> bool:
+        # pylint: disable=too-many-return-statements
         """True when the task's render inputs are unchanged in ``project``.
 
         Whole-project etag drift treats every commit as fatal, but under
@@ -2796,15 +2906,36 @@ class FileImageExecutionService:
         media import touching disjoint pointers — quarantining then
         discards a finished, paid render (field run 2026-08-07: the
         first commit of a four-wide storyboard wave staled the other
-        three). Publishing stays allowed when every frozen read-set
-        version still resolves to the same checksum and the target
-        still exists; anything else keeps the fail-closed quarantine.
+        three). Publishing stays allowed when the target's authored inputs,
+        current reference choices and output selection still match, and every
+        frozen version retains its checksum. Unrelated commits remain safe.
         """
 
         metadata = task.metadata or {}
         command = str(metadata.get("commandType") or "")
         target_ref = str(metadata.get("targetRef") or "")
         if not command or not target_ref:
+            return False
+        guard = metadata.get("authoringInputGuard")
+        snapshot = metadata.get("requestSnapshot")
+        if (
+            not isinstance(guard, Mapping)
+            or guard.get("contractVersion") != 1
+            or not isinstance(snapshot, Mapping)
+        ):
+            # Older requests did not record enough authority to safely rebase
+            # an uncommitted result after Project drift. Keep the paid file in
+            # quarantine instead of guessing whether its inputs are current.
+            return False
+        try:
+            current_fingerprint = _image_authoring_fingerprint(
+                project,
+                snapshot,
+                str(guard.get("imageModelName") or ""),
+            )
+        except (NotFoundError, ValidationError, ValueError, KeyError):
+            return False
+        if current_fingerprint != guard.get("fingerprint"):
             return False
         for item in task.read_set or []:
             if not isinstance(item, Mapping):

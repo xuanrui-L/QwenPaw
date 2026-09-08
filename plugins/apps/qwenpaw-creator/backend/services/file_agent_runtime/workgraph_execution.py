@@ -341,7 +341,7 @@ def workgraph_blocking_reviews(
 ) -> list:
     """Join the same review fences used by admission, scoped to this request.
 
-    Creative/mixed reviews and heavy production retain their project fence.
+    Creative/mixed reviews fence the affected production dependencies.
     Independent visual work waits only for its own outputs or input images.
     Run on a worker thread: both snapshot and review discovery read files.
     """
@@ -364,7 +364,13 @@ def workgraph_blocking_reviews(
         slots = frozenset(artifact.slot_id for artifact in artifacts)
         owners = frozenset(artifact.owner_ref for artifact in artifacts)
         for node in nodes:
-            if _blocked_by_active_media_review(node, slots, owners):
+            if _blocked_by_active_media_review(
+                node,
+                slots,
+                owners,
+                graph=graph,
+                project=project,
+            ):
                 joined.append(review)
                 break
             if node.kind in {"visual", "lineup"}:
@@ -582,7 +588,16 @@ async def ready_request_context(
         elif _blocked_by_active_sync_review(
             node,
             sync_review_pending=bool(fences),
-        ) or _blocked_by_active_media_review(node, slots, owners):
+            fences=fences,
+            graph=graph,
+            project=snapshot.project,
+        ) or _blocked_by_active_media_review(
+            node,
+            slots,
+            owners,
+            graph=graph,
+            project=snapshot.project,
+        ):
             blocked[node.node_id] = "WAITING_REVIEW"
         elif node.target_ref and node.target_ref.startswith("element:"):
             if (

@@ -617,7 +617,7 @@ function statusCopy(status: string): string {
         {
           started: "running",
           succeeded: "done",
-          failed: "failed",
+          failed: "toolFailed",
           cancelled: "cancelled",
           waiting_review: "waiting_review",
           unknown: "unknown",
@@ -849,7 +849,7 @@ function ToolCallCard({ data }: { data: ToolCallPresentation }) {
       )}
       {status === "failed" && (
         <p className="agent-activity-notice">
-          {t("agentActivity.failureHint")}
+          {t("agentActivity.toolFailureHint")}
         </p>
       )}
       {status === "waiting_review" && (

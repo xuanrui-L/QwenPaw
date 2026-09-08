@@ -279,6 +279,63 @@ describe("R2V Workbench page", () => {
     },
   );
 
+  it("keeps production reference diagnostics quiet and reports manual save failures", async () => {
+    const project = cloneProject();
+    const creation =
+      project.timelines.items["timeline:main"].elements_by_id["r2v-window"]
+        .creation;
+    if (creation.type !== "r2v") throw new Error("Expected R2V fixture");
+    creation.storyboard_prompt = "[Image 3] 中的橘猫扒着窗台";
+    seedProject(project);
+    const saveError = "参考图片编号超出了当前参考图列表，请修正后保存。";
+    const { calls } = installMockFetch([
+      ...modelRoutes("wan2.7-r2v"),
+      {
+        match: "/r2v-references",
+        response: {
+          json: {
+            elementId: "r2v-window",
+            stage: "storyboard",
+            storyboardSelected: false,
+            ready: false,
+            invalidMarkerIndices: [3],
+            references: [],
+          },
+        },
+      },
+      {
+        match: "/projects/p1/project",
+        method: "PATCH",
+        response: { status: 422, ok: false, json: { message: saveError } },
+      },
+    ]);
+    const { container } = renderWorkbench();
+    const regenerate = container.querySelector(
+      '[data-prompt-regenerate="element:r2v-window/creation/storyboard_prompt"]',
+    );
+    await waitFor(() => expect(regenerate).toBeDisabled());
+    expect(
+      screen.queryByText(/参考图缺失、数量超限或引用编号不匹配/),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-prompt-token-missing="3"]'),
+    ).toHaveTextContent("IMG 3");
+    expect(screen.queryByText(/未绑定/)).toBeNull();
+    expect(screen.queryByText(saveError, { exact: false })).toBeNull();
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+
+    const input = screen.getByDisplayValue(creation.storyboard_prompt);
+    fireEvent.change(input, {
+      target: { value: "[Image 8] 中的橘猫扒着窗台" },
+    });
+    expect(screen.queryByText(saveError, { exact: false })).toBeNull();
+    fireEvent.blur(input);
+    expect(
+      await screen.findByText(saveError, { exact: false }),
+    ).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: creation.storyboard_prompt } });
+  });
+
   it("dispatches the video node from the prompt-card regenerate button", async () => {
     const { calls } = installMockFetch([
       ...modelRoutes("wan2.7-r2v"),

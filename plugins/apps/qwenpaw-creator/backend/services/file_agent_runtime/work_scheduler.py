@@ -155,19 +155,60 @@ _MEDIA_REVIEW_DEPENDENT_KINDS = frozenset(
     {"visual", "lineup", "storyboard", "video", "compose"},
 )
 # Heavy/billed nodes that need stable inputs: storyboard, video, and compose.
-# These are unconditionally fenced by both media review (any active slot) and
-# sync review (text review pending). Visual/lineup are lighter and only fenced
-# when their specific target slot is under review.
+# Reviews fence their consumers and transitive dependencies; unrelated work
+# may proceed. Project-wide or unknown review scopes remain conservative.
 _HEAVY_NODE_KINDS = frozenset({"storyboard", "video", "compose"})
+
+
+def _review_scope(node: WorkNode, graph: WorkGraph, project=None):
+    """Owners read by a node, including transitive and explicit references."""
+    owners: set[str] = set()
+    visited: set[str] = set()
+    pending = [node]
+    by_id = graph.by_id
+    while pending:
+        current = pending.pop()
+        if current.node_id in visited:
+            continue
+        visited.add(current.node_id)
+        if current.target_ref:
+            owners.add(current.target_ref)
+        pending.extend(by_id[dep] for dep in current.deps if dep in by_id)
+        if project is not None and current.timeline_id:
+            timeline = project.timelines.items.get(current.timeline_id)
+            element = (
+                timeline.elements_by_id.get(
+                    (current.target_ref or "").removeprefix("element:"),
+                )
+                if timeline
+                else None
+            )
+            if element and current.kind in {"storyboard", "video"}:
+                for version_id in getattr(
+                    element.creation,
+                    f"{current.kind}_reference_version_ids",
+                    (),
+                ):
+                    version = project.assets.artifact_versions_by_id.get(
+                        version_id,
+                    )
+                    if version:
+                        owners.add(version.owner_ref)
+    return owners
 
 
 def _blocked_by_active_media_review(
     node: WorkNode,
     active_slots: frozenset[str],
     active_owner_refs: frozenset[str],
+    *,
+    graph: WorkGraph | None = None,
+    project=None,
 ) -> bool:
     if not active_slots or node.kind not in _MEDIA_REVIEW_DEPENDENT_KINDS:
         return False
+    if graph is not None:
+        return bool(_review_scope(node, graph, project) & active_owner_refs)
     if node.kind in _HEAVY_NODE_KINDS:
         return True
     # ArtifactSlot ids are opaque (asset:{id}:variant:{vid}:image), while a
@@ -179,14 +220,51 @@ def _blocked_by_active_media_review(
     return False
 
 
+def _reviewed_pointer_owner(pointer: str) -> str | None:
+    from services.project_files.json_pointer import split_pointer
+
+    parts = split_pointer(pointer)
+    if (
+        len(parts) >= 5
+        and parts[:2] == ("timelines", "items")
+        and parts[3] == "elements_by_id"
+    ):
+        return f"element:{parts[4]}"
+    if len(parts) >= 4:
+        prefix = {
+            ("visual", "entities", "items"): "asset",
+            ("visual", "cast_lineups", "items"): "lineup",
+        }.get(parts[:3])
+        if prefix:
+            return f"{prefix}:{parts[3]}"
+    return None
+
+
 def _blocked_by_active_sync_review(
     node: WorkNode,
     *,
     sync_review_pending: bool,
+    fences=(),
+    graph: WorkGraph | None = None,
+    project=None,
 ) -> bool:
-    """Fence storyboard/video/compose until pre-generation text review ends."""
+    """Wait for reviews of this node's inputs and shared dependencies."""
 
-    return sync_review_pending and node.kind in _HEAVY_NODE_KINDS
+    if not sync_review_pending or node.kind not in _HEAVY_NODE_KINDS:
+        return False
+    if graph is None or not fences:
+        return True
+    owners = _review_scope(node, graph, project)
+    for fence in fences:
+        pointers = fence.get("reviewed_pointers")
+        if not pointers:
+            return True
+        for pointer in pointers:
+            owner = _reviewed_pointer_owner(pointer)
+            # Project-wide or unrecognized edits retain the conservative gate.
+            if owner is None or owner in owners:
+                return True
+    return False
 
 
 class WorkGraphScheduler:
@@ -218,6 +296,9 @@ class WorkGraphScheduler:
         self._transient_last: dict[tuple[str, str, str], float] = {}
         self._inflight: dict[str, set[str]] = {}
         self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._preparation_tasks: dict[str, asyncio.Task[None]] = {}
+        self._preparing: dict[str, set[str]] = {}
+        self._closed = False
         self._sync_gate_rechecks: dict[str, asyncio.TimerHandle] = {}
         self._cancelled_projects: set[str] = set()
         # Keyed by (project, node, fingerprint): a deterministic failure
@@ -292,6 +373,8 @@ class WorkGraphScheduler:
     def wake(self, project_id: str) -> None:
         """Signal that durable state changed; start the loop if needed."""
 
+        if self._closed:
+            return
         # A wake is a state-change signal, not authorization to resume. tick()
         # checks the durable Session stop even for startup/late-commit wakes.
         # This local set only suppresses cancelled dispatch finalizers.
@@ -305,8 +388,11 @@ class WorkGraphScheduler:
             )
 
     async def shutdown(self) -> None:
+        # Cancelled preparation/dispatch finalizers must not start new loops.
+        self._closed = True
         tasks = [
             *self._loops.values(),
+            *self._preparation_tasks.values(),
             *(
                 task
                 for project_tasks in self._dispatch_tasks.values()
@@ -325,6 +411,8 @@ class WorkGraphScheduler:
                 pass
         self._loops.clear()
         self._dispatch_tasks.clear()
+        self._preparation_tasks.clear()
+        self._preparing.clear()
         for handle in self._sync_gate_rechecks.values():
             handle.cancel()
         self._sync_gate_rechecks.clear()
@@ -334,6 +422,10 @@ class WorkGraphScheduler:
         """Synchronously signal every scheduler-owned task for one Project."""
 
         self._cancelled_projects.add(project_id)
+        preparation = self._preparation_tasks.pop(project_id, None)
+        if preparation is not None:
+            preparation.cancel()
+        self._preparing.pop(project_id, None)
         loop = self._loops.pop(project_id, None)
         if loop is not None:
             loop.cancel()
@@ -579,10 +671,13 @@ class WorkGraphScheduler:
                 snapshot.generation,
             )
             return graph
-        running = sum(
-            1 for node in graph.nodes if node.status.value == "running"
-        )
-        capacity = get_media_parallelism() - running - len(inflight)
+        active_media = {
+            node.node_id
+            for node in graph.nodes
+            if node.status is WorkNodeStatus.RUNNING
+        } | (inflight - self._preparing.get(project_id, set()))
+        # The durable task and its scheduler handle are the same operation.
+        capacity = get_media_parallelism() - len(active_media)
         # Auto-saved frontend edits open a short grace window per element;
         # dispatching inside it would hand a possibly half-finished prompt
         # to a paid provider. Recheck once the earliest window expires.
@@ -606,6 +701,9 @@ class WorkGraphScheduler:
             if _blocked_by_active_sync_review(
                 node,
                 sync_review_pending=sync_review_pending,
+                fences=sync_fences,
+                graph=graph,
+                project=snapshot.project,
             ):
                 logger.info(
                     "work-graph node %s waits for synchronous text review",
@@ -616,6 +714,8 @@ class WorkGraphScheduler:
                 node,
                 reviewing_slots,
                 reviewing_owners,
+                graph=graph,
+                project=snapshot.project,
             ):
                 logger.info(
                     "work-graph node %s waits for async review of %s",
@@ -653,7 +753,22 @@ class WorkGraphScheduler:
         if held_recheck is not None:
             # Same one-shot wake mechanics as the sync-gate recheck timer.
             self._schedule_sync_gate_recheck(project_id, held_recheck)
-        await self._prepare_changed_prompts(project_id, graph)
+        preparation = self._preparation_tasks.get(project_id)
+        if preparation is None or preparation.done():
+            # One bounded text preparation per project, independent of media
+            # capacity. Its model call must never hold the dispatch loop.
+            preparation = asyncio.create_task(
+                self._prepare_changed_prompts(project_id, graph),
+            )
+            self._preparation_tasks[project_id] = preparation
+
+            def prepared(done: asyncio.Task[None]) -> None:
+                if self._preparation_tasks.get(project_id) is done:
+                    self._preparation_tasks.pop(project_id, None)
+                if not done.cancelled():
+                    done.exception()
+
+            preparation.add_done_callback(prepared)
         await self._emit_graph_transitions(
             project_id,
             graph,
@@ -691,7 +806,7 @@ class WorkGraphScheduler:
         for node in graph.nodes:
             if (
                 # pylint: disable-next=too-many-boolean-expressions
-                node.kind != "storyboard"
+                node.kind not in {"storyboard", "video"}
                 or not getattr(node, "prompt_sync_required", False)
                 or not node.timeline_id
                 or not node.target_ref
@@ -759,6 +874,7 @@ class WorkGraphScheduler:
                 or not key[2].startswith("prepare-")
             }
             self._inflight.setdefault(project_id, set()).add(node.node_id)
+            self._preparing.setdefault(project_id, set()).add(node.node_id)
             try:
                 if status.get("validationMessage"):
                     raise ValueError(status["validationMessage"])
@@ -815,6 +931,7 @@ class WorkGraphScheduler:
                 )
             finally:
                 self._inflight.get(project_id, set()).discard(node.node_id)
+                self._preparing.get(project_id, set()).discard(node.node_id)
                 if project_id not in self._cancelled_projects:
                     self.wake(project_id)
             return

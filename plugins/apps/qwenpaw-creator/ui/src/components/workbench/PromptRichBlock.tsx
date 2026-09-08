@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Image, Input, Tooltip } from "antd";
+import { Input, Tooltip } from "antd";
+import ImageLightbox from "@/components/assets/ImageLightbox";
 import { Loader2, SquarePen, Wand2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
@@ -132,9 +133,9 @@ export default function PromptRichBlock({
           <span
             key={partIndex}
             data-prompt-token-missing={match[1]}
-            className="mx-0.5 inline-flex items-center rounded-full border border-dashed border-[var(--color-danger)]/50 bg-[var(--color-bg-primary)] px-2 py-0.5 align-[-3px] font-mono text-[9px] font-bold leading-none text-[var(--color-danger)]"
+            className="mx-0.5 inline-flex items-center rounded-full border border-dashed border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 py-0.5 align-[-3px] font-mono text-[9px] font-bold leading-none text-[var(--color-text-secondary)]"
           >
-            {t("r2v.tokenMissing", { index: match[1] })}
+            {t("r2v.tokenReferenceNumber", { index: match[1] })}
           </span>
         );
       }
@@ -278,17 +279,7 @@ export default function PromptRichBlock({
 
       {/* Controlled zoom preview for token thumbnails. */}
       {previewSrc && (
-        <Image
-          style={{ display: "none" }}
-          src={previewSrc}
-          preview={{
-            visible: true,
-            src: previewSrc,
-            onVisibleChange: (visible) => {
-              if (!visible) setPreviewSrc(null);
-            },
-          }}
-        />
+        <ImageLightbox src={previewSrc} onClose={() => setPreviewSrc(null)} />
       )}
 
       <PromptEditorModal

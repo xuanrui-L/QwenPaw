@@ -20,7 +20,10 @@ from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, TaskKind, TaskStatus
-from services.prompt_text import missing_narrative_dialogue
+from services.prompt_text import (
+    missing_narrative_dialogue,
+    video_prompt_time_error,
+)
 from services.project_files.prompt_sync import prompt_sync_status
 from services.project_files.blueprint_readiness import (
     STORY_BEFORE_VISUAL_MESSAGE,
@@ -817,6 +820,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             label = element.label or element_id
             creation_type = getattr(creation, "type", "r2v")
             prompt_sync_gap = None
+            storyboard_sync_gap = None
             if creation_type == "r2v" and not element_id.startswith(
                 "snapshot:",
             ):
@@ -824,9 +828,21 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     prompt_sync_document,
                     timeline_id,
                     element_id,
+                    stage="video",
                 )
                 if sync["status"] in ("needs_update", "needs_confirmation"):
                     prompt_sync_gap = "镜头与提示词待同步或待审阅确认"
+                storyboard_sync = prompt_sync_status(
+                    prompt_sync_document,
+                    timeline_id,
+                    element_id,
+                    stage="storyboard",
+                )
+                if storyboard_sync["status"] in (
+                    "needs_update",
+                    "needs_confirmation",
+                ):
+                    storyboard_sync_gap = "分镜内容与提示词待同步"
 
             storyboard_id: str | None = None
             storyboard_slot: str | None = None
@@ -937,9 +953,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         )
                     ):
                         status = WorkNodeStatus.FAILED
-                if prompt_sync_gap and task is None:
+                if storyboard_sync_gap and task is None:
                     status = WorkNodeStatus.GATED
-                    missing = (prompt_sync_gap,)
+                    missing = (storyboard_sync_gap,)
                     authored_text_gap = True
                 add(
                     WorkNode(
@@ -959,7 +975,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         ),
                         missing=missing,
                         authored_text_gap=authored_text_gap,
-                        prompt_sync_required=bool(prompt_sync_gap),
+                        prompt_sync_required=bool(storyboard_sync_gap),
                         locator={"page": "plan", "elementId": element_id},
                         command="GENERATE_STORYBOARD_IMAGE",
                         target_ref=f"element:{element_id}",
@@ -1101,6 +1117,14 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         status = WorkNodeStatus.FAILED
 
             # Command and dispatch arguments based on creation type
+            time_error = video_prompt_time_error(
+                getattr(creation, "video_prompt", ""),
+                element.span.duration_tick / timeline.ticks_per_second,
+            )
+            if time_error and task is None:
+                status = WorkNodeStatus.GATED
+                video_missing = (*video_missing, time_error)
+                video_text_gap = True
             if prompt_sync_gap and task is None:
                 status = WorkNodeStatus.GATED
                 video_missing = (prompt_sync_gap,)
@@ -1115,7 +1139,10 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 )
             ):
                 status = WorkNodeStatus.GATED
-                video_missing = (*video_missing, "视频提示词遗漏了片段内容中的对白或旁白原文")
+                video_missing = (
+                    *video_missing,
+                    "视频提示词遗漏了片段内容中的对白或旁白原文",
+                )
                 video_text_gap = True
             command, dispatch_arguments = _video_dispatch_command(
                 creation_type,

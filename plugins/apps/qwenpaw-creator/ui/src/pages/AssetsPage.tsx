@@ -64,9 +64,13 @@ import PageSkeleton from "@/components/PageSkeleton";
 import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
 import { selectPrimaryTimeline } from "@/selectors/timelineElementSelectors";
 import { isVoiceOnlyVisualEntity } from "@/selectors/blueprintSelectors";
+import RelatedAssetPicker from "@/components/workbench/RelatedAssetPicker";
 import { visualVariantLabel } from "@/lib/visualVariants";
 import { useTranslation } from "react-i18next";
-import { projectJsonPointer } from "@/lib/projectJsonPointer";
+import {
+  creatorFieldForPointer,
+  projectJsonPointer,
+} from "@/lib/projectJsonPointer";
 import InlineReviewDiff from "@/components/agent/InlineReviewDiff";
 
 type FilterKey = "all" | "character" | "scene" | "prop" | "video" | "audio";
@@ -1191,7 +1195,12 @@ export function GenerationPromptEditor({
         {target.label}
       </span>
       <div className="space-y-2 rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/50 p-3">
-        <p className="max-h-[135px] overflow-y-auto whitespace-pre-wrap text-xs leading-[1.6] text-[var(--color-text-primary)]">
+        <p
+          data-creator-field={creatorFieldForPointer(target.pointer)}
+          data-creator-path={target.pointer}
+          data-creator-field-label={target.label}
+          className="max-h-[135px] select-text overflow-y-auto whitespace-pre-wrap text-xs leading-[1.6] text-[var(--color-text-primary)]"
+        >
           {target.value || t("assets.promptPlaceholder")}
         </p>
         <div className="flex justify-end gap-3">
@@ -1238,7 +1247,7 @@ export function GenerationPromptEditor({
 
 /** Voice generation dialog: design prompt (when the TTS model supports it)
  *  and/or an audio sample; submits straight to the enrollment executor. */
-function VoiceGenerationModal({
+export function VoiceGenerationModal({
   open,
   projectId,
   entity,
@@ -1258,11 +1267,13 @@ function VoiceGenerationModal({
   );
   const [voicePrompt, setVoicePrompt] = useState("");
   const [sampleId, setSampleId] = useState<string | null>(null);
+  const [samplePickerOpen, setSamplePickerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!open || !entity) return;
-    setVoicePrompt(entity.voice?.voice_prompt || entity.description || "");
+    setVoicePrompt(entity.voice?.voice_prompt || "");
     setSampleId(entity.voice?.sample_source_version_id ?? null);
+    setSamplePickerOpen(false);
     setCapabilities(null);
     void getVoiceCapabilities(projectId)
       .then(setCapabilities)
@@ -1281,7 +1292,7 @@ function VoiceGenerationModal({
     : [];
   const submit = async () => {
     if (!entity) return;
-    const prompt = supportsDesign ? voicePrompt.trim() : "";
+    const prompt = supportsDesign && !sampleId ? voicePrompt.trim() : "";
     if (!prompt && !sampleId) {
       message.error(t("assets.voiceNeedInput"));
       return;
@@ -1291,7 +1302,7 @@ function VoiceGenerationModal({
       await createCharacterVoice(projectId, {
         characterRef: `asset:${entity.entity_id}`,
         ...(prompt ? { voicePrompt: prompt } : {}),
-        ...(!prompt && sampleId ? { sampleSourceVersionId: sampleId } : {}),
+        ...(sampleId ? { sampleSourceVersionId: sampleId } : {}),
         preferredName: entity.name,
       });
       message.success(t("assets.voiceDone"));
@@ -1322,6 +1333,7 @@ function VoiceGenerationModal({
             </span>
             <Input.TextArea
               value={voicePrompt}
+              disabled={Boolean(sampleId)}
               onChange={(event) => setVoicePrompt(event.target.value)}
               autoSize={{ minRows: 3, maxRows: 8 }}
               placeholder={t("assets.voicePromptPlaceholder")}
@@ -1335,16 +1347,48 @@ function VoiceGenerationModal({
               ? t("assets.voiceSampleOptional")
               : t("assets.voiceSampleRequired")}
           </span>
-          <Select
-            className="!w-full"
-            allowClear
-            placeholder={t("assets.voiceSamplePlaceholder")}
-            value={sampleId}
-            options={audioOptions}
-            onChange={(next) => setSampleId(next ?? null)}
-          />
+          <div className="flex items-center gap-2">
+            <Button
+              className="min-w-0 flex-1"
+              onClick={() => setSamplePickerOpen(true)}
+            >
+              {audioOptions.find((item) => item.value === sampleId)?.label ??
+                t("assets.voiceSamplePlaceholder")}
+            </Button>
+            {sampleId && (
+              <Button onClick={() => setSampleId(null)}>
+                {t("common.clear")}
+              </Button>
+            )}
+          </div>
+          {sampleId && (
+            <audio
+              src={getAssetVersionMediaUrl(sampleId)}
+              controls
+              preload="none"
+              className="mt-2 h-9 w-full"
+            />
+          )}
         </div>
       </div>
+      <RelatedAssetPicker
+        open={samplePickerOpen}
+        title={t("assets.voiceSamplePlaceholder")}
+        candidates={audioOptions.map((option) => ({
+          id: option.value,
+          name: option.label,
+          kind: "material",
+          thumbUrl: null,
+          audioUrl: getAssetVersionMediaUrl(option.value),
+        }))}
+        boundIds={sampleId ? [sampleId] : []}
+        singleSelection
+        onCancel={() => setSamplePickerOpen(false)}
+        onConfirm={(ids) => {
+          setSampleId(ids[0] ?? null);
+          setSamplePickerOpen(false);
+        }}
+      />
     </Modal>
   );
 }
@@ -2052,7 +2096,11 @@ export default function AssetsPage() {
                         <h3 className="mt-2 text-base font-semibold text-[var(--color-text-primary)]">
                           {selected.name}
                         </h3>
-                        <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[var(--color-text-secondary)]">
+                        <p
+                          data-creator-field={`${selected.ref}/description`}
+                          data-creator-field-label={selected.name}
+                          className="mt-1 select-text whitespace-pre-wrap text-xs leading-5 text-[var(--color-text-secondary)]"
+                        >
                           {selected.description}
                         </p>
                       </div>
@@ -2064,7 +2112,14 @@ export default function AssetsPage() {
                           <h4 className="text-xs font-semibold">
                             {reviewedVisualField.label}
                           </h4>
-                          <p className="whitespace-pre-wrap text-xs leading-5">
+                          <p
+                            data-creator-field={creatorFieldForPointer(
+                              reviewedVisualField.pointer,
+                            )}
+                            data-creator-path={reviewedVisualField.pointer}
+                            data-creator-field-label={reviewedVisualField.label}
+                            className="select-text whitespace-pre-wrap text-xs leading-5"
+                          >
                             {reviewedVisualField.value || "—"}
                           </p>
                           <InlineReviewDiff

@@ -111,13 +111,42 @@ def sync_stamp(
             f"{field}_fingerprint": digest(creation.get(field, ""))
             for field in _PROMPTS
         },
+        **{
+            f"{stage}_input_fingerprint": stage_input_fingerprint(
+                document,
+                timeline_id,
+                element_id,
+                stage,
+            )
+            for stage in ("storyboard", "video")
+        },
     }
+
+
+def stage_input_fingerprint(document, timeline_id, element_id, stage):
+    """Storyboards start before video text; videos follow storyboard edits."""
+    plan = plan_input(document, timeline_id, element_id)
+    other = "video" if stage == "storyboard" else "storyboard"
+    plan["creation"].pop(f"{other}_reference_version_ids", None)
+    _, element = live_element(document, timeline_id, element_id)
+    inputs = {
+        "plan": plan,
+        "prompt": element["creation"].get(f"{stage}_prompt", ""),
+    }
+    if stage == "video":
+        inputs["storyboardPrompt"] = element["creation"].get(
+            "storyboard_prompt",
+            "",
+        )
+    return digest(inputs)
 
 
 def prompt_sync_status(
     project: Any,
     timeline_id: str,
     element_id: str,
+    *,
+    stage: str | None = None,
 ) -> dict:
     document = _json(project)
     _, element = live_element(document, timeline_id, element_id)
@@ -127,7 +156,15 @@ def prompt_sync_status(
     status, reason = "legacy", "untracked"
     changed = []
     if previous and previous.get("contract_version") == 2:
-        changed = [key for key in current if current[key] != previous.get(key)]
+        changed = [
+            key
+            for key in (
+                "plan_fingerprint",
+                "storyboard_prompt_fingerprint",
+                "video_prompt_fingerprint",
+            )
+            if current[key] != previous.get(key)
+        ]
         if not changed:
             status, reason = "current", "aligned"
         elif "plan_fingerprint" in changed and not all(
@@ -136,6 +173,14 @@ def prompt_sync_status(
             status, reason = "needs_update", "plan_changed"
         else:
             status, reason = "needs_confirmation", "prompts_edited"
+        if stage is not None:
+            key = f"{stage}_input_fingerprint"
+            if previous.get(key):
+                status, reason = (
+                    ("current", "aligned")
+                    if previous[key] == current[key]
+                    else ("needs_update", "stage_inputs_changed")
+                )
     return {
         "status": status,
         "reason": reason,
@@ -177,8 +222,15 @@ def assert_r2v_prompt_sync(
     project: Any,
     timeline_id: str,
     element_id: str,
+    *,
+    stage: str | None = None,
 ) -> None:
-    status = prompt_sync_status(project, timeline_id, element_id)["status"]
+    status = prompt_sync_status(
+        project,
+        timeline_id,
+        element_id,
+        stage=stage,
+    )["status"]
     if status == "needs_update":
         raise ValidationError("片段内容已修改，请先同步分镜图和视频提示词")
     if status == "needs_confirmation":
@@ -264,6 +316,34 @@ def _only_redundant_storyboard_refs_changed(
     )
 
 
+def _refresh_authored_stage_stamps(
+    document,
+    timeline_id,
+    element_id,
+    creation,
+    old_creation,
+    confirmation,
+):
+    # Only the CAS writer derives these stamps. The shared provenance remains
+    # unchanged, so an unedited representation still needs synchronization.
+    if confirmation or not creation.get("prompt_sync"):
+        return
+    creation["prompt_sync"] = dict(creation["prompt_sync"])
+    for stage in ("storyboard", "video"):
+        field = f"{stage}_prompt"
+        if creation.get(field, "").strip() and creation.get(
+            field,
+        ) != old_creation.get(field):
+            creation["prompt_sync"][
+                f"{stage}_input_fingerprint"
+            ] = stage_input_fingerprint(
+                document,
+                timeline_id,
+                element_id,
+                stage,
+            )
+
+
 def derive_prompt_sync_changes(
     before: Mapping[str, Any],
     after: dict[str, Any],
@@ -273,8 +353,8 @@ def derive_prompt_sync_changes(
 ) -> None:
     """Called under the Project CAS lock for every writer, including agents.
 
-    Ordinary writes cannot forge provenance. Only a validated service accept
-    can stamp new provenance, and its read baseline is checked under that lock.
+    Ordinary writes cannot forge provenance. A validated service accept stamps
+    shared alignment; authored stage inputs are derived under the same lock.
     """
     if confirmation:
         timeline_id, element_id, token = confirmation
@@ -367,3 +447,11 @@ def derive_prompt_sync_changes(
                 )
             else:
                 creation["prompt_sync"] = None
+            _refresh_authored_stage_stamps(
+                after,
+                timeline_id,
+                element_id,
+                creation,
+                old["creation"],
+                confirmation,
+            )
