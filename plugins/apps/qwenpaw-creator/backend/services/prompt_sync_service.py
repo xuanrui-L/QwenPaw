@@ -290,11 +290,18 @@ class PromptSyncService:
         project_id: str,
         timeline_id: str,
         element_id: str,
+        *,
+        stage: Literal["storyboard", "video"] | None = None,
     ) -> dict:
         snapshot, document = self._read(project_id, timeline_id, element_id)
         _, element = live_element(document, timeline_id, element_id)
         creation = element["creation"]
-        status = prompt_sync_status(document, timeline_id, element_id)
+        status = prompt_sync_status(
+            document,
+            timeline_id,
+            element_id,
+            stage=stage,
+        )
         layout_issue = (
             "分镜图提示词的格数不明确或互相冲突，请统一网格、分镜格数和关键帧数量后重新生成"
             if (

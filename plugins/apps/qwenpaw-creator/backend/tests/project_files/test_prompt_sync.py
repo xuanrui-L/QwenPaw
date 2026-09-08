@@ -154,6 +154,10 @@ def test_legacy_shots_can_be_read_but_cannot_be_written(services):
 
 
 def test_storyboard_readiness_does_not_wait_for_video_rewrite(services):
+    from fastapi import FastAPI
+    import httpx
+    from api.dependencies import project_file_services
+    from api.prompt_sync_routes import router
     from services.project_files.prompt_sync import prompt_sync_status
     from services.file_agent_runtime.work_graph import derive_work_graph
 
@@ -180,6 +184,32 @@ def test_storyboard_readiness_does_not_wait_for_video_rewrite(services):
         ).status.value
         == "ready"
     )
+
+    # The actual workbench HTTP preflight must agree with the graph's
+    # ready storyboard, while retaining the pending video/global sync.
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[project_file_services] = lambda: services
+
+    async def preflight():
+        path = f"/projects/{PID}/timelines/{TID}/elements/{EID}/prompt-sync"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            assert (await client.get(path)).json()["status"] != "current"
+            for stage, expected in (
+                ("storyboard", "current"),
+                ("video", "needs_update"),
+            ):
+                response = await client.get(path, params={"stage": stage})
+                assert response.status_code == 200
+                assert response.json()["status"] == expected
+            assert (
+                await client.get(path, params={"stage": "invalid"})
+            ).status_code == 422
+
+    asyncio.run(preflight())
 
     edit(services, "video_prompt", VD + "摄影机缓慢推进。")
     project = services.projects.read(PID).project

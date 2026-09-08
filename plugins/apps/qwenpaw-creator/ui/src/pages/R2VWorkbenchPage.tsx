@@ -413,11 +413,11 @@ export function WorkbenchSurface({
     requestedVersion?.owner_ref !== `element:${elementId}`
       ? null
       : requestedMediaType?.startsWith("video/")
-      ? "vd"
-      : requestedVersion.kind === "r2v_storyboard_image" ||
-        requestedVersion.slot_id.endsWith(":storyboard")
-      ? "sb"
-      : null;
+        ? "vd"
+        : requestedVersion.kind === "r2v_storyboard_image" ||
+            requestedVersion.slot_id.endsWith(":storyboard")
+          ? "sb"
+          : null;
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   // Authoritative [Image N] order from the backend: entity binding and
@@ -489,8 +489,7 @@ export function WorkbenchSurface({
         (!(result.reason instanceof CreatorHttpError) ||
           result.reason.status >= 500 ||
           result.reason.status === 429 ||
-          (result.reason.status === 404 &&
-            result.reason.code !== "NOT_FOUND"));
+          (result.reason.status === 404 && result.reason.code !== "NOT_FOUND"));
       // A temporarily unavailable backend does not unbind verified media.
       // Retry without requiring another project edit or reopening the page.
       if (!retryable(video))
@@ -507,10 +506,7 @@ export function WorkbenchSurface({
             ? storyboard.value
             : null,
         );
-      if (
-        (retryable(video) || retryable(storyboard)) &&
-        retryAttempt < 8
-      )
+      if ((retryable(video) || retryable(storyboard)) && retryAttempt < 8)
         retryTimer = setTimeout(
           () => void refresh(),
           Math.min(30_000, 1000 * 2 ** retryAttempt++),
@@ -563,7 +559,7 @@ export function WorkbenchSurface({
       const output =
         kind === "storyboard"
           ? authorityElement.outputs.storyboard
-          : authorityElement.outputs.video ?? authorityElement.outputs.main;
+          : (authorityElement.outputs.video ?? authorityElement.outputs.main);
       const slot = output
         ? project.assets.artifact_slots_by_id[output.slot_id]
         : null;
@@ -795,7 +791,9 @@ export function WorkbenchSurface({
           timelineId: timeline.timeline_id,
           elementId: element.element_id,
         };
-        let sync = await getPromptSync(scope);
+        // Use the same stage boundary as Work Graph. A ready storyboard
+        // must not wait for a separate video/narrative rewrite.
+        let sync = await getPromptSync(scope, undefined, kind);
         if (!isCurrent() || submittedInput !== inputSignature()) return;
         if (sync.validationMessage) throw new Error(sync.validationMessage);
         if (
@@ -816,7 +814,7 @@ export function WorkbenchSurface({
           await pollOnce(projectId);
           if (!isCurrent()) return;
           submittedInput = inputSignature();
-          sync = await getPromptSync(scope);
+          sync = await getPromptSync(scope, undefined, kind);
           if (!isCurrent() || submittedInput !== inputSignature()) return;
           // Dispatch only the exact synchronized content returned by this
           // operation; an unrelated concurrent edit must not inherit its click.
@@ -942,7 +940,7 @@ export function WorkbenchSurface({
   const slotOf = (name: string): ArtifactSlotDocument | null => {
     const output = element.outputs[name];
     return output
-      ? project.assets.artifact_slots_by_id[output.slot_id] ?? null
+      ? (project.assets.artifact_slots_by_id[output.slot_id] ?? null)
       : null;
   };
   const storyboardSlot = slotOf("storyboard");
@@ -1142,11 +1140,10 @@ export function WorkbenchSurface({
     const modeCreation = creation;
     const imageOptions = [
       ...Object.values(project.assets.artifact_versions_by_id)
-        .filter(
-          (version) =>
-            project.assets.files_by_id[version.file_id]?.media_type.startsWith(
-              "image/",
-            ),
+        .filter((version) =>
+          project.assets.files_by_id[version.file_id]?.media_type.startsWith(
+            "image/",
+          ),
         )
         .map((version) => ({
           value: version.version_id,
@@ -1170,11 +1167,10 @@ export function WorkbenchSurface({
           url: getAssetVersionMediaUrl(version.version_id),
         })),
       ...Object.values(project.assets.artifact_versions_by_id)
-        .filter(
-          (version) =>
-            project.assets.files_by_id[version.file_id]?.media_type.startsWith(
-              "audio/",
-            ),
+        .filter((version) =>
+          project.assets.files_by_id[version.file_id]?.media_type.startsWith(
+            "audio/",
+          ),
         )
         .map((version) => ({
           value: version.version_id,
@@ -1448,8 +1444,8 @@ export function WorkbenchSurface({
             ? [normalizeVisualEntityId(draft.creation.scene_ref)]
             : []
           : field === "characters"
-          ? draft.creation.character_refs.map(normalizeVisualEntityId)
-          : draft.creation.prop_refs.map(normalizeVisualEntityId);
+            ? draft.creation.character_refs.map(normalizeVisualEntityId)
+            : draft.creation.prop_refs.map(normalizeVisualEntityId);
       for (const entityId of previousEntityIds) {
         if (nextEntityIds.includes(entityId)) continue;
         delete draft.creation.visual_variant_refs[entityId];
@@ -1484,18 +1480,18 @@ export function WorkbenchSurface({
     kind === "character"
       ? creation.character_refs
       : kind === "prop"
-      ? creation.prop_refs
-      : creation.scene_ref
-      ? [creation.scene_ref]
-      : [];
+        ? creation.prop_refs
+        : creation.scene_ref
+          ? [creation.scene_ref]
+          : [];
   const removeEntityRef = (kind: "character" | "scene" | "prop", id: string) =>
     commitReferenceEdit(() => {
       const field =
         kind === "scene"
           ? ("scene" as const)
           : kind === "character"
-          ? ("characters" as const)
-          : ("props" as const);
+            ? ("characters" as const)
+            : ("props" as const);
       changeEntityReferences(
         field,
         entityKindRefs(kind).filter(
@@ -1702,8 +1698,8 @@ export function WorkbenchSurface({
         thumbUrl: !available
           ? null
           : source
-          ? getAssetVersionMediaUrl(item.versionId)
-          : getArtifactVersionMediaUrl(item.versionId),
+            ? getAssetVersionMediaUrl(item.versionId)
+            : getArtifactVersionMediaUrl(item.versionId),
       };
     });
   };
