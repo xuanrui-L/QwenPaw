@@ -800,10 +800,11 @@ class CreatorFileServices:
                 "不要重新生成已通过产物，也不要要求用户输入 continue。"
             ),
             (
-                "若通过的产物是某 R2V Element 的分镜图，其视频不会自动开始："
-                "请立即对该 Element 重新委派 R2V 生成 Director 以继续生成视频；"
-                "这不算重新生成已通过产物。其他被暂停的 Specialist 同理，"
-                "需重新委派同一目标才会继续后续步骤。"
+                "若通过的是分镜图，核对该 Element 的视频制作状态："
+                "要求执行授权且视频尚未开始时，用 request_workgraph_execution "
+                "请求该 Element 的 video 阶段；允许自动执行时由调度器继续。"
+                "此前已返回阻塞的请求不会自行恢复，需要在条件满足后重新请求。"
+                "不要用重新委派 Director 代替媒体调度，已在运行的任务不重复请求。"
             ),
             "已通过产物：",
         ]
@@ -815,7 +816,7 @@ class CreatorFileServices:
         if auto_continued:
             lines.append(
                 "以下 Element 的视频已由 Runtime 自动开始生成，"
-                "请勿重新委派这些 Element，继续其他未完成步骤即可：",
+                "请勿重复请求这些 Element，继续其他未完成步骤即可：",
             )
             lines.extend(f"- {target}" for target in auto_continued)
         return "\n".join(lines)

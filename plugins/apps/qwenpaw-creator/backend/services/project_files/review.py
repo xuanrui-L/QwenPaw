@@ -380,7 +380,9 @@ def _render_rejection_feedback(
     if feedback.action is ReviewRejectionAction.UNDO_AND_REGENERATE:
         lines = [
             "【系统自动消息 · 用户审阅反馈】",
-            "用户已撤销以下产出，并明确要求重新生成。请只重做列出的逻辑目标，" + "不要恢复被撤销的版本，也不要重复生成其他已接受目标。",
+            "用户已撤销以下产出，并明确要求重新生成。请先回应用户反馈，再据此调整后续计划。"
+            "优先重做以下目标，不要恢复被撤销的版本；用户明确要求的关联调整也应落实，"
+            "其余已接受的目标不要重复生成。",
             "目标：",
             *target_lines,
         ]
