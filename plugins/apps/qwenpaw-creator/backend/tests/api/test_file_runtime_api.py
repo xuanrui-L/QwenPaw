@@ -6,6 +6,7 @@ import asyncio
 import threading
 import time
 
+import pytest
 from fastapi import FastAPI
 
 from api.dependencies import creator_error_handler, project_file_services
@@ -88,7 +89,15 @@ def test_file_session_message_is_idempotent_and_visible(
     assert refreshed.last_event_seq == 1
 
 
-def test_event_stream_replays_pages_and_follows_live_append(tmp_path):
+@pytest.mark.parametrize(
+    "change",
+    ["append", "replace", "truncate", "remove", "corrupt"],
+)
+def test_event_stream_replays_pages_and_handles_file_changes(
+    tmp_path,
+    caplog,
+    change,
+):
     _app_value, services, _snapshot, _bootstrap = _app(tmp_path)
     store = services.sessions
 
@@ -103,6 +112,7 @@ def test_event_stream_replays_pages_and_follows_live_append(tmp_path):
 
     for value in range(1, 206):
         append(value)
+    event_path = store.event_reader("project-1", "session-1").store.path
 
     class Connection:
         polls = 0
@@ -123,10 +133,26 @@ def test_event_stream_replays_pages_and_follows_live_append(tmp_path):
         async for chunk in response.body_iterator:
             ids.append(int(chunk.split("\n", 1)[0].removeprefix("id: ")))
             if len(ids) == 1:
-                append(206)
+                if change == "append":
+                    append(206)
+                elif change == "replace":
+                    replacement = event_path.with_suffix(".replacement")
+                    replacement.write_bytes(event_path.read_bytes())
+                    replacement.replace(event_path)
+                elif change == "truncate":
+                    event_path.write_bytes(b"")
+                elif change == "remove":
+                    event_path.unlink()
+                else:
+                    with event_path.open("ab") as handle:
+                        handle.write(b"{invalid json}\n")
         return ids
 
-    assert asyncio.run(scenario()) == list(range(4, 207))
+    assert asyncio.run(scenario()) == list(
+        range(4, 207 if change == "append" else 204),
+    )
+    if change != "append":
+        assert "Event replay stopped" in caplog.text
 
 
 def test_interrupt_is_persisted_before_process_local_cancellation(

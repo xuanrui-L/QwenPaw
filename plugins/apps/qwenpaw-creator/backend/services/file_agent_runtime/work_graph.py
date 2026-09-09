@@ -1381,6 +1381,9 @@ def _storyboard_gate_dependencies(
     Missing selected artwork is a media dependency; missing definitions or
     bindings need the agent. Unrelated episodes and unbound variants cannot
     gate an otherwise executable storyboard.
+
+    Append missing media nodes once to this element's caller-owned ``deps``;
+    return non-media gaps separately.
     """
 
     gaps: list[str] = []

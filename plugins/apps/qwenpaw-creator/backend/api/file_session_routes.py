@@ -45,6 +45,7 @@ from services.file_agent_runtime import (
     notify_creator_agent_runtime,
 )
 from services.project_files.facade import CreatorFileServices
+from services.runtime_files.errors import JsonlCorruptionError
 from services.runtime_files.models import (
     MessageChannel,
     MessageClassification,
@@ -636,6 +637,17 @@ async def stream_events(
                     limit=200,
                 )
             except SessionStoreError:
+                return
+            except JsonlCorruptionError:
+                # The response has already started. Close this replay so the
+                # client can reconnect with its last delivered cursor; never
+                # skip a corrupt line or silently follow a replacement file.
+                logger.warning(
+                    "Event replay stopped for project=%s session=%s",
+                    _log_safe(project_id),
+                    _log_safe(session.session_id),
+                    exc_info=True,
+                )
                 return
             if events:
                 idle_ticks = 0
