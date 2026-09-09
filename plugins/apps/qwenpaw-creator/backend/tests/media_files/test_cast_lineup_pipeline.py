@@ -142,13 +142,8 @@ def test_resolve_rejects_lineup_generation_with_unfinished_characters(
         )
 
 
-def test_lineup_request_preserves_seated_cast_without_extra_standing_people(
-    tmp_path,
-) -> None:
-    project = _ab_project()
-    lineup = project.visual.cast_lineups.items["lineup:main"]
-    lineup.description = "两人坐在沙发上，A 左 B 右，只有 B 持茶壶。"
-    for version_id in ("art:a-main", "art:b-main"):
+def _add_images(project: Project, *version_ids: str) -> None:
+    for version_id in version_ids:
         file_id = f"file-{version_id}"
         project.assets.files_by_id[file_id] = IndexedFile(
             file_id=file_id,
@@ -175,6 +170,21 @@ def test_lineup_request_preserves_seated_cast_without_extra_standing_people(
                 },
             },
         )
+
+
+@pytest.mark.parametrize("explicit_order", [False, True])
+def test_lineup_request_preserves_seated_cast_without_extra_standing_people(
+    tmp_path,
+    explicit_order,
+) -> None:
+    project = _ab_project()
+    lineup = project.visual.cast_lineups.items["lineup:main"]
+    lineup.description = "两人坐在沙发上，A 左 B 右，只有 B 持茶壶。"
+    _add_images(project, "art:a-main", "art:b-main")
+    expected = ("art:a-main", "art:b-main")
+    if explicit_order:
+        expected = tuple(reversed(expected))
+        lineup.reference_artifact_version_ids = list(expected)
     resolved = _resolve_request(
         snapshot=SimpleNamespace(project=project),
         project_root=tmp_path,
@@ -183,13 +193,87 @@ def test_lineup_request_preserves_seated_cast_without_extra_standing_people(
         arguments={},
         image_model_name="qwen-image-3.0-pro",
     )
-    assert resolved.reference_version_ids == ("art:a-main", "art:b-main")
+    assert resolved.reference_version_ids == expected
     assert len(resolved.reference_image_urls) == 2
     assert lineup.description in resolved.prompt
     assert "画面总共只有 2 人" in resolved.prompt
     assert "每个角色只出现一次" in resolved.prompt
     assert "只有未指定姿态时才采用中性全身并排站姿" in resolved.prompt
     assert "所有角色全身站立并排" not in resolved.prompt
+
+
+@pytest.mark.parametrize(
+    "case", ["nested", "changed_identity", "stale", "unrelated_image"]
+)
+def test_four_person_lineup_reuses_existing_group_within_reference_budget(
+    tmp_path,
+    case,
+) -> None:
+    project = _project(
+        *[
+            _entity(f"char:{name}", variants={"var:main": f"art:{name}"})
+            for name in "abcd"
+        ]
+    )
+    lineup = _lineup(*(f"char:{name}" for name in "abcd"))
+    lineup.description = "[Image 1] 提供前三人的身份，[Image 2] 提供第四人的身份。"
+    lineup.reference_artifact_version_ids = ["art:abc", "art:d"]
+    project.visual.cast_lineups.items[lineup.lineup_id] = lineup
+    _add_images(
+        project,
+        "art:a",
+        "art:b",
+        "art:c",
+        "art:d",
+        "art:ab",
+        "art:abc",
+        "art:b-new",
+    )
+    versions = project.assets.artifact_versions_by_id
+    for version_id, ancestors in [
+        ("art:ab", ["art:a", "art:b"]),
+        ("art:abc", ["art:ab", "art:c"]),
+    ]:
+        versions[version_id].kind = "cast_lineup_image"
+        versions[version_id].provenance_refs = [
+            f"artifact-version:{v}" for v in ancestors
+        ]
+    if case == "stale":
+        versions["art:ab"].stale = True
+    elif case == "unrelated_image":
+        versions["art:abc"].kind = "visual_asset_image"
+        lineup.description = "四人同框，各角色身份保持一致。"
+    elif case == "changed_identity":
+        project.visual.entities.items["char:b"].variants.items[
+            "var:main"
+        ].selected_artifact_version_id = "art:b-new"
+
+    def resolve():
+        return _resolve_request(
+            snapshot=SimpleNamespace(project=project),
+            project_root=tmp_path,
+            command=CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE,
+            target_ref="lineup:lineup:main",
+            arguments={},
+            image_model_name="qwen-image-3.0-pro",
+        )
+
+    if case in {"stale", "unrelated_image"}:
+        # An unrelated scene/prop image or stale nested group cannot replace
+        # the missing individual identities, even if it has similar lineage.
+        with pytest.raises(
+            ValidationError, match="IMAGE_REFERENCE_BUDGET_EXCEEDED"
+        ):
+            resolve()
+    else:
+        expected = ("art:abc", "art:d")
+        if case == "changed_identity":
+            expected += ("art:b-new",)
+        resolved = resolve()
+        assert resolved.reference_version_ids == expected
+        assert tuple(row["versionId"] for row in resolved.read_set) == expected
+        assert len(resolved.reference_image_urls) == len(expected)
+        assert not resolved.budget_dropped_version_ids
 
 
 def _duo_creation() -> R2VCreation:

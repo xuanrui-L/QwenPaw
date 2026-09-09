@@ -748,6 +748,42 @@ def _lineup_character_reference_ids(
     return version_ids, missing
 
 
+def _lineup_reference_ids(
+    project: Project,
+    anchors: Sequence[str],
+    authored: Sequence[str],
+) -> list[str]:
+    """Keep authored image numbers and reuse proven lineup identity inputs.
+
+    A previously generated lineup may carry several current identity anchors.
+    Expanding those anchors again both exceeds provider limits and shifts the
+    author's [Image N] roles. Only non-stale lineup artifacts can substitute
+    for the exact versions recorded in their immutable source lineage.
+    """
+    explicit = list(dict.fromkeys(authored))
+    covered = set(explicit)
+    pending = list(explicit)
+    while pending:
+        version = project.assets.artifact_versions_by_id.get(pending.pop())
+        if (
+            version is None
+            or version.kind != "cast_lineup_image"
+            or version.stale
+        ):
+            continue
+        for ref in version.provenance_refs:
+            if not ref.startswith("artifact-version:"):
+                continue
+            ancestor_id = ref.removeprefix("artifact-version:")
+            if ancestor_id not in covered:
+                covered.add(ancestor_id)
+                pending.append(ancestor_id)
+    return [
+        *explicit,
+        *(anchor for anchor in anchors if anchor not in covered),
+    ]
+
+
 def _resolve_request(
     *,
     snapshot: ProjectSnapshot,
@@ -969,12 +1005,16 @@ def _resolve_request(
             "no watermarks, no annotation text in the image.",
         )
         prompt = "\n".join(prompt_parts)
-        version_ids = [
-            *anchor_ids,
+        explicit_version_ids = [
             *lineup.reference_asset_version_ids,
             *lineup.reference_artifact_version_ids,
             *explicit_version_ids,
         ]
+        version_ids = _lineup_reference_ids(
+            project,
+            anchor_ids,
+            explicit_version_ids,
+        )
         resolved = _ResolvedRequest(
             command=command,
             target_ref=f"lineup:{lineup_id}",
