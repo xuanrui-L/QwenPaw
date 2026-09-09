@@ -556,6 +556,25 @@ def test_local_contention_preserves_the_same_provider_task(
         assert task.result["providerTaskId"] == "provider-task-stale"
 
 
+def test_submit_timeout_keeps_a_nonempty_diagnostic(tmp_path, monkeypatch):
+    services = _services(tmp_path, monkeypatch)
+
+    class TimedOutProvider:
+        calls = 0
+
+        async def submit(self, **_kwargs):
+            self.calls += 1
+            raise TimeoutError()
+
+    provider = TimedOutProvider()
+    task = _run_video(services, provider)
+    assert task.status.value == "FAILED"
+    assert task.error["code"] == "R2V_PROVIDER_SUBMISSION_FAILED"
+    assert "exceeded 180 seconds" in task.error["message"]
+    assert task.error["errorId"]
+    assert provider.calls == 1
+
+
 def test_unrelated_commit_during_render_does_not_quarantine(
     tmp_path,
     monkeypatch,

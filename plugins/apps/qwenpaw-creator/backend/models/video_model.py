@@ -206,6 +206,28 @@ async def _resolve_reference_media_url(
         ) from exc
 
 
+async def _resolve_reference_media_urls(
+    urls: list[str],
+    backend: str,
+) -> list[tuple[str, str]]:
+    """Upload independent references concurrently without changing numbering."""
+    slots = asyncio.Semaphore(3)
+
+    async def resolve(url):
+        async with slots:
+            return await _resolve_reference_media_url(url, backend)
+
+    tasks = [asyncio.create_task(resolve(url)) for url in urls]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        # No upload should outlive a cancelled/failed generation admission.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 def _seedance_spec(model_name: str) -> tuple[frozenset[str], int, int, bool]:
     """The documented (resolutions, min/max duration, allows -1) window."""
 
@@ -793,11 +815,14 @@ async def submit_video_task(
                 model_name=effective_model,
             )
         media.append({"type": "video", "url": resolved_video})
-        for img_url in unique_references:
-            resolved_url, media_kind = await _resolve_reference_media_url(
-                img_url,
-                upload_backend,
-            )
+        resolved_references = await _resolve_reference_media_urls(
+            unique_references,
+            upload_backend,
+        )
+        for img_url, (resolved_url, media_kind) in zip(
+            unique_references,
+            resolved_references,
+        ):
             if media_kind != "image":
                 raise ModelError(
                     "video_edit reference media must be images: "
@@ -818,11 +843,14 @@ async def submit_video_task(
             )
         voice_shape, voice_budget = voice_support or ("", 0)
         standalone_voices: list[str] = []
-        for img_url in unique_references:
-            resolved_url, media_kind = await _resolve_reference_media_url(
-                img_url,
-                upload_backend,
-            )
+        resolved_references = await _resolve_reference_media_urls(
+            unique_references,
+            upload_backend,
+        )
+        for img_url, (resolved_url, media_kind) in zip(
+            unique_references,
+            resolved_references,
+        ):
             if media_kind == "audio":
                 raise ModelError(
                     "audio files cannot be sent as image/video references; "

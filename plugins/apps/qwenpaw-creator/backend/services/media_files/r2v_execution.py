@@ -3233,11 +3233,18 @@ class FileR2VExecutionService:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            await self._mark_submit_failed_if_owned(task, claimed, str(error))
+            detail = str(error) or (
+                f"R2V reference preparation or provider submission exceeded "
+                f"{self.submit_timeout_seconds:g} seconds"
+                if isinstance(error, TimeoutError)
+                else type(error).__name__
+            )
+            await self._mark_submit_failed_if_owned(task, claimed, detail)
             await self._fail(
                 task,
                 code="R2V_PROVIDER_SUBMISSION_FAILED",
-                message=str(error),
+                message=detail,
+                error=error,
             )
             return True
         finally:
