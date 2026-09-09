@@ -98,26 +98,46 @@ function VisualDetail({
   const { t } = useTranslation();
   const patchProject = useProjectSnapshotStore((state) => state.patch);
   const patching = useProjectSnapshotStore((state) => state.patching);
-  const selectedVersionId = entitySelectedVersionId(entity);
+  const [viewedVariantId, setViewedVariantId] = useState<string | null>(null);
+  const variantIds = entity.variants.order.filter(
+    (id) => entity.variants.items[id],
+  );
+  const variantId =
+    (viewedVariantId && variantIds.includes(viewedVariantId)
+      ? viewedVariantId
+      : null) ??
+    (entity.canonical_variant_id &&
+    variantIds.includes(entity.canonical_variant_id)
+      ? entity.canonical_variant_id
+      : variantIds[0]);
+  const variant = variantId ? entity.variants.items[variantId] : null;
+  const selectedVersionId = variant
+    ? variant.selected_artifact_version_id
+    : entitySelectedVersionId(entity);
   const [viewedVersionId, setViewedVersionId] = useState<string | null>(null);
-  useEffect(() => setViewedVersionId(null), [entity.entity_id]);
-  const displayedVersionId = viewedVersionId ?? selectedVersionId;
-  const imageUrl = displayedVersionId
-    ? getArtifactVersionMediaUrl(displayedVersionId)
-    : null;
+  useEffect(() => {
+    setViewedVariantId(null);
+    setViewedVersionId(null);
+  }, [entity.entity_id]);
   const versionIds = Array.from(
     new Set([
-      ...entity.variants.order.flatMap(
-        (id) => entity.variants.items[id]?.generated_artifact_version_ids ?? [],
-      ),
+      ...(variant?.generated_artifact_version_ids ?? []),
       ...(selectedVersionId ? [selectedVersionId] : []),
     ]),
   );
+  const displayedVersionId =
+    viewedVersionId && versionIds.includes(viewedVersionId)
+      ? viewedVersionId
+      : selectedVersionId;
+  const imageUrl = displayedVersionId
+    ? getArtifactVersionMediaUrl(displayedVersionId)
+    : null;
   // Same editing surface as the asset library detail: fullscreen prompt
   // editor with pickable reference images, plus the DAG regenerate pill.
   const promptTarget = useMemo(
-    () => visualEntityPromptTarget(project, entity, selectedVersionId),
-    [project, entity, selectedVersionId],
+    () =>
+      visualEntityPromptTarget(project, entity, selectedVersionId, variantId),
+    [project, entity, selectedVersionId, variantId],
   );
   const regenerateNodeId = promptTarget
     ? dispatchNodeIdForPrompt(promptTarget.pointer)
@@ -171,6 +191,32 @@ function VisualDetail({
         {t("blueprint.backToList")}
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pb-2">
+        {variantIds.length > 1 && (
+          <div>
+            <FieldLabel>{t("blueprint.variantSelector")}</FieldLabel>
+            <div className="flex flex-wrap gap-1.5">
+              {variantIds.map((id) => (
+                <button
+                  type="button"
+                  key={id}
+                  aria-pressed={id === variantId}
+                  title={entity.variants.items[id].requirements}
+                  onClick={() => {
+                    setViewedVariantId(id);
+                    setViewedVersionId(null);
+                  }}
+                  className={`rounded-lg border px-3 py-1.5 text-left text-xs ${
+                    id === variantId
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                      : "border-[var(--color-border)] text-[var(--color-text-secondary)]"
+                  }`}
+                >
+                  {visualVariantLabel(entity.variants.items[id])}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="flex min-h-[220px] shrink-0 items-center justify-center rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-0">
           {imageUrl ? (
             // Full-frame portrait designs must show the whole figure —
@@ -579,11 +625,14 @@ export default function BlueprintPrepDrawer({
   const [kind, setKind] = useState<VisualKind>("character");
   useEffect(() => {
     setDetail(focus);
-    if (focus?.type === "visual") {
-      const entity = project.visual.entities.items[focus.entityId];
-      if (entity) setKind(entity.kind);
-    }
-  }, [focus, open, project]);
+  }, [focus, open]);
+  const focusedKind =
+    focus?.type === "visual"
+      ? project.visual.entities.items[focus.entityId]?.kind
+      : null;
+  useEffect(() => {
+    if (focusedKind) setKind(focusedKind);
+  }, [focusedKind]);
 
   // Escape closes the page (detail level first, then the page itself).
   useEffect(() => {

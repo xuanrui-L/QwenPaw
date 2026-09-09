@@ -2164,6 +2164,7 @@
     },
     "continuity": "一致性",
     "variantCount": "造型数",
+    "variantSelector": "造型 / 状态",
     "designPrompt": "设计 提示词（可编辑，保存后可要求重新生成）",
     "savePrompt": "保存 提示词",
     "promptSaved": "提示词 已保存",

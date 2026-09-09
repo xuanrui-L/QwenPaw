@@ -2164,6 +2164,7 @@
     },
     "continuity": "Continuity",
     "variantCount": "Variants",
+    "variantSelector": "Appearance / state",
     "designPrompt": "Design prompt (editable; save then ask to regenerate)",
     "savePrompt": "Save prompt",
     "promptSaved": "Prompt saved",

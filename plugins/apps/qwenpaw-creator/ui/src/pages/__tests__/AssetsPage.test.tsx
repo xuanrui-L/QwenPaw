@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import AssetsPage, { VoiceGenerationModal } from "@/pages/AssetsPage";
+import BlueprintPrepDrawer from "@/components/blueprint/BlueprintPrepDrawer";
 import { NavigationRuntime } from "@/routing/navigation";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -308,6 +309,66 @@ describe("AssetsPage Project projection", () => {
 
     expect(await screen.findByText("相对关系说明")).toBeInTheDocument();
     expect(screen.getAllByText(/左矮右高/).length).toBeGreaterThan(0);
+  });
+
+  it("keeps the ungenerated variant selected during background updates and dispatches that variant", async () => {
+    const project = cloneProject();
+    const entity = project.visual.entities.items.cat;
+    entity.required_variant_ids.push("variant:cat:wet");
+    entity.variants.order.push("variant:cat:wet");
+    entity.variants.items["variant:cat:wet"] = {
+      ...entity.variants.items["variant:cat:default"],
+      variant_id: "variant:cat:wet",
+      requirements: "淋湿后的造型",
+      prompt: "以主图为参考，仅把毛发改为淋湿状态",
+      reference_artifact_version_ids: ["cat-anchor-v1"],
+      generated_artifact_version_ids: [],
+      selected_artifact_version_id: null,
+    };
+    seedProject(project);
+    const { calls } = installMockFetch([
+      {
+        match: "/dispatch",
+        method: "POST",
+        response: { json: { dispatched: true } },
+      },
+      ...ingestRoutes(),
+    ]);
+    const drawer = (snapshot: ProjectDocument) => (
+      <MemoryRouter>
+        <BlueprintPrepDrawer
+          project={snapshot}
+          projectId="p1"
+          open
+          tab="visual"
+          focus={null}
+          onClose={() => {}}
+          onTabChange={() => {}}
+        />
+      </MemoryRouter>
+    );
+    const { container, rerender } = render(drawer(project));
+    fireEvent.click(screen.getByRole("button", { name: /^圆润大橘猫/ }));
+    fireEvent.click(screen.getByRole("button", { name: "淋湿后的造型" }));
+    expect(screen.getByText("设计图待生成")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /v1/ })).not.toBeInTheDocument();
+
+    rerender(drawer({ ...structuredClone(project), generation: 4 }));
+    expect(screen.getByRole("button", { name: "淋湿后的造型" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByText("以主图为参考，仅把毛发改为淋湿状态")).toBeInTheDocument();
+    expect(container.querySelector("[data-prompt-edit]")).toHaveAttribute(
+      "data-prompt-edit",
+      "/visual/entities/items/cat/variants/items/variant:cat:wet/prompt",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "重新生成图片" }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.method === "POST").map((call) => call.url)).toEqual([
+        "/api/qwenpaw-creator/projects/p1/work-graph/nodes/visual%3Acat%3Avariant%3Acat%3Awet/dispatch",
+      ]),
+    );
   });
 });
 
