@@ -20,7 +20,7 @@ provider task id is never submitted again after its safety lease expires.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -3136,13 +3136,20 @@ class FileR2VExecutionService:
         )
         request = claimed.request
         try:
-            task = await self._prepare_submit_claim(task, request)
+            task = await self._retry_submit_local_io(
+                task,
+                self._prepare_submit_claim,
+                task,
+                request,
+            )
         except BaseException:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
             raise
         try:
-            await self._require_live_submit_claim(
+            await self._retry_submit_local_io(
+                task,
+                self._require_live_submit_claim,
                 task,
                 claimed,
                 require_active_task=True,
@@ -3222,7 +3229,9 @@ class FileR2VExecutionService:
             # critical section.  Keep the durable owner heartbeat alive until
             # this CAS has completed so another supervisor cannot observe an
             # expired claim between provider acceptance and id persistence.
-            await asyncio.to_thread(
+            await self._retry_submit_local_io(
+                task,
+                asyncio.to_thread,
                 self._update_state_sync,
                 task.project_id,
                 task.task_id,
@@ -3284,6 +3293,34 @@ class FileR2VExecutionService:
                 status=SpecialistRunStatus.WAITING_RUNTIME,
             )
         return True
+
+    async def _retry_submit_local_io(
+        self,
+        task: TaskRecord,
+        operation: Callable[..., Awaitable[Any]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Retain the live claim and provider receipt through local contention.
+
+        Only local, replayable operations belong here. Re-entering `_submit`
+        would discard an accepted provider ID or strand a pre-submit claim;
+        retrying the provider itself could bill the same generation twice.
+        Cancellation and non-lock failures retain their existing semantics.
+        """
+        while True:
+            try:
+                return await operation(*args, **kwargs)
+            except LockTimeoutError:
+                logger.warning(
+                    "r2v submit state busy; retrying local write: "
+                    "project=%s task=%s",
+                    _log_safe(task.project_id),
+                    _log_safe(task.task_id),
+                )
+                await asyncio.sleep(
+                    min(1.0, max(0.25, self.poll_interval_seconds)),
+                )
 
     async def _prepare_submit_claim(
         self,
@@ -3372,7 +3409,6 @@ class FileR2VExecutionService:
         interval = min(30.0, max(0.01, self.submit_claim_seconds / 4.0))
         while True:
             await asyncio.sleep(interval)
-            now = float(self.clock())
             owned = False
 
             def heartbeat(current: R2VTaskState) -> Mapping[str, Any]:
@@ -3380,6 +3416,7 @@ class FileR2VExecutionService:
                 if not self._owns_live_submit_claim(current, claim):
                     return current.model_dump(mode="python")
                 owned = True
+                now = float(self.clock())
                 dumped = current.model_dump(mode="python")
                 dumped.update(
                     {
@@ -3391,7 +3428,9 @@ class FileR2VExecutionService:
                 )
                 return dumped
 
-            await asyncio.to_thread(
+            await self._retry_submit_local_io(
+                task,
+                asyncio.to_thread,
                 self._update_state_sync,
                 task.project_id,
                 task.task_id,

@@ -472,7 +472,19 @@ def _run_video(services: CreatorFileServices, provider):
     return asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("phase", ["start", "submitted", "polled", "shutdown"])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "start",
+        "prepare",
+        "bind",
+        "heartbeat",
+        "submitted",
+        "polled",
+        "shutdown",
+        "bind_shutdown",
+    ],
+)
 def test_local_contention_preserves_the_same_provider_task(
     tmp_path,
     monkeypatch,
@@ -485,6 +497,8 @@ def test_local_contention_preserves_the_same_provider_task(
 
     async def submit(**kwargs):
         submitted.append(1)
+        if phase == "heartbeat":
+            await asyncio.sleep(0.8)
         return await original_submit(**kwargs)
 
     monkeypatch.setattr(provider, "submit", submit)
@@ -495,6 +509,8 @@ def test_local_contention_preserves_the_same_provider_task(
             provider=provider,
             poll_interval_seconds=0.01,
             poll_lease_seconds=0.1,
+            submit_timeout_seconds=1,
+            submit_claim_seconds=2,
         )
         dispatched = await worker.dispatch(
             project_id=PROJECT_ID,
@@ -509,8 +525,17 @@ def test_local_contention_preserves_the_same_provider_task(
 
         def read(*args, **kwargs):
             nonlocal blocked
-            should_block = phase in {"start", "shutdown"} or (
-                phase == "submitted" and submitted
+            should_block = (
+                phase in {"start", "shutdown"}
+                or (phase == "submitted" and submitted)
+                or (
+                    phase == "prepare"
+                    and worker._read_state_sync(
+                        PROJECT_ID,
+                        dispatched.task_id,
+                    ).phase
+                    == "SUBMIT_CLAIMED"
+                )
             )
             if should_block and (not blocked or phase == "shutdown"):
                 blocked = True
@@ -519,10 +544,13 @@ def test_local_contention_preserves_the_same_provider_task(
 
         def update(project_id, task_id, change):
             nonlocal blocked
-            if (
-                phase == "polled"
-                and change.__name__ == "success"
-                and not blocked
+            target = {"polled": "success", "heartbeat": "heartbeat"}.get(
+                phase,
+                "bind",
+            )
+            if phase in {"polled", "bind", "bind_shutdown", "heartbeat"} and (
+                change.__name__ == target
+                and (not blocked or phase == "bind_shutdown")
             ):
                 blocked = True
                 raise LockTimeoutError(tmp_path / "project.lock", 10.0)
@@ -532,7 +560,7 @@ def test_local_contention_preserves_the_same_provider_task(
         monkeypatch.setattr(worker, "_update_state_sync", update)
         job = worker.start_task(PROJECT_ID, dispatched.task_id)
         try:
-            if phase == "shutdown":
+            if phase in {"shutdown", "bind_shutdown"}:
                 async with asyncio.timeout(2):
                     while not blocked:
                         await asyncio.sleep(0.01)
@@ -547,9 +575,12 @@ def test_local_contention_preserves_the_same_provider_task(
     task, blocked = asyncio.run(scenario())
     assert blocked
     assert _r2v_task_count(services) == 1
-    if phase == "shutdown":
-        assert task.status.value == "QUEUED"
-        assert not submitted
+    if phase in {"shutdown", "bind_shutdown"}:
+        assert task.status.value == (
+            "RUNNING" if phase == "bind_shutdown" else "QUEUED"
+        )
+        assert len(submitted) == (1 if phase == "bind_shutdown" else 0)
+        assert task.error is None
     else:
         assert task.status.value == "SUCCEEDED"
         assert len(submitted) == 1
