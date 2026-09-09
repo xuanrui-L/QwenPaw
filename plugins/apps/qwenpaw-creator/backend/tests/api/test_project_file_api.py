@@ -235,11 +235,14 @@ def test_invalid_external_project_keeps_last_good_and_reports_sync_error(
     assert result.json()["lastGoodGeneration"] == 0
 
 
-def test_active_review_poll_is_created_only_from_review_boundary(
+def test_active_review_poll_reads_atomic_heads_while_project_writer_is_busy(
     tmp_path,
     run_scenario,
+    api_request,
 ) -> None:
     app, services, base = _app(tmp_path)
+    url = "/projects/project-1/runtime/reviews/active"
+    assert api_request(app, "GET", url).status_code == 204
     _pending_review(services, base)
 
     async def scenario(client):
@@ -250,7 +253,8 @@ def test_active_review_poll_is_created_only_from_review_boundary(
         )
         return first, second
 
-    first, second = run_scenario(app, scenario)
+    with services.projects.lifecycle_lock("project-1"):
+        first, second = run_scenario(app, scenario)
     assert first.status_code == 200
     reviews = first.json()
     assert isinstance(reviews, list) and len(reviews) == 1
@@ -526,6 +530,7 @@ def test_missing_project_writes_do_not_create_a_phantom_directory(
     app.dependency_overrides[project_file_services] = lambda: services
 
     async def scenario(client):
+        poll = await client.get("/projects/missing/runtime/reviews/active")
         patch = await client.patch(
             "/projects/missing/project",
             headers={"Idempotency-Key": "missing-patch"},
@@ -564,10 +569,10 @@ def test_missing_project_writes_do_not_create_a_phantom_directory(
                 ],
             },
         )
-        return patch, acquire, review
+        return poll, patch, acquire, review
 
     results = run_scenario(app, scenario)
-    assert [result.status_code for result in results] == [404] * 3
+    assert [result.status_code for result in results] == [404] * 4
     assert not (tmp_path / "missing").exists()
 
 
