@@ -1061,21 +1061,19 @@ export default function ElementDetail({
                       <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-[11px] leading-5 text-[var(--color-text-secondary)]">
                         <b
                           className="block truncate text-[var(--color-text-primary)]"
-                          title={decodeURIComponent(
+                          title={
                             (element.render_source.type === "artifact_version"
                               ? project.assets.artifact_versions_by_id
                               : project.assets.source_versions_by_id)[
                               element.render_source.version_id
-                            ]?.name || t("elementDetail.currentSource"),
-                          )}
+                            ]?.name || t("elementDetail.currentSource")
+                          }
                         >
-                          {decodeURIComponent(
-                            (element.render_source.type === "artifact_version"
-                              ? project.assets.artifact_versions_by_id
-                              : project.assets.source_versions_by_id)[
-                              element.render_source.version_id
-                            ]?.name || t("elementDetail.currentSource"),
-                          )}
+                          {(element.render_source.type === "artifact_version"
+                            ? project.assets.artifact_versions_by_id
+                            : project.assets.source_versions_by_id)[
+                            element.render_source.version_id
+                          ]?.name || t("elementDetail.currentSource")}
                         </b>
                         <br />
                         {t("elementDetail.using")}{" "}

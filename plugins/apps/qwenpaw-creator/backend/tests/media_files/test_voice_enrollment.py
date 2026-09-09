@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=protected-access
 """Voice enrollment executor: prompt persistence and audition fallback."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +11,7 @@ import wave
 import pytest
 
 from models import tts_model
+from domain.errors import ConflictError
 from services.media_files import audio_execution
 from services.media_files.audio_execution import (
     execute_file_voice_enrollment_command,
@@ -55,16 +57,25 @@ def _services_with_character(tmp_path, monkeypatch):
     return services
 
 
-@pytest.mark.parametrize("failure_stage", [None, "tts", "binding"])
+@pytest.mark.parametrize("failure_stage", [None, "tts", "binding", "commit"])
 def test_design_enrollment_persists_voice_and_recovers_audition(
     tmp_path,
     monkeypatch,
     failure_stage,
 ):
+    # pylint: disable=too-many-statements
     services = _services_with_character(tmp_path, monkeypatch)
     calls = {"design": 0, "synthesize": 0}
     expected_syntheses = 2 if failure_stage == "tts" else 1
     attach_sample = audio_execution._attach_voice_sample
+    real_commit = services.commits.commit
+
+    def commit(*args, **kwargs):
+        if failure_stage == "commit":
+            raise RuntimeError("temporary voice publication failure")
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(services.commits, "commit", commit)
 
     def attach(*args, **kwargs):
         if failure_stage == "binding":
@@ -110,6 +121,18 @@ def test_design_enrollment_persists_voice_and_recovers_audition(
         )
 
     monkeypatch.setattr(tts_model, "synthesize", synthesize)
+    if failure_stage == "commit":
+        with pytest.raises(RuntimeError, match="publication failure"):
+            asyncio.run(
+                execute_file_voice_enrollment_command(
+                    services,
+                    project_id="p-voice",
+                    target_ref="asset:hero",
+                    arguments={"voicePrompt": "低哑男声，语速缓慢"},
+                    idempotency_key="voice-key-1",
+                ),
+            )
+        failure_stage = None
     result = asyncio.run(
         execute_file_voice_enrollment_command(
             services,
@@ -160,3 +183,75 @@ def test_design_enrollment_persists_voice_and_recovers_audition(
     assert sample.file_id in fresh.assets.files_by_id
     assert calls["design"] == 1
     assert calls["synthesize"] == expected_syntheses
+
+
+@pytest.mark.parametrize("first_completed", ["old", "new"])
+def test_later_voice_request_wins_regardless_of_provider_completion_order(
+    tmp_path,
+    monkeypatch,
+    first_completed,
+):
+    services = _services_with_character(tmp_path, monkeypatch)
+
+    async def scenario():
+        started = {key: asyncio.Event() for key in ("old", "new")}
+        releases = {key: asyncio.Event() for key in started}
+        calls = []
+
+        async def design(*, voice_prompt, **_kwargs):
+            calls.append(voice_prompt)
+            started[voice_prompt].set()
+            await releases[voice_prompt].wait()
+            return tts_model.VoiceEnrollment(
+                voice_id=f"voice-{voice_prompt}",
+                target_model="cosyvoice-v3.5-plus",
+                origin="design",
+            )
+
+        async def audition(*_args, result, **_kwargs):
+            return result
+
+        async def delete(*_args, **_kwargs):
+            raise AssertionError("no previously bound voice should be deleted")
+
+        monkeypatch.setattr(tts_model, "design_voice", design)
+        monkeypatch.setattr(tts_model, "delete_voice", delete)
+        monkeypatch.setattr(audio_execution, "_ensure_voice_sample", audition)
+
+        async def enroll(key):
+            return await execute_file_voice_enrollment_command(
+                services,
+                project_id="p-voice",
+                target_ref="asset:hero",
+                arguments={"voicePrompt": key},
+                idempotency_key=key,
+            )
+
+        tasks = {}
+        for key in started:
+            tasks[key] = asyncio.create_task(enroll(key))
+            await asyncio.wait_for(started[key].wait(), timeout=3)
+        results = {}
+        for key in (
+            first_completed,
+            "new" if first_completed == "old" else "old",
+        ):
+            releases[key].set()
+            results[key] = (
+                await asyncio.gather(tasks[key], return_exceptions=True)
+            )[0]
+        assert isinstance(results["old"], ConflictError)
+        assert results["new"].voice_id == "voice-new"
+        assert (
+            services.projects.read("p-voice")
+            .project.visual.entities.items["hero"]
+            .voice.voice_id
+            == "voice-new"
+        )
+        # Retrying the obsolete key must not turn it into the newest intent
+        # or pay the provider again.
+        with pytest.raises(ConflictError):
+            await enroll("old")
+        assert calls == ["old", "new"]
+
+    asyncio.run(scenario())

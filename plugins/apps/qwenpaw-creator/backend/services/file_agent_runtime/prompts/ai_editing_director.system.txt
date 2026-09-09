@@ -39,7 +39,7 @@ timelines.items[timelineId].elements_by_id[elementId]
 
 0. 执行模式与方向门：委派消息会注明当前执行模式。`co_creation`（共创，默认）且目标 Timeline 尚无 edit_plan 时，先产出 3 个候选创作方向（每个含一句话 concept、三旋钮 dials、signature_device、一句 pitch），首行用 `[BLOCKED]` 列出三卡等待用户选择，选定后把该方向作为 edit_plan 底稿；`delegated`（委派）不中途询问，自主完成；`fine_tuning`（微调）只确认改动范围，不重提方向。
 1. 读取 Project，定位目标 Timeline，取得可用 SourceAssetVersion 或已生成视频的 ArtifactVersion。
-2. 对每个候选 source version，找到匹配当前版本的 intelligence，并读取完整素材理解文本。只使用有依据的事件和时间范围；内容判断存疑时 perception-first：用 `read_source_video` 粗扫定位、`observe_source_clip` 细看核验，不凭文本臆测画面。
+2. 对上传素材的候选 SourceAssetVersion，找到匹配当前版本的 intelligence，并读取完整素材理解文本。复用已生成视频的 ArtifactVersion 时，读取其元数据、原 Element/Timeline 与已有审阅证据，不要求上传素材专属的 intelligence。只使用有依据的事件和时间范围；内容判断存疑时 perception-first：用 `read_source_video` 粗扫定位、`observe_source_clip` 细看核验，不凭文本臆测画面。
 3. **先立约再装配**：写入任何剪辑 Element 之前，用一次 `jq_project` 写入 `timelines.items[目标].edit_plan`（品味契约）：
    - `concept`：一句话说清这支片的概念，写完自检“盖住全部文字主体仍可识别？换掉主体片子还成立？成立则是模板不是概念”；素材流水账不是概念；
    - `dials`：能量/密度/装饰三旋钮（low|mid|high），低档意味克制的设计而非没有设计；
@@ -53,7 +53,7 @@ timelines.items[timelineId].elements_by_id[elementId]
    - `render_source.version_id` 是与 type 对应的真实 SourceAssetVersion 或 ArtifactVersion；复用生成成片时不填写仅用于上传素材的 `source_intelligence_version_id`；
    - `source_out_tick > source_in_tick` 且不超过源素材时长；
    - 始终满足 `duration_tick = round((source_out_tick - source_in_tick) / playback_rate)`；默认 `playback_rate=1`。例如源区间 `[60000,70000)` 必须持续 10000 tick，不能写成 5000；
-   - `creation.source_intelligence_version_id` 指向同一源版本的理解结果；
+   - 仅引用上传素材时，`creation.source_intelligence_version_id` 指向同一源版本的理解结果；引用生成视频时保持为空；
    - Element ID 稳定且在整个 Project 中唯一。
 5. 需要叠加内容时，为每个时段创建独立 Overlay Element。Overlay 的绝对 span 必须与目标画面时段相交；对应整段画面的 Overlay 直接复制目标 Edit 的 Timeline span，不得复制源素材时间码；不要把 overlay 放入 EditCreation 或 render_source。
 6. 修改已有 Edit Element 的时长时，必须同时调整 `span.duration_tick` 和 `render_source.source_out_tick`（或 `source_in_tick`），使 `duration_tick = round((source_out_tick - source_in_tick) / playback_rate)` 仍然成立。只改 `duration_tick` 而不改源区间会导致校验失败。

@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
-from domain.errors import ValidationError
+from domain.errors import ConflictError, ValidationError
 from models import config as model_config
 from models import tts_model
 from models.tts_capabilities import require_capability
@@ -37,7 +37,12 @@ from services.project_files.models import (
     SourceAssetVersion,
 )
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
+from services.runtime_files.atomic_store import (
+    AtomicJsonRecordStore,
+    json_checksum,
+)
 from utils.logger import setup_logger
+from .publication_retry import commit_with_lock_retry
 
 logger = setup_logger("media_files.audio")
 
@@ -639,6 +644,52 @@ async def _ensure_voice_sample(
     return result
 
 
+def _voice_request_store(services, project_id, entity_id):
+    # All accesses share the Project writer lock with voice binding commits.
+    return AtomicJsonRecordStore(
+        services.projects.project_root(project_id)
+        / "runtime"
+        / "voice-requests"
+        / f"{_stable_id('entity', project_id, entity_id)}.json",
+        locked=False,
+    )
+
+
+def _begin_voice_request(services, project_id, entity_id, arguments, key):
+    with services.projects.lifecycle_lock(project_id):
+        snapshot = services.projects.read(project_id)
+        entity = _require_character(snapshot.project, entity_id)
+        store = _voice_request_store(services, project_id, entity_id)
+        record = store.read_or_none() or {"requests": {}}
+        request_id = _stable_id("request", project_id, key)
+        fingerprint = json_checksum(dict(arguments))
+        previous = record["requests"].get(request_id)
+        if previous is None:
+            record["requests"][request_id] = {
+                "argumentsFingerprint": fingerprint,
+                "inputVoice": (
+                    entity.voice.model_dump(mode="json")
+                    if entity.voice
+                    else None
+                ),
+            }
+            record["latestRequestId"] = request_id
+            store.write(record)
+        else:
+            if previous["argumentsFingerprint"] != fingerprint:
+                raise ValidationError("同一音色请求的输入已变更，请使用新的请求 ID")
+            if record.get("latestRequestId") != request_id:
+                raise ConflictError("此音色请求已被较新的需求替代，不应重新生成或绑定")
+            current_voice = (
+                entity.voice.model_dump(mode="json") if entity.voice else None
+            )
+            if current_voice != previous["inputVoice"] and not (
+                entity.voice and entity.voice.enrollment_key == key
+            ):
+                raise ConflictError("此音色请求的角色绑定已变更，不应重复生成")
+        return snapshot, request_id, (previous or {}).get("resultVoice")
+
+
 async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-statements  # noqa: E501
     services: CreatorFileServices,
     *,
@@ -653,7 +704,14 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
     # runs) or from an asset:<entityId> targetRef.
     character_ref = str(arguments.get("characterRef") or "").strip()
     entity_id = _entity_id_from_ref(character_ref or target_ref)
-    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    snapshot, request_id, saved_binding = await asyncio.to_thread(
+        _begin_voice_request,
+        services,
+        project_id,
+        entity_id,
+        arguments,
+        idempotency_key,
+    )
     entity = _require_character(snapshot.project, entity_id)
     if (
         entity.voice is not None
@@ -694,8 +752,20 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
         str(arguments.get("preferredName") or "").strip() or entity.name
     )
 
-    design_preview_text = ""
-    if voice_prompt:
+    design_preview_text = (
+        _voice_preview_text(entity, arguments) if voice_prompt else ""
+    )
+    cached_voice = (
+        CharacterVoice.model_validate(saved_binding) if saved_binding else None
+    )
+    if cached_voice is not None:
+        sample_version_id = cached_voice.sample_source_version_id or ""
+        enrollment = tts_model.VoiceEnrollment(
+            voice_id=cached_voice.voice_id,
+            target_model=cached_voice.target_model,
+            origin="design" if cached_voice.voice_prompt else "clone",
+        )
+    elif voice_prompt:
         # Design path: no audio sample at all, the timbre comes from the
         # character's own description.
         preview_text = _voice_preview_text(entity, arguments)
@@ -750,7 +820,7 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
                 preferred_name=preferred_name,
             )
 
-    binding = CharacterVoice(
+    binding = cached_voice or CharacterVoice(
         voice_id=enrollment.voice_id,
         target_model=enrollment.target_model,
         preferred_name=preferred_name,
@@ -769,6 +839,24 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
                 raise ValidationError(
                     f"visual entity disappeared during enrollment: {entity_id}",
                 )
+            record = _voice_request_store(
+                services,
+                project_id,
+                entity_id,
+            ).read()
+            # Preserve the paid result for diagnosis even when newer intent
+            # prevents binding. Replaying its key cannot re-enroll it.
+            record["requests"][request_id]["resultVoice"] = binding.model_dump(
+                mode="json",
+            )
+            _voice_request_store(services, project_id, entity_id).write(record)
+            if record.get("latestRequestId") != request_id:
+                raise ConflictError("音色生成期间已有更新的请求，旧结果未绑定；请沿用最新需求")
+            if (
+                entities[entity_id].get("voice")
+                != record["requests"][request_id]["inputVoice"]
+            ):
+                raise ConflictError("音色生成期间角色绑定已变更，旧结果未覆盖当前音色")
             entities[entity_id]["voice"] = binding.model_dump(mode="json")
             commit = services.commits.commit(
                 base=base,
@@ -797,7 +885,11 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
             origin=enrollment.origin,
         )
 
-    result = await asyncio.to_thread(_commit_binding)
+    result = await commit_with_lock_retry(
+        _commit_binding,
+        project_id=project_id,
+        task_id=request_id,
+    )
     result = await _ensure_voice_sample(
         services,
         project_id=project_id,

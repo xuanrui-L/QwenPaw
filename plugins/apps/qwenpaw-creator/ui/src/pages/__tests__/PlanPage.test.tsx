@@ -184,6 +184,35 @@ describe("PlanPage Timeline/Element frontend", () => {
     ).toBe("新的午饭名场面");
   });
 
+  it.each(["source_asset_version", "artifact_version"] as const)(
+    "opens an Edit backed by %s with a literal percent in its name",
+    async (type) => {
+      const project = cloneProject();
+      const element =
+        project.timelines.items["timeline:main"].elements_by_id["edit-opening"];
+      const versionId =
+        type === "artifact_version"
+          ? "final-v1"
+          : element.render_source!.version_id;
+      if (typeof versionId !== "string")
+        throw new Error("Expected video fixture");
+      const versions =
+        type === "artifact_version"
+          ? project.assets.artifact_versions_by_id
+          : project.assets.source_versions_by_id;
+      versions[versionId].name = "100% 完成的成片";
+      element.render_source = {
+        ...element.render_source!,
+        type,
+        version_id: versionId,
+      };
+      seedProject(project);
+      installMockFetch(pollRoutes());
+      renderPage("/project/p1/plan?element=edit-opening");
+      expect(await screen.findByTitle("100% 完成的成片")).toBeInTheDocument();
+    },
+  );
+
   it("moves the playhead from a chart click and opens a block's overview in the rail", async () => {
     const { container } = renderPage();
     const chart = container.querySelector("[data-timeline-chart]")!;
