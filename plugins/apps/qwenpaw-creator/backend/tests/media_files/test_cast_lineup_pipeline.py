@@ -166,7 +166,7 @@ def _add_images(project: Project, *version_ids: str) -> None:
             created_at="2026-09-09T00:00:00Z",
             metadata={
                 "provider": {
-                    "source_url": f"https://example.com/{file_id}.png"
+                    "source_url": f"https://example.com/{file_id}.png",
                 },
             },
         )
@@ -203,7 +203,8 @@ def test_lineup_request_preserves_seated_cast_without_extra_standing_people(
 
 
 @pytest.mark.parametrize(
-    "case", ["nested", "changed_identity", "stale", "unrelated_image"]
+    "case",
+    ["nested", "changed_identity", "stale", "unrelated_image"],
 )
 def test_four_person_lineup_reuses_existing_group_within_reference_budget(
     tmp_path,
@@ -213,7 +214,7 @@ def test_four_person_lineup_reuses_existing_group_within_reference_budget(
         *[
             _entity(f"char:{name}", variants={"var:main": f"art:{name}"})
             for name in "abcd"
-        ]
+        ],
     )
     lineup = _lineup(*(f"char:{name}" for name in "abcd"))
     lineup.description = "[Image 1] 提供前三人的身份，[Image 2] 提供第四人的身份。"
@@ -262,7 +263,8 @@ def test_four_person_lineup_reuses_existing_group_within_reference_budget(
         # An unrelated scene/prop image or stale nested group cannot replace
         # the missing individual identities, even if it has similar lineage.
         with pytest.raises(
-            ValidationError, match="IMAGE_REFERENCE_BUDGET_EXCEEDED"
+            ValidationError,
+            match="IMAGE_REFERENCE_BUDGET_EXCEEDED",
         ):
             resolve()
     else:

@@ -829,161 +829,63 @@ def test_upgrade_does_not_restale_artifacts_from_the_old_ledger() -> None:
     )
 
 
-def test_t2v_element_produces_only_video_node() -> None:
-    """T2V elements skip storyboard and produce only a video node."""
-    from services.project_files.models import T2VCreation
-
+@pytest.mark.parametrize(
+    "mode,inputs,command",
+    [
+        ("t2v", {"video_prompt": "A beautiful sunset"}, "GENERATE_R2V_VIDEO"),
+        (
+            "i2v",
+            {
+                "video_prompt": "A beautiful sunset",
+                "first_frame_version_id": "img:first-frame",
+            },
+            "GENERATE_R2V_VIDEO",
+        ),
+        (
+            "s2v",
+            {
+                "portrait_version_id": "img:portrait",
+                "audio_version_id": "aud:voice",
+            },
+            "GENERATE_S2V_VIDEO",
+        ),
+    ],
+)
+@pytest.mark.parametrize("ready", [True, False])
+def test_non_r2v_modes_schedule_video_only_when_inputs_ready(
+    mode,
+    inputs,
+    command,
+    ready,
+):
     project = _project()
-    element = TimelineElement(
-        element_id="elem:t2v",
-        label="T2V Element",
-        span=TimelineSpan(start_tick=0, duration_tick=4_000),
-        location=ElementLocation(),
-        creation=T2VCreation(
-            video_prompt="A beautiful sunset",
+    _add_element(
+        project,
+        TimelineElement.model_validate(
+            {
+                "element_id": "elem:video",
+                "label": "Video",
+                "span": {"start_tick": 0, "duration_tick": 4000},
+                "location": {},
+                "creation": {"type": mode, **(inputs if ready else {})},
+            },
         ),
     )
-    _add_element(project, element)
-
     graph = derive_work_graph(project)
-    by_id = graph.by_id
-
-    # No storyboard node for T2V
-    assert "storyboard:elem:t2v" not in by_id
-
-    # Video node exists and is READY (prompt is set)
-    video_node = by_id["video:elem:t2v"]
-    assert video_node.status is WorkNodeStatus.READY
-    assert video_node.command == "GENERATE_R2V_VIDEO"
-    assert video_node.dispatch_arguments == {"mode": "t2v"}
-
-
-def test_t2v_element_gated_without_prompt() -> None:
-    """T2V elements are GATED when video_prompt is missing."""
-    from services.project_files.models import T2VCreation
-
-    project = _project()
-    element = TimelineElement(
-        element_id="elem:t2v",
-        label="T2V Element",
-        span=TimelineSpan(start_tick=0, duration_tick=4_000),
-        location=ElementLocation(),
-        creation=T2VCreation(video_prompt=""),
-    )
-    _add_element(project, element)
-
-    graph = derive_work_graph(project)
-    video_node = graph.by_id["video:elem:t2v"]
-    assert video_node.status is WorkNodeStatus.GATED
-    assert "video_prompt 缺失" in video_node.missing
-
-
-def test_i2v_element_produces_only_video_node() -> None:
-    """I2V elements skip storyboard and depend on first_frame."""
-    from services.project_files.models import I2VCreation
-
-    project = _project()
-    element = TimelineElement(
-        element_id="elem:i2v",
-        label="I2V Element",
-        span=TimelineSpan(start_tick=0, duration_tick=4_000),
-        location=ElementLocation(),
-        creation=I2VCreation(
-            video_prompt="A beautiful sunset",
-            first_frame_version_id="img:first-frame",
-        ),
-    )
-    _add_element(project, element)
-
-    graph = derive_work_graph(project)
-    by_id = graph.by_id
-
-    # No storyboard node for I2V
-    assert "storyboard:elem:i2v" not in by_id
-
-    # Video node exists and is READY (prompt + first_frame are set)
-    video_node = by_id["video:elem:i2v"]
-    assert video_node.status is WorkNodeStatus.READY
-    assert video_node.command == "GENERATE_R2V_VIDEO"
-    assert video_node.dispatch_arguments == {"mode": "i2v"}
-
-
-def test_i2v_element_gated_without_first_frame() -> None:
-    """I2V elements are GATED when first_frame_version_id is missing."""
-    from services.project_files.models import I2VCreation
-
-    project = _project()
-    element = TimelineElement(
-        element_id="elem:i2v",
-        label="I2V Element",
-        span=TimelineSpan(start_tick=0, duration_tick=4_000),
-        location=ElementLocation(),
-        creation=I2VCreation(
-            video_prompt="A beautiful sunset",
-            first_frame_version_id=None,
-        ),
-    )
-    _add_element(project, element)
-
-    graph = derive_work_graph(project)
-    video_node = graph.by_id["video:elem:i2v"]
-    assert video_node.status is WorkNodeStatus.GATED
-    assert "first_frame_version_id 缺失" in video_node.missing
-
-
-def test_s2v_element_produces_only_video_node() -> None:
-    """S2V elements skip storyboard and depend on portrait + audio."""
-    from services.project_files.models import S2VCreation
-
-    project = _project()
-    element = TimelineElement(
-        element_id="elem:s2v",
-        label="S2V Element",
-        span=TimelineSpan(start_tick=0, duration_tick=4_000),
-        location=ElementLocation(),
-        creation=S2VCreation(
-            portrait_version_id="img:portrait",
-            audio_version_id="aud:voice",
-        ),
-    )
-    _add_element(project, element)
-
-    graph = derive_work_graph(project)
-    by_id = graph.by_id
-
-    # No storyboard node for S2V
-    assert "storyboard:elem:s2v" not in by_id
-
-    # Video node exists and is READY (portrait + audio are set)
-    video_node = by_id["video:elem:s2v"]
-    assert video_node.status is WorkNodeStatus.READY
-    assert video_node.command == "GENERATE_S2V_VIDEO"
-    assert video_node.dispatch_arguments == {}
-
-
-def test_s2v_element_gated_without_portrait_or_audio() -> None:
-    """S2V elements are GATED when portrait or audio is missing."""
-    from services.project_files.models import S2VCreation
-
-    project = _project()
-    # Missing both portrait and audio
-    element = TimelineElement(
-        element_id="elem:s2v",
-        label="S2V Element",
-        span=TimelineSpan(start_tick=0, duration_tick=4_000),
-        location=ElementLocation(),
-        creation=S2VCreation(
-            portrait_version_id=None,
-            audio_version_id=None,
-        ),
-    )
-    _add_element(project, element)
-
-    graph = derive_work_graph(project)
-    video_node = graph.by_id["video:elem:s2v"]
-    assert video_node.status is WorkNodeStatus.GATED
-    assert "portrait_version_id 缺失" in video_node.missing
-    assert "audio_version_id 缺失" in video_node.missing
+    assert "storyboard:elem:video" not in graph.by_id
+    node = graph.by_id["video:elem:video"]
+    if ready:
+        assert node.status is WorkNodeStatus.READY
+        assert node.command == command
+        assert node.dispatch_arguments == (
+            {} if mode == "s2v" else {"mode": mode}
+        )
+    else:
+        assert node.status is WorkNodeStatus.GATED
+        for field in inputs:
+            if mode == "i2v" and field == "video_prompt":
+                continue  # I2V can animate the first frame without extra text.
+            assert f"{field} 缺失" in node.missing
 
 
 def test_mixed_timeline_compose_includes_t2v_i2v_s2v() -> None:
@@ -1049,7 +951,8 @@ def test_mixed_timeline_compose_includes_t2v_i2v_s2v() -> None:
 
 
 @pytest.mark.parametrize(
-    "command_name", ["COMPOSE_FINAL_VIDEO", "EXECUTE_EDIT"]
+    "command_name",
+    ["COMPOSE_FINAL_VIDEO", "EXECUTE_EDIT"],
 )
 def test_episode_compilation_reuses_artifacts_with_original_audio(
     command_name: str,

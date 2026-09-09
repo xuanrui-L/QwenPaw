@@ -706,7 +706,8 @@ def test_forward_cursor_replays_once_and_follows_repaired_tail(
 
 @pytest.mark.parametrize("damage", ["invalid", "gap", "replace", "truncate"])
 def test_forward_cursor_fails_closed_on_durable_stream_changes(
-    tmp_path, damage
+    tmp_path,
+    damage,
 ):
     path = tmp_path / "events.jsonl"
     store = DurableJsonlStore(path, EventRecord)

@@ -351,21 +351,26 @@ describe("AssetsPage Project projection", () => {
     fireEvent.click(screen.getByRole("button", { name: /^圆润大橘猫/ }));
     fireEvent.click(screen.getByRole("button", { name: "淋湿后的造型" }));
     expect(screen.getByText("设计图待生成")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /v1/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /v1/ }),
+    ).not.toBeInTheDocument();
 
     rerender(drawer({ ...structuredClone(project), generation: 4 }));
-    expect(screen.getByRole("button", { name: "淋湿后的造型" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(screen.getByText("以主图为参考，仅把毛发改为淋湿状态")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "淋湿后的造型" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByText("以主图为参考，仅把毛发改为淋湿状态"),
+    ).toBeInTheDocument();
     expect(container.querySelector("[data-prompt-edit]")).toHaveAttribute(
       "data-prompt-edit",
       "/visual/entities/items/cat/variants/items/variant:cat:wet/prompt",
     );
     fireEvent.click(screen.getByRole("button", { name: "重新生成图片" }));
     await waitFor(() =>
-      expect(calls.filter((call) => call.method === "POST").map((call) => call.url)).toEqual([
+      expect(
+        calls.filter((call) => call.method === "POST").map((call) => call.url),
+      ).toEqual([
         "/api/qwenpaw-creator/projects/p1/work-graph/nodes/visual%3Acat%3Avariant%3Acat%3Awet/dispatch",
       ]),
     );

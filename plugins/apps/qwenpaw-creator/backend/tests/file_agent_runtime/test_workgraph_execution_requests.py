@@ -340,7 +340,7 @@ def test_authorized_provider_outlives_feedback_but_not_hard_stop(
                             "kinds": ["visual"],
                         },
                     ),
-                )
+                ),
             )
 
         runtime = FileCreatorAgentRuntime(
@@ -355,13 +355,13 @@ def test_authorized_provider_outlives_feedback_but_not_hard_stop(
             runtime.notify("probe-project")
             await wait_for(
                 lambda: runtime.executions.list_execution_authorizations(
-                    "probe-project"
-                )
+                    "probe-project",
+                ),
             )
             approve(
                 runtime,
                 runtime.executions.list_execution_authorizations(
-                    "probe-project"
+                    "probe-project",
                 )[0],
             )
             await asyncio.wait_for(started.wait(), timeout=3)
@@ -379,7 +379,7 @@ def test_authorized_provider_outlives_feedback_but_not_hard_stop(
                     lambda: runtime.executions.list_tasks("probe-project")[
                         0
                     ].status
-                    is TaskStatus.SUCCEEDED
+                    is TaskStatus.SUCCEEDED,
                 )
             else:
                 # The HTTP hard-stop performs this durable cleanup after

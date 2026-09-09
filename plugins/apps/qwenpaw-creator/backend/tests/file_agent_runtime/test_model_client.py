@@ -69,7 +69,7 @@ def test_long_production_compacts_automatic_history_but_keeps_human_input():
                     {
                         "type": "text",
                         "text": f"review-{index}:" + "自动审阅结果。" * 300,
-                    }
+                    },
                 ],
             },
         )
@@ -111,7 +111,7 @@ def test_long_production_compacts_automatic_history_but_keeps_human_input():
                     + json.dumps(history, ensure_ascii=False)
                     + "\n\nCURRENT_USER_REQUEST=\n"
                     + current,
-                }
+                },
             ],
             [],
         )
@@ -202,7 +202,7 @@ def test_new_snapshot_frees_history_space_for_script_and_skills(
     continuation = result[1]["content"]
     assert human in continuation
     assert continuation.endswith(
-        "CURRENT_USER_REQUEST=\nContinue automatically."
+        "CURRENT_USER_REQUEST=\nContinue automatically.",
     )
     assert ("old" * 5200 in continuation) is not superseded
     if superseded:
@@ -588,7 +588,8 @@ def test_thinking_chunks_are_coalesced_without_losing_order_or_tail(
         )
         if ending == "provider_error":
             with pytest.raises(
-                AgentModelError, match="invalid provider response"
+                AgentModelError,
+                match="invalid provider response",
             ):
                 await request
         else:

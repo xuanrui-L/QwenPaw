@@ -138,7 +138,8 @@ def _shrink_continuation(
                     continue
                 previous = _snapshot_content(part.get("text"))
                 if previous and _snapshot_supersedes(
-                    latest_snapshot, previous
+                    latest_snapshot,
+                    previous,
                 ):
                     part["text"] = json_text(
                         {

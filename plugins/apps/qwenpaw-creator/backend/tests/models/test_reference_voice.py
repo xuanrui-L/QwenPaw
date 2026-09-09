@@ -248,7 +248,7 @@ def test_voice_mapping_and_budget_follow_deduplicated_wire_order(monkeypatch):
             ratio="16:9",
             duration=5,
             resolution="720P",
-        )
+        ),
     )
     body = captured["body"]["input"]
     assert [
@@ -277,7 +277,7 @@ def test_voice_mapping_and_budget_follow_deduplicated_wire_order(monkeypatch):
                 ratio="16:9",
                 duration=5,
                 resolution="720P",
-            )
+            ),
         )
     assert "body" not in captured
 
@@ -298,7 +298,8 @@ def test_voice_excerpt_decodes_and_fits_total_budget(tmp_path, voice_count):
 
     async def inspect():
         async with wan_voice_excerpt(
-            source.as_uri(), voice_count=voice_count
+            source.as_uri(),
+            voice_count=voice_count,
         ) as url:
             excerpt = Path(url.removeprefix("file://"))
             with wave.open(str(excerpt), "rb") as audio:

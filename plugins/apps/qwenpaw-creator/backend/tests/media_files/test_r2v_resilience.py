@@ -654,143 +654,73 @@ def test_changed_render_inputs_during_render_still_quarantine(
     assert (task.error or {}).get("code") == "PROJECT_INPUT_SNAPSHOT_STALE"
 
 
-def test_frozen_inputs_still_current_t2v(tmp_path, monkeypatch) -> None:
-    """T2V elements have no external references, so inputs are always current."""
-
-    from services.project_files.models import (
-        ElementLocation,
-        T2VCreation,
-        TimelineElement,
-        TimelineSpan,
-    )
-
-    services = r2v_project_services(
-        tmp_path,
-        monkeypatch,
-        project_id="t2v-stale-project",
-        name="T2V Stale",
-        elements=(
-            TimelineElement(
-                element_id="t2v-1",
-                label="T2V Element",
-                span=TimelineSpan(start_tick=0, duration_tick=4_000),
-                location=ElementLocation(),
-                creation=T2VCreation(video_prompt="A beautiful sunset"),
-            ),
+@pytest.mark.parametrize(
+    "mode,inputs,frozen",
+    [
+        (
+            "t2v",
+            {"video_prompt": "A beautiful sunset"},
+            {"referenceVersionIds": []},
         ),
-    )
-    project = services.projects.read("t2v-stale-project").project
-    task = SimpleNamespace(
-        task_id="task-1",
-        project_id="t2v-stale-project",
-        kind="r2v_generation",
-        status="RUNNING",
-        input_refs=["element:t2v-1"],
-        metadata={
-            "requestSnapshot": {
-                "elementId": "t2v-1",
-                "referenceVersionIds": [],
+        (
+            "i2v",
+            {
+                "video_prompt": "A beautiful sunset",
+                "first_frame_version_id": "img:first-frame",
             },
-        },
-    )
-    assert r2v_execution.FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        task,
-    )
-
-
-def test_frozen_inputs_still_current_i2v(tmp_path, monkeypatch) -> None:
-    """I2V elements check first_frame_version_id."""
-
-    from services.project_files.models import (
-        ElementLocation,
-        I2VCreation,
-        TimelineElement,
-        TimelineSpan,
-    )
-
-    services = r2v_project_services(
-        tmp_path,
-        monkeypatch,
-        project_id="i2v-stale-project",
-        name="I2V Stale",
-        elements=(
-            TimelineElement(
-                element_id="i2v-1",
-                label="I2V Element",
-                span=TimelineSpan(start_tick=0, duration_tick=4_000),
-                location=ElementLocation(),
-                creation=I2VCreation(
-                    video_prompt="A beautiful sunset",
-                    first_frame_version_id="img:first-frame",
-                ),
-            ),
-        ),
-    )
-    project = services.projects.read("i2v-stale-project").project
-    task = SimpleNamespace(
-        task_id="task-1",
-        project_id="i2v-stale-project",
-        kind="r2v_generation",
-        status="RUNNING",
-        input_refs=["element:i2v-1"],
-        metadata={
-            "requestSnapshot": {
-                "elementId": "i2v-1",
+            {
                 "referenceVersionIds": ["img:first-frame"],
                 "firstFrameVersionId": "img:first-frame",
             },
-        },
-    )
-    assert r2v_execution.FileR2VExecutionService._frozen_inputs_still_current(
-        project,
-        task,
-    )
-
-
-def test_frozen_inputs_still_current_s2v(tmp_path, monkeypatch) -> None:
-    """S2V elements check portrait + audio."""
-
-    from services.project_files.models import (
-        ElementLocation,
-        S2VCreation,
-        TimelineElement,
-        TimelineSpan,
-    )
-
-    services = r2v_project_services(
-        tmp_path,
-        monkeypatch,
-        project_id="s2v-stale-project",
-        name="S2V Stale",
-        elements=(
-            TimelineElement(
-                element_id="s2v-1",
-                label="S2V Element",
-                span=TimelineSpan(start_tick=0, duration_tick=4_000),
-                location=ElementLocation(),
-                creation=S2VCreation(
-                    portrait_version_id="img:portrait",
-                    audio_version_id="aud:voice",
-                ),
-            ),
         ),
-    )
-    project = services.projects.read("s2v-stale-project").project
-    task = SimpleNamespace(
-        task_id="task-1",
-        project_id="s2v-stale-project",
-        kind="r2v_generation",
-        status="RUNNING",
-        input_refs=["element:s2v-1"],
-        metadata={
-            "requestSnapshot": {
-                "elementId": "s2v-1",
+        (
+            "s2v",
+            {
+                "portrait_version_id": "img:portrait",
+                "audio_version_id": "aud:voice",
+            },
+            {
                 "referenceVersionIds": ["img:portrait", "aud:voice"],
                 "s2vImageVersionId": "img:portrait",
                 "s2vAudioVersionId": "aud:voice",
             },
-        },
+        ),
+    ],
+)
+def test_frozen_inputs_still_current_by_video_mode(
+    tmp_path,
+    monkeypatch,
+    mode,
+    inputs,
+    frozen,
+):
+    from services.project_files.models import TimelineElement
+
+    services = r2v_project_services(
+        tmp_path,
+        monkeypatch,
+        project_id="stale-project",
+        name="Video input snapshot",
+        elements=(
+            TimelineElement.model_validate(
+                {
+                    "element_id": "video-1",
+                    "label": "Video",
+                    "span": {"start_tick": 0, "duration_tick": 4000},
+                    "location": {},
+                    "creation": {"type": mode, **inputs},
+                },
+            ),
+        ),
+    )
+    project = services.projects.read("stale-project").project
+    task = SimpleNamespace(
+        task_id="task-1",
+        project_id="stale-project",
+        kind="r2v_generation",
+        status="RUNNING",
+        input_refs=["element:video-1"],
+        metadata={"requestSnapshot": {"elementId": "video-1", **frozen}},
     )
     assert r2v_execution.FileR2VExecutionService._frozen_inputs_still_current(
         project,

@@ -127,7 +127,9 @@ def test_reference_uploads_overlap_but_keep_order_and_stop_together(
                 active.remove(url)
 
         monkeypatch.setattr(
-            video_model, "_resolve_reference_media_url", upload
+            video_model,
+            "_resolve_reference_media_url",
+            upload,
         )
         pending = asyncio.create_task(
             video_model._resolve_reference_media_urls(list(release), "wan"),

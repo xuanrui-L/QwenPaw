@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 
 import pytest
 
@@ -369,3 +370,59 @@ def test_turn_budget_scales_with_element_count() -> None:
     assert scale_mainline_max_model_turns(64, 12) == 64
     # Negative counts (defensive) fall back to the base.
     assert scale_mainline_max_model_turns(24, -3) == 24
+
+
+@pytest.mark.parametrize("case", ["encrypted", "mixed", "unavailable"])
+def test_persisted_secrets_are_decoded_when_supported(
+    tmp_path,
+    monkeypatch,
+    case,
+):
+    # pylint: disable=protected-access
+    data = {
+        "llm": {
+            "api_key": "ENC:llm-key",
+            "base_url": "https://example.com/v1",
+        },
+        "oss": {
+            "access_key_secret": "ENC:oss-secret",
+            "policy_api_key": "ENC:policy-key",
+        },
+    }
+    if case == "mixed":
+        data.update(
+            image={"api_key": "plaintext-image-key"},
+            oss={"access_key_secret": "", "policy_api_key": None},
+        )
+    config_file = tmp_path / "model_config.json"
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(config, "_get_model_config_path", lambda: config_file)
+    monkeypatch.setattr(
+        config,
+        "_SECRET_STORE_AVAILABLE",
+        case != "unavailable",
+    )
+    monkeypatch.setattr(
+        config,
+        "_secret_is_encrypted",
+        lambda value: value.startswith("ENC:"),
+    )
+    monkeypatch.setattr(config, "_secret_decrypt", lambda value: value[4:])
+    expected = {
+        section: {
+            key: (
+                value[4:]
+                if case != "unavailable"
+                and isinstance(value, str)
+                and value.startswith("ENC:")
+                else value
+            )
+            for key, value in fields.items()
+        }
+        for section, fields in data.items()
+    }
+    config._clear_user_config_cache()
+    try:
+        assert config._get_user_config() == expected
+    finally:
+        config._clear_user_config_cache()

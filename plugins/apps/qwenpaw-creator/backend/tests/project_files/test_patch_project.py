@@ -215,7 +215,8 @@ def _r2v_element(element_id: str, narrative: str = "叙事") -> dict:
 
 @pytest.mark.parametrize("tool_name", ["patch_project", "jq_project"])
 def test_misplaced_video_prompt_reports_repair_without_committing(
-    tmp_path, tool_name
+    tmp_path,
+    tool_name,
 ):
     tools = _tools(tmp_path)
     base = tools.store.read("project-1")

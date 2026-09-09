@@ -189,8 +189,8 @@ export default function FileProjectReviewPanel({
         decision === "ACCEPT"
           ? t("fileReview.keptCount", { count: affectedUnits })
           : rejectionFeedback?.action === "UNDO_AND_REGENERATE"
-            ? t("fileReview.undoneCount", { count: affectedUnits })
-            : t("fileReview.undoneCountSimple", { count: affectedUnits }),
+          ? t("fileReview.undoneCount", { count: affectedUnits })
+          : t("fileReview.undoneCountSimple", { count: affectedUnits }),
       );
       return true;
     } catch {

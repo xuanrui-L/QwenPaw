@@ -2055,7 +2055,7 @@ def test_feedback_keeps_admitted_media_alive_but_hard_stop_cancels_it(
             target_ref="asset:hero",
         )
         media = asyncio.create_task(
-            scheduler._dispatch(PROJECT_ID, node, "fp")
+            scheduler._dispatch(PROJECT_ID, node, "fp"),
         )
         scheduler._dispatch_tasks.setdefault(PROJECT_ID, set()).add(media)
         scheduler._inflight.setdefault(PROJECT_ID, set()).add(node.node_id)
@@ -2069,7 +2069,8 @@ def test_feedback_keeps_admitted_media_alive_but_hard_stop_cancels_it(
                 expected_run_id=active.run_id,
             )
             await asyncio.wait_for(
-                asyncio.gather(active.task, return_exceptions=True), timeout=2
+                asyncio.gather(active.task, return_exceptions=True),
+                timeout=2,
             )
             release_media.set()
             await asyncio.gather(media, return_exceptions=True)
@@ -2577,14 +2578,76 @@ def test_mainline_character_voice_waits_for_authorization(
     assert specialists == []
 
 
-@pytest.mark.parametrize("review_state", ["none", "pending", "accepted"])
-def test_prompt_gap_feedback_is_queued_outside_auto_approve(
+@pytest.mark.parametrize(
+    "review_state,after_failure,gap,reason,previous_yolo",
+    [
+        pytest.param(
+            "none",
+            False,
+            True,
+            "video_prompt 缺失",
+            False,
+            id="normal",
+        ),
+        pytest.param(
+            "pending",
+            False,
+            True,
+            "video_prompt 缺失",
+            False,
+            id="pending-review",
+        ),
+        pytest.param(
+            "accepted",
+            False,
+            True,
+            "video_prompt 缺失",
+            False,
+            id="accepted-review",
+        ),
+        pytest.param(
+            "none",
+            True,
+            True,
+            "video_prompt 缺失",
+            False,
+            id="transient-failure",
+        ),
+        pytest.param(
+            "none",
+            True,
+            False,
+            "上游分镜未完成",
+            False,
+            id="paid-repair-forbidden",
+        ),
+        pytest.param(
+            "none",
+            False,
+            True,
+            "video_prompt 缺失",
+            True,
+            id="separate-yolo-fuse",
+        ),
+        pytest.param(
+            "none",
+            False,
+            True,
+            "台本文案尚未落到 Element 上",
+            False,
+            id="structured-gap-not-wording",
+        ),
+    ],
+)
+def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
     tmp_path,
     monkeypatch,
     review_state,
+    after_failure,
+    gap,
+    reason,
+    previous_yolo,
 ) -> None:
-    """A false completion gets a free repair turn, never a media dispatch."""
-
     services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
     if review_state != "none":
         candidate = snapshot.project.model_dump(mode="json")
@@ -2609,13 +2672,27 @@ def test_prompt_gap_feedback_is_queued_outside_auto_approve(
         if review_state == "accepted":
             _accept_review(services, review)
     driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    if previous_yolo:
+        for index in range(driver.YOLO_RESUME_MAX_CONSECUTIVE):
+            services.sessions.append_message(
+                PROJECT_ID,
+                SESSION_ID,
+                CONVERSATION_ID,
+                role="user",
+                content_parts=[
+                    {"type": "text", "text": f"YOLO resume {index}"},
+                ],
+                source=driver.YOLO_RESUME_SOURCE,
+                channel=MessageChannel.RUNTIME,
+                metadata={"projectGeneration": snapshot.generation},
+            )
     node = WorkNode(
         node_id="video:ep1",
         kind="video",
         label="第一场 · 视频",
         status=WorkNodeStatus.GATED,
-        missing=("video_prompt 缺失",),
-        authored_text_gap=True,
+        missing=(reason,),
+        authored_text_gap=gap,
     )
     monkeypatch.setattr(
         driver_module,
@@ -2630,234 +2707,31 @@ def test_prompt_gap_feedback_is_queued_outside_auto_approve(
             generation=1,
         ),
     )
-    wakes: list[str] = []
+    wakes = []
     monkeypatch.setattr(driver.work_scheduler, "wake", wakes.append)
-
+    before = len(services.sessions.list_messages(PROJECT_ID, SESSION_ID))
     asyncio.run(
         driver._queue_yolo_completion_resume(
             project_id=PROJECT_ID,
             session_id=SESSION_ID,
             conversation_id=CONVERSATION_ID,
             run_id="agent-run-false-complete",
+            after_failure=after_failure,
         ),
     )
-
-    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    assert wakes == [], "non-auto prompt repair must not wake paid scheduling"
-    if review_state == "pending":
-        assert not any(
-            message.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
-            for message in messages
-        ), "pending human review must settle before automatic prompt repair"
-        return
-    feedback = messages[-1]
-    assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
-    assert "video_prompt 缺失" in feedback.content_parts[0].text
-    assert "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
-    assert feedback.metadata["modelRequiredNodes"] == ["video:ep1"]
-
-
-def test_prompt_gap_repair_survives_retryable_failure_outside_auto_approve(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """A transient fault must not swallow the free manual-mode repair turn."""
-
-    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
-    node = WorkNode(
-        node_id="video:ep1",
-        kind="video",
-        label="第一场 · 视频",
-        status=WorkNodeStatus.GATED,
-        missing=("video_prompt 缺失",),
-        authored_text_gap=True,
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_media_review_mode",
-        lambda: "manual",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda _project, tasks, *, media_models=None: WorkGraph(
-            nodes=(node,),
-            generation=1,
-        ),
-    )
-    wakes: list[str] = []
-    monkeypatch.setattr(driver.work_scheduler, "wake", wakes.append)
-
-    asyncio.run(
-        driver._queue_yolo_completion_resume(
-            project_id=PROJECT_ID,
-            session_id=SESSION_ID,
-            conversation_id=CONVERSATION_ID,
-            run_id="agent-run-transient-failure",
-            after_failure=True,
-        ),
-    )
-
-    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    feedback = messages[-1]
-    assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
-    assert "瞬态故障" in feedback.content_parts[0].text
-    assert "video_prompt 缺失" in feedback.content_parts[0].text
-    assert wakes == [], "non-auto prompt repair must not wake paid scheduling"
-
-
-def test_manual_mode_failure_without_prompt_gap_waits_for_a_human(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Paid continuation after a fault stays a YOLO-only behavior."""
-
-    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
-    node = WorkNode(
-        node_id="video:ep1",
-        kind="video",
-        label="第一场 · 视频",
-        status=WorkNodeStatus.GATED,
-        missing=("上游分镜未完成",),
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_media_review_mode",
-        lambda: "manual",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda _project, tasks, *, media_models=None: WorkGraph(
-            nodes=(node,),
-            generation=1,
-        ),
-    )
-
-    asyncio.run(
-        driver._queue_yolo_completion_resume(
-            project_id=PROJECT_ID,
-            session_id=SESSION_ID,
-            conversation_id=CONVERSATION_ID,
-            run_id="agent-run-transient-failure-no-gap",
-            after_failure=True,
-        ),
-    )
-
-    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    assert all(
-        item.source
-        not in {
-            driver.YOLO_RESUME_SOURCE,
-            driver.PROMPT_CONTRACT_RESUME_SOURCE,
-        }
-        for item in messages
-    )
-
-
-def test_prompt_repair_fuse_is_independent_from_previous_yolo_mode(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Changing review mode starts a fresh, non-paid repair streak."""
-
-    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
-    for index in range(driver.YOLO_RESUME_MAX_CONSECUTIVE):
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            content_parts=[{"type": "text", "text": f"YOLO resume {index}"}],
-            source=driver.YOLO_RESUME_SOURCE,
-            channel=MessageChannel.RUNTIME,
-            metadata={"projectGeneration": snapshot.generation},
-        )
-    node = WorkNode(
-        node_id="video:ep1",
-        kind="video",
-        label="第一场 · 视频",
-        status=WorkNodeStatus.GATED,
-        missing=("video_prompt 缺失",),
-        authored_text_gap=True,
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_media_review_mode",
-        lambda: "manual",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda _project, tasks, *, media_models=None: WorkGraph(
-            nodes=(node,),
-            generation=1,
-        ),
-    )
-
-    asyncio.run(
-        driver._queue_yolo_completion_resume(
-            project_id=PROJECT_ID,
-            session_id=SESSION_ID,
-            conversation_id=CONVERSATION_ID,
-            run_id="agent-run-after-review-mode-change",
-        ),
-    )
-
-    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    assert messages[-1].source == driver.PROMPT_CONTRACT_RESUME_SOURCE
-
-
-def test_prompt_gap_feedback_does_not_depend_on_gap_wording(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """Reworded gap text must not silently disable the free repair path.
-
-    The selection used to grep the human-readable reason for "prompt" /
-    "台词" / "对话密度", so renaming a message would have turned a free
-    repair turn into a silent stall.
-    """
-
-    services, _snapshot = _create_project(tmp_path, initial_goal="完成短剧")
-    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
-    reworded = WorkNode(
-        node_id="video:ep1",
-        kind="video",
-        label="第一场 · 视频",
-        status=WorkNodeStatus.GATED,
-        missing=("台本文案尚未落到 Element 上",),
-        authored_text_gap=True,
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "get_media_review_mode",
-        lambda: "manual",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "derive_work_graph",
-        lambda _project, tasks, *, media_models=None: WorkGraph(
-            nodes=(reworded,),
-            generation=1,
-        ),
-    )
-
-    asyncio.run(
-        driver._queue_yolo_completion_resume(
-            project_id=PROJECT_ID,
-            session_id=SESSION_ID,
-            conversation_id=CONVERSATION_ID,
-            run_id="agent-run-reworded-gap",
-        ),
-    )
-
-    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
-    assert messages[-1].source == driver.PROMPT_CONTRACT_RESUME_SOURCE
-    assert "台本文案尚未落到 Element 上" in messages[-1].content_parts[0].text
+    messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)[before:]
+    assert wakes == [], "manual prompt repair must never wake paid scheduling"
+    if review_state == "pending" or not gap:
+        assert messages == []
+    else:
+        assert len(messages) == 1
+        feedback = messages[0]
+        assert feedback.source == driver.PROMPT_CONTRACT_RESUME_SOURCE
+        assert reason in feedback.content_parts[0].text
+        assert "没有提交任何对应的付费媒体任务" in feedback.content_parts[0].text
+        assert feedback.metadata["modelRequiredNodes"] == ["video:ep1"]
+        if after_failure:
+            assert "瞬态故障" in feedback.content_parts[0].text
 
 
 def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
@@ -3341,7 +3215,7 @@ def test_batch_merges_notifications_but_stops_at_non_batchable(
                     str(item["content"])
                     for item in messages
                     if item["role"] == "user"
-                )
+                ),
             )
             return AgentModelTurn(content="处理完毕。")
 
@@ -3437,7 +3311,9 @@ def test_human_revisions_take_priority_over_queued_automated_reviews(
         driver = _driver(services, callback)
         if review_pause:
             services.sessions.set_session_status(
-                PROJECT_ID, SESSION_ID, review_pause
+                PROJECT_ID,
+                SESSION_ID,
+                review_pause,
             )
             await driver._reconcile_project(PROJECT_ID)
             assert PROJECT_ID not in driver._active

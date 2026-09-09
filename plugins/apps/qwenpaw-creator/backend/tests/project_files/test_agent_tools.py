@@ -228,7 +228,8 @@ def test_project_pages_supply_replayable_utf8_cursor_and_reject_stale_pages(
     tools = _tools(store)
     text = "对白片段：花儿本是心里的话。"
     tools.jq_project(
-        project_id="project-1", program=f".description = {json.dumps(text)}"
+        project_id="project-1",
+        program=f".description = {json.dumps(text)}",
     )
     request = {
         "projectId": "project-1",
@@ -252,14 +253,16 @@ def test_project_pages_supply_replayable_utf8_cursor_and_reject_stale_pages(
     }
     with pytest.raises(AgentProjectToolError, match="Fields do not exist"):
         tools.invoke(
-            "read_project", {"projectId": "project-1", "fields": ["missing"]}
+            "read_project",
+            {"projectId": "project-1", "fields": ["missing"]},
         )
     missing_etag = dict(first["nextPage"])
     missing_etag.pop("expectedEtag")
     with pytest.raises(AgentProjectToolError, match="expectedEtag"):
         tools.invoke("read_project", missing_etag)
     tools.jq_project(
-        project_id="project-1", program='.description = "new text"'
+        project_id="project-1",
+        program='.description = "new text"',
     )
     with pytest.raises(AgentProjectToolError, match="changed between pages"):
         tools.invoke("read_project", first["nextPage"])

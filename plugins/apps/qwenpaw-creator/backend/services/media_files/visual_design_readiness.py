@@ -89,7 +89,7 @@ def _entity_readiness_issues(
                 creation.visual_variant_refs.get(entity_id)
                 or (required[0] if len(required) == 1 else "")
                 for _, creation in element_references
-            )
+            ),
         )
     for variant_id in filter(None, required):
         if variant_id not in defined:
@@ -198,7 +198,7 @@ def visual_design_readiness_issues(
                 entity,
                 element_references,
                 bound_only=element_id is not None,
-            )
+            ),
         )
     issues.extend(_lineup_readiness_issues(project, element_id))
 
