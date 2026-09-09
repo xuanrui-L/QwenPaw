@@ -41,7 +41,7 @@ from .auto_snapshot import auto_snapshot_timelines, frozen_snapshot_edits
 from .candidate_normalization import normalize_project_candidate
 from .commit import PROTECTED_EXACT_POINTERS, ProjectCommitBoundary
 from .jq_transform import JqProjectTransformer
-from .models import EditPlan, Project, TimelineElement
+from .models import EditPlan, Project, R2VCreation, TimelineElement
 from .patch_ops import PatchOpError, apply_patch_ops
 from .schema_prompt import ProjectSchemaPrompt, build_project_schema_prompt
 from .store import ProjectSnapshot, ProjectStore
@@ -798,11 +798,27 @@ _ELEMENT_LEVEL_FIELDS = frozenset(
 
 
 def _misnested_element_field_hint(item: Mapping[str, Any]) -> str:
-    """Name the bracket-misplacement when element fields sit in creation."""
+    """Name a known field placed on the wrong side of ``creation``."""
 
+    loc = item.get("loc") or ()
+    if (
+        item.get("type") == "extra_forbidden"
+        and len(loc) == 6
+        and loc[:2] == ("timelines", "items")
+        and loc[3] == "elements_by_id"
+        and loc[-1] in R2VCreation.model_fields
+    ):
+        pointer = "/" + "/".join(
+            str(part).replace("~", "~0").replace("/", "~1")
+            for part in (*loc[:-1], "creation", loc[-1])
+        )
+        return (
+            "该创作字段误写在 Element 顶层，应放入 creation 内。"
+            f"正确 patch 路径：{pointer}；"
+            "移除本次候选的顶层字段后重新提交，项目尚未修改"
+        )
     if item.get("type") != "missing":
         return ""
-    loc = item.get("loc") or ()
     if not loc or str(loc[-1]) not in _ELEMENT_LEVEL_FIELDS:
         return ""
     parent = item.get("input")
@@ -818,7 +834,11 @@ def _misnested_element_field_hint(item: Mapping[str, Any]) -> str:
     return ""
 
 
-def _translate_project_schema_error(error: ValidationError) -> str:
+def _translate_project_schema_error(
+    error: ValidationError,
+    *,
+    tool_name: str = JQ_PROJECT_TOOL_NAME,
+) -> str:
     """Render post-jq Project validation errors as located, fixable items."""
 
     items = error.errors()
@@ -855,9 +875,13 @@ def _translate_project_schema_error(error: ValidationError) -> str:
             f"- ...另有 {len(items) - _MAX_SCHEMA_ERROR_LINES} 处错误",
         )
     return (
-        "jq 输出未通过 Project Schema 校验，项目未被修改：\n"
+        f"{tool_name} 输出未通过 Project Schema 校验，项目未被修改：\n"
         + "\n".join(lines)
-        + "\n请修正 program/jsonArgs 后重试。"
+        + (
+            "\n请修正 ops 后重试。"
+            if tool_name == PATCH_PROJECT_TOOL_NAME
+            else "\n请修正 program/jsonArgs 后重试。"
+        )
     )
 
 
@@ -1709,7 +1733,10 @@ class AgentProjectTools:
                 ) from exc
             except ValidationError as exc:
                 raise AgentProjectToolError(
-                    _translate_project_schema_error(exc),
+                    _translate_project_schema_error(
+                        exc,
+                        tool_name=PATCH_PROJECT_TOOL_NAME,
+                    ),
                     code="PATCH_PROJECT_SCHEMA_INVALID",
                     details={
                         "validationErrors": exc.errors(
