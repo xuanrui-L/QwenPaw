@@ -944,8 +944,13 @@ def _resolve_request(
             for ref in lineup.character_refs
         ]
         prompt_parts = [
-            "一张多角色阵容对比图（cast lineup）：所有角色全身站立并排，"
-            "同一地平线，从左到右依次为：" + "、".join(character_names) + "。",
+            f"一张多角色阵容参考图（cast lineup）：画面总共只有"
+            f" {len(character_names)} 人，分别是："
+            + "、".join(character_names)
+            + "。每个角色只出现一次，不复制参考身份板中的其他角度或姿态。",
+            "角色的坐站、位置与道具归属以下面的创作说明和相对关系为准；"
+            "只有未指定姿态时才采用中性全身并排站姿，"
+            "不得在指定坐姿之外再增加同一人的站姿。",
             "严格保持各角色之间真实的身高与体型比例，风格、光照、色彩基准完全统一。",
         ]
         if prompt:

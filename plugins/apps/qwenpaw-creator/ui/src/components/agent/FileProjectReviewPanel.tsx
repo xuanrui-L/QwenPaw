@@ -47,6 +47,7 @@ function artifactKindLabel(kind: string): string {
   const map: Record<string, string> = {
     r2v_storyboard_image: i18n.t("fileReview.storyboard"),
     visual_asset_image: i18n.t("fileReview.characterVisual"),
+    cast_lineup_image: i18n.t("fileReview.castLineup"),
     r2v_video: i18n.t("fileReview.video"),
   };
   return map[kind] ?? "";
@@ -141,6 +142,10 @@ export default function FileProjectReviewPanel({
         project,
       )}」${i18n.t("fileReview.imageOf")}`;
     }
+    const artifact = locator.artifactVersionId
+      ? project?.assets.artifact_versions_by_id[locator.artifactVersionId]
+      : null;
+    if (artifact?.name) return artifact.name;
     return mediaLabel(locator);
   };
 

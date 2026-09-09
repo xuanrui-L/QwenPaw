@@ -20,6 +20,7 @@ from services.project_files.models import (
     ArtifactVersion,
     IndexedFile,
     Project,
+    VisualCastLineup,
     VisualEntity,
     VisualVariant,
 )
@@ -116,7 +117,20 @@ def test_image_review_uses_the_generated_variant_purpose_and_prompt(tmp_path):
         entity.variants.order.append(variant_id)
     entity.canonical_variant_id = "night"
     project.visual.entities.items["hero"] = entity
-    project.visual.entities.order = ["hero"]
+    project.visual.entities.items["peer"] = VisualEntity(
+        entity_id="peer",
+        kind="character",
+        name="孙老四",
+        required_variant_ids=[],
+    )
+    project.visual.entities.order = ["hero", "peer"]
+    project.visual.cast_lineups.items["cast"] = VisualCastLineup(
+        lineup_id="cast",
+        name="双人阵容",
+        character_refs=["hero", "peer"],
+        relative_notes="坐姿，手里只有一把茶壶。",
+    )
+    project.visual.cast_lineups.order = ["cast"]
     services.projects.create(project)
     context = media_module._derive_plan_context(
         services,
@@ -131,6 +145,18 @@ def test_image_review_uses_the_generated_variant_purpose_and_prompt(tmp_path):
     assert context["generation_prompt"] == entity.variants.items["day"].prompt
     assert context["variant_requirements"] == "人物多角度参考，不是剧情画面"
     assert context["visual_identity"]["name"] == "尕梅"
+    lineup_context = media_module._derive_plan_context(
+        services,
+        PROJECT_ID,
+        {
+            "commandType": "GENERATE_CAST_LINEUP_IMAGE",
+            "targetRef": "lineup:cast",
+        },
+    )
+    assert lineup_context["artifact_purpose"] == "cast_lineup_reference"
+    assert lineup_context["lineup"]["expected_character_count"] == 2
+    assert lineup_context["lineup"]["characters"][0]["name"] == "尕梅"
+    assert "坐姿" in lineup_context["lineup"]["relative_notes"]
 
 
 def _admit(root: Path, version: str, owner: str = "owner-a"):
@@ -356,19 +382,26 @@ def test_schedule_review_fence_is_reference_counted(monkeypatch) -> None:
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["GENERATE_STORYBOARD_IMAGE", "GENERATE_CAST_LINEUP_IMAGE"],
+)
 def test_prepublication_reservation_closes_commit_listener_race(
     monkeypatch,
+    command,
 ) -> None:
     monkeypatch.setenv("CREATOR_MEDIA_REVIEW_ENABLED", "1")
     release = asyncio.Event()
 
     async def fake_loop(services, *, project_id, published, kind):
+        assert kind == "image"
         await release.wait()
 
     monkeypatch.setattr(media_module, "run_media_review_loop", fake_loop)
 
     async def _run() -> None:
         published = _published("assets/artifacts/precommit.png")
+        published["commandType"] = command
         token = media_module.reserve_media_review(
             SimpleNamespace(),
             project_id=PROJECT_ID,

@@ -24,7 +24,9 @@ from services.media_files.visual_reference_resolution import (
     resolve_r2v_visual_reference_version_ids,
 )
 from services.project_files.models import (
+    ArtifactVersion,
     ElementLocation,
+    IndexedFile,
     Project,
     R2VCreation,
     TimelineElement,
@@ -138,6 +140,56 @@ def test_resolve_rejects_lineup_generation_with_unfinished_characters(
             target_ref="lineup:lineup:main",
             arguments={},
         )
+
+
+def test_lineup_request_preserves_seated_cast_without_extra_standing_people(
+    tmp_path,
+) -> None:
+    project = _ab_project()
+    lineup = project.visual.cast_lineups.items["lineup:main"]
+    lineup.description = "两人坐在沙发上，A 左 B 右，只有 B 持茶壶。"
+    for version_id in ("art:a-main", "art:b-main"):
+        file_id = f"file-{version_id}"
+        project.assets.files_by_id[file_id] = IndexedFile(
+            file_id=file_id,
+            kind="artifact_payload",
+            relative_uri=f"assets/artifacts/{file_id}.png",
+            sha256="0" * 64,
+            size_bytes=1,
+            media_type="image/png",
+            created_at="2026-09-09T00:00:00Z",
+        )
+        project.assets.artifact_versions_by_id[version_id] = ArtifactVersion(
+            version_id=version_id,
+            slot_id=f"asset:{version_id}",
+            kind="visual_asset_image",
+            name=version_id,
+            owner_ref=f"asset:{version_id}",
+            file_id=file_id,
+            checksum="0" * 64,
+            based_on_generation=1,
+            created_at="2026-09-09T00:00:00Z",
+            metadata={
+                "provider": {
+                    "source_url": f"https://example.com/{file_id}.png"
+                },
+            },
+        )
+    resolved = _resolve_request(
+        snapshot=SimpleNamespace(project=project),
+        project_root=tmp_path,
+        command=CreatorCommandType.GENERATE_CAST_LINEUP_IMAGE,
+        target_ref="lineup:lineup:main",
+        arguments={},
+        image_model_name="qwen-image-3.0-pro",
+    )
+    assert resolved.reference_version_ids == ("art:a-main", "art:b-main")
+    assert len(resolved.reference_image_urls) == 2
+    assert lineup.description in resolved.prompt
+    assert "画面总共只有 2 人" in resolved.prompt
+    assert "每个角色只出现一次" in resolved.prompt
+    assert "只有未指定姿态时才采用中性全身并排站姿" in resolved.prompt
+    assert "所有角色全身站立并排" not in resolved.prompt
 
 
 def _duo_creation() -> R2VCreation:

@@ -106,6 +106,7 @@ _VIDEO_CHECK_KEYS = (
 # final render (COMPOSE_FINAL_VIDEO) stays with the render_review module.
 REVIEWED_COMMANDS: dict[str, str] = {
     "GENERATE_ASSET": "image",
+    "GENERATE_CAST_LINEUP_IMAGE": "image",
     "GENERATE_STORYBOARD_IMAGE": "image",
     "GENERATE_R2V_VIDEO": "element_video",
     "GENERATE_S2V_VIDEO": "element_video",
@@ -232,6 +233,17 @@ def _visual_plan_context(
                 "name": lineup.name,
                 "description": lineup.description,
                 "relative_notes": lineup.relative_notes,
+                "expected_character_count": len(lineup.character_refs),
+                "characters": [
+                    {
+                        "name": entity.name,
+                        "description": entity.description,
+                        "continuity": entity.continuity,
+                    }
+                    for ref in lineup.character_refs
+                    if (entity := project.visual.entities.items.get(ref))
+                    is not None
+                ],
             }
     return context
 
