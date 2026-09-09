@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,7 @@ from services.project_files.models import (
 )
 from services.project_files.review import ReviewDecisionItem
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
+from services.runtime_files.errors import LockTimeoutError
 
 from .conftest import (
     FakeImageProvider,
@@ -272,8 +274,11 @@ def test_storyboard_and_r2v_publish_named_element_outputs(
     assert element.render_source.type == "element_output"
 
 
+@pytest.mark.parametrize("progress_fault", [None, "initial", "completion"])
 def test_each_edit_selection_is_an_element_and_timeline_executes_them(
     tmp_path,
+    monkeypatch,
+    progress_fault,
 ):
     services = CreatorFileServices.create(tmp_path.resolve())
     project = Project.new(
@@ -328,8 +333,30 @@ def test_each_edit_selection_is_an_element_and_timeline_executes_them(
         review_policy=ReviewPolicy.AUTO_FIX,
     )
     edit_runner = RecordingLocalRunner()
+    worker = FileLocalMediaExecutionService(services, runner=edit_runner)
+    transition = worker.executions.transition_task
+    event_loop_thread = threading.get_ident()
+    injected = []
+
+    def report(*args, **kwargs):
+        updates = kwargs.get("updates", {})
+        metadata = updates.get("metadata", {})
+        if "completedElements" in metadata:
+            phase = (
+                "initial"
+                if metadata["completedElements"] == 0
+                else "completion"
+            )
+            if phase == "initial":
+                assert threading.get_ident() != event_loop_thread
+            if phase == progress_fault:
+                injected.append(phase)
+                raise LockTimeoutError(tmp_path / "progress.lock", 0.01)
+        return transition(*args, **kwargs)
+
+    monkeypatch.setattr(worker.executions, "transition_task", report)
     edit = asyncio.run(
-        FileLocalMediaExecutionService(services, runner=edit_runner).execute(
+        worker.execute(
             project_id="edit-project",
             command="EXECUTE_EDIT",
             target_ref="timeline:timeline:main",
@@ -337,6 +364,8 @@ def test_each_edit_selection_is_an_element_and_timeline_executes_them(
             idempotency_key="edit-1",
         ),
     )
+    assert injected == ([progress_fault] if progress_fault else [])
+    assert len(edit_runner.calls) == 1
     snapshot = services.projects.read("edit-project").project
     timeline = snapshot.timelines.items["timeline:main"]
     creations = [
