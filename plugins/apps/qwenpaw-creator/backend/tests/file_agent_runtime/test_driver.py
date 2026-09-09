@@ -1532,17 +1532,29 @@ def test_object_grounding_generated_url_is_scoped_to_current_project(
 
 
 @pytest.mark.parametrize("transient_lock", [False, True])
-def test_stream_persistence_retries_local_locks_and_reports_real_io_failure(
+@pytest.mark.parametrize("boundary", ["stream", "assistant", "tool"])
+def test_session_persistence_retries_without_replaying_model_or_tool(
     tmp_path,
     monkeypatch,
     transient_lock,
+    boundary,
 ) -> None:
     from services.runtime_files.errors import LockTimeoutError
 
     model_calls = []
+    tool_calls = []
+    invoke = driver_module.AgentProjectTools.invoke
+
+    def invoke_once(self, name, arguments):
+        tool_calls.append(name)
+        return invoke(self, name, arguments)
+
+    monkeypatch.setattr(driver_module.AgentProjectTools, "invoke", invoke_once)
 
     async def callback(_messages, _tools) -> AgentModelTurn:
         model_calls.append(1)
+        if len(model_calls) == 1:
+            return _read_call("read-once")
         return AgentModelTurn(content="完整结果")
 
     async def scenario():
@@ -1552,27 +1564,47 @@ def test_stream_persistence_retries_local_locks_and_reports_real_io_failure(
         )
         driver = _driver(services, callback)
         original_append_event = driver.sessions.append_event
+        original_append_message = driver.sessions.append_message
         append_calls = []
 
+        def contend():
+            append_calls.append(1)
+            if not transient_lock:
+                raise OSError("disk write failed")
+            if len(append_calls) <= 4:
+                raise LockTimeoutError(tmp_path / "project.lock", 10.0)
+
         def append_event(*args, **kwargs):
-            if kwargs.get("event_type") == "agent.message_delta":
-                append_calls.append(1)
-                if not transient_lock:
-                    raise OSError("disk write failed")
-                if len(append_calls) <= 4:
-                    raise LockTimeoutError(tmp_path / "project.lock", 10.0)
+            if (
+                boundary == "stream"
+                and kwargs.get("event_type") == "agent.message_delta"
+            ):
+                contend()
             return original_append_event(*args, **kwargs)
 
+        def append_message(*args, **kwargs):
+            if kwargs.get("role") == boundary and not kwargs.get(
+                "metadata",
+                {},
+            ).get("toolCall"):
+                contend()
+            return original_append_message(*args, **kwargs)
+
         monkeypatch.setattr(driver.sessions, "append_event", append_event)
+        monkeypatch.setattr(driver.sessions, "append_message", append_message)
         await _run_to_idle(driver, services, error=not transient_lock)
         session = services.sessions.get_project_session(PROJECT_ID)
         events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+        messages = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
         await driver.stop()
-        return session, events
+        return session, events, messages
 
-    session, events = asyncio.run(scenario())
+    session, events, messages = asyncio.run(scenario())
 
-    assert len(model_calls) == 1
+    assert len(model_calls) == (
+        1 if boundary == "tool" and not transient_lock else 2
+    )
+    assert tool_calls == ["read_project"]
     failed = [
         event for event in events if event.event_type == "agent.run.failed"
     ]
@@ -1581,12 +1613,19 @@ def test_stream_persistence_retries_local_locks_and_reports_real_io_failure(
         assert not failed
         deltas = [e for e in events if e.event_type == "agent.message_delta"]
         assert [e.payload["delta"] for e in deltas] == ["完整结果"]
+        assert len([m for m in messages if m.role == "tool"]) == 1
+        assert len([m for m in messages if m.role == "assistant"]) == 2
+        assert messages[-1].content_parts[0].text == "完整结果"
     else:
-        assert session.error["code"] == "STREAM_PERSISTENCE_FAILED"
-        assert session.error["retryable"] is True
-        assert (
-            failed[-1].payload["error"]["code"] == "STREAM_PERSISTENCE_FAILED"
+        expected_code = (
+            "STREAM_PERSISTENCE_FAILED"
+            if boundary == "stream"
+            else "AGENT_RUN_FAILED"
         )
+        assert session.error["code"] == expected_code
+        assert failed[-1].payload["error"]["code"] == expected_code
+        if boundary == "stream":
+            assert session.error["retryable"] is True
 
 
 @pytest.mark.parametrize(

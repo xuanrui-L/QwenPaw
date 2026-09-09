@@ -7572,7 +7572,8 @@ class FileCreatorAgentRuntime:
                     },
                 },
             )
-        appended = await asyncio.to_thread(
+        appended = await self._persist_session_append(
+            f"{project_id}: assistant message",
             self.sessions.append_message,
             project_id,
             session_id,
@@ -7619,7 +7620,8 @@ class FileCreatorAgentRuntime:
             result,
             failed=failed,
         )
-        appended = await asyncio.to_thread(
+        appended = await self._persist_session_append(
+            f"{project_id}: tool result",
             self.sessions.append_message,
             project_id,
             session_id,
@@ -8693,6 +8695,35 @@ class FileCreatorAgentRuntime:
             )
             return
 
+    async def _persist_session_append(
+        self,
+        description: str,
+        func: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        # Session appends acquire their locks before writing the record.
+        # Keep already received model/tool output while waiting for a burst
+        # of Project commits; retry only the local append, never execution.
+        # Real I/O errors propagate and the bounded backoff is cancellable.
+        delays = (0.25, 0.5, 1.0, 2.0, 2.0)
+        attempts = len(delays) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await asyncio.to_thread(func, *args, **kwargs)
+            except LockTimeoutError:
+                if attempt == attempts:
+                    raise
+                logger.warning(
+                    "session append lock contention (attempt %d/%d) "
+                    "(%s); retrying",
+                    attempt,
+                    attempts,
+                    description,
+                )
+                await asyncio.sleep(delays[attempt - 1])
+
     async def _event(
         self,
         project_id: str,
@@ -8702,41 +8733,17 @@ class FileCreatorAgentRuntime:
         request: CreatorMessageRecord,
         payload: Mapping[str, Any],
     ) -> None:
-        # A lock timeout means the append never started (the exclusive
-        # project lock was never acquired), so retrying is safe. Bursts of
-        # serial Project commits (e.g. scene auto-rereview) can hold the
-        # lock beyond one wait and must not kill the whole agent run.
-        # Large reviewed Projects can hold the writer across several 10s
-        # waits. Keep the already received stream chunk and retry only its
-        # local append; never replay the model request. The bounded backoff
-        # remains cancellable when the user stops the run.
-        delays = (0.25, 0.5, 1.0, 2.0, 2.0)
-        attempts = len(delays) + 1
-        for attempt in range(1, attempts + 1):
-            try:
-                await asyncio.to_thread(
-                    self.sessions.append_event,
-                    project_id,
-                    session_id,
-                    event_type=event_type,
-                    actor="file_agent_runtime",
-                    round_id=f"agent-round-{run_id}",
-                    message_id=request.message_id,
-                    payload=dict(payload),
-                )
-                break
-            except LockTimeoutError:
-                if attempt == attempts:
-                    raise
-                logger.warning(
-                    "event append lock contention (attempt %d/%d) "
-                    "project=%s type=%s; retrying",
-                    attempt,
-                    attempts,
-                    project_id,
-                    event_type,
-                )
-                await asyncio.sleep(delays[attempt - 1])
+        await self._persist_session_append(
+            f"{project_id}: {event_type}",
+            self.sessions.append_event,
+            project_id,
+            session_id,
+            event_type=event_type,
+            actor="file_agent_runtime",
+            round_id=f"agent-round-{run_id}",
+            message_id=request.message_id,
+            payload=dict(payload),
+        )
         if not event_type.endswith("_delta"):
             trace_event(
                 f"creator.{event_type}",
