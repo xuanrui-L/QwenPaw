@@ -871,7 +871,7 @@ class S2VCreation(StrictModel):
 
 
 class EditCreation(StrictModel):
-    """Creative facts for one selected source range.
+    """Creative facts for one selected uploaded or generated media range.
 
     The exact source and range live in the Element's ``render_source``.  A
     multi-selection edit is represented by multiple Elements, never by a
@@ -1674,12 +1674,10 @@ class Project(StrictModel):
                 if not isinstance(
                     element.render_source,
                     SourceVersionRenderSource,
-                ) or isinstance(
-                    element.render_source,
-                    ArtifactVersionRenderSource,
                 ):
                     raise ValueError(
-                        "Edit Element render_source must select one source asset range",
+                        "Edit Element render_source must select one source "
+                        "or artifact version range",
                     )
                 if element.render_source.source_out_tick is None:
                     raise ValueError(

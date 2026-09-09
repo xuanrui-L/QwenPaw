@@ -3079,7 +3079,6 @@ def _timeline_execution(
         end_seconds: float | None = None
         if isinstance(element.creation, EditCreation):
             assert isinstance(render_source, SourceVersionRenderSource)
-            assert not isinstance(render_source, ArtifactVersionRenderSource)
             assert render_source.source_out_tick is not None
             start_seconds = (
                 render_source.source_in_tick / timeline.ticks_per_second

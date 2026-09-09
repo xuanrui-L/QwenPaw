@@ -81,7 +81,7 @@ R2V: element:<elementId>
 AI Edit: timeline:<timelineId>
 ```
 
-R2V 读写目标 Element 的 `creation(type=r2v)`，storyboard/main 由媒体工具写入 Element outputs。AI Edit 在目标 Timeline 中创建多个 `creation(type=edit)` Element，每个 Element 的 render_source 直接选择一个源素材范围；独立 Overlay Element 表达叠加内容，Timeline render slot 保存执行结果。
+R2V 读写目标 Element 的 `creation(type=r2v)`，storyboard/main 由媒体工具写入 Element outputs。AI Edit 在目标 Timeline 中创建多个 `creation(type=edit)` Element，每个 Element 的 render_source 直接选择一个已有媒体范围：上传素材用 `source_asset_version`，已生成片段或逐集成片用 `artifact_version`，都必须提供 `source_in_tick/source_out_tick`。多集连播通过多个 Edit Element 顺序复用各集的真实成片版本，保留原声，不重新生成媒体；Overlay Element 只表达叠加内容，不能代替连播主轨。Timeline render slot 保存最终合成结果。
 
 ### Pydantic 权威 JSON Schema
 

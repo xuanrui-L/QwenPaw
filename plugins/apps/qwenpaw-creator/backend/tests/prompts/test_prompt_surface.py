@@ -98,7 +98,8 @@ def test_creator_owns_timeline_element_planning() -> None:
         "jq_project",
     ):
         assert responsibility in prompt
-    assert "结构完成后才进入视觉和媒体生产" in prompt
+    assert "已经满足本轮要求和审阅条件的部分可以继续制作" in prompt
+    assert "已生成片段或逐集成片用 `type=artifact_version`" in prompt
     assert "Runtime 自动选择最新 Project 快照并维护受保护字段" in prompt
     assert "content_type=pet_video" in prompt
     assert "台词卡 Overlay Element" in prompt

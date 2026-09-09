@@ -1048,6 +1048,98 @@ def test_mixed_timeline_compose_includes_t2v_i2v_s2v() -> None:
     assert "video:elem:s2v" in compose.deps
 
 
+@pytest.mark.parametrize(
+    "command_name", ["COMPOSE_FINAL_VIDEO", "EXECUTE_EDIT"]
+)
+def test_episode_compilation_reuses_artifacts_with_original_audio(
+    command_name: str,
+) -> None:
+    """Saved Edit facts must reach a render recipe without new generation."""
+    from domain.enums import CreatorCommandType
+    from pydantic import ValidationError
+    from services.media_files.local_execution import _timeline_execution
+    from services.project_files.models import (
+        ArtifactVersionRenderSource,
+        EditCreation,
+    )
+
+    project = _project()
+    for episode in range(1, 7):
+        version_id = f"art:episode-{episode}"
+        _select_slot(
+            project,
+            slot_id=f"timeline:timeline:ep{episode}:render",
+            kind="final_video",
+            owner_ref=f"timeline:timeline:ep{episode}",
+            version_id=version_id,
+        )
+        project.assets.files_by_id[
+            f"file-{version_id}"
+        ].media_type = "video/mp4"
+        project.assets.artifact_versions_by_id[
+            version_id
+        ].duration_seconds = 10.0
+        _add_element(
+            project,
+            TimelineElement(
+                element_id=f"elem:episode-{episode}",
+                location=ElementLocation(),
+                span=TimelineSpan(
+                    start_tick=(episode - 1) * 3000,
+                    duration_tick=3000,
+                ),
+                creation=EditCreation(intent="按集序复用已有成片"),
+                render_source=ArtifactVersionRenderSource(
+                    version_id=version_id,
+                    source_in_tick=1000,
+                    source_out_tick=7000,
+                    playback_rate=2.0,
+                ),
+            ),
+        )
+    project = Project.model_validate(project.model_dump(mode="json"))
+    graph = derive_work_graph(project)
+    compose = graph.by_id["compose:timeline:main"]
+    assert compose.status is WorkNodeStatus.READY
+    assert compose.deps == ()
+    assert not any(
+        node.kind in {"storyboard", "video"} for node in graph.nodes
+    )
+
+    resolved = _timeline_execution(
+        project=project,
+        timeline=project.timelines.items["timeline:main"],
+        target_ref="timeline:timeline:main",
+        command=CreatorCommandType[command_name],
+    )
+    assert [item.version_id for item in resolved.inputs] == [
+        f"art:episode-{episode}" for episode in range(1, 7)
+    ]
+    for item in resolved.inputs:
+        assert (item.start_seconds, item.end_seconds) == (1.0, 7.0)
+        assert item.playback_rate == 2.0
+        assert item.original_sound == "preserve"
+    assert all(
+        item["ref"].startswith("artifact-version:")
+        for item in resolved.read_set
+    )
+    assert [item["startTick"] for item in resolved.source_selections] == list(
+        range(0, 18000, 3000),
+    )
+
+    # Allowing generated inputs must retain the exact trim/span contract.
+    raw = project.model_dump(mode="json")
+    source = raw["timelines"]["items"]["timeline:main"]["elements_by_id"][
+        "elem:episode-1"
+    ]["render_source"]
+    source["source_out_tick"] = None
+    with pytest.raises(ValidationError, match="requires source_out_tick"):
+        Project.model_validate(raw)
+    source["source_out_tick"] = 5000
+    with pytest.raises(ValidationError, match="duration mismatch"):
+        Project.model_validate(raw)
+
+
 def test_stale_nodes_are_model_required() -> None:
     """STALE nodes are included in model_required_nodes()."""
     project = _project()

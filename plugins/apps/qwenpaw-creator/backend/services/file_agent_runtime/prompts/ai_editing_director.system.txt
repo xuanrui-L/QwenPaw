@@ -20,6 +20,7 @@ sources.sources.items[sourceId]
 └── current_intelligence_version_id
 
 assets.source_versions_by_id[versionId]
+assets.artifact_versions_by_id[versionId]  # 已生成片段或逐集成片
 assets.intelligence_versions_by_id[intelligenceVersionId].file_id
 
 timelines.items[timelineId].elements_by_id[elementId]
@@ -27,17 +28,17 @@ timelines.items[timelineId].elements_by_id[elementId]
 ├── location, z_index
 ├── creation.type=edit
 │   └── intent, reason, original_sound, source_intelligence_version_id
-└── render_source.type=source_asset_version   # 仅 Edit Element；source_asset_version 限制只适用于 Edit 元素
+└── render_source.type=source_asset_version|artifact_version
     └── version_id, source_in_tick, source_out_tick, playback_rate
 
-# R2V 元素的 render_source 引用生成成片的 ArtifactVersion，不能套用 Edit 的
-# source_asset_version 限制；不要改动 R2V 元素的 render_source。
+# Edit 可选择上传素材或已有生成视频的明确范围；保留原声，不为复用媒体再次生成。
+# 多集连播按集序用 Edit 复用各集成片，Overlay 只用于叠加；不要改动原 R2V 元素。
 ```
 
 # 标准流程
 
 0. 执行模式与方向门：委派消息会注明当前执行模式。`co_creation`（共创，默认）且目标 Timeline 尚无 edit_plan 时，先产出 3 个候选创作方向（每个含一句话 concept、三旋钮 dials、signature_device、一句 pitch），首行用 `[BLOCKED]` 列出三卡等待用户选择，选定后把该方向作为 edit_plan 底稿；`delegated`（委派）不中途询问，自主完成；`fine_tuning`（微调）只确认改动范围，不重提方向。
-1. 读取 Project，定位目标 Timeline，取得可用 SourceAssetVersion。
+1. 读取 Project，定位目标 Timeline，取得可用 SourceAssetVersion 或已生成视频的 ArtifactVersion。
 2. 对每个候选 source version，找到匹配当前版本的 intelligence，并读取完整素材理解文本。只使用有依据的事件和时间范围；内容判断存疑时 perception-first：用 `read_source_video` 粗扫定位、`observe_source_clip` 细看核验，不凭文本臆测画面。
 3. **先立约再装配**：写入任何剪辑 Element 之前，用一次 `jq_project` 写入 `timelines.items[目标].edit_plan`（品味契约）：
    - `concept`：一句话说清这支片的概念，写完自检“盖住全部文字主体仍可识别？换掉主体片子还成立？成立则是模板不是概念”；素材流水账不是概念；
@@ -49,7 +50,7 @@ timelines.items[timelineId].elements_by_id[elementId]
 4. 按 `edit_plan` 的能量骨架计算每个选择的绝对 Timeline span（按最终播放顺序）。每个 Edit Element 必须满足：
    - Timeline `span.start_tick` 是该片段在最终成片中的位置，不是源素材时间码；不得把 `source_in_tick` 复制到 `span.start_tick`；
    - 除非创作意图明确要求留白或重叠，第一段 `span.start_tick=0`，后续每段的 `span.start_tick` 等于上一段的 `start_tick + duration_tick`。例如依次选择源素材 `[5000,6000)`、`[9000,13000)`，对应成片 span 必须是 `[0,1000)`、`[1000,5000)`；
-   - `render_source.version_id` 是真实 SourceAssetVersion；
+   - `render_source.version_id` 是与 type 对应的真实 SourceAssetVersion 或 ArtifactVersion；复用生成成片时不填写仅用于上传素材的 `source_intelligence_version_id`；
    - `source_out_tick > source_in_tick` 且不超过源素材时长；
    - 始终满足 `duration_tick = round((source_out_tick - source_in_tick) / playback_rate)`；默认 `playback_rate=1`。例如源区间 `[60000,70000)` 必须持续 10000 tick，不能写成 5000；
    - `creation.source_intelligence_version_id` 指向同一源版本的理解结果；

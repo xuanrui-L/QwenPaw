@@ -240,6 +240,8 @@ def test_revise_verdict_sends_feedback_and_caps_rounds(
     first_text = feedback[0].content_parts[0].text or ""
     assert "render_review_feedback" in first_text
     assert "ai_editing_director" in first_text
+    assert "不是新的用户要求" in first_text
+    assert "不得据此重新生成媒体" in first_text
     assert TARGET_REF in first_text
     assert feedback[0].metadata["renderReview"]["round"] == 1
 
