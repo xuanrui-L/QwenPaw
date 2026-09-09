@@ -155,6 +155,92 @@ def _execute(services, provider, key="storyboard-key"):
     )
 
 
+@pytest.mark.parametrize("contention", ["read", "write", "cancel"])
+def test_materialized_image_lock_retry_preserves_output_and_cancellation(
+    tmp_path,
+    monkeypatch,
+    contention,
+):
+    from domain.enums import TaskStatus
+    from services.runtime_files.errors import LockTimeoutError
+
+    services = _services(tmp_path, monkeypatch)
+    provider = _CountingProvider()
+    worker = FileImageExecutionService(services, provider=provider)
+    # Observe the boundary after bytes exist, before their Task record write.
+    # pylint: disable-next=protected-access
+    original_materialize = worker._materialize_and_publish
+    original_get = worker.executions.get_task
+    original_transition = worker.executions.transition_task
+    materialized = False
+    injected = False
+
+    async def materialize(*, base, resolved, task, ids, output):
+        nonlocal materialized
+        result = await original_materialize(
+            base=base,
+            resolved=resolved,
+            task=task,
+            ids=ids,
+            output=output,
+        )
+        materialized = True
+        return result
+
+    def get_task(project_id, task_id, **kwargs):
+        nonlocal injected
+        if materialized and not injected and contention == "read":
+            injected = True
+            raise LockTimeoutError(tmp_path / "project.lock", 10)
+        return original_get(project_id, task_id, **kwargs)
+
+    def transition(project_id, task_id, **kwargs):
+        nonlocal injected
+        if (
+            materialized
+            and not injected
+            and contention != "read"
+            and kwargs.get("updates", {}).get("result") is not None
+        ):
+            injected = True
+            if contention == "cancel":
+                original_transition(
+                    project_id,
+                    task_id,
+                    expected_status=TaskStatus.RUNNING,
+                    status=TaskStatus.CANCELLED,
+                )
+            raise LockTimeoutError(tmp_path / "project.lock", 10)
+        return original_transition(project_id, task_id, **kwargs)
+
+    monkeypatch.setattr(worker, "_materialize_and_publish", materialize)
+    monkeypatch.setattr(worker.executions, "get_task", get_task)
+    monkeypatch.setattr(worker.executions, "transition_task", transition)
+    request = {
+        "project_id": PROJECT_ID,
+        "command": "GENERATE_STORYBOARD_IMAGE",
+        "target_ref": f"element:{ELEMENT_ID}",
+        "arguments": {},
+        "idempotency_key": "materialized-lock-retry",
+    }
+    if contention == "cancel":
+        with pytest.raises(ConflictError, match="取消"):
+            asyncio.run(worker.execute(**request))
+        project = services.projects.read(PROJECT_ID).project
+        assert not project.assets.artifact_versions_by_id
+    else:
+        result = asyncio.run(worker.execute(**request))
+        replay = asyncio.run(worker.execute(**request))
+        assert result.artifact_version_id == replay.artifact_version_id
+        assert replay.replayed
+        project = services.projects.read(PROJECT_ID).project
+        assert (
+            result.artifact_version_id
+            in project.assets.artifact_versions_by_id
+        )
+    assert injected and provider.calls == 1
+
+
 def test_transient_failure_reopens_a_retry_slot(tmp_path, monkeypatch):
     services = _services(tmp_path, monkeypatch)
 

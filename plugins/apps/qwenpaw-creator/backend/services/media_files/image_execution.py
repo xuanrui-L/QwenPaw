@@ -68,7 +68,10 @@ from services.project_files.models import (
     VisualVariant,
 )
 from services.media_files.call_budget import ensure_media_call_budget
-from services.media_files.publication_retry import commit_with_lock_retry
+from services.media_files.publication_retry import (
+    commit_with_lock_retry,
+    record_materialized_result,
+)
 from services.media_files.element_adapter import (
     bind_candidate_output,
     find_timeline_element,
@@ -1833,45 +1836,16 @@ class FileImageExecutionService:
                 ids=ids,
                 output=provider_output,
             )
-            latest = await asyncio.to_thread(
-                self.executions.get_task,
-                project_id,
-                task.task_id,
+            task = await record_materialized_result(
+                self.executions,
+                project_id=project_id,
+                task_id=task.task_id,
+                result=published_result,
+                progress=0.9,
             )
-            if latest.status is TaskStatus.CANCELLED:
+            if task.status is TaskStatus.CANCELLED:
                 await self._quarantine(
-                    task=latest,
-                    ids=ids,
-                    reason="TASK_CANCELLED_BEFORE_IMPORT",
-                    result=published_result,
-                    run_status=SpecialistRunStatus.CANCELLED,
-                )
-                raise ConflictError("图片 Task 已取消，迟到结果已隔离")
-            try:
-                task = await asyncio.to_thread(
-                    self.executions.transition_task,
-                    project_id,
-                    task.task_id,
-                    expected_status=TaskStatus.RUNNING,
-                    status=TaskStatus.RUNNING,
-                    updates={
-                        "progress": 0.9,
-                        "result": published_result,
-                        "output_refs": [
-                            f"artifact-version:{ids['artifact_version_id']}",
-                        ],
-                    },
-                )
-            except ExecutionStateConflict:
-                latest = await asyncio.to_thread(
-                    self.executions.get_task,
-                    project_id,
-                    task.task_id,
-                )
-                if latest.status is not TaskStatus.CANCELLED:
-                    raise
-                await self._quarantine(
-                    task=latest,
+                    task=task,
                     ids=ids,
                     reason="TASK_CANCELLED_BEFORE_IMPORT",
                     result=published_result,
@@ -2652,31 +2626,16 @@ class FileImageExecutionService:
         # Record the immutable result on the Task, then converge it exactly
         # like the in-process path does, so the Task reaches SUCCEEDED and
         # the Project commit becomes visible.
-        try:
-            task = await asyncio.to_thread(
-                self.executions.transition_task,
-                task.project_id,
-                task.task_id,
-                expected_status=TaskStatus.RUNNING,
-                status=TaskStatus.RUNNING,
-                updates={
-                    "progress": 0.9,
-                    "result": published_result,
-                    "output_refs": [
-                        f"artifact-version:{ids['artifact_version_id']}",
-                    ],
-                },
-            )
-        except ExecutionStateConflict:
-            latest = await asyncio.to_thread(
-                self.executions.get_task,
-                task.project_id,
-                task.task_id,
-            )
-            if latest.status is not TaskStatus.CANCELLED:
-                raise
+        task = await record_materialized_result(
+            self.executions,
+            project_id=task.project_id,
+            task_id=task.task_id,
+            result=published_result,
+            progress=0.9,
+        )
+        if task.status is TaskStatus.CANCELLED:
             await self._quarantine(
-                task=latest,
+                task=task,
                 ids=ids,
                 reason="TASK_CANCELLED_BEFORE_IMPORT",
                 result=published_result,

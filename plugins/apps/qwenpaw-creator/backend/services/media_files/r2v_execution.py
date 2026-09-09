@@ -76,7 +76,10 @@ from services.project_files.models import (
     T2VCreation,
 )
 from services.media_files.call_budget import ensure_media_call_budget
-from services.media_files.publication_retry import commit_with_lock_retry
+from services.media_files.publication_retry import (
+    commit_with_lock_retry,
+    record_materialized_result,
+)
 from services.media_files.element_adapter import (
     bind_candidate_output,
     find_timeline_element,
@@ -4472,10 +4475,12 @@ class FileR2VExecutionService:
                 claimed,
                 stable=stable,
             )
-        latest = await asyncio.to_thread(
-            self.executions.get_task,
-            task.project_id,
-            task.task_id,
+        latest = await record_materialized_result(
+            self.executions,
+            project_id=task.project_id,
+            task_id=task.task_id,
+            result=published,
+            progress=0.95,
         )
         if latest.status is TaskStatus.CANCELLED:
             await self._quarantine(
@@ -4486,26 +4491,6 @@ class FileR2VExecutionService:
                 run_status=SpecialistRunStatus.CANCELLED,
             )
             return
-        if latest.status is TaskStatus.RUNNING and latest.result is None:
-            try:
-                latest = await asyncio.to_thread(
-                    self.executions.transition_task,
-                    task.project_id,
-                    task.task_id,
-                    expected_status=TaskStatus.RUNNING,
-                    status=TaskStatus.RUNNING,
-                    updates={
-                        "progress": 0.95,
-                        "result": published,
-                        "output_refs": [str(published["outputRef"])],
-                    },
-                )
-            except ExecutionStateConflict:
-                latest = await asyncio.to_thread(
-                    self.executions.get_task,
-                    task.project_id,
-                    task.task_id,
-                )
         await self._converge(latest, stable, published)
 
     @staticmethod
