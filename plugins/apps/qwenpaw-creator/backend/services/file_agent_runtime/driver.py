@@ -8706,7 +8706,12 @@ class FileCreatorAgentRuntime:
         # project lock was never acquired), so retrying is safe. Bursts of
         # serial Project commits (e.g. scene auto-rereview) can hold the
         # lock beyond one wait and must not kill the whole agent run.
-        attempts = 3
+        # Large reviewed Projects can hold the writer across several 10s
+        # waits. Keep the already received stream chunk and retry only its
+        # local append; never replay the model request. The bounded backoff
+        # remains cancellable when the user stops the run.
+        delays = (0.25, 0.5, 1.0, 2.0, 2.0)
+        attempts = len(delays) + 1
         for attempt in range(1, attempts + 1):
             try:
                 await asyncio.to_thread(
@@ -8731,7 +8736,7 @@ class FileCreatorAgentRuntime:
                     project_id,
                     event_type,
                 )
-                await asyncio.sleep(attempt)
+                await asyncio.sleep(delays[attempt - 1])
         if not event_type.endswith("_delta"):
             trace_event(
                 f"creator.{event_type}",

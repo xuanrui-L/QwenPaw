@@ -1531,11 +1531,18 @@ def test_object_grounding_generated_url_is_scoped_to_current_project(
         )
 
 
-def test_stream_persistence_failure_is_not_reported_as_a_model_failure(
+@pytest.mark.parametrize("transient_lock", [False, True])
+def test_stream_persistence_retries_local_locks_and_reports_real_io_failure(
     tmp_path,
     monkeypatch,
+    transient_lock,
 ) -> None:
+    from services.runtime_files.errors import LockTimeoutError
+
+    model_calls = []
+
     async def callback(_messages, _tools) -> AgentModelTurn:
+        model_calls.append(1)
         return AgentModelTurn(content="完整结果")
 
     async def scenario():
@@ -1545,14 +1552,19 @@ def test_stream_persistence_failure_is_not_reported_as_a_model_failure(
         )
         driver = _driver(services, callback)
         original_append_event = driver.sessions.append_event
+        append_calls = []
 
         def append_event(*args, **kwargs):
             if kwargs.get("event_type") == "agent.message_delta":
-                raise OSError("runtime lock timeout")
+                append_calls.append(1)
+                if not transient_lock:
+                    raise OSError("disk write failed")
+                if len(append_calls) <= 4:
+                    raise LockTimeoutError(tmp_path / "project.lock", 10.0)
             return original_append_event(*args, **kwargs)
 
         monkeypatch.setattr(driver.sessions, "append_event", append_event)
-        await _run_to_idle(driver, services, error=True)
+        await _run_to_idle(driver, services, error=not transient_lock)
         session = services.sessions.get_project_session(PROJECT_ID)
         events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
         await driver.stop()
@@ -1560,13 +1572,21 @@ def test_stream_persistence_failure_is_not_reported_as_a_model_failure(
 
     session, events = asyncio.run(scenario())
 
-    assert session.error is not None
-    assert session.error["code"] == "STREAM_PERSISTENCE_FAILED"
-    assert session.error["retryable"] is True
+    assert len(model_calls) == 1
     failed = [
         event for event in events if event.event_type == "agent.run.failed"
     ]
-    assert failed[-1].payload["error"]["code"] == "STREAM_PERSISTENCE_FAILED"
+    if transient_lock:
+        assert session.error is None
+        assert not failed
+        deltas = [e for e in events if e.event_type == "agent.message_delta"]
+        assert [e.payload["delta"] for e in deltas] == ["完整结果"]
+    else:
+        assert session.error["code"] == "STREAM_PERSISTENCE_FAILED"
+        assert session.error["retryable"] is True
+        assert (
+            failed[-1].payload["error"]["code"] == "STREAM_PERSISTENCE_FAILED"
+        )
 
 
 @pytest.mark.parametrize(
