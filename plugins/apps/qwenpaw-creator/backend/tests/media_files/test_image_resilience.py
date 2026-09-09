@@ -255,10 +255,12 @@ def test_transient_failure_reopens_a_retry_slot(tmp_path, monkeypatch):
     assert result.replayed is False and result.artifact_version_id
 
 
+@pytest.mark.parametrize("terminal_status", ["cancelled", "failed"])
 # pylint: disable-next=too-many-statements
-def test_manual_workgraph_retry_after_stop_reuses_one_new_media_task(
+def test_manual_workgraph_retry_reuses_one_new_media_task(
     tmp_path,
     monkeypatch,
+    terminal_status,
 ):
     import httpx
     from fastapi import FastAPI
@@ -272,15 +274,19 @@ def test_manual_workgraph_retry_after_stop_reuses_one_new_media_task(
 
     services = _services(tmp_path, monkeypatch)
 
+    # pylint: disable-next=too-many-statements
     async def scenario():
         started = asyncio.Event()
         release = asyncio.Event()
         provider = _CountingProvider()
         generate = provider.generate
+        fail_first = terminal_status == "failed"
 
         async def controlled_generate(**kwargs):
             started.set()
             await release.wait()
+            if fail_first:
+                raise RuntimeError("reference preparation failed")
             return await generate(**kwargs)
 
         provider.generate = controlled_generate
@@ -300,11 +306,26 @@ def test_manual_workgraph_retry_after_stop_reuses_one_new_media_task(
             WorkGraphScheduler(services).dispatch_node(PROJECT_ID, node),
         )
         await asyncio.wait_for(started.wait(), timeout=3)
-        first.cancel()
-        await asyncio.gather(first, return_exceptions=True)
-        _cancel_active_project_tasks_sync(services, PROJECT_ID)
-        cancelled = executions.list_tasks(PROJECT_ID)[0]
-        assert cancelled.status is TaskStatus.CANCELLED
+        if fail_first:
+            release.set()
+            with pytest.raises(RuntimeError, match="reference preparation"):
+                await first
+            # Automatic dispatch must retain the failure barrier. Only the
+            # manual HTTP route below grants a fresh attempt.
+            with pytest.raises(ConflictError, match="FAILED"):
+                await WorkGraphScheduler(services).dispatch_node(
+                    PROJECT_ID,
+                    node,
+                )
+        else:
+            first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            _cancel_active_project_tasks_sync(services, PROJECT_ID)
+        previous = executions.list_tasks(PROJECT_ID)[0]
+        expected = TaskStatus.FAILED if fail_first else TaskStatus.CANCELLED
+        assert previous.status is expected
+        fail_first = False
+        release.clear()
 
         app = FastAPI()
         app.include_router(work_graph_routes.router)
@@ -339,9 +360,9 @@ def test_manual_workgraph_retry_after_stop_reuses_one_new_media_task(
         assert (
             executions.get_task(
                 PROJECT_ID,
-                cancelled.task_id,
+                previous.task_id,
             ).status
-            is TaskStatus.CANCELLED
+            is expected
         )
         assert sum(t.status is TaskStatus.SUCCEEDED for t in tasks) == 1
 
