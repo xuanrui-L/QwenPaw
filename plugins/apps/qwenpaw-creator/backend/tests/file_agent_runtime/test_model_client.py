@@ -117,6 +117,103 @@ def test_long_production_compacts_automatic_history_but_keeps_human_input():
         )
 
 
+@pytest.mark.parametrize(
+    ("project_id", "generation", "superseded"),
+    [
+        ("project-1", None, False),
+        ("project-1", 19, False),
+        ("project-2", 21, False),
+        ("project-1", 20, True),
+        ("project-1", 21, True),
+    ],
+)
+def test_new_snapshot_frees_history_space_for_script_and_skills(
+    project_id,
+    generation,
+    superseded,
+):
+    human = "Keep all six episodes and the accepted films. " + "h" * 700
+    previous = {
+        "project": {"project_id": "project-1", "description": "old" * 5200},
+        "generation": 20,
+        "etag": "old-etag",
+    }
+    history = [
+        {
+            "role": "user",
+            "source": "user",
+            "content": [{"type": "text", "text": human}],
+        },
+        {
+            "role": "tool",
+            "content": [{"type": "text", "text": json.dumps(previous)}],
+        },
+    ]
+    messages = [
+        {"role": "system", "content": "s" * 9000},
+        {
+            "role": "user",
+            "content": "CONVERSATION_HISTORY_JSON="
+            + json.dumps(history)
+            + "\n\nCURRENT_USER_REQUEST=\nContinue automatically.",
+        },
+    ]
+    calls = []
+    if generation is not None:
+        calls.append(
+            (
+                "snapshot",
+                json.dumps(
+                    {
+                        "project": {
+                            "project_id": project_id,
+                            "description": "current" * 700,
+                        },
+                        "generation": generation,
+                        "etag": "current-etag",
+                    },
+                ),
+            ),
+        )
+    calls.extend([("skill", "skill" * 1300), ("script", "script" * 1100)])
+    for call_id, content in calls:
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "Read " + call_id,
+                    "tool_calls": [
+                        AgentToolCall(
+                            call_id=call_id,
+                            name="read_project",
+                            arguments={},
+                        ).history_dict(),
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": content,
+                },
+            ],
+        )
+    original = json.dumps(messages)
+    result = prepare_model_messages(messages, [], max_bytes=32 * 1024)
+    continuation = result[1]["content"]
+    assert human in continuation
+    assert continuation.endswith(
+        "CURRENT_USER_REQUEST=\nContinue automatically."
+    )
+    assert ("old" * 5200 in continuation) is not superseded
+    if superseded:
+        assert [m["tool_call_id"] for m in result if m["role"] == "tool"] == [
+            "snapshot",
+            "skill",
+            "script",
+        ]
+    assert json.dumps(messages) == original
+
+
 def _configure_text_model(
     monkeypatch: pytest.MonkeyPatch,
     *,
