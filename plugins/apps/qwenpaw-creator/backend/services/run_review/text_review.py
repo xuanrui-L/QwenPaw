@@ -128,6 +128,15 @@ def reviewable_changed_pointers(
     expanded: list[str] = []
 
     def walk(value: Any, pointer: str) -> None:
+        parts = pointer.split("/")
+        if (
+            len(parts) >= 4
+            and parts[1:3] == ["timelines", "items"]
+            and parts[3].startswith("snapshot:")
+        ):
+            # These copies are frozen by the write boundary and never enter
+            # production. Auto-saving history must not review old prompts.
+            return
         if classify_pointers([pointer]) is not None:
             if _has_reviewable_content(value):
                 expanded.append(pointer)

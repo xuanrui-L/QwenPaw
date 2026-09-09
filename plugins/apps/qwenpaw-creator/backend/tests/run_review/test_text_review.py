@@ -478,13 +478,42 @@ def test_whole_element_create_expands_nested_generation_text() -> None:
         },
     }
     root = "/timelines/items/timeline:main/elements_by_id/elem:one"
-    expanded = reviewable_changed_pointers(project, [root])
+    snapshot_id = "snapshot:timeline:main:1"
+    snapshot_root = f"/timelines/items/{snapshot_id}"
+    # An automatic copy can retain prompts invalid under current rules.
+    # Saving it must not create fresh review or repair work for old content.
+    project["timelines"]["items"][snapshot_id] = {
+        "elements_by_id": {
+            f"{snapshot_id}:elem:old": {
+                "creation": {
+                    "type": "r2v",
+                    "storyboard_prompt": "",
+                    "video_prompt": "",
+                    "intent": "Historical text only",
+                },
+            },
+        },
+    }
+    expanded = reviewable_changed_pointers(project, [root, snapshot_root])
+    assert expanded == reviewable_changed_pointers(project, ["/timelines"])
     assert f"{root}/creation/narrative" in expanded
     assert f"{root}/creation/storyboard_prompt" in expanded
     assert f"{root}/creation/video_prompt" in expanded
+    assert not any(snapshot_id in pointer for pointer in expanded)
     groups = classify_pointer_groups(expanded)
     assert groups
     assert groups[0][0] == "generation_content"
+    assert not reviewable_changed_pointers(project, [snapshot_root])
+    assert not check_changed_r2v_prompt_contracts(
+        project,
+        [snapshot_root],
+    )["applicable"]
+    assert check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines"],
+    )[
+        "checked_elements"
+    ] == ["elem:one"]
 
 
 def test_empty_r2v_prompt_is_reported_without_calling_review_model(
