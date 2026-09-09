@@ -18,6 +18,7 @@ from services.media_files.image_execution import FileImageExecutionService
 from services.media_files.r2v_execution import FileR2VExecutionService
 from services.project_files.facade import CreatorFileServices
 from services.runtime_files.execution_store import ProjectExecutionStore
+from services.runtime_files.errors import LockTimeoutError
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 from utils.paths import unique_task_work_path
 from scripts.recover_completed_r2v_materialization import (
@@ -469,6 +470,90 @@ def _run_video(services: CreatorFileServices, provider):
         return task
 
     return asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["start", "submitted", "polled", "shutdown"])
+def test_local_contention_preserves_the_same_provider_task(
+    tmp_path,
+    monkeypatch,
+    phase,
+) -> None:
+    services = _services(tmp_path, monkeypatch)
+    provider = _MutatingR2VProvider(services, lambda _candidate: None)
+    submitted = []
+    original_submit = provider.submit
+
+    async def submit(**kwargs):
+        submitted.append(1)
+        return await original_submit(**kwargs)
+
+    monkeypatch.setattr(provider, "submit", submit)
+
+    async def scenario():
+        worker = FileR2VExecutionService(
+            services,
+            provider=provider,
+            poll_interval_seconds=0.01,
+            poll_lease_seconds=0.1,
+        )
+        dispatched = await worker.dispatch(
+            project_id=PROJECT_ID,
+            target_ref=f"element:{ELEMENT_ID}",
+            arguments={},
+            idempotency_key="lock-recovery",
+            start=False,
+        )
+        get_task = worker.executions.get_task
+        update_state = worker._update_state_sync
+        blocked = False
+
+        def read(*args, **kwargs):
+            nonlocal blocked
+            should_block = phase in {"start", "shutdown"} or (
+                phase == "submitted" and submitted
+            )
+            if should_block and (not blocked or phase == "shutdown"):
+                blocked = True
+                raise LockTimeoutError(tmp_path / "project.lock", 10.0)
+            return get_task(*args, **kwargs)
+
+        def update(project_id, task_id, change):
+            nonlocal blocked
+            if (
+                phase == "polled"
+                and change.__name__ == "success"
+                and not blocked
+            ):
+                blocked = True
+                raise LockTimeoutError(tmp_path / "project.lock", 10.0)
+            return update_state(project_id, task_id, change)
+
+        monkeypatch.setattr(worker.executions, "get_task", read)
+        monkeypatch.setattr(worker, "_update_state_sync", update)
+        job = worker.start_task(PROJECT_ID, dispatched.task_id)
+        try:
+            if phase == "shutdown":
+                async with asyncio.timeout(2):
+                    while not blocked:
+                        await asyncio.sleep(0.01)
+                await worker.shutdown()
+                assert job.cancelled()
+            else:
+                await asyncio.wait_for(job, timeout=8)
+            return get_task(PROJECT_ID, dispatched.task_id), blocked
+        finally:
+            await worker.shutdown()
+
+    task, blocked = asyncio.run(scenario())
+    assert blocked
+    assert _r2v_task_count(services) == 1
+    if phase == "shutdown":
+        assert task.status.value == "QUEUED"
+        assert not submitted
+    else:
+        assert task.status.value == "SUCCEEDED"
+        assert len(submitted) == 1
+        assert task.result["providerTaskId"] == "provider-task-stale"
 
 
 def test_unrelated_commit_during_render_does_not_quarantine(

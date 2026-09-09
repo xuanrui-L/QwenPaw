@@ -115,7 +115,7 @@ from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     canonical_json_bytes,
 )
-from services.runtime_files.errors import RecordNotFoundError
+from services.runtime_files.errors import LockTimeoutError, RecordNotFoundError
 from services.runtime_files.execution_models import (
     SpecialistRunRecord,
     TaskAttemptStatus,
@@ -2406,12 +2406,8 @@ class FileR2VExecutionService:
         current = self._jobs.get(task_id)
         if current is not None and not current.done():
             return current
-        try:
-            task = self.executions.get_task(project_id, task_id)
-        except RecordNotFoundError:
-            return None
-        if task.status in _TERMINAL_TASKS:
-            return None
+        # Read durable state inside the supervisor, off the event loop. A
+        # concurrent Project commit must not strand an admitted Task here.
         worker = asyncio.create_task(
             self._drive(project_id, task_id),
             name=f"file-r2v:{task_id}",
@@ -2938,13 +2934,34 @@ class FileR2VExecutionService:
             )
 
     async def _drive(self, project_id: str, task_id: str) -> None:
+        while True:
+            try:
+                await self._drive_until_idle(project_id, task_id)
+                return
+            except LockTimeoutError:
+                # Re-enter from durable state, retaining the provider ID and
+                # claims. Local contention is not a failed generation and
+                # must never open a newly billed retry slot. Shutdown can
+                # still cancel the backoff and leave recovery to startup.
+                logger.warning(
+                    "r2v local state busy; resuming same task: "
+                    "project=%s task=%s",
+                    _log_safe(project_id),
+                    _log_safe(task_id),
+                )
+                await asyncio.sleep(max(0.25, self.poll_interval_seconds))
+
+    async def _drive_until_idle(self, project_id: str, task_id: str) -> None:
         try:
             while True:
-                task = await asyncio.to_thread(
-                    self.executions.get_task,
-                    project_id,
-                    task_id,
-                )
+                try:
+                    task = await asyncio.to_thread(
+                        self.executions.get_task,
+                        project_id,
+                        task_id,
+                    )
+                except RecordNotFoundError:
+                    return
                 if task.status in _TERMINAL_TASKS:
                     aligned = await self._align_state_to_terminal_task(task)
                     if not aligned:
@@ -3032,6 +3049,8 @@ class FileR2VExecutionService:
                 elif state.phase not in _ACTIVE_PHASES:
                     return
                 await asyncio.sleep(self.poll_interval_seconds)
+        except LockTimeoutError:
+            raise
         except _R2VClaimLost:
             # Another live supervisor owns the durable claim.  A stale worker
             # must exit without changing Task, Run, state, or published files.
