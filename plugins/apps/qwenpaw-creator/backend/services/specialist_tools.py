@@ -536,8 +536,8 @@ _VOICE_ENROLLMENT_ARGUMENTS = _arguments_schema(
         "sampleSourceVersionId": {
             "type": "string",
             "description": (
-                "可选；已存在的 exact 音频 SourceAssetVersion id 作为 10–20 秒"
-                "音色样本（复刻路径）。"
+                "可选；已存在的 exact 音频或视频 SourceAssetVersion id 作为 "
+                "10–20 秒音色样本（复刻路径）；视频会自动提取音轨。"
             ),
         },
         "sampleText": {

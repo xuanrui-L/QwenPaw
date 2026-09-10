@@ -515,14 +515,16 @@ def _uploaded_notifications(services):
     ]
 
 
-def test_asset_upload_mid_conversation_steers_the_agent_once(
+def test_asset_uploads_steer_the_agent_once_per_ingest(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     run_scenario,
 ) -> None:
-    """A chat/library upload lands one runtime steer; replays stay silent."""
+    """One steer per ingest: multipart replays stay silent, URL assets
+    notify once the background download actually lands."""
 
     app, services = _session_app(tmp_path)
+    _install_remote_transport(monkeypatch, chunks=[b"12", b"34"])
     wakes = _install_notification_capture(services, monkeypatch)
 
     async def scenario(client):
@@ -544,21 +546,39 @@ def test_asset_upload_mid_conversation_steers_the_agent_once(
             },
             files={"file": ("lulu.png", b"png-bytes", "image/png")},
         )
-        return first, replay
+        remote = await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "remote-1"},
+            json={
+                "clientRequestId": "remote-1",
+                "kind": "url",
+                "name": "clip.mp4",
+                "value": "https://assets.example/clip.mp4",
+                "postIngestAction": "ATTACH_SOURCE",
+            },
+        )
+        pending = list(file_asset_routes._REMOTE_INGEST_TASKS.values())
+        if pending:
+            await asyncio.gather(*pending)
+        return first, replay, remote
 
-    first, replay = run_scenario(app, scenario)
+    first, replay, remote = run_scenario(app, scenario)
 
     assert first.status_code == 202
     assert replay.status_code == 202
+    assert remote.status_code == 202
     notes = _uploaded_notifications(services)
-    assert len(notes) == 1
-    note = notes[0]
-    assert note.role == "user"
-    assert "lulu.png" in note.content_parts[0].text
-    assert note.metadata["assetVersionRefs"] == [
+    assert len(notes) == 2
+    upload_note, remote_note = notes
+    assert upload_note.role == "user"
+    assert "lulu.png" in upload_note.content_parts[0].text
+    assert upload_note.metadata["assetVersionRefs"] == [
         f"asset-version:{first.json()['assetVersionId']}",
     ]
-    assert wakes == ["project-1"]
+    assert remote_note.metadata["assetVersionRefs"] == [
+        f"asset-version:{remote.json()['assetVersionId']}",
+    ]
+    assert wakes == ["project-1", "project-1"]
 
 
 def test_asset_upload_before_first_message_stays_silent(
@@ -595,42 +615,3 @@ def test_asset_upload_before_first_message_stays_silent(
         )
         == []
     )
-
-
-def test_remote_asset_completion_steers_the_agent(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-    run_scenario,
-) -> None:
-    """URL assets notify once the background download actually lands."""
-
-    app, services = _session_app(tmp_path)
-    _install_remote_transport(monkeypatch, chunks=[b"12", b"34"])
-    wakes = _install_notification_capture(services, monkeypatch)
-
-    async def scenario(client):
-        response = await client.post(
-            "/projects/project-1/assets",
-            headers={"Idempotency-Key": "remote-1"},
-            json={
-                "clientRequestId": "remote-1",
-                "kind": "url",
-                "name": "clip.mp4",
-                "value": "https://assets.example/clip.mp4",
-                "postIngestAction": "ATTACH_SOURCE",
-            },
-        )
-        pending = list(file_asset_routes._REMOTE_INGEST_TASKS.values())
-        if pending:
-            await asyncio.gather(*pending)
-        return response
-
-    response = run_scenario(app, scenario)
-
-    assert response.status_code == 202
-    notes = _uploaded_notifications(services)
-    assert len(notes) == 1
-    assert notes[0].metadata["assetVersionRefs"] == [
-        f"asset-version:{response.json()['assetVersionId']}",
-    ]
-    assert wakes == ["project-1"]

@@ -38,6 +38,9 @@ from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
     ensure_media_call_budget,
 )
+from services.media_files.image_execution import (
+    recover_unclaimed_image_tasks,
+)
 from services.media_files.transient_errors import is_transient_error_message
 from services.file_agent_runtime.notifications import RuntimeEventKind
 from services.file_agent_runtime.work_graph import (
@@ -611,6 +614,21 @@ class WorkGraphScheduler:
         except Exception:  # pylint: disable=broad-except
             logger.exception("work-graph state read failed for %s", project_id)
             return None
+
+        # A dispatch that died between task admission and the provider claim
+        # leaves a RUNNING record no executor owns; the graph would derive
+        # that node RUNNING forever and never re-dispatch. No claim means no
+        # provider spend, so closing it as a transient failure is free.
+        if await asyncio.to_thread(
+            recover_unclaimed_image_tasks,
+            self.services,
+            project_id,
+            tasks,
+        ):
+            tasks = await asyncio.to_thread(
+                self.executions.list_tasks,
+                project_id,
+            )
 
         # Auto-rereview stale scene locks before deriving the graph.
         # Without this, compose stays GATED (scene locks expired) but

@@ -57,6 +57,80 @@ def _services_with_character(tmp_path, monkeypatch):
     return services
 
 
+def test_video_sample_version_yields_its_extracted_audio_track(
+    tmp_path,
+    monkeypatch,
+):
+    """用户把音色参考录在视频里时，样本取其音轨而不是被格式拒绝。
+
+    2026-09-10 现场：一段黑屏 mp4 音色参考被 "must be audio media" 卡死，
+    尽管素材理解已确认音轨可用。
+    """
+
+    import subprocess
+
+    from api.file_asset_routes import _AssetInput, _ingest_many_sync
+    from services.runtime_files.runtime_dependencies import resolve_ffmpeg
+
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("ffmpeg unavailable")
+    clip = tmp_path / "voice-ref.mp4"
+    generated = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            "-c:a",
+            "aac",
+            str(clip),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if generated.returncode != 0:
+        pytest.skip(f"ffmpeg cannot synthesize fixture: {generated.stderr}")
+
+    services = _services_with_character(tmp_path, monkeypatch)
+    ingested, _ = _ingest_many_sync(
+        services,
+        project_id="p-voice",
+        key="voice-ref-video",
+        inputs=[
+            _AssetInput(
+                name="voice-ref.mp4",
+                content=clip.read_bytes(),
+                media_type="video/mp4",
+            ),
+        ],
+        attach_source=False,
+        scope="voice-ref-test",
+    )
+    version_id = ingested["items"][0]["assetVersionId"]
+
+    payload, media_type = audio_execution._sample_bytes_for_version(
+        services,
+        project_id="p-voice",
+        version_id=version_id,
+    )
+
+    assert media_type == "audio/wav"
+    with wave.open(io.BytesIO(payload), "rb") as sample:
+        assert sample.getnchannels() == 1
+        assert sample.getframerate() == 24000
+        seconds = sample.getnframes() / sample.getframerate()
+    assert 0.8 <= seconds <= 1.3
+
+
 @pytest.mark.parametrize("failure_stage", [None, "tts", "binding", "commit"])
 def test_design_enrollment_persists_voice_and_recovers_audition(
     tmp_path,
