@@ -550,10 +550,10 @@ def _extracted_video_audio_bytes(payload: bytes, *, suffix: str) -> bytes:
                 stdin=subprocess.DEVNULL,
                 check=False,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             raise ValidationError(
                 "视频音轨提取超时；请改用更短的片段或直接上传音频文件作为音色样本",
-            )
+            ) from exc
         if result.returncode != 0 or not output.exists():
             raise ValidationError(
                 "视频音轨提取失败（该视频可能没有音轨）："
