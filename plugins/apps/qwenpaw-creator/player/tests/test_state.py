@@ -185,7 +185,7 @@ def test_upsert_project_registers_then_updates_keeping_owner(store):
     store.upsert_project(
         ProjectRecord(
             project_id=PROJECT,
-            owner_user_id="bob",
+            owner_user_id="alice",
             title="改名了",
             node_count=7,
             ending_count=3,

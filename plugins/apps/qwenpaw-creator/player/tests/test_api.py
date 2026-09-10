@@ -496,71 +496,17 @@ def _between(text: str, start: str, stop: str) -> str:
     return text[begin:end]
 
 
-def test_tone_is_posthoc_never_on_the_choice_card(client):
-    """tone 是**事后标注**:抉择卡不给风险色与文案,只有事后两处消费它。
-
-    理由:红色 = "别选"是替观众做判断,会把分支内容压到没人玩。数据链路
-    一个字没改(/api/bundle 照旧下发 tone,跨端契约测试锁着),这里锁的是
-    放映端前端的**消费点** —— 正向反向都钉,以免后人把 tone 整个删掉。
-    """
-
-    script = client.get("/assets/app.js").text
-    stylesheet = client.get("/assets/styles/player.css").text
-
-    card = _between(script, "function makeCard", "function startCountdown")
-    assert "tone" not in card
-    assert "badge" not in card
-    assert ".choice-card.tone" not in stylesheet
-    assert ".badge" not in stylesheet
-
-    review = _between(script, "function renderReview", "function layout")
-    assert "tone-" in review and "badge_labels" in review
-    # 回顾只讲本局 —— 直接吃全历史 path 会把上一局的风险档标到这一局身上。
-    assert "S.progress.path" not in review
-    assert "currentRunPath" in review
-    drawing = _between(script, "function renderMap", "function wire")
-    assert "walked" in drawing and "tone-" in drawing
-    # 未走过的分支保持中性,否则地图就成了风险预告图。
-    assert "walked.has(" in drawing
-
-    for selector in (".review-list .tone-danger", ".map-link.tone-danger"):
-        assert selector in stylesheet
-
-
-def test_map_separates_walked_edges_from_reachable_ones(client):
-    """地图必须分得清"走过的路"与"只是可去",且零进度时得看得见起点。
-
-    方案 B:地图只长在观众踩过的地方。revealed = {entry} ∪ visited,不再按
-    reveal_depth 向下游展开。fog 节点不渲染,入口没看过时显示"起点"。
-    """
-
-    script = client.get("/assets/app.js").text
-    stylesheet = client.get("/assets/styles/player.css").text
-
-    drawing = _between(script, "function renderMap", "function wire")
-    assert "walkedEdge" in drawing
-    assert "reachable" in drawing
-    # 风险色仍然只跟着走过的边,不能被 reachable 带回去。
-    assert 'linkClass += " seen"' in drawing
-    # 汇流点必须按边的来源精确匹配,否则一个父节点走过会把另一个也染绿。
-    assert "item.source_timeline_id === id" in drawing
-    assert "isChildOf" not in script
-    # 方案 B:两端都没揭示的边不画。
-    assert "if (!shown) return" in drawing
-    # 方案 B:fog 节点不画。
-    assert "if (!open) return" in drawing
-    # 入口没看过时显示"起点"而非"可去"。
-    assert '"起点"' in drawing
-
-    reveal = _between(script, "function revealSet", "function renderMap")
-    assert "entry_timeline_id" in reveal
-    # 方案 B:不再按 reveal_depth 展开下游,revealed 只有入口+已看。
-    assert "reveal_depth" not in reveal
-    assert "frontier" not in reveal
-
-    assert ".map-link.reachable" in stylesheet
-    # 拿 --ivb-fog 当文字色等于隐身(它与页面底色几乎同色),中过三招。
-    assert "color:var(--ivb-fog)" not in stylesheet
+def test_work_visuals_are_only_authored_documents(client):
+    page = client.get("/").text
+    script = client.get("/assets/authored-player.js").text
+    choices = client.get("/assets/interaction-runtime.js").text
+    assert 'id="screen-title"' not in page
+    assert 'id="screen-map"' not in page
+    assert 'id="screen-ending"' not in page
+    assert "bundle.authored_html" in script
+    assert "function fallback" not in choices
+    assert "linear-gradient" not in choices
+    assert "tone-" not in script
 
 
 def test_every_dom_id_used_by_app_js_exists_in_the_page(client):
@@ -571,7 +517,7 @@ def test_every_dom_id_used_by_app_js_exists_in_the_page(client):
 
     script = client.get("/assets/app.js").text
     page = client.get("/").text
-    block = _between(script, "const dom = {}", "].forEach")
+    block = _between(script, "const dom = Object.fromEntries([", "].map")
     used = set(re.findall(r'"([A-Za-z0-9_-]+)"', block))
     declared = set(re.findall(r'id="([^"]+)"', page))
     assert used, "没抓到 id 列表,下面的断言会是空真"
@@ -618,7 +564,6 @@ def test_library_screen_is_wired_into_the_page(client):
         "lib-empty",
         "lib-scope-all",
         "lib-scope-mine",
-        "btn-library",
     ):
         assert f'id="{element_id}"' in page
 
@@ -631,9 +576,9 @@ def test_frontend_is_project_id_aware(client):
     assert "document.baseURI" in state_js
     assert "/api/projects/" in state_js
     assert "segmentUrl" in state_js
-    assert "currentPid" in app_js
-    assert "bootLibrary" in app_js
-    assert "bootPlayer" in app_js
+    assert "URLSearchParams" in app_js
+    assert "wireLibrary()" in app_js
+    assert "IVBAuthoredPlayer.mount" in app_js
     assert "global.Api.bundle(pid)" in app_js
     # 旧的写死单包端点不该再出现在前端。
     assert '"/api/bundle"' not in app_js

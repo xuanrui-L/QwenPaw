@@ -83,6 +83,7 @@ class EdgeInfo:
     prompt: str
     target_timeline_id: str
     tone: str | None = None
+    source_timeline_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +100,8 @@ class InteractionPoint:
     options: tuple[OptionRef, ...]
     countdown_seconds: float | None = None
     default_edge_ref: str | None = None
+    motion_html: str | None = None
+    base_frame_data_uri: str | None = None
 
     def option_edges(self) -> tuple[str, ...]:
         return tuple(option.edge_ref for option in self.options)
@@ -164,6 +167,7 @@ class Presentation:
     """
 
     present: bool = False
+    authored_html: str | None = None
     theme: Theme = BUILTIN_THEME
     screens: dict[str, Any] = field(default_factory=dict)
     stylesheets: tuple[str, ...] = ()
@@ -234,6 +238,7 @@ class Bundle:
             edge
             for edge in self.edges.values()
             if edge.target_timeline_id in targets
+            and edge.source_timeline_id in (None, timeline_id)
         )
 
 

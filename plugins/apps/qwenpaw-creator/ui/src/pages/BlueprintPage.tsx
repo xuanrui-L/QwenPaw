@@ -1,3 +1,4 @@
+import InteractionWorkbench from "@/components/interaction/InteractionWorkbench";
 import { useEffect, useMemo, useState } from "react";
 import { FolderSearch, Palette } from "lucide-react";
 import { MenuUnfoldOutlined } from "@ant-design/icons";
@@ -86,7 +87,7 @@ export default function BlueprintPage() {
     if (!project || !timelineFromQuery) return;
     if (!project.timelines.items[timelineFromQuery]) return;
     setSelectedTimelineId(timelineFromQuery);
-    setScriptOpen(true);
+    setScriptOpen(!String(query.get("field") || "").includes("/creation/"));
     useCreatorInteractionStore
       .getState()
       .select(`timeline:${timelineFromQuery}`);
@@ -254,6 +255,7 @@ export default function BlueprintPage() {
         </div>
       )}
 
+      <InteractionWorkbench project={project} />
       <BlueprintRoughCutStrip project={project} onSelectTimeline={openScript} />
 
       {/* Inline panels: only the workspace column, AgentDock stays visible. */}

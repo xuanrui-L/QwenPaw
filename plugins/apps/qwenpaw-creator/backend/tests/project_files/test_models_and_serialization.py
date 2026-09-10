@@ -253,6 +253,7 @@ def test_legacy_document_etag_survives_in_memory_schema_migration():
         mode="json",
     )
     raw["schema_version"] = 3
+    raw.pop("interactive_presentation", None)
     del raw["visual"]["entities"]["items"]["char:hero"]["required_variant_ids"]
     # Legacy documents predate the character voice field entirely.
     del raw["visual"]["entities"]["items"]["char:hero"]["voice"]

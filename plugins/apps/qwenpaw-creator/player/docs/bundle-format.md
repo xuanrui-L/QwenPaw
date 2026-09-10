@@ -1,3 +1,9 @@
+> 2026-09-10 作品页面协议更新：新的 Creator 导出必须包含 Agent 生成且已审阅的 `presentation.html`。`presentation.json` 为 `{ "schema_version": 1, "format": "agent_html_css", "document": "presentation.html" }`。页面与抉择的全部视觉均来自生成的 HTML/CSS；不套用默认主题、首页、地图或结局模板。旧 `theme/screens/stylesheets` 字段仅用于解析历史包，新播放页不会用它们补齐作品，缺少生成页面时提示重新生成导出。
+>
+> `presentation.html` 包含四个独立 `data-screen="title|play|map|ending"` 区域；播放页声明 `video data-player-video`、空 `data-slot="interaction"`。按钮以 `data-action` 声明 start/resume/map/map_back/toggle_play/replay/title/jump/reset，jump 和地图节点用真实 `data-node-ref`。宿主绑定可信媒体 URL、动作、进度和文本，不补布局。未访问地图节点隐藏，jump 仅允许已访问节点。倒计时节点 `data-interaction-countdown` 由抉择 HTML 自行设计，宿主只更新数字。两种 HTML 均禁止脚本、事件属性、外部资源，播放器通过 CSP 与无脚本 iframe 隔离。
+>
+> `manifest.json.authored_html` 与 `presentation.html` 保存同一生成文档，offline/hosted/Creator 复用 `authored-player.js`。`content_revision` 隔离离线进度版本。旧模板已从生产导出器与项目播放器移除；测试夹具只用作 mock 合约实例，不被生产代码读取。
+
 # IVB — Interactive Video Bundle 格式规范 v1
 
 > 本文是**唯一权威**。它描述 Creator(生产端)导出的 zip 到底长什么样,以及放映端
@@ -14,17 +20,17 @@
 | 结构不可变 | 包一旦产出就不再被改写;放映端只读 |
 | 版本可判定 | `manifest.schema_version` 是整数,放映端用**区间**判断,不要求精确相等 |
 | 双向可诊断 | 结构错误必须能定位到具体 id/文件/字段,不允许"加载失败" |
-| 无图片资产 | v1 不含封面/缩略图。选项卡是文字卡。`thumbnail`/`cover` 字段**不存在**,不留空声明 |
+| 封面与背景 | 不单独导出封面/缩略图；可选交互背景帧以内联 data URI 保存，动效仍可叠在暂停的视频上 |
 
 ## 1. 目录结构
 
 ```
 <bundle>.zip
-├── manifest.json          # 必需  内容层 + 表现层默认值(唯一事实源)
-├── presentation.json      # 可选  表现层覆盖;缺失 → 放映端内置默认
-├── index.html             # 可选  Creator 内置的免服务播放器(file:// 双击即播)
-├── segments/<slug>.mp4    # 必需  每个分段一个成片文件
-└── styles/<name>.css      # 可选  presentation.stylesheets 指向的自定义样式
+├── manifest.json          # 必需：剧情、媒体映射和同一份 authored_html
+├── presentation.json      # 新作品必需：声明 agent_html_css 文档路径
+├── presentation.html      # 新作品必需：Agent 生成并审阅的完整作品界面
+├── index.html             # Creator 导出的离线播放器，file:// 可打开
+└── segments/<slug>.mp4    # 每个剧情节点一个成片文件
 ```
 
 `manifest.json` 与 `index.html` 内嵌的是**同一份 payload**。放映端只读
@@ -47,6 +53,8 @@
   "interactions": [ ... ],          // 必需, 可为空数组(见 §2.5 的守卫)
   "edge_index": { ... },            // 必需, 分支型项目非空
   "titles": { ... },                // 兼容字段, 见 §2.4
+  "authored_html": "<!DOCTYPE html>...", // 新作品的已审阅页面
+  "content_revision": "...",         // 含页面、剧情和视频校验和的内容指纹
   "meta": { ... }                   // 必需
 }
 ```
@@ -61,8 +69,7 @@
   "bundle_id": "project-01H...",    // 必需, 稳定;状态层按它隔离进度
   "title": "深夜便利店",             // 必需
   "tagline": "第一行项目描述",       // 可空字符串
-  "synopsis": "创意简报正文",        // 可空字符串
-  "accent": "#b8ff2e"               // 必需, 3 位或 6 位 hex;被 presentation 覆盖
+  "synopsis": "创意简报正文"         // 可空字符串
 }
 ```
 
@@ -70,8 +77,10 @@
 
 ### 2.3 `segments` 与 `nodes`
 
-`segments` 是 `timeline_id -> 包内相对路径`。路径由 `timeline_id` 把 `:` 换成 `_`
-再加 `.mp4` 派生,但放映端**按字面路径读文件**,不重新派生。
+`segments` 是 `timeline_id -> 包内相对路径`。Creator 用 timeline ID 的 UTF-8
+字节十六进制编码再加 `.mp4`，避免 `a:b` 与 `a_b` 碰撞，也兼容 file:// URL。
+放映端按 manifest 中的字面路径读文件，不重新派生；重复 ZIP 成员或两个节点
+引用同一分段路径均为致命错误 `DUPLICATE_MEMBER`。
 
 `nodes` 是 `timeline_id -> 节点对象`,承载故事地图与 DAG 邻接:
 
@@ -96,6 +105,7 @@
   "label": "拿走钥匙",              // 选项显示文字, 必需字段(可空串)
   "prompt": "你听见门锁响了",        // 辅助文案, 必需字段(可空串)
   "target_timeline_id": "timeline:a",      // 必需, 必须命中 nodes
+  "source_timeline_id": "timeline:open",   // Creator 输出；旧包可缺省
   "tone": "risky"                   // 可选;缺省 = 中性卡, 见 §3
 }
 ```
@@ -111,29 +121,38 @@
 ```jsonc
 {
   "source_timeline_id": "timeline:open",  // 必需, 必须命中 nodes
-  "at_seconds": 42.5,                     // 必需, >=0;应小于分段时长(越界只告警)
+  "at_seconds": 42.5,                     // 必需, 有限数且 >=0;越界拒绝
   "question": "你要拿走钥匙吗?",           // 必需, 非空
   "options": [                            // 必需, >=2 项, edge_ref 不得重复
     { "edge_ref": "edge:take_key", "hotspot": null },
     { "edge_ref": "edge:stay_put", "hotspot": null }
   ],
   "countdown_seconds": 10,                // 可选, >0;null = 不倒计时
-  "default_edge_ref": "edge:stay_put"     // 可选;倒计时耗尽时走的边, 必须是 options 之一
+  "default_edge_ref": "edge:stay_put",    // 开启倒计时则必需，且属于 options
+  "motion_html": "<!DOCTYPE html>...",   // 新作品必需，Agent 生成的 CSS-only HTML
+  "base_frame_data_uri": null             // 可选，PNG/JPEG/WebP data URI
 }
 ```
 
-`hotspot` 是 `{x, y, w, h}` 归一化矩形(`normalized_canvas`),用于热区点击;
-`null` = 由播放器自动布局成卡片列表。v1 播放器**只实现列表布局**,
-`hotspot` 原样保留、不解释。
+`hotspot` 使用 Creator `ElementLocation`：`x/y/width/height/anchor_x/anchor_y`
+均为 normalized_canvas 数值，另可带 `rotation_degrees/opacity`。宿主将位置、
+尺寸、锚点、旋转与透明度应用到对应按钮；`null` 使用 Agent 生成的布局。
 
-`at_seconds` 语义:分段播到该秒时暂停并弹出抉择。抉择点在分段末尾时
-(Creator 当前把所有 interaction 元素放在 timeline 尾部)等价于"看完再选"。
+`at_seconds` 语义：分段播到该秒时暂停并弹出抉择。Creator 预览、离线 HTML
+与放映端共用交互运行时；宿主拥有点击导航和倒计时。打开地图、切到后台时
+暂停倒计时与 CSS 动画，返回后继续。问句和按钮文案以 manifest 为准。
+
+生成 HTML 只允许安全的静态标记和 CSS，禁止脚本、事件属性、外链资源、
+CSS url/import/转义及表单导航。每个选项必须恰有一个 `button[data-edge-ref]`。
+问句文字节点使用 `data-question`，按钮文字使用 `data-option-label`。
+浏览器额外使用禁脚本 iframe sandbox 和 CSP；分支目标始终由宿主读取边数据。
+可选背景帧由 Creator 验证为已索引的 PNG/JPEG/WebP，最大 8 MB，再以内联数据导出。
 
 ### 2.6 顺序保证
 
-同一 `source_timeline_id` 内的抉择点必须按 `at_seconds` 升序;同秒按 `options[0].edge_ref`
-字典序。Creator 侧排序键即 `at_seconds`,放映端不重排,遇到乱序直接判
-`INTERACTION_ORDER_UNSTABLE`。
+一个节点最多一个启用的抉择点；选择后即离开本节点。连续问题需要拆成不同
+节点。多个抉择点、非有限数、错误热区、外源边或不完整选项覆盖，均报
+`INTERACTION_CONTRACT`。选项必须覆盖源节点全部出边，不能借用另一节点的边。
 
 ## 3. `tone` — 三档风险语义
 
@@ -159,25 +178,9 @@
   `option.tone ?? edge.tone`,而 `option.tone` 在 v1 不存在 → 事实单一来源是边
 - 同一抉择点内三档可混用,不强制齐档
 
-### 展示时机:**事后**标注,不在抉择卡上
+### 表现方式
 
-判定语义不变(仍是"选之前这条看起来多冒险"),但**只在事后渲染**:
-
-| 位置 | 是否渲染 tone | 实现 |
-|---|---|---|
-| 抉择卡(`#choice-cards`) | ❌ 不给风险色也不给文案 | `app.js` `makeCard` |
-| 结局回顾的已走过抉择 | ✅ | `app.js` `renderReview` + `badge_labels` |
-| 故事地图的边 | ✅ 但**只给真正走过的边** | `app.js` `renderMap` 的 `walked` |
-| 地图上的未走过分支 | ❌ 中性 | 否则地图成了风险预告图 |
-
-理由:红色 = "别选"是替观众做判断,会把最贵的分支内容压到没人走;而选项的
-`label` / `prompt` 本身已在传达预期,抹不平。事后标注则是在给重看的人当年没
-留意到的信息。`tests/test_api.py::test_tone_is_posthoc_never_on_the_choice_card`
-钉住这个分界。
-
-**数据链路一字不改**:`/api/bundle` 照旧下发 `edge.tone` 与 `badge_labels`,
-改的只是前端消费点。包内自带的 `index.html` 不受本节约束(它是免服务播放器,
-仍在抉择卡上展示 badge),两侧锁的是 **badge 文案常量相等**,不是渲染时机。
+`tone` 只表示剧情语义，保留在边数据中。当前宿主不根据 tone 自动添加颜色、徽标或风险卡片；具体视觉由 Agent 按项目设计要求创作，不存在内置风险样式。
 
 ## 4. 图结构约束(DAG)
 
@@ -197,11 +200,12 @@
 | 选项数 ≥ 2 | `TOO_FEW_OPTIONS` |
 | `is_ending == (children 为空)` | `ENDING_FLAG_MISMATCH` |
 
-**告警级**(包仍可放映):`at_seconds` 超出分段探测时长
-(`AT_SECONDS_OUT_OF_RANGE`)、分段 `mvhd` 无法解析出时长
-(`SEGMENT_UNDURABLE`)、孤儿分段(`SEGMENT_ORPHAN`)、`titles` 与
-`nodes[*].title` 分叉(`TITLES_DIVERGED`)。理由:成片真实长度由 compose
-决定,导出前生产端无法可靠预算,拿它废包只会误杀。
+`AT_SECONDS_OUT_OF_RANGE` 为致命错误。Creator HTTP 导出还用 ffprobe 校验
+实际视频流和时长，拒绝缺失、过期、来源选择不一致的成片及待审阅改动。
+作品界面或交互动效缺失/过期也会阻断导出。`fallback=static_endcard` 不再触发固定选项模板；静态选项也必须生成并审阅 HTML。
+
+告警级仍包括：放映端无法解析 `mvhd` 时长 (`SEGMENT_UNDURABLE`)、孤儿分段
+(`SEGMENT_ORPHAN`)、`titles` 与节点标题不一致 (`TITLES_DIVERGED`)。
 
 ### 4.1 "分岔必须有抉择点"守卫
 
@@ -217,71 +221,41 @@ interaction → 包无效。**
 `children` 为空的节点即结局节点。结局数 = `nodes` 中 `is_ending` 为真的数量。
 不引入独立的 `endings` 表(内容层),避免与状态层的解锁记录重名混淆。
 
-## 5. 表现层 — `presentation.json`(可选)
+## 5. 表现层 — Agent 生成的完整 HTML
 
-目的:**UI 样式不硬编码在 HTML 里**。放映端内置一套默认样式,包可用本文件覆盖。
-文件缺失 → 全部用内置默认,不产生诊断告警以外的任何错误。
+新作品的 `presentation.json` 为：
 
-```jsonc
+```json
 {
-  "schema_version": 1,                  // 必需
-  "theme": {                            // 全部可选, 缺项回退内置
-    "accent":  "#b8ff2e",               // 主色(荧光绿)
-    "danger":  "#ff3355",               // 危险色, tone=danger 的回顾/地图边色
-    "warning": "#ffb547",               // tone=risky 的回顾/地图边色
-    "success": "#5fd68a",               // tone=safe 的回顾/地图边色
-    "background": "#05070a",            // 最底色
-    "surface": "#0a0d11",               // 卡片底
-    "surface_alt": "#11161c",
-    "text": "#e8f0d8",
-    "text_dim": "#7d8a72",
-    "fog": "#1a222b"                    // 故事地图未解锁色
-  },
-  "screens": {                          // 全部可选
-    "title":   { "cta_label": "开始游戏", "secondary_label": "剧情地图" },
-    "choice":  { "layout": "list",       // v1 只接受 list
-                 "badge_labels": { "safe": "○ 稳妥",
-                                   "risky": "△ 冒险",
-                                   "danger": "✕ 危险" } },
-    "map":     { "reveal_depth": 1 },    // 已解锁节点的下游展开深度
-    "ending":  { "show_review": true }   // 结局页展示已走过的抉择
-  },
-  "stylesheets": ["styles/choice.css"]  // 包内相对路径, 追加于内置样式之后
+  "schema_version": 1,
+  "format": "agent_html_css",
+  "document": "presentation.html"
 }
 ```
 
-### `map.reveal_depth` 的确切语义
+`presentation.html` 和 `manifest.authored_html` 必须完全一致。两者不一致、页面不安全、必备结构/动作缺失或地图引用错误时，Reader 拒绝包。历史包的 theme/screens/stylesheets 仍可解析，但播放器不再据此生成页面；缺少 authored HTML 时提示返回 Creator 重新生成。
 
-**v1 前端不再消费此字段**(保留在 bundle 格式里仅为向后兼容)。
+四个互不嵌套的页面必须各有一个。以下是行为协议，不包含任何布局、颜色或按钮形态：
 
-节点只渲染两种:已看(`seen`)与入口(`locked`,入口没看过时显示"起点")。未看过的
-非入口节点不渲染 —— 地图只长在观众踩过的地方。
-
-连线只渲染两端都在已看+入口集合里的边,分两态:
-
-| 连线态 | 判据 | 视觉 |
+| 页面 | 必备控件 | 可选动作 |
 |---|---|---|
-| 走过 | 该边的 `edge_ref` 出现在某条 `visit.choice_edge` 里;包里无边实体时,"父已看 + 子已看 + 父只有一个下游"兼判 | 实线,有 tone 则上三档色 |
-| 可去未走 | 两端均已看,但这条边没走过(汇流节点常见:从另一条路到过同一终点) | 中性点线 |
+| title 首页 | start、resume | map、reset |
+| play 播放 | video[data-player-video]、空 data-slot=interaction、toggle_play、map、replay | title |
+| map 剧情地图 | map_back、每个真实剧情节点的 data-node-ref | jump、title、reset |
+| ending 结局 | replay、title | map、reset |
 
-两个坑都已在真实包上实测过:两端已揭示 **!=** 这条边走过(否则未走过的分支也染主色,
-地图失去路径意义);而匹配边必须按 **(来源, 目标)** 精确到条 —— 汇流节点的两个父节点
-共用同一个 `target_timeline_id`,只比目标会把没走过的那条也认成走过。`edge_index` 里
-没有来源字段,来源由放映端从 `interactions[*].options[*].edge_ref` 反推。
+控件均以 `button[data-action]` 绑定。开始、重新开始与剧情地图不可因剧本省略。`replay` 从故事入口重新播放，保留探索记录；`reset` 清空探索记录回首页。未访问地图节点由宿主隐藏，`jump` 仅回看已访问节点。地图打开时暂停视频与倒计时。其余布局、文案、装饰、响应式样式与动效全部由生成 HTML 决定。
 
-诊断级别(全部为 `warning`,不阻断播放):
-`PRESENTATION_UNREADABLE` / `PRESENTATION_VERSION_UNSUPPORTED` /
-`THEME_COLOR_MALFORMED` / `STYLESHEET_MISSING` / `SCREEN_FIELD_UNKNOWN`。
+Creator 的 `interactive_presentation` 保存 `design_prompt`、逐页 `screens` 和生成结果 `motion`。`screens[title|play|map|ending]` 有独立的 `design_prompt` 与 `controls[action] = {label, design_prompt}`。这是 Agent 与前端共享的设计意图模型。显式按钮文案会在生成时校验，不满足时先尝试修正；必备按钮没有单独配置时仍由 Agent 设计。逐页或按钮修改使页面待重新生成，不会让视频、剧本过期。
 
-`variant`(按节点覆盖控件形态)在 v1 **不实现**:demo 的渲染器全文零次读取它,
-且它的 key 在播放器里就被自己拍平废掉了。规范不收录未被任何实现验证过的接口。
+抉择的 `creation.design_prompt` 描述该选择层，`options[*].design_prompt` 描述单个选项按钮。选项文案与走向仍来自 narrative_edges。前端“交互设计”提供四页实际预览、桌面/手机切换、按钮定位和抉择走向说明，保存设计后生成、审阅，再导出。
 
 ## 6. 状态层 — SQLite
 
 见 `docs/er-diagram.md` §3。契约要点:
 
 - 单文件 `state.db`,与包**分离存放**(包是只读分发物,状态是本地积累物)
-- 所有表带 `user_id`,v1 恒为 `1`,列**保留不删** —— 将来加回鉴权不迁库
+- 进度按 `user_id` 与 project 隔离；用户身份来自服务受信任的请求头。覆盖上传还须匹配已有作品的 owner。
 - 没有 `users` / `tokens` 表
 - `variables` 表**不建**(无 Condition 实现,建了就是死表)
 - 清空进度必须是真 `DELETE`,不允许用"把 current_node 写成空串"冒充
@@ -296,29 +270,18 @@ interaction → 包无效。**
 
 ## 8. Creator 侧导出前置条件
 
-导出前 Creator 必须校验(不通过则拒绝出包并点名)。已实现部分:
+HTTP 导出持有项目生命周期锁，并在同一份快照上完成门禁与组包：
 
 | 约束 | 实现位置 |
 |---|---|
-| 每个可达分段都有已选定成片 | `derive_interactive_manifest` 的 `missing` 门禁 |
-| `option.edge_ref` 必须命中已有边 | `derive_interactive_manifest` 的 `known_edges` 门禁 |
-| 选项数 ≥ 2 | `_validate_story_graph` |
-| 无环 | `_validate_story_graph`(报环路径 `a -> b -> a`) |
-| 分岔节点必须有抉择点(§4.1) | `_validate_story_graph` |
-| 产出 `presentation.json` | `assemble_interactive_bundle` → `_presentation_payload` |
+| 无待审阅改动、无排队/运行中的制作任务 | `interactive_bundle_routes._assemble` |
+| live 剧情节点闭合、单根、全可达、无环，排除历史快照 | `derive_interactive_manifest` / `_validate_story_graph` |
+| 每个节点选择了有效且当前的成片，选项完整覆盖出边 | `derive_interactive_manifest` |
+| 媒体文件与索引校验和一致，实际视频流可读，抉择时间不超实际时长 | HTTP 导出 ffprobe 与来源检查 |
+| 页面和抉择 HTML 已生成、未过期、安全且协议完整 | `assemble_interactive_bundle` / HTML validators |
+| 必备页面、开始、重新开始、剧情地图，以及显式按钮文案完整 | `validate_presentation_html` |
+| `presentation.html` 与 manifest 内 HTML 一致 | 导出单一数据源与 Reader 双向校验 |
 
-其余 §4 约束在 Creator 侧**由构造保证而不是靠检查**:`nodes` 只从
-`manifest.segments`(= 从入口可达集)生成,`children` 由 `narrative_edges`
-现拼,所以全可达 / 单根 / 引用闭合 / `is_ending == (children 为空)` 不可能
-被违反。这也是环需要单独拦的原因 —— 它是唯一“构造允许、但是错的”形状。
+Agent 的 `workspace_schema.system.txt` 与自动生成的 Project Schema 同步提供上述设计字段、行为语义、任务目标、审阅和导出门禁。`bundle:project` 的 DONE 表示导出准备完成，不代表已发布；不得为等待不存在的自动出包任务而反复修改快照。
 
-`at_seconds` 是否落在成片时长内**不是**导出门禁:Creator 只能拿到
-`planned_duration_seconds`,真实长度由 compose 决定。它属于放映端的告警。
-
-结构起草提示词(`workspace_schema.system.txt`)必须同步教三档语义:
-`edge_index[*].tone` 是模型在起草 `narrative_edges` 时填的,不教就恒空,
-三档表现层形同不存在。
-
-跨端回归:`plugins/apps/qwenpaw-creator/player/tests/test_creator_contract.py` 直接调用 Creator
-导出器,把产物交给放映端 Reader / Server 验证零诊断。两侧字段名、默认值、
-badge 文案任何一处飘移都会在那里红 —— 这就是“校验规则只实现一份”的机制。
+跨端回归 `player/tests/test_creator_contract.py` 直接调用 Creator 导出器，把产物交给 Reader / Server 验证。独立播放器和 Creator 共享同一份行为控制器与镜像 HTML 校验器；编辑器的定位边框只存在于审阅预览，不写入导出作品。

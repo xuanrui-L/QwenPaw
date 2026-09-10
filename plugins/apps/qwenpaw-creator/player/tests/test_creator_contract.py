@@ -39,10 +39,6 @@ except Exception as exc:  # pragma: no cover - 环境缺失时整模块跳过
     )
 
 from ivb.format.reader import inspect_bundle  # noqa: E402
-from ivb.format.model import (  # noqa: E402
-    BUILTIN_THEME,
-    DEFAULT_BADGE_LABELS,
-)
 from ivb.server.app import create_app  # noqa: E402
 from ivb.state.store import ANONYMOUS_USER_ID  # noqa: E402
 from ivb.testing import fake_mp4  # noqa: E402
@@ -105,6 +101,14 @@ def _export_creator_bundle(tmp_path: Path) -> Path:
         span=models.TimelineSpan(start_tick=88_000, duration_tick=4_000),
         creation=models.InteractionCreation(
             type="interaction",
+            motion=models.MotionGraphic(
+                html=(
+                    "<html><body><span data-interaction-countdown></span>"
+                    '<button data-edge-ref="edge:a">'
+                    '选择A</button><button data-edge-ref="edge:b">'
+                    "选择B</button></body></html>"
+                ),
+            ),
             question="是否当众揭发沈修？",
             options=[
                 models.InteractionOption(edge_ref="edge:a"),
@@ -162,6 +166,26 @@ def _export_creator_bundle(tmp_path: Path) -> Path:
     for timeline_id in timelines:
         payload = fake_mp4(95.0)
         payloads[_attach_final_cut(project, timeline_id, payload)] = payload
+    authoring = importlib.import_module(
+        "services.media_files.presentation_authoring",
+    )
+    html = (
+        (ROOT / "tests/fixtures/authored-presentation.html")
+        .read_text()
+        .replace(
+            "__NODES__",
+            "".join(
+                '<button data-action="jump" '
+                f'data-node-ref="{tid}">{tid}</button>'
+                for tid in timelines
+            ),
+        )
+    )
+    project.interactive_presentation.motion = models.MotionGraphic(
+        html=html,
+        design_notes="input_fingerprint="
+        + authoring.presentation_fingerprint(project),
+    )
     archive = bundle_mod.assemble_interactive_bundle(
         project,
         read_artifact_file=lambda file_id: payloads[file_id],
@@ -208,32 +232,62 @@ def test_creator_export_segments_are_streamable(exported):
     bundle = inspection.bundle
 
     assert bundle is not None
-    assert bundle.segments["tl:ep4a"] == "segments/tl_ep4a.mp4"
+    assert bundle.segments["tl:ep4a"] == "segments/746c3a65703461.mp4"
     assert inspection.durations["tl:ep4a"] == pytest.approx(95.0)
 
 
-def test_creator_presentation_matches_player_defaults(exported):
-    """Creator 写出的表现层必须与放映端内置主题同构:字段名一致、未覆盖项
-    落到同一批默认值,否则"可选表现层"就变成第二套真相。"""
+def test_creator_presentation_is_authored_html(exported):
+    import zipfile
 
     presentation = inspect_bundle(exported).bundle.presentation
-
-    assert presentation.present is True
-    assert set(presentation.theme.as_css_vars()) == set(
-        BUILTIN_THEME.as_css_vars(),
-    )
-    assert (
-        presentation.screens["choice"]["badge_labels"] == DEFAULT_BADGE_LABELS
-    )
-    assert presentation.screens["choice"]["layout"] == "list"
-    assert presentation.screens["map"]["reveal_depth"] == 1
+    with zipfile.ZipFile(exported) as archive:
+        assert (
+            presentation.authored_html
+            == archive.read("presentation.html").decode()
+        )
+    assert presentation.screens == {}
     assert presentation.stylesheets == ()
 
 
-def test_badge_labels_are_one_source_across_both_players():
-    """两套播放器共用同一批文案:选项卡上写什么,不该由两侧各自决定。"""
+def test_runtime_shell_contains_no_work_page_template():
+    """作品页面必须来自模型文档，而不是导出器的布局代码。"""
 
-    assert bundle_mod.TONE_BADGES == DEFAULT_BADGE_LABELS
+    assert "data-screen" not in bundle_mod.PLAYER_HTML
+
+
+@pytest.mark.parametrize(
+    "breach",
+    ["missing", "script", "mismatch", "foreign_node"],
+)
+def test_authored_document_failures_are_fatal(exported, tmp_path, breach):
+    import json
+    import zipfile
+
+    with zipfile.ZipFile(exported) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    if breach == "missing":
+        members.pop("presentation.html")
+    elif breach == "script":
+        members["presentation.html"] = members["presentation.html"].replace(
+            b"<head>",
+            b"<head><script>alert(1)</script>",
+        )
+    elif breach == "foreign_node":
+        members["presentation.html"] = members["presentation.html"].replace(
+            b"tl:ep4a",
+            b"unknown",
+        )
+    else:
+        manifest = json.loads(members["manifest.json"])
+        manifest["authored_html"] = {"invalid": "not the reviewed document"}
+        members["manifest.json"] = json.dumps(manifest).encode()
+    bad = tmp_path / "bad-authored.zip"
+    with zipfile.ZipFile(bad, "w") as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    assert any(
+        d.code == "PRESENTATION_CONTRACT" for d in inspect_bundle(bad).fatal
+    )
 
 
 def test_player_server_boots_on_the_creator_export(exported, library):
@@ -259,7 +313,7 @@ def test_player_server_boots_on_the_creator_export(exported, library):
     ]
 
     segment = http.get(
-        "/api/projects/project-contract/segments/tl_ep3.mp4",
+        "/api/projects/project-contract/segments/746c3a657033.mp4",
         headers={"Range": "bytes=0-99"},
     )
     assert segment.status_code == 206

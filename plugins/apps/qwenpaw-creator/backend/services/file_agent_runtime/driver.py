@@ -3999,7 +3999,7 @@ class FileCreatorAgentRuntime:
         targets, kinds = parse_request_targets(arguments, project_id)
         fence = _EpochFence(self, project_id, run_id, epoch)
         fence.assert_alive()
-        snapshot, _, graph, blocked = await ready_request_context(
+        snapshot, request_tasks, graph, blocked = await ready_request_context(
             self.services,
             self.executions,
             project_id,
@@ -4059,7 +4059,9 @@ class FileCreatorAgentRuntime:
                 )
             else:
                 plans.append(requested_work_node(snapshot, node))
-        if any(plan.node.kind != "compose" for plan in plans):
+        if any(
+            plan.node.kind not in {"compose", "interaction"} for plan in plans
+        ):
             await asyncio.to_thread(
                 ensure_media_call_budget,
                 self.services,
@@ -4110,8 +4112,13 @@ class FileCreatorAgentRuntime:
             approved_fingerprint = plan.fingerprint
             confirmed_project_etag = None
             confirmed_node_id = None
-            dispatch_fingerprint = self.work_scheduler._ledger_fingerprint(
-                node,
+            dispatch_fingerprint = (
+                self.work_scheduler.manual_retry_fingerprint(
+                    node,
+                    request_tasks,
+                )
+                if node.kind == "interaction"
+                else self.work_scheduler._ledger_fingerprint(node)
             )
             key = (
                 f"dag-{node.node_id}-"
@@ -4196,7 +4203,8 @@ class FileCreatorAgentRuntime:
                     self.services,
                     self.executions,
                     project_id,
-                    check_media_budget=not is_compose,
+                    check_media_budget=node.kind
+                    not in {"compose", "interaction"},
                     confirmed_project_etag=confirmed_project_etag,
                     confirmed_node_id=confirmed_node_id,
                 )
@@ -4259,7 +4267,16 @@ class FileCreatorAgentRuntime:
                         )
                         != (provider, model)
                     )
-                    or self.work_scheduler._ledger_fingerprint(current_node)
+                    or (
+                        self.work_scheduler.manual_retry_fingerprint(
+                            current_node,
+                            tasks,
+                        )
+                        if current_node.kind == "interaction"
+                        else self.work_scheduler._ledger_fingerprint(
+                            current_node,
+                        )
+                    )
                     != dispatch_fingerprint
                 ):
                     return {
@@ -10244,6 +10261,8 @@ def _execution_provider_model(
         from models.config import get_tts_model_name
 
         return "dashscope", get_tts_model_name()
+    if spec.provider_kind == "text":
+        return "text", get_text_model_name()
     if spec.provider_kind == "s2v":
         from models.config import get_s2v_model_name
 
@@ -10252,6 +10271,7 @@ def _execution_provider_model(
 
 
 _AUTHORIZATION_OPERATION_LABELS = {
+    "interaction_draft": "生成交互动效",
     "image_generation": "生成图片",
     "r2v_generation": "生成视频",
     "s2v_generation": "生成数字人视频",

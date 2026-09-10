@@ -16,8 +16,10 @@
 from __future__ import annotations
 
 import shutil
+import hashlib
 import threading
 import zipfile
+from uuid import uuid4
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,7 +85,7 @@ class ProjectLibrary:
         #: store;具体用户的进度视图由 :meth:`store_for` 按需派生并缓存。
         self.store = ProgressStore(self.db_path, user_id=user_id)
         self._stores: dict[str, ProgressStore] = {user_id: self.store}
-        self._cache: dict[str, tuple[float, Inspection]] = {}
+        self._cache: dict[str, tuple[tuple[str, float], Inspection]] = {}
         self._lock = threading.Lock()
 
     # -- 用户进度视图 --------------------------------------------------
@@ -135,8 +137,52 @@ class ProjectLibrary:
                     ),
                 ],
             )
-        dest = self.data_dir / BUNDLES_DIRNAME / project_id
-        _materialize(origin, dest)
+        existing = self.store.get_project(project_id)
+        if existing is not None and existing.owner_user_id != owner_user_id:
+            raise PermissionError("Only the owner may replace this project")
+        # Publish an immutable revision before switching the catalog pointer.
+        # A failed copy/validation/SQL transaction leaves the previous revision
+        # available, including to requests which already resolved its path.
+        staged = self.data_dir / BUNDLES_DIRNAME / f".stage-{uuid4().hex}"
+        try:
+            _materialize(origin, staged)
+            verified = inspect_bundle(staged)
+            if verified.bundle is None:
+                raise BundleError(verified.diagnostics)
+            if verified.bundle.meta.bundle_id != project_id:
+                raise BundleError(
+                    [
+                        errors.make(
+                            "BUNDLE_UNREADABLE",
+                            str(origin),
+                            "source changed during install",
+                        ),
+                    ],
+                )
+            bundle = verified.bundle
+            digest = hashlib.sha256()
+            for member in sorted(p for p in staged.rglob("*") if p.is_file()):
+                name = member.relative_to(staged).as_posix().encode()
+                digest.update(len(name).to_bytes(8, "big"))
+                digest.update(name)
+                digest.update(hashlib.sha256(member.read_bytes()).digest())
+            namespace = hashlib.sha256(project_id.encode()).hexdigest()
+            dest = (
+                self.data_dir
+                / BUNDLES_DIRNAME
+                / namespace
+                / digest.hexdigest()
+            )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                staged.rename(dest)
+            except OSError:
+                if not dest.is_dir():
+                    raise
+                # Another installer may already have published identical bytes.
+        finally:
+            if staged.exists():
+                shutil.rmtree(staged)
         record = ProjectRecord(
             project_id=project_id,
             owner_user_id=owner_user_id,
@@ -145,7 +191,7 @@ class ProjectLibrary:
             node_count=len(bundle.nodes),
             ending_count=len(bundle.endings),
             interaction_count=len(bundle.interactions),
-            storage_path=f"{BUNDLES_DIRNAME}/{project_id}",
+            storage_path=dest.relative_to(self.data_dir).as_posix(),
         )
         self.store.upsert_project(record)
         with self._lock:
@@ -162,7 +208,7 @@ class ProjectLibrary:
         if record is None:
             raise ProjectNotFound(project_id)
         path = self.data_dir / record.storage_path
-        stamp = _mtime(path)
+        stamp = (record.storage_path, _mtime(path))
         with self._lock:
             hit = self._cache.get(project_id)
             if hit is not None and hit[0] == stamp:
@@ -196,7 +242,7 @@ def _materialize(source: Path, dest: Path) -> None:
     """把 zip 或目录落成 ``dest`` 目录;重复安装先清后写(见 §1.5)。"""
 
     if dest.exists():
-        shutil.rmtree(dest)
+        raise FileExistsError(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if source.is_dir():
         shutil.copytree(source, dest)

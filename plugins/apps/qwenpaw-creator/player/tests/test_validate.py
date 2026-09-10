@@ -130,7 +130,7 @@ def test_titles_divergence_is_a_warning(tmp_path):
     assert inspection.bundle is not None
 
 
-def test_at_seconds_overrun_does_not_kill_the_bundle(tmp_path):
+def test_at_seconds_overrun_is_fatal(tmp_path):
     """成片真实长度由 compose 决定,导出前不可靠预算 —— 越界只能提醒,
     不能废包(Creator 真实包的 at_seconds 就是 88.0 这种大值)。"""
 
@@ -139,9 +139,8 @@ def test_at_seconds_overrun_does_not_kill_the_bundle(tmp_path):
         "overrun",
         breaches=("at_seconds_overrun",),
     )
-    assert "AT_SECONDS_OUT_OF_RANGE" in codes(inspection.warnings)
-    assert not inspection.fatal
-    assert inspection.bundle is not None
+    assert "AT_SECONDS_OUT_OF_RANGE" in codes(inspection.fatal)
+    assert inspection.bundle is None
 
 
 def test_undurable_segment_downgrades_to_warning(tmp_path):

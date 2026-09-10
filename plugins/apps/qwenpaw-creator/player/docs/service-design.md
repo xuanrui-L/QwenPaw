@@ -1,3 +1,5 @@
+> 作品表现层改为 Agent 文档：项目页只挂载 `IVBAuthoredPlayer`；库列表是宿主服务 UI。首页、地图、结局不再由 `app.js` 绘制。`project_for_player` 下发已验证的 `authored_html`，状态 API 仍是权威进度来源。旧 `theme/screens` 解析兼容保留，但不自动生成可播放页面。详见 bundle-format.md 顶部的最新协议。
+
 # IVB Player 服务设计 — 多用户互动视频展示
 
 > 状态：已实现（§9 七步全部落地）。本文是 ivb 从"单包放映器"升级为"多用户互动视频展示服务"的落地依据。
@@ -26,7 +28,7 @@ ivb 是**互动视频的展示微服务**：接收 Creator 导出的互动视频
 | 2 | 标识类型 | `user_id`、`project_id` 一律 **TEXT**。（`user_id` 现为 INTEGER，一并转 TEXT；开发期数据可弃，直接重建库，无迁移成本。） |
 | 3 | 列表视图 | 两档：**我的**（`WHERE owner_user_id = 当前用户`）/ **全部**（不过滤）。**不建 visibility 列**——"我的/全部"是查询过滤，不是逐包权限。将来若要 private，再加一列 `visibility`。 |
 | 4 | 存储选型 | **SQLite 起步**，保持 `ProgressStore` 为唯一 DB 接缝；扩 PostgreSQL 时只换接缝实现（见 §8）。 |
-| 5 | 重复上传 | 暂不处理。同 `project_id` 再上传：覆盖 `bundles/{pid}/` 文件 + 更新目录行（owner 保持首次上传者），进度不动。 |
+| 5 | 重复上传 | 仅原 owner 可替换，其他用户返回 403。先完整暂存、校验并发布不可变内容目录，再原子切换目录记录；内容改变时清空该项目所有用户的旧版进度，相同内容重传保留进度。 |
 
 ## 2. 关键概念：`bundle_id` vs `project_id`（分层，勿混）
 
@@ -50,12 +52,12 @@ graph TB
     UP["POST /api/projects 上传+校验"]
     LIST["GET /api/projects?scope=mine|all"]
     PLAY["/api/projects/{pid}/bundle · segments · state/*"]
-    CACHE["Bundle 缓存 key=pid+mtime"]
+    CACHE["Bundle 缓存 key=storage_path+mtime"]
     REPO["Store 协议 (DB 接缝)"]
   end
   subgraph DATA["持久卷 /data"]
     DB[("ivb.db: projects + 4 状态表")]
-    BLOBS[("bundles/{pid}/…")]
+    BLOBS[("bundles/{project_hash}/{content_hash}/…")]
   end
   L --> LIST
   L -->|点卡片| P
@@ -68,9 +70,9 @@ graph TB
 ```
 
 要点：
-- **一个进程服务所有包**：`project_id` 从 URL 路径进来，按目录表解析到磁盘上的包，`inspect_bundle` 结果按 `(pid, mtime)` 缓存。取代现状 `create_app(bundle_path)` 的启动期单绑。
+- **一个进程服务所有包**：`project_id` 从 URL 路径进来，按目录表解析到磁盘上的包，`inspect_bundle` 结果按 `(storage_path, mtime)` 缓存。取代现状 `create_app(bundle_path)` 的启动期单绑。
 - **读包入口不变**：仍走 `inspect_bundle`，复用"bundle 非空 ⟺ 无致命诊断"这条不变式——上传校验与放映共用同一个裁判。
-- **ivb 不拥有身份**：`user_id` 由上游随请求传入，ivb 只在数据层用它做 `(user_id, project_id)` 隔离，不参与认证/授权判断。
+- **ivb 不拥有身份**：`user_id` 由上游随请求传入，ivb 只在数据层用它做 `(user_id, project_id)` 隔离，不验证身份真伪；替换作品时校验 owner。
 
 ## 4. 数据模型
 
@@ -87,7 +89,7 @@ projects(
   node_count       INTEGER,
   ending_count     INTEGER,
   interaction_count INTEGER,
-  storage_path     TEXT,               -- bundles/{project_id}
+  storage_path     TEXT,               -- bundles/{project_hash}/{content_hash}
   created_at       BIGINT,
   updated_at       BIGINT
 )
@@ -108,7 +110,7 @@ projects(
 
 | 方法 | 路径 | 用户输入 | 作用 |
 |---|---|---|---|
-| POST | `/api/projects` | user_id + multipart zip（可选 title） | `inspect_bundle` 校验：致命 → 422 回显诊断并丢弃；合法 → 落盘 `bundles/{pid}/` + upsert `projects`（owner=当前用户） |
+| POST | `/api/projects` | user_id + multipart zip（可选 title） | `inspect_bundle` 校验：致命 → 422 回显诊断并丢弃；合法 → 暂存后发布不可变目录 `bundles/{project_hash}/{content_hash}/` + upsert `projects`（首次 owner=当前用户；替换必须与原 owner 相同） |
 | GET | `/api/projects?scope=mine\|all` | user_id | 库列表；`mine` 过滤 owner，`all` 不过滤 |
 | GET | `/api/projects/{pid}` | user_id | 单项目详情 |
 | GET | `/api/projects/{pid}/bundle` | user_id | `project_for_player` 内容+表现 join（缓存命中不重复读包） |
@@ -120,7 +122,7 @@ projects(
 ## 6. 结构性改动（实现要点）
 
 1. **`create_app` 从单包改多包**：签名 `create_app(data_dir, db_path)`；新增按 `pid` 解析包的中间步骤（查目录 → 取 `storage_path` → `inspect_bundle` → 缓存）。
-2. **Bundle 缓存**：`dict[pid] -> (mtime, Inspection/Bundle)` + 锁；mtime 变化或重新上传时失效。
+2. **Bundle 缓存**：`dict[pid] -> (storage_path, mtime, Inspection/Bundle)` + 锁；mtime 变化或重新上传时失效。
 3. **端点前缀迁移**：现有 `/api/bundle`、`/api/state/*` 全部收到 `/api/projects/{pid}/…` 之下。
 4. **前端 `BASE` 动态化**（前提）：现 `state.js` 写死 `BASE = ""`，挂子路径会全 404。改法：`create_app` 支持 `root_path`，`index()` 注入 `<base href>`，`state.js` 从 `document.baseURI` 反推 `BASE`，`app.js` 的 `segmentUrl` 走 `BASE`。
 5. **库列表页**：新增前端屏（卡片：标题/上传者/节点·结局·抉择点数/更新时间 + "我的/全部"切换），点卡片路由到该项目放映页。
@@ -137,7 +139,7 @@ projects(
 - **单实例**：`--data /data`，持久卷上放 `ivb.db(+WAL)` 与 `bundles/` → 容器重建/滚动发布不丢。
 - **约束（写死）**：SQLite = 单写者，**只能一个副本**。横向扩容前必须先迁 PG（§8），否则并发写会锁库/损坏。
 - **不要把 SQLite 放网络文件系统**（NFS/EFS/云盘多挂载）：WAL 依赖本机文件锁，跨主机共享会损坏。
-- **包体存储**：`bundles/{project_id}/` 目录与 DB 同卷，容器外持久化。
+- **包体存储**：`bundles/{project_hash}/{content_hash}/` 目录与 DB 同卷，容器外持久化。
 
 ### 7.2 未来演进（OSS + PG）
 
@@ -196,6 +198,17 @@ projects(
 
 - 身份的产生、认证、授权、登录、凭据签发——由上游/其它团队负责，ivb 只消费传入的 `user_id`。
 - 逐包可见性（private/public）——只有"我的/全部"查询视图。
-- 重复上传的版本/冲突处理。
+- 已打开观众页面的版本热切换与旧版本目录自动清理。
 - 多副本高可用（先单实例 + 持久卷）。
 - 包体对象存储 OSS（本期本地 `bundles/`，未来按 §7.2 迁移）。
+
+## 12. 替换的失败边界
+
+ZIP 解压/目录复制先进入 `.stage-*`，校验暂存内容并确认 project ID 后才发布。
+最终目录用项目 ID 哈希和内容哈希定位，禁止先删除旧目录。SQLite 的
+`BEGIN IMMEDIATE` 将 owner 检查、目录切换和旧进度清理放在同一事务里。
+失败不会破坏当前目录记录或旧包；旧的不可变目录保留以供在途读取。
+重复上传相同内容只更新目录元信息，不清理进度。
+
+线上身份真实性仍由可信网关保证。当前未实现版本热切换协议：内容替换后，
+已打开的页面应刷新以载入新的故事图；不要将旧页面连续观看视为跨版本无缝迁移。

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+import math
+import re
+from .interaction_html import validate_interaction_html
 
 from . import errors
 from .errors import Diagnostic
@@ -46,6 +49,8 @@ def _check_shape(
     bundle: Bundle,
     sink: list[Diagnostic],
 ) -> None:
+    if len(set(bundle.segments.values())) != len(bundle.segments):
+        sink.append(errors.make("DUPLICATE_MEMBER", "segments"))
     if set(bundle.nodes) != set(bundle.segments):
         only_nodes = sorted(set(bundle.nodes) - set(bundle.segments))
         only_segments = sorted(set(bundle.segments) - set(bundle.nodes))
@@ -136,7 +141,7 @@ def _check_interactions(
     durations: Mapping[str, float],
 ) -> None:
     # 每条规则顺序 append 诊断,分支多是校验函数的固有形态。
-    # pylint: disable=too-many-branches
+    # pylint: disable=too-many-branches,too-many-statements
     seen_by_source: dict[str, list[float]] = {}
     for position, point in enumerate(bundle.interactions):
         where = f"interactions[{position}]"
@@ -182,8 +187,92 @@ def _check_interactions(
                     value=point.default_edge_ref,
                 ),
             )
+        problems = []
+        node = bundle.nodes.get(point.source_timeline_id)
+        targets = set()
+        for option in point.options:
+            edge = bundle.edges.get(option.edge_ref)
+            if edge is not None:
+                targets.add(edge.target_timeline_id)
+                if edge.source_timeline_id not in (
+                    None,
+                    point.source_timeline_id,
+                ):
+                    problems.append(
+                        f"edge {option.edge_ref} belongs to another source",
+                    )
+            hotspot = option.hotspot
+            if hotspot is not None:
+                for key in (
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "anchor_x",
+                    "anchor_y",
+                    "opacity",
+                    "rotation_degrees",
+                ):
+                    if key in hotspot and (
+                        not isinstance(hotspot[key], (float, int))
+                        or not math.isfinite(hotspot[key])
+                    ):
+                        problems.append(f"invalid hotspot {key}")
+        if node and targets != set(node.children):
+            problems.append(
+                "options must cover exactly the source node children",
+            )
+        if not math.isfinite(point.at_seconds) or point.at_seconds < 0:
+            problems.append("at_seconds must be finite and nonnegative")
+        if point.countdown_seconds is not None and (
+            not math.isfinite(point.countdown_seconds)
+            or point.countdown_seconds <= 0
+            or point.default_edge_ref is None
+        ):
+            problems.append(
+                "countdown requires a finite positive duration "
+                "and default edge",
+            )
+        if point.base_frame_data_uri and (
+            len(point.base_frame_data_uri) > 12 * 1024 * 1024
+            or not re.fullmatch(
+                r"data:image/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+=*",
+                point.base_frame_data_uri,
+            )
+        ):
+            problems.append("invalid embedded base frame")
+        if point.motion_html:
+            problems.extend(
+                validate_interaction_html(
+                    point.motion_html,
+                    list(refs),
+                    require_countdown=bool(
+                        bundle.presentation.authored_html
+                        and point.countdown_seconds
+                        and point.default_edge_ref,
+                    ),
+                ),
+            )
+        elif bundle.presentation.authored_html:
+            problems.append(
+                "authored work requires generated choice HTML; "
+                "no template fallback",
+            )
+        if point.source_timeline_id in seen_by_source:
+            problems.append("only one interaction per narrative node")
+        if problems:
+            sink.append(
+                errors.make(
+                    "INTERACTION_CONTRACT",
+                    where,
+                    "; ".join(problems),
+                ),
+            )
         duration = durations.get(point.source_timeline_id)
-        if duration is not None and not 0 <= point.at_seconds < duration:
+        if (
+            duration is not None
+            and not 0 <= point.at_seconds <= duration + 0.05
+        ):
             sink.append(
                 errors.make(
                     "AT_SECONDS_OUT_OF_RANGE",

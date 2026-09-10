@@ -77,11 +77,11 @@ CODEBOOK: dict[str, tuple[Severity, str]] = {
         Severity.FATAL,
         "default_edge_ref 不是该抉择点的选项之一",
     ),
-    # 成片真实长度由 compose 决定,导出前 Creator 侧无法可靠预算;Creator 的
-    # 测试里 at_seconds=88.0 就是一个合规的中后段抉择点。因此越界只说明“建议
-    # 看一眼”,不能拿来废包。
+    # Creator 在导出时探测实际成片；播放器同样拒绝无法到达的抉择点。
+    "INTERACTION_CONTRACT": (Severity.FATAL, "交互内容不符合播放契约"),
+    "DUPLICATE_MEMBER": (Severity.FATAL, "ZIP 成员或分段路径重复"),
     "AT_SECONDS_OUT_OF_RANGE": (
-        Severity.WARNING,
+        Severity.FATAL,
         "at_seconds 超出分段探测时长",
     ),
     "INTERACTION_ORDER_UNSTABLE": (
@@ -103,6 +103,7 @@ CODEBOOK: dict[str, tuple[Severity, str]] = {
         "titles 与 nodes[*].title 不一致",
     ),
     # --- 表现层 ---
+    "PRESENTATION_CONTRACT": (Severity.FATAL, "Agent 作品页面缺失或不符合播放协议"),
     "PRESENTATION_UNREADABLE": (
         Severity.WARNING,
         "presentation.json 存在但不是合法 JSON",
