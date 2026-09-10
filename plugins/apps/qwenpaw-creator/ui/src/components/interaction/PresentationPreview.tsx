@@ -11,6 +11,7 @@ import {
 } from "@/api/creator";
 import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
 import { screens, type PreviewControl } from "./presentationDesign";
+import DesignViewport from "./DesignViewport";
 import "../../../../player/ivb/static/interaction-runtime.js";
 import "../../../../player/ivb/static/authored-player.js";
 
@@ -211,25 +212,13 @@ export function PresentationPreview({
             "，保存设计并生成后可在这里查看实际效果。"}
         </p>
       )}
-      <div
-        ref={root}
-        style={
-          review
-            ? {
-                width: mobile ? 390 : "100%",
-                maxWidth: "100%",
-                height: mobile ? 640 : 480,
-                margin: "auto",
-              }
-            : undefined
-        }
-        className={
-          review
-            ? "overflow-hidden rounded border border-[var(--color-border)]"
-            : "h-[82vh] w-full"
-        }
-        data-presentation-preview
-      />
+      <DesignViewport mobile={mobile} active={review}>
+        <div
+          ref={root}
+          className={review ? "h-full w-full" : "h-[82vh] w-full"}
+          data-presentation-preview
+        />
+      </DesignViewport>
     </div>
   );
 }

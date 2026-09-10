@@ -87,7 +87,11 @@ _INTERACTION_SYSTEM_PROMPT = (
     '- 每个选项渲染为一个可点击的 button 元素，且必须带 data-edge-ref="<边id>" 属性，'
     "属性值逐字使用给定的边 id，每个选项恰好一个，不得多不得少；\n"
     "- 从零设计布局、色彩、排版、装饰与动画，根据故事和用户要求独立创作，不套模板。"
-    "遵循画幅，响应式铺满容器；宿主不提供任何兜底视觉。\n"
+    "响应式铺满宿主容器；视频画幅不是交互容器的固定比例。"
+    "宿主不提供任何兜底视觉。\n"
+    "- 必须适配桌面 1280×720 与手机 390×640；问句、全部选项和倒计时完整可见。"
+    "禁止用固定 16:9、max-height:calc(100vw*9/16) 等限制根舞台导致手机内容裁切。"
+    "窄屏调整字号、间距和按钮布局；高度不足时允许容器内滚动，不能隐藏必要内容。\n"
     "- 若有倒计时，必须自行设计一个带 data-interaction-countdown 的文本节点；"
     "宿主只填入剩余秒数，不绘制外观。\n"
     "- 问句文字节点带 data-question，不要标在包裹按钮的容器上；"
@@ -482,6 +486,7 @@ async def execute_file_interaction_command(
                 # A presentation contains four complete screens. Keep its
                 # response bounded while allowing more time than one choice.
                 timeout=300.0 if is_presentation else 180.0,
+                thinking_budget=2048,
             )
             candidate = _strip_code_fences(raw)
             problems = (
