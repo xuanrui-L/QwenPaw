@@ -69,7 +69,10 @@ _WAN_27_IMAGE_DOCUMENTATION = (
     "https://help.aliyun.com/zh/model-studio/"
     "wan-image-generation-and-editing-api-reference"
 )
-_WAN_26_IMAGE_DOCUMENTATION = "https://help.aliyun.com/zh/model-studio/wan-image-generation-api-reference"
+_WAN_26_IMAGE_DOCUMENTATION = (
+    "https://help.aliyun.com/zh/model-studio/"
+    "wan-image-generation-api-reference"
+)
 _OPENAI_IMAGE_DOCUMENTATION = (
     "https://github.com/openai/openai-python/blob/main/"
     "src/openai/types/image_edit_params.py"
