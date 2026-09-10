@@ -107,6 +107,43 @@ def test_openai_protocol_sends_bearer_when_key_present(monkeypatch) -> None:
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
 
 
+@pytest.mark.parametrize(
+    ("model", "host", "budget", "expected"),
+    [
+        ("qwen3.7-plus", "dashscope.aliyuncs.com", 2048, 2048),
+        ("qwen3.8-max", "deployment.maas.aliyuncs.com", 2048, 2048),
+        ("qwen3.7-plus", "gateway.example.com", 2048, None),
+        ("other-model", "dashscope.aliyuncs.com", 2048, None),
+        ("qwen3.7-plus", "dashscope.aliyuncs.com", None, None),
+    ],
+)
+def test_optional_reasoning_budget_preserves_gateway_contract(
+    monkeypatch,
+    model,
+    host,
+    budget,
+    expected,
+) -> None:
+    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
+    monkeypatch.setattr(
+        text_model.model_config,
+        "get_text_model_name",
+        lambda: model,
+    )
+    monkeypatch.setattr(
+        text_model.model_config,
+        "get_text_base_url",
+        lambda: f"https://{host}/v1",
+    )
+    captured: dict = {}
+    _fake_httpx(monkeypatch, captured)
+    asyncio.run(text_model.chat_completion("ping", thinking_budget=budget))
+    if expected is None:
+        assert "thinking_budget" not in captured["body"]
+    else:
+        assert captured["body"]["thinking_budget"] == expected
+
+
 def test_anthropic_protocol_still_requires_api_key(monkeypatch) -> None:
     _patch_config(monkeypatch, protocol="Anthropic Claude", api_key="")
 

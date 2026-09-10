@@ -75,7 +75,7 @@ class _InteractionParser(HTMLParser):
             re.I,
         ):
             self.problems.append(
-                "external resources or escaped CSS are forbidden",
+                "external resources, CSS comments or escapes are forbidden",
             )
 
 

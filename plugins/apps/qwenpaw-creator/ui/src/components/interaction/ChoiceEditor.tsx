@@ -8,6 +8,7 @@ import type {
 import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import InteractionView from "./InteractionView";
+import DesignViewport from "./DesignViewport";
 import { generationLabels } from "./PresentationEditor";
 import { useDesignDraft } from "./useDesignDraft";
 
@@ -33,6 +34,7 @@ export default function ChoiceEditor({
     "design_prompt" | "options"
   >;
   const [busy, setBusy] = useState(false);
+  const [mobile, setMobile] = useState(false);
   const [selected, setSelected] = useState(creation.options[0]?.edge_ref);
   const patch = useProjectSnapshotStore((s) => s.patch);
   const basePath = `/timelines/items/${timelineId}/elements_by_id/${element.element_id}/creation`;
@@ -103,19 +105,27 @@ export default function ChoiceEditor({
       </p>
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
         <div>
-          <div
-            className="relative overflow-hidden rounded-lg bg-black"
-            style={{
-              aspectRatio: project.settings.aspect_ratio.replace(":", "/"),
-            }}
-          >
+          <div className="mb-2 flex justify-end gap-1 text-xs">
+            {[false, true].map((value) => (
+              <button
+                type="button"
+                key={String(value)}
+                className="btn-secondary"
+                aria-pressed={mobile === value}
+                onClick={() => setMobile(value)}
+              >
+                {value ? "手机" : "桌面"}
+              </button>
+            ))}
+          </div>
+          <DesignViewport mobile={mobile}>
             <InteractionView
               project={project}
               creation={creation}
               countdown={false}
               onSelect={setSelected}
             />
-          </div>
+          </DesignViewport>
           <p className="mt-2 text-xs">
             实际生成的抉择动效 · 点击选项可定位设计 · 预览中倒计时不推进
           </p>
