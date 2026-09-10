@@ -40,6 +40,7 @@ class _PresentationParser(_InteractionParser):
         self.roots = Counter()
         self.button = None
         self.labels = {}
+        self.bindings = set()
 
     def handle_starttag(self, tag, attrs):
         # Each independent protocol rule contributes a diagnostic.
@@ -51,12 +52,23 @@ class _PresentationParser(_InteractionParser):
         if tag in {"html", "head", "body"}:
             self.roots[tag] += 1
         screen = values.get("data-screen")
-        parent_screen = next((s for _, s in reversed(self.stack) if s), None)
+        parent_screen = next(
+            (s for _, s, _ in reversed(self.stack) if s),
+            None,
+        )
         if screen:
             self.screens.append(screen)
             if parent_screen:
                 self.problems.append("screens must not be nested")
         scope = screen or parent_screen
+        binding = values.get("data-bind")
+        if binding:
+            self.bindings.add((scope, binding))
+            if self.button is not None or screen:
+                self.problems.append("data-bind requires a text-only node")
+        if tag in {"button", "video"} or "data-slot" in values:
+            if binding or any(b for _, _, b in self.stack):
+                self.problems.append("data-bind must not contain controls")
         action = values.get("data-action")
         if action:
             self.actions.append(action)
@@ -88,7 +100,7 @@ class _PresentationParser(_InteractionParser):
             if scope != "play":
                 self.problems.append("interaction slot must be in play")
         if tag not in {"br", "hr", "meta"}:
-            self.stack.append((tag, screen))
+            self.stack.append((tag, screen, binding))
 
     def handle_endtag(self, tag):
         super().handle_endtag(tag)
@@ -107,6 +119,19 @@ class _PresentationParser(_InteractionParser):
         super().handle_data(data)
         if self.button is not None:
             self.button[2].append(data)
+
+    def validate_text_bindings(self):
+        required_bindings = {
+            ("title", "project.title"),
+            ("title", "project.synopsis"),
+            ("ending", "node.title"),
+            ("ending", "node.synopsis"),
+        }
+        if not required_bindings.issubset(self.bindings):
+            self.problems.append(
+                "missing required screen text bindings: "
+                + str(sorted(required_bindings - self.bindings)),
+            )
 
 
 def validate_presentation_html(
@@ -132,6 +157,7 @@ def validate_presentation_html(
         )
     if parser.video != 1 or parser.slots != 1:
         parser.problems.append("one video and one interaction slot required")
+    parser.validate_text_bindings()
     required = PRESENTATION_REQUIRED_ACTIONS
     if not required.issubset(set(parser.scoped_actions)):
         parser.problems.append(

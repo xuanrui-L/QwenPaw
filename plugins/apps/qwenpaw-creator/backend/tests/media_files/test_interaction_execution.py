@@ -955,6 +955,15 @@ def test_project_interface_review_revision_and_stability(
         lambda h: h.replace('<button data-action="replay">重新开始</button>', ""),
         lambda h: h.replace('data-action="map"', 'data-action="title"'),
         lambda h: h.replace(
+            'data-bind="node.title"',
+            'data-bind="project.title"',
+        ),
+        lambda h: h.replace('data-bind="node.synopsis"', ""),
+        lambda h: h.replace(
+            'data-screen="ending"',
+            'data-screen="ending" data-bind="node.title"',
+        ),
+        lambda h: h.replace(
             "</style>",
             '@import "https://bad.example/x.css";</style>',
         ),

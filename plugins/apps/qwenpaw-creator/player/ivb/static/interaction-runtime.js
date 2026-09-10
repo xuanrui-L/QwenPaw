@@ -8,7 +8,9 @@
     const document = container.ownerDocument;
     const root = document.createElement("div");
     root.dataset.interactionView = "";
-    root.style.cssText = "position:absolute;inset:0;overflow:hidden";
+    // The authored slot may be pointer-transparent while no choice is open.
+    // Active controls must receive events instead of passing them to video.
+    root.style.cssText = "position:absolute;inset:0;overflow:hidden;pointer-events:auto!important";
     if (point.base_frame_data_uri || point.base_frame_url) {
       const image = document.createElement("img");
       image.alt = ""; image.src = point.base_frame_data_uri || point.base_frame_url;
@@ -42,7 +44,7 @@
       frame.title = point.question || "交互动效预览";
       frame.setAttribute("sandbox", "allow-same-origin");
       frame.setAttribute("referrerpolicy", "no-referrer");
-      frame.style.cssText = "position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent";
+      frame.style.cssText = "position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;pointer-events:auto!important";
       const policy = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; form-action 'none'; base-uri 'none'">`;
       const reset = "<style>html,body{margin:0!important;width:100%!important;height:100%!important;overflow:hidden!important;box-sizing:border-box}*,*::before,*::after{box-sizing:border-box}button[data-edge-ref]{cursor:pointer}html[data-paused] *,html[data-paused] *::before,html[data-paused] *::after{animation-play-state:paused!important}</style>";
       frame.onload = () => {
