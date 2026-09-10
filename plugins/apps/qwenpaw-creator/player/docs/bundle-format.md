@@ -4,6 +4,8 @@
 >
 > `manifest.json.authored_html` 与 `presentation.html` 保存同一生成文档，offline/hosted/Creator 复用 `authored-player.js`。`content_revision` 隔离离线进度版本。旧模板已从生产导出器与项目播放器移除；测试夹具只用作 mock 合约实例，不被生产代码读取。
 
+> 首页必须绑定 `project.title`、`project.synopsis`，结局页必须绑定 `node.title`、`node.synopsis`，使不同分支展示真实结局。绑定节点不能包含按钮、视频或交互容器。交互容器出现抉择时由宿主接管点击，避免透明容器将点击穿透至视频。设计预览提供 1280×720 桌面与 390×720 手机视口，按编辑面板宽度缩放；这些是设备尺寸，不是作品布局模板。
+
 # IVB — Interactive Video Bundle 格式规范 v1
 
 > 本文是**唯一权威**。它描述 Creator(生产端)导出的 zip 到底长什么样,以及放映端
