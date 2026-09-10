@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import contextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -179,6 +181,15 @@ def test_translate_submits_async_task_polls_and_downloads_result(
 @pytest.mark.parametrize(
     ("model_name", "expected"),
     [
+        ("wan2.7-image-pro", 9),
+        ("wan2.7-image", 9),
+        ("wan2.6-image", 4),
+        ("z-image-turbo", 0),
+        (" WAN2.7-IMAGE-PRO ", 9),
+        ("wan2.7", None),
+        ("wan2.7-r2v", None),
+        ("wan2.7-i2v", None),
+        ("wan2.7-image-pro-unknown", None),
         ("qwen-image-3.0-pro", 3),
         ("qwen-image-2.0-pro-2026-06-22", 3),
         ("qwen-image-edit-plus-2025-12-15", 3),
@@ -210,3 +221,26 @@ def test_official_reference_limits_are_model_specific(model_name, expected):
     else:
         assert capability is not None
         assert capability.documentation_url.startswith("https://")
+
+
+def test_every_ui_image_preset_has_a_reference_contract() -> None:
+    """A selectable model must not fail later as an unknown capability."""
+    app_root = Path(__file__).resolve().parents[3]
+    source = (
+        app_root / "ui/src/components/creator/ModelConfigModal.tsx"
+    ).read_text(encoding="utf-8")
+    presets = source.split("const IMAGE_PRESETS:", 1)[1].split(
+        "const VIDEO_PRESETS:",
+        1,
+    )[0]
+    arrays = re.findall(r"models:\s*(\[[^\]]*\])", presets)
+    assert arrays, "No image presets found; update this contract test"
+    model_names = set(re.findall(r'"([^"\n]+)"', "".join(arrays)))
+    missing = sorted(
+        name
+        for name in model_names
+        if image_reference_capability(name) is None
+    )
+    assert (
+        not missing
+    ), f"Image presets missing reference capabilities: {missing}"
