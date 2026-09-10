@@ -120,7 +120,7 @@ from services.runtime_files.atomic_store import (
     AtomicJsonRecordStore,
     canonical_json_bytes,
 )
-from services.runtime_files.errors import RecordNotFoundError
+from services.runtime_files.errors import LockTimeoutError, RecordNotFoundError
 from services.runtime_files.execution_models import (
     SpecialistRunRecord,
     TaskAttemptStatus,
@@ -3079,7 +3079,6 @@ def _timeline_execution(
         end_seconds: float | None = None
         if isinstance(element.creation, EditCreation):
             assert isinstance(render_source, SourceVersionRenderSource)
-            assert not isinstance(render_source, ArtifactVersionRenderSource)
             assert render_source.source_out_tick is not None
             start_seconds = (
                 render_source.source_in_tick / timeline.ticks_per_second
@@ -3758,7 +3757,11 @@ class FileLocalMediaExecutionService:
             )
             total_elements = _render_element_total(spec.inputs)
             if spec.on_element_done is not None and total_elements > 0:
-                spec.on_element_done(0, total_elements)
+                await asyncio.to_thread(
+                    spec.on_element_done,
+                    0,
+                    total_elements,
+                )
             runner_output = await self.runner.render(spec)
             published_result = await asyncio.to_thread(
                 self._materialize_and_publish,
@@ -4280,9 +4283,10 @@ class FileLocalMediaExecutionService:
                         },
                     },
                 )
-            except ExecutionStateConflict:
+            except (ExecutionStateConflict, LockTimeoutError):
                 # Cancellation or another terminal transition won the Runtime
-                # lock; the renderer will observe that state before import.
+                # lock, or a Project writer delayed this optional progress
+                # update. Keep rendering; import rechecks authoritative state.
                 return
 
         spec = LocalMediaExecutionSpec(

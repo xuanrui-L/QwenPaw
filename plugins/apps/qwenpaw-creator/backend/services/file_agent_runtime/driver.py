@@ -614,6 +614,54 @@ def _timelines_have_plan(project: Any, target_refs: list[str]) -> bool:
     return True
 
 
+def _source_identity_facts(
+    project: Any,
+    target_refs: list[str],
+) -> list[dict[str, Any]]:
+    """Runtime-verified identity for each delegated source target.
+
+    Handing the specialist the sourceId/selected-version pair it would
+    otherwise spend its first VLM turn locating via read_project.
+    """
+
+    facts: list[dict[str, Any]] = []
+    for target_ref in target_refs:
+        kind, separator, identifier = str(target_ref).partition(":")
+        if kind != "asset" or not separator or not identifier:
+            continue
+        source = next(
+            (
+                item
+                for item in project.sources.sources.items.values()
+                if item.logical_asset_id == identifier
+            ),
+            None,
+        )
+        if source is None:
+            continue
+        version = project.assets.source_versions_by_id.get(
+            source.selected_asset_version_id,
+        )
+        intelligence = project.assets.intelligence_versions_by_id.get(
+            source.current_intelligence_version_id,
+        )
+        facts.append(
+            {
+                "targetRef": str(target_ref),
+                "sourceId": source.source_id,
+                "selectedAssetVersionId": source.selected_asset_version_id,
+                "name": version.name if version else source.display_name,
+                "mediaKind": version.media_kind if version else None,
+                "intelligenceMatchesSelectedVersion": bool(
+                    intelligence
+                    and intelligence.source_asset_version_id
+                    == source.selected_asset_version_id,
+                ),
+            },
+        )
+    return facts
+
+
 def _agent_waiting_review_summary(
     specialist_summary: str | None,
 ) -> str:
@@ -2087,16 +2135,22 @@ class FileCreatorAgentRuntime:
                 handle.run_id,
                 handle.epoch,
             )
-            self.work_scheduler.cancel_project(project_id)
-            self._cancel_project_specialists(project_id, reason=reason)
+            if not superseded:
+                self.work_scheduler.cancel_project(project_id)
+                self._cancel_project_specialists(project_id, reason=reason)
             handle.task.cancel()
             self.notify(project_id)
             return True
         # Signal cancellation first. Revoke may need to wait behind an atomic
         # publication already holding the in-process commit boundary; stop and
         # delete must not keep the caller waiting for that completed decision.
-        self.work_scheduler.cancel_project(project_id)
-        self._cancel_project_specialists(project_id, reason=reason)
+        # Replacing the mainline with user feedback leaves already admitted
+        # media and specialists running. Their own input guards reject stale
+        # results; cancelling the scheduler here loses synchronous provider
+        # requests while leaving their durable Tasks RUNNING forever.
+        if not superseded:
+            self.work_scheduler.cancel_project(project_id)
+            self._cancel_project_specialists(project_id, reason=reason)
         handle.task.cancel()
         cleanup = asyncio.create_task(
             asyncio.to_thread(
@@ -2362,9 +2416,9 @@ class FileCreatorAgentRuntime:
     ) -> Any | None:
         """Settle durable pauses before reconcile may dispatch anything.
 
-        Returns the converged Session, or ``None`` while the Session is
-        paused — a durable interrupt is being served, or an active Review
-        keeps the mainline waiting for the user.
+        Returns the converged Session, or ``None`` during a durable stop.
+        Review admission depends on the queued message: an explicit human
+        revision must be readable while its draft is still under review.
         """
 
         if session.status is CreatorSessionStatus.INTERRUPT_REQUESTED:
@@ -2381,11 +2435,6 @@ class FileCreatorAgentRuntime:
                 )
             return None
         session = await self._converge_resolved_review(project_id, session)
-        # Pending Review is a durable, recoverable pause. Messages may be
-        # queued while the user decides, but none may start until every active
-        # Review is resolved and the Session projection has converged.
-        if session.status is CreatorSessionStatus.PENDING_REVIEW:
-            return None
         return session
 
     async def _reconcile_project(self, project_id: str) -> None:
@@ -2482,28 +2531,25 @@ class FileCreatorAgentRuntime:
                 await self._maybe_flush_idle_notifications(project_id)
             return
         message = user_messages[0]
-        # An interruption replaces the old mainline request. Routine results
-        # queued just before it belong in the replacement's conversation
-        # history, not in a new autonomous run ahead of the human request.
-        # Keep separately budgeted review repairs and other conversations in
-        # their original order.
+        # An explicit human revision supersedes earlier automated followups
+        # in this conversation, including reviews of the now-rejected output.
+        # Their evidence remains in conversation history; starting their old
+        # repair requests first would hide the user's correction from the LLM.
+        # Coalesce queued revisions into the latest request: earlier human
+        # feedback and intervening evidence remain in chronological history.
+        # Without a human revision, automated repairs still keep their own
+        # run identities/budgets. Never cross another conversation.
         for candidate in user_messages:
             if candidate.conversation_id != message.conversation_id:
                 break
-            if candidate.review_boundary is not None:
-                if candidate.source in {"user", "review_rejection_feedback"}:
-                    message = candidate
-                break
-            if candidate.source not in BATCHABLE_NOTIFICATION_SOURCES:
-                break
-            origin_source, _ = await self._delegation_origin(
-                project_id,
-                candidate,
-            )
-            if origin_source in {
+            if candidate.source in {"user", "review_rejection_feedback"}:
+                if candidate.review_boundary is None:
+                    break
+                message = candidate
+                continue
+            if candidate.source not in BATCHABLE_NOTIFICATION_SOURCES | {
                 "run_review_feedback",
                 "render_review_feedback",
-                "review_rejection_feedback",
             }:
                 break
         if self._blocked_heads.get(project_id) == message.message_seq:
@@ -2533,9 +2579,10 @@ class FileCreatorAgentRuntime:
             return
         # A detached specialist can create a Review after its mainline run
         # already finished, so the Session never transitioned to
-        # PENDING_REVIEW. Gate on the durable Review record itself
-        # (read-only, and only when a run is about to launch): queued
-        # messages wait and are consumed once the user decides.
+        # PENDING_REVIEW. Gate automated continuations on the durable record.
+        # Human feedback may revise a still-pending draft without accepting
+        # it first. Commits keep their review policy, and production retains
+        # its separate review and execution-authorization gates.
         try:
             active_review = await asyncio.to_thread(
                 self.services.reviews.active,
@@ -2550,7 +2597,10 @@ class FileCreatorAgentRuntime:
                 project_id,
             )
             return
-        if active_review is not None:
+        if active_review is not None and message.source not in {
+            "user",
+            "review_rejection_feedback",
+        }:
             return
         run_id = f"agent-run-{uuid4().hex}"
         epoch = self._begin_epoch(project_id, run_id)
@@ -2795,6 +2845,7 @@ class FileCreatorAgentRuntime:
                 epoch=epoch,
                 request=message,
                 tools=tools,
+                batch_tail=batch[1:],
             )
             result = await self._model_loop(
                 project_id=project_id,
@@ -3059,12 +3110,19 @@ class FileCreatorAgentRuntime:
         epoch,
         request,
         tools,
+        batch_tail=None,
     ) -> list[dict[str, Any]]:
         """Start exact uploaded-source work before creative planning begins."""
         from .native_media import _version_id_from_ref
 
-        refs = request.metadata.get("assetVersionRefs") or []
-        if not isinstance(refs, list) or not refs:
+        # Consecutive upload notifications batch into one run; every batched
+        # message may carry its own refs, not just the head.
+        refs: list[Any] = []
+        for record in (request, *(batch_tail or ())):
+            record_refs = record.metadata.get("assetVersionRefs") or []
+            if isinstance(record_refs, list):
+                refs.extend(record_refs)
+        if not refs:
             return []
         base = await asyncio.to_thread(tools.read_project, project_id)
         project = base.project
@@ -3132,19 +3190,24 @@ class FileCreatorAgentRuntime:
                 ops=operations,
             )
         activity = []
-        for offset in range(0, len(targets), 10):
+        # One delegation per target: each specialist run observes only its
+        # own media and commits once, so N uploads are understood in
+        # parallel instead of serially inside a single shared run.
+        for index, target in enumerate(targets):
             activity.append(
                 await self._run_subagent(
                     project_id=project_id,
                     session_id=session_id,
                     parent_run_id=run_id,
-                    parent_action_id=f"uploads-{offset}",
+                    parent_action_id=(
+                        f"uploads-{request.message_seq}-{index}"
+                    ),
                     epoch=epoch,
                     request=request,
                     tools=tools,
                     arguments={
                         "role": SpecialistRole.SOURCE_INTELLIGENCE.value,
-                        "target_refs": targets[offset : offset + 10],
+                        "target_refs": [target],
                         "task": "理解本轮上传素材，记录其真实外观、风格与内容，保存与当前版本匹配的结果。",
                     },
                 ),
@@ -3219,15 +3282,7 @@ class FileCreatorAgentRuntime:
             },
         ]
         if source_activity:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "本轮上传素材的理解已启动："
-                    + json.dumps(source_activity, ensure_ascii=False)
-                    + "。可以先规划不依赖素材外观的内容；使用这些素材编写视觉设定前，"
-                    "先读取已保存的理解结果。不要重复委派。",
-                },
-            )
+            messages.append(_source_activity_message(source_activity))
         tool_call_count = 0
         review_ids: list[str] = []
         waiting_review_summary: str | None = None
@@ -3265,12 +3320,15 @@ class FileCreatorAgentRuntime:
         while turn_number < effective_max_turns:
             turn_number += 1
             self._assert_epoch(project_id, run_id, epoch)
-            # Human input, including undo-and-redo feedback, joins the next
-            # model turn. The agent decides how to revise the work; automated
-            # review repairs retain their separate request identity below.
+            # Human feedback already waiting at run start must also reach
+            # the first model turn. An intervening automated finding cannot
+            # hide a newer human revision; it becomes evidence for that
+            # revision, just as it does in idle admission above.
             incoming = (
                 []
                 if turn_number == 1
+                and request.source
+                not in {"initial_goal", "user", "review_rejection_feedback"}
                 else await asyncio.to_thread(
                     self.sessions.list_messages,
                     project_id,
@@ -3279,21 +3337,33 @@ class FileCreatorAgentRuntime:
                     limit=None,
                 )
             )
+            revision_seq = input_cursor
             for item in incoming:
                 if item.role != "user":
                     continue
+                if item.conversation_id != request.conversation_id:
+                    break
                 if (
-                    item.conversation_id != request.conversation_id
-                    or item.review_boundary is not None
+                    item.review_boundary is not None
+                    and item.review_boundary.interrupted_run_id == run_id
+                ):
+                    break
+                if item.source in {"user", "review_rejection_feedback"}:
+                    revision_seq = item.message_seq
+            for item in incoming:
+                if item.role != "user":
+                    continue
+                if item.conversation_id != request.conversation_id:
+                    break
+                if item.message_seq > revision_seq and (
+                    item.review_boundary is not None
                     or item.source
-                    in {
-                        "run_review_feedback",
-                        "render_review_feedback",
-                    }
+                    in {"run_review_feedback", "render_review_feedback"}
                 ):
                     break
                 if (
-                    item.source == NOTIFICATION_SOURCE
+                    item.message_seq > revision_seq
+                    and item.source == NOTIFICATION_SOURCE
                     and item.metadata.get("notificationKind")
                     == RuntimeEventKind.SUBAGENT_TERMINAL.value
                     and await self._delegation_origin(project_id, item)
@@ -3320,6 +3390,30 @@ class FileCreatorAgentRuntime:
                     },
                 )
                 input_cursor = item.message_seq
+                # Uploads may join a live run (composer sends and asset
+                # notifications both carry assetVersionRefs): understanding
+                # must start here exactly as it does for a run head, or the
+                # material silently never gets analyzed (field run
+                # 2026-09-11: a mid-run video upload produced no
+                # source_intelligence run at all).
+                if item.metadata.get("assetVersionRefs"):
+                    # Every incoming message reaches this loop separately.
+                    # No batch_tail here: the following messages start their
+                    # own delegations without merging independent requests.
+                    joined_activity = (
+                        await self._start_attached_source_understanding(
+                            project_id=project_id,
+                            session_id=session_id,
+                            run_id=run_id,
+                            epoch=epoch,
+                            request=item,
+                            tools=tools,
+                        )
+                    )
+                    if joined_activity:
+                        messages.append(
+                            _source_activity_message(joined_activity),
+                        )
             # Turn-boundary drain: quiet progress staged while this run is
             # working (e.g. a detached specialist finishing mid-run) joins
             # the live conversation as a non-durable user turn.
@@ -3781,8 +3875,8 @@ class FileCreatorAgentRuntime:
                     )
                     if pending:
                         self._assert_epoch(project_id, run_id, epoch)
-                        summary = "当前制作尚未开始。" + _agent_waiting_review_summary(
-                            None,
+                        summary = _agent_waiting_review_summary(
+                            "这项制作请求正在等待相关内容的审阅，请先完成审阅。",
                         )
                         assistant_message_id = f"message-{uuid4().hex}"
                         delta_index = 0
@@ -4089,7 +4183,7 @@ class FileCreatorAgentRuntime:
 
                     # Deliberately bypass the unattended adapter's optional
                     # motion-design model call; all local admission remains.
-                    result = await execute_file_local_media_command(
+                    execution = execute_file_local_media_command(
                         self.services,
                         project_id=project_id,
                         command=current_node.command,
@@ -4101,7 +4195,7 @@ class FileCreatorAgentRuntime:
                         ),
                     )
                 else:
-                    result = await self.work_scheduler.dispatch_node(
+                    execution = self.work_scheduler.dispatch_node(
                         project_id,
                         current_node,
                         dispatch_fingerprint,
@@ -4109,6 +4203,11 @@ class FileCreatorAgentRuntime:
                             f"project:{fresh.etag}:work-graph",
                         ),
                     )
+                result = await self.work_scheduler.await_admitted_execution(
+                    project_id,
+                    current_node.node_id,
+                    execution,
+                )
                 task_id = getattr(result, "task_id", None)
                 if task_id is None and isinstance(result, Mapping):
                     task_id = result.get("taskId")
@@ -5592,6 +5691,7 @@ class FileCreatorAgentRuntime:
         if feedback_constraint:
             user_text += "\n\n" + feedback_constraint
         native_media_parts: list[dict[str, Any]] = []
+        include_project_readers = True
         if role is SpecialistRole.SOURCE_INTELLIGENCE:
             native_media_parts = await source_intelligence_content_parts(
                 self.services,
@@ -5603,6 +5703,29 @@ class FileCreatorAgentRuntime:
                 "\n\n本消息附有本次委派需要观察的全部原生图片/视频，"
                 f"共 {len(native_media_parts)} 份。必须基于这些原生媒体进行观察，"
                 "不能把消息中的 URL 文本当作已经完成素材理解。"
+            )
+            identity_facts = _source_identity_facts(
+                snapshot.project,
+                delegated.target_refs,
+            )
+            if identity_facts:
+                user_text += (
+                    "\n\n已核验的素材身份如下（来自当前 Project）；"
+                    "直接采用，无需再定位：\n"
+                    + json.dumps(
+                        identity_facts,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            # With every target's identity verified and no matching prior
+            # intelligence to re-read, the reader tools only invite wasted
+            # VLM turns (observed: a 594s read_project turn) — drop them.
+            include_project_readers = len(identity_facts) != len(
+                delegated.target_refs,
+            ) or any(
+                fact["intelligenceMatchesSelectedVersion"]
+                for fact in identity_facts
             )
             runtime_media_facts = []
             for part in native_media_parts:
@@ -5692,6 +5815,7 @@ class FileCreatorAgentRuntime:
             self.specialist_tools.manifest_for(
                 role,
                 admitted_target_refs=delegated.target_refs,
+                include_project_readers=include_project_readers,
             ),
         )
         tool_call_count = 0
@@ -7550,7 +7674,8 @@ class FileCreatorAgentRuntime:
                     },
                 },
             )
-        appended = await asyncio.to_thread(
+        appended = await self._persist_session_append(
+            f"{project_id}: assistant message",
             self.sessions.append_message,
             project_id,
             session_id,
@@ -7597,7 +7722,8 @@ class FileCreatorAgentRuntime:
             result,
             failed=failed,
         )
-        appended = await asyncio.to_thread(
+        appended = await self._persist_session_append(
+            f"{project_id}: tool result",
             self.sessions.append_message,
             project_id,
             session_id,
@@ -8671,6 +8797,35 @@ class FileCreatorAgentRuntime:
             )
             return
 
+    async def _persist_session_append(
+        self,
+        description: str,
+        func: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        # Session appends acquire their locks before writing the record.
+        # Keep already received model/tool output while waiting for a burst
+        # of Project commits; retry only the local append, never execution.
+        # Real I/O errors propagate and the bounded backoff is cancellable.
+        delays = (0.25, 0.5, 1.0, 2.0, 2.0)
+        attempts = len(delays) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await asyncio.to_thread(func, *args, **kwargs)
+            except LockTimeoutError:
+                if attempt == attempts:
+                    raise
+                logger.warning(
+                    "session append lock contention (attempt %d/%d) "
+                    "(%s); retrying",
+                    attempt,
+                    attempts,
+                    description,
+                )
+                await asyncio.sleep(delays[attempt - 1])
+
     async def _event(
         self,
         project_id: str,
@@ -8680,36 +8835,17 @@ class FileCreatorAgentRuntime:
         request: CreatorMessageRecord,
         payload: Mapping[str, Any],
     ) -> None:
-        # A lock timeout means the append never started (the exclusive
-        # project lock was never acquired), so retrying is safe. Bursts of
-        # serial Project commits (e.g. scene auto-rereview) can hold the
-        # lock beyond one wait and must not kill the whole agent run.
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                await asyncio.to_thread(
-                    self.sessions.append_event,
-                    project_id,
-                    session_id,
-                    event_type=event_type,
-                    actor="file_agent_runtime",
-                    round_id=f"agent-round-{run_id}",
-                    message_id=request.message_id,
-                    payload=dict(payload),
-                )
-                break
-            except LockTimeoutError:
-                if attempt == attempts:
-                    raise
-                logger.warning(
-                    "event append lock contention (attempt %d/%d) "
-                    "project=%s type=%s; retrying",
-                    attempt,
-                    attempts,
-                    project_id,
-                    event_type,
-                )
-                await asyncio.sleep(attempt)
+        await self._persist_session_append(
+            f"{project_id}: {event_type}",
+            self.sessions.append_event,
+            project_id,
+            session_id,
+            event_type=event_type,
+            actor="file_agent_runtime",
+            round_id=f"agent-round-{run_id}",
+            message_id=request.message_id,
+            payload=dict(payload),
+        )
         if not event_type.endswith("_delta"):
             trace_event(
                 f"creator.{event_type}",
@@ -8848,6 +8984,18 @@ def _artifact_selection_notes(
     return notes
 
 
+def _source_activity_message(
+    source_activity: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": "本轮上传素材的理解已启动："
+        + json.dumps(source_activity, ensure_ascii=False)
+        + "。可以先规划不依赖素材外观的内容；使用这些素材编写视觉设定前，"
+        "先读取已保存的理解结果。不要重复委派。",
+    }
+
+
 def _running_message_text(
     message: CreatorMessageRecord,
     *,
@@ -8899,7 +9047,11 @@ def _message_text(
                     list(dict.fromkeys(exact_refs)),
                     ensure_ascii=False,
                     separators=(",", ":"),
-                ),
+                )
+                + "\n请先用简短的公开回复确认已收到这些素材，并结合当前项目的"
+                "实际进展说明接下来会如何安排使用它们（哪些工作现在就能继续、"
+                "哪些要等素材理解结果）。素材理解由 Runtime 自动启动并在完成后"
+                "以 Runtime 通知送达，不要为此重复委派。",
             )
     context = message.metadata.get("context")
     if isinstance(context, Mapping):

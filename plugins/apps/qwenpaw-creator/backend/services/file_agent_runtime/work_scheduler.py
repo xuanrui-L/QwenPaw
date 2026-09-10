@@ -25,7 +25,7 @@ import asyncio
 import time
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
-from domain.enums import CreatorCommandType, CreatorSessionStatus
+from domain.enums import CreatorCommandType, CreatorSessionStatus, TaskStatus
 from models.config import (
     EXECUTION_AUTHORIZATION_ALLOW_ALL,
     get_execution_authorization_mode,
@@ -37,6 +37,9 @@ from models.config import (
 from services.media_files.call_budget import (
     MediaCallBudgetExhausted,
     ensure_media_call_budget,
+)
+from services.media_files.image_execution import (
+    recover_unclaimed_image_tasks,
 )
 from services.media_files.transient_errors import is_transient_error_message
 from services.file_agent_runtime.notifications import RuntimeEventKind
@@ -296,7 +299,7 @@ class WorkGraphScheduler:
         self._transient_retries: dict[tuple[str, str, str], int] = {}
         self._transient_last: dict[tuple[str, str, str], float] = {}
         self._inflight: dict[str, set[str]] = {}
-        self._dispatch_tasks: dict[str, set[asyncio.Task[None]]] = {}
+        self._dispatch_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._preparation_tasks: dict[str, asyncio.Task[None]] = {}
         self._preparing: dict[str, set[str]] = {}
         self._closed = False
@@ -368,6 +371,36 @@ class WorkGraphScheduler:
     @staticmethod
     def _dispatch_slot(fingerprint: str) -> str:
         return dispatch_slot(fingerprint)
+
+    @classmethod
+    def manual_retry_fingerprint(cls, node: WorkNode, tasks: Sequence) -> str:
+        """A human request may move beyond a terminal execution.
+
+        Failed/cancelled slots retry, and a succeeded slot re-rolls with the
+        same inputs. The terminal task determines the next identity, so
+        concurrent clicks converge on one new task. Automatic dispatch keeps
+        its original slot; only an explicit manual request authorizes another
+        paid attempt.
+        """
+        base = fingerprint = cls._ledger_fingerprint(node)
+        by_key = {
+            key: task
+            for task in tasks
+            for key in (task.idempotency_key, task.caused_by_request_id)
+            if key
+        }
+        while True:
+            key = f"dag-{node.node_id}-{cls._dispatch_slot(fingerprint)}"
+            previous = by_key.get(key)
+            if previous is None or previous.status not in (
+                TaskStatus.CANCELLED,
+                TaskStatus.FAILED,
+                TaskStatus.SUCCEEDED,
+            ):
+                return fingerprint
+            fingerprint = (
+                f"{base}-manual-retry-{cls._dispatch_slot(previous.task_id)}"
+            )
 
     # -- lifecycle -----------------------------------------------------
 
@@ -585,6 +618,21 @@ class WorkGraphScheduler:
         except Exception:  # pylint: disable=broad-except
             logger.exception("work-graph state read failed for %s", project_id)
             return None
+
+        # A dispatch that died between task admission and the provider claim
+        # leaves a RUNNING record no executor owns; the graph would derive
+        # that node RUNNING forever and never re-dispatch. No claim means no
+        # provider spend, so closing it as a transient failure is free.
+        if await asyncio.to_thread(
+            recover_unclaimed_image_tasks,
+            self.services,
+            project_id,
+            tasks,
+        ):
+            tasks = await asyncio.to_thread(
+                self.executions.list_tasks,
+                project_id,
+            )
 
         # Auto-rereview stale scene locks before deriving the graph.
         # Without this, compose stays GATED (scene locks expired) but
@@ -862,7 +910,21 @@ class WorkGraphScheduler:
                 node.timeline_id,
                 element_id,
             )
-            if status["status"] not in {"needs_update", "needs_confirmation"}:
+            # For legacy elements with empty prompts, treat as needing sync
+            # so the scheduler can auto-generate prompts from the narrative.
+            is_legacy_with_empty_prompts = (
+                status["status"] == "legacy"
+                and not status.get("storyboardPrompt", "").strip()
+                and not status.get("videoPrompt", "").strip()
+            )
+            if (
+                status["status"]
+                not in {
+                    "needs_update",
+                    "needs_confirmation",
+                }
+                and not is_legacy_with_empty_prompts
+            ):
                 continue
             fingerprint = "prepare-" + status["baselineToken"]
             ledger_key = (project_id, node.node_id, fingerprint)
@@ -890,7 +952,12 @@ class WorkGraphScheduler:
                     project_id,
                     node.timeline_id,
                     element_id,
-                    source=status.get("suggestedSource") or "storyboardPrompt",
+                    source=(
+                        "currentPlan"
+                        if is_legacy_with_empty_prompts
+                        else status.get("suggestedSource")
+                        or "storyboardPrompt"
+                    ),
                 )
                 if not await asyncio.to_thread(self.enabled):
                     return
@@ -1432,6 +1499,36 @@ class WorkGraphScheduler:
             if project_id not in self._cancelled_projects:
                 self.wake(project_id)
 
+    async def await_admitted_execution(
+        self,
+        project_id: str,
+        node_id: str,
+        execution: Awaitable[Any],
+    ) -> Any:
+        """Own an approved request independently of its mainline waiter.
+
+        Approval and input checks must precede this call. A new message can
+        cancel the waiter, while hard-stop/shutdown still cancel this job.
+        """
+        task = asyncio.create_task(execution)
+        self._dispatch_tasks.setdefault(project_id, set()).add(task)
+        self._inflight.setdefault(project_id, set()).add(node_id)
+
+        def completed(done: asyncio.Task[Any]) -> None:
+            owned = self._dispatch_tasks.get(project_id)
+            if owned is not None:
+                owned.discard(done)
+                if not owned:
+                    self._dispatch_tasks.pop(project_id, None)
+            self._inflight.get(project_id, set()).discard(node_id)
+            if not done.cancelled():
+                done.exception()
+            if not self._closed and project_id not in self._cancelled_projects:
+                self.wake(project_id)
+
+        task.add_done_callback(completed)
+        return await asyncio.shield(task)
+
     async def dispatch_node(
         self,
         project_id: str,
@@ -1654,7 +1751,6 @@ async def _default_compose_dispatch(
         execute_file_local_media_command,
     )
     from services.runtime_files.errors import RecordNotFoundError
-    from services.runtime_files.execution_models import TaskStatus
 
     # A master render is a free local pass, so a failed attempt must not
     # freeze the slot: probe the durable ledger and mint the next retry

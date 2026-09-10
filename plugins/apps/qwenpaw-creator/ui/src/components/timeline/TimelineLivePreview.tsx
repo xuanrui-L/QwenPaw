@@ -30,10 +30,7 @@ import {
   overlayContentKind,
   resolveElementVisualMeta,
 } from "@/selectors/timelineElementSelectors";
-import {
-  InterviewSummaryBox,
-  PetOsBubble,
-} from "@/components/timeline/OverlayCopyLayer";
+import { PetOsBubble } from "@/components/timeline/OverlayCopyLayer";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 
@@ -215,33 +212,24 @@ function TextOverlayLayer({
 }) {
   const { element } = layer;
   if (element.creation.type !== "overlay") return null;
-  // Deterministic copy rendering identical to the final compositor, so the
-  // preview matches the final render.
   // Pet-OS bubble (with animal emoji) is only used when the project
-  // content_type is "pets"; otherwise fall back to the plain card style.
+  // content_type is "pets"; otherwise subtitle boxes are not rendered.
   const isPetOs =
     element.creation.vibe !== "summary" &&
     element.creation.overlay_kind !== "interview_summary" &&
     contentType === "pets";
+  if (!isPetOs) return null;
   return (
     <div
       data-live-text-overlay={element.element_id}
       className="absolute"
       style={locationBoxStyle(element.location)}
     >
-      {isPetOs ? (
-        <PetOsBubble
-          text={element.creation.text}
-          vibe={element.creation.vibe}
-          stageWidth={stageWidth}
-        />
-      ) : (
-        <InterviewSummaryBox
-          text={element.creation.text}
-          stageWidth={stageWidth}
-          stageHeight={stageHeight}
-        />
-      )}
+      <PetOsBubble
+        text={element.creation.text}
+        vibe={element.creation.vibe}
+        stageWidth={stageWidth}
+      />
     </div>
   );
 }

@@ -315,6 +315,92 @@ def test_review_opened_during_authorization_keeps_its_wait_reason(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("superseded", [False, True])
+def test_authorized_provider_outlives_feedback_but_not_hard_stop(
+    tmp_path,
+    monkeypatch,
+    superseded,
+):
+    pin(monkeypatch)
+
+    async def scenario():
+        services = create(tmp_path)
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def model(_messages, _tools):
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="media-before-feedback",
+                        name="request_workgraph_execution",
+                        arguments={
+                            "projectId": "probe-project",
+                            "targetRefs": ["asset:hero"],
+                            "kinds": ["visual"],
+                        },
+                    ),
+                ),
+            )
+
+        runtime = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(model),
+            poll_interval_seconds=0.01,
+        )
+        calls = []
+        fake_dispatch(runtime, calls, release=release, started=started)
+        try:
+            await runtime.start()
+            runtime.notify("probe-project")
+            await wait_for(
+                lambda: runtime.executions.list_execution_authorizations(
+                    "probe-project",
+                ),
+            )
+            approve(
+                runtime,
+                runtime.executions.list_execution_authorizations(
+                    "probe-project",
+                )[0],
+            )
+            await asyncio.wait_for(started.wait(), timeout=3)
+            handle = runtime._active["probe-project"]
+            await runtime.interrupt(
+                "probe-project",
+                superseded=superseded,
+                reason="agentdock_message" if superseded else "user_interrupt",
+                expected_run_id=handle.run_id,
+            )
+            await asyncio.gather(handle.task, return_exceptions=True)
+            release.set()
+            if superseded:
+                await wait_for(
+                    lambda: runtime.executions.list_tasks("probe-project")[
+                        0
+                    ].status
+                    is TaskStatus.SUCCEEDED,
+                )
+            else:
+                # The HTTP hard-stop performs this durable cleanup after
+                # signalling process-local jobs. Exercise the same boundary.
+                from api.file_session_routes import (
+                    _cancel_active_project_tasks_sync,
+                )
+
+                _cancel_active_project_tasks_sync(services, "probe-project")
+                assert (
+                    runtime.executions.list_tasks("probe-project")[0].status
+                    is TaskStatus.CANCELLED
+                )
+            assert len(calls) == 1
+        finally:
+            release.set()
+            await runtime.stop()
+
+    asyncio.run(scenario())
+
+
 def approve(runtime, record):
     runtime.executions.decide_execution_authorization(
         "probe-project",
@@ -330,7 +416,7 @@ def approve(runtime, record):
     )
 
 
-def fake_dispatch(runtime, calls):
+def fake_dispatch(runtime, calls, *, release=None, started=None):
     async def dispatch(project_id, node, fingerprint, **kwargs):
         snapshot = runtime.services.projects.read(project_id)
         assert kwargs["expected_object_versions"] == (
@@ -357,6 +443,10 @@ def fake_dispatch(runtime, calls):
             expected_status=TaskStatus.QUEUED,
             status=TaskStatus.RUNNING,
         )
+        if started is not None:
+            started.set()
+        if release is not None:
+            await release.wait()
         runtime.executions.transition_task(
             project_id,
             task.task_id,

@@ -51,6 +51,7 @@ import {
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { nodeGenerating } from "@/lib/generationActivity";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
 import { useTimelineStore } from "@/store/timelineStore";
@@ -889,18 +890,60 @@ function variantReferenceTokens(
     ...variant.reference_asset_version_ids,
     ...variant.reference_artifact_version_ids,
   ];
-  return versionIds.map((versionId, position) => ({
-    index: position + 1,
-    name: referenceVersionDisplayName(project, versionId),
+  return versionIds.map((versionId, position) => {
+    const anchor = visualAnchorToken(project, versionId);
+    if (anchor) return { ...anchor, index: position + 1 };
+    return {
+      index: position + 1,
+      name: referenceVersionDisplayName(project, versionId),
+      kind: "artifact" as const,
+      thumbUrl: refImageThumbUrl(
+        project,
+        null,
+        project.assets.artifact_versions_by_id[versionId]
+          ? `artifact-version:${versionId}`
+          : `asset-version:${versionId}`,
+      ),
+    };
+  });
+}
+
+/** A style anchor `visual:<entityId>:<variantId>` presents as the base
+    entity itself; before the base image exists the token has no thumb. */
+function resolveVisualAnchor(
+  project: ProjectDocument,
+  ref: string,
+): { name: string; versionId: string | null } | null {
+  if (!ref.startsWith("visual:")) return null;
+  for (const entityId of project.visual.entities.order) {
+    const entity = project.visual.entities.items[entityId];
+    if (!entity) continue;
+    for (const variantId of entity.variants.order) {
+      if (ref !== `visual:${entityId}:${variantId}`) continue;
+      return {
+        name: entity.name || entityId,
+        versionId:
+          entity.variants.items[variantId]?.selected_artifact_version_id ??
+          null,
+      };
+    }
+  }
+  return { name: ref, versionId: null };
+}
+
+function visualAnchorToken(
+  project: ProjectDocument,
+  ref: string,
+): Omit<PromptRichToken, "index"> | null {
+  const anchor = resolveVisualAnchor(project, ref);
+  if (!anchor) return null;
+  return {
+    name: anchor.name,
     kind: "artifact" as const,
-    thumbUrl: refImageThumbUrl(
-      project,
-      null,
-      project.assets.artifact_versions_by_id[versionId]
-        ? `artifact-version:${versionId}`
-        : `asset-version:${versionId}`,
-    ),
-  }));
+    thumbUrl: anchor.versionId
+      ? refImageThumbUrl(project, null, `artifact-version:${anchor.versionId}`)
+      : null,
+  };
 }
 
 /** Project image assets not yet referenced by this variant — pickable in the
@@ -914,6 +957,12 @@ function variantReferenceCandidates(
     ...variant.reference_artifact_version_ids,
     ...variant.generated_artifact_version_ids,
   ]);
+  // A style anchor occupies its base image's slot: offering that image
+  // again would duplicate the reference and break [Image N] numbering.
+  for (const ref of variant.reference_artifact_version_ids) {
+    const versionId = resolveVisualAnchor(project, ref)?.versionId;
+    if (versionId) taken.add(versionId);
+  }
   // Artifact versions produced by a visual entity's variants carry that
   // entity's kind so the condensed asset-library picker can offer real
   // category tabs; loose versions stay "material".
@@ -1170,6 +1219,7 @@ export function GenerationPromptEditor({
   onRegenerate,
   regenerateLabel,
   saving,
+  regenerating = false,
 }: {
   target: PromptTarget;
   onSave: (
@@ -1180,9 +1230,16 @@ export function GenerationPromptEditor({
   onRegenerate?: () => void;
   regenerateLabel: string;
   saving: boolean;
+  regenerating?: boolean;
 }) {
   const { t } = useTranslation();
   const [editOpen, setEditOpen] = useState(false);
+  // An empty prompt is a planned-but-unwritten target only until someone
+  // writes it: a user clearing the prompt to rewrite must not lock the
+  // editor out, so the awaiting state is sticky-off once non-empty.
+  const everWritten = useRef(!!target.value.trim());
+  if (target.value.trim()) everWritten.current = true;
+  const awaitingAgent = !everWritten.current;
   const softPill =
     "inline-flex h-10 shrink-0 cursor-pointer select-none items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 text-sm font-medium leading-6 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-border-strong)] disabled:cursor-not-allowed disabled:opacity-50";
   return (
@@ -1201,13 +1258,16 @@ export function GenerationPromptEditor({
           data-creator-field-label={target.label}
           className="max-h-[135px] select-text overflow-y-auto whitespace-pre-wrap text-xs leading-[1.6] text-[var(--color-text-primary)]"
         >
-          {target.value || t("assets.promptPlaceholder")}
+          {target.value ||
+            (awaitingAgent
+              ? t("r2v.awaitAgentPrompt")
+              : t("r2v.generateAndEdit", { label: target.label }))}
         </p>
         <div className="flex justify-end gap-3">
           <button
             type="button"
             data-prompt-edit={target.pointer}
-            disabled={saving}
+            disabled={saving || awaitingAgent}
             className={softPill}
             onClick={() => setEditOpen(true)}
           >
@@ -1219,7 +1279,8 @@ export function GenerationPromptEditor({
               <RegeneratePill
                 field={target.pointer}
                 label={regenerateLabel}
-                disabled={saving}
+                loading={regenerating}
+                disabled={saving || awaitingAgent}
                 onClick={onRegenerate}
               />
             </span>
@@ -2349,6 +2410,10 @@ export default function AssetsPage() {
                             key={promptTarget.pointer}
                             target={promptTarget}
                             saving={patching}
+                            regenerating={nodeGenerating(
+                              tasks,
+                              dispatchNodeIdForPrompt(promptTarget.pointer),
+                            )}
                             regenerateLabel={
                               selected.mediaKind === "video"
                                 ? t("r2v.regenerateVideo")
@@ -2364,11 +2429,13 @@ export default function AssetsPage() {
                               return () => {
                                 void dispatchWorkGraphNode(id, nodeId)
                                   .then((result) => {
-                                    message.success(
-                                      result.dispatched
-                                        ? t("r2v.regenQueued")
-                                        : t("r2v.regenUpToDate"),
-                                    );
+                                    if (result.dispatched) {
+                                      message.success(t("r2v.regenQueued"));
+                                    } else if (result.status === "running") {
+                                      message.info(t("r2v.regenRunning"));
+                                    } else {
+                                      message.info(t("r2v.regenUpToDate"));
+                                    }
                                     void refreshTasks(id);
                                     void pollOnce(id);
                                   })

@@ -7,8 +7,11 @@ import {
   getArtifactVersionMediaUrl,
   getInteractiveBundleUrl,
 } from "@/api/creator";
-import { selectNarrativeShape } from "@/selectors/timelineElementSelectors";
-import { selectFinalFilmVersionId } from "@/selectors/blueprintSelectors";
+import { selectTimelineFilmVersionId } from "@/selectors/blueprintSelectors";
+import {
+  selectLiveTimelineIds,
+  selectNarrativeShape,
+} from "@/selectors/timelineElementSelectors";
 import {
   ExportProgressCard,
   saveExportFile,
@@ -33,24 +36,26 @@ export default function ProjectExportActions({
     useState<ExportProgressState | null>(null);
   const exporting = exportProgress?.status === "running";
 
-  // The downloadable 成片: only the version the user currently has selected
-  // on the single live timeline's render slot, while it is fresh — the
-  // selector owns that contract (multi-episode projects have no whole film,
-  // and history snapshots never count as timelines).
-  const filmVersion = useMemo(() => {
-    const wholeFilmId = selectFinalFilmVersionId(project);
-    if (!wholeFilmId) return null;
-    return {
-      versionId: wholeFilmId,
-      name: project.assets.artifact_versions_by_id[wholeFilmId]?.name ?? null,
-    };
-  }, [project]);
+  // Multi-episode projects expose each selected film by its timeline title.
+  // Never infer that an individual episode represents the entire project.
+  const films = useMemo(
+    () =>
+      selectLiveTimelineIds(project).map((timelineId, index) => ({
+        timelineId,
+        versionId: selectTimelineFilmVersionId(project, timelineId),
+        name:
+          project.timelines.items[timelineId].title ||
+          t("blueprint.episodeN", { n: index + 1 }),
+      })),
+    [project, t],
+  );
+  const hasFilm = films.some((film) => film.versionId);
 
-  const downloadFilm = async () => {
-    if (!filmVersion) return;
-    const url = getArtifactVersionMediaUrl(filmVersion.versionId);
+  const downloadFilm = async (film: (typeof films)[number]) => {
+    if (!film.versionId) return;
+    const url = getArtifactVersionMediaUrl(film.versionId);
     const filename = `${
-      filmVersion.name || project.name || t("blueprint.finalCut")
+      film.name || project.name || t("blueprint.finalCut")
     }.mp4`;
     try {
       const response = await fetch(url);
@@ -136,17 +141,32 @@ export default function ProjectExportActions({
         trigger={["click"]}
         menu={{
           items: [
-            ...(shape !== "branching"
+            ...(shape === "branching"
+              ? []
+              : films.length > 1
               ? [
+                  {
+                    type: "group" as const,
+                    key: "films",
+                    label: t("blueprint.downloadFinal"),
+                    children: films.map((film) => ({
+                      key: film.timelineId,
+                      label: film.name,
+                      icon: <Download className="h-3.5 w-3.5" />,
+                      disabled: !film.versionId,
+                      onClick: () => void downloadFilm(film),
+                    })),
+                  },
+                ]
+              : [
                   {
                     key: "download",
                     label: t("blueprint.downloadFinal"),
                     icon: <Download className="h-3.5 w-3.5" />,
-                    disabled: !filmVersion,
-                    onClick: () => void downloadFilm(),
+                    disabled: !hasFilm,
+                    onClick: () => films[0] && void downloadFilm(films[0]),
                   },
-                ]
-              : []),
+                ]),
             {
               key: "export",
               label: exporting
@@ -165,7 +185,7 @@ export default function ProjectExportActions({
           title={
             shape === "branching"
               ? t("blueprint.exportProject")
-              : filmVersion
+              : hasFilm
               ? t("blueprint.downloadFinalTitle")
               : t("blueprint.waitingForFinalCut")
           }

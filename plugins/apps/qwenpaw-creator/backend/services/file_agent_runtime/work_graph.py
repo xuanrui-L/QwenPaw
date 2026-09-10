@@ -15,11 +15,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
 from domain.enums import CreatorCommandType, TaskKind, TaskStatus
+from services.media_files.visual_design_readiness import (
+    visual_design_readiness_issues,
+)
 from services.prompt_text import (
     missing_narrative_dialogue,
     video_prompt_time_error,
@@ -41,6 +45,7 @@ from services.project_files.models import (
     Project,
     R2VCreation,
     S2VCreation,
+    visual_style_anchor,
     SourceVersionRenderSource,
     T2VCreation,
 )
@@ -297,13 +302,16 @@ class WorkGraph:
         )
 
 
+TaskKey = tuple[str, str, str | None]
+
+
 def _active_task_index(
     tasks: Sequence[Any],
-) -> tuple[dict[tuple[str, str], Any], dict[tuple[str, str], Any]]:
-    """Index tasks by (kind, targetRef): active ones and latest failures."""
+) -> tuple[dict[TaskKey, Any], dict[TaskKey, Any]]:
+    """Index active tasks and latest failures within each variant's scope."""
 
-    active: dict[tuple[str, str], Any] = {}
-    failed: dict[tuple[str, str], Any] = {}
+    active: dict[TaskKey, Any] = {}
+    failed: dict[TaskKey, Any] = {}
     for task in tasks:
         metadata = getattr(task, "metadata", None) or {}
         target = str(
@@ -312,7 +320,7 @@ def _active_task_index(
         )
         if not target:
             continue
-        key = (str(task.kind), target)
+        key = (str(task.kind), target, metadata.get("variantId"))
         if task.status in (TaskStatus.QUEUED, TaskStatus.RUNNING):
             active[key] = task
         elif task.status is TaskStatus.FAILED:
@@ -320,6 +328,57 @@ def _active_task_index(
             if existing is None or task.updated_at > existing.updated_at:
                 failed[key] = task
     return active, failed
+
+
+def _variant_task(
+    index: Mapping[TaskKey, Any],
+    entity_id: str,
+    variant_id: str,
+) -> Any | None:
+    key = (TaskKind.IMAGE_GENERATION.value, f"asset:{entity_id}")
+    # Legacy single-variant tasks omitted variantId. An explicitly scoped
+    # sibling must never hide this variant's active task or latest failure.
+    return index.get((*key, variant_id)) or index.get((*key, None))
+
+
+def _gate_visual_anchors(nodes: list[WorkNode]) -> list[WorkNode]:
+    """Propagate unsettled anchors through the DAG in any authoring order.
+
+    A selected image is still outgoing when its node is STALE, FAILED or
+    waiting on another anchor. Hold idle descendants before dispatch so a
+    scheduler tick cannot launch them alongside an upstream regeneration.
+    """
+
+    by_id = {node.node_id: node for node in nodes}
+    dependents: dict[str, list[str]] = {}
+    for node in nodes:
+        for dependency in node.deps:
+            dependents.setdefault(dependency, []).append(node.node_id)
+    pending = [
+        node.node_id
+        for node in nodes
+        if node.status is not WorkNodeStatus.DONE
+    ]
+    visited: set[str] = set()
+    while pending:
+        dependency = pending.pop()
+        if dependency in visited:
+            continue
+        visited.add(dependency)
+        for node_id in dependents.get(dependency, ()):
+            node = by_id[node_id]
+            if node.status is WorkNodeStatus.RUNNING:
+                continue
+            status = node.status
+            if status in (WorkNodeStatus.READY, WorkNodeStatus.DONE):
+                status = WorkNodeStatus.GATED
+            by_id[node_id] = replace(
+                node,
+                status=status,
+                missing=tuple(dict.fromkeys((*node.missing, dependency))),
+            )
+            pending.append(node_id)
+    return [by_id[node.node_id] for node in nodes]
 
 
 def _task_error_summary(task: Any) -> str | None:
@@ -374,25 +433,59 @@ def _failure_inputs_changed(
     )
 
 
+def _as_moment(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            return _as_moment(
+                datetime.fromisoformat(value.replace("Z", "+00:00")),
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def _failure_after_selected(
+    project: Project,
+    variant: Any,
+    failure: Any,
+) -> bool:
+    artifact = project.assets.artifact_versions_by_id.get(
+        variant.selected_artifact_version_id or "",
+    )
+    failed_at = _as_moment(getattr(failure, "updated_at", None))
+    if failed_at is None:
+        return False
+    made_at = (
+        _as_moment(getattr(artifact, "created_at", None)) if artifact else None
+    )
+    return made_at is None or failed_at > made_at
+
+
 def _variant_status(
     *,
+    project: Project,
     entity: Any,
     variant: Any,
-    active: Mapping[tuple[str, str], Any],
-    failed: Mapping[tuple[str, str], Any],
+    active: Mapping[TaskKey, Any],
+    failed: Mapping[TaskKey, Any],
 ) -> tuple[WorkNodeStatus, Any | None]:
-    key = (TaskKind.IMAGE_GENERATION.value, f"asset:{entity.entity_id}")
-    task = active.get(key)
-    if task is not None and (
-        (task.metadata or {}).get("variantId") in (None, variant.variant_id)
-    ):
+    task = _variant_task(active, entity.entity_id, variant.variant_id)
+    if task is not None:
         return WorkNodeStatus.RUNNING, task
+    failure = _variant_task(failed, entity.entity_id, variant.variant_id)
     if variant.selected_artifact_version_id:
+        if failure is not None and _failure_after_selected(
+            project,
+            variant,
+            failure,
+        ):
+            # A re-roll or repair failed after this node completed: the old
+            # artifact must not mask the failure or announce success.
+            return WorkNodeStatus.FAILED, failure
         return WorkNodeStatus.DONE, None
-    failure = failed.get(key)
-    if failure is not None and (
-        (failure.metadata or {}).get("variantId") in (None, variant.variant_id)
-    ):
+    if failure is not None:
         return WorkNodeStatus.FAILED, failure
     return WorkNodeStatus.READY, None
 
@@ -598,27 +691,82 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         for variant_id in entity.variants.order:
             variant = entity.variants.items[variant_id]
             node_id = f"visual:{entity_id}:{variant_id}"
+            # Style anchors (visual:<entity>:<variant>) resolve to the base
+            # variant's currently selected image: related scenes plan their
+            # cross-references up front and the graph serialises them behind
+            # the base render instead of racing it.
+            anchor_deps: list[str] = []
+            anchor_waiting: list[str] = []
+            resolved_artifact_refs: list[str] = []
+            for ref in sorted(variant.reference_artifact_version_ids):
+                anchor = visual_style_anchor(project.visual.entities, ref)
+                if anchor is None:
+                    resolved_artifact_refs.append(ref)
+                    continue
+                anchor_entity_id, anchor_variant = anchor
+                anchor_deps.append(ref)
+                anchor_task = _variant_task(
+                    active,
+                    anchor_entity_id,
+                    anchor_variant.variant_id,
+                )
+                anchor_rendering = anchor_task is not None
+                if anchor_rendering or (
+                    not anchor_variant.selected_artifact_version_id
+                ):
+                    # No image yet, or the base is being repainted right
+                    # now: rendering against the outgoing image wastes a
+                    # paid call that the base update then quarantines.
+                    anchor_waiting.append(ref)
+                if anchor_variant.selected_artifact_version_id:
+                    resolved_artifact_refs.append(
+                        anchor_variant.selected_artifact_version_id,
+                    )
             fingerprint = _fingerprint(
                 node_id,
                 variant.prompt,
                 sorted(variant.reference_asset_version_ids),
-                sorted(variant.reference_artifact_version_ids),
+                resolved_artifact_refs,
             )
             status, task = _variant_status(
+                project=project,
                 entity=entity,
                 variant=variant,
                 active=active,
                 failed=failed,
             )
-            if status is WorkNodeStatus.FAILED and _failure_inputs_changed(
-                task,
-                node_id,
-                fingerprint,
-                media_models,
+            if (
+                status is WorkNodeStatus.FAILED
+                and not variant.selected_artifact_version_id
+                and _failure_inputs_changed(
+                    task,
+                    node_id,
+                    fingerprint,
+                    media_models,
+                )
             ):
                 status, task = WorkNodeStatus.READY, None
             missing: tuple[str, ...] = ()
             authored_text_gap = False
+            if status is WorkNodeStatus.DONE and _artifact_is_stale(
+                project,
+                variant.selected_artifact_version_id,
+                [
+                    *sorted(variant.reference_asset_version_ids),
+                    *resolved_artifact_refs,
+                ],
+                node_id=node_id,
+                dispatch_fingerprint=fingerprint,
+                tasks=tasks,
+                media_models=media_models,
+            ):
+                status = WorkNodeStatus.STALE
+            if anchor_waiting and status is not WorkNodeStatus.RUNNING:
+                # Manual re-rolls also dispatch DONE/STALE/FAILED nodes, so
+                # every idle dependent must expose its unsettled anchors.
+                if status in (WorkNodeStatus.READY, WorkNodeStatus.DONE):
+                    status = WorkNodeStatus.GATED
+                missing = tuple(anchor_waiting)
             if status is WorkNodeStatus.READY and visual_story_missing(
                 project,
                 entity_id,
@@ -657,6 +805,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     kind="visual",
                     label=f"{entity.name} · {variant_id.split(':')[-1]}",
                     status=status,
+                    deps=tuple(anchor_deps),
                     lane="visual",
                     task_id=getattr(task, "task_id", None),
                     progress=getattr(task, "progress", None),
@@ -672,8 +821,17 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     target_ref=f"asset:{entity_id}",
                     dispatch_arguments={"variantId": variant_id},
                     dispatch_fingerprint=fingerprint,
+                    regeneration_of=(
+                        variant.selected_artifact_version_id
+                        if status
+                        in (WorkNodeStatus.STALE, WorkNodeStatus.FAILED)
+                        else None
+                    ),
                 ),
             )
+
+    nodes = _gate_visual_anchors(nodes)
+    statuses.update({node.node_id: node.status for node in nodes})
 
     # ---- Lane 2: cast lineups ----------------------------------------
     def _anchor_variant_node(entity: Any) -> str | None:
@@ -701,7 +859,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             if not _entity_has_artwork(entity):
                 missing_anchors.append(anchor or ref)
         node_id = f"lineup:{lineup_id}"
-        key = (TaskKind.IMAGE_GENERATION.value, f"lineup:{lineup_id}")
+        key = (TaskKind.IMAGE_GENERATION.value, f"lineup:{lineup_id}", None)
         task = active.get(key)
         failure = failed.get(key)
         missing = tuple(missing_anchors)
@@ -767,7 +925,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         )
 
     # ---- Lane: timeline scripts (blueprint script flow) ---------------
-    # 每条 timeline 一个 kind="script" 节点：slot 无版本→READY，selected
+    # 每条 timeline 一个 kind="script" 节点：已发布正文或 selected
     # 版本存在且未 stale→DONE，版本 stale→STALE。剧本流仅在项目启用时
     # 生效（存在 timeline_script slot 或多 timeline）；旧项目（单
     # timeline 且无 script slot）不生成 script 节点，行为零回退。
@@ -788,13 +946,14 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             if selected
             else None
         )
-        key = (TaskKind.SCRIPT_DRAFT.value, f"timeline:{timeline_id}")
+        key = (TaskKind.SCRIPT_DRAFT.value, f"timeline:{timeline_id}", None)
         task = active.get(key)
         failure = failed.get(key)
         fingerprint = _fingerprint(
             node_id,
             timeline.title,
             timeline.synopsis,
+            timeline.description,
             project.strategy.creative_brief,
         )
         if task is not None:
@@ -803,6 +962,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             status = (
                 WorkNodeStatus.STALE if version.stale else WorkNodeStatus.DONE
             )
+        elif slot is None and timeline.description.strip():
+            # The authoring prompt and review UI also publish scripts in
+            # Timeline.description. Do not regenerate an accepted inline
+            # script merely because this project has multiple episodes.
+            # An existing unselected/stale artifact slot remains a gate.
+            status = WorkNodeStatus.DONE
         elif failure is not None and not _failure_inputs_changed(
             failure,
             node_id,
@@ -898,7 +1063,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     deps.append(f"visual:{entity_id}:{variant_id}")
                 gate_missing = _storyboard_gate_dependencies(
                     project,
-                    creation,
+                    element_id,
                     deps,
                 )
 
@@ -910,6 +1075,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 key = (
                     TaskKind.IMAGE_GENERATION.value,
                     f"element:{element_id}",
+                    None,
                 )
                 task = active.get(key)
                 failure = failed.get(key)
@@ -1009,7 +1175,13 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         ),
                         missing=missing,
                         authored_text_gap=authored_text_gap,
-                        prompt_sync_required=bool(storyboard_sync_gap),
+                        prompt_sync_required=(
+                            bool(storyboard_sync_gap)
+                            or (
+                                not (creation.storyboard_prompt or "").strip()
+                                and (creation.narrative or "").strip()
+                            )
+                        ),
                         locator={"page": "plan", "elementId": element_id},
                         command="GENERATE_STORYBOARD_IMAGE",
                         target_ref=f"element:{element_id}",
@@ -1026,7 +1198,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             # Video node for all types
             video_id = f"video:{element_id}"
             video_slot = _slot_selected(project, f"element:{element_id}:main")
-            key = (TaskKind.R2V_GENERATION.value, f"element:{element_id}")
+            key = (
+                TaskKind.R2V_GENERATION.value,
+                f"element:{element_id}",
+                None,
+            )
             task = active.get(key)
             failure = failed.get(key)
 
@@ -1376,7 +1552,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         task = next(
             (
                 item
-                for (kind, _), item in active.items()
+                for (kind, _, _), item in active.items()
                 if kind == TaskKind.COMPOSE.value
                 and str(
                     item.metadata.get("targetRef") or "",
@@ -1531,136 +1707,35 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
 def _storyboard_gate_dependencies(
     project: Project,
-    creation: R2VCreation,
+    element_id: str,
     deps: list[str],
 ) -> tuple[str, ...]:
-    """Mirror visual_design_readiness for one element's storyboard.
+    """Use the executor's target-scoped readiness contract for dispatch.
 
-    Machine-dispatchable gaps (unselected required variants) are appended
-    to ``deps`` as media node ids the scheduler can solve; model-only
-    gaps (undefined variants, missing multi-variant bindings, entities
-    with no variants at all — schema invariant: declared variants always
-    live in required_variant_ids) come back as plain-text reasons that
-    route to the completion resume.
+    Missing selected artwork is a media dependency; missing definitions or
+    bindings need the agent. Unrelated episodes and unbound variants cannot
+    gate an otherwise executable storyboard.
 
-    A multi-character storyboard additionally waits for any *planned*
-    lineup covering ≥2 of its characters: the lineup image is the
-    pairwise-contrast anchor (relative height/build, kit discriminators),
-    and field runs showed identity drift — duplicated jersey numbers —
-    exactly when storyboards rendered while the lineup was still absent.
-    Projects that plan no lineup are unaffected.
-
-    Declared-but-unselected lineups gate *every* storyboard, not only the
-    covering ones: the execution gate
-    (assert_visual_design_ready_for_storyboards) is project-wide, and a
-    graph that reports READY for a node the executor refuses poisons the
-    dispatch ledger before any task record exists. Field run 2026-08-12
-    (project 27dc): a single-character closing scene derived READY while
-    the counter lineup was pending, its pre-spend dispatch was rejected,
-    and the node stalled READY-but-undispatchable for 25 minutes until a
-    restart cleared the ledger.
+    Append missing media nodes once to this element's caller-owned ``deps``;
+    return non-media gaps separately.
     """
-
-    gate_missing: list[str] = []
-    referenced = dict.fromkeys(
-        [
-            *creation.character_refs,
-            *([creation.scene_ref] if creation.scene_ref is not None else []),
-            *creation.prop_refs,
-        ],
-    )
-    for ref in referenced:
-        entity = project.visual.entities.items.get(ref)
-        if entity is None:
-            continue
-        gate_missing.extend(_entity_gate_gaps(entity, ref, creation, deps))
-    for lineup_node in _covering_lineup_nodes(project, creation):
-        if lineup_node not in deps:
-            deps.append(lineup_node)
-    for lineup_node in _declared_pending_lineup_nodes(project):
-        if lineup_node not in deps:
-            deps.append(lineup_node)
-    return tuple(gate_missing)
-
-
-def _entity_gate_gaps(
-    entity: Any,
-    ref: str,
-    creation: R2VCreation,
-    deps: list[str],
-) -> list[str]:
-    """One referenced entity's model-only gaps; dispatchable ones → deps."""
 
     gaps: list[str] = []
-    if not entity.required_variant_ids:
-        if entity.selected_artifact_version_id is None:
-            gaps.append(f"{ref} 尚无使用中视觉产物")
-        return gaps
-    for required_id in entity.required_variant_ids:
-        variant = entity.variants.items.get(required_id)
-        node = f"visual:{ref}:{required_id}"
-        if variant is None:
-            gaps.append(f"{ref}/{required_id} 尚未定义")
-        elif variant.selected_artifact_version_id is None:
+    for issue in visual_design_readiness_issues(
+        project,
+        element_id=element_id,
+    ):
+        node = None
+        if issue.code == "MISSING_CAST_LINEUP_IMAGE":
+            node = f"lineup:{issue.entity_id}"
+        elif issue.code == "MISSING_SELECTED_ARTIFACT" and issue.variant_id:
+            node = f"visual:{issue.entity_id}:{issue.variant_id}"
+        if node is not None:
             if node not in deps:
                 deps.append(node)
-    if len(entity.required_variant_ids) > 1 and not (
-        creation.visual_variant_refs.get(ref)
-    ):
-        gaps.append(f"{ref} 缺少 variant 绑定")
-    return gaps
-
-
-def _declared_pending_lineup_nodes(project: Project) -> list[str]:
-    """Unselected lineups any enabled element declared, project-wide.
-
-    Mirrors _lineup_readiness_issues exactly: a declared
-    ``cast_lineup_refs`` blocks every storyboard in the project until the
-    lineup artwork is selected.
-    """
-
-    pending: list[str] = []
-    for timeline_id in narrative_timeline_ids(project):
-        timeline = project.timelines.items[timeline_id]
-        for element in timeline.elements_by_id.values():
-            creation = element.creation
-            if not element.enabled or not isinstance(creation, R2VCreation):
-                continue
-            for lineup_ref in creation.cast_lineup_refs:
-                lineup = project.visual.cast_lineups.items.get(lineup_ref)
-                node = f"lineup:{lineup_ref}"
-                if (
-                    lineup is None
-                    or lineup.selected_artifact_version_id is None
-                ) and node not in pending:
-                    pending.append(node)
-    return pending
-
-
-def _covering_lineup_nodes(
-    project: Project,
-    creation: R2VCreation,
-) -> list[str]:
-    """Planned-but-unselected lineups this storyboard should wait for.
-
-    Explicit ``cast_lineup_refs`` always count; otherwise any planned
-    lineup sharing ≥2 characters with the element covers it. Selected
-    lineups resolve to DONE nodes and never block.
-    """
-
-    if len(creation.character_refs) < 2:
-        return []
-    element_cast = set(creation.character_refs)
-    explicit = set(creation.cast_lineup_refs)
-    nodes: list[str] = []
-    for lineup_id in project.visual.cast_lineups.order:
-        lineup = project.visual.cast_lineups.items[lineup_id]
-        covering = lineup_id in explicit or (
-            len(element_cast & set(lineup.character_refs)) >= 2
-        )
-        if covering:
-            nodes.append(f"lineup:{lineup_id}")
-    return nodes
+        else:
+            gaps.append(issue.message())
+    return tuple(gaps)
 
 
 def _entity_has_artwork(entity: Any) -> bool:

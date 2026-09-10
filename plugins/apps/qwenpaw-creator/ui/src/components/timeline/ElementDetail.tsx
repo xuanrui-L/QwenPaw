@@ -1056,21 +1056,24 @@ export default function ElementDetail({
                         })
                       }
                     />
-                    {element.render_source?.type === "source_asset_version" && (
+                    {(element.render_source?.type === "source_asset_version" ||
+                      element.render_source?.type === "artifact_version") && (
                       <div className="rounded-lg bg-[var(--color-bg-secondary)] p-3 text-[11px] leading-5 text-[var(--color-text-secondary)]">
                         <b
                           className="block truncate text-[var(--color-text-primary)]"
-                          title={decodeURIComponent(
-                            project.assets.source_versions_by_id[
+                          title={
+                            (element.render_source.type === "artifact_version"
+                              ? project.assets.artifact_versions_by_id
+                              : project.assets.source_versions_by_id)[
                               element.render_source.version_id
-                            ]?.name || t("elementDetail.currentSource"),
-                          )}
+                            ]?.name || t("elementDetail.currentSource")
+                          }
                         >
-                          {decodeURIComponent(
-                            project.assets.source_versions_by_id[
-                              element.render_source.version_id
-                            ]?.name || t("elementDetail.currentSource"),
-                          )}
+                          {(element.render_source.type === "artifact_version"
+                            ? project.assets.artifact_versions_by_id
+                            : project.assets.source_versions_by_id)[
+                            element.render_source.version_id
+                          ]?.name || t("elementDetail.currentSource")}
                         </b>
                         <br />
                         {t("elementDetail.using")}{" "}

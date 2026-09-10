@@ -11,7 +11,7 @@ import PromptEditorModal from "../PromptEditorModal";
 import PromptTokenEditor, {
   type PromptTokenEditorHandle,
 } from "../PromptTokenEditor";
-import type { PromptRichToken } from "../PromptRichBlock";
+import PromptRichBlock, { type PromptRichToken } from "../PromptRichBlock";
 
 const token: PromptRichToken = {
   index: 1,
@@ -132,5 +132,34 @@ describe("prompt image interactions", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "完 成" }));
     expect(onDone).toHaveBeenCalledWith("前[Image 1] 后", []);
+  });
+
+  it("gates editing and regeneration until the agent writes the prompt", () => {
+    const props = {
+      label: "视频提示词",
+      onChange: vi.fn(),
+      field: "video_prompt",
+      path: "/episodes/0/video_prompt",
+      tokens: [] as PromptRichToken[],
+      onRegenerate: vi.fn(),
+      regenerateLabel: "再次生成视频",
+    };
+    const { rerender } = render(<PromptRichBlock {...props} value="" />);
+    expect(screen.getByText("等待 Agent 编写生成提示词")).toBeInTheDocument();
+    expect(document.querySelector("[data-prompt-edit]")).toBeDisabled();
+    expect(document.querySelector("[data-prompt-regenerate]")).toBeDisabled();
+
+    rerender(<PromptRichBlock {...props} value="一段写好的提示词" />);
+    expect(document.querySelector("[data-prompt-edit]")).toBeEnabled();
+    expect(document.querySelector("[data-prompt-regenerate]")).toBeEnabled();
+
+    // Clearing a written prompt is an edit in progress, not a hand-back to
+    // the agent: the editor must stay usable or the user is locked out.
+    rerender(<PromptRichBlock {...props} value="" />);
+    expect(
+      screen.queryByText("等待 Agent 编写生成提示词"),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector("[data-prompt-edit]")).toBeEnabled();
+    expect(document.querySelector("[data-prompt-regenerate]")).toBeEnabled();
   });
 });

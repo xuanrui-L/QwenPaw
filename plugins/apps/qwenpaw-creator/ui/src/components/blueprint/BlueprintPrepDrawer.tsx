@@ -22,6 +22,7 @@ import {
 } from "@/selectors/blueprintSelectors";
 import { visualVariantLabel } from "@/lib/visualVariants";
 import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
+import { nodeGenerating } from "@/lib/generationActivity";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import {
   GenerationPromptEditor,
@@ -98,40 +99,65 @@ function VisualDetail({
   const { t } = useTranslation();
   const patchProject = useProjectSnapshotStore((state) => state.patch);
   const patching = useProjectSnapshotStore((state) => state.patching);
-  const selectedVersionId = entitySelectedVersionId(entity);
+  const [viewedVariantId, setViewedVariantId] = useState<string | null>(null);
+  const variantIds = entity.variants.order.filter(
+    (id) => entity.variants.items[id],
+  );
+  const variantId =
+    (viewedVariantId && variantIds.includes(viewedVariantId)
+      ? viewedVariantId
+      : null) ??
+    (entity.canonical_variant_id &&
+    variantIds.includes(entity.canonical_variant_id)
+      ? entity.canonical_variant_id
+      : variantIds[0]);
+  const variant = variantId ? entity.variants.items[variantId] : null;
+  const selectedVersionId = variant
+    ? variant.selected_artifact_version_id
+    : entitySelectedVersionId(entity);
   const [viewedVersionId, setViewedVersionId] = useState<string | null>(null);
-  useEffect(() => setViewedVersionId(null), [entity.entity_id]);
-  const displayedVersionId = viewedVersionId ?? selectedVersionId;
-  const imageUrl = displayedVersionId
-    ? getArtifactVersionMediaUrl(displayedVersionId)
-    : null;
+  useEffect(() => {
+    setViewedVariantId(null);
+    setViewedVersionId(null);
+  }, [entity.entity_id]);
   const versionIds = Array.from(
     new Set([
-      ...entity.variants.order.flatMap(
-        (id) => entity.variants.items[id]?.generated_artifact_version_ids ?? [],
-      ),
+      ...(variant?.generated_artifact_version_ids ?? []),
       ...(selectedVersionId ? [selectedVersionId] : []),
     ]),
   );
+  const displayedVersionId =
+    viewedVersionId && versionIds.includes(viewedVersionId)
+      ? viewedVersionId
+      : selectedVersionId;
+  const imageUrl = displayedVersionId
+    ? getArtifactVersionMediaUrl(displayedVersionId)
+    : null;
   // Same editing surface as the asset library detail: fullscreen prompt
   // editor with pickable reference images, plus the DAG regenerate pill.
   const promptTarget = useMemo(
-    () => visualEntityPromptTarget(project, entity, selectedVersionId),
-    [project, entity, selectedVersionId],
+    () =>
+      visualEntityPromptTarget(project, entity, selectedVersionId, variantId),
+    [project, entity, selectedVersionId, variantId],
   );
   const regenerateNodeId = promptTarget
     ? dispatchNodeIdForPrompt(promptTarget.pointer)
     : null;
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
+  const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
 
   const regenerate = () => {
     if (!regenerateNodeId) return;
     void dispatchWorkGraphNode(projectId, regenerateNodeId)
       .then((result) => {
-        message.success(
-          result.dispatched ? t("r2v.regenQueued") : t("r2v.regenUpToDate"),
-        );
+        if (result.dispatched) {
+          message.success(t("r2v.regenQueued"));
+        } else if (result.status === "running") {
+          message.info(t("r2v.regenRunning"));
+        } else {
+          message.info(t("r2v.regenUpToDate"));
+        }
         void refreshTasks(projectId);
         void pollOnce(projectId);
       })
@@ -171,6 +197,32 @@ function VisualDetail({
         {t("blueprint.backToList")}
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pb-2">
+        {variantIds.length > 1 && (
+          <div>
+            <FieldLabel>{t("blueprint.variantSelector")}</FieldLabel>
+            <div className="flex flex-wrap gap-1.5">
+              {variantIds.map((id) => (
+                <button
+                  type="button"
+                  key={id}
+                  aria-pressed={id === variantId}
+                  title={entity.variants.items[id].requirements}
+                  onClick={() => {
+                    setViewedVariantId(id);
+                    setViewedVersionId(null);
+                  }}
+                  className={`rounded-lg border px-3 py-1.5 text-left text-xs ${
+                    id === variantId
+                      ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                      : "border-[var(--color-border)] text-[var(--color-text-secondary)]"
+                  }`}
+                >
+                  {visualVariantLabel(entity.variants.items[id])}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="flex min-h-[220px] shrink-0 items-center justify-center rounded-[10px] border border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-0">
           {imageUrl ? (
             // Full-frame portrait designs must show the whole figure —
@@ -250,6 +302,7 @@ function VisualDetail({
                 : promptTarget
             }
             saving={patching}
+            regenerating={nodeGenerating(tasks, regenerateNodeId)}
             regenerateLabel={t("r2v.regenerateImage")}
             onRegenerate={regenerateNodeId ? regenerate : undefined}
             onSave={savePromptTarget}
@@ -579,11 +632,14 @@ export default function BlueprintPrepDrawer({
   const [kind, setKind] = useState<VisualKind>("character");
   useEffect(() => {
     setDetail(focus);
-    if (focus?.type === "visual") {
-      const entity = project.visual.entities.items[focus.entityId];
-      if (entity) setKind(entity.kind);
-    }
-  }, [focus, open, project]);
+  }, [focus, open]);
+  const focusedKind =
+    focus?.type === "visual"
+      ? project.visual.entities.items[focus.entityId]?.kind
+      : null;
+  useEffect(() => {
+    if (focusedKind) setKind(focusedKind);
+  }, [focusedKind]);
 
   // Escape closes the page (detail level first, then the page itself).
   useEffect(() => {
