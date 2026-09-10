@@ -45,6 +45,7 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
     graph = derive_work_graph(
         snapshot.project,
         tasks=tasks,
+        pending_reviews=services.reviews.all_pending(project_id),
         media_models=(get_image_model_name(), get_video_model_name()),
     )
     return {

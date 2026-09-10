@@ -5411,6 +5411,9 @@ async def start_file_media_execution_services(
             raise RuntimeError(
                 "R2V execution service already uses another provider",
             )
+    from .interaction_execution import recover_interrupted_interaction_tasks
+
+    await asyncio.to_thread(recover_interrupted_interaction_tasks, services)
     await recover_interrupted_image_tasks(services)
     from .local_execution import recover_file_local_media_project
     from services.project_files.store import ProjectIntegrityError

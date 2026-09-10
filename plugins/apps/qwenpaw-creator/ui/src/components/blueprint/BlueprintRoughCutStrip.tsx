@@ -1,3 +1,5 @@
+import InteractionView from "@/components/interaction/InteractionView";
+import { PresentationPreview } from "@/components/interaction/PresentationEditor";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -183,16 +185,41 @@ function PreviewCinema({
     [project.narrative_edges],
   );
 
-  const interactionQuestion = useMemo(() => {
-    const timeline = project.timelines.items[currentId];
-    if (!timeline) return null;
-    for (const element of Object.values(timeline.elements_by_id)) {
-      if (element.enabled && element.creation.type === "interaction") {
-        return element.creation.question || null;
-      }
-    }
-    return null;
-  }, [project, currentId]);
+  const interactionElement = useMemo(
+    () =>
+      Object.values(
+        project.timelines.items[currentId]?.elements_by_id ?? {},
+      ).find(
+        (element) => element.enabled && element.creation.type === "interaction",
+      ),
+    [project, currentId],
+  );
+  const creation =
+    interactionElement?.creation.type === "interaction"
+      ? interactionElement.creation
+      : null;
+  const openChoice = useCallback(() => {
+    if (!creation) return false;
+    setOptions(
+      creation.options.flatMap((option) => {
+        const edge = edges.find(
+          (edge) =>
+            edge.edge_id === option.edge_ref &&
+            edge.source_timeline_id === currentId,
+        );
+        return edge
+          ? [
+              {
+                edgeId: edge.edge_id,
+                label: edge.label,
+                target: edge.target_timeline_id,
+              },
+            ]
+          : [];
+      }),
+    );
+    return true;
+  }, [creation, edges, currentId]);
 
   const advanceTo = useCallback((timelineId: string) => {
     setCurrentId(timelineId);
@@ -208,6 +235,7 @@ function PreviewCinema({
       setEnded(true);
       return;
     }
+    if (openChoice()) return;
     const outgoing = edges.filter(
       (edge) => edge.source_timeline_id === currentId,
     );
@@ -234,7 +262,7 @@ function PreviewCinema({
       }
     }
     setEnded(true);
-  }, [wholeFilm, edges, liveOrder, currentId, labelOf, advanceTo]);
+  }, [wholeFilm, edges, liveOrder, currentId, labelOf, advanceTo, openChoice]);
 
   const replay = useCallback(() => {
     setReplayNonce((nonce) => nonce + 1);
@@ -293,6 +321,21 @@ function PreviewCinema({
                 setAspectRatio(videoWidth / videoHeight);
               }
             }}
+            onTimeUpdate={(event) => {
+              if (
+                interactionElement &&
+                !options &&
+                event.currentTarget.currentTime >=
+                  interactionElement.span.start_tick /
+                    project.timelines.items[currentId].ticks_per_second
+              ) {
+                event.currentTarget.pause();
+                openChoice();
+              }
+            }}
+            onPlay={(event) => {
+              if (options) event.currentTarget.pause();
+            }}
             onEnded={handleEnded}
             onError={() => setError(true)}
             style={
@@ -313,21 +356,21 @@ function PreviewCinema({
 
         {/* Branch choice overlay — every fork stays previewable. */}
         {options && (
-          <div className="absolute inset-0 flex flex-col items-center justify-end gap-2.5 bg-gradient-to-t from-black/85 via-black/35 to-transparent pb-[12%]">
-            <p className="mb-1 px-6 text-center text-sm font-bold text-white drop-shadow">
-              {interactionQuestion ?? t("blueprint.previewChoice")}
-            </p>
-            {options.map((option) => (
-              <button
-                key={option.edgeId}
-                type="button"
-                onClick={() => advanceTo(option.target)}
-                className="w-[min(78%,320px)] rounded-xl border border-white/40 bg-white/10 px-4 py-2.5 text-[13px] font-bold text-white backdrop-blur-md transition-all hover:scale-[1.03] hover:border-[var(--color-accent)] hover:bg-[var(--color-accent)]/50"
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
+          <InteractionView
+            creation={
+              creation ?? {
+                type: "interaction",
+                question: t("blueprint.previewChoice"),
+                options: options.map((option) => ({ edge_ref: option.edgeId })),
+              }
+            }
+            project={project}
+            onSelect={(ref) => {
+              const target = options.find((option) => option.edgeId === ref)
+                ?.target;
+              if (target) advanceTo(target);
+            }}
+          />
         )}
 
         {/* Playback finished — offer replay from the entry. */}
@@ -396,7 +439,11 @@ export default function BlueprintRoughCutStrip({
   const filmUrl = filmVersionId
     ? getArtifactVersionMediaUrl(filmVersionId)
     : null;
-  if (!frames.length && !filmUrl) return null;
+  const hasSegment = selectLiveTimelineIds(project).some((id) => {
+    const slot = project.assets.artifact_slots_by_id[`timeline:${id}:render`];
+    return slot?.kind === "final_video" && Boolean(slot.selected_version_id);
+  });
+  if (!frames.length && !filmUrl && !hasSegment) return null;
 
   const timelineLabelOf = (timelineId: string) => {
     const timeline = project.timelines.items[timelineId];
@@ -493,16 +540,39 @@ export default function BlueprintRoughCutStrip({
           </button>
         </span>
       </div>
-      {playingId && (
-        <PreviewCinema
-          project={project}
-          startId={playingId}
-          filmUrl={filmUrl}
-          labelOf={timelineLabelOf}
-          srcOf={finalCutUrlOf}
-          onClose={() => setPlayingId(null)}
-        />
-      )}
+      {playingId === FULL_FILM_ID && isBranching
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/70 p-5"
+              role="dialog"
+              aria-label="互动作品预览"
+              data-authored-cinema
+            >
+              <div className="w-[94vw] overflow-hidden rounded-lg bg-[var(--color-bg-primary)]">
+                <div className="flex justify-end p-2">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setPlayingId(null)}
+                  >
+                    关闭预览
+                  </button>
+                </div>
+                <PresentationPreview project={project} review={false} />
+              </div>
+            </div>,
+            document.body,
+          )
+        : playingId && (
+            <PreviewCinema
+              project={project}
+              startId={playingId}
+              filmUrl={filmUrl}
+              labelOf={timelineLabelOf}
+              srcOf={finalCutUrlOf}
+              onClose={() => setPlayingId(null)}
+            />
+          )}
       {!collapsed && (
         <div className="mt-2 flex items-stretch gap-3 overflow-x-auto pb-1.5">
           {timelineIds.map((timelineId) => {

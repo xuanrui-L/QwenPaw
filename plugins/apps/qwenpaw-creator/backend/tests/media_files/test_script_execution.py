@@ -262,3 +262,85 @@ def test_same_guidance_retry_still_replays(tmp_path, monkeypatch) -> None:
     assert retry.replayed
     assert retry.artifact_version_id == first.artifact_version_id
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("change", ["stale", "guidance"])
+def test_identical_redraft_is_fresh_and_next_retry_does_not_regenerate(
+    tmp_path,
+    monkeypatch,
+    change,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    first = _draft(services, key="original")
+    if change == "stale":
+        base = services.projects.read(PROJECT_ID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["assets"]["artifact_versions_by_id"][
+            first.artifact_version_id
+        ]["stale"] = True
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin=ChangeOrigin.FRONTEND_EDIT,
+            review_policy=ReviewPolicy.AUTO_FIX,
+            caused_by_request_id="invalidate",
+            round_id="invalidate",
+            transaction_id="invalidate",
+        )
+    guidance = "保留同样的正文" if change == "guidance" else None
+    second = _draft(services, key="regenerate", guidance=guidance)
+    assert second.artifact_version_id != first.artifact_version_id
+    snapshot = services.projects.read(PROJECT_ID)
+    assert not snapshot.project.assets.artifact_versions_by_id[
+        second.artifact_version_id
+    ].stale
+    assert (
+        derive_work_graph(snapshot.project).by_id["script:timeline:ep2"].status
+        is WorkNodeStatus.DONE
+    )
+    third = _draft(services, key="retry", guidance=guidance)
+    assert (
+        third.replayed
+        and third.artifact_version_id == second.artifact_version_id
+    )
+    assert len(calls) == 2
+    assert services.projects.read(PROJECT_ID).etag == snapshot.etag
+
+
+def test_changed_inputs_during_model_call_do_not_publish_old_script(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path)
+
+    async def change_then_return(*_args, **_kwargs):
+        base = services.projects.read(PROJECT_ID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["timelines"]["items"]["timeline:ep2"][
+            "synopsis"
+        ] = "New story during generation"
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin=ChangeOrigin.FRONTEND_EDIT,
+            review_policy=ReviewPolicy.AUTO_FIX,
+            caused_by_request_id="during",
+            round_id="during",
+            transaction_id="during",
+        )
+        return DRAFT
+
+    monkeypatch.setattr(
+        script_execution.text_model,
+        "chat_completion",
+        change_then_return,
+    )
+    with pytest.raises(ValidationError, match="旧结果未发布"):
+        _draft(services, key="old-inputs")
+    assert (
+        "script:timeline:ep2"
+        not in services.projects.read(
+            PROJECT_ID,
+        ).project.assets.artifact_slots_by_id
+    )

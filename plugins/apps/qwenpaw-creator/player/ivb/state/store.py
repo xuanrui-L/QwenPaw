@@ -542,6 +542,30 @@ class ProgressStore:
 
         now = _now()
         with closing(self._connect()) as conn, conn:
+            # Ownership and pointer replacement are one cross-process atomic
+            # decision. HTTP preflight alone races concurrent uploads.
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute(
+                "SELECT owner_user_id, storage_path FROM projects "
+                "WHERE project_id = ?",
+                (record.project_id,),
+            ).fetchone()
+            if previous is not None:
+                if previous["owner_user_id"] != record.owner_user_id:
+                    raise PermissionError(
+                        "Only the owner may replace this project",
+                    )
+                if previous["storage_path"] != record.storage_path:
+                    for table in (
+                        "progress",
+                        "visits",
+                        "choice_stats",
+                        "endings",
+                    ):
+                        conn.execute(
+                            f"DELETE FROM {table} WHERE project_id = ?",
+                            (record.project_id,),
+                        )
             conn.execute(
                 """
                 INSERT INTO projects

@@ -323,6 +323,7 @@ export interface AudioCreationDocument extends ProjectJsonRecord {
 export interface InteractionOptionDocument extends ProjectJsonRecord {
   /** Points at Project.narrative_edges.edge_id: label/target derive from the edge. */
   edge_ref: string;
+  design_prompt?: string;
   hotspot?: ElementLocationDocument | null;
 }
 
@@ -330,6 +331,7 @@ export interface InteractionOptionDocument extends ProjectJsonRecord {
 export interface InteractionCreationDocument extends ProjectJsonRecord {
   type: "interaction";
   question: string;
+  design_prompt?: string;
   options: InteractionOptionDocument[];
   countdown_seconds?: number | null;
   /** Edge taken when the countdown expires without a click. */
@@ -338,6 +340,35 @@ export interface InteractionCreationDocument extends ProjectJsonRecord {
   base_frame_ref?: string | null;
   motion?: MotionGraphicDocument | null;
   fallback?: "static_endcard" | "split_publish";
+}
+
+export type PresentationScreenId = "title" | "play" | "map" | "ending";
+export type PresentationActionId =
+  | "start"
+  | "resume"
+  | "toggle_play"
+  | "map"
+  | "map_back"
+  | "replay"
+  | "title"
+  | "jump"
+  | "reset";
+export interface InteractiveControlDesignDocument extends ProjectJsonRecord {
+  label: string;
+  design_prompt: string;
+}
+export interface InteractiveScreenDesignDocument extends ProjectJsonRecord {
+  design_prompt: string;
+  controls: Partial<
+    Record<PresentationActionId, InteractiveControlDesignDocument>
+  >;
+}
+export interface InteractivePresentationDocument extends ProjectJsonRecord {
+  design_prompt: string;
+  screens?: Partial<
+    Record<PresentationScreenId, InteractiveScreenDesignDocument>
+  >;
+  motion: MotionGraphicDocument | null;
 }
 
 export type ElementCreationDocument =
@@ -485,6 +516,7 @@ export interface ProjectDocument extends ProjectJsonRecord {
   timelines: ProjectEntityCollection<TimelineDocument>;
   /** Branching edges between timelines (schema v9; [] / absent = no branches). */
   narrative_edges?: NarrativeEdgeDocument[];
+  interactive_presentation?: InteractivePresentationDocument;
   assets: ProjectAssetIndexDocument;
 }
 

@@ -13,53 +13,86 @@ edges 指纹嵌入 design_notes），同输入重复派发直接复放。
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
-from domain.errors import ValidationError
+from domain.errors import ValidationError, ConflictError
+from domain.enums import TaskKind, TaskStatus
 from models import text_model
+from services.runtime_files.execution_store import ProjectExecutionStore
+from services.runtime_files.execution_models import TaskRecord
+from services.runtime_files.errors import RecordNotFoundError
+from services.project_files.interaction_html import validate_interaction_html
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     narrative_timeline_ids,
     InteractionCreation,
+    InteractivePresentation,
     MotionGraphic,
     NarrativeEdge,
     Project,
     TimelineElement,
 )
-from services.runtime_files.models import ChangeOrigin, ReviewPolicy
+from services.project_files.presentation_html import validate_presentation_html
+from services.runtime_files.models import (
+    ChangeOrigin,
+    ReviewPolicy,
+    ReviewBoundary,
+)
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
 
 from .interaction_fingerprint import (
     FINGERPRINT_MARKER as _FINGERPRINT_MARKER,
-    interaction_request_fingerprint as _request_fingerprint,
+    interaction_request_fingerprint,
 )
+from .presentation_authoring import (
+    PRESENTATION_TARGET,
+    PRESENTATION_SYSTEM_PROMPT,
+    presentation_fingerprint,
+    presentation_prompt,
+)
+
+
+def _request_fingerprint(creation, edges, project):
+    if isinstance(creation, InteractivePresentation):
+        return presentation_fingerprint(project, creation)
+    return interaction_request_fingerprint(creation, edges, project)
+
+
+def _creation_for_target(project, element_id):
+    if element_id == PRESENTATION_TARGET:
+        return "", project.interactive_presentation
+    timeline_id, element = _locate_interaction(project, element_id)
+    return timeline_id, element.creation
+
 
 logger = setup_logger("media_files.interaction")
 
 # 不合格输出（缺 data-edge-ref 等）只重试一次：文本调用便宜但不免费，
 # 连续两次结构性不合格说明 prompt/输入需要人工调整，报 ModelError。
 _MAX_MODEL_ATTEMPTS = 2
+_ACTIVE_TASKS: set[tuple[str, str, str]] = set()
 
 # MotionGraphic.html 的模型约束（min_length=32 / max_length=200_000）。
 _MIN_HTML_CHARS = 32
 _MAX_HTML_CHARS = 200_000
-
-_EDGE_REF_ATTR = re.compile(r"data-edge-ref\s*=\s*[\"']([^\"']+)[\"']")
 
 _INTERACTION_SYSTEM_PROMPT = (
     "你是互动短剧的抉择动效设计师。输出一份完整的纯 HTML 文档"
     "（以 <!DOCTYPE html> 开头），作为观众抉择点的可点击动效层。硬性要求：\n"
     "- 全部样式与动画写在内联 <style> 中，只用 CSS 动画（@keyframes）；\n"
     "- 禁止出现 <script>，禁止引用任何外部资源（外链、外部字体、外部图片）；\n"
-    '- 每个选项渲染为一个可点击元素，且必须带 data-edge-ref="<边id>" 属性，'
+    '- 每个选项渲染为一个可点击的 button 元素，且必须带 data-edge-ref="<边id>" 属性，'
     "属性值逐字使用给定的边 id，每个选项恰好一个，不得多不得少；\n"
-    "- 蓝图风格约束：深色影视氛围、竖屏 9:16 布局、问题文案醒目居中，"
-    "选项按钮沿画面下部排布；若有倒计时则在画面角落预留倒计时视觉位；\n"
-    "- 4-6 秒循环的呼吸/浮动动画，突出选项的可点击感；\n"
+    "- 从零设计布局、色彩、排版、装饰与动画，根据故事和用户要求独立创作，不套模板。"
+    "遵循画幅，响应式铺满容器；宿主不提供任何兜底视觉。\n"
+    "- 若有倒计时，必须自行设计一个带 data-interaction-countdown 的文本节点；"
+    "宿主只填入剩余秒数，不绘制外观。\n"
+    "- 问句文字节点带 data-question，不要标在包裹按钮的容器上；"
+    "每个 button 内用 span data-option-label 表达权威文案；\n"
+    "- 不用 CSS 注释、转义、url()、@import；不使用事件属性、外部图片或链接；\n"
     "- 只输出 HTML 文档本身，不要任何解释，不要 markdown 代码围栏。"
 )
 
@@ -72,6 +105,7 @@ class FileInteractionExecutionResult:
     project_etag: str
     project_generation: int
     replayed: bool
+    task_id: str | None = None
 
 
 def _stable_id(prefix: str, project_id: str, idempotency_key: str) -> str:
@@ -126,7 +160,12 @@ def _build_interaction_prompt(
         option_lines.append(
             f"{index}. 边id `{option.edge_ref}` · 选项文案「"
             f"{edge.label or option.edge_ref}」 · 走向《{target_title}》"
-            + (f" · 抉择语「{edge.prompt}」" if edge.prompt else ""),
+            + (f" · 抉择语「{edge.prompt}」" if edge.prompt else "")
+            + (
+                f" · 按钮外观要求「{option.design_prompt}」"
+                if option.design_prompt
+                else ""
+            ),
         )
     countdown = (
         f"{creation.countdown_seconds:.0f} 秒后自动选择默认项"
@@ -141,6 +180,13 @@ def _build_interaction_prompt(
     sections = [
         f"项目：{project.name}（{project.description or '无描述'}）",
         f"源集（抉择点所在叙事节点）：{timeline.title or timeline_id}",
+        f"画幅：{project.settings.aspect_ratio}；"
+        f"视觉风格：{project.visual.style}；视觉基调：{project.visual.visual_bible}",
+        f"设计与修改要求：{creation.design_prompt or '清晰可点击，与项目视觉一致'}",
+        f"作品页面设计要求：{project.interactive_presentation.design_prompt}",
+        f"背景帧引用：{creation.base_frame_ref or '播放器在抉择时暂停的画面'}；不嵌入图片资源",
+        "热点（normalized_canvas，宿主应用精确位置）："
+        f"{[o.model_dump(mode='json') for o in creation.options]}",
         f"抉择问题：{creation.question}",
         "选项（每个选项一个可点击元素，data-edge-ref 逐字用边id）：\n" + "\n".join(option_lines),
         f"倒计时：{countdown}",
@@ -168,28 +214,13 @@ def _validate_motion_html(
 ) -> list[str]:
     """结构性校验：不合格原因列表（空 = 合格）。"""
 
-    problems: list[str] = []
-    lowered = html.lower()
-    if "<script" in lowered:
-        problems.append("包含 <script>，动效必须是纯 CSS 动画")
-    refs = _EDGE_REF_ATTR.findall(html)
-    expected = len(creation.options)
-    if len(refs) != expected:
-        problems.append(
-            f"data-edge-ref 出现 {len(refs)} 次，应为选项数 {expected} 次",
-        )
-    missing = [
-        option.edge_ref
-        for option in creation.options
-        if option.edge_ref not in refs
-    ]
-    if missing:
-        problems.append("缺少选项 data-edge-ref：" + "、".join(missing))
-    if len(html) < _MIN_HTML_CHARS:
-        problems.append("HTML 文档过短")
-    if len(html) > _MAX_HTML_CHARS:
-        problems.append(f"HTML 文档超过 {_MAX_HTML_CHARS} 字符上限")
-    return problems
+    return validate_interaction_html(
+        html,
+        [o.edge_ref for o in creation.options],
+        require_countdown=bool(
+            creation.countdown_seconds and creation.default_edge_ref,
+        ),
+    )
 
 
 def _design_notes(
@@ -230,26 +261,41 @@ def _publish_interaction_motion(
     design_notes: str,
     fingerprint: str,
     idempotency_key: str,
+    input_fingerprint: str,
+    design_prompt: str,
+    task_id: str,
 ) -> FileInteractionExecutionResult:
     """写回 element.creation.motion，走既有提交边界（commit 时全量校验）。"""
 
     with services.projects.lifecycle_lock(project_id):
         base = services.projects.read(project_id)
         working = base.project.model_copy(deep=True)
-        timeline = working.timelines.items.get(timeline_id)
-        element = (
-            timeline.elements_by_id.get(element_id)
-            if timeline is not None
-            else None
-        )
-        if element is None or not isinstance(
-            element.creation,
-            InteractionCreation,
+        _, creation = _creation_for_target(working, element_id)
+        current_edges = {
+            edge.edge_id: edge for edge in working.narrative_edges
+        }
+        if (
+            _request_fingerprint(creation, current_edges, working)
+            != input_fingerprint
         ):
-            raise ValidationError(
-                f"抉择交互 element 已不存在: {element_id}",
+            raise ConflictError(
+                "Interaction inputs changed during generation; "
+                "stale result was discarded",
             )
-        element.creation.motion = MotionGraphic(
+        if services.reviews.all_pending(project_id):
+            raise ConflictError(
+                "Project has pending review; interaction result was discarded",
+            )
+        task = ProjectExecutionStore(services.root).get_task(
+            project_id,
+            task_id,
+        )
+        if task.status is not TaskStatus.RUNNING:
+            raise ConflictError(
+                "Interaction task was cancelled; result was discarded",
+            )
+        creation.design_prompt = design_prompt
+        creation.motion = MotionGraphic(
             format="html_css",
             html=html,
             fps=24,
@@ -260,7 +306,12 @@ def _publish_interaction_motion(
             base=base,
             candidate=working.model_dump(mode="json"),
             origin=ChangeOrigin.RUNTIME_TASK,
-            review_policy=ReviewPolicy.AUTO_FIX,
+            review_policy=ReviewPolicy.REQUIRE_REVIEW,
+            review_boundary=ReviewBoundary(
+                request_id=idempotency_key,
+                accepted_generation=base.generation,
+                accepted_etag=base.etag,
+            ),
             caused_by_request_id=idempotency_key,
             round_id=_stable_id("round", project_id, idempotency_key),
             transaction_id=_stable_id(
@@ -268,7 +319,7 @@ def _publish_interaction_motion(
                 project_id,
                 idempotency_key,
             ),
-            advance_accepted_baseline=True,
+            advance_accepted_baseline=False,
             _lifecycle_lock_held=True,
         )
         services.poller.note_commit(commit.snapshot)
@@ -279,6 +330,7 @@ def _publish_interaction_motion(
         project_etag=commit.snapshot.etag,
         project_generation=commit.snapshot.generation,
         replayed=False,
+        task_id=task_id,
     )
 
 
@@ -289,20 +341,33 @@ async def execute_file_interaction_command(
     target_ref: str,
     arguments: Mapping[str, Any],
     idempotency_key: str,
+    expected_object_versions: Sequence[str] = (),
 ) -> FileInteractionExecutionResult:
     """为一个抉择 element 起草 html_css 动效并写回 creation.motion。"""
+    # Keep admission, generation, publication and durable failure in one flow.
+    # pylint: disable=too-many-branches,too-many-statements
 
-    element_id = _element_id_from_ref(target_ref)
+    is_presentation = target_ref == f"project:{project_id}"
+    element_id = (
+        PRESENTATION_TARGET
+        if is_presentation
+        else _element_id_from_ref(target_ref)
+    )
     snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    if any(
+        not value.startswith(f"project:{snapshot.etag}:")
+        for value in expected_object_versions
+    ):
+        raise ConflictError(
+            "Interaction command target changed before admission",
+        )
     project = snapshot.project
-    timeline_id, element = _locate_interaction(project, element_id)
-    creation = element.creation
-    assert isinstance(creation, InteractionCreation)
+    timeline_id, creation = _creation_for_target(project, element_id)
 
     edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
     unknown = [
         option.edge_ref
-        for option in creation.options
+        for option in getattr(creation, "options", [])
         if option.edge_ref not in edges_by_id
     ]
     if unknown:
@@ -310,10 +375,19 @@ async def execute_file_interaction_command(
             "交互选项引用未知分支边: " + "、".join(unknown),
         )
 
-    fingerprint = _request_fingerprint(creation, edges_by_id)
+    input_fingerprint = _request_fingerprint(creation, edges_by_id, project)
+    guidance = str(arguments.get("guidance") or "").strip()
+    if guidance:
+        creation = creation.model_copy(update={"design_prompt": guidance})
+    fingerprint = _request_fingerprint(creation, edges_by_id, project)
+    dispatch_key = idempotency_key
     # 与 script_execution 一致：stale 重派共享节点派发 key，但发布事务
     # 必须换新 id；用请求指纹为持久 id 定界，避免撞旧事务。
-    idempotency_key = f"{idempotency_key}:{fingerprint[:16]}"
+    idempotency_key = _stable_id(
+        "interaction",
+        project_id,
+        f"{idempotency_key}:{fingerprint}",
+    )
     motion = creation.motion
     if (
         _motion_is_drafted(motion)
@@ -333,58 +407,231 @@ async def execute_file_interaction_command(
             replayed=True,
         )
 
-    prompt = _build_interaction_prompt(
-        project,
-        timeline_id,
-        creation,
-        edges_by_id,
-    )
-    guidance = str(arguments.get("guidance") or "").strip()
-    if guidance:
-        prompt += f"\n\n额外修改意见（必须遵循）：{guidance}"
-
-    html: str | None = None
-    problems: list[str] = []
-    attempt_prompt = prompt
-    for _attempt in range(_MAX_MODEL_ATTEMPTS):
-        raw = await text_model.chat_completion(
-            attempt_prompt,
-            system_prompt=_INTERACTION_SYSTEM_PROMPT,
-            temperature=0.5,
+    execution = ProjectExecutionStore(services.root)
+    task_id = _stable_id("task", project_id, idempotency_key)
+    if services.reviews.all_pending(project_id):
+        raise ConflictError(
+            "Approve or reject pending project changes "
+            "before generating interaction motion",
         )
-        candidate = _strip_code_fences(raw)
-        problems = _validate_motion_html(candidate, creation)
-        if not problems:
-            html = candidate
-            break
-        logger.warning(
-            "interaction draft invalid output for %s: %s",
-            element_id,
-            "；".join(problems),
-        )
-        attempt_prompt = (
-            prompt
-            + "\n\n上一次输出不合格（"
-            + "；".join(problems)
-            + "），请严格按硬性要求重新输出完整 HTML 文档。"
-        )
-    if html is None:
+    try:
+        existing = execution.get_task(project_id, task_id)
+    except RecordNotFoundError:
+        existing = None
+    if existing is not None:
+        if existing.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+            raise ConflictError("Interaction generation already running")
         raise ModelError(
-            "抉择动效生成结果不合格：" + "；".join(problems),
+            "Interaction task already finished; "
+            "edit the design or explicitly retry with a new key",
             retryable=False,
         )
-
-    return await asyncio.to_thread(
-        _publish_interaction_motion,
-        services,
-        project_id=project_id,
-        timeline_id=timeline_id,
-        element_id=element_id,
-        html=html,
-        design_notes=_design_notes(creation, edges_by_id, fingerprint),
-        fingerprint=fingerprint,
-        idempotency_key=idempotency_key,
+    execution.create_task(
+        TaskRecord(
+            task_id=task_id,
+            project_id=project_id,
+            kind=TaskKind.INTERACTION_DRAFT,
+            request_fingerprint=fingerprint,
+            idempotency_key=dispatch_key,
+            input_generation=snapshot.generation,
+            input_etag=snapshot.etag,
+            input_refs=[target_ref],
+            metadata={
+                "targetRef": target_ref,
+                "timelineId": timeline_id,
+                "elementId": element_id,
+                "inputFingerprint": input_fingerprint,
+            },
+        ),
     )
+    attempt_id = f"{task_id}-attempt-1"
+    execution.append_task_attempt(
+        project_id,
+        task_id,
+        event_id=f"{attempt_id}-start",
+        attempt_id=attempt_id,
+        status="RUNNING",
+        input={"fingerprint": fingerprint},
+    )
+    prompt = (
+        presentation_prompt(project, creation)
+        if is_presentation
+        else _build_interaction_prompt(
+            project,
+            timeline_id,
+            creation,
+            edges_by_id,
+        )
+    )
+    active_key = (str(services.root), project_id, task_id)
+    _ACTIVE_TASKS.add(active_key)
+    try:
+        html = None
+        problems = []
+        attempt_prompt = prompt
+        for attempt in range(_MAX_MODEL_ATTEMPTS):
+            raw = await text_model.chat_completion(
+                attempt_prompt,
+                system_prompt=(
+                    PRESENTATION_SYSTEM_PROMPT
+                    if is_presentation
+                    else _INTERACTION_SYSTEM_PROMPT
+                ),
+                temperature=0.5,
+                max_tokens=12000 if is_presentation else 6000,
+            )
+            candidate = _strip_code_fences(raw)
+            problems = (
+                validate_presentation_html(
+                    candidate,
+                    narrative_timeline_ids(project),
+                    {
+                        key: value.model_dump(mode="json")
+                        for key, value in creation.screens.items()
+                    },
+                )
+                if is_presentation
+                else _validate_motion_html(candidate, creation)
+            )
+            if not problems:
+                html = candidate
+                break
+            attempt_prompt = (
+                prompt
+                + "\n\n上一次输出不合格（"
+                + "；".join(problems)
+                + "），请重新输出完整 HTML。"
+            )
+        if html is None:
+            raise ModelError(
+                "抉择动效生成结果不合格：" + "；".join(problems),
+                retryable=False,
+            )
+        result = await asyncio.to_thread(
+            _publish_interaction_motion,
+            services,
+            project_id=project_id,
+            timeline_id=timeline_id,
+            element_id=element_id,
+            html=html,
+            design_notes=(
+                "Agent-authored project interface\n"
+                f"{_FINGERPRINT_MARKER}{fingerprint}"
+                if is_presentation
+                else _design_notes(creation, edges_by_id, fingerprint)
+            ),
+            fingerprint=fingerprint,
+            idempotency_key=idempotency_key,
+            input_fingerprint=input_fingerprint,
+            design_prompt=creation.design_prompt,
+            task_id=task_id,
+        )
+        execution.append_task_attempt(
+            project_id,
+            task_id,
+            event_id=f"{attempt_id}-end",
+            attempt_id=attempt_id,
+            status="SUCCEEDED",
+            output_refs=[target_ref],
+            output={
+                "projectGeneration": result.project_generation,
+                "reviewRequired": True,
+                "modelAttempts": attempt + 1,
+            },
+        )
+        return result
+    except BaseException as exc:
+        status = (
+            TaskStatus.CANCELLED
+            if isinstance(exc, asyncio.CancelledError)
+            else (
+                TaskStatus.QUARANTINED
+                if isinstance(exc, ConflictError)
+                else TaskStatus.FAILED
+            )
+        )
+        current = execution.get_task(project_id, task_id)
+        if current.status is TaskStatus.RUNNING:
+            execution.append_task_attempt(
+                project_id,
+                task_id,
+                event_id=f"{attempt_id}-end",
+                attempt_id=attempt_id,
+                status=status.value,
+                error={"message": str(exc), "retryable": False},
+            )
+        raise
+    finally:
+        _ACTIVE_TASKS.discard(active_key)
+
+
+def recover_interrupted_interaction_tasks(
+    services: CreatorFileServices,
+) -> int:
+    """Converge a published result or park an interrupted one-shot text call.
+
+    Creator supports one backend process. Active calls in that process are
+    excluded; restarting must never resubmit a possibly billed model request.
+    """
+    execution = ProjectExecutionStore(services.root)
+    recovered = 0
+    for project_id in services.projects.discover_project_ids():
+        for task in execution.list_tasks(project_id):
+            if (
+                task.kind is not TaskKind.INTERACTION_DRAFT
+                or task.status not in {TaskStatus.QUEUED, TaskStatus.RUNNING}
+            ):
+                continue
+            if (str(services.root), project_id, task.task_id) in _ACTIVE_TASKS:
+                continue
+            project = services.projects.read(project_id).project
+            try:
+                _, creation = _creation_for_target(
+                    project,
+                    str(task.metadata.get("elementId", "")),
+                )
+                published = bool(
+                    creation.motion
+                    and f"{_FINGERPRINT_MARKER}{task.request_fingerprint}"
+                    in creation.motion.design_notes,
+                )
+            except ValidationError:
+                published = False
+            status = TaskStatus.SUCCEEDED if published else TaskStatus.FAILED
+            updates = (
+                {"result": {"reviewRequired": True}}
+                if published
+                else {
+                    "error": {
+                        "message": (
+                            "Interaction generation interrupted; "
+                            "edit inputs or explicitly retry"
+                        ),
+                        "retryable": False,
+                    },
+                }
+            )
+            attempts = execution.list_task_attempts(project_id, task.task_id)
+            if attempts and attempts[-1].status.value == "RUNNING":
+                execution.append_task_attempt(
+                    project_id,
+                    task.task_id,
+                    event_id=f"{attempts[-1].attempt_id}-recovered",
+                    attempt_id=attempts[-1].attempt_id,
+                    status=status.value,
+                    output=updates.get("result", {}),
+                    error=updates.get("error"),
+                )
+            else:
+                execution.transition_task(
+                    project_id,
+                    task.task_id,
+                    expected_status=task.status,
+                    status=status,
+                    updates=updates,
+                )
+            recovered += 1
+    return recovered
 
 
 __all__ = [

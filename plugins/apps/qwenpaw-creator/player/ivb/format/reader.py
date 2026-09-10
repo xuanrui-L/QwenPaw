@@ -160,6 +160,8 @@ class ZipBundleSource(BundleSource):
         self.path = path
         self.label = str(path)
         self._archive = zipfile.ZipFile(path)
+        names = self._archive.namelist()
+        self.duplicate_members = len(names) != len(set(names))
         self._members = {
             info.filename
             for info in self._archive.infolist()
@@ -490,6 +492,11 @@ def _parse_edges(
             prompt=str(item.get("prompt") or ""),
             target_timeline_id=target,
             tone=str(tone) if tone is not None else None,
+            source_timeline_id=(
+                str(item["source_timeline_id"])
+                if item.get("source_timeline_id") is not None
+                else None
+            ),
         )
     return edges
 
@@ -526,6 +533,17 @@ def _parse_interactions(
                 )
         countdown = item.get("countdown_seconds")
         try:
+            countdown = float(countdown) if countdown is not None else None
+        except (TypeError, ValueError):
+            sink.append(
+                errors.make(
+                    "INTERACTION_CONTRACT",
+                    where,
+                    "countdown_seconds must be numeric",
+                ),
+            )
+            countdown = None
+        try:
             at_seconds = float(item.get("at_seconds", 0.0))
         except (TypeError, ValueError):
             sink.append(
@@ -538,6 +556,16 @@ def _parse_interactions(
                 at_seconds=at_seconds,
                 question=str(item.get("question") or ""),
                 options=tuple(options),
+                motion_html=(
+                    str(item["motion_html"])
+                    if item.get("motion_html") is not None
+                    else None
+                ),
+                base_frame_data_uri=(
+                    str(item["base_frame_data_uri"])
+                    if item.get("base_frame_data_uri") is not None
+                    else None
+                ),
                 countdown_seconds=(
                     float(countdown) if countdown is not None else None
                 ),
@@ -556,7 +584,8 @@ def _parse_presentation(
     sink: list[Diagnostic],
 ) -> Presentation:
     # theme / screens / stylesheets 三段各自带校验分支,合并超限;拆开反割裂。
-    # pylint: disable=too-many-branches
+    # pylint: disable=too-many-branches,too-many-return-statements
+    # pylint: disable=too-many-statements
     if not source.names() or PRESENTATION_NAME not in source.names():
         return Presentation()
     where = PRESENTATION_NAME
@@ -582,6 +611,22 @@ def _parse_presentation(
             ),
         )
         return Presentation(present=True)
+
+    if raw.get("format") == "agent_html_css":
+        from .presentation_html import validate_presentation_html
+
+        try:
+            # The member name is a format contract, not a visual template.
+            if raw.get("document") != "presentation.html":
+                raise ValueError("document must be presentation.html")
+            html = source.read_bytes("presentation.html").decode("utf-8")
+            problems = validate_presentation_html(html)
+            if problems:
+                raise ValueError("; ".join(problems))
+        except (ValueError, OSError, KeyError) as exc:
+            sink.append(errors.make("PRESENTATION_CONTRACT", where, str(exc)))
+            return Presentation(present=True)
+        return Presentation(present=True, authored_html=html)
 
     theme_fields = {
         "accent": "accent",
@@ -729,6 +774,8 @@ def inspect_bundle(path: str | Path) -> Inspection:
             durations={},
         )
 
+    if getattr(source, "duplicate_members", False):
+        diagnostics.append(errors.make("DUPLICATE_MEMBER", source.label))
     for name in sorted(members):
         if not is_safe_member_name(name):
             diagnostics.append(
@@ -766,6 +813,32 @@ def inspect_bundle(path: str | Path) -> Inspection:
     edges = _parse_edges(raw, diagnostics)
     interactions = _parse_interactions(raw, diagnostics)
     presentation = _parse_presentation(source, diagnostics)
+    if presentation.authored_html:
+        from .presentation_html import validate_presentation_html
+
+        problems = validate_presentation_html(
+            presentation.authored_html,
+            list(nodes),
+        )
+        if problems:
+            diagnostics.append(
+                errors.make(
+                    "PRESENTATION_CONTRACT",
+                    PRESENTATION_NAME,
+                    "; ".join(problems),
+                ),
+            )
+        if (
+            raw.get("authored_html") is not None
+            and raw.get("authored_html") != presentation.authored_html
+        ):
+            diagnostics.append(
+                errors.make(
+                    "PRESENTATION_CONTRACT",
+                    PRESENTATION_NAME,
+                    "manifest and presentation document differ",
+                ),
+            )
 
     segments = {
         str(timeline_id): str(path_value)

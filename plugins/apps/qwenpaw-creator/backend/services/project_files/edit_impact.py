@@ -159,7 +159,10 @@ def _mark_timeline_render_stale(
         "artifact_slots_by_id",
     ).items():
         slot = _record(raw_slot)
-        if slot.get("owner_ref") != owner_ref:
+        if (
+            slot.get("owner_ref") != owner_ref
+            or slot.get("kind") != "final_video"
+        ):
             continue
         _mark_selected_stale(
             document,
@@ -360,6 +363,10 @@ def _apply_element_path(  # pylint: disable=too-many-branches
     if element is None:
         return
     impact.affected_element_ids.add(element_id)
+    # Audience interactions are played separately from the final cut.
+    # Editing/generating their HTML must not invalidate paid video work.
+    if _record(element.get("creation")).get("type") == "interaction":
+        return
     suffix = tokens[5:]
     if not suffix:
         _mark_timeline_render_stale(document, timeline_id, impact)
@@ -594,6 +601,56 @@ def _pointer_unchanged(
     return base_found == candidate_found and base_value == candidate_value
 
 
+def _script_inputs(document: Mapping[str, Any]) -> Any:
+    """Only authoring inputs, never downstream elements or frozen history.
+
+    The script prompt embeds the live narrative structure, so changing a
+    synopsis/edge can invalidate scripts in other episodes too.
+    """
+    timelines = _items(document, "timelines", "items")
+    order = _record(document.get("timelines")).get("order", [])
+    strategy = _record(document.get("strategy"))
+    sources = _items(document, "sources", "sources")
+    source_items = _record(sources.get("items"))
+    return (
+        tuple(
+            document.get(key) for key in ("name", "description", "scenario")
+        ),
+        tuple(
+            strategy.get(key)
+            for key in (
+                "creative_brief",
+                "audience",
+                "creative_direction",
+                "constraints",
+            )
+        ),
+        _record(document.get("settings")).get("target_duration_seconds"),
+        [
+            (
+                tid,
+                *(
+                    _record(timelines.get(tid)).get(key)
+                    for key in (
+                        "title",
+                        "synopsis",
+                        "planned_duration_seconds",
+                    )
+                ),
+            )
+            for tid in order
+            if not tid.startswith("snapshot:")
+        ],
+        document.get("narrative_edges", []),
+        [
+            _record(source_items.get(sid)).get(
+                "current_intelligence_version_id",
+            )
+            for sid in sources.get("order", [])
+        ],
+    )
+
+
 def apply_frontend_edit_impacts(
     candidate: Mapping[str, Any],
     submitted_pointers: Sequence[str],
@@ -604,6 +661,22 @@ def apply_frontend_edit_impacts(
 
     document = copy.deepcopy(dict(candidate))
     impact = EditImpact()
+    if base is not None and _script_inputs(base) != _script_inputs(document):
+        for slot_id, raw_slot in _items(
+            document,
+            "assets",
+            "artifact_slots_by_id",
+        ).items():
+            slot = _record(raw_slot)
+            if slot.get("kind") == "timeline_script" and not str(
+                slot.get("owner_ref", ""),
+            ).startswith("timeline:snapshot:"):
+                _mark_selected_stale(
+                    document,
+                    slot_id,
+                    reason="剧本创作依据已修改，需要重新起草",
+                    impact=impact,
+                )
     for pointer in dict.fromkeys(submitted_pointers):
         if is_prompt_sync_pointer(pointer):
             # This stamp is derived under the commit lock. It does not alter

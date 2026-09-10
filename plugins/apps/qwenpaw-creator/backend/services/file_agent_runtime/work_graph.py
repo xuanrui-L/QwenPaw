@@ -35,6 +35,7 @@ from services.project_files.blueprint_readiness import (
 )
 from services.media_files.interaction_fingerprint import (
     motion_matches_request,
+    interaction_request_fingerprint,
 )
 from services.project_files.models import (
     ArtifactVersionRenderSource,
@@ -263,6 +264,20 @@ class WorkGraph:
                 blocked.append(node)
                 continue
             if node.status is WorkNodeStatus.STALE:
+                # A stale bundle is a projection of its segment dependencies.
+                # Regenerating those segments already owns this gap; waking
+                # the authoring agent here causes needless project rewrites.
+                if (
+                    node.kind == "bundle"
+                    and node.missing
+                    and all(
+                        miss in by_id
+                        and by_id[miss].kind in DISPATCHABLE_KINDS
+                        and by_id[miss].status is not WorkNodeStatus.FAILED
+                        for miss in node.missing
+                    )
+                ):
+                    continue
                 # In authorized unattended execution, complete stale media
                 # and their machine-owned dependencies belong to scheduling.
                 if (
@@ -667,6 +682,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
     project: Project,
     tasks: Sequence[Any] = (),
     *,
+    pending_reviews: Sequence[Any] = (),
     media_models: tuple[str, str] | None = None,
 ) -> WorkGraph:
     """Project the production DAG from durable facts. Pure function.
@@ -676,6 +692,23 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
     half a dozen accumulators through helpers for no clarity gain.
     """
 
+    pending_interactions = set()
+    pending_presentation = False
+    for review in pending_reviews:
+        for operation in review.operations:
+            if str(operation.json_pointer or "").startswith(
+                "/interactive_presentation",
+            ):
+                pending_presentation = True
+            tokens = str(operation.json_pointer or "").split("/")
+            if (
+                len(tokens) > 5
+                and tokens[1] == "timelines"
+                and tokens[4] == "elements_by_id"
+            ):
+                pending_interactions.add(
+                    tokens[5].replace("~1", "/").replace("~0", "~"),
+                )
     active, failed = _active_task_index(tasks)
     prompt_sync_document = project.model_dump(mode="json")
     nodes: list[WorkNode] = []
@@ -1403,6 +1436,63 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
     # deps = 该 timeline 的 script 节点（若存在）：剧本定稿前问题/选项
     # 文案还会变，先起草只会浪费再重画。
     interaction_node_ids: list[str] = []
+    if project.narrative_edges:
+        from services.media_files.presentation_authoring import (
+            presentation_fingerprint,
+            presentation_is_current,
+        )
+
+        node_id = "interaction:project"
+        semantic = presentation_fingerprint(project)
+        fingerprint = _fingerprint(node_id, semantic)
+        deps = tuple(script_node_by_timeline.values())
+        key = (
+            TaskKind.INTERACTION_DRAFT.value,
+            f"project:{project.project_id}",
+        )
+        task, failure = active.get(key), failed.get(key)
+        missing = _upstream_missing(deps, statuses)
+        if task is not None:
+            status = WorkNodeStatus.RUNNING
+        elif pending_presentation:
+            status = WorkNodeStatus.WAITING_REVIEW
+        elif presentation_is_current(project):
+            status = WorkNodeStatus.DONE
+        elif missing:
+            status = WorkNodeStatus.GATED
+        elif (
+            failure is not None
+            and (getattr(failure, "metadata", None) or {}).get(
+                "inputFingerprint",
+            )
+            == semantic
+        ):
+            status = WorkNodeStatus.FAILED
+        else:
+            status = WorkNodeStatus.READY
+        add(
+            WorkNode(
+                node_id=node_id,
+                kind="interaction",
+                label="作品页面 · 首页、播放、地图与结局",
+                status=status,
+                deps=deps,
+                lane="interaction",
+                task_id=getattr(task, "task_id", None),
+                error=_task_error_summary(failure)
+                if status is WorkNodeStatus.FAILED
+                else None,
+                missing=missing,
+                locator={
+                    "page": "blueprint",
+                    "field": "/interactive_presentation/motion",
+                },
+                command="GENERATE_INTERACTION_MOTION",
+                target_ref=f"project:{project.project_id}",
+                dispatch_fingerprint=fingerprint,
+            ),
+        )
+        interaction_node_ids.append(node_id)
     edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
     for timeline_id in live_timeline_ids:
         timeline = project.timelines.items[timeline_id]
@@ -1422,39 +1512,45 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             )
             task = active.get(key)
             failure = failed.get(key)
-            fingerprint = _fingerprint(
-                node_id,
-                creation.question,
-                str(creation.countdown_seconds or ""),
-                creation.default_edge_ref or "",
-                sorted(
-                    (
-                        option.edge_ref,
-                        getattr(edges_by_id.get(option.edge_ref), "label", ""),
-                        getattr(
-                            edges_by_id.get(option.edge_ref),
-                            "prompt",
-                            "",
-                        ),
-                    )
-                    for option in creation.options
-                ),
+            semantic_fingerprint = interaction_request_fingerprint(
+                creation,
+                edges_by_id,
+                project,
             )
+            fingerprint = _fingerprint(node_id, semantic_fingerprint)
             motion = creation.motion
             # DONE only while the draft still covers the CURRENT
             # question/options/edges; an edited choice point re-opens.
-            drafted = motion_matches_request(motion, creation, edges_by_id)
+            drafted = motion_matches_request(
+                motion,
+                creation,
+                edges_by_id,
+                project,
+            )
             missing = _upstream_missing(deps, statuses)
             if task is not None:
                 status = WorkNodeStatus.RUNNING
+            elif element_id in pending_interactions:
+                status = WorkNodeStatus.WAITING_REVIEW
             elif drafted:
                 status = WorkNodeStatus.DONE
             elif missing:
                 status = WorkNodeStatus.GATED
-            elif failure is not None and not _failure_inputs_changed(
-                failure,
-                node_id,
-                fingerprint,
+            elif failure is not None and (
+                (getattr(failure, "metadata", None) or {}).get(
+                    "inputFingerprint",
+                )
+                == semantic_fingerprint
+                or (
+                    not (getattr(failure, "metadata", None) or {}).get(
+                        "inputFingerprint",
+                    )
+                    and not _failure_inputs_changed(
+                        failure,
+                        node_id,
+                        fingerprint,
+                    )
+                )
             ):
                 status = WorkNodeStatus.FAILED
             else:
@@ -1634,12 +1730,14 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
 
     # ---- Interactive bundle gate (方案 2.7b) ---------------------------
     # 分支项目的最终交付是互动包，不是单一 mp4。bundle 节点是纯门禁投影：
-    # 全部可达分段有未过期成片 + 全部抉择动效就绪 → READY（此时经
+    # 全部可达分段有未过期成片 + 全部抉择动效已审阅 → DONE（此时经
     # GET /projects/{id}/interactive-bundle 导出，节点本身不派发媒体任务，
     # dispatchable=False）；任一分段成片 stale / 依赖 stale → STALE。
     if project.narrative_edges:
         # pylint: disable-next=import-outside-toplevel
         from services.media_files.interactive_bundle import (
+            derive_interactive_manifest,
+            InteractiveBundleError,
             reachable_timeline_ids,
         )
 
@@ -1683,17 +1781,27 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             statuses.get(dep) is WorkNodeStatus.STALE for dep in bundle_deps
         ):
             stale = True
-        if stale:
+        if not missing and not stale:
+            try:
+                derive_interactive_manifest(project)
+            except InteractiveBundleError as exc:
+                missing = (str(exc),)
+        if pending_reviews:
+            status = WorkNodeStatus.WAITING_REVIEW
+        elif stale:
             status = WorkNodeStatus.STALE
         elif missing:
             status = WorkNodeStatus.GATED
         else:
-            status = WorkNodeStatus.READY
+            # This node represents export readiness, not a background job.
+            # READY with no command can never finish and prevents the normal
+            # all-done milestone from reaching the agent.
+            status = WorkNodeStatus.DONE
         add(
             WorkNode(
                 node_id="bundle:project",
                 kind="bundle",
-                label="互动包 · 经 GET /interactive-bundle 导出",
+                label="互动包准备 · 可经 interactive-bundle 导出",
                 status=status,
                 deps=tuple(bundle_deps),
                 lane="compose",

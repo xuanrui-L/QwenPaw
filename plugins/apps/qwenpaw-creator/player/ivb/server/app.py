@@ -175,7 +175,8 @@ def project_for_player(service: BundleService) -> dict[str, Any]:
             "prompt": edge.prompt,
             "tone": edge.tone,
             "target_timeline_id": edge.target_timeline_id,
-            "source_timeline_id": edge_sources.get(edge_ref, ""),
+            "source_timeline_id": edge.source_timeline_id
+            or edge_sources.get(edge_ref, ""),
         }
 
     interactions: list[dict[str, Any]] = []
@@ -185,6 +186,8 @@ def project_for_player(service: BundleService) -> dict[str, Any]:
                 "source_timeline_id": point.source_timeline_id,
                 "at_seconds": point.at_seconds,
                 "question": point.question,
+                "motion_html": point.motion_html,
+                "base_frame_data_uri": point.base_frame_data_uri,
                 "countdown_seconds": point.countdown_seconds,
                 "default_edge_ref": point.default_edge_ref,
                 "options": [
@@ -223,6 +226,7 @@ def project_for_player(service: BundleService) -> dict[str, Any]:
             ),
         },
         "entry_timeline_id": bundle.entry_timeline_id,
+        "authored_html": presentation.authored_html,
         "nodes": nodes,
         "edges": {edge_id: edge_view(edge_id) for edge_id in bundle.edges},
         "interactions": interactions,
@@ -464,6 +468,11 @@ def create_app(
                     staged,
                     owner_user_id=user_id,
                     title=title,
+                )
+            except PermissionError as exc:
+                return JSONResponse(
+                    status_code=403,
+                    content={"ok": False, "detail": str(exc)},
                 )
             except BundleError as exc:
                 return JSONResponse(

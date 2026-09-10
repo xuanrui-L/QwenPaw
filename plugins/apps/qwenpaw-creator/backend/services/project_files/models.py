@@ -1123,6 +1123,8 @@ class InteractionOption(StrictModel):
     # Points at Project.narrative_edges[*].edge_id — the edge is the single
     # source of truth for option label and target timeline.
     edge_ref: str = Field(min_length=1)
+    # Appearance only; copy and navigation still belong to the story edge.
+    design_prompt: str = ""
     # Tap hotspot in normalized canvas space; None = auto layout by the
     # generated motion.
     hotspot: ElementLocation | None = None
@@ -1135,6 +1137,7 @@ class InteractionCreation(StrictModel):
 
     type: Literal["interaction"]
     question: str = Field(min_length=1)
+    design_prompt: str = ""
     options: list[InteractionOption] = Field(min_length=1)
     countdown_seconds: float | None = Field(default=None, gt=0)
     # Edge taken when the countdown expires without a tap.
@@ -1146,6 +1149,17 @@ class InteractionCreation(StrictModel):
 
     @model_validator(mode="after")
     def _validate_options(self) -> InteractionCreation:
+        if self.motion is not None and self.motion.format != "html_css":
+            raise ValueError("interaction motion must use html_css")
+        if self.countdown_seconds is not None and not math.isfinite(
+            self.countdown_seconds,
+        ):
+            raise ValueError("interaction countdown must be finite")
+        if (
+            self.countdown_seconds is not None
+            and self.default_edge_ref is None
+        ):
+            raise ValueError("interaction countdown requires default_edge_ref")
         refs = [option.edge_ref for option in self.options]
         if len(refs) != len(set(refs)):
             raise ValueError("interaction options cannot repeat edge_ref")
@@ -1416,6 +1430,8 @@ class InteractionPoint(StrictModel):
     options: list[InteractionOption] = Field(min_length=1)
     countdown_seconds: float | None = Field(default=None, gt=0)
     default_edge_ref: str | None = None
+    motion_html: str | None = None
+    base_frame_data_uri: str | None = None
 
 
 class InteractiveManifest(StrictModel):
@@ -1456,6 +1472,54 @@ def narrative_timeline_ids(project: "Project") -> tuple[str, ...]:
     )
 
 
+PresentationScreen = Literal["title", "play", "map", "ending"]
+PresentationAction = Literal[
+    "start",
+    "resume",
+    "toggle_play",
+    "map",
+    "map_back",
+    "replay",
+    "title",
+    "jump",
+    "reset",
+]
+
+
+class InteractiveControlDesign(StrictModel):
+    label: str = ""
+    design_prompt: str = ""
+
+
+class InteractiveScreenDesign(StrictModel):
+    design_prompt: str = ""
+    controls: dict[PresentationAction, InteractiveControlDesign] = Field(
+        default_factory=dict,
+    )
+
+
+class InteractivePresentation(StrictModel):
+    """Project-specific interface, authored by the agent and reviewed as HTML."""
+
+    design_prompt: str = ""
+    # Semantic design intentions, never a layout preset or HTML template.
+    screens: dict[PresentationScreen, InteractiveScreenDesign] = Field(
+        default_factory=dict,
+    )
+    motion: MotionGraphic | None = None
+
+    @model_validator(mode="after")
+    def _css_only(self):
+        from .presentation_html import PRESENTATION_ACTIONS
+
+        if self.motion is not None and self.motion.format != "html_css":
+            raise ValueError("interactive presentation must use html_css")
+        for screen, design in self.screens.items():
+            if set(design.controls) - PRESENTATION_ACTIONS[screen]:
+                raise ValueError(f"unsupported control for {screen}")
+        return self
+
+
 class Project(StrictModel):
     schema_version: Literal[9] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
@@ -1478,6 +1542,9 @@ class Project(StrictModel):
         ),
     )
     narrative_edges: list[NarrativeEdge] = Field(default_factory=list)
+    interactive_presentation: InteractivePresentation = Field(
+        default_factory=InteractivePresentation,
+    )
     assets: AssetIndex = Field(default_factory=AssetIndex)
 
     @model_validator(mode="after")
@@ -1488,12 +1555,35 @@ class Project(StrictModel):
                 raise ValueError("narrative edge ids must be unique")
             seen.add(edge.edge_id)
             for ref in (edge.source_timeline_id, edge.target_timeline_id):
-                if ref not in self.timelines.items:
+                if ref not in narrative_timeline_ids(self):
                     raise ValueError(
                         f"narrative edge references unknown timeline {ref!r}",
                     )
             if edge.source_timeline_id == edge.target_timeline_id:
                 raise ValueError("narrative edge cannot loop onto itself")
+        edges = {edge.edge_id: edge for edge in self.narrative_edges}
+        for tid in narrative_timeline_ids(self):
+            points = [
+                element
+                for element in self.timelines.items[
+                    tid
+                ].elements_by_id.values()
+                if element.enabled
+                and isinstance(element.creation, InteractionCreation)
+            ]
+            if len(points) > 1:
+                raise ValueError(
+                    f"{tid}: only one enabled interaction per narrative node",
+                )
+            for element in points:
+                for option in element.creation.options:
+                    edge = edges.get(option.edge_ref)
+                    if edge is None or edge.source_timeline_id != tid:
+                        raise ValueError(
+                            f"{element.element_id}: interaction option must "
+                            f"reference an outgoing edge of {tid}: "
+                            f"{option.edge_ref}",
+                        )
         return self
 
     @model_validator(mode="before")
@@ -1878,6 +1968,34 @@ class Project(StrictModel):
                     creation.motion,
                     require_externalized=True,
                 )
+            elif isinstance(creation, InteractionCreation):
+                if creation.base_frame_ref is not None:
+                    _require_version_refs(
+                        source_versions,
+                        artifact_versions,
+                        [
+                            creation.base_frame_ref.removeprefix(
+                                "artifact-version:",
+                            ),
+                        ],
+                        "interaction base frame",
+                    )
+                self._validate_committed_motion_document(
+                    element_id,
+                    creation.motion,
+                )
+                if creation.motion is not None and creation.motion.html:
+                    from .interaction_html import validate_interaction_html
+
+                    problems = validate_interaction_html(
+                        creation.motion.html,
+                        None,
+                    )
+                    if creation.motion.format != "html_css" or problems:
+                        raise ValueError(
+                            "invalid interaction motion: "
+                            + "; ".join(problems),
+                        )
             elif isinstance(creation, AudioCreation):
                 _require_key(
                     source_versions,

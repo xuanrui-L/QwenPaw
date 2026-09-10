@@ -1355,6 +1355,9 @@ def test_interaction_node_done_when_motion_is_drafted() -> None:
     project = _project()
     _make_branching(project)
     _draft_choice_motion(project)
+    from tests.media_files.test_interactive_bundle import _draft_presentation
+
+    _draft_presentation(project)
 
     graph = derive_work_graph(project)
     assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
@@ -1372,6 +1375,9 @@ def test_interaction_node_reopens_when_options_change_after_draft() -> None:
     project = _project()
     _make_branching(project)
     _draft_choice_motion(project)
+    from tests.media_files.test_interactive_bundle import _draft_presentation
+
+    _draft_presentation(project)
     _select_slot(
         project,
         slot_id="script:timeline:main",
@@ -1386,6 +1392,7 @@ def test_interaction_node_reopens_when_options_change_after_draft() -> None:
     fingerprint = interaction_request_fingerprint(
         element.creation,
         edges_by_id,
+        project,
     )
     element.creation.motion.design_notes = (
         f"抉择动效\n{FINGERPRINT_MARKER}{fingerprint}"
@@ -1450,16 +1457,22 @@ def test_bundle_node_gates_until_segments_and_interactions_done() -> None:
     }
 
     _draft_choice_motion(project)
+    from tests.media_files.test_interactive_bundle import _draft_presentation
+
+    _draft_presentation(project)
     for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
         _select_final_video(project, timeline_id)
     graph = derive_work_graph(project)
-    assert graph.by_id["bundle:project"].status is WorkNodeStatus.READY
+    assert graph.by_id["bundle:project"].status is WorkNodeStatus.DONE
 
 
 def test_bundle_node_goes_stale_when_a_segment_final_is_stale() -> None:
     project = _project()
     _make_branching(project)
     _draft_choice_motion(project)
+    from tests.media_files.test_interactive_bundle import _draft_presentation
+
+    _draft_presentation(project)
     for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
         _select_final_video(project, timeline_id)
     project.assets.artifact_versions_by_id[
@@ -1708,6 +1721,50 @@ def test_failed_reroll_is_not_masked_by_the_old_success() -> None:
         WorkNodeStatus.FAILED
     )
     assert status_with_failure("2026-08-04T00:00:00Z") is WorkNodeStatus.DONE
+
+
+def test_completed_branching_graph_has_no_permanent_ready_bundle():
+    project = _project()
+    _make_branching(project)
+    for timeline_id in project.timelines.order:
+        project.timelines.items[
+            timeline_id
+        ].description = "Published complete scene."
+        _select_final_video(project, timeline_id)
+    _draft_choice_motion(project)
+    from tests.media_files.test_interactive_bundle import _draft_presentation
+
+    _draft_presentation(project)
+    graph = derive_work_graph(project)
+    assert not graph.unfinished(), [
+        (n.node_id, n.status) for n in graph.unfinished()
+    ]
+    assert not graph.model_required_nodes()
+
+
+def test_stale_bundle_waits_for_machine_dependencies():
+    from services.file_agent_runtime.work_graph import WorkGraph, WorkNode
+
+    graph = WorkGraph(
+        nodes=(
+            WorkNode(
+                node_id="compose:main",
+                kind="compose",
+                label="compose",
+                status=WorkNodeStatus.RUNNING,
+            ),
+            WorkNode(
+                node_id="bundle:project",
+                kind="bundle",
+                label="bundle",
+                status=WorkNodeStatus.STALE,
+                deps=("compose:main",),
+                missing=("compose:main",),
+            ),
+        ),
+        generation=1,
+    )
+    assert not graph.model_required_nodes(automatic_regeneration=True)
 
 
 @pytest.mark.parametrize("reverse_tasks", [False, True])

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import zipfile
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pytest
@@ -16,9 +17,6 @@ from services.media_files.interactive_bundle import (
     derive_interactive_manifest,
     InteractiveBundleError,
     PLAYER_HTML,
-    TONE_BADGES,
-    TITLE_CTA_LABEL,
-    TITLE_RESUME_LABEL,
 )
 from services.project_files.models import (
     ArtifactSlot,
@@ -31,6 +29,7 @@ from services.project_files.models import (
     Timeline,
     TimelineElement,
     TimelineSpan,
+    MotionGraphic,
 )
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
@@ -73,6 +72,29 @@ def _with_final_video(project: Project, timeline_id: str, data: bytes) -> None:
     )
 
 
+def _draft_presentation(project):
+    from services.media_files.presentation_authoring import (
+        presentation_fingerprint,
+    )
+    from services.project_files.models import narrative_timeline_ids
+
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "player/tests/fixtures/authored-presentation.html"
+    )
+    html = fixture.read_text().replace(
+        "__NODES__",
+        "".join(
+            f'<button data-action="jump" data-node-ref="{tid}">{tid}</button>'
+            for tid in narrative_timeline_ids(project)
+        ),
+    )
+    project.interactive_presentation.motion = MotionGraphic(
+        html=html,
+        design_notes=f"input_fingerprint={presentation_fingerprint(project)}",
+    )
+
+
 def _branching_project() -> tuple[Project, dict[str, bytes]]:
     source = Timeline(
         timeline_id="tl:ep3",
@@ -86,6 +108,15 @@ def _branching_project() -> tuple[Project, dict[str, bytes]]:
                 creation=InteractionCreation(
                     type="interaction",
                     question="是否当众揭发沈修？",
+                    motion=MotionGraphic(
+                        html=(
+                            "<html><body>"
+                            "<span data-interaction-countdown></span>"
+                            '<button data-edge-ref="edge:a">'
+                            '选择A</button><button data-edge-ref="edge:b">'
+                            "选择B</button></body></html>"
+                        ),
+                    ),
                     options=[
                         InteractionOption(edge_ref="edge:a"),
                         InteractionOption(edge_ref="edge:b"),
@@ -137,6 +168,7 @@ def _branching_project() -> tuple[Project, dict[str, bytes]]:
         data = f"video-bytes-{timeline_id}".encode()
         _with_final_video(project, timeline_id, data)
         payloads[f"file:{timeline_id}:final"] = data
+    _draft_presentation(project)
     return project, payloads
 
 
@@ -168,15 +200,14 @@ def test_missing_segment_fails_closed() -> None:
 
 def test_unknown_edge_ref_fails_closed() -> None:
     project, _ = _branching_project()
-    project.narrative_edges = project.narrative_edges[:1]
-
-    with pytest.raises(InteractiveBundleError, match="edge:b"):
-        derive_interactive_manifest(project)
+    with pytest.raises(ValueError, match="edge:b"):
+        project.narrative_edges = project.narrative_edges[:1]
 
 
 def test_bundle_zip_contains_player_manifest_and_segments() -> None:
     project, payloads = _branching_project()
 
+    _draft_presentation(project)
     bundle = assemble_interactive_bundle(
         project,
         read_artifact_file=lambda file_id: payloads[file_id],
@@ -188,11 +219,12 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         assert "manifest.json" in names
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["entry_timeline_id"] == "tl:ep3"
-        assert manifest["segments"]["tl:ep4a"] == "segments/tl_ep4a.mp4"
+        assert manifest["segments"]["tl:ep4a"] == "segments/746c3a65703461.mp4"
         assert manifest["edge_index"]["edge:a"] == {
             "label": "选择A · 揭发真相",
             "prompt": "",
             "target_timeline_id": "tl:ep4a",
+            "source_timeline_id": "tl:ep3",
         }
         # Legacy field kept for backward compatibility with old players.
         assert manifest["titles"]["tl:ep3"] == "第3集 · 双重身份"
@@ -210,143 +242,57 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         }
         assert manifest["nodes"]["tl:ep4a"]["is_ending"] is True
         assert manifest["nodes"]["tl:ep4a"]["synopsis"] == ("真相大白，正义得到伸张。")
-        assert archive.read("segments/tl_ep3.mp4") == b"video-bytes-tl:ep3"
+        assert (
+            archive.read("segments/746c3a657033.mp4") == b"video-bytes-tl:ep3"
+        )
         player = archive.read("index.html").decode()
         assert "edge_index" in player and "countdown" in player
-        # Playback must start behind a user gesture: the game shell only
-        # ever starts a segment from a click (title menu / map node /
-        # choice card), so the exported bundle can never be a dead page.
-        assert "开始故事" in player
-        assert "showGate(" in player
-        assert "playSegment(entryId)" in player
-        # No bare auto-play bootstrap may come back.
-        assert "\n  playSegment(entryId);" not in player
-        assert "\n  playSegment(manifest.entry_timeline_id);" not in player
-        # A missing / unrenderable branch must surface a visible notice.
-        assert "素材未就绪" in player
-        assert "video.onerror" in player
+        assert "IVBAuthoredPlayer.offline" in player
+        assert "localStorage.setItem" in player
+        assert (
+            archive.read("presentation.html").decode()
+            == project.interactive_presentation.motion.html
+        )
+        assert (
+            manifest["authored_html"]
+            == project.interactive_presentation.motion.html
+        )
+        assert "__MANIFEST_JSON__" not in player
 
 
-def test_player_game_shell_contract() -> None:
-    """The game-shell player: 3 screens, fog-of-war story map, persisted
-    progress, and graceful degradation (reduced motion, old manifests)."""
+def test_no_generated_interface_means_no_export():
+    project, payloads = _branching_project()
+    project.interactive_presentation.motion = None
+    with pytest.raises(InteractiveBundleError, match="interface is missing"):
+        assemble_interactive_bundle(
+            project,
+            read_artifact_file=payloads.__getitem__,
+        )
 
+
+def test_interface_style_is_not_in_the_runtime_shell():
+    assert "#b8ff2e" not in PLAYER_HTML
+    assert "data-screen" not in PLAYER_HTML
+    assert "开始故事" not in PLAYER_HTML
+
+
+def test_replaced_video_invalidates_offline_progress_revision():
     project, payloads = _branching_project()
 
-    bundle = assemble_interactive_bundle(
-        project,
-        read_artifact_file=lambda file_id: payloads[file_id],
-    )
+    def revision():
+        package = assemble_interactive_bundle(
+            project,
+            read_artifact_file=payloads.__getitem__,
+        )
+        with zipfile.ZipFile(io.BytesIO(package)) as archive:
+            return json.loads(archive.read("manifest.json"))[
+                "content_revision"
+            ]
 
-    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-        player = archive.read("index.html").decode()
-    # Three screens + title menu (copy is data-driven via manifest.meta).
-    for marker in (
-        'id="scr-title"',
-        'id="scr-map"',
-        'id="scr-play"',
-        "继续上次",
-        "重新开始",
-        "剧情地图",
-        "结局图鉴",
-    ):
-        assert marker in player, marker
-    # Progress persists per bundle in localStorage; 重新开始 must confirm.
-    assert '"qwenpaw-if:" + (meta.bundle_id || entryId)' in player
-    assert "localStorage.setItem" in player
-    assert "localStorage.removeItem" in player
-    assert "window.confirm" in player
-    # Fog of war: only visited nodes + their direct "?" children render.
-    assert "revealMap" in player
-    assert "？？？" in player
-    # CSS-only atmosphere must respect prefers-reduced-motion.
-    assert "prefers-reduced-motion" in player
-    # Old manifests without meta/nodes must keep working.
-    assert "fallbackNodes" in player
-    assert "manifest.nodes || fallbackNodes()" in player
-    assert "manifest.meta ||" in player
-    # The manifest stays inlined: file:// blocks fetch of sibling files.
-    assert 'type="application/json"' in player
-    assert "fetch(" not in player
-
-
-def test_player_uniform_fog_hides_ending_identity() -> None:
-    """彻底迷雾: every unvisited frontier node is the SAME anonymous "?"
-    silhouette. Ending identity (★ / red pill / ENDING tag / title) may
-    only appear after the node was reached, and the map layout must not
-    reserve slots that hint at structure beyond the frontier."""
-
-    project, payloads = _branching_project()
-
-    bundle = assemble_interactive_bundle(
-        project,
-        read_artifact_file=lambda file_id: payloads[file_id],
-    )
-
-    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-        player = archive.read("index.html").decode()
-    # The ending pill class is applied only inside the visited branch;
-    # the old unconditional `cls += " node--end"` must not come back.
-    assert 'if (info.is_ending) { el.classList.add("node--end"); }' in player
-    assert 'cls += " node--end"' not in player
-    # Pre-visit defaults: same tag / icon / name for every fogged node.
-    assert 'let tag = "?";' in player
-    assert 'let icon = "?";' in player
-    assert 'let name = "？？？";' in player
-    # No pre-visit ★ leak for locked endings (old branch removed).
-    assert "} else if (info.is_ending)" not in player
-    assert ".node--end.node--locked" not in player
-    # One shared tooltip for all fogged nodes — the per-node ternary that
-    # showed "未达成的结局" for ending frontiers must be gone (the
-    # aggregate 结局图鉴 toast copy is allowed: it leaks nothing per-node).
-    assert 'info.is_ending ? "未达成的结局"' not in player
-    assert "未探索的剧情点" in player
-    # Layout is computed over the revealed subgraph only: no reserved
-    # empty slots / x-scale leaking depth beyond the frontier.
-    assert "function layoutPositions(reveal)" in player
-    assert "positions = layoutPositions(reveal);" in player
-    # The aggregate endings counter (已解锁 X/Y) stays — aggregate-only.
-    assert "endingIds.length" in player
-
-
-def test_player_themed_choice_cards_contract() -> None:
-    """主题化选项卡: accent-derived palette, runtime first-frame faces with
-    graceful canvas-taint fallback, fog-blur for unvisited targets, and
-    optional tone passthrough."""
-
-    project, payloads = _branching_project()
-
-    bundle = assemble_interactive_bundle(
-        project,
-        read_artifact_file=lambda file_id: payloads[file_id],
-    )
-
-    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-        player = archive.read("index.html").decode()
-    # Palette derives from meta.accent: rgb triplet feeds hover glow,
-    # borders and the countdown ring via rgba(var(--accent-rgb),X).
-    assert "--accent-rgb" in player
-    assert 'style.setProperty("--accent-rgb", rgb.join(","));' in player
-    assert "rgba(var(--accent-rgb),.7)" in player  # card hover border
-    # Choice-area CSS (countdown ring + cards) no longer hardcodes the
-    # default green — it must follow the derived accent palette.
-    choice_css = player[
-        player.index(".cd-ring") : player.index("gate (tap-to-start")
-    ]
-    assert "rgba(184,255,46" not in choice_css
-    # Face capture: offscreen <video> + <canvas>, taint-safe.
-    assert "captureFrame" in player
-    assert "toDataURL" in player
-    assert "drawImage" in player
-    # Fog interaction: unvisited targets are blurred silhouettes.
-    assert "is-fogged" in player
-    assert "blur(16px) brightness(.3)" in player
-    # Gradient fallback face exists even when capture fails (c-face
-    # keeps its accent-tinted gradient background).
-    assert "c-face" in player
-    # Optional tone: option-level wins over edge-level; absent = neutral.
-    assert "option.tone || edge.tone" in player
-    assert "data-tone" in player
+    before = revision()
+    _with_final_video(project, "tl:ep4a", b"revised-video")
+    payloads["file:tl:ep4a:final"] = b"revised-video"
+    assert revision() != before
 
 
 def test_edge_index_omits_tone_when_unset() -> None:
@@ -355,6 +301,7 @@ def test_edge_index_omits_tone_when_unset() -> None:
 
     project, payloads = _branching_project()
 
+    _draft_presentation(project)
     bundle = assemble_interactive_bundle(
         project,
         read_artifact_file=lambda file_id: payloads[file_id],
@@ -364,7 +311,12 @@ def test_edge_index_omits_tone_when_unset() -> None:
         manifest = json.loads(archive.read("manifest.json"))
     for entry in manifest["edge_index"].values():
         assert "tone" not in entry
-        assert set(entry) == {"label", "prompt", "target_timeline_id"}
+        assert set(entry) == {
+            "label",
+            "prompt",
+            "target_timeline_id",
+            "source_timeline_id",
+        }
 
 
 def test_edge_index_carries_tone() -> None:
@@ -375,6 +327,7 @@ def test_edge_index_carries_tone() -> None:
     project.narrative_edges[0].tone = "safe"
     project.narrative_edges[1].tone = "danger"
 
+    _draft_presentation(project)
     bundle = assemble_interactive_bundle(
         project,
         read_artifact_file=lambda file_id: payloads[file_id],
@@ -425,53 +378,26 @@ def test_single_option_interaction_fails_closed() -> None:
     project, _ = _branching_project()
     element = project.timelines.items["tl:ep3"].elements_by_id["el:choice"]
     element.creation.options = element.creation.options[:1]
+    element.creation.countdown_seconds = None
     element.creation.default_edge_ref = None
 
     with pytest.raises(InteractiveBundleError, match="tl:ep3"):
         derive_interactive_manifest(project)
 
 
-def test_presentation_json_matches_the_bundled_shell() -> None:
-    """The optional presentation member must describe the shipped shell
-    exactly — otherwise a standalone player restyling from it would drift
-    from what the in-zip ``index.html`` actually looks like."""
-
+def test_presentation_json_points_to_authored_document():
     project, payloads = _branching_project()
-
+    _draft_presentation(project)
     bundle = assemble_interactive_bundle(
         project,
-        read_artifact_file=lambda file_id: payloads[file_id],
+        read_artifact_file=payloads.__getitem__,
     )
-
     with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-        presentation = json.loads(archive.read("presentation.json"))
-        manifest = json.loads(archive.read("manifest.json"))
-    assert presentation["schema_version"] == 1
-    assert set(presentation["theme"]) == {
-        "accent",
-        "danger",
-        "warning",
-        "success",
-        "background",
-        "surface",
-        "surface_alt",
-        "text",
-        "text_dim",
-        "fog",
-    }
-    assert presentation["theme"]["accent"] == manifest["meta"]["accent"]
-    assert set(presentation["screens"]) == {
-        "title",
-        "choice",
-        "map",
-        "ending",
-    }
-    assert presentation["screens"]["choice"]["badge_labels"] == TONE_BADGES
-    assert presentation["stylesheets"] == []
-    # Single source of truth for the duplicated-in-JS copy: the shell keeps
-    # its own literals (file:// cannot fetch a sibling), so guard the pair.
-    for label in (*TONE_BADGES.values(), TITLE_CTA_LABEL, TITLE_RESUME_LABEL):
-        assert label in PLAYER_HTML, label
+        assert json.loads(archive.read("presentation.json")) == {
+            "schema_version": 1,
+            "format": "agent_html_css",
+            "document": "presentation.html",
+        }
 
 
 def test_linear_project_nodes_chain_in_order() -> None:
@@ -479,9 +405,10 @@ def test_linear_project_nodes_chain_in_order() -> None:
     the story map stays a path and only the last node is the ending."""
 
     project, payloads = _branching_project()
-    project.narrative_edges = []
     project.timelines.items["tl:ep3"].elements_by_id.clear()
+    project.narrative_edges = []
 
+    _draft_presentation(project)
     bundle = assemble_interactive_bundle(
         project,
         read_artifact_file=lambda file_id: payloads[file_id],
@@ -498,9 +425,9 @@ def test_linear_project_nodes_chain_in_order() -> None:
 
 def test_linear_project_bundles_every_ordered_timeline() -> None:
     project, _payloads = _branching_project()
-    project.narrative_edges = []
     # Drop the choice element so the linear cut stays plain video.
     project.timelines.items["tl:ep3"].elements_by_id.clear()
+    project.narrative_edges = []
 
     manifest = derive_interactive_manifest(project)
 
@@ -508,37 +435,54 @@ def test_linear_project_bundles_every_ordered_timeline() -> None:
     assert manifest.interactions == []
 
 
-def test_player_playback_controls_contract() -> None:
-    """Bottom control bar: play/pause, in-segment seek, playback speed.
-
-    The speed pick must survive segment swaps (defaultPlaybackRate +
-    loadedmetadata re-apply) and the bar must lock while a choice layer
-    or gate owns the flow so a seek cannot re-enter segmentEnded.
-    """
-
-    project, payloads = _branching_project()
-
-    bundle = assemble_interactive_bundle(
-        project,
-        read_artifact_file=lambda file_id: payloads[file_id],
+def test_export_rejects_missing_or_stale_motion_and_stale_video():
+    project, _ = _branching_project()
+    creation = (
+        project.timelines.items["tl:ep3"].elements_by_id["el:choice"].creation
     )
+    creation.motion = None
+    with pytest.raises(InteractiveBundleError, match="motion is missing"):
+        derive_interactive_manifest(project)
+    creation.fallback = "static_endcard"
+    with pytest.raises(InteractiveBundleError, match="motion is missing"):
+        derive_interactive_manifest(project)
+    creation.motion = MotionGraphic(
+        html="<html><body>valid authored choice document</body></html>",
+    )
+    project.assets.artifact_versions_by_id["tl:ep4a:final:v1"].stale = True
+    with pytest.raises(InteractiveBundleError, match="tl:ep4a"):
+        derive_interactive_manifest(project)
 
-    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-        player = archive.read("index.html").decode()
 
-    assert 'id="ctrlBar"' in player
-    assert 'id="seekBar"' in player
-    assert 'type="range"' in player
-    assert "playbackRate" in player
-    assert "defaultPlaybackRate" in player
-    for rate in ("0.5", "0.75", "1.25", "1.5", "2"):
-        assert rate in player
-    # Choice/gate lock discipline.
-    assert "is-locked" in player
-    assert "setCtrlLocked(true)" in player
-    assert "setCtrlLocked(false)" in player
-    # The bar replaces native controls; the video element stays bare.
-    assert '<video id="video" playsinline></video>' in player
-    # The control-bar CSS must sit before the themed choice slice so the
-    # .cd-ring -> gate contract window stays untouched.
-    assert player.index(".ctrl{") < player.index(".cd-ring")
+def test_segment_filename_mapping_is_injective_for_valid_entity_ids():
+    from services.media_files.interactive_bundle import _player_manifest
+
+    project, _ = _branching_project()
+    raw = project.model_dump(mode="json")
+    raw["timelines"]["items"]["tl_ep3"] = raw["timelines"]["items"].pop(
+        "tl:ep4a",
+    )
+    raw["timelines"]["items"]["tl_ep3"]["timeline_id"] = "tl_ep3"
+    raw["timelines"]["order"][1] = "tl_ep3"
+    raw["narrative_edges"][0]["target_timeline_id"] = "tl_ep3"
+    project = Project.model_validate(raw)
+    _with_final_video(project, "tl_ep3", b"other-bytes")
+    manifest = _player_manifest(project, derive_interactive_manifest(project))
+    assert len(set(manifest["segments"].values())) == 3
+    assert manifest["segments"]["tl:ep3"] != manifest["segments"]["tl_ep3"]
+
+
+def test_export_and_project_reject_foreign_edges_and_multiple_choices():
+    project, _ = _branching_project()
+    raw = project.model_dump(mode="json")
+    raw["narrative_edges"][0]["source_timeline_id"] = "tl:ep4b"
+    with pytest.raises(ValueError, match="outgoing edge"):
+        Project.model_validate(raw)
+    raw = project.model_dump(mode="json")
+    point = dict(
+        raw["timelines"]["items"]["tl:ep3"]["elements_by_id"]["el:choice"],
+    )
+    point["element_id"] = "el:second"
+    raw["timelines"]["items"]["tl:ep3"]["elements_by_id"]["el:second"] = point
+    with pytest.raises(ValueError, match="only one"):
+        Project.model_validate(raw)

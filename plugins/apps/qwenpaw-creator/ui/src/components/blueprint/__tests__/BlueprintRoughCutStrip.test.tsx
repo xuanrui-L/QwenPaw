@@ -130,49 +130,29 @@ describe("BlueprintRoughCutStrip whole-film preview", () => {
     expect(container.querySelector("[data-roughcut-play-film]")).toBeTruthy();
   });
 
-  it("branching projects play the interactive story from the entry segment", () => {
+  it("branching works require generated pages and never fall back to a fixed interface", async () => {
     const project = withBranching(cloneProject());
-    const { container, baseElement, getByText } = renderStrip(project);
-
-    // No composed whole film, yet the whole-story chip is offered — and it
-    // is the interactive entry, not the 成片 one.
+    const { container, baseElement, findByText } = renderStrip(project);
     const chip = container.querySelector("[data-roughcut-play-film]");
     expect(chip).toBeTruthy();
     expect(chip!.textContent).toContain("播放整个互动包");
-    expect(chip!.textContent).not.toContain("成片");
-
     fireEvent.click(chip!);
-    const video = baseElement.querySelector<HTMLVideoElement>(
-      "[data-roughcut-player] video",
-    );
-    expect(video).toBeTruthy();
-    // Starts from the entry timeline's segment, not a composed artifact.
-    expect(video!.getAttribute("src")).not.toContain("final-v1");
-    expect(video!.getAttribute("src")).toContain(
-      encodeURIComponent("timeline:main"),
-    );
-
-    // The branch point surfaces the audience choice instead of ending.
-    fireEvent.ended(video!);
-    expect(getByText("选择A · 星夜归途")).toBeInTheDocument();
-    fireEvent.click(getByText("选择B · 回到晨光"));
-    const nextVideo = baseElement.querySelector<HTMLVideoElement>(
-      "[data-roughcut-player] video",
-    );
-    expect(nextVideo!.getAttribute("src")).toContain(
-      encodeURIComponent("timeline:ep2"),
-    );
+    expect(baseElement.querySelector("[data-authored-cinema]")).toBeTruthy();
+    expect(await findByText(/作品页面尚未生成/)).toBeInTheDocument();
+    expect(
+      baseElement.querySelector("[data-roughcut-player] video"),
+    ).toBeNull();
+    expect(baseElement.querySelector("[data-edge-ref]")).toBeNull();
   });
 
-  it("branching projects with a composed film still enter the interactive playback", () => {
+  it("a composed film cannot substitute for missing authored interactive pages", async () => {
     const project = withBranching(withWholeFilm(cloneProject()));
-    const { container, baseElement } = renderStrip(project);
-
+    const { container, baseElement, findByText } = renderStrip(project);
     fireEvent.click(container.querySelector("[data-roughcut-play-film]")!);
-    const video = baseElement.querySelector<HTMLVideoElement>(
-      "[data-roughcut-player] video",
-    );
-    expect(video!.getAttribute("src")).not.toContain("final-v1");
+    expect(await findByText(/作品页面尚未生成/)).toBeInTheDocument();
+    expect(
+      baseElement.querySelector("[data-roughcut-player] video"),
+    ).toBeNull();
   });
 });
 

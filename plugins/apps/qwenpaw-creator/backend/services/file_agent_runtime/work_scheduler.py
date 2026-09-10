@@ -392,11 +392,19 @@ class WorkGraphScheduler:
         while True:
             key = f"dag-{node.node_id}-{cls._dispatch_slot(fingerprint)}"
             previous = by_key.get(key)
-            if previous is None or previous.status not in (
-                TaskStatus.CANCELLED,
-                TaskStatus.FAILED,
-                TaskStatus.SUCCEEDED,
-            ):
+            retryable = previous is not None and (
+                previous.status in (
+                    TaskStatus.CANCELLED,
+                    TaskStatus.FAILED,
+                    TaskStatus.SUCCEEDED,
+                )
+                or (
+                    node.kind == "interaction"
+                    and node.status is not WorkNodeStatus.DONE
+                    and previous.status == TaskStatus.QUARANTINED
+                )
+            )
+            if not retryable:
                 return fingerprint
             fingerprint = (
                 f"{base}-manual-retry-{cls._dispatch_slot(previous.task_id)}"
@@ -644,19 +652,20 @@ class WorkGraphScheduler:
             tasks,
         )
 
+        pending_reviews = await asyncio.to_thread(
+            self.services.reviews.all_pending,
+            project_id,
+        )
         graph = derive_work_graph(
             snapshot.project,
             tasks=tasks,
+            pending_reviews=pending_reviews,
             media_models=(get_image_model_name(), get_video_model_name()),
         )
         from services.run_review import admission
         from services.run_review.media_review import active_media_review_slots
         from .workgraph_execution import _publication_artifacts
 
-        pending_reviews = await asyncio.to_thread(
-            self.services.reviews.all_pending,
-            project_id,
-        )
         publications = [
             _publication_artifacts(review) for review in pending_reviews
         ]
@@ -699,6 +708,7 @@ class WorkGraphScheduler:
             if delay is not None:
                 self._schedule_sync_gate_recheck(project_id, delay)
         inflight = self._inflight.setdefault(project_id, set())
+        media_budget_exhausted = False
         try:
             # Wallet fuse: a spent budget pauses automatic dispatch; the
             # media entry points enforce it too, this just avoids creating
@@ -714,12 +724,7 @@ class WorkGraphScheduler:
                 project_id,
                 exc,
             )
-            await self._emit_graph_transitions(
-                project_id,
-                graph,
-                snapshot.generation,
-            )
-            return graph
+            media_budget_exhausted = True
         active_media = {
             node.node_id
             for node in graph.nodes
@@ -732,6 +737,12 @@ class WorkGraphScheduler:
         # to a paid provider. Recheck once the earliest window expires.
         held_recheck: float | None = None
         for node in self._dispatch_candidates(project_id, graph, tasks):
+            if media_budget_exhausted and node.kind not in {
+                "compose",
+                "interaction",
+                "script",
+            }:
+                continue
             if capacity <= 0:
                 break
             target_ref = node.target_ref or ""
@@ -1340,7 +1351,11 @@ class WorkGraphScheduler:
                             request_id=(
                                 f"node_succeeded-{node.node_id}-{fingerprint}"
                             ),
-                            text=f"生成完成：{node.label}",
+                            text=(
+                                f"交互动效已就绪，可用于互动包：{node.label}"
+                                if node.kind == "interaction"
+                                else f"生成完成：{node.label}"
+                            ),
                             node=node,
                         )
                 elif (
@@ -1650,6 +1665,7 @@ async def _default_interaction_dispatch(
     target_ref: str,
     arguments: dict[str, Any],
     idempotency_key: str,
+    expected_object_versions: Sequence[str] = (),
 ) -> Any:
     """Draft one interaction element's html_css motion (text model only)."""
 
@@ -1666,6 +1682,7 @@ async def _default_interaction_dispatch(
         target_ref=target_ref,
         arguments=arguments,
         idempotency_key=idempotency_key,
+        expected_object_versions=expected_object_versions,
     )
 
 

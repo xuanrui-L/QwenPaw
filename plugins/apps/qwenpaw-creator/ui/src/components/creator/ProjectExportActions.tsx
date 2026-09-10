@@ -120,7 +120,15 @@ export default function ProjectExportActions({
     setBundleBusy(true);
     try {
       const response = await fetch(getInteractiveBundleUrl(projectId));
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(
+          error?.error?.message ||
+            error?.message ||
+            error?.detail ||
+            `HTTP ${response.status}`,
+        );
+      }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -128,8 +136,10 @@ export default function ProjectExportActions({
       anchor.download = `${projectId}-interactive.zip`;
       anchor.click();
       URL.revokeObjectURL(url);
-    } catch {
-      message.error(t("blueprint.exportBundleFailed"));
+    } catch (error) {
+      message.error(
+        `${t("blueprint.exportBundleFailed")}：${(error as Error).message}`,
+      );
     } finally {
       setBundleBusy(false);
     }

@@ -27,15 +27,26 @@ Project
 │       ├── edit_plan                 # 剪辑品味契约（可为 null）：concept、dials(energy/density/decoration: low|mid|high)、signature_device、pacing、design_floor(opening/transitions/body/ending)、mechanical_exemption、scene_ledger[]
 │       └── elements_by_id
 │           └── span, location, z_index, creation, outputs, render_source
+├── interactive_presentation           # design_prompt、screens、motion：设计意图与生成 HTML，不套用模板
 ├── narrative_edges                   # 分支剧情边列表（NarrativeEdge：edge_id、source/target_timeline_id、label、prompt、tone）；线性多集留空，顺序即 timelines.order
 └── assets                            # 文件、源版本、理解版本、Artifact 槽位与版本索引
 ```
+
+### 作品页面与交互设计
+
+分支作品的首页、播放页、剧情地图、结局页和抉择动效都必须由 Agent 按本项目从零设计。不允许套用固定模板；示例只能解释协议，不作为默认作品或自动回退。
+先通过 patch_project 写 `/interactive_presentation/design_prompt` 的设计要求，再调用 `request_workgraph_execution`，`targetRefs=["project:<project_id>"]`、`kinds=["interaction"]`。系统通过文本模型生成 `interactive_presentation.motion`，进入审阅；禁止自行伪造 HTML 产物或 input_fingerprint。`interaction:project` 是页面任务，必须同抉择任务一起完成。
+同时在 `interactive_presentation.screens` 按 `title`（首页）、`play`（播放）、`map`（剧情地图）、`ending`（结局）记录逐页的 `design_prompt` 与 `controls`。每个 control 的键是行为名，值为 `{label, design_prompt}`：label 是明确要求的按钮文案，留空由设计模型创作；design_prompt 是外观、位置、动效等自由描述，不是模板名称。生成结果必须包含声明的按钮并遵守非空文案，修改这些字段会使页面待重新生成，不会使剧本或视频过期。
+必备能力不能删除：首页有 start（开始）、resume（继续）；播放页有 toggle_play（播放/暂停）、map（剧情地图）、replay（重新开始）；地图有 map_back（返回）；结局有 replay、title（首页）。必备按钮即使没有单独配置也必须生成。replay 从故事入口重新播放但保留探索记录；reset 清空全部探索记录回首页。可选功能按剧本需要：首页可加 map/reset，播放可加 title，地图可加 jump/title/reset，结局可加 map/reset；jump 只回看已访问节点。不可虚构其他动作。
+页面 HTML 用 `data-screen=title|play|map|ending`、`video data-player-video`、`data-slot=interaction` 和 `button data-action` 声明宿主绑定；所有视觉和 CSS 动画来自生成结果。播放器仅控制动作、视频、状态、安全边界，不补齐模板。缺少页面、过期或待审阅时不能导出。
+用户可在蓝图“交互设计”里切换首页、播放、地图、结局的实际预览，切换桌面/手机，并点击按钮定位其文案与设计要求。保存后重新生成、审阅；只改页面无需重新生成视频。抉择的 `creation.design_prompt` 控制对应交互层，`options[*].design_prompt` 可单独描述每个交互按钮的形态与动效；按钮文案和目标仍以 narrative_edges 为准。前端显示抉择时间、倒计时/默认走向和选项对应的剧情节点。带倒计时的 HTML 必须自行设计 `data-interaction-countdown` 文本节点，宿主仅更新数字。`static_endcard` 不会触发模板兜底，静态视觉也需要生成 HTML。
 
 ### 基础不变量
 
 - `EntityCollection` 始终由 `items` 和 `order` 组成；两者 ID 集合必须完全一致且顺序不重复。
 - 结构起草（structure_draft）：多集/分支项目直接用 `patch_project` 创建/更新 `timelines.items[*]`，`title` 是本集标题，`synopsis` 是梗概，`description` 保存可读的完整正文剧本（动作、表演、衔接、对白和声音），`planned_duration_seconds` 是本集时长；顺序写入 `timelines.order`。已有选中的 `timeline_script` 正文时沿用该剧本，不重复创建另一份。按集增量写作与制作，后续集尚未写完不阻塞前面已就绪的镜头。分支剧情把抉择写入根级 `narrative_edges`（source/target 必须是已存在的 timelineId，同一 source 的多条边共享 prompt 文案）。
-- 分支项目的每个分岔节点还必须在该 Timeline 的 `elements_by_id` 里放一个 `creation.type="interaction"` 元素：只有 `narrative_edges` 而没有这个元素，导出会被确定性拒绝（观众看得到多条分支却无从点选）。`options[*].edge_ref` 必须指向本源 timeline 的已有边，且至少两条——两条以上就是一个真正的抉择点；`question` 是屏幕上抛给观众的问句；`countdown_seconds` 留空表示不倒计时，`default_edge_ref` 必须是 `options` 之一，表示超时后的默认走向；`base_frame_ref` / `motion` 由交互生成服务写回，起草时留空。span 落在该集成片的中后段（默认 1000 tick/秒，例如 88 秒处写 `start_tick=88000`、`duration_tick=4000`），一个节点可以有多个前后相继的抉择点。
+- 分支项目的每个分岔节点还必须在该 Timeline 的 `elements_by_id` 里放一个 `creation.type="interaction"` 元素：只有 `narrative_edges` 而没有这个元素，导出会被确定性拒绝（观众看得到多条分支却无从点选）。`options[*].edge_ref` 必须指向本源 timeline 的已有边，且至少两条——两条以上就是一个真正的抉择点；`question` 是屏幕上抛给观众的问句；`countdown_seconds` 留空表示不倒计时，`default_edge_ref` 必须是 `options` 之一，表示超时后的默认走向；`motion` 由交互生成服务写回并进入审阅，起草时留空；`base_frame_ref` 可选填已存在的图像版本，留空时以暂停的视频画面为背景。`design_prompt` 保存动效的视觉要求和修改意见，修改它会触发重新生成，禁止以伪造 HTML 或指纹绕过生成与审阅。span 落在该集成片的中后段（默认 1000 tick/秒，例如 88 秒处写 `start_tick=88000`、`duration_tick=4000`），每个节点只允许一个启用的抉择点，选择任一选项即跳往目标节点；需要连续提问时拆分为不同节点。选项必须覆盖该节点全部出边。start_tick/ticks_per_second 不得超过实际视频时长；倒计时必须同时指定默认边。生成中或存在待审阅修改、过期成片/动效时不能导出。审阅中可在蓝图交互预览查看动效，再批准或拒绝；修改 question/options/design_prompt/hotspot 后重新生成、审阅、导出新的互动包。
+- `Timeline.title` 是剧情节点标题；`name` 用于时间线版本/快照名称，不要用它替代剧情标题；只写 Schema 明确列出的字段。`patch_project` 新建节点的准确示例：`{"op":"upsert_entity","collection":"/timelines","id":"tl:ending","value":{"timeline_id":"tl:ending","title":"结局","description":"完整剧本","planned_duration_seconds":2}}`。参数必须是 `id`，不能写 `entity_id`；该操作自动维护 items/order。交互动效通过 `request_workgraph_execution` 的 `targetRefs=["element:<elementId>"]`、`kinds=["interaction"]` 发起；生成元素视频之后，仍需逐节点 `COMPOSE_FINAL_VIDEO` 产出并选定 `timeline:<id>:render` 的 final_video；媒体与交互动效审批完成后才能导出互动包。`bundle:project` 是导出准备门禁，DONE 表示可通过蓝图“导出互动包”下载，不代表已上传或发布；准备完成后给出交付入口，不要反复修改 Project 或读快照等待不存在的 bundle 生成任务。
 - `narrative_edges[*].tone` 是观众点下去之前对风险的预期，三档取一（可留空 = 中性卡）：`safe` 顺着目标走、代价已知且可逆；`risky` 仍然顺着目标，但代价未知或很高——一次主动冒险；`danger` 违背目标且不可逆，明知会变糟仍走进去。拿不准时只问一句“这一步几乎肯定会让事情变糟吗？”——是 → `danger`，只是“可能会” → `risky`。逐条边独立判定，不要为了“显得有对比”而强行拉档。
 - `variants` 只存在于 `visual.entities.items[<entityId>].variants`；`visual` 顶层没有 `variants` 字段。
 - `required_variant_ids` 是用户需求中全部必需视觉状态的结构化合同。先完整列出，再逐项建立 `variants`；不得把它缩减成当前已经创建的 Variant。每个实际 Variant ID 都必须已在该清单中声明。
