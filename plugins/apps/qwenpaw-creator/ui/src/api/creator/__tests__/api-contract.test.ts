@@ -3,13 +3,13 @@ import { installMockFetch } from "@/test/mockFetch";
 import {
   createAssetImport,
   createProject,
+  copyProject,
   decideFileProjectReview,
   patchProject,
   sendCreatorMessage,
   saveModelConfig,
   testModelConnection,
 } from "@/api/creator";
-import type { DocumentMetadata } from "@/contracts/creator/assets";
 import { configuredModelConfig } from "@/test/agentFixtures";
 import { openCreatorEvents } from "@/api/creator/events";
 
@@ -226,11 +226,23 @@ describe("new Creator API contract", () => {
     });
   });
 
-  it("mirrors the backend document metadata contract", () => {
-    // schemas/assets.py DocumentMetadata serializes as camelCase pageCount.
-    const document: DocumentMetadata = { format: "pdf", pageCount: 4 };
-    expect(document).toEqual({ format: "pdf", pageCount: 4 });
-    expect(Object.keys(document).sort()).toEqual(["format", "pageCount"]);
+  it("uses a caller-stable idempotency key for project copy retries", async () => {
+    const { calls } = installMockFetch([
+      {
+        match: "/projects/source-1/copy",
+        response: { status: 201, json: { projectId: "copy-1" } },
+      },
+    ]);
+    await copyProject("source-1", "copy-operation-1");
+    await copyProject("source-1", "copy-operation-1");
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call).toMatchObject({
+        method: "POST",
+        url: "/api/qwenpaw-creator/projects/source-1/copy",
+        headers: { "idempotency-key": "copy-operation-1" },
+      });
+    }
   });
 });
 

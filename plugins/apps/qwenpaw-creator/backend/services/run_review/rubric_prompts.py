@@ -160,7 +160,7 @@ def render_taste_principles(role: str) -> str:
 
     Rendered once and pasted into the ``prompts/*.system.txt`` files; kept
     here so tests can assert the prompt files stay derived from the vendored
-    rubric (see ``tests/run_review/test_rubric_prompts.py``).
+    rubric (see ``tests/run_review/test_vendored_rules.py``).
     """
     concept = APPEAL_RUBRIC_ROWS[0]
     rhythm = APPEAL_RUBRIC_ROWS[2]

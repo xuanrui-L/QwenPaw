@@ -30,7 +30,11 @@ from services.media_files.image_execution import (
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import Project
 from services.project_files.store import ProjectSnapshot
-from services.runtime_files.models import ChangeOrigin, ReviewPolicy
+from services.runtime_files.models import (
+    ChangeOrigin,
+    ReviewPolicy,
+    ReviewStatus,
+)
 from utils.exceptions import ModelError
 
 from .conftest import make_r2v_element, r2v_project_services
@@ -1160,3 +1164,34 @@ def test_multi_reference_image_prompt_is_labelled_and_rendered() -> None:
         image_model_name="qwen-image-3.0-pro",
         has_explicit_urls=False,
     )
+
+
+@pytest.mark.parametrize("mode", ["required", "auto_approve"])
+def test_media_review_mode_controls_storyboard_publication(
+    tmp_path,
+    monkeypatch,
+    mode,
+):
+    services = _services(tmp_path, monkeypatch)
+    if mode == "auto_approve":
+        monkeypatch.setattr(
+            "services.media_files.review_admission.get_media_review_mode",
+            lambda: mode,
+        )
+    provider = _CountingProvider()
+    result = _execute(services, provider)
+    assert provider.calls == 1
+    review = services.reviews.active(PROJECT_ID)
+    if mode == "required":
+        assert review is not None
+        assert review.status is ReviewStatus.PENDING
+    else:
+        assert review is None
+        slots = services.projects.read(
+            PROJECT_ID,
+        ).project.assets.artifact_slots_by_id
+        assert any(
+            slot.kind == "r2v_storyboard_image"
+            and slot.selected_version_id == result.artifact_version_id
+            for slot in slots.values()
+        )

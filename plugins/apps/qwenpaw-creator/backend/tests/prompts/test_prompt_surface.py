@@ -378,3 +378,17 @@ def test_native_dialogue_voice_guidance_matches_video_capability(
     ) is supports_reference_voice
     # Lack of a system TTS voice must not disable native video dialogue.
     assert "通过 TTS 合成配音必须" in prompt
+
+
+@pytest.mark.unit
+def test_prompts_preserve_explicit_paid_image_ceiling() -> None:
+    prompt = load_file_agent_prompt("creator_agent.system")
+    for contract in (
+        "显式媒体预算覆盖默认资产拆分",
+        "共享设计图数 + R2V Element 数",
+        "不能用共享设计 Artifact 冒充",
+        "单张共享设计图预算例外",
+        "不得建立 cast lineup 或创建第二个可调度视觉节点",
+        "全部图片调用上限”不足以覆盖这些 storyboard",
+    ):
+        assert contract in prompt
