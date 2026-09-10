@@ -479,6 +479,9 @@ async def execute_file_interaction_command(
                 ),
                 temperature=0.5,
                 max_tokens=12000 if is_presentation else 6000,
+                # A presentation contains four complete screens. Keep its
+                # response bounded while allowing more time than one choice.
+                timeout=300.0 if is_presentation else 180.0,
             )
             candidate = _strip_code_fences(raw)
             problems = (
