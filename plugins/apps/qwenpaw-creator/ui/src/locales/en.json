@@ -920,6 +920,7 @@
     "emptyHint2": "Currently selected objects will be automatically included as context.",
     "scrollToBottom": "Scroll to bottom ↓",
     "inputPlaceholder": "Enter modification intent, @ to reference objects...",
+    "uploadAsset": "Upload asset",
     "stopAllAgents": "Stop All Agents",
     "stopAllSuccess": "All Agent activity stopped",
     "stopRequested": "Stop request sent, click to force stop",

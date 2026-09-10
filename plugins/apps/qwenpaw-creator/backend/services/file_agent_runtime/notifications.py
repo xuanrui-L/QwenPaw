@@ -101,6 +101,8 @@ class RuntimeEventKind(StrEnum):
     NARRATION_REGENERATED = "narration_regenerated"
     # The user rolled a timeline back onto one of its snapshots.
     TIMELINE_SNAPSHOT_RESTORED = "timeline_snapshot_restored"
+    # The user ingested new source assets after the conversation began.
+    SOURCE_ASSETS_UPLOADED = "source_assets_uploaded"
 
 
 class NotificationLevel(StrEnum):
@@ -125,6 +127,9 @@ EVENT_LEVELS: dict[RuntimeEventKind, NotificationLevel] = {
     # reasoning about, and a staged record would only surface if some other
     # delivery happened to follow.
     RuntimeEventKind.TIMELINE_SNAPSHOT_RESTORED: NotificationLevel.NEXT_STEP,
+    # Not quiet: the user often uploads assets precisely because the Agent
+    # asked for them, and nothing else would tell it the material arrived.
+    RuntimeEventKind.SOURCE_ASSETS_UPLOADED: NotificationLevel.NEXT_STEP,
 }
 
 

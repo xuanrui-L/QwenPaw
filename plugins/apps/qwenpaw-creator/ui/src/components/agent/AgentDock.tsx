@@ -25,6 +25,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Plus,
   RotateCcw,
   Square,
   Undo2,
@@ -33,6 +34,7 @@ import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
   getGeneratedMediaUrl,
+  ingestAssetFile,
 } from "@/api/creator";
 import type {
   CreatorContentPart,
@@ -1216,6 +1218,32 @@ export default function AgentDock({
   }, [projectId]);
   const [showJump, setShowJump] = useState(false);
   const inputRef = useRef<MentionInputHandle>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [uploadingAssets, setUploadingAssets] = useState(false);
+  const uploadAssets = async (files: File[]) => {
+    if (!projectId || files.length === 0) return;
+    const uploadProject = projectId;
+    setUploadingAssets(true);
+    try {
+      for (const file of files) {
+        await ingestAssetFile(uploadProject, file, "ATTACH_SOURCE");
+      }
+      if (currentProject.current === uploadProject) {
+        message.success(t("assets.uploadSuccess"));
+      }
+      await Promise.allSettled([
+        useProjectSnapshotStore.getState().pollOnce(uploadProject),
+        useCreatorTaskViewStore.getState().refresh(uploadProject),
+      ]);
+    } catch (error) {
+      const text =
+        error instanceof Error ? error.message : t("assets.uploadFailed");
+      if (currentProject.current === uploadProject) message.error(text, 6);
+    } finally {
+      setUploadingAssets(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
   const previousPendingAuthorizationCount = useRef(0);
@@ -2344,6 +2372,27 @@ export default function AgentDock({
                 </div>
               )}
               <div className="flex items-end gap-2">
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  data-agent-upload-input
+                  onChange={(event) => {
+                    const files = Array.from(event.target.files ?? []);
+                    if (files.length) void uploadAssets(files);
+                  }}
+                />
+                <Button
+                  aria-label={t("agent.uploadAsset")}
+                  title={t("agent.uploadAsset")}
+                  icon={<Plus className="h-4 w-4" />}
+                  loading={uploadingAssets}
+                  disabled={!projectId}
+                  onClick={() => uploadInputRef.current?.click()}
+                  className="!flex !h-8 !w-8 !shrink-0 !items-center !justify-center !p-0"
+                  data-agent-upload-asset
+                />
                 <MentionInput
                   ref={inputRef}
                   placeholder={t("agent.inputPlaceholder")}

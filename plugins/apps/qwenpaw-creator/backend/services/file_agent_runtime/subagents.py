@@ -60,6 +60,18 @@ class DelegateToAgentInput(BaseModel):
             raise ValueError(
                 f"specialist role is not delegatable: {self.role.value}",
             )
+        if (
+            self.role is SpecialistRole.SOURCE_INTELLIGENCE
+            and len(self.target_refs) > 1
+        ):
+            # A batched delegation reads every image in the same model turn
+            # and blows the per-turn wall-clock budget; per-asset runs
+            # execute in parallel instead.
+            raise ValueError(
+                "source_intelligence_agent accepts exactly one asset target "
+                "per delegation; delegate each asset separately — the runs "
+                "execute in parallel.",
+            )
         allowed_kinds, allowed_project_targets = _ROLE_TARGETS[self.role]
         for target_ref in self.target_refs:
             kind, separator, identifier = target_ref.partition(":")
@@ -82,10 +94,11 @@ def delegate_tool_manifest() -> dict[str, Any]:
             "name": DELEGATE_TOOL_NAME,
             "description": (
                 "把一个边界明确的素材理解或 AI 剪辑任务委派给对应 Creator "
-                "Specialist。source_intelligence_agent 使用 asset:<logicalAssetId>；"
-                "ai_editing_director 使用 timeline:<id>。调用立即返回 "
-                "status=ACCEPTED 与 runId，Specialist 在后台执行；其终态"
-                "（SUCCESS/BLOCKED/FAILED 或等待审阅）会以【系统自动消息 · "
+                "Specialist。source_intelligence_agent 使用 asset:<logicalAssetId>，"
+                "且每次委派恰好一个 asset（多个素材各自委派一次，后台并行执行；"
+                "一次传多个会被拒绝）；ai_editing_director 使用 timeline:<id>。"
+                "调用立即返回 status=ACCEPTED 与 runId，Specialist 在后台执行；"
+                "其终态（SUCCESS/BLOCKED/FAILED 或等待审阅）会以【系统自动消息 · "
                 "Runtime 通知】送达，届时再读取 Project 验证产出。接受后"
                 "不要等待、不要轮询，也不要对同一目标重复委派；可以继续"
                 "处理其他不依赖该产物的目标，或结束本回合。"

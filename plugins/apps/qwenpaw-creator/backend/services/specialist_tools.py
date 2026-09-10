@@ -1099,12 +1099,16 @@ class FileSpecialistToolRegistry:
         role: SpecialistRole,
         *,
         admitted_target_refs: Sequence[str],
+        include_project_readers: bool = True,
     ) -> tuple[dict[str, Any], ...]:
         project_tools = [
             item
             for item in agent_project_tool_manifest()
             if role is not SpecialistRole.SOURCE_INTELLIGENCE
-            or item["function"]["name"] in _SOURCE_PROJECT_TOOL_NAMES
+            or (
+                include_project_readers
+                and item["function"]["name"] in _SOURCE_PROJECT_TOOL_NAMES
+            )
         ]
         business_tools = []
         for spec in _SPECS:

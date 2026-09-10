@@ -448,3 +448,189 @@ def test_remote_asset_url_validation_fails_closed_on_ssrf_vectors() -> None:
         )
         == "https://assets.example/video.mp4?version=1"
     )
+
+
+def _session_app(tmp_path, *, initial_goal: str | None = "做一条视频"):
+    """A ``project-1`` whose Runtime Session mirrors real project creation."""
+
+    services = CreatorFileServices.create(tmp_path.resolve())
+    goal_kwargs = (
+        {
+            "initial_goal": initial_goal,
+            "goal_id": "goal-1",
+            "initial_message_id": "message-initial",
+            "initial_client_message_id": "client-initial",
+        }
+        if initial_goal is not None
+        else {}
+    )
+    services.projects.create(
+        Project.new(project_id="project-1", name="One"),
+        initialize_staged_project=lambda staged_root: (
+            services.sessions.initialize_staged_project(
+                staged_root,
+                "project-1",
+                session_id="session-1",
+                conversation_id="conversation-1",
+                **goal_kwargs,
+            )
+        ),
+    )
+    app = FastAPI()
+    app.add_exception_handler(CreatorError, creator_error_handler)
+    app.include_router(router)
+    app.include_router(media_router)
+    app.dependency_overrides[project_file_services] = lambda: services
+    return app, services
+
+
+def _install_notification_capture(services, monkeypatch):
+    # pylint: disable=import-outside-toplevel
+    from types import SimpleNamespace
+
+    from services.file_agent_runtime.notifications import (
+        RuntimeNotificationBus,
+    )
+
+    wakes: list[str] = []
+    bus = RuntimeNotificationBus(services, wake_dispatcher=wakes.append)
+    monkeypatch.setattr(
+        file_asset_routes,
+        "get_creator_agent_runtime",
+        lambda: SimpleNamespace(notifications=bus),
+    )
+    return wakes
+
+
+def _uploaded_notifications(services):
+    return [
+        item
+        for item in services.sessions.list_messages(
+            "project-1",
+            "session-1",
+            after_seq=0,
+            limit=None,
+        )
+        if item.metadata.get("notificationKind") == "source_assets_uploaded"
+    ]
+
+
+def test_asset_upload_mid_conversation_steers_the_agent_once(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_scenario,
+) -> None:
+    """A chat/library upload lands one runtime steer; replays stay silent."""
+
+    app, services = _session_app(tmp_path)
+    wakes = _install_notification_capture(services, monkeypatch)
+
+    async def scenario(client):
+        first = await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "upload-1"},
+            data={
+                "clientRequestId": "upload-1",
+                "postIngestAction": "ATTACH_SOURCE",
+            },
+            files={"file": ("lulu.png", b"png-bytes", "image/png")},
+        )
+        replay = await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "upload-1"},
+            data={
+                "clientRequestId": "upload-1",
+                "postIngestAction": "ATTACH_SOURCE",
+            },
+            files={"file": ("lulu.png", b"png-bytes", "image/png")},
+        )
+        return first, replay
+
+    first, replay = run_scenario(app, scenario)
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    notes = _uploaded_notifications(services)
+    assert len(notes) == 1
+    note = notes[0]
+    assert note.role == "user"
+    assert "lulu.png" in note.content_parts[0].text
+    assert note.metadata["assetVersionRefs"] == [
+        f"asset-version:{first.json()['assetVersionId']}",
+    ]
+    assert wakes == ["project-1"]
+
+
+def test_asset_upload_before_first_message_stays_silent(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_scenario,
+) -> None:
+    """Launch-flow uploads precede the first message and must not wake."""
+
+    app, services = _session_app(tmp_path, initial_goal=None)
+    wakes = _install_notification_capture(services, monkeypatch)
+
+    async def scenario(client):
+        return await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "launch-upload"},
+            data={
+                "clientRequestId": "launch-upload",
+                "postIngestAction": "NONE",
+            },
+            files={"file": ("lulu.png", b"png-bytes", "image/png")},
+        )
+
+    response = run_scenario(app, scenario)
+
+    assert response.status_code == 202
+    assert wakes == []
+    assert (
+        services.sessions.list_messages(
+            "project-1",
+            "session-1",
+            after_seq=0,
+            limit=None,
+        )
+        == []
+    )
+
+
+def test_remote_asset_completion_steers_the_agent(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_scenario,
+) -> None:
+    """URL assets notify once the background download actually lands."""
+
+    app, services = _session_app(tmp_path)
+    _install_remote_transport(monkeypatch, chunks=[b"12", b"34"])
+    wakes = _install_notification_capture(services, monkeypatch)
+
+    async def scenario(client):
+        response = await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "remote-1"},
+            json={
+                "clientRequestId": "remote-1",
+                "kind": "url",
+                "name": "clip.mp4",
+                "value": "https://assets.example/clip.mp4",
+                "postIngestAction": "ATTACH_SOURCE",
+            },
+        )
+        pending = list(file_asset_routes._REMOTE_INGEST_TASKS.values())
+        if pending:
+            await asyncio.gather(*pending)
+        return response
+
+    response = run_scenario(app, scenario)
+
+    assert response.status_code == 202
+    notes = _uploaded_notifications(services)
+    assert len(notes) == 1
+    assert notes[0].metadata["assetVersionRefs"] == [
+        f"asset-version:{response.json()['assetVersionId']}",
+    ]
+    assert wakes == ["project-1"]

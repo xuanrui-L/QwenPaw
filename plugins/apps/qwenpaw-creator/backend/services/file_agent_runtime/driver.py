@@ -614,6 +614,54 @@ def _timelines_have_plan(project: Any, target_refs: list[str]) -> bool:
     return True
 
 
+def _source_identity_facts(
+    project: Any,
+    target_refs: list[str],
+) -> list[dict[str, Any]]:
+    """Runtime-verified identity for each delegated source target.
+
+    Handing the specialist the sourceId/selected-version pair it would
+    otherwise spend its first VLM turn locating via read_project.
+    """
+
+    facts: list[dict[str, Any]] = []
+    for target_ref in target_refs:
+        kind, separator, identifier = str(target_ref).partition(":")
+        if kind != "asset" or not separator or not identifier:
+            continue
+        source = next(
+            (
+                item
+                for item in project.sources.sources.items.values()
+                if item.logical_asset_id == identifier
+            ),
+            None,
+        )
+        if source is None:
+            continue
+        version = project.assets.source_versions_by_id.get(
+            source.selected_asset_version_id,
+        )
+        intelligence = project.assets.intelligence_versions_by_id.get(
+            source.current_intelligence_version_id,
+        )
+        facts.append(
+            {
+                "targetRef": str(target_ref),
+                "sourceId": source.source_id,
+                "selectedAssetVersionId": source.selected_asset_version_id,
+                "name": version.name if version else source.display_name,
+                "mediaKind": version.media_kind if version else None,
+                "intelligenceMatchesSelectedVersion": bool(
+                    intelligence
+                    and intelligence.source_asset_version_id
+                    == source.selected_asset_version_id,
+                ),
+            },
+        )
+    return facts
+
+
 def _agent_waiting_review_summary(
     specialist_summary: str | None,
 ) -> str:
@@ -2797,6 +2845,7 @@ class FileCreatorAgentRuntime:
                 epoch=epoch,
                 request=message,
                 tools=tools,
+                batch_tail=batch[1:],
             )
             result = await self._model_loop(
                 project_id=project_id,
@@ -3061,12 +3110,19 @@ class FileCreatorAgentRuntime:
         epoch,
         request,
         tools,
+        batch_tail=None,
     ) -> list[dict[str, Any]]:
         """Start exact uploaded-source work before creative planning begins."""
         from .native_media import _version_id_from_ref
 
-        refs = request.metadata.get("assetVersionRefs") or []
-        if not isinstance(refs, list) or not refs:
+        # Consecutive upload notifications batch into one run; every batched
+        # message may carry its own refs, not just the head.
+        refs: list[Any] = []
+        for record in (request, *(batch_tail or ())):
+            record_refs = record.metadata.get("assetVersionRefs") or []
+            if isinstance(record_refs, list):
+                refs.extend(record_refs)
+        if not refs:
             return []
         base = await asyncio.to_thread(tools.read_project, project_id)
         project = base.project
@@ -3134,19 +3190,22 @@ class FileCreatorAgentRuntime:
                 ops=operations,
             )
         activity = []
-        for offset in range(0, len(targets), 10):
+        # One delegation per target: each specialist run observes only its
+        # own media and commits once, so N uploads are understood in
+        # parallel instead of serially inside a single shared run.
+        for index, target in enumerate(targets):
             activity.append(
                 await self._run_subagent(
                     project_id=project_id,
                     session_id=session_id,
                     parent_run_id=run_id,
-                    parent_action_id=f"uploads-{offset}",
+                    parent_action_id=f"uploads-{index}",
                     epoch=epoch,
                     request=request,
                     tools=tools,
                     arguments={
                         "role": SpecialistRole.SOURCE_INTELLIGENCE.value,
-                        "target_refs": targets[offset : offset + 10],
+                        "target_refs": [target],
                         "task": "理解本轮上传素材，记录其真实外观、风格与内容，保存与当前版本匹配的结果。",
                     },
                 ),
@@ -5614,6 +5673,7 @@ class FileCreatorAgentRuntime:
         if feedback_constraint:
             user_text += "\n\n" + feedback_constraint
         native_media_parts: list[dict[str, Any]] = []
+        include_project_readers = True
         if role is SpecialistRole.SOURCE_INTELLIGENCE:
             native_media_parts = await source_intelligence_content_parts(
                 self.services,
@@ -5625,6 +5685,29 @@ class FileCreatorAgentRuntime:
                 "\n\n本消息附有本次委派需要观察的全部原生图片/视频，"
                 f"共 {len(native_media_parts)} 份。必须基于这些原生媒体进行观察，"
                 "不能把消息中的 URL 文本当作已经完成素材理解。"
+            )
+            identity_facts = _source_identity_facts(
+                snapshot.project,
+                delegated.target_refs,
+            )
+            if identity_facts:
+                user_text += (
+                    "\n\n已核验的素材身份如下（来自当前 Project）；"
+                    "直接采用，无需再定位：\n"
+                    + json.dumps(
+                        identity_facts,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            # With every target's identity verified and no matching prior
+            # intelligence to re-read, the reader tools only invite wasted
+            # VLM turns (observed: a 594s read_project turn) — drop them.
+            include_project_readers = len(identity_facts) != len(
+                delegated.target_refs,
+            ) or any(
+                fact["intelligenceMatchesSelectedVersion"]
+                for fact in identity_facts
             )
             runtime_media_facts = []
             for part in native_media_parts:
@@ -5714,6 +5797,7 @@ class FileCreatorAgentRuntime:
             self.specialist_tools.manifest_for(
                 role,
                 admitted_target_refs=delegated.target_refs,
+                include_project_readers=include_project_readers,
             ),
         )
         tool_call_count = 0

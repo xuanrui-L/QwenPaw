@@ -920,6 +920,7 @@
     "emptyHint2": "当前选中的对象会自动带入上下文。",
     "scrollToBottom": "回到底部 ↓",
     "inputPlaceholder": "输入修改意图，@ 可引用对象…",
+    "uploadAsset": "上传素材",
     "stopAllAgents": "停止所有 Agent",
     "stopAllSuccess": "已停止所有 Agent 活动",
     "stopRequested": "停止请求已发送，点击再次停止",

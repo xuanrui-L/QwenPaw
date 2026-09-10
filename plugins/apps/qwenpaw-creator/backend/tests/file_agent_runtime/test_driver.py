@@ -4277,3 +4277,83 @@ def test_uploaded_image_understanding_starts_before_first_planning_turn(
             await driver.stop()
 
     asyncio.run(scenario())
+
+
+def test_batched_upload_refs_delegate_one_run_per_target(
+    tmp_path,
+    monkeypatch,
+):
+    """Refs across a batched run fan out into single-target delegations.
+
+    Chat uploads land as one runtime notification per request; consecutive
+    notifications batch into one run whose head is only the first message.
+    Every batched ref must still start understanding, and each target gets
+    its own specialist run so uploads are understood in parallel.
+    """
+
+    async def scenario():
+        services, _ = _create_project(tmp_path, initial_goal=None)
+        ingested, _ = _ingest_many_sync(
+            services,
+            project_id=PROJECT_ID,
+            key="source-batch-images",
+            inputs=[
+                _AssetInput(
+                    name=f"img-{index}.png",
+                    content=_png_bytes_for_grounding(),
+                    media_type="image/png",
+                )
+                for index in range(3)
+            ],
+            attach_source=False,
+            scope="source-batch-test",
+        )
+        refs = [
+            f"asset-version:{item['assetVersionId']}"
+            for item in ingested["items"]
+        ]
+        expected_targets = {
+            f"asset:{item['assetId']}" for item in ingested["items"]
+        }
+        _append_initial_request(
+            services,
+            content_parts=[{"type": "text", "text": "按上传素材创作"}],
+            intent="制作",
+            metadata={"assetVersionRefs": refs[:2]},
+        )
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": "又补了一张图"}],
+            channel=MessageChannel.AGENTDOCK,
+            metadata={"assetVersionRefs": refs[2:]},
+        )
+        calls = []
+
+        async def delegate(**kwargs):
+            calls.append(kwargs["arguments"])
+            return {
+                "status": "ACCEPTED",
+                "targetRefs": kwargs["arguments"]["target_refs"],
+            }
+
+        async def model(_messages, _tools):
+            return AgentModelTurn(content="先规划内容，等待素材理解结果。")
+
+        driver = _driver(services, model)
+        monkeypatch.setattr(driver, "_run_subagent", delegate)
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await _wait_consumed(services, 2)
+            await driver.wait_until_idle(PROJECT_ID)
+        finally:
+            await driver.stop()
+        return calls, expected_targets
+
+    calls, expected_targets = asyncio.run(scenario())
+
+    assert [len(call["target_refs"]) for call in calls] == [1, 1, 1]
+    assert {call["target_refs"][0] for call in calls} == expected_targets

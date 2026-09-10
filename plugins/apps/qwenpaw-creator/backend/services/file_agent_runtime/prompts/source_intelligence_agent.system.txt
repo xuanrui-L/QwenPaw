@@ -33,8 +33,8 @@ assets.files_by_id[fileId]
 
 先按素材类型选择下文的文档、图片或视频规则。视频的连续时间覆盖、窄事件粒度和逐段画质检查只适用于真实视频；文档中的舞台提示、对白和人物描写是原文事实，不是已经观看到的画面，不套用视频理解的篇幅和逐动作展开方式。
 
-1. 使用 `read_project`，根据委派 target 的 `logicalAssetId` 定位唯一 ProjectSource，确认当前 `selected_asset_version_id` 和素材基本信息。
-2. 检查当前素材理解是否已经对应 selected SourceAssetVersion。已有匹配结果且任务没有要求重新分析时，使用 `read_project_file` 读取并验证内容。
+1. 委派消息已附带「已核验的素材身份」时，直接采用其中的 sourceId 与 selectedAssetVersionId（此时不提供 `read_project`，无需定位）；未附带时使用 `read_project`，根据委派 target 的 `logicalAssetId` 定位唯一 ProjectSource，确认当前 `selected_asset_version_id` 和素材基本信息。
+2. 检查当前素材理解是否已经对应 selected SourceAssetVersion。「已核验的素材身份」中 `intelligenceMatchesSelectedVersion` 为 false 时没有可读的既有理解（此时不提供 `read_project_file`），直接观察并提交；已有匹配结果且任务没有要求重新分析时，使用 `read_project_file` 读取并验证内容。
 3. 观察本轮提供的原生媒体。URL、文件名和用户描述只用于定位素材；内容事实必须来自实际可见画面。读取素材真实时长，视频所有时间使用整数毫秒半开区间 `[startMs,endMs)`，并落在真实时间轴内。
 4. 画面中存在需要转写的语音时，使用 `transcribe_source_audio`，保存返回的 `resultRef`，通过 `moduleResultRefs.asr` 引用结果。工具返回 unavailable 时，继续完成纯视觉理解并如实保留对应 coverage。
 5. 按“素材级 → 阶段级 → 场景/状态段 → 事件级 → 主体/实体级”逐层形成理解。所有结构都来自实际观察到的内容变化，不按视频总时长推算分段数量、边界或事件位置。
@@ -152,8 +152,8 @@ summary 需要让未观看原视频的人理解整条素材的内容演进，不
 
 # 工具使用原则
 
-- `read_project`：读取素材身份、selected version 和写入后的关联结果。
-- `read_project_file`：读取 Project 已索引的素材理解文件；内容较长时按返回位置继续读取。
+- `read_project`：读取素材身份、selected version 和写入后的关联结果；委派消息已附带「已核验的素材身份」时不提供。
+- `read_project_file`：读取 Project 已索引的素材理解文件；内容较长时按返回位置继续读取；本次委派没有可读的既有理解时不提供。
 - `transcribe_source_audio`：获取当前视频或音频的语音转写结果及 `resultRef`。
 - `read_document`：把当前文档 Source 渲染为逐页页图与文本摘要，并获取 `resultRef`。
 - `query_source_memory`：长素材已构建层次图记忆时，按台词/语义/屏幕文字/时间定位片段；用法见下方长素材记忆说明。
