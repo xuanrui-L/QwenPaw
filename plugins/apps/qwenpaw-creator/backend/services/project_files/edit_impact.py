@@ -20,6 +20,7 @@ from .json_pointer import split_pointer
 from .media_selection import video_selection_fingerprint
 from .models import TimelineElement
 from .prompt_sync import is_prompt_sync_pointer
+from .script_artifacts import SCRIPT_SLOT_KIND
 
 
 @dataclass(slots=True)
@@ -162,6 +163,16 @@ def _mark_timeline_render_stale(
     ).items():
         slot = _record(raw_slot)
         if slot.get("owner_ref") != owner_ref:
+            continue
+        if slot.get("kind") == SCRIPT_SLOT_KIND:
+            # The timeline script is an upstream authoring input, not a render
+            # output: it is drafted from the timeline title/synopsis and the
+            # creative brief, never from Element content, so an Element edit
+            # cannot make its text obsolete.  Because it shares the timeline
+            # owner_ref with the composed master, the scan has to skip it
+            # explicitly - otherwise every prompt edit would leave a STALE
+            # script gating the storyboard and video lanes behind a re-run
+            # that would overwrite the narrative the author just wrote.
             continue
         _mark_selected_stale(
             document,
