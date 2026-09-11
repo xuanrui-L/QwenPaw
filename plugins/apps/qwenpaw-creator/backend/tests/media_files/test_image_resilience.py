@@ -1345,6 +1345,7 @@ def test_style_anchor_resolves_to_base_selection_at_dispatch():
         order=["scene:home", "scene:door"],
     )
 
+    # pylint: disable-next=protected-access
     assert image_execution._resolved_artifact_reference_ids(
         project,
         dependent,
@@ -1352,4 +1353,5 @@ def test_style_anchor_resolves_to_base_selection_at_dispatch():
 
     base.selected_artifact_version_id = None
     with pytest.raises(ValidationError, match="风格锚点"):
+        # pylint: disable-next=protected-access
         image_execution._resolved_artifact_reference_ids(project, dependent)
