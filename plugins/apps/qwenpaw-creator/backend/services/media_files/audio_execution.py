@@ -508,25 +508,116 @@ async def execute_file_tts_command(
     )
 
 
+def _extracted_video_audio_bytes(payload: bytes, *, suffix: str) -> bytes:
+    """Extract a local video's audio track as voice-grade mono WAV."""
+
+    from services.runtime_files.runtime_dependencies import resolve_ffmpeg
+
+    executable = resolve_ffmpeg()
+    if not executable:
+        raise ValidationError(
+            "从视频提取音轨需要 FFmpeg；请安装 ffmpeg，或改为上传音频文件作为音色样本",
+        )
+    with tempfile.TemporaryDirectory(prefix="creator-voice-sample-") as tmp:
+        source = Path(tmp) / f"source{suffix or '.mp4'}"
+        output = Path(tmp) / "sample.wav"
+        source.write_bytes(payload)
+        try:
+            result = subprocess.run(
+                [
+                    executable,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "24000",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                stdin=subprocess.DEVNULL,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ValidationError(
+                "视频音轨提取超时；请改用更短的片段或直接上传音频文件作为音色样本",
+            ) from exc
+        if result.returncode != 0 or not output.exists():
+            raise ValidationError(
+                "视频音轨提取失败（该视频可能没有音轨）："
+                + (result.stderr or result.stdout or "unknown")[-300:],
+            )
+        return output.read_bytes()
+
+
 def _sample_bytes_for_version(
     services: CreatorFileServices,
     *,
     project_id: str,
     version_id: str,
-) -> tuple[bytes, str]:
+    idempotency_key: str,
+) -> tuple[bytes, str, str]:
+    """Resolve a voice sample to audio bytes, media type and version id.
+
+    Video versions are resolved through a persisted extracted-audio
+    SourceAssetVersion (not a temp file): the binding must reference an
+    ``audio/`` version because downstream R2V voice resolution rejects
+    anything else (CR 2026-09-11: a video-bound sample enrolled fine and
+    then failed every render with "characterVoiceSample 必须是 audio/").
+    """
+
     snapshot = services.projects.read(project_id)
     version = snapshot.project.assets.source_versions_by_id.get(version_id)
     if version is None:
         raise ValidationError(f"sample source version not found: {version_id}")
-    if version.media_kind != "audio":
-        raise ValidationError("voice sample version must be audio media")
+    if version.media_kind not in {"audio", "video"}:
+        raise ValidationError(
+            "voice sample version must be audio or video media",
+        )
     if version.file_id is None:
         raise ValidationError("voice sample version has no local file")
     indexed = snapshot.project.assets.files_by_id.get(version.file_id)
     if indexed is None:
         raise ValidationError("voice sample file is not indexed")
     store = AssetFileStore(services.projects.project_root(project_id))
-    return store.read_verified(indexed), indexed.media_type
+    payload = store.read_verified(indexed)
+    if version.media_kind == "audio":
+        return payload, indexed.media_type, version_id
+    # Users often record the reference voice inside a video (field run
+    # 2026-09-10: a black-frame mp4 voice reference was walled by the
+    # audio-only check); its audio track is the sample.
+    extracted = _extracted_video_audio_bytes(
+        payload,
+        suffix=PurePosixPath(indexed.relative_uri).suffix,
+    )
+    registered = _register_audio_asset(
+        services,
+        project_id=project_id,
+        idempotency_key=f"{idempotency_key}:extract-audio",
+        content=extracted,
+        media_type="audio/wav",
+        name=f"{version.name} · 音轨"[:80],
+        duration_seconds=_audio_duration_seconds(extracted, "audio/wav"),
+        metadata={
+            "sourceKind": "voice_sample_extract",
+            "extractedFromVersionId": version_id,
+        },
+        provenance_refs=(f"asset-version:{version_id}",),
+        caused_by_request_id=idempotency_key,
+    )
+    return extracted, "audio/wav", registered.source_asset_version_id
 
 
 def _attach_voice_sample(
@@ -778,11 +869,16 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
         sample_version_id = ""
     else:
         if sample_version_id:
-            sample_bytes, sample_media_type = await asyncio.to_thread(
+            (
+                sample_bytes,
+                sample_media_type,
+                sample_version_id,
+            ) = await asyncio.to_thread(
                 _sample_bytes_for_version,
                 services,
                 project_id=project_id,
                 version_id=sample_version_id,
+                idempotency_key=idempotency_key,
             )
         elif sample_text:
             # Audition path: synthesize a system-voice sample, keep it as an
@@ -799,11 +895,16 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
                 idempotency_key=f"{idempotency_key}:sample",
             )
             sample_version_id = audition.source_asset_version_id
-            sample_bytes, sample_media_type = await asyncio.to_thread(
+            (
+                sample_bytes,
+                sample_media_type,
+                sample_version_id,
+            ) = await asyncio.to_thread(
                 _sample_bytes_for_version,
                 services,
                 project_id=project_id,
                 version_id=sample_version_id,
+                idempotency_key=idempotency_key,
             )
         else:
             raise ValidationError(

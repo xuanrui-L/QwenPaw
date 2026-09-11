@@ -96,6 +96,12 @@ export default function PromptRichBlock({
   const { t } = useTranslation();
   const project = useProjectSnapshotStore((state) => state.project);
   const presentedValue = presentPromptEntityNames(value, project);
+  // An empty prompt is a planned-but-unwritten node only until someone
+  // writes it: a user clearing the prompt to rewrite must not lock the
+  // editor out, so the awaiting state is sticky-off once non-empty.
+  const everWritten = useRef(!!value.trim());
+  if (value.trim()) everWritten.current = true;
+  const awaitingAgent = !everWritten.current;
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
@@ -217,7 +223,9 @@ export default function PromptRichBlock({
             </div>
           ) : (
             <span className="text-[var(--color-text-tertiary)]">
-              {placeholder ?? t("r2v.generateAndEdit", { label })}
+              {awaitingAgent
+                ? t("r2v.awaitAgentPrompt")
+                : placeholder ?? t("r2v.generateAndEdit", { label })}
             </span>
           )}
           {collapsed && (
@@ -245,7 +253,7 @@ export default function PromptRichBlock({
           <button
             type="button"
             data-prompt-edit={field}
-            disabled={disabled}
+            disabled={disabled || awaitingAgent}
             onClick={() => setFullOpen(true)}
             className="inline-flex h-10 shrink-0 cursor-pointer select-none items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 text-sm font-medium leading-6 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-border-strong)] disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -257,7 +265,7 @@ export default function PromptRichBlock({
               field={field}
               label={regenerateLabel ?? ""}
               loading={regenerating}
-              disabled={disabled || regenerateDisabled}
+              disabled={disabled || regenerateDisabled || awaitingAgent}
               onClick={onRegenerate}
             />
           )}

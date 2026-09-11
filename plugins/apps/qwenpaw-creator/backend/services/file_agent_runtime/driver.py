@@ -614,6 +614,54 @@ def _timelines_have_plan(project: Any, target_refs: list[str]) -> bool:
     return True
 
 
+def _source_identity_facts(
+    project: Any,
+    target_refs: list[str],
+) -> list[dict[str, Any]]:
+    """Runtime-verified identity for each delegated source target.
+
+    Handing the specialist the sourceId/selected-version pair it would
+    otherwise spend its first VLM turn locating via read_project.
+    """
+
+    facts: list[dict[str, Any]] = []
+    for target_ref in target_refs:
+        kind, separator, identifier = str(target_ref).partition(":")
+        if kind != "asset" or not separator or not identifier:
+            continue
+        source = next(
+            (
+                item
+                for item in project.sources.sources.items.values()
+                if item.logical_asset_id == identifier
+            ),
+            None,
+        )
+        if source is None:
+            continue
+        version = project.assets.source_versions_by_id.get(
+            source.selected_asset_version_id,
+        )
+        intelligence = project.assets.intelligence_versions_by_id.get(
+            source.current_intelligence_version_id,
+        )
+        facts.append(
+            {
+                "targetRef": str(target_ref),
+                "sourceId": source.source_id,
+                "selectedAssetVersionId": source.selected_asset_version_id,
+                "name": version.name if version else source.display_name,
+                "mediaKind": version.media_kind if version else None,
+                "intelligenceMatchesSelectedVersion": bool(
+                    intelligence
+                    and intelligence.source_asset_version_id
+                    == source.selected_asset_version_id,
+                ),
+            },
+        )
+    return facts
+
+
 def _agent_waiting_review_summary(
     specialist_summary: str | None,
 ) -> str:
@@ -2797,6 +2845,7 @@ class FileCreatorAgentRuntime:
                 epoch=epoch,
                 request=message,
                 tools=tools,
+                batch_tail=batch[1:],
             )
             result = await self._model_loop(
                 project_id=project_id,
@@ -3061,12 +3110,19 @@ class FileCreatorAgentRuntime:
         epoch,
         request,
         tools,
+        batch_tail=None,
     ) -> list[dict[str, Any]]:
         """Start exact uploaded-source work before creative planning begins."""
         from .native_media import _version_id_from_ref
 
-        refs = request.metadata.get("assetVersionRefs") or []
-        if not isinstance(refs, list) or not refs:
+        # Consecutive upload notifications batch into one run; every batched
+        # message may carry its own refs, not just the head.
+        refs: list[Any] = []
+        for record in (request, *(batch_tail or ())):
+            record_refs = record.metadata.get("assetVersionRefs") or []
+            if isinstance(record_refs, list):
+                refs.extend(record_refs)
+        if not refs:
             return []
         base = await asyncio.to_thread(tools.read_project, project_id)
         project = base.project
@@ -3134,19 +3190,24 @@ class FileCreatorAgentRuntime:
                 ops=operations,
             )
         activity = []
-        for offset in range(0, len(targets), 10):
+        # One delegation per target: each specialist run observes only its
+        # own media and commits once, so N uploads are understood in
+        # parallel instead of serially inside a single shared run.
+        for index, target in enumerate(targets):
             activity.append(
                 await self._run_subagent(
                     project_id=project_id,
                     session_id=session_id,
                     parent_run_id=run_id,
-                    parent_action_id=f"uploads-{offset}",
+                    parent_action_id=(
+                        f"uploads-{request.message_seq}-{index}"
+                    ),
                     epoch=epoch,
                     request=request,
                     tools=tools,
                     arguments={
                         "role": SpecialistRole.SOURCE_INTELLIGENCE.value,
-                        "target_refs": targets[offset : offset + 10],
+                        "target_refs": [target],
                         "task": "理解本轮上传素材，记录其真实外观、风格与内容，保存与当前版本匹配的结果。",
                     },
                 ),
@@ -3221,15 +3282,7 @@ class FileCreatorAgentRuntime:
             },
         ]
         if source_activity:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "本轮上传素材的理解已启动："
-                    + json.dumps(source_activity, ensure_ascii=False)
-                    + "。可以先规划不依赖素材外观的内容；使用这些素材编写视觉设定前，"
-                    "先读取已保存的理解结果。不要重复委派。",
-                },
-            )
+            messages.append(_source_activity_message(source_activity))
         tool_call_count = 0
         review_ids: list[str] = []
         waiting_review_summary: str | None = None
@@ -3337,6 +3390,27 @@ class FileCreatorAgentRuntime:
                     },
                 )
                 input_cursor = item.message_seq
+                # Uploads may join a live run (composer sends and asset
+                # notifications both carry assetVersionRefs): understanding
+                # must start here exactly as it does for a run head, or the
+                # material silently never gets analyzed (field run
+                # 2026-09-11: a mid-run video upload produced no
+                # source_intelligence run at all).
+                if item.metadata.get("assetVersionRefs"):
+                    joined_activity = (
+                        await self._start_attached_source_understanding(
+                            project_id=project_id,
+                            session_id=session_id,
+                            run_id=run_id,
+                            epoch=epoch,
+                            request=item,
+                            tools=tools,
+                        )
+                    )
+                    if joined_activity:
+                        messages.append(
+                            _source_activity_message(joined_activity),
+                        )
             # Turn-boundary drain: quiet progress staged while this run is
             # working (e.g. a detached specialist finishing mid-run) joins
             # the live conversation as a non-durable user turn.
@@ -5614,6 +5688,7 @@ class FileCreatorAgentRuntime:
         if feedback_constraint:
             user_text += "\n\n" + feedback_constraint
         native_media_parts: list[dict[str, Any]] = []
+        include_project_readers = True
         if role is SpecialistRole.SOURCE_INTELLIGENCE:
             native_media_parts = await source_intelligence_content_parts(
                 self.services,
@@ -5625,6 +5700,29 @@ class FileCreatorAgentRuntime:
                 "\n\n本消息附有本次委派需要观察的全部原生图片/视频，"
                 f"共 {len(native_media_parts)} 份。必须基于这些原生媒体进行观察，"
                 "不能把消息中的 URL 文本当作已经完成素材理解。"
+            )
+            identity_facts = _source_identity_facts(
+                snapshot.project,
+                delegated.target_refs,
+            )
+            if identity_facts:
+                user_text += (
+                    "\n\n已核验的素材身份如下（来自当前 Project）；"
+                    "直接采用，无需再定位：\n"
+                    + json.dumps(
+                        identity_facts,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+            # With every target's identity verified and no matching prior
+            # intelligence to re-read, the reader tools only invite wasted
+            # VLM turns (observed: a 594s read_project turn) — drop them.
+            include_project_readers = len(identity_facts) != len(
+                delegated.target_refs,
+            ) or any(
+                fact["intelligenceMatchesSelectedVersion"]
+                for fact in identity_facts
             )
             runtime_media_facts = []
             for part in native_media_parts:
@@ -5714,6 +5812,7 @@ class FileCreatorAgentRuntime:
             self.specialist_tools.manifest_for(
                 role,
                 admitted_target_refs=delegated.target_refs,
+                include_project_readers=include_project_readers,
             ),
         )
         tool_call_count = 0
@@ -8882,6 +8981,18 @@ def _artifact_selection_notes(
     return notes
 
 
+def _source_activity_message(
+    source_activity: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": "本轮上传素材的理解已启动："
+        + json.dumps(source_activity, ensure_ascii=False)
+        + "。可以先规划不依赖素材外观的内容；使用这些素材编写视觉设定前，"
+        "先读取已保存的理解结果。不要重复委派。",
+    }
+
+
 def _running_message_text(
     message: CreatorMessageRecord,
     *,
@@ -8933,7 +9044,11 @@ def _message_text(
                     list(dict.fromkeys(exact_refs)),
                     ensure_ascii=False,
                     separators=(",", ":"),
-                ),
+                )
+                + "\n请先用简短的公开回复确认已收到这些素材，并结合当前项目的"
+                "实际进展说明接下来会如何安排使用它们（哪些工作现在就能继续、"
+                "哪些要等素材理解结果）。素材理解由 Runtime 自动启动并在完成后"
+                "以 Runtime 通知送达，不要为此重复委派。",
             )
     context = message.metadata.get("context")
     if isinstance(context, Mapping):

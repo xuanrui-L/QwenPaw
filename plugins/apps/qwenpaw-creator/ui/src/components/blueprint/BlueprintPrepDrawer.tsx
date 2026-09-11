@@ -22,6 +22,7 @@ import {
 } from "@/selectors/blueprintSelectors";
 import { visualVariantLabel } from "@/lib/visualVariants";
 import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
+import { nodeGenerating } from "@/lib/generationActivity";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import {
   GenerationPromptEditor,
@@ -143,15 +144,20 @@ function VisualDetail({
     ? dispatchNodeIdForPrompt(promptTarget.pointer)
     : null;
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
+  const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
 
   const regenerate = () => {
     if (!regenerateNodeId) return;
     void dispatchWorkGraphNode(projectId, regenerateNodeId)
       .then((result) => {
-        message.success(
-          result.dispatched ? t("r2v.regenQueued") : t("r2v.regenUpToDate"),
-        );
+        if (result.dispatched) {
+          message.success(t("r2v.regenQueued"));
+        } else if (result.status === "running") {
+          message.info(t("r2v.regenRunning"));
+        } else {
+          message.info(t("r2v.regenUpToDate"));
+        }
         void refreshTasks(projectId);
         void pollOnce(projectId);
       })
@@ -296,6 +302,7 @@ function VisualDetail({
                 : promptTarget
             }
             saving={patching}
+            regenerating={nodeGenerating(tasks, regenerateNodeId)}
             regenerateLabel={t("r2v.regenerateImage")}
             onRegenerate={regenerateNodeId ? regenerate : undefined}
             onSave={savePromptTarget}

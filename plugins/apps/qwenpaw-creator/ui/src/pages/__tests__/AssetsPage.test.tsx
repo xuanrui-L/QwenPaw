@@ -1,7 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
-import AssetsPage, { VoiceGenerationModal } from "@/pages/AssetsPage";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import AssetsPage, {
+  GenerationPromptEditor,
+  visualEntityPromptTarget,
+  VoiceGenerationModal,
+} from "@/pages/AssetsPage";
 import BlueprintPrepDrawer from "@/components/blueprint/BlueprintPrepDrawer";
 import { NavigationRuntime } from "@/routing/navigation";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
@@ -374,6 +378,46 @@ describe("AssetsPage Project projection", () => {
         "/api/qwenpaw-creator/projects/p1/work-graph/nodes/visual%3Acat%3Avariant%3Acat%3Awet/dispatch",
       ]),
     );
+  });
+
+  it("keeps an anchor's selected image out of the reference picker", () => {
+    const project = cloneProject();
+    const entity = project.visual.entities.items.cat;
+    entity.variants.items["derived"] = {
+      ...entity.variants.items["variant:cat:default"],
+      variant_id: "derived",
+      prompt: "保持 [Image 1] 的角色身份",
+      reference_artifact_version_ids: ["visual:cat:variant:cat:default"],
+      generated_artifact_version_ids: [],
+      selected_artifact_version_id: null,
+    };
+    entity.variants.order.push("derived");
+    project.assets.artifact_versions_by_id["another-image"] = {
+      ...project.assets.artifact_versions_by_id["cat-anchor-v1"],
+      version_id: "another-image",
+    };
+    render(
+      <GenerationPromptEditor
+        target={visualEntityPromptTarget(project, entity, null, "derived")!}
+        onSave={vi.fn()}
+        saving={false}
+        regenerateLabel="重新生成图片"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    expect(
+      document.querySelector('[data-prompt-reference-row="1"] img'),
+    ).toHaveAttribute(
+      "src",
+      "/api/qwenpaw-creator/media/artifacts/cat-anchor-v1",
+    );
+    fireEvent.click(document.querySelector("[data-prompt-add-reference]")!);
+    expect(
+      document.querySelector('[data-picker-asset="cat-anchor-v1"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector('[data-picker-asset="another-image"]'),
+    ).toBeInTheDocument();
   });
 });
 

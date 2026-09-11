@@ -1287,3 +1287,170 @@ def test_snapshot_does_not_count_toward_script_flow() -> None:
         node.node_id for node in graph.nodes if node.kind == "script"
     )
     assert script_nodes == ["script:timeline:ep2", "script:timeline:main"]
+
+
+def test_style_anchor_gates_then_rides_the_base_selection() -> None:
+    """`visual:<entity>:<variant>` refs plan a spatial group up front.
+
+    Field run 2026-09-11 (卧室/家门口/电梯口): related scenes rendered in
+    parallel with zero cross references. The anchor gates the dependent
+    scene until the base image is selected, then resolves into the dispatch
+    fingerprint so a re-selected base re-identifies the node.
+    """
+
+    project = _project()
+    project.visual.entities.items["scene:bedroom"] = _entity(
+        "scene:bedroom",
+        {"var:base": None},
+    )
+    project.visual.entities.order.append("scene:bedroom")
+    project.visual.entities.items["scene:door"] = _entity(
+        "scene:door",
+        {"var:base": None},
+    )
+    project.visual.entities.order.append("scene:door")
+    anchor_ref = "visual:scene:bedroom:var:base"
+    door = project.visual.entities.items["scene:door"].variants.items[
+        "var:base"
+    ]
+    door.reference_artifact_version_ids = [anchor_ref]
+    node_id = "visual:scene:door:var:base"
+
+    gated = derive_work_graph(project).by_id[node_id]
+    assert gated.status is WorkNodeStatus.GATED
+    assert gated.missing == (anchor_ref,)
+    assert gated.deps == (anchor_ref,)
+
+    bedroom = project.visual.entities.items["scene:bedroom"].variants.items[
+        "var:base"
+    ]
+    bedroom.selected_artifact_version_id = "art:bed-1"
+    ready = derive_work_graph(project).by_id[node_id]
+    assert ready.status is WorkNodeStatus.READY
+    first = ready.dispatch_fingerprint
+
+    # The anchor resolves to the concrete base image: choosing another base
+    # version changes the dependent's input identity.
+    bedroom.selected_artifact_version_id = "art:bed-2"
+    second = derive_work_graph(project).by_id[node_id].dispatch_fingerprint
+    assert first != second
+
+    # A repaint in flight re-gates the dependent: rendering against the
+    # outgoing base image burns a paid call that the update quarantines.
+    repainting = derive_work_graph(
+        project,
+        tasks=[
+            _task(
+                "image_generation",
+                "asset:scene:bedroom",
+                TaskStatus.RUNNING,
+                metadata={"variantId": "var:base"},
+            ),
+        ],
+    ).by_id[node_id]
+    assert repainting.status is WorkNodeStatus.GATED
+    assert repainting.missing == (anchor_ref,)
+
+
+def test_completed_dependent_goes_stale_when_the_base_reselects() -> None:
+    """A finished related scene must surface as STALE once its anchor's
+    image changes — silently staying DONE hid the drift (CR 2026-09-11)."""
+
+    project = _project()
+    project.visual.entities.items["scene:bedroom"] = _entity(
+        "scene:bedroom",
+        {"var:base": "art:bed-1"},
+    )
+    project.visual.entities.order.append("scene:bedroom")
+    project.visual.entities.items["scene:door"] = _entity(
+        "scene:door",
+        {"var:door": "art:door-1"},
+    )
+    project.visual.entities.order.append("scene:door")
+    door = project.visual.entities.items["scene:door"].variants.items[
+        "var:door"
+    ]
+    door.reference_artifact_version_ids = ["visual:scene:bedroom:var:base"]
+    _select_slot(
+        project,
+        slot_id="asset:scene:door:variant:var:door:image",
+        kind="visual_asset_image",
+        owner_ref="asset:scene:door",
+        version_id="art:door-1",
+        provenance=["artifact-version:art:bed-1"],
+    )
+    node_id = "visual:scene:door:var:door"
+
+    assert derive_work_graph(project).by_id[node_id].status is (
+        WorkNodeStatus.DONE
+    )
+
+    repainting = _task(
+        "image_generation",
+        "asset:scene:bedroom",
+        TaskStatus.RUNNING,
+        metadata={"variantId": "var:base"},
+    )
+    held = derive_work_graph(project, tasks=[repainting]).by_id[node_id]
+    assert held.status is WorkNodeStatus.GATED
+    assert held.missing == ("visual:scene:bedroom:var:base",)
+
+    bedroom = project.visual.entities.items["scene:bedroom"].variants.items[
+        "var:base"
+    ]
+    bedroom.selected_artifact_version_id = "art:bed-2"
+    graph = derive_work_graph(project)
+    assert graph.by_id[node_id].status is WorkNodeStatus.STALE
+    assert graph.by_id[node_id].regeneration_of == "art:door-1"
+    assert node_id in {node.node_id for node in graph.regeneration_nodes()}
+
+    held = derive_work_graph(project, tasks=[repainting])
+    assert held.by_id[node_id].missing == ("visual:scene:bedroom:var:base",)
+    assert held.regeneration_nodes() == ()
+
+
+def test_failed_reroll_is_not_masked_by_the_old_success() -> None:
+    """A failure newer than the selected artifact surfaces as FAILED and
+    stays parked (reopening would replay the finished base slot forever);
+    an older, already-superseded failure keeps the node DONE."""
+
+    project = _project()
+    project.visual.entities.items["char:a"] = _entity(
+        "char:a",
+        {"var:x": "art:x"},
+    )
+    project.visual.entities.order.append("char:a")
+    _select_slot(
+        project,
+        slot_id="asset:char:a:variant:var:x:image",
+        kind="visual_asset_image",
+        owner_ref="asset:char:a",
+        version_id="art:x",
+    )
+    node_id = "visual:char:a:var:x"
+
+    def status_with_failure(updated_at: str) -> WorkNodeStatus:
+        return (
+            derive_work_graph(
+                project,
+                tasks=[
+                    _task(
+                        "image_generation",
+                        "asset:char:a",
+                        TaskStatus.FAILED,
+                        metadata={"variantId": "var:x"},
+                        error={"message": "orphaned before claim"},
+                        idempotency_key=f"dag-{node_id}-reroll-slot",
+                        updated_at=updated_at,
+                    ),
+                ],
+            )
+            .by_id[node_id]
+            .status
+        )
+
+    # The artifact fixture is created at 2026-08-05.
+    assert status_with_failure("2026-08-06T00:00:00Z") is (
+        WorkNodeStatus.FAILED
+    )
+    assert status_with_failure("2026-08-04T00:00:00Z") is WorkNodeStatus.DONE

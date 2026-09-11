@@ -13,6 +13,8 @@ import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
+import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
+import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import {
   evt,
@@ -80,6 +82,51 @@ const ACCEPTED = {
   creatorSessionId: "session-1",
   conversationId: "conversation-1",
 };
+
+function stagedSubmission(names = ["a.png"]) {
+  const { calls, fetchMock } = installMockFetch([
+    { match: "/messages", method: "POST", response: { json: ACCEPTED } },
+    { match: "/specialist-runs", response: { json: { items: [] } } },
+    { match: "/tasks", response: { json: { items: [] } } },
+    {
+      match: "/projects/p1/project",
+      response: { json: { project: projectDocument } },
+    },
+  ]);
+  const uploads: Array<{
+    resolve: (body: unknown) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+    String(input).endsWith("/assets") && init?.method === "POST"
+      ? new Promise<Response>((resolve, reject) =>
+          uploads.push({
+            resolve: (body) =>
+              resolve({
+                ok: true,
+                status: 200,
+                headers: new Headers(),
+                json: async () => body,
+              } as Response),
+            reject,
+          }),
+        )
+      : fetchMock(input, init),
+  );
+  useAgentDockUiStore.getState().setOpen(true);
+  renderDock();
+  fireEvent.change(document.querySelector("[data-agent-upload-input]")!, {
+    target: {
+      files: names.map((name) => new File([name], name, { type: "image/png" })),
+    },
+  });
+  const write = (text: string) => {
+    composerBox().textContent = text;
+    fireEvent.input(composerBox());
+  };
+  write("指令 A");
+  return { uploads, calls, write };
+}
 
 const seedSession = (status: string, patch: Record<string, unknown> = {}) =>
   useCreatorSessionStore.setState(
@@ -313,6 +360,142 @@ describe("AgentDock public output and interactions", () => {
       expect(useCreatorSessionStore.getState().queuedUi[0]?.state).toBe(
         "queued",
       ),
+    );
+  });
+
+  it.each(["selection", "reference"])(
+    "preserves a changed %s with identical text during upload",
+    async (kind) => {
+      const { uploads, calls } = stagedSubmission();
+      const first = {
+        text: "同一段文字",
+        label: "提示词",
+        ref: "element:a",
+        field: "prompt",
+        path: "/a",
+        start: 0,
+        end: 5,
+      };
+      if (kind === "selection") {
+        act(() => useAgentDockUiStore.getState().setSelection(first));
+      } else {
+        act(() =>
+          useCreatorInteractionStore.getState().setExtraRefs([
+            {
+              ref: "asset-version:a",
+              name: "同名素材",
+              type: "asset",
+              uiLocator: {},
+            },
+          ]),
+        );
+      }
+      fireEvent.keyDown(composerBox(), { key: "Enter" });
+      expect(uploads).toHaveLength(1);
+      if (kind === "selection") {
+        fireEvent.click(composerBox().querySelector("[data-sel]")!);
+        act(() =>
+          useAgentDockUiStore
+            .getState()
+            .setSelection({ ...first, start: 10, end: 15 }),
+        );
+      } else {
+        act(() =>
+          useCreatorInteractionStore.getState().setExtraRefs([
+            {
+              ref: "asset-version:b",
+              name: "同名素材",
+              type: "asset",
+              uiLocator: {},
+            },
+          ]),
+        );
+      }
+      await act(async () => uploads[0].resolve({ assetVersionId: "uploaded" }));
+      await waitFor(() =>
+        expect(calls.some((call) => call.method === "POST")).toBe(true),
+      );
+      expect(composerBox()).toHaveTextContent("指令 A");
+      const body = calls.find((call) => call.method === "POST")!.body as {
+        context: { selections: unknown[]; extraRefs: string[] };
+      };
+      if (kind === "selection") {
+        expect(body.context.selections).toEqual([first]);
+        expect(composerBox().querySelector("[data-sel]")).toHaveAttribute(
+          "data-sel-start",
+          "10",
+        );
+      } else {
+        expect(body.context.extraRefs).toContain("asset-version:a");
+        expect(useCreatorInteractionStore.getState().extraRefs[0].ref).toBe(
+          "asset-version:b",
+        );
+      }
+    },
+  );
+
+  it("offers the original instruction after a partial upload failure without overwriting the new draft", async () => {
+    const { uploads, calls, write } = stagedSubmission(["a.png", "b.png"]);
+    const selection = {
+      text: "原选区",
+      label: "提示词",
+      ref: "element:a",
+      field: "prompt",
+      path: "/a",
+      start: 0,
+      end: 3,
+    };
+    act(() => useAgentDockUiStore.getState().setSelection(selection));
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    await act(async () => uploads[0].resolve({ assetVersionId: "a" }));
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    write("指令 B");
+    await act(async () => uploads[1].reject(new Error("upload interrupted")));
+    expect(composerBox()).toHaveTextContent("指令 B");
+    expect(
+      document.querySelector("[data-agent-interrupted-text]"),
+    ).toHaveTextContent("指令 A");
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+    fireEvent.click(
+      within(
+        document.querySelector("[data-agent-interrupted-text]") as HTMLElement,
+      ).getByRole("button", { name: "恢复到输入框" }),
+    );
+    expect(composerBox()).toHaveTextContent("指令 A");
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    await waitFor(() => expect(uploads).toHaveLength(3));
+    await act(async () => uploads[2].resolve({ assetVersionId: "b" }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
+        assetVersionRefs: ["asset-version:a", "asset-version:b"],
+        context: { selections: [selection] },
+      }),
+    );
+    expect(
+      (
+        calls.find((call) => call.method === "POST")!.body as {
+          message: string;
+        }
+      ).message,
+    ).toContain("指令 A");
+  });
+
+  it("excludes removed files from both the remaining uploads and final message", async () => {
+    const { uploads, calls } = stagedSubmission(["a.png", "b.png", "c.png"]);
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    const remove = (name: string) =>
+      fireEvent.click(
+        within(screen.getByText(name).parentElement!).getByRole("button"),
+      );
+    remove("a.png");
+    remove("b.png");
+    await act(async () => uploads[0].resolve({ assetVersionId: "a" }));
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    await act(async () => uploads[1].resolve({ assetVersionId: "c" }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
+        assetVersionRefs: ["asset-version:c"],
+      }),
     );
   });
 

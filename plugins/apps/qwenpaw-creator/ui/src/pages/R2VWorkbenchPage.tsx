@@ -20,6 +20,7 @@ import {
   type ProjectEditOperation,
 } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { nodeGenerating } from "@/lib/generationActivity";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import {
@@ -129,7 +130,6 @@ function PromptTextArea({
   field,
   path,
   disabled = false,
-  placeholder,
   onChange,
   onRegenerate,
   regenerating = false,
@@ -147,6 +147,12 @@ function PromptTextArea({
   regenerateLabel?: string;
 }) {
   const { t } = useTranslation();
+  // An empty prompt is a planned-but-unwritten field only until someone
+  // writes it: a user clearing the draft to rewrite must not lock the box,
+  // so the awaiting state is sticky-off once the value has been non-empty.
+  const everWritten = useRef(!!value.trim());
+  if (value.trim()) everWritten.current = true;
+  const awaitingAgent = !everWritten.current;
   return (
     <div
       data-creator-field={field}
@@ -159,10 +165,14 @@ function PromptTextArea({
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
         <TextArea
           value={value}
-          disabled={disabled}
+          disabled={disabled || awaitingAgent}
           onChange={(event) => onChange(event.target.value)}
           autoSize={{ minRows: 2, maxRows: 10 }}
-          placeholder={placeholder ?? t("r2v.generateAndEdit", { label })}
+          placeholder={
+            awaitingAgent
+              ? t("r2v.awaitAgentPrompt")
+              : t("r2v.generateAndEdit", { label })
+          }
           className="!rounded-none !border-0 !bg-transparent !text-xs !shadow-none"
         />
         {onRegenerate && (
@@ -171,7 +181,7 @@ function PromptTextArea({
               field={field}
               label={regenerateLabel ?? ""}
               loading={regenerating}
-              disabled={disabled}
+              disabled={disabled || awaitingAgent}
               onClick={onRegenerate}
             />
           </div>
@@ -1250,7 +1260,8 @@ export function WorkbenchSurface({
                       onChange={(value) => updateModeField("script", value)}
                       onRegenerate={() => void regenerateNode("video")}
                       regenerating={
-                        regeneratingNode === `video:${element.element_id}`
+                        regeneratingNode === `video:${element.element_id}` ||
+                        nodeGenerating(tasks, `video:${element.element_id}`)
                       }
                       regenerateLabel={t("r2v.regenerateVideo")}
                     />
@@ -1309,7 +1320,8 @@ export function WorkbenchSurface({
                       }
                       onRegenerate={() => void regenerateNode("video")}
                       regenerating={
-                        regeneratingNode === `video:${element.element_id}`
+                        regeneratingNode === `video:${element.element_id}` ||
+                        nodeGenerating(tasks, `video:${element.element_id}`)
                       }
                       regenerateLabel={t("r2v.regenerateVideo")}
                     />
@@ -1919,7 +1931,8 @@ export function WorkbenchSurface({
                     collapseHeight={230}
                     onRegenerate={() => void regenerateNode("storyboard")}
                     regenerating={
-                      regeneratingNode === `storyboard:${element.element_id}`
+                      regeneratingNode === `storyboard:${element.element_id}` ||
+                      nodeGenerating(tasks, `storyboard:${element.element_id}`)
                     }
                     regenerateLabel={t("r2v.regenerateImage")}
                     onEditComplete={scheduleSilentApply}
@@ -1992,7 +2005,8 @@ export function WorkbenchSurface({
                     collapseHeight={460}
                     onRegenerate={() => void regenerateNode("video")}
                     regenerating={
-                      regeneratingNode === `video:${element.element_id}`
+                      regeneratingNode === `video:${element.element_id}` ||
+                      nodeGenerating(tasks, `video:${element.element_id}`)
                     }
                     regenerateLabel={t("r2v.regenerateVideo")}
                     onEditComplete={scheduleSilentApply}

@@ -259,6 +259,102 @@ def test_transient_failure_reopens_a_retry_slot(tmp_path, monkeypatch):
     assert result.replayed is False and result.artifact_version_id
 
 
+def test_unclaimed_running_task_recovers_into_a_retry_slot(
+    tmp_path,
+    monkeypatch,
+):
+    """An executor死于 claim 前留下的 RUNNING 记录必须可自愈重派。
+
+    2026-09-10 现场：四个场景空镜在 claim_sync 的 lifecycle 锁超时后停在
+    RUNNING（无 provider-claim.json），节点被判 RUNNING 永不重派。无 claim
+    即无消费，超过宽限期后清为 retryable FAILED，重试槽只再付费一次。
+    """
+
+    from domain.enums import TaskStatus
+    from services.runtime_files.errors import LockTimeoutError
+
+    services = _services(tmp_path, monkeypatch)
+    provider = _CountingProvider()
+    worker = FileImageExecutionService(services, provider=provider)
+
+    async def dead_claim(task):
+        del task
+        raise LockTimeoutError(tmp_path / "project.lock", 10)
+
+    monkeypatch.setattr(worker, "_claim_provider", dead_claim)
+    request = {
+        "project_id": PROJECT_ID,
+        "command": "GENERATE_STORYBOARD_IMAGE",
+        "target_ref": f"element:{ELEMENT_ID}",
+        "arguments": {},
+        "idempotency_key": "scene-anchor",
+    }
+    with pytest.raises(LockTimeoutError):
+        asyncio.run(worker.execute(**request))
+
+    executions = worker.executions
+    stuck = executions.list_tasks(PROJECT_ID)[0]
+    claim = image_execution.provider_claim_path(
+        services.projects.project_root(PROJECT_ID),
+        stuck.task_id,
+    )
+    assert stuck.status.value == "RUNNING"
+    assert not claim.exists()
+    assert provider.calls == 0
+
+    # Within the grace window the record stays walled: a live executor may
+    # legitimately sit between admission and its provider claim.
+    fresh_worker = FileImageExecutionService(services, provider=provider)
+    with pytest.raises(ConflictError, match="已由另一个执行者领取"):
+        asyncio.run(fresh_worker.execute(**request))
+
+    # Past the grace the zombie closes as retryable; the next slot runs and
+    # pays the provider exactly once.
+    monkeypatch.setattr(
+        image_execution,
+        "_UNCLAIMED_RUNNING_GRACE_SECONDS",
+        0.0,
+    )
+    result = asyncio.run(fresh_worker.execute(**request))
+    assert provider.calls == 1
+    assert result.artifact_version_id
+    swept = executions.get_task(PROJECT_ID, stuck.task_id)
+    assert swept.status is TaskStatus.FAILED
+    assert swept.error["retryable"] is True
+    assert "timed out" in swept.error["message"]
+    # The zombie's SpecialistRun must reach a terminal state too, or the
+    # UI keeps deriving background activity forever.
+    from domain.enums import SpecialistRunStatus
+
+    assert (
+        executions.get_run(PROJECT_ID, swept.run_id).status
+        is SpecialistRunStatus.FAILED
+    )
+    # Recovery tombstones the claim boundary: a still-alive zombie executor
+    # that wakes up later loses the claim race and aborts before paying.
+    assert claim.exists()
+    # pylint: disable-next=protected-access
+    assert asyncio.run(fresh_worker._claim_provider(swept)) is False
+
+    # The scheduler sweep shares the predicate: a claimed RUNNING record is
+    # provider spend in flight and must never be touched.
+    claimed = stuck.model_copy(update={"task_id": "task-claimed"})
+    claim_file = image_execution.provider_claim_path(
+        services.projects.project_root(PROJECT_ID),
+        claimed.task_id,
+    )
+    claim_file.parent.mkdir(parents=True, exist_ok=True)
+    claim_file.write_text("{}", encoding="utf-8")
+    assert (
+        image_execution.recover_unclaimed_image_tasks(
+            services,
+            PROJECT_ID,
+            [claimed],
+        )
+        is False
+    )
+
+
 @pytest.mark.parametrize("terminal_status", ["cancelled", "failed"])
 # pylint: disable-next=too-many-statements
 def test_manual_workgraph_retry_reuses_one_new_media_task(
@@ -355,9 +451,13 @@ def test_manual_workgraph_retry_reuses_one_new_media_task(
             response = await retry
             assert response.status_code == 200
             assert response.json()["dispatched"] is True
+            # DONE nodes now re-roll on explicit request (same-prompt
+            # regeneration is a user right); with the fresh result still
+            # awaiting review, the re-roll is refused loudly instead of
+            # being swallowed as "already up to date".
             completed = await client.post(path)
-            assert completed.status_code == 200
-            assert completed.json()["dispatched"] is False
+            assert completed.status_code == 409
+            assert completed.json()["code"] == "WAITING_REVIEW"
         tasks = executions.list_tasks(PROJECT_ID)
         assert len(tasks) == 2
         assert provider.calls == 1
@@ -1219,3 +1319,63 @@ def test_media_review_mode_controls_storyboard_publication(
             and slot.selected_version_id == result.artifact_version_id
             for slot in slots.values()
         )
+
+
+def test_style_anchor_resolves_to_base_selection_at_dispatch():
+    """Dispatch reads the base variant's current image through the anchor;
+    a regressed (unselected) base fails closed instead of rendering blind."""
+
+    from services.project_files.models import (
+        EntityCollection,
+        VisualEntity,
+        VisualVariant,
+    )
+
+    project = Project.new(project_id="p-anchor", name="Anchor")
+    base = VisualVariant(
+        variant_id="var:base",
+        selected_artifact_version_id="art-base-1",
+    )
+    dependent = VisualVariant(
+        variant_id="var:door",
+        reference_artifact_version_ids=[
+            "visual:scene:home:var:base",
+            "art-plain-9",
+        ],
+    )
+    project.visual.entities = EntityCollection(
+        items={
+            "scene:home": VisualEntity(
+                entity_id="scene:home",
+                kind="scene",
+                name="家",
+                required_variant_ids=["var:base"],
+                variants=EntityCollection(
+                    items={"var:base": base},
+                    order=["var:base"],
+                ),
+            ),
+            "scene:door": VisualEntity(
+                entity_id="scene:door",
+                kind="scene",
+                name="家门口",
+                required_variant_ids=["var:door"],
+                variants=EntityCollection(
+                    items={"var:door": dependent},
+                    order=["var:door"],
+                ),
+            ),
+        },
+        order=["scene:home", "scene:door"],
+    )
+
+    # pylint: disable-next=protected-access
+    assert image_execution._resolved_artifact_reference_ids(
+        project,
+        dependent,
+    ) == ["art-base-1", "art-plain-9"]
+
+    base.selected_artifact_version_id = None
+    with pytest.raises(ValidationError, match="风格锚点"):
+        # pylint: disable-next=protected-access
+        image_execution._resolved_artifact_reference_ids(project, dependent)

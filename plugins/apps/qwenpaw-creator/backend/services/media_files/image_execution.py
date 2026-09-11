@@ -66,6 +66,7 @@ from services.project_files.models import (
     R2VCreation,
     VisualEntity,
     VisualVariant,
+    visual_style_anchor,
 )
 from services.media_files.call_budget import ensure_media_call_budget
 from services.media_files.publication_retry import (
@@ -167,6 +168,160 @@ class ImageReferenceBudgetError(ValidationError):
     """Resolved Project references exceed the active image model contract."""
 
     code = "IMAGE_REFERENCE_BUDGET_EXCEEDED"
+
+
+# A live executor moves from the RUNNING transition to the provider claim
+# within seconds (the lifecycle-lock fuse caps the wait at 10s); a RUNNING
+# record older than this with no claim has no owner left.
+_UNCLAIMED_RUNNING_GRACE_SECONDS = 120.0
+
+
+def provider_claim_path(project_root: Path, task_id: str) -> Path:
+    return project_root / "runtime" / "tasks" / task_id / "provider-claim.json"
+
+
+def _orphaned_unclaimed_error() -> dict[str, Any]:
+    # "timed out" keeps the scheduler's transient-dispatch matcher happy for
+    # the FAILED-node reopen path; retryable=True satisfies the durable
+    # retry-slot probe.
+    return {
+        "code": "ORPHANED_BEFORE_PROVIDER_CLAIM",
+        "type": "OrphanedTaskError",
+        "message": (
+            "image executor died (e.g. lock timed out) before the provider "
+            "claim; no provider job was submitted, so a retry is free"
+        ),
+        "retryable": True,
+    }
+
+
+def _recover_unclaimed_task(
+    services: CreatorFileServices,
+    executions: ProjectExecutionStore,
+    task: TaskRecord,
+    *,
+    grace_seconds: float | None = None,
+) -> bool:
+    """Close one ownerless RUNNING image task as a retryable failure.
+
+    The provider claim file is the spend-admission boundary: RUNNING with no
+    result and no claim means the executor died between task admission and
+    the provider call (field run 2026-09-10: a lifecycle-lock timeout in
+    claim_sync stranded four scene renders as RUNNING forever). Recovery
+    races a possibly still-alive executor for that same boundary: it
+    atomically tombstones the claim first, so whichever side loses the
+    ``try_create`` race aborts — the executor via its claimed-by-another
+    conflict, recovery by leaving the record alone. Only a won tombstone
+    fails the task, which keeps the paid provider call unique.
+    """
+
+    if grace_seconds is None:
+        grace_seconds = _UNCLAIMED_RUNNING_GRACE_SECONDS
+    if (
+        task.kind is not TaskKind.IMAGE_GENERATION
+        or task.status is not TaskStatus.RUNNING
+        or task.result is not None
+    ):
+        return False
+    age_seconds = (datetime.now(UTC) - task.updated_at).total_seconds()
+    if age_seconds < grace_seconds:
+        return False
+    claim_store = AtomicJsonRecordStore(
+        provider_claim_path(
+            services.projects.project_root(task.project_id),
+            task.task_id,
+        ),
+    )
+    tombstone = {
+        "taskId": task.task_id,
+        "requestFingerprint": task.request_fingerprint,
+        "claimedAt": datetime.now(UTC).isoformat(),
+        "recovered": True,
+    }
+    if claim_store.try_create(tombstone) is None:
+        try:
+            existing = claim_store.read()
+        except RecordNotFoundError:
+            return False
+        if not (
+            isinstance(existing, dict)
+            and existing.get("recovered") is True
+            and existing.get("taskId") == task.task_id
+        ):
+            # A real executor claimed the provider: spend may exist.
+            return False
+        # A previous sweep died between tombstone and transition; finish it.
+    try:
+        executions.transition_task(
+            task.project_id,
+            task.task_id,
+            expected_status=TaskStatus.RUNNING,
+            status=TaskStatus.FAILED,
+            updates={"error": _orphaned_unclaimed_error()},
+        )
+    except (ExecutionStateConflict, RecordNotFoundError):
+        # Another writer moved the record first; its outcome wins.
+        return False
+    _finish_orphaned_run(executions, task)
+    logger.warning(
+        "recovered unclaimed RUNNING image task: project=%s task=%s "
+        "age=%.0fs",
+        task.project_id,
+        task.task_id,
+        age_seconds,
+    )
+    return True
+
+
+def _finish_orphaned_run(
+    executions: ProjectExecutionStore,
+    task: TaskRecord,
+) -> None:
+    """Close the zombie's SpecialistRun so it stops deriving as active."""
+
+    if not task.run_id:
+        return
+    try:
+        run = executions.get_run(task.project_id, task.run_id)
+    except RecordNotFoundError:
+        return
+    if run.status in {
+        SpecialistRunStatus.SUCCEEDED,
+        SpecialistRunStatus.BLOCKED,
+        SpecialistRunStatus.FAILED,
+        SpecialistRunStatus.STALE,
+        SpecialistRunStatus.CANCELLED,
+    }:
+        return
+    try:
+        executions.transition_run(
+            task.project_id,
+            task.run_id,
+            expected_status=run.status,
+            status=SpecialistRunStatus.FAILED,
+        )
+    except (ExecutionStateConflict, RecordNotFoundError):
+        return
+
+
+def recover_unclaimed_image_tasks(
+    services: CreatorFileServices,
+    project_id: str,
+    tasks: Sequence[TaskRecord],
+) -> bool:
+    """Sweep ownerless RUNNING image tasks; True when any record changed."""
+
+    del project_id  # tasks are already project-scoped by the caller
+    executions = ProjectExecutionStore(services.root)
+    changed = False
+    for task in tasks:
+        # Identity checks run inside the helper before any attribute the
+        # scheduler's duck-typed test records may lack.
+        if getattr(task, "kind", None) is not TaskKind.IMAGE_GENERATION:
+            continue
+        if _recover_unclaimed_task(services, executions, task):
+            changed = True
+    return changed
 
 
 class ImageModelCapabilityError(ValidationError):
@@ -511,6 +666,31 @@ def _list_of_strings(value: Any, *, label: str) -> list[str]:
     ):
         raise ValidationError(f"{label} 必须是字符串数组")
     return [item.strip() for item in value if item.strip()]
+
+
+def _resolved_artifact_reference_ids(
+    project: Project,
+    variant: VisualVariant,
+) -> list[str]:
+    """Variant artifact refs with style anchors resolved to concrete ids.
+
+    ``visual:<entityId>:<variantId>`` anchors read the base variant's
+    currently selected image; an anchor without one fails closed — the work
+    graph gates such nodes, so reaching here means the base regressed
+    between admission and execution.
+    """
+    refs: list[str] = []
+    for ref in variant.reference_artifact_version_ids:
+        anchor = visual_style_anchor(project.visual.entities, ref)
+        if anchor is None:
+            refs.append(ref)
+        elif anchor[1].selected_artifact_version_id:
+            refs.append(anchor[1].selected_artifact_version_id)
+        else:
+            raise ValidationError(
+                f"风格锚点 {ref} 还没有已选图片；先生成并确认基准场景",
+            )
+    return refs
 
 
 def _target_id(target_ref: str, prefix: str) -> str:
@@ -931,9 +1111,14 @@ def _resolve_request(
                 "生成视觉 Asset 需要显式 prompt 或已提交的 Variant prompt；"
                 "实体名称、简介和全局风格只是连续性事实，不能作为付费生成兜底",
             )
+        artifact_refs = (
+            _resolved_artifact_reference_ids(project, variant)
+            if variant
+            else []
+        )
         version_ids = [
             *(variant.reference_asset_version_ids if variant else []),
-            *(variant.reference_artifact_version_ids if variant else []),
+            *artifact_refs,
             *explicit_version_ids,
         ]
         resolved = _ResolvedRequest(
@@ -1559,7 +1744,9 @@ def _image_authoring_fingerprint(
                     variant.reference_asset_version_ids if variant else []
                 ),
                 "referenceArtifacts": (
-                    variant.reference_artifact_version_ids if variant else []
+                    _resolved_artifact_reference_ids(project, variant)
+                    if variant
+                    else []
                 ),
                 "selectedVersion": (
                     variant.selected_artifact_version_id
@@ -1709,6 +1896,13 @@ class FileImageExecutionService:
                 return self._result_from_task(existing_task, replayed=True)
             if existing_task.status is TaskStatus.RUNNING:
                 if existing_task.result is None:
+                    if await asyncio.to_thread(
+                        _recover_unclaimed_task,
+                        self.services,
+                        self.executions,
+                        existing_task,
+                    ):
+                        continue
                     raise ConflictError("图片 Task 已由另一个执行者领取")
                 return await self._converge(
                     task=existing_task,
@@ -2358,11 +2552,10 @@ class FileImageExecutionService:
             ):
                 self.services.projects.read(task.project_id)
                 claim_store = AtomicJsonRecordStore(
-                    self.services.projects.project_root(task.project_id)
-                    / "runtime"
-                    / "tasks"
-                    / task.task_id
-                    / "provider-claim.json",
+                    provider_claim_path(
+                        self.services.projects.project_root(task.project_id),
+                        task.task_id,
+                    ),
                 )
                 created = claim_store.try_create(claim)
                 existing = None if created is not None else claim_store.read()
