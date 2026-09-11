@@ -2246,6 +2246,7 @@
     "steps": "Activity",
     "noOutput": "Waiting for a response",
     "sendFailed": "Message could not be sent. Please try again.",
+    "retrySend": "Retry send",
     "continued": "Continued in the next request",
     "productionOutcome": {
       "waiting_review": "Not started · Awaiting review",

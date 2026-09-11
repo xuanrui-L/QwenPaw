@@ -36,12 +36,24 @@ async function createStableConversation(projectId: string) {
   return created;
 }
 
+type SendMessageInput = Omit<
+  SendCreatorMessageRequest,
+  "clientMessageId" | "conversationId"
+> & {
+  message?: string;
+  clientMessageId?: string;
+};
+
 interface QueuedUiMessage {
   clientMessageId: string;
   requestSignature: string;
   text: string;
   state: "sending" | "queued" | "failed";
   error?: string;
+  /** The full original request: a failed send retries verbatim (same
+      selections/context/refs and the same clientMessageId), never a
+      plain-text reconstruction. */
+  request?: SendMessageInput;
 }
 
 export interface StreamingAssistantMessage {
@@ -199,15 +211,8 @@ interface CreatorSessionState {
   loadOlderMessages: () => Promise<void>;
   refreshSession: () => Promise<void>;
   refreshMessages: (after?: number) => Promise<void>;
-  sendMessage: (
-    request: Omit<
-      SendCreatorMessageRequest,
-      "clientMessageId" | "conversationId"
-    > & {
-      message?: string;
-      clientMessageId?: string;
-    },
-  ) => Promise<void>;
+  sendMessage: (request: SendMessageInput) => Promise<void>;
+  retryQueuedMessage: (clientMessageId: string) => Promise<void>;
   stopAllAgents: () => Promise<void>;
   ingestEvents: (events: CreatorEvent[]) => void;
   ingestEvent: (event: CreatorEvent) => void;
@@ -980,7 +985,13 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               ...state.queuedUi.filter(
                 (item) => item.clientMessageId !== clientMessageId,
               ),
-              { clientMessageId, requestSignature, text, state: "sending" },
+              {
+                clientMessageId,
+                requestSignature,
+                text,
+                state: "sending" as const,
+                request: input,
+              },
             ],
           };
         });
@@ -1050,6 +1061,16 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           });
           throw error;
         }
+      },
+
+      retryQueuedMessage: async (clientMessageId) => {
+        const item = get().queuedUi.find(
+          (entry) =>
+            entry.clientMessageId === clientMessageId &&
+            entry.state === "failed",
+        );
+        if (!item?.request) return;
+        await get().sendMessage({ ...item.request, clientMessageId });
       },
 
       stopAllAgents: async () => {

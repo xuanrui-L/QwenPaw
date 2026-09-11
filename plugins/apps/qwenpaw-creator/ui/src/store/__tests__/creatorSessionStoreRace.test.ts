@@ -118,6 +118,53 @@ describe("Creator Session async project/conversation isolation", () => {
     });
   });
 
+  it("retries a failed send verbatim under its original clientMessageId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.reject(new Error("network down"))),
+    );
+    bind("p1", "conversation-p1");
+    // Attachments and structured selections must survive the retry — a
+    // plain-text reconstruction would send selections=[] and drop refs
+    // (CR 2026-09-11).
+    const request = {
+      message: "指令 A",
+      assetVersionRefs: ["asset-version:av1"],
+      context: { selections: [{ field: "prompt", path: "/a", text: "选区" }] },
+    };
+
+    await expect(store().sendMessage(request)).rejects.toThrow("network down");
+    const failed = store().queuedUi[0];
+    expect(failed).toMatchObject({ state: "failed", request });
+
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: unknown, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        return Promise.resolve(
+          response({
+            messageSeq: 1,
+            eventSeq: 1,
+            classification: "mutation_instruction",
+            appendState: "queued_until_message_boundary",
+            creatorSessionId: "session-p1",
+            conversationId: "conversation-p1",
+          }),
+        );
+      }),
+    );
+    await store().retryQueuedMessage(failed.clientMessageId);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toMatchObject({
+      clientMessageId: failed.clientMessageId,
+      assetVersionRefs: ["asset-version:av1"],
+      context: request.context,
+    });
+    expect(store().queuedUi).toMatchObject([{ state: "queued" }]);
+  });
+
   it("does not merge an old pagination response into a new project", async () => {
     const pending = stubPending();
     bind("p1", "conversation-p1");

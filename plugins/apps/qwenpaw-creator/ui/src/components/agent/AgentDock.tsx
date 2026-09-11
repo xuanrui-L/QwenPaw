@@ -1228,7 +1228,6 @@ export default function AgentDock({
     setRateLimitResuming(false);
     setPendingUploads([]);
     setUploadingAssets(false);
-    stagedSentRefs.current = [];
     submissionVersion.current += 1;
     projectLifecycleVersion.current += 1;
   }, [projectId]);
@@ -1238,20 +1237,20 @@ export default function AgentDock({
   const uploadSeq = useRef(0);
   // Files picked via "+" stay staged until the user hits send: their refs
   // then ride the message (same contract as launch-time uploads), which is
-  // what triggers per-asset understanding.
+  // what triggers per-asset understanding. An entry whose upload already
+  // succeeded (a prior attempt failed later) keeps its chip visible with
+  // the ref instead of the file — attachments are never invisible state.
   const [pendingUploads, setPendingUploads] = useState<
-    { id: string; file: File }[]
+    { id: string; name: string; file?: File; ref?: string }[]
   >([]);
   const [uploadingAssets, setUploadingAssets] = useState(false);
-  // Refs already ingested by a failed send attempt: reused on retry instead
-  // of uploading the same bytes again.
-  const stagedSentRefs = useRef<{ ref: string; name: string }[]>([]);
   const stageUploads = (files: File[]) => {
     if (files.length === 0) return;
     setPendingUploads((prev) => [
       ...prev,
       ...files.map((file) => ({
         id: `staged-${(uploadSeq.current += 1)}`,
+        name: file.name,
         file,
       })),
     ]);
@@ -1767,9 +1766,8 @@ export default function AgentDock({
       selections: [],
     };
     const text = content.text.trim();
-    const staged = pendingUploads;
-    if (!text && staged.length === 0 && stagedSentRefs.current.length === 0)
-      return;
+    const batch = pendingUploads;
+    if (!text && batch.length === 0) return;
     const allRefs = [
       ...new Set([
         ...contextChips.map((item) => item.ref),
@@ -1778,49 +1776,36 @@ export default function AgentDock({
     ];
     const version = ++submissionVersion.current;
     const submittedProject = projectId;
-    const submittedExtraRefs = extraRefs;
-    // This submission claims the retry refs: concurrent sends must not share
-    // attachments, and an older send finishing must not clear a newer batch.
-    const uploadedRefs = stagedSentRefs.current;
-    stagedSentRefs.current = [];
-    // Clear the composer right away: anything typed while the uploads are in
-    // flight belongs to the next message, not to this one.
-    inputRef.current?.clear();
-    setCanSend(false);
-    setInlineRefs([]);
-    setDraft("");
-    setMentionQuery(null);
-    useCreatorInteractionStore.getState().setExtraRefs([]);
-    // Only reachable while this is the latest live submission (guards below),
-    // so stagedSentRefs is still the empty array this batch claimed.
-    const restoreComposer = (restoreText: string) => {
-      stagedSentRefs.current = uploadedRefs;
-      if (restoreText && !inputRef.current?.getContent().text.trim()) {
-        inputRef.current?.setText(restoreText);
-        setCanSend(true);
-        setDraft(restoreText);
-        useCreatorInteractionStore.getState().setExtraRefs(submittedExtraRefs);
-      }
-    };
-    // Staged attachments ingest now (silently: their refs ride this message,
-    // so the run itself triggers per-asset understanding — the same contract
-    // launch-time uploads use).
-    if (staged.length > 0) {
+    // Fresh files ingest now (silently: their refs ride this message, so the
+    // run itself triggers per-asset understanding — the same contract
+    // launch-time uploads use). Chips stay visible the whole way: a finished
+    // upload converts its chip to a ref entry in place, so a later failure
+    // never strands invisible attachment state, and a re-send skips the
+    // already-uploaded bytes.
+    const uploaded = new Map<string, string>(
+      batch
+        .filter((item) => item.ref)
+        .map((item) => [item.id, item.ref as string]),
+    );
+    const filesToUpload = batch.filter((item) => item.file && !item.ref);
+    if (filesToUpload.length > 0) {
       setUploadingAssets(true);
       try {
-        for (const item of staged) {
+        for (const item of filesToUpload) {
           const accepted = await ingestAssetFile(
             submittedProject,
-            item.file,
+            item.file as File,
             "ATTACH_SOURCE",
             { notifyAgent: false },
           );
-          uploadedRefs.push({
-            ref: `asset-version:${accepted.assetVersionId}`,
-            name: item.file.name,
-          });
+          const ref = `asset-version:${accepted.assetVersionId}`;
+          uploaded.set(item.id, ref);
           setPendingUploads((prev) =>
-            prev.filter((pending) => pending.id !== item.id),
+            prev.map((pending) =>
+              pending.id === item.id
+                ? { ...pending, file: undefined, ref }
+                : pending,
+            ),
           );
         }
       } catch (error) {
@@ -1829,7 +1814,6 @@ export default function AgentDock({
           currentProject.current === submittedProject &&
           submissionVersion.current === version
         ) {
-          restoreComposer(text);
           message.error(
             error instanceof Error ? error.message : t("assets.uploadFailed"),
             6,
@@ -1860,19 +1844,37 @@ export default function AgentDock({
       submissionVersion.current !== version
     )
       return;
-    const assetVersionRefs = uploadedRefs.map((item) => item.ref);
+    const attachments = batch.flatMap((item) => {
+      const ref = uploaded.get(item.id);
+      return ref ? [{ ref, name: item.name }] : [];
+    });
+    const assetVersionRefs = attachments.map((item) => item.ref);
     const messageText =
       text ||
       t("agent.uploadOnlyMessage", {
-        names: uploadedRefs.map((item) => item.name).join("、"),
+        names: attachments.map((item) => item.name).join("、"),
       });
     // Manual project.json edits accumulated since the previous message ride
     // along as context so the agent can re-evaluate dependent plan pieces.
     const userEdits = useCreatorEditBufferStore
       .getState()
       .consumeContext(projectId);
+    // The batch is handed to the message now: its chips leave the composer,
+    // and the text clears only when the user hasn't rewritten it while the
+    // uploads ran — edits made meanwhile belong to the next message.
+    setPendingUploads((prev) =>
+      prev.filter((pending) => !uploaded.has(pending.id)),
+    );
+    if ((inputRef.current?.getContent().text ?? "").trim() === text) {
+      inputRef.current?.clear();
+      setCanSend(false);
+      setInlineRefs([]);
+      setDraft("");
+      setMentionQuery(null);
+      useCreatorInteractionStore.getState().setExtraRefs([]);
+    }
     try {
-      const pending = sendMessage({
+      await sendMessage({
         message: messageText,
         assetVersionRefs:
           assetVersionRefs.length > 0 ? assetVersionRefs : undefined,
@@ -1899,22 +1901,21 @@ export default function AgentDock({
           userEdits: userEdits ?? undefined,
         },
       });
-      await pending;
       if (userEdits) {
         useCreatorEditBufferStore
           .getState()
           .markFlushed(projectId, userEdits.lastEntryAt);
       }
-    } catch (error) {
+    } catch {
+      // The failed request lives on its queuedUi card with the verbatim
+      // payload and a retry entry — never backfilled into whatever draft
+      // the composer holds by now.
       if (
         !dockAlive.current ||
         currentProject.current !== submittedProject ||
         submissionVersion.current !== version
       )
         return;
-      // Restore the composed text (upload-only sends included) so retry is
-      // one click; the already-ingested refs ride along via stagedSentRefs.
-      restoreComposer(messageText);
       message.error(t("agentActivity.failureHint"));
     }
   };
@@ -2211,9 +2212,26 @@ export default function AgentDock({
                       {item.text}
                     </div>
                     {item.state === "failed" && (
-                      <p className="text-right text-[11px] text-[var(--color-danger)]">
-                        {t("agentActivity.sendFailed")}
-                      </p>
+                      <div className="flex items-center justify-end gap-2 text-[11px]">
+                        <span className="text-[var(--color-danger)]">
+                          {t("agentActivity.sendFailed")}
+                        </span>
+                        {item.request && (
+                          <button
+                            type="button"
+                            data-agent-retry-send={item.clientMessageId}
+                            onClick={() =>
+                              void useCreatorSessionStore
+                                .getState()
+                                .retryQueuedMessage(item.clientMessageId)
+                                .catch(() => undefined)
+                            }
+                            className="font-medium text-[var(--color-accent)] hover:underline"
+                          >
+                            {t("agentActivity.retrySend")}
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 ))}
@@ -2477,7 +2495,7 @@ export default function AgentDock({
                       className="inline-flex max-w-[220px] items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-1 pl-2 pr-1 text-[11px] text-[var(--color-text-secondary)]"
                     >
                       <Paperclip className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
-                      <span className="min-w-0 truncate">{item.file.name}</span>
+                      <span className="min-w-0 truncate">{item.name}</span>
                       <button
                         type="button"
                         onClick={() =>

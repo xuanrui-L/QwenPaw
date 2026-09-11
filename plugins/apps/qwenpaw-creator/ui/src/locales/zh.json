@@ -2246,6 +2246,7 @@
     "steps": "处理记录",
     "noOutput": "正在等待公开回复",
     "sendFailed": "发送未成功，请重新发送。",
+    "retrySend": "重试发送",
     "continued": "已转入后续处理",
     "productionOutcome": {
       "waiting_review": "尚未开始 · 等待审阅",
