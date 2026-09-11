@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
@@ -296,13 +296,16 @@ class WorkGraph:
         )
 
 
+TaskKey = tuple[str, str, str | None]
+
+
 def _active_task_index(
     tasks: Sequence[Any],
-) -> tuple[dict[tuple[str, str], Any], dict[tuple[str, str], Any]]:
-    """Index tasks by (kind, targetRef): active ones and latest failures."""
+) -> tuple[dict[TaskKey, Any], dict[TaskKey, Any]]:
+    """Index active tasks and latest failures within each variant's scope."""
 
-    active: dict[tuple[str, str], Any] = {}
-    failed: dict[tuple[str, str], Any] = {}
+    active: dict[TaskKey, Any] = {}
+    failed: dict[TaskKey, Any] = {}
     for task in tasks:
         metadata = getattr(task, "metadata", None) or {}
         target = str(
@@ -311,7 +314,7 @@ def _active_task_index(
         )
         if not target:
             continue
-        key = (str(task.kind), target)
+        key = (str(task.kind), target, metadata.get("variantId"))
         if task.status in (TaskStatus.QUEUED, TaskStatus.RUNNING):
             active[key] = task
         elif task.status is TaskStatus.FAILED:
@@ -319,6 +322,57 @@ def _active_task_index(
             if existing is None or task.updated_at > existing.updated_at:
                 failed[key] = task
     return active, failed
+
+
+def _variant_task(
+    index: Mapping[TaskKey, Any],
+    entity_id: str,
+    variant_id: str,
+) -> Any | None:
+    key = (TaskKind.IMAGE_GENERATION.value, f"asset:{entity_id}")
+    # Legacy single-variant tasks omitted variantId. An explicitly scoped
+    # sibling must never hide this variant's active task or latest failure.
+    return index.get((*key, variant_id)) or index.get((*key, None))
+
+
+def _gate_visual_anchors(nodes: list[WorkNode]) -> list[WorkNode]:
+    """Propagate unsettled anchors through the DAG in any authoring order.
+
+    A selected image is still outgoing when its node is STALE, FAILED or
+    waiting on another anchor. Hold idle descendants before dispatch so a
+    scheduler tick cannot launch them alongside an upstream regeneration.
+    """
+
+    by_id = {node.node_id: node for node in nodes}
+    dependents: dict[str, list[str]] = {}
+    for node in nodes:
+        for dependency in node.deps:
+            dependents.setdefault(dependency, []).append(node.node_id)
+    pending = [
+        node.node_id
+        for node in nodes
+        if node.status is not WorkNodeStatus.DONE
+    ]
+    visited: set[str] = set()
+    while pending:
+        dependency = pending.pop()
+        if dependency in visited:
+            continue
+        visited.add(dependency)
+        for node_id in dependents.get(dependency, ()):
+            node = by_id[node_id]
+            if node.status is WorkNodeStatus.RUNNING:
+                continue
+            status = node.status
+            if status in (WorkNodeStatus.READY, WorkNodeStatus.DONE):
+                status = WorkNodeStatus.GATED
+            by_id[node_id] = replace(
+                node,
+                status=status,
+                missing=tuple(dict.fromkeys((*node.missing, dependency))),
+            )
+            pending.append(node_id)
+    return [by_id[node.node_id] for node in nodes]
 
 
 def _task_error_summary(task: Any) -> str | None:
@@ -408,20 +462,13 @@ def _variant_status(
     project: Project,
     entity: Any,
     variant: Any,
-    active: Mapping[tuple[str, str], Any],
-    failed: Mapping[tuple[str, str], Any],
+    active: Mapping[TaskKey, Any],
+    failed: Mapping[TaskKey, Any],
 ) -> tuple[WorkNodeStatus, Any | None]:
-    key = (TaskKind.IMAGE_GENERATION.value, f"asset:{entity.entity_id}")
-    task = active.get(key)
-    if task is not None and (
-        (task.metadata or {}).get("variantId") in (None, variant.variant_id)
-    ):
+    task = _variant_task(active, entity.entity_id, variant.variant_id)
+    if task is not None:
         return WorkNodeStatus.RUNNING, task
-    failure = failed.get(key)
-    if failure is not None and (failure.metadata or {}).get(
-        "variantId",
-    ) not in (None, variant.variant_id):
-        failure = None
+    failure = _variant_task(failed, entity.entity_id, variant.variant_id)
     if variant.selected_artifact_version_id:
         if failure is not None and _failure_after_selected(
             project,
@@ -652,16 +699,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     continue
                 anchor_entity_id, anchor_variant = anchor
                 anchor_deps.append(ref)
-                anchor_task = active.get(
-                    (
-                        TaskKind.IMAGE_GENERATION.value,
-                        f"asset:{anchor_entity_id}",
-                    ),
+                anchor_task = _variant_task(
+                    active,
+                    anchor_entity_id,
+                    anchor_variant.variant_id,
                 )
-                anchor_rendering = anchor_task is not None and (
-                    (anchor_task.metadata or {}).get("variantId")
-                    in (None, anchor_variant.variant_id)
-                )
+                anchor_rendering = anchor_task is not None
                 if anchor_rendering or (
                     not anchor_variant.selected_artifact_version_id
                 ):
@@ -781,6 +824,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 ),
             )
 
+    nodes = _gate_visual_anchors(nodes)
+    statuses.update({node.node_id: node.status for node in nodes})
+
     # ---- Lane 2: cast lineups ----------------------------------------
     def _anchor_variant_node(entity: Any) -> str | None:
         if entity.canonical_variant_id:
@@ -807,7 +853,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             if not _entity_has_artwork(entity):
                 missing_anchors.append(anchor or ref)
         node_id = f"lineup:{lineup_id}"
-        key = (TaskKind.IMAGE_GENERATION.value, f"lineup:{lineup_id}")
+        key = (TaskKind.IMAGE_GENERATION.value, f"lineup:{lineup_id}", None)
         task = active.get(key)
         failure = failed.get(key)
         missing = tuple(missing_anchors)
@@ -894,7 +940,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             if selected
             else None
         )
-        key = (TaskKind.SCRIPT_DRAFT.value, f"timeline:{timeline_id}")
+        key = (TaskKind.SCRIPT_DRAFT.value, f"timeline:{timeline_id}", None)
         task = active.get(key)
         failure = failed.get(key)
         fingerprint = _fingerprint(
@@ -1023,6 +1069,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 key = (
                     TaskKind.IMAGE_GENERATION.value,
                     f"element:{element_id}",
+                    None,
                 )
                 task = active.get(key)
                 failure = failed.get(key)
@@ -1139,7 +1186,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             # Video node for all types
             video_id = f"video:{element_id}"
             video_slot = _slot_selected(project, f"element:{element_id}:main")
-            key = (TaskKind.R2V_GENERATION.value, f"element:{element_id}")
+            key = (
+                TaskKind.R2V_GENERATION.value,
+                f"element:{element_id}",
+                None,
+            )
             task = active.get(key)
             failure = failed.get(key)
 
@@ -1397,7 +1448,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         task = next(
             (
                 item
-                for (kind, _), item in active.items()
+                for (kind, _, _), item in active.items()
                 if kind == TaskKind.COMPOSE.value
                 and str(
                     item.metadata.get("targetRef") or "",

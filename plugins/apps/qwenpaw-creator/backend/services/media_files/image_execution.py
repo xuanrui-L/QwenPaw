@@ -1976,6 +1976,13 @@ class FileImageExecutionService:
             arguments=dict(arguments),
             image_model_name=image_model_name,
         )
+        await asyncio.to_thread(
+            self._assert_visual_anchors_ready,
+            base.project,
+            command_value,
+            resolved.target_ref,
+            resolved.variant_id,
+        )
         fingerprint_payload: dict[str, Any] = {
             "command": command_value.value,
             "targetRef": resolved.target_ref,
@@ -2040,8 +2047,22 @@ class FileImageExecutionService:
             resolved=resolved,
             ids=ids,
         )
-        if not await self._claim_provider(task):
-            raise ConflictError("图片 Task 已由另一个执行者领取")
+        try:
+            if not await self._claim_provider(task):
+                raise ConflictError("图片 Task 已由另一个执行者领取")
+        except ValidationError as exc:
+            # An anchor can start repainting after admission. No provider
+            # claim exists yet: close this attempt and allow a free retry
+            # once its dependencies settle instead of leaving it RUNNING.
+            await self._fail_if_running(
+                project_id,
+                ids,
+                "VISUAL_ANCHOR_NOT_READY",
+                message=str(exc),
+                error=exc,
+                retryable=True,
+            )
+            raise
 
         try:
             # No Project/Runtime lock spans this await.  The ContextVar only
@@ -2532,6 +2553,44 @@ class FileImageExecutionService:
         ):
             raise ConflictError("Idempotency-Key 已用于不同的图片命令")
 
+    def _assert_visual_anchors_ready(
+        self,
+        project: Project,
+        command: CreatorCommandType | str,
+        target_ref: str,
+        variant_id: str | None,
+    ) -> None:
+        if command != CreatorCommandType.GENERATE_ASSET or not variant_id:
+            return
+        entity_id = target_ref.removeprefix("asset:")
+        entity = project.visual.entities.items.get(entity_id)
+        variant = entity.variants.items.get(variant_id) if entity else None
+        if variant is None or not any(
+            visual_style_anchor(project.visual.entities, ref) is not None
+            for ref in variant.reference_artifact_version_ids
+        ):
+            return
+        from services.file_agent_runtime.work_graph import (
+            WorkNodeStatus,
+            derive_work_graph,
+        )
+
+        graph = derive_work_graph(
+            project,
+            self.executions.list_tasks(project.project_id),
+        )
+        by_id = graph.by_id
+        node = by_id[f"visual:{entity_id}:{variant_id}"]
+        waiting = [
+            dependency
+            for dependency in node.deps
+            if by_id[dependency].status is not WorkNodeStatus.DONE
+        ]
+        if waiting:
+            raise ValidationError(
+                "风格锚点尚未就绪，请等待基准图完成后再生成：" + "、".join(waiting),
+            )
+
     async def _claim_provider(self, task: TaskRecord) -> bool:
         """Durably claim the one-shot provider call without holding a lock.
 
@@ -2550,7 +2609,13 @@ class FileImageExecutionService:
                 task.project_id,
                 shared=True,
             ):
-                self.services.projects.read(task.project_id)
+                latest = self.services.projects.read(task.project_id)
+                self._assert_visual_anchors_ready(
+                    latest.project,
+                    str(task.metadata.get("commandType") or ""),
+                    str(task.metadata.get("targetRef") or ""),
+                    task.metadata.get("variantId"),
+                )
                 claim_store = AtomicJsonRecordStore(
                     provider_claim_path(
                         self.services.projects.project_root(task.project_id),

@@ -42,10 +42,13 @@ type SendMessageInput = Omit<
 > & {
   message?: string;
   clientMessageId?: string;
+  /** Uploads can finish after navigation; keep the submitted conversation. */
+  conversationId?: string;
 };
 
 interface QueuedUiMessage {
   clientMessageId: string;
+  conversationId: string;
   requestSignature: string;
   text: string;
   state: "sending" | "queued" | "failed";
@@ -553,7 +556,11 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           ).length;
           const removable = new Set(
             state.queuedUi
-              .filter((item) => item.state !== "failed")
+              .filter(
+                (item) =>
+                  item.conversationId === conversationId &&
+                  item.state !== "failed",
+              )
               .slice(0, appendedUserCount)
               .map((item) => item.clientMessageId),
           );
@@ -951,8 +958,11 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
       },
 
       sendMessage: async (input) => {
-        const { projectId, session, activeConversationId } = get();
-        if (!projectId || !session || !activeConversationId)
+        const { projectId, session } = get();
+        const conversationId =
+          input.conversationId ?? get().activeConversationId;
+        const generation = lifecycleGeneration;
+        if (!projectId || !session || !conversationId)
           throw new Error(i18n.t("store.sessionNotInit"));
         const text =
           input.message ??
@@ -963,7 +973,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           content: input.content,
           assetVersionRefs: input.assetVersionRefs,
           context: input.context,
-          conversationId: activeConversationId,
+          conversationId,
         });
         const failedRetry = get().queuedUi.find(
           (item) =>
@@ -977,7 +987,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         set((state) => {
           if (
             state.projectId !== projectId ||
-            state.activeConversationId !== activeConversationId
+            lifecycleGeneration !== generation
           )
             return {};
           return {
@@ -987,6 +997,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
               ),
               {
                 clientMessageId,
+                conversationId,
                 requestSignature,
                 text,
                 state: "sending" as const,
@@ -1000,17 +1011,17 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             ...input,
             clientMessageId,
             creatorSessionId: session.id,
-            conversationId: activeConversationId,
+            conversationId,
           });
           if (
             get().projectId !== projectId ||
-            get().activeConversationId !== activeConversationId
+            lifecycleGeneration !== generation
           )
             return;
           set((state) => {
             if (
               state.projectId !== projectId ||
-              state.activeConversationId !== activeConversationId
+              lifecycleGeneration !== generation
             )
               return {};
             return {
@@ -1022,18 +1033,20 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             };
           });
           if (accepted.appendState === "appended") {
-            const page = await listMessages(projectId, activeConversationId, {
+            const page = await listMessages(projectId, conversationId, {
               after: Math.max(0, accepted.messageSeq - 1),
               limit: 1,
             });
             set((state) => {
               if (
                 state.projectId !== projectId ||
-                state.activeConversationId !== activeConversationId
+                lifecycleGeneration !== generation
               )
                 return {};
               return {
-                messages: mergeMessages(state.messages, page.items),
+                ...(state.activeConversationId === conversationId
+                  ? { messages: mergeMessages(state.messages, page.items) }
+                  : {}),
                 queuedUi: state.queuedUi.filter(
                   (item) => item.clientMessageId !== clientMessageId,
                 ),
@@ -1044,7 +1057,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           set((state) => {
             if (
               state.projectId !== projectId ||
-              state.activeConversationId !== activeConversationId
+              lifecycleGeneration !== generation
             )
               return {};
             return {
@@ -1067,6 +1080,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         const item = get().queuedUi.find(
           (entry) =>
             entry.clientMessageId === clientMessageId &&
+            entry.conversationId === get().activeConversationId &&
             entry.state === "failed",
         );
         if (!item?.request) return;

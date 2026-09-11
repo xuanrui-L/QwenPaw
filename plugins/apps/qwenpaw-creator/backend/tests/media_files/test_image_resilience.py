@@ -1379,3 +1379,110 @@ def test_style_anchor_resolves_to_base_selection_at_dispatch():
     with pytest.raises(ValidationError, match="风格锚点"):
         # pylint: disable-next=protected-access
         image_execution._resolved_artifact_reference_ids(project, dependent)
+
+
+@pytest.mark.parametrize("start_before_claim", [False, True])
+def test_direct_asset_command_waits_for_anchor_before_provider_spend(
+    tmp_path,
+    monkeypatch,
+    start_before_claim,
+):
+    from domain.enums import TaskStatus
+    from services.runtime_files.errors import LockTimeoutError
+    from .conftest import accept_pending_reviews
+
+    services = _services(tmp_path, monkeypatch)
+    source = _snapshot(
+        variants={
+            "items": {
+                "var:base": {"variant_id": "var:base", "prompt": "角色基准图"},
+                "var:door": {
+                    "variant_id": "var:door",
+                    "prompt": "角色在门口",
+                    "reference_artifact_version_ids": [
+                        "visual:char:haaland:var:base",
+                    ],
+                },
+            },
+            "order": ["var:base", "var:door"],
+        },
+    )
+    snapshot = services.projects.read(PROJECT_ID)
+    candidate = snapshot.project.model_dump(mode="json")
+    candidate["visual"] = source.project.visual.model_dump(mode="json")
+    services.commits.commit(
+        base=snapshot,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+    )
+    provider = _CountingProvider()
+    worker = FileImageExecutionService(services, provider=provider)
+    base_request = {
+        "project_id": PROJECT_ID,
+        "command": "GENERATE_ASSET",
+        "target_ref": "asset:char:haaland",
+        "arguments": {"variantId": "var:base"},
+        "idempotency_key": "initial-anchor",
+    }
+    asyncio.run(worker.execute(**base_request))
+    accept_pending_reviews(services, PROJECT_ID)
+    assert provider.calls == 1
+    stalled = FileImageExecutionService(services, provider=provider)
+
+    async def dead_claim(_task):
+        raise LockTimeoutError(tmp_path / "project.lock", 10)
+
+    monkeypatch.setattr(stalled, "_claim_provider", dead_claim)
+
+    async def start_anchor():
+        with pytest.raises(LockTimeoutError):
+            await stalled.execute(
+                **{**base_request, "idempotency_key": "repaint-anchor"},
+            )
+
+    if start_before_claim:
+        original_start = worker._start  # pylint: disable=protected-access
+
+        async def start_with_anchor(*, run, task, resolved, ids):
+            task = await original_start(
+                run=run,
+                task=task,
+                resolved=resolved,
+                ids=ids,
+            )
+            await start_anchor()
+            return task
+
+        monkeypatch.setattr(worker, "_start", start_with_anchor)
+    else:
+        asyncio.run(start_anchor())
+
+    dependent_request = {
+        **base_request,
+        "arguments": {"variantId": "var:door"},
+        "idempotency_key": "dependent-anchor",
+    }
+    with pytest.raises(ValidationError, match="风格锚点"):
+        asyncio.run(worker.execute(**dependent_request))
+    assert provider.calls == 1
+    if start_before_claim:
+        monkeypatch.setattr(worker, "_start", original_start)
+    for task in worker.executions.list_tasks(PROJECT_ID):
+        if task.metadata.get("variantId") == "var:door":
+            assert task.status is TaskStatus.FAILED
+            assert not image_execution.provider_claim_path(
+                services.projects.project_root(PROJECT_ID),
+                task.task_id,
+            ).exists()
+        elif task.status is TaskStatus.RUNNING:
+            worker.executions.transition_task(
+                PROJECT_ID,
+                task.task_id,
+                expected_status=TaskStatus.RUNNING,
+                status=TaskStatus.CANCELLED,
+            )
+    # Cancelling the repaint settles the selected base; the same request
+    # can now retry without duplicating any paid dependent generation.
+    result = asyncio.run(worker.execute(**dependent_request))
+    assert result.artifact_version_id
+    assert provider.calls == 2

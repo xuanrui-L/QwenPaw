@@ -4359,9 +4359,11 @@ def test_batched_upload_refs_delegate_one_run_per_target(
     assert {call["target_refs"][0] for call in calls} == expected_targets
 
 
+@pytest.mark.parametrize("upload_count", [1, 2])
 def test_upload_joining_a_live_run_starts_understanding(
     tmp_path,
     monkeypatch,
+    upload_count,
 ):
     """Refs on a message that joins a running turn loop must still fan out.
 
@@ -4381,15 +4383,16 @@ def test_upload_joining_a_live_run_starts_understanding(
             key="mid-run-upload",
             inputs=[
                 _AssetInput(
-                    name="voice-ref.png",
+                    name=f"voice-ref-{index}.png",
                     content=_png_bytes_for_grounding(),
                     media_type="image/png",
-                ),
+                )
+                for index in range(upload_count)
             ],
             attach_source=False,
             scope="mid-run-upload-test",
         )
-        item = ingested["items"][0]
+        items = ingested["items"]
 
         async def delegate(**kwargs):
             calls.append(kwargs["arguments"])
@@ -4401,22 +4404,23 @@ def test_upload_joining_a_live_run_starts_understanding(
         async def model(messages, _tools):
             received.append([dict(entry) for entry in messages])
             if len(received) == 1:
-                services.sessions.append_message(
-                    PROJECT_ID,
-                    SESSION_ID,
-                    CONVERSATION_ID,
-                    role="user",
-                    content_parts=[
-                        {"type": "text", "text": "我刚上传了噜噜的参考素材"},
-                    ],
-                    source="user",
-                    channel=MessageChannel.AGENTDOCK,
-                    metadata={
-                        "assetVersionRefs": [
-                            f"asset-version:{item['assetVersionId']}",
+                for item in items:
+                    services.sessions.append_message(
+                        PROJECT_ID,
+                        SESSION_ID,
+                        CONVERSATION_ID,
+                        role="user",
+                        content_parts=[
+                            {"type": "text", "text": "我刚上传了噜噜的参考素材"},
                         ],
-                    },
-                )
+                        source="user",
+                        channel=MessageChannel.AGENTDOCK,
+                        metadata={
+                            "assetVersionRefs": [
+                                f"asset-version:{item['assetVersionId']}",
+                            ],
+                        },
+                    )
                 return _read_call("read-before-upload")
             return AgentModelTurn(content="收到素材，理解进行中。")
 
@@ -4425,16 +4429,16 @@ def test_upload_joining_a_live_run_starts_understanding(
         await driver.start()
         try:
             driver.notify(PROJECT_ID)
-            await _wait_consumed(services, 2)
+            await _wait_consumed(services, 1 + upload_count)
             await driver.wait_until_idle(PROJECT_ID)
         finally:
             await driver.stop()
-        return item
+        return items
 
-    item = asyncio.run(scenario())
+    items = asyncio.run(scenario())
 
     assert [call["target_refs"] for call in calls] == [
-        [f"asset:{item['assetId']}"],
+        [f"asset:{item['assetId']}"] for item in items
     ]
     # The joined turn must carry the started-notice so the agent neither
     # re-delegates nor believes understanding is running when it is not.
