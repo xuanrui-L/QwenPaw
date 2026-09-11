@@ -73,24 +73,18 @@ def test_source_intelligence_delegation_takes_exactly_one_asset() -> None:
     """A batched delegation reads every image in one model turn and blows
     the per-turn wall-clock budget; the contract forces per-asset fan-out."""
 
-    single = DelegateToAgentInput.model_validate(
-        {
-            "role": "source_intelligence_agent",
-            "target_refs": ["asset:asset-a"],
-            "task": "理解素材",
-        },
-    )
-    single.validate_contract(project_id="project-1")
+    def contract(*refs: str) -> None:
+        DelegateToAgentInput.model_validate(
+            {
+                "role": "source_intelligence_agent",
+                "target_refs": list(refs),
+                "task": "理解素材",
+            },
+        ).validate_contract(project_id="project-1")
 
-    batched = DelegateToAgentInput.model_validate(
-        {
-            "role": "source_intelligence_agent",
-            "target_refs": ["asset:asset-a", "asset:asset-b"],
-            "task": "理解素材",
-        },
-    )
+    contract("asset:asset-a")
     with pytest.raises(ValueError, match="exactly one asset target"):
-        batched.validate_contract(project_id="project-1")
+        contract("asset:asset-a", "asset:asset-b")
 
 
 def test_unknown_target_kinds_still_fail_the_contract() -> None:

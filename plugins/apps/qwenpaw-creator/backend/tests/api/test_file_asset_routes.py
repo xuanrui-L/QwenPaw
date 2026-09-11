@@ -450,20 +450,10 @@ def test_remote_asset_url_validation_fails_closed_on_ssrf_vectors() -> None:
     )
 
 
-def _session_app(tmp_path, *, initial_goal: str | None = "做一条视频"):
+def _session_app(tmp_path):
     """A ``project-1`` whose Runtime Session mirrors real project creation."""
 
     services = CreatorFileServices.create(tmp_path.resolve())
-    goal_kwargs = (
-        {
-            "initial_goal": initial_goal,
-            "goal_id": "goal-1",
-            "initial_message_id": "message-initial",
-            "initial_client_message_id": "client-initial",
-        }
-        if initial_goal is not None
-        else {}
-    )
     services.projects.create(
         Project.new(project_id="project-1", name="One"),
         initialize_staged_project=lambda staged_root: (
@@ -472,7 +462,6 @@ def _session_app(tmp_path, *, initial_goal: str | None = "做一条视频"):
                 "project-1",
                 session_id="session-1",
                 conversation_id="conversation-1",
-                **goal_kwargs,
             )
         ),
     )
@@ -520,14 +509,46 @@ def test_asset_uploads_steer_the_agent_once_per_ingest(
     monkeypatch: pytest.MonkeyPatch,
     run_scenario,
 ) -> None:
-    """One steer per ingest: multipart replays stay silent, URL assets
-    notify once the background download actually lands."""
+    """One steer per ingest, gated on the session having a first message:
+    launch-flow uploads stay silent (their refs ride the initial message),
+    multipart replays stay silent, URL assets notify once the background
+    download lands, and composer-staged uploads (notifyAgent=false) ride
+    their outgoing message instead."""
 
     app, services = _session_app(tmp_path)
     _install_remote_transport(monkeypatch, chunks=[b"12", b"34"])
     wakes = _install_notification_capture(services, monkeypatch)
 
     async def scenario(client):
+        # Launch flow: the session has no messages yet — stay silent.
+        launch = await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "launch-upload"},
+            data={
+                "clientRequestId": "launch-upload",
+                "postIngestAction": "NONE",
+            },
+            files={"file": ("cover.png", b"png-bytes-0", "image/png")},
+        )
+        assert launch.status_code == 202
+        assert wakes == []
+        assert (
+            services.sessions.list_messages(
+                "project-1",
+                "session-1",
+                after_seq=0,
+                limit=None,
+            )
+            == []
+        )
+        services.sessions.append_message(
+            "project-1",
+            "session-1",
+            "conversation-1",
+            role="user",
+            content_parts=[{"type": "text", "text": "做一条视频"}],
+            source="user",
+        )
         first = await client.post(
             "/projects/project-1/assets",
             headers={"Idempotency-Key": "upload-1"},
@@ -592,39 +613,3 @@ def test_asset_uploads_steer_the_agent_once_per_ingest(
         f"asset-version:{remote.json()['assetVersionId']}",
     ]
     assert wakes == ["project-1", "project-1"]
-
-
-def test_asset_upload_before_first_message_stays_silent(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-    run_scenario,
-) -> None:
-    """Launch-flow uploads precede the first message and must not wake."""
-
-    app, services = _session_app(tmp_path, initial_goal=None)
-    wakes = _install_notification_capture(services, monkeypatch)
-
-    async def scenario(client):
-        return await client.post(
-            "/projects/project-1/assets",
-            headers={"Idempotency-Key": "launch-upload"},
-            data={
-                "clientRequestId": "launch-upload",
-                "postIngestAction": "NONE",
-            },
-            files={"file": ("lulu.png", b"png-bytes", "image/png")},
-        )
-
-    response = run_scenario(app, scenario)
-
-    assert response.status_code == 202
-    assert wakes == []
-    assert (
-        services.sessions.list_messages(
-            "project-1",
-            "session-1",
-            after_seq=0,
-            limit=None,
-        )
-        == []
-    )
