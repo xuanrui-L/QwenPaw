@@ -478,12 +478,44 @@ function ConversationMessage({ item }: { item: CreatorMessage }) {
   // A persisted tool envelope or hidden thinking has no conversation body.
   // Do not leave an empty sibling between otherwise consecutive tool rows.
   if (!content.length && !showThinking && !showAction) return null;
-  if (item.role === "user")
+  if (item.role === "user") {
+    // Sent attachments must stay visible on the message itself — the
+    // composer chips are consumed by the send.
+    const attachmentRefs = Array.isArray(item.metadata?.assetVersionRefs)
+      ? (item.metadata.assetVersionRefs as unknown[])
+          .map((ref) => String(ref))
+          .filter((ref) => ref.startsWith("asset-version:"))
+      : [];
     return (
-      <div data-agent-message className="agent-user-message">
-        <MessageParts parts={content} />
+      <div className="ml-auto flex w-fit max-w-full flex-col items-end gap-1">
+        <div data-agent-message className="agent-user-message">
+          <MessageParts parts={content} />
+        </div>
+        {attachmentRefs.length > 0 && (
+          <div
+            className="flex flex-wrap justify-end gap-1"
+            data-agent-message-attachments
+          >
+            {attachmentRefs.map((ref) => {
+              const versionId = ref.slice("asset-version:".length);
+              const name =
+                project?.assets.source_versions_by_id[versionId]?.name ||
+                versionId.slice(-8);
+              return (
+                <span
+                  key={ref}
+                  className="inline-flex max-w-[200px] items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]"
+                >
+                  <Paperclip className="h-2.5 w-2.5 shrink-0 text-[var(--color-accent)]" />
+                  <span className="min-w-0 truncate">{name}</span>
+                </span>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
+  }
   return (
     <div
       data-agent-message

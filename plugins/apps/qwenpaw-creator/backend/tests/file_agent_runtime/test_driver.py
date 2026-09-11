@@ -4357,3 +4357,89 @@ def test_batched_upload_refs_delegate_one_run_per_target(
 
     assert [len(call["target_refs"]) for call in calls] == [1, 1, 1]
     assert {call["target_refs"][0] for call in calls} == expected_targets
+
+
+def test_upload_joining_a_live_run_starts_understanding(
+    tmp_path,
+    monkeypatch,
+):
+    """Refs on a message that joins a running turn loop must still fan out.
+
+    Field run 2026-09-11 (project-3c08b43d): a video uploaded from the
+    composer while the agent was planning joined the live run, yet no
+    source_intelligence run was ever created and the started-notice lied.
+    """
+
+    calls = []
+    received = []
+
+    async def scenario():
+        services, _ = _create_project(tmp_path, initial_goal="制作噜噜视频")
+        ingested, _ = _ingest_many_sync(
+            services,
+            project_id=PROJECT_ID,
+            key="mid-run-upload",
+            inputs=[
+                _AssetInput(
+                    name="voice-ref.png",
+                    content=_png_bytes_for_grounding(),
+                    media_type="image/png",
+                ),
+            ],
+            attach_source=False,
+            scope="mid-run-upload-test",
+        )
+        item = ingested["items"][0]
+
+        async def delegate(**kwargs):
+            calls.append(kwargs["arguments"])
+            return {
+                "status": "ACCEPTED",
+                "targetRefs": kwargs["arguments"]["target_refs"],
+            }
+
+        async def model(messages, _tools):
+            received.append([dict(entry) for entry in messages])
+            if len(received) == 1:
+                services.sessions.append_message(
+                    PROJECT_ID,
+                    SESSION_ID,
+                    CONVERSATION_ID,
+                    role="user",
+                    content_parts=[
+                        {"type": "text", "text": "我刚上传了噜噜的参考素材"},
+                    ],
+                    source="user",
+                    channel=MessageChannel.AGENTDOCK,
+                    metadata={
+                        "assetVersionRefs": [
+                            f"asset-version:{item['assetVersionId']}",
+                        ],
+                    },
+                )
+                return _read_call("read-before-upload")
+            return AgentModelTurn(content="收到素材，理解进行中。")
+
+        driver = _driver(services, model)
+        monkeypatch.setattr(driver, "_run_subagent", delegate)
+        await driver.start()
+        try:
+            driver.notify(PROJECT_ID)
+            await _wait_consumed(services, 2)
+            await driver.wait_until_idle(PROJECT_ID)
+        finally:
+            await driver.stop()
+        return item
+
+    item = asyncio.run(scenario())
+
+    assert [call["target_refs"] for call in calls] == [
+        [f"asset:{item['assetId']}"],
+    ]
+    # The joined turn must carry the started-notice so the agent neither
+    # re-delegates nor believes understanding is running when it is not.
+    joined_turn = received[-1]
+    assert any(
+        "本轮上传素材的理解已启动" in str(entry.get("content") or "")
+        for entry in joined_turn
+    )

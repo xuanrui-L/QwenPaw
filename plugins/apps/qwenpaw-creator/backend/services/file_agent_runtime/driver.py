@@ -3199,7 +3199,9 @@ class FileCreatorAgentRuntime:
                     project_id=project_id,
                     session_id=session_id,
                     parent_run_id=run_id,
-                    parent_action_id=f"uploads-{index}",
+                    parent_action_id=(
+                        f"uploads-{request.message_seq}-{index}"
+                    ),
                     epoch=epoch,
                     request=request,
                     tools=tools,
@@ -3280,15 +3282,7 @@ class FileCreatorAgentRuntime:
             },
         ]
         if source_activity:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "本轮上传素材的理解已启动："
-                    + json.dumps(source_activity, ensure_ascii=False)
-                    + "。可以先规划不依赖素材外观的内容；使用这些素材编写视觉设定前，"
-                    "先读取已保存的理解结果。不要重复委派。",
-                },
-            )
+            messages.append(_source_activity_message(source_activity))
         tool_call_count = 0
         review_ids: list[str] = []
         waiting_review_summary: str | None = None
@@ -3396,6 +3390,27 @@ class FileCreatorAgentRuntime:
                     },
                 )
                 input_cursor = item.message_seq
+                # Uploads may join a live run (composer sends and asset
+                # notifications both carry assetVersionRefs): understanding
+                # must start here exactly as it does for a run head, or the
+                # material silently never gets analyzed (field run
+                # 2026-09-11: a mid-run video upload produced no
+                # source_intelligence run at all).
+                if item.metadata.get("assetVersionRefs"):
+                    joined_activity = (
+                        await self._start_attached_source_understanding(
+                            project_id=project_id,
+                            session_id=session_id,
+                            run_id=run_id,
+                            epoch=epoch,
+                            request=item,
+                            tools=tools,
+                        )
+                    )
+                    if joined_activity:
+                        messages.append(
+                            _source_activity_message(joined_activity),
+                        )
             # Turn-boundary drain: quiet progress staged while this run is
             # working (e.g. a detached specialist finishing mid-run) joins
             # the live conversation as a non-durable user turn.
@@ -8964,6 +8979,18 @@ def _artifact_selection_notes(
         if note is not None:
             notes.append(note)
     return notes
+
+
+def _source_activity_message(
+    source_activity: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "content": "本轮上传素材的理解已启动："
+        + json.dumps(source_activity, ensure_ascii=False)
+        + "。可以先规划不依赖素材外观的内容；使用这些素材编写视觉设定前，"
+        "先读取已保存的理解结果。不要重复委派。",
+    }
 
 
 def _running_message_text(
