@@ -2451,9 +2451,7 @@ export default function AgentDock({
                       className="inline-flex max-w-[220px] items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-1 pl-2 pr-1 text-[11px] text-[var(--color-text-secondary)]"
                     >
                       <Paperclip className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
-                      <span className="min-w-0 truncate">
-                        {item.file.name}
-                      </span>
+                      <span className="min-w-0 truncate">{item.file.name}</span>
                       <button
                         type="button"
                         onClick={() =>
@@ -2542,8 +2540,7 @@ export default function AgentDock({
                     icon={<ArrowUpOutlined />}
                     loading={uploadingAssets}
                     disabled={
-                      (!canSend && pendingUploads.length === 0) ||
-                      originalsGate
+                      (!canSend && pendingUploads.length === 0) || originalsGate
                     }
                     onClick={() => void submit()}
                     className="!flex !h-8 !w-8 !items-center !justify-center !p-0"
