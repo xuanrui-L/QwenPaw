@@ -373,11 +373,13 @@ class WorkGraphScheduler:
 
     @classmethod
     def manual_retry_fingerprint(cls, node: WorkNode, tasks: Sequence) -> str:
-        """A human retry may move beyond a failed or cancelled execution.
+        """A human request may move beyond a terminal execution.
 
-        The terminal task determines the next identity, so concurrent clicks
-        converge on one new task. Automatic dispatch keeps its original slot;
-        only an explicit manual request authorizes another paid attempt.
+        Failed/cancelled slots retry, and a succeeded slot re-rolls with the
+        same inputs. The terminal task determines the next identity, so
+        concurrent clicks converge on one new task. Automatic dispatch keeps
+        its original slot; only an explicit manual request authorizes another
+        paid attempt.
         """
         base = fingerprint = cls._ledger_fingerprint(node)
         by_key = {
@@ -392,6 +394,7 @@ class WorkGraphScheduler:
             if previous is None or previous.status not in (
                 TaskStatus.CANCELLED,
                 TaskStatus.FAILED,
+                TaskStatus.SUCCEEDED,
             ):
                 return fingerprint
             fingerprint = (

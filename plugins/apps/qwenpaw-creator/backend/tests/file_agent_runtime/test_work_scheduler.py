@@ -1447,3 +1447,38 @@ def test_review_scope_keeps_independent_sibling_running():
             )
             is blocked
         )
+
+
+def test_manual_fingerprint_re_rolls_a_succeeded_slot() -> None:
+    """A manual request on a DONE node mints a fresh paid identity.
+
+    User rule 2026-09-11: 生成完成后即使提示词未改也可以重新生成。The
+    succeeded slot previously stopped the walk, so a manual dispatch
+    replayed the finished task instead of generating again; failed and
+    cancelled retries keep their existing convergence.
+    """
+
+    node = WorkNode(
+        node_id="visual:char:a:var:x",
+        kind="visual",
+        label="a",
+        status=WorkNodeStatus.DONE,
+        dispatch_fingerprint="fp-base",
+    )
+    base = WorkGraphScheduler._ledger_fingerprint(node)
+    slot = work_scheduler.dispatch_slot(base)
+    succeeded = SimpleNamespace(
+        task_id="task-done-1",
+        status=TaskStatus.SUCCEEDED,
+        idempotency_key=f"dag-{node.node_id}-{slot}",
+        caused_by_request_id=None,
+    )
+
+    fresh = WorkGraphScheduler.manual_retry_fingerprint(node, [succeeded])
+    assert fresh != base
+    assert fresh.startswith(f"{base}-manual-retry-")
+    # Concurrent clicks converge: the same terminal task derives the same
+    # next identity.
+    assert WorkGraphScheduler.manual_retry_fingerprint(node, [succeeded]) == (
+        fresh
+    )

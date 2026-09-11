@@ -451,9 +451,13 @@ def test_manual_workgraph_retry_reuses_one_new_media_task(
             response = await retry
             assert response.status_code == 200
             assert response.json()["dispatched"] is True
+            # DONE nodes now re-roll on explicit request (same-prompt
+            # regeneration is a user right); with the fresh result still
+            # awaiting review, the re-roll is refused loudly instead of
+            # being swallowed as "already up to date".
             completed = await client.post(path)
-            assert completed.status_code == 200
-            assert completed.json()["dispatched"] is False
+            assert completed.status_code == 409
+            assert completed.json()["code"] == "WAITING_REVIEW"
         tasks = executions.list_tasks(PROJECT_ID)
         assert len(tasks) == 2
         assert provider.calls == 1
@@ -1291,3 +1295,61 @@ def test_media_review_mode_controls_storyboard_publication(
             and slot.selected_version_id == result.artifact_version_id
             for slot in slots.values()
         )
+
+
+def test_style_anchor_resolves_to_base_selection_at_dispatch():
+    """Dispatch reads the base variant's current image through the anchor;
+    a regressed (unselected) base fails closed instead of rendering blind."""
+
+    from services.project_files.models import (
+        EntityCollection,
+        VisualEntity,
+        VisualVariant,
+    )
+
+    project = Project.new(project_id="p-anchor", name="Anchor")
+    base = VisualVariant(
+        variant_id="var:base",
+        selected_artifact_version_id="art-base-1",
+    )
+    dependent = VisualVariant(
+        variant_id="var:door",
+        reference_artifact_version_ids=[
+            "visual:scene:home:var:base",
+            "art-plain-9",
+        ],
+    )
+    project.visual.entities = EntityCollection(
+        items={
+            "scene:home": VisualEntity(
+                entity_id="scene:home",
+                kind="scene",
+                name="家",
+                required_variant_ids=["var:base"],
+                variants=EntityCollection(
+                    items={"var:base": base},
+                    order=["var:base"],
+                ),
+            ),
+            "scene:door": VisualEntity(
+                entity_id="scene:door",
+                kind="scene",
+                name="家门口",
+                required_variant_ids=["var:door"],
+                variants=EntityCollection(
+                    items={"var:door": dependent},
+                    order=["var:door"],
+                ),
+            ),
+        },
+        order=["scene:home", "scene:door"],
+    )
+
+    assert image_execution._resolved_artifact_reference_ids(
+        project,
+        dependent,
+    ) == ["art-base-1", "art-plain-9"]
+
+    base.selected_artifact_version_id = None
+    with pytest.raises(ValidationError, match="风格锚点"):
+        image_execution._resolved_artifact_reference_ids(project, dependent)

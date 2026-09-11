@@ -51,6 +51,7 @@ import {
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { nodeGenerating } from "@/lib/generationActivity";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
 import { useTimelineStore } from "@/store/timelineStore";
@@ -889,18 +890,48 @@ function variantReferenceTokens(
     ...variant.reference_asset_version_ids,
     ...variant.reference_artifact_version_ids,
   ];
-  return versionIds.map((versionId, position) => ({
-    index: position + 1,
-    name: referenceVersionDisplayName(project, versionId),
-    kind: "artifact" as const,
-    thumbUrl: refImageThumbUrl(
-      project,
-      null,
-      project.assets.artifact_versions_by_id[versionId]
-        ? `artifact-version:${versionId}`
-        : `asset-version:${versionId}`,
-    ),
-  }));
+  return versionIds.map((versionId, position) => {
+    const anchor = visualAnchorToken(project, versionId);
+    if (anchor) return { ...anchor, index: position + 1 };
+    return {
+      index: position + 1,
+      name: referenceVersionDisplayName(project, versionId),
+      kind: "artifact" as const,
+      thumbUrl: refImageThumbUrl(
+        project,
+        null,
+        project.assets.artifact_versions_by_id[versionId]
+          ? `artifact-version:${versionId}`
+          : `asset-version:${versionId}`,
+      ),
+    };
+  });
+}
+
+/** A style anchor `visual:<entityId>:<variantId>` presents as the base
+    entity itself; before the base image exists the token has no thumb. */
+function visualAnchorToken(
+  project: ProjectDocument,
+  ref: string,
+): Omit<PromptRichToken, "index"> | null {
+  if (!ref.startsWith("visual:")) return null;
+  for (const entityId of project.visual.entities.order) {
+    const entity = project.visual.entities.items[entityId];
+    if (!entity) continue;
+    for (const variantId of entity.variants.order) {
+      if (ref !== `visual:${entityId}:${variantId}`) continue;
+      const selected =
+        entity.variants.items[variantId]?.selected_artifact_version_id;
+      return {
+        name: entity.name || entityId,
+        kind: "artifact" as const,
+        thumbUrl: selected
+          ? refImageThumbUrl(project, null, `artifact-version:${selected}`)
+          : null,
+      };
+    }
+  }
+  return { name: ref, kind: "artifact" as const, thumbUrl: null };
 }
 
 /** Project image assets not yet referenced by this variant — pickable in the
@@ -1170,6 +1201,7 @@ export function GenerationPromptEditor({
   onRegenerate,
   regenerateLabel,
   saving,
+  regenerating = false,
 }: {
   target: PromptTarget;
   onSave: (
@@ -1180,6 +1212,7 @@ export function GenerationPromptEditor({
   onRegenerate?: () => void;
   regenerateLabel: string;
   saving: boolean;
+  regenerating?: boolean;
 }) {
   const { t } = useTranslation();
   const [editOpen, setEditOpen] = useState(false);
@@ -1228,6 +1261,7 @@ export function GenerationPromptEditor({
               <RegeneratePill
                 field={target.pointer}
                 label={regenerateLabel}
+                loading={regenerating}
                 disabled={saving || awaitingAgent}
                 onClick={onRegenerate}
               />
@@ -2358,6 +2392,10 @@ export default function AssetsPage() {
                             key={promptTarget.pointer}
                             target={promptTarget}
                             saving={patching}
+                            regenerating={nodeGenerating(
+                              tasks,
+                              dispatchNodeIdForPrompt(promptTarget.pointer),
+                            )}
                             regenerateLabel={
                               selected.mediaKind === "video"
                                 ? t("r2v.regenerateVideo")
@@ -2373,11 +2411,13 @@ export default function AssetsPage() {
                               return () => {
                                 void dispatchWorkGraphNode(id, nodeId)
                                   .then((result) => {
-                                    message.success(
-                                      result.dispatched
-                                        ? t("r2v.regenQueued")
-                                        : t("r2v.regenUpToDate"),
-                                    );
+                                    if (result.dispatched) {
+                                      message.success(t("r2v.regenQueued"));
+                                    } else if (result.status === "running") {
+                                      message.info(t("r2v.regenRunning"));
+                                    } else {
+                                      message.info(t("r2v.regenUpToDate"));
+                                    }
                                     void refreshTasks(id);
                                     void pollOnce(id);
                                   })

@@ -20,6 +20,7 @@ import {
   type ProjectEditOperation,
 } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { nodeGenerating } from "@/lib/generationActivity";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useTimelineStore } from "@/store/timelineStore";
 import {
@@ -1259,7 +1260,8 @@ export function WorkbenchSurface({
                       onChange={(value) => updateModeField("script", value)}
                       onRegenerate={() => void regenerateNode("video")}
                       regenerating={
-                        regeneratingNode === `video:${element.element_id}`
+                        regeneratingNode === `video:${element.element_id}` ||
+                        nodeGenerating(tasks, `video:${element.element_id}`)
                       }
                       regenerateLabel={t("r2v.regenerateVideo")}
                     />
@@ -1318,7 +1320,8 @@ export function WorkbenchSurface({
                       }
                       onRegenerate={() => void regenerateNode("video")}
                       regenerating={
-                        regeneratingNode === `video:${element.element_id}`
+                        regeneratingNode === `video:${element.element_id}` ||
+                        nodeGenerating(tasks, `video:${element.element_id}`)
                       }
                       regenerateLabel={t("r2v.regenerateVideo")}
                     />
@@ -1928,7 +1931,8 @@ export function WorkbenchSurface({
                     collapseHeight={230}
                     onRegenerate={() => void regenerateNode("storyboard")}
                     regenerating={
-                      regeneratingNode === `storyboard:${element.element_id}`
+                      regeneratingNode === `storyboard:${element.element_id}` ||
+                      nodeGenerating(tasks, `storyboard:${element.element_id}`)
                     }
                     regenerateLabel={t("r2v.regenerateImage")}
                     onEditComplete={scheduleSilentApply}
@@ -2001,7 +2005,8 @@ export function WorkbenchSurface({
                     collapseHeight={460}
                     onRegenerate={() => void regenerateNode("video")}
                     regenerating={
-                      regeneratingNode === `video:${element.element_id}`
+                      regeneratingNode === `video:${element.element_id}` ||
+                      nodeGenerating(tasks, `video:${element.element_id}`)
                     }
                     regenerateLabel={t("r2v.regenerateVideo")}
                     onEditComplete={scheduleSilentApply}

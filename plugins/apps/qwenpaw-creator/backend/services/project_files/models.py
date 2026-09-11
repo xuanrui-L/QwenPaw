@@ -472,6 +472,12 @@ class VisualVariant(StrictModel):
     reference_asset_version_ids: list[EntityId] = Field(default_factory=list)
     reference_artifact_version_ids: list[EntityId] = Field(
         default_factory=list,
+        description=(
+            "参考图（ArtifactVersion id）。同一空间群/风格群的关联场景，"
+            "还接受跨实体风格锚点 visual:<entityId>:<variantId>：派发时"
+            "解析为该基准变体当前选中的图片；基准图未生成前本节点在工作图"
+            "中等待，因此可以在规划期就写好，无需等基准出图。"
+        ),
     )
     generated_artifact_version_ids: list[EntityId] = Field(
         default_factory=list,
@@ -483,6 +489,24 @@ class VisualVariant(StrictModel):
     # entity's continuity.
     derived_from_variant_id: EntityId | None = None
     consistency_tags: list[str] = Field(default_factory=list)
+
+
+VISUAL_ANCHOR_REF_PREFIX = "visual:"
+
+
+def visual_style_anchor(entities: Any, ref: str) -> VisualVariant | None:
+    """Resolve a style-anchor ref ``visual:<entityId>:<variantId>``.
+
+    Entity and variant ids may themselves contain colons, so the ref is
+    matched against constructed ids instead of being split apart.
+    """
+    if not ref.startswith(VISUAL_ANCHOR_REF_PREFIX):
+        return None
+    for entity_id, entity in entities.items.items():
+        for variant_id, variant in entity.variants.items.items():
+            if ref == f"{VISUAL_ANCHOR_REF_PREFIX}{entity_id}:{variant_id}":
+                return variant
+    return None
 
 
 class CharacterVoice(StrictModel):
@@ -1508,11 +1532,18 @@ class Project(StrictModel):
                     variant.reference_asset_version_ids,
                     "visual source",
                 )
-                _require_all(
-                    artifact_versions,
-                    variant.reference_artifact_version_ids,
-                    "visual artifact reference",
-                )
+                for ref in variant.reference_artifact_version_ids:
+                    anchor = visual_style_anchor(self.visual.entities, ref)
+                    if anchor is None:
+                        _require_key(
+                            artifact_versions,
+                            ref,
+                            "visual artifact reference",
+                        )
+                    elif anchor is variant:
+                        raise ValueError(
+                            f"visual style anchor {ref} references itself",
+                        )
                 _require_all(
                     artifact_versions,
                     variant.generated_artifact_version_ids,

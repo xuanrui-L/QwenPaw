@@ -40,6 +40,7 @@ from services.project_files.models import (
     Project,
     R2VCreation,
     S2VCreation,
+    visual_style_anchor,
     SourceVersionRenderSource,
     T2VCreation,
 )
@@ -595,11 +596,30 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         for variant_id in entity.variants.order:
             variant = entity.variants.items[variant_id]
             node_id = f"visual:{entity_id}:{variant_id}"
+            # Style anchors (visual:<entity>:<variant>) resolve to the base
+            # variant's currently selected image: related scenes plan their
+            # cross-references up front and the graph serialises them behind
+            # the base render instead of racing it.
+            anchor_deps: list[str] = []
+            anchor_waiting: list[str] = []
+            resolved_artifact_refs: list[str] = []
+            for ref in sorted(variant.reference_artifact_version_ids):
+                anchor = visual_style_anchor(project.visual.entities, ref)
+                if anchor is None:
+                    resolved_artifact_refs.append(ref)
+                    continue
+                anchor_deps.append(ref)
+                if anchor.selected_artifact_version_id:
+                    resolved_artifact_refs.append(
+                        anchor.selected_artifact_version_id,
+                    )
+                else:
+                    anchor_waiting.append(ref)
             fingerprint = _fingerprint(
                 node_id,
                 variant.prompt,
                 sorted(variant.reference_asset_version_ids),
-                sorted(variant.reference_artifact_version_ids),
+                resolved_artifact_refs,
             )
             status, task = _variant_status(
                 entity=entity,
@@ -616,6 +636,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 status, task = WorkNodeStatus.READY, None
             missing: tuple[str, ...] = ()
             authored_text_gap = False
+            if status is WorkNodeStatus.READY and anchor_waiting:
+                # The base image is the whole point of the reference: hold
+                # the render until the anchor variant has a selected image.
+                status = WorkNodeStatus.GATED
+                missing = tuple(anchor_waiting)
             if status is WorkNodeStatus.READY and visual_story_missing(
                 project,
                 entity_id,
@@ -654,6 +679,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     kind="visual",
                     label=f"{entity.name} · {variant_id.split(':')[-1]}",
                     status=status,
+                    deps=tuple(anchor_deps),
                     lane="visual",
                     task_id=getattr(task, "task_id", None),
                     progress=getattr(task, "progress", None),

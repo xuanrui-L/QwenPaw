@@ -66,6 +66,7 @@ from services.project_files.models import (
     R2VCreation,
     VisualEntity,
     VisualVariant,
+    visual_style_anchor,
 )
 from services.media_files.call_budget import ensure_media_call_budget
 from services.media_files.publication_retry import (
@@ -667,6 +668,31 @@ def _list_of_strings(value: Any, *, label: str) -> list[str]:
     return [item.strip() for item in value if item.strip()]
 
 
+def _resolved_artifact_reference_ids(
+    project: Project,
+    variant: VisualVariant,
+) -> list[str]:
+    """Variant artifact refs with style anchors resolved to concrete ids.
+
+    ``visual:<entityId>:<variantId>`` anchors read the base variant's
+    currently selected image; an anchor without one fails closed — the work
+    graph gates such nodes, so reaching here means the base regressed
+    between admission and execution.
+    """
+    refs: list[str] = []
+    for ref in variant.reference_artifact_version_ids:
+        anchor = visual_style_anchor(project.visual.entities, ref)
+        if anchor is None:
+            refs.append(ref)
+        elif anchor.selected_artifact_version_id:
+            refs.append(anchor.selected_artifact_version_id)
+        else:
+            raise ValidationError(
+                f"风格锚点 {ref} 还没有已选图片；先生成并确认基准场景",
+            )
+    return refs
+
+
 def _target_id(target_ref: str, prefix: str) -> str:
     expected = f"{prefix}:"
     if not target_ref.startswith(expected) or not target_ref[len(expected) :]:
@@ -1085,9 +1111,14 @@ def _resolve_request(
                 "生成视觉 Asset 需要显式 prompt 或已提交的 Variant prompt；"
                 "实体名称、简介和全局风格只是连续性事实，不能作为付费生成兜底",
             )
+        artifact_refs = (
+            _resolved_artifact_reference_ids(project, variant)
+            if variant
+            else []
+        )
         version_ids = [
             *(variant.reference_asset_version_ids if variant else []),
-            *(variant.reference_artifact_version_ids if variant else []),
+            *artifact_refs,
             *explicit_version_ids,
         ]
         resolved = _ResolvedRequest(
@@ -1713,7 +1744,9 @@ def _image_authoring_fingerprint(
                     variant.reference_asset_version_ids if variant else []
                 ),
                 "referenceArtifacts": (
-                    variant.reference_artifact_version_ids if variant else []
+                    _resolved_artifact_reference_ids(project, variant)
+                    if variant
+                    else []
                 ),
                 "selectedVersion": (
                     variant.selected_artifact_version_id

@@ -1287,3 +1287,50 @@ def test_snapshot_does_not_count_toward_script_flow() -> None:
         node.node_id for node in graph.nodes if node.kind == "script"
     )
     assert script_nodes == ["script:timeline:ep2", "script:timeline:main"]
+
+
+def test_style_anchor_gates_then_rides_the_base_selection() -> None:
+    """`visual:<entity>:<variant>` refs plan a spatial group up front.
+
+    Field run 2026-09-11 (卧室/家门口/电梯口): related scenes rendered in
+    parallel with zero cross references. The anchor gates the dependent
+    scene until the base image is selected, then resolves into the dispatch
+    fingerprint so a re-selected base re-identifies the node.
+    """
+
+    project = _project()
+    project.visual.entities.items["scene:bedroom"] = _entity(
+        "scene:bedroom",
+        {"var:base": None},
+    )
+    project.visual.entities.order.append("scene:bedroom")
+    project.visual.entities.items["scene:door"] = _entity(
+        "scene:door",
+        {"var:base": None},
+    )
+    project.visual.entities.order.append("scene:door")
+    anchor_ref = "visual:scene:bedroom:var:base"
+    door = project.visual.entities.items["scene:door"].variants.items[
+        "var:base"
+    ]
+    door.reference_artifact_version_ids = [anchor_ref]
+    node_id = "visual:scene:door:var:base"
+
+    gated = derive_work_graph(project).by_id[node_id]
+    assert gated.status is WorkNodeStatus.GATED
+    assert gated.missing == (anchor_ref,)
+    assert gated.deps == (anchor_ref,)
+
+    bedroom = project.visual.entities.items["scene:bedroom"].variants.items[
+        "var:base"
+    ]
+    bedroom.selected_artifact_version_id = "art:bed-1"
+    ready = derive_work_graph(project).by_id[node_id]
+    assert ready.status is WorkNodeStatus.READY
+    first = ready.dispatch_fingerprint
+
+    # The anchor resolves to the concrete base image: choosing another base
+    # version changes the dependent's input identity.
+    bedroom.selected_artifact_version_id = "art:bed-2"
+    second = derive_work_graph(project).by_id[node_id].dispatch_fingerprint
+    assert first != second
