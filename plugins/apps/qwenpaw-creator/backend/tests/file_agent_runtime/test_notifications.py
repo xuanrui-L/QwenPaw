@@ -434,6 +434,48 @@ def test_hard_cap_parks_steer_until_human_resets_streak(
     ] == ["graphdone-g5"]
 
 
+def test_upload_steer_bypasses_and_resets_the_autonomous_streak(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """User uploads are human acts: the fuse must not block or count them.
+
+    CR 2026-09-11: consecutive uploads exhausted the autonomous budget and
+    later uploads stopped triggering understanding until the user typed.
+    """
+
+    services = _services(tmp_path, monkeypatch)
+    bus, wakes = _bus(services)
+    _exhaust_hard_cap(services)
+
+    delivered = asyncio.run(
+        bus.steer(
+            PROJECT_ID,
+            kind=RuntimeEventKind.SOURCE_ASSETS_UPLOADED,
+            request_id="assets-uploaded-task-1",
+            text="用户刚上传了 1 个素材：lulu.png。",
+            payload={"assetVersionRefs": ["asset-version:v1"]},
+        ),
+    )
+
+    assert delivered is True
+    assert _user_messages(services)[-1].source == NOTIFICATION_SOURCE
+
+    # The delivered upload message resets the streak like a typed message:
+    # the next autonomous NEXT_STEP goes straight through.
+    resumed = asyncio.run(
+        bus.steer(
+            PROJECT_ID,
+            kind=RuntimeEventKind.GRAPH_ALL_DONE,
+            request_id="graphdone-g7",
+            text="工作图全部节点已完成。",
+        ),
+    )
+
+    assert resumed is True
+    assert len(wakes.calls) == 2
+
+
 def test_drain_into_resume_never_steals_a_live_claim(
     tmp_path,
     monkeypatch,

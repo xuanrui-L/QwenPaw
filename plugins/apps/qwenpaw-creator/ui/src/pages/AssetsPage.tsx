@@ -1183,6 +1183,10 @@ export function GenerationPromptEditor({
 }) {
   const { t } = useTranslation();
   const [editOpen, setEditOpen] = useState(false);
+  // An empty prompt is a planned-but-unwritten target: the agent still owes
+  // the prompt (or its upstream reference), so editing and regenerating
+  // would dispatch an unplanned generation.
+  const awaitingAgent = !target.value.trim();
   const softPill =
     "inline-flex h-10 shrink-0 cursor-pointer select-none items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 text-sm font-medium leading-6 text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-border-strong)] disabled:cursor-not-allowed disabled:opacity-50";
   return (
@@ -1201,13 +1205,13 @@ export function GenerationPromptEditor({
           data-creator-field-label={target.label}
           className="max-h-[135px] select-text overflow-y-auto whitespace-pre-wrap text-xs leading-[1.6] text-[var(--color-text-primary)]"
         >
-          {target.value || t("assets.promptPlaceholder")}
+          {target.value || t("r2v.awaitAgentPrompt")}
         </p>
         <div className="flex justify-end gap-3">
           <button
             type="button"
             data-prompt-edit={target.pointer}
-            disabled={saving}
+            disabled={saving || awaitingAgent}
             className={softPill}
             onClick={() => setEditOpen(true)}
           >
@@ -1219,7 +1223,7 @@ export function GenerationPromptEditor({
               <RegeneratePill
                 field={target.pointer}
                 label={regenerateLabel}
-                disabled={saving}
+                disabled={saving || awaitingAgent}
                 onClick={onRegenerate}
               />
             </span>

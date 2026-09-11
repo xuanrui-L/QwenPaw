@@ -1648,6 +1648,12 @@ async def ingest_asset(
             stable_client_id=str(form.get("clientRequestId") or ""),
         )
         post_action = str(form.get("postIngestAction") or "NONE")
+        # Composer-staged uploads ride the user's outgoing message (its
+        # assetVersionRefs trigger understanding); a steer here would
+        # double-notify the same fact.
+        notify_agent = (
+            str(form.get("notifyAgent") or "true").casefold() != "false"
+        )
         name = Path(upload.filename or "upload.bin").name
         media_type = (
             upload.content_type
@@ -1678,6 +1684,7 @@ async def ingest_asset(
             stable_client_id=body.client_request_id,
         )
         post_action = body.post_ingest_action
+        notify_agent = True
         name = body.name.strip() or "asset"
         if body.kind == "text":
             payload = body.value.encode("utf-8")
@@ -1755,7 +1762,7 @@ async def ingest_asset(
         item["assetId"],
         result["status"],
     )
-    if not replayed:
+    if not replayed and notify_agent:
         await _notify_assets_uploaded(
             services,
             project_id=project_id,

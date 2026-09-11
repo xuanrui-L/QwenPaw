@@ -330,6 +330,10 @@ def test_unclaimed_running_task_recovers_into_a_retry_slot(
         executions.get_run(PROJECT_ID, swept.run_id).status
         is SpecialistRunStatus.FAILED
     )
+    # Recovery tombstones the claim boundary: a still-alive zombie executor
+    # that wakes up later loses the claim race and aborts before paying.
+    assert claim.exists()
+    assert asyncio.run(fresh_worker._claim_provider(swept)) is False
 
     # The scheduler sweep shares the predicate: a claimed RUNNING record is
     # provider spend in flight and must never be touched.

@@ -560,13 +560,26 @@ def test_asset_uploads_steer_the_agent_once_per_ingest(
         pending = list(file_asset_routes._REMOTE_INGEST_TASKS.values())
         if pending:
             await asyncio.gather(*pending)
-        return first, replay, remote
+        # Composer-staged uploads ride the outgoing message instead:
+        # notifyAgent=false must stay silent.
+        staged = await client.post(
+            "/projects/project-1/assets",
+            headers={"Idempotency-Key": "staged-1"},
+            data={
+                "clientRequestId": "staged-1",
+                "postIngestAction": "ATTACH_SOURCE",
+                "notifyAgent": "false",
+            },
+            files={"file": ("staged.png", b"png-bytes-2", "image/png")},
+        )
+        return first, replay, remote, staged
 
-    first, replay, remote = run_scenario(app, scenario)
+    first, replay, remote, staged = run_scenario(app, scenario)
 
     assert first.status_code == 202
     assert replay.status_code == 202
     assert remote.status_code == 202
+    assert staged.status_code == 202
     notes = _uploaded_notifications(services)
     assert len(notes) == 2
     upload_note, remote_note = notes

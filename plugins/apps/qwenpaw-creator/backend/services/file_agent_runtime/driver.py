@@ -9017,7 +9017,11 @@ def _message_text(
                     list(dict.fromkeys(exact_refs)),
                     ensure_ascii=False,
                     separators=(",", ":"),
-                ),
+                )
+                + "\n请先用简短的公开回复确认已收到这些素材，并结合当前项目的"
+                "实际进展说明接下来会如何安排使用它们（哪些工作现在就能继续、"
+                "哪些要等素材理解结果）。素材理解由 Runtime 自动启动并在完成后"
+                "以 Runtime 通知送达，不要为此重复委派。",
             )
     context = message.metadata.get("context")
     if isinstance(context, Mapping):

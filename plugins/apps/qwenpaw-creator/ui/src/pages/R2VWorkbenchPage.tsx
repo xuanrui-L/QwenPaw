@@ -129,7 +129,6 @@ function PromptTextArea({
   field,
   path,
   disabled = false,
-  placeholder,
   onChange,
   onRegenerate,
   regenerating = false,
@@ -147,6 +146,9 @@ function PromptTextArea({
   regenerateLabel?: string;
 }) {
   const { t } = useTranslation();
+  // An empty prompt is a planned-but-unwritten field: the agent still owes
+  // it, so editing or regenerating would dispatch an unplanned generation.
+  const awaitingAgent = !value.trim();
   return (
     <div
       data-creator-field={field}
@@ -159,10 +161,10 @@ function PromptTextArea({
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)]">
         <TextArea
           value={value}
-          disabled={disabled}
+          disabled={disabled || awaitingAgent}
           onChange={(event) => onChange(event.target.value)}
           autoSize={{ minRows: 2, maxRows: 10 }}
-          placeholder={placeholder ?? t("r2v.generateAndEdit", { label })}
+          placeholder={t("r2v.awaitAgentPrompt")}
           className="!rounded-none !border-0 !bg-transparent !text-xs !shadow-none"
         />
         {onRegenerate && (
@@ -171,7 +173,7 @@ function PromptTextArea({
               field={field}
               label={regenerateLabel ?? ""}
               loading={regenerating}
-              disabled={disabled}
+              disabled={disabled || awaitingAgent}
               onClick={onRegenerate}
             />
           </div>

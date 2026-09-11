@@ -314,7 +314,11 @@ class RuntimeNotificationBus:
                 project_id,
             )
             return False
-        if await asyncio.to_thread(
+        # An upload steer is a human act: every delivery requires a fresh
+        # user upload, so it cannot form an autonomous loop and must not be
+        # parked behind a streak that earlier autonomous events exhausted.
+        human_initiated = kind is RuntimeEventKind.SOURCE_ASSETS_UPLOADED
+        if not human_initiated and await asyncio.to_thread(
             self._autonomous_streak_exhausted,
             project_id,
             session,
@@ -718,6 +722,15 @@ class RuntimeNotificationBus:
             if item.role != "user":
                 continue
             if item.source in RUNTIME_AUTONOMOUS_SOURCES:
+                if (
+                    item.metadata.get("notificationKind")
+                    == RuntimeEventKind.SOURCE_ASSETS_UPLOADED.value
+                ):
+                    # An upload is a human act carried by the bus: it resets
+                    # the streak exactly like a typed message, otherwise a
+                    # user who only uploads (never types) would exhaust the
+                    # autonomous budget with their own actions.
+                    break
                 streak += 1
                 if streak >= NOTIFY_AUTONOMOUS_HARD_CAP:
                     return True

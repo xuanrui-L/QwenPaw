@@ -117,10 +117,15 @@ def test_video_sample_version_yields_its_extracted_audio_track(
     )
     version_id = ingested["items"][0]["assetVersionId"]
 
-    payload, media_type = audio_execution._sample_bytes_for_version(
+    (
+        payload,
+        media_type,
+        resolved_id,
+    ) = audio_execution._sample_bytes_for_version(
         services,
         project_id="p-voice",
         version_id=version_id,
+        idempotency_key="voice-enroll-1",
     )
 
     assert media_type == "audio/wav"
@@ -129,6 +134,22 @@ def test_video_sample_version_yields_its_extracted_audio_track(
         assert sample.getframerate() == 24000
         seconds = sample.getnframes() / sample.getframerate()
     assert 0.8 <= seconds <= 1.3
+    # The binding must reference a persisted audio version (downstream R2V
+    # voice resolution rejects video-bound samples), provenance-linked to
+    # the original video.
+    assert resolved_id != version_id
+    project = services.projects.read("p-voice").project
+    resolved = project.assets.source_versions_by_id[resolved_id]
+    assert resolved.media_kind == "audio"
+    assert resolved.metadata.get("extractedFromVersionId") == version_id
+    # Replays resolve to the same persisted version instead of minting one.
+    _, _, replay_id = audio_execution._sample_bytes_for_version(
+        services,
+        project_id="p-voice",
+        version_id=version_id,
+        idempotency_key="voice-enroll-1",
+    )
+    assert replay_id == resolved_id
 
 
 @pytest.mark.parametrize("failure_stage", [None, "tts", "binding", "commit"])

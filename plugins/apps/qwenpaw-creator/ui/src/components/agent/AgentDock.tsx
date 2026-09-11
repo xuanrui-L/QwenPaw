@@ -25,10 +25,12 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Paperclip,
   Plus,
   RotateCcw,
   Square,
   Undo2,
+  X,
 } from "lucide-react";
 import {
   getArtifactVersionMediaUrl,
@@ -1213,36 +1215,35 @@ export default function AgentDock({
   useEffect(() => {
     setRemovedContextRefs([]);
     setRateLimitResuming(false);
+    setPendingUploads([]);
+    setUploadingAssets(false);
+    stagedSentRefs.current = [];
     submissionVersion.current += 1;
     projectLifecycleVersion.current += 1;
   }, [projectId]);
   const [showJump, setShowJump] = useState(false);
   const inputRef = useRef<MentionInputHandle>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadSeq = useRef(0);
+  // Files picked via "+" stay staged until the user hits send: their refs
+  // then ride the message (same contract as launch-time uploads), which is
+  // what triggers per-asset understanding.
+  const [pendingUploads, setPendingUploads] = useState<
+    { id: string; file: File }[]
+  >([]);
   const [uploadingAssets, setUploadingAssets] = useState(false);
-  const uploadAssets = async (files: File[]) => {
-    if (!projectId || files.length === 0) return;
-    const uploadProject = projectId;
-    setUploadingAssets(true);
-    try {
-      for (const file of files) {
-        await ingestAssetFile(uploadProject, file, "ATTACH_SOURCE");
-      }
-      if (currentProject.current === uploadProject) {
-        message.success(t("assets.uploadSuccess"));
-      }
-      await Promise.allSettled([
-        useProjectSnapshotStore.getState().pollOnce(uploadProject),
-        useCreatorTaskViewStore.getState().refresh(uploadProject),
-      ]);
-    } catch (error) {
-      const text =
-        error instanceof Error ? error.message : t("assets.uploadFailed");
-      if (currentProject.current === uploadProject) message.error(text, 6);
-    } finally {
-      setUploadingAssets(false);
-      if (uploadInputRef.current) uploadInputRef.current.value = "";
-    }
+  // Refs already ingested by a failed send attempt: reused on retry instead
+  // of uploading the same bytes again.
+  const stagedSentRefs = useRef<{ ref: string; name: string }[]>([]);
+  const stageUploads = (files: File[]) => {
+    if (files.length === 0) return;
+    setPendingUploads((prev) => [
+      ...prev,
+      ...files.map((file) => ({
+        id: `staged-${(uploadSeq.current += 1)}`,
+        file,
+      })),
+    ]);
   };
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
@@ -1748,14 +1749,16 @@ export default function AgentDock({
   };
 
   const submit = async () => {
-    if (originalsGate) return;
+    if (originalsGate || uploadingAssets) return;
     const content = inputRef.current?.getContent() ?? {
       text: "",
       refs: [],
       selections: [],
     };
     const text = content.text.trim();
-    if (!text) return;
+    const staged = pendingUploads;
+    if (!text && staged.length === 0 && stagedSentRefs.current.length === 0)
+      return;
     const allRefs = [
       ...new Set([
         ...contextChips.map((item) => item.ref),
@@ -1765,6 +1768,67 @@ export default function AgentDock({
     const version = ++submissionVersion.current;
     const submittedProject = projectId;
     const submittedExtraRefs = extraRefs;
+    // Staged attachments ingest now (silently: their refs ride this message,
+    // so the run itself triggers per-asset understanding — the same contract
+    // launch-time uploads use).
+    const uploadedRefs = [...stagedSentRefs.current];
+    if (staged.length > 0) {
+      setUploadingAssets(true);
+      try {
+        for (const item of staged) {
+          const accepted = await ingestAssetFile(
+            submittedProject,
+            item.file,
+            "ATTACH_SOURCE",
+            { notifyAgent: false },
+          );
+          uploadedRefs.push({
+            ref: `asset-version:${accepted.assetVersionId}`,
+            name: item.file.name,
+          });
+          stagedSentRefs.current = uploadedRefs;
+          setPendingUploads((prev) =>
+            prev.filter((pending) => pending.id !== item.id),
+          );
+        }
+      } catch (error) {
+        if (
+          currentProject.current === submittedProject &&
+          submissionVersion.current === version
+        ) {
+          message.error(
+            error instanceof Error ? error.message : t("assets.uploadFailed"),
+            6,
+          );
+        }
+        return;
+      } finally {
+        setUploadingAssets(false);
+      }
+      // The snapshot/task stores hold only the current project's state: a
+      // stale refresh after switching projects would clobber the new page,
+      // and sendMessage below reads the store's current project.
+      if (
+        currentProject.current !== submittedProject ||
+        submissionVersion.current !== version
+      )
+        return;
+      void Promise.allSettled([
+        useProjectSnapshotStore.getState().pollOnce(submittedProject),
+        useCreatorTaskViewStore.getState().refresh(submittedProject),
+      ]);
+    }
+    if (
+      currentProject.current !== submittedProject ||
+      submissionVersion.current !== version
+    )
+      return;
+    const assetVersionRefs = uploadedRefs.map((item) => item.ref);
+    const messageText =
+      text ||
+      t("agent.uploadOnlyMessage", {
+        names: uploadedRefs.map((item) => item.name).join("、"),
+      });
     // Manual project.json edits accumulated since the previous message ride
     // along as context so the agent can re-evaluate dependent plan pieces.
     const userEdits = useCreatorEditBufferStore
@@ -1772,7 +1836,9 @@ export default function AgentDock({
       .consumeContext(projectId);
     try {
       const pending = sendMessage({
-        message: text,
+        message: messageText,
+        assetVersionRefs:
+          assetVersionRefs.length > 0 ? assetVersionRefs : undefined,
         context: {
           panel: interactionPanel,
           selected:
@@ -1803,6 +1869,7 @@ export default function AgentDock({
       setMentionQuery(null);
       useCreatorInteractionStore.getState().setExtraRefs([]);
       await pending;
+      stagedSentRefs.current = [];
       if (userEdits) {
         useCreatorEditBufferStore
           .getState()
@@ -1814,10 +1881,12 @@ export default function AgentDock({
         submissionVersion.current !== version
       )
         return;
+      // Restore the composed text (upload-only sends included) so retry is
+      // one click; the already-ingested refs ride along via stagedSentRefs.
       if (!inputRef.current?.getContent().text.trim()) {
-        inputRef.current?.setText(text);
+        inputRef.current?.setText(messageText);
         setCanSend(true);
-        setDraft(text);
+        setDraft(messageText);
         useCreatorInteractionStore.getState().setExtraRefs(submittedExtraRefs);
       }
       message.error(t("agentActivity.failureHint"));
@@ -2371,6 +2440,36 @@ export default function AgentDock({
                   <SourceCacheGate status={sourceCache} compact />
                 </div>
               )}
+              {pendingUploads.length > 0 && (
+                <div
+                  className="mb-2 flex flex-wrap gap-1.5"
+                  data-agent-upload-staged
+                >
+                  {pendingUploads.map((item) => (
+                    <span
+                      key={item.id}
+                      className="inline-flex max-w-[220px] items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg-secondary)] py-1 pl-2 pr-1 text-[11px] text-[var(--color-text-secondary)]"
+                    >
+                      <Paperclip className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
+                      <span className="min-w-0 truncate">
+                        {item.file.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPendingUploads((prev) =>
+                            prev.filter((pending) => pending.id !== item.id),
+                          )
+                        }
+                        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full hover:bg-[var(--color-border)]"
+                        aria-label={t("home.removeAttachment")}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="flex items-end gap-2">
                 <input
                   ref={uploadInputRef}
@@ -2379,16 +2478,16 @@ export default function AgentDock({
                   hidden
                   data-agent-upload-input
                   onChange={(event) => {
-                    const files = Array.from(event.target.files ?? []);
-                    if (files.length) void uploadAssets(files);
+                    stageUploads(Array.from(event.target.files ?? []));
+                    if (uploadInputRef.current)
+                      uploadInputRef.current.value = "";
                   }}
                 />
                 <Button
                   aria-label={t("agent.uploadAsset")}
                   title={t("agent.uploadAsset")}
                   icon={<Plus className="h-4 w-4" />}
-                  loading={uploadingAssets}
-                  disabled={!projectId}
+                  disabled={!projectId || uploadingAssets}
                   onClick={() => uploadInputRef.current?.click()}
                   className="!flex !h-8 !w-8 !shrink-0 !items-center !justify-center !p-0"
                   data-agent-upload-asset
@@ -2404,7 +2503,9 @@ export default function AgentDock({
                   onMentionConfirm={confirmMention}
                   onMentionClose={() => setMentionQuery(null)}
                 />
-                {(stoppable || stopping) && !canSend ? (
+                {(stoppable || stopping) &&
+                !canSend &&
+                pendingUploads.length === 0 ? (
                   <Button
                     type="primary"
                     danger
@@ -2439,7 +2540,11 @@ export default function AgentDock({
                     type="primary"
                     aria-label={t("common.send")}
                     icon={<ArrowUpOutlined />}
-                    disabled={!canSend || originalsGate}
+                    loading={uploadingAssets}
+                    disabled={
+                      (!canSend && pendingUploads.length === 0) ||
+                      originalsGate
+                    }
                     onClick={() => void submit()}
                     className="!flex !h-8 !w-8 !items-center !justify-center !p-0"
                   />

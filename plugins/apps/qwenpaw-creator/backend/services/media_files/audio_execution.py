@@ -567,7 +567,17 @@ def _sample_bytes_for_version(
     *,
     project_id: str,
     version_id: str,
-) -> tuple[bytes, str]:
+    idempotency_key: str,
+) -> tuple[bytes, str, str]:
+    """Resolve a voice sample to audio bytes, media type and version id.
+
+    Video versions are resolved through a persisted extracted-audio
+    SourceAssetVersion (not a temp file): the binding must reference an
+    ``audio/`` version because downstream R2V voice resolution rejects
+    anything else (CR 2026-09-11: a video-bound sample enrolled fine and
+    then failed every render with "characterVoiceSample 必须是 audio/").
+    """
+
     snapshot = services.projects.read(project_id)
     version = snapshot.project.assets.source_versions_by_id.get(version_id)
     if version is None:
@@ -584,17 +594,30 @@ def _sample_bytes_for_version(
     store = AssetFileStore(services.projects.project_root(project_id))
     payload = store.read_verified(indexed)
     if version.media_kind == "audio":
-        return payload, indexed.media_type
+        return payload, indexed.media_type, version_id
     # Users often record the reference voice inside a video (field run
     # 2026-09-10: a black-frame mp4 voice reference was walled by the
     # audio-only check); its audio track is the sample.
-    return (
-        _extracted_video_audio_bytes(
-            payload,
-            suffix=PurePosixPath(indexed.relative_uri).suffix,
-        ),
-        "audio/wav",
+    extracted = _extracted_video_audio_bytes(
+        payload,
+        suffix=PurePosixPath(indexed.relative_uri).suffix,
     )
+    registered = _register_audio_asset(
+        services,
+        project_id=project_id,
+        idempotency_key=f"{idempotency_key}:extract-audio",
+        content=extracted,
+        media_type="audio/wav",
+        name=f"{version.name} · 音轨"[:80],
+        duration_seconds=_audio_duration_seconds(extracted, "audio/wav"),
+        metadata={
+            "sourceKind": "voice_sample_extract",
+            "extractedFromVersionId": version_id,
+        },
+        provenance_refs=(f"asset-version:{version_id}",),
+        caused_by_request_id=idempotency_key,
+    )
+    return extracted, "audio/wav", registered.source_asset_version_id
 
 
 def _attach_voice_sample(
@@ -846,11 +869,16 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
         sample_version_id = ""
     else:
         if sample_version_id:
-            sample_bytes, sample_media_type = await asyncio.to_thread(
+            (
+                sample_bytes,
+                sample_media_type,
+                sample_version_id,
+            ) = await asyncio.to_thread(
                 _sample_bytes_for_version,
                 services,
                 project_id=project_id,
                 version_id=sample_version_id,
+                idempotency_key=idempotency_key,
             )
         elif sample_text:
             # Audition path: synthesize a system-voice sample, keep it as an
@@ -867,11 +895,16 @@ async def execute_file_voice_enrollment_command(  # pylint: disable=too-many-sta
                 idempotency_key=f"{idempotency_key}:sample",
             )
             sample_version_id = audition.source_asset_version_id
-            sample_bytes, sample_media_type = await asyncio.to_thread(
+            (
+                sample_bytes,
+                sample_media_type,
+                sample_version_id,
+            ) = await asyncio.to_thread(
                 _sample_bytes_for_version,
                 services,
                 project_id=project_id,
                 version_id=sample_version_id,
+                idempotency_key=idempotency_key,
             )
         else:
             raise ValidationError(

@@ -206,9 +206,12 @@ def _recover_unclaimed_task(
     The provider claim file is the spend-admission boundary: RUNNING with no
     result and no claim means the executor died between task admission and
     the provider call (field run 2026-09-10: a lifecycle-lock timeout in
-    claim_sync stranded four scene renders as RUNNING forever). Closing the
-    record costs nothing and hands the node back to the bounded transient
-    retry machinery. Claimed or fresh tasks are never touched.
+    claim_sync stranded four scene renders as RUNNING forever). Recovery
+    races a possibly still-alive executor for that same boundary: it
+    atomically tombstones the claim first, so whichever side loses the
+    ``try_create`` race aborts — the executor via its claimed-by-another
+    conflict, recovery by leaving the record alone. Only a won tombstone
+    fails the task, which keeps the paid provider call unique.
     """
 
     if grace_seconds is None:
@@ -222,12 +225,31 @@ def _recover_unclaimed_task(
     age_seconds = (datetime.now(UTC) - task.updated_at).total_seconds()
     if age_seconds < grace_seconds:
         return False
-    claim = provider_claim_path(
-        services.projects.project_root(task.project_id),
-        task.task_id,
+    claim_store = AtomicJsonRecordStore(
+        provider_claim_path(
+            services.projects.project_root(task.project_id),
+            task.task_id,
+        ),
     )
-    if claim.exists():
-        return False
+    tombstone = {
+        "taskId": task.task_id,
+        "requestFingerprint": task.request_fingerprint,
+        "claimedAt": datetime.now(UTC).isoformat(),
+        "recovered": True,
+    }
+    if claim_store.try_create(tombstone) is None:
+        try:
+            existing = claim_store.read()
+        except RecordNotFoundError:
+            return False
+        if not (
+            isinstance(existing, dict)
+            and existing.get("recovered") is True
+            and existing.get("taskId") == task.task_id
+        ):
+            # A real executor claimed the provider: spend may exist.
+            return False
+        # A previous sweep died between tombstone and transition; finish it.
     try:
         executions.transition_task(
             task.project_id,
