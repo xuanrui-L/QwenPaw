@@ -1,82 +1,63 @@
-import { useState } from "react";
-import { message } from "antd";
+import { useState, type ReactNode } from "react";
 import type {
   InteractionCreationDocument,
   ProjectDocument,
   TimelineElementDocument,
 } from "@/contracts/creator";
-import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
-import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { GenerationPromptEditor } from "@/pages/AssetsPage";
 import InteractionView from "./InteractionView";
 import DesignViewport from "./DesignViewport";
-import { generationLabels } from "./PresentationEditor";
-import { useDesignDraft } from "./useDesignDraft";
+import {
+  generationLabels,
+  useInteractionGeneration,
+} from "./useInteractionGeneration";
 
 export default function ChoiceEditor({
   project,
   timelineId,
   element,
   status,
+  renderPreview,
 }: {
   project: ProjectDocument;
   timelineId: string;
   element: TimelineElementDocument;
   status: string;
+  renderPreview?: (onSelect: (edgeRef: string) => void) => ReactNode;
 }) {
   const creation = element.creation as InteractionCreationDocument;
-  const initial = JSON.stringify({
-    design_prompt: creation.design_prompt ?? "",
-    options: creation.options,
-  });
-  const draft = useDesignDraft(initial);
-  const design = JSON.parse(draft.value) as Pick<
-    InteractionCreationDocument,
-    "design_prompt" | "options"
-  >;
-  const [busy, setBusy] = useState(false);
+  const generation = useInteractionGeneration(project.project_id, status);
   const [mobile, setMobile] = useState(false);
-  const [selected, setSelected] = useState(creation.options[0]?.edge_ref);
-  const patch = useProjectSnapshotStore((s) => s.patch);
-  const basePath = `/timelines/items/${timelineId}/elements_by_id/${element.element_id}/creation`;
-  const generate = async () => {
-    setBusy(true);
-    try {
-      if (draft.dirty) {
-        const base = JSON.parse(draft.base);
-        await patch(project.project_id, [
-          {
-            op: "replace",
-            path: `${basePath}/design_prompt`,
-            before: base.design_prompt,
-            value: design.design_prompt,
-          },
-          {
-            op: "replace",
-            path: `${basePath}/options`,
-            before: base.options,
-            value: design.options,
-          },
-        ]);
-        draft.saved();
-      }
-      const result = await dispatchWorkGraphNode(
-        project.project_id,
-        `interaction:${element.element_id}`,
-      );
-      message.info(
-        result.status === "done"
-          ? "当前抉择已生成，修改设计后可重新生成"
-          : "抉择生成已提交，完成后请预览并审阅",
-      );
-    } catch (error) {
-      message.error((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const selectedOption = design.options.find(
+  const [selected, setSelected] = useState<string>();
+  const selectedIndex = creation.options.findIndex(
     (option) => option.edge_ref === selected,
   );
+  const selectedOption = creation.options[selectedIndex];
+  const basePath = `/timelines/items/${timelineId}/elements_by_id/${element.element_id}/creation`;
+  const savePrompt = (next: string) =>
+    generation.save(
+      selectedOption
+        ? [
+            {
+              op: "replace",
+              path: `${basePath}/options`,
+              before: creation.options,
+              value: creation.options.map((option) =>
+                option.edge_ref === selected
+                  ? { ...option, design_prompt: next }
+                  : option,
+              ),
+            },
+          ]
+        : [
+            {
+              op: "replace",
+              path: `${basePath}/design_prompt`,
+              before: creation.design_prompt ?? "",
+              value: next,
+            },
+          ],
+    );
   return (
     <article
       data-creator-path={`${basePath}/motion`}
@@ -103,65 +84,64 @@ export default function ChoiceEditor({
             }」。`
           : "由观众主动选择，不自动跳转。"}
       </p>
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div>
-          <div className="mb-2 flex justify-end gap-1 text-xs">
-            {[false, true].map((value) => (
-              <button
-                type="button"
-                key={String(value)}
-                className="btn-secondary"
-                aria-pressed={mobile === value}
-                onClick={() => setMobile(value)}
-              >
-                {value ? "手机" : "桌面"}
-              </button>
-            ))}
-          </div>
-          <DesignViewport mobile={mobile}>
-            <InteractionView
-              project={project}
-              creation={creation}
-              countdown={false}
-              onSelect={setSelected}
-            />
-          </DesignViewport>
-          <p className="mt-2 text-xs">
-            实际生成的抉择动效 · 点击选项可定位设计 · 预览中倒计时不推进
-          </p>
+          {renderPreview ? (
+            renderPreview(setSelected)
+          ) : (
+            <>
+              <div className="mb-2 flex justify-end gap-1 text-xs">
+                {[false, true].map((value) => (
+                  <button
+                    type="button"
+                    key={String(value)}
+                    className="btn-secondary"
+                    aria-pressed={mobile === value}
+                    onClick={() => setMobile(value)}
+                  >
+                    {value ? "手机" : "桌面"}
+                  </button>
+                ))}
+              </div>
+              <DesignViewport mobile={mobile}>
+                <InteractionView
+                  project={project}
+                  creation={creation}
+                  countdown={false}
+                  onSelect={setSelected}
+                />
+              </DesignViewport>
+              <p className="mt-2 text-xs">
+                实际生成的抉择动效 · 视频画面为示意 · 点击选项查看详情
+              </p>
+            </>
+          )}
         </div>
-        <div className="rounded-xl border border-[var(--color-border)] p-3">
-          <label className="block text-xs">
-            抉择布局与动效要求
-            <textarea
-              aria-label="抉择布局与动效要求"
-              className="mt-1 w-full rounded border bg-[var(--color-bg-secondary)] p-2"
-              rows={4}
-              value={design.design_prompt}
-              onChange={(e) =>
-                draft.change(
-                  JSON.stringify({ ...design, design_prompt: e.target.value }),
-                )
-              }
-            />
-          </label>
-          <p className="my-2 text-xs font-medium">交互按钮与剧情走向</p>
+        <aside
+          className="min-w-0 space-y-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-4"
+          data-interaction-details
+        >
+          <strong className="text-sm">交互按钮与剧情走向</strong>
           <div className="grid gap-2">
-            {design.options.map((option) => {
+            <button
+              type="button"
+              className="btn-secondary"
+              aria-pressed={!selectedOption}
+              onClick={() => setSelected(undefined)}
+            >
+              整体抉择设计
+            </button>
+            {creation.options.map((option) => {
               const edge = project.narrative_edges?.find(
                 (value) => value.edge_id === option.edge_ref,
               );
               return (
                 <button
                   type="button"
-                  className={
-                    selected === option.edge_ref
-                      ? "btn-primary"
-                      : "btn-secondary"
-                  }
+                  className="btn-secondary"
                   key={option.edge_ref}
-                  onClick={() => setSelected(option.edge_ref)}
                   aria-pressed={selected === option.edge_ref}
+                  onClick={() => setSelected(option.edge_ref)}
                 >
                   {edge?.label ?? option.edge_ref} →{" "}
                   {edge
@@ -171,69 +151,39 @@ export default function ChoiceEditor({
               );
             })}
           </div>
-          {selectedOption && (
-            <label className="mt-3 block text-xs">
-              所选交互按钮的外观与动效
-              <textarea
-                aria-label="所选交互按钮的外观与动效"
-                className="mt-1 w-full rounded border bg-[var(--color-bg-secondary)] p-2"
-                rows={4}
-                value={selectedOption.design_prompt ?? ""}
-                onChange={(e) =>
-                  draft.change(
-                    JSON.stringify({
-                      ...design,
-                      options: design.options.map((option) =>
-                        option.edge_ref === selected
-                          ? { ...option, design_prompt: e.target.value }
-                          : option,
-                      ),
-                    }),
-                  )
-                }
-              />
-            </label>
-          )}
-          <p className="mt-2 text-xs text-[var(--color-text-secondary)]">
-            按钮文案与走向来自剧本分支，可在蓝图中修改，或告诉助手需要调整的剧情。
+          <GenerationPromptEditor
+            key={selected ?? "whole"}
+            target={{
+              pointer: selectedOption
+                ? `${basePath}/options/${selectedIndex}/design_prompt`
+                : `${basePath}/design_prompt`,
+              label: selectedOption ? "按钮外观与动效提示词" : "抉择生成提示词",
+              value:
+                (selectedOption
+                  ? selectedOption.design_prompt
+                  : creation.design_prompt) ?? "",
+            }}
+            saving={generation.locked}
+            regenerateLabel={
+              generation.busy || status === "running"
+                ? "生成中…"
+                : creation.motion
+                ? "重新生成抉择"
+                : "生成抉择动效"
+            }
+            onSave={(_, next) => savePrompt(next)}
+            onRegenerate={() =>
+              generation.generate(`interaction:${element.element_id}`)
+            }
+          />
+          <p className="text-xs text-[var(--color-text-secondary)]">
+            编辑完成后保存提示词；重新生成更新此处抉择，完成后进入审阅。按钮文案与走向来自剧本分支，可在蓝图或通过助手修改。
           </p>
-        </div>
+          {status === "waiting_review" && (
+            <p className="text-xs">请先在审阅面板批准或拒绝本次生成。</p>
+          )}
+        </aside>
       </div>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={
-            busy ||
-            draft.conflict ||
-            status === "running" ||
-            status === "waiting_review"
-          }
-          onClick={() => void generate()}
-        >
-          {busy ? "提交中…" : draft.dirty ? "保存并生成抉择" : "生成抉择动效"}
-        </button>
-        {draft.dirty && (
-          <button type="button" className="btn-secondary" onClick={draft.reset}>
-            撤销未保存修改
-          </button>
-        )}
-        <span className="text-xs">
-          {draft.dirty
-            ? "有未保存修改，预览仍为上次生成结果。"
-            : "只更新此处的抉择界面，不重做视频。"}
-        </span>
-      </div>
-      {draft.conflict && (
-        <p role="alert">
-          设计已被其他操作更新。请先复制未保存内容，再撤销修改以载入最新设计。
-        </p>
-      )}
-      {status === "waiting_review" && (
-        <p className="mt-2 text-xs">
-          请在审阅面板批准或拒绝本次生成，再继续修改。
-        </p>
-      )}
     </article>
   );
 }

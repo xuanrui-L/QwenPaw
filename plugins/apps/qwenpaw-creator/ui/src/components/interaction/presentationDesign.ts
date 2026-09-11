@@ -15,8 +15,8 @@ export const screens: {
     id: "title",
     label: "首页",
     purpose: "作品介绍与观看入口",
-    required: ["start", "resume"],
-    optional: ["map", "reset"],
+    required: ["start", "map", "replay", "resume"],
+    optional: ["reset"],
   },
   {
     id: "play",

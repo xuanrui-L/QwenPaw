@@ -17,7 +17,9 @@ strong/b/em/i/small/br/hr/ul/ol/li/dl/dt/dd/code/pre/time/video，
 以及基本 SVG 图形。完整闭合所有非空标签。
 宿主只绑定以下协议，不提供任何页面视觉或兜底样式。请自行设计响应式布局和视频/抉择层容器。
 四个互不嵌套的区域 data-screen="title|play|map|ending" 各一个，宿主切换可见性。
-title 内必须有 button data-action="start" 和 "resume"。
+title 内必须有四个 button：data-action="start"（开始）、"map"（剧情地图）、
+"replay"（重新开始）和 "resume"（继续观看）。首页不能遗漏地图或重新开始。
+首页 start/map/replay 必须带可辨认的可见文字，不能只用 SVG、符号、title 或 aria-label 代替。
 play 内恰好一个 video data-player-video（无 src/autoplay/loop/poster，可加 controls），
 一个 data-slot="interaction" 容器；容器覆盖视频区域且为空，抉择时宿主挂载另一个生成的动效。
 play 内必须有 button data-action="toggle_play"、"map" 和 "replay"（重新开始）；播放器不会绘制导航按钮。
@@ -45,7 +47,7 @@ node.title、node.synopsis、progress.visited 或 progress.endings。
 
 def presentation_inputs(project, creation=None):
     return {
-        "interface_contract": 3,
+        "interface_contract": 4,
         "project": {
             "title": project.name,
             "description": project.description,

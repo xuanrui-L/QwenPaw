@@ -952,6 +952,7 @@ def test_project_interface_review_revision_and_stability(
             'data-node-ref="missing"',
         ),
         lambda h: h.replace('data-action="start"', 'data-action="execute"'),
+        lambda h: h.replace(">剧情地图</button>", ">△</button>"),
         lambda h: h.replace('<button data-action="replay">重新开始</button>', ""),
         lambda h: h.replace('data-action="map"', 'data-action="title"'),
         lambda h: h.replace(
@@ -1090,3 +1091,121 @@ def test_presentation_design_rejects_unknown_screen_actions(screens):
 
     with pytest.raises(SchemaError):
         InteractivePresentation.model_validate({"screens": screens})
+
+
+@pytest.mark.parametrize("action", ["map", "replay"])
+def test_homepage_requires_its_own_map_and_restart(action):
+    from services.project_files.presentation_html import (
+        validate_presentation_html,
+    )
+
+    html = _presentation_html()
+    # Remove only the homepage control; a play-page control cannot satisfy it.
+    title, rest = html.split("</section>", 1)
+    title = title.replace(f'data-action="{action}"', 'data-removed="yes"')
+    errors = validate_presentation_html(title + "</section>" + rest)
+    assert any(f"('title', '{action}')" in error for error in errors)
+
+
+def test_explicit_regeneration_is_reviewed_and_deduped(tmp_path, monkeypatch):
+    from domain.errors import ConflictError
+
+    services = _services(tmp_path, with_runtime=True)
+    calls = _mock_chat(
+        monkeypatch,
+        [_presentation_html(), _presentation_html("#fff2dc")],
+    )
+
+    def execute(key, regenerate=False):
+        return asyncio.run(
+            execute_file_interaction_command(
+                services,
+                project_id=PROJECT_ID,
+                target_ref=f"project:{PROJECT_ID}",
+                arguments={"regenerate": regenerate},
+                idempotency_key=key,
+            ),
+        )
+
+    execute("first")
+    with pytest.raises(ConflictError):
+        execute("manual", True)
+    _decide_all(services)
+    before = services.projects.read(PROJECT_ID).project
+    assert execute("automatic-retry").replayed
+    assert len(calls) == 1
+    assert not execute("manual", True).replayed
+    after = services.projects.read(PROJECT_ID).project
+    assert (
+        after.interactive_presentation.motion.html
+        != before.interactive_presentation.motion.html
+    )
+    assert (
+        after.timelines == before.timelines and after.assets == before.assets
+    )
+    assert services.reviews.all_pending(PROJECT_ID)
+    assert execute("manual", True).replayed
+    assert len(calls) == 2
+    _decide_all(services)
+    assert execute("automatic-after-manual").replayed
+    assert services.projects.read(PROJECT_ID).generation == after.generation
+
+
+def test_http_manual_regeneration_uses_new_slot_without_changing_prompt(
+    tmp_path,
+    monkeypatch,
+):
+    import httpx
+    from fastapi import FastAPI
+    from api.dependencies import project_file_services, creator_error_handler
+    from api.work_graph_routes import router
+    from domain.errors import CreatorError
+
+    services = _services(tmp_path, with_runtime=True)
+    calls = _mock_chat(
+        monkeypatch,
+        [_presentation_html(), _presentation_html("#fff2dc")],
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.add_exception_handler(CreatorError, creator_error_handler)
+    app.dependency_overrides[project_file_services] = lambda: services
+    url = (
+        f"/projects/{PROJECT_ID}/work-graph/nodes/interaction:project/dispatch"
+    )
+
+    async def scenario():
+        await execute_file_interaction_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"project:{PROJECT_ID}",
+            arguments={},
+            idempotency_key="seed-page",
+        )
+        _decide_all(services)
+        before = services.projects.read(PROJECT_ID).project
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            automatic = await client.post(url)
+            assert automatic.status_code == 200, automatic.text
+            assert not automatic.json()["dispatched"]
+            manual = await client.post(url, json={"regenerate": True})
+            assert manual.status_code == 200, manual.text
+            assert manual.json()["dispatched"]
+            assert len(calls) == 2
+            blocked = await client.post(url, json={"regenerate": True})
+            assert blocked.status_code == 409, blocked.text
+            assert len(calls) == 2
+        after = services.projects.read(PROJECT_ID).project
+        assert (
+            after.interactive_presentation.design_prompt
+            == before.interactive_presentation.design_prompt
+        )
+        assert (
+            after.interactive_presentation.motion.html
+            != before.interactive_presentation.motion.html
+        )
+
+    asyncio.run(scenario())

@@ -10,7 +10,7 @@ from collections import Counter
 from .interaction_html import _InteractionParser
 
 PRESENTATION_ACTIONS = {
-    "title": {"start", "resume", "map", "reset"},
+    "title": {"start", "resume", "map", "replay", "reset"},
     "play": {"toggle_play", "map", "replay", "title"},
     "map": {"map_back", "jump", "title", "reset"},
     "ending": {"replay", "title", "map", "reset"},
@@ -18,6 +18,8 @@ PRESENTATION_ACTIONS = {
 PRESENTATION_REQUIRED_ACTIONS = {
     ("title", "start"),
     ("title", "resume"),
+    ("title", "map"),
+    ("title", "replay"),
     ("play", "map"),
     ("play", "toggle_play"),
     ("play", "replay"),
@@ -120,6 +122,16 @@ class _PresentationParser(_InteractionParser):
         if self.button is not None:
             self.button[2].append(data)
 
+    def validate_homepage_labels(self):
+        for action in ("start", "map", "replay"):
+            labels = self.labels.get(("title", action), [])
+            if not any(
+                any(char.isalnum() for char in label) for label in labels
+            ):
+                self.problems.append(
+                    f"homepage {action} requires visible button text",
+                )
+
     def validate_text_bindings(self):
         required_bindings = {
             ("title", "project.title"),
@@ -158,6 +170,7 @@ def validate_presentation_html(
     if parser.video != 1 or parser.slots != 1:
         parser.problems.append("one video and one interaction slot required")
     parser.validate_text_bindings()
+    parser.validate_homepage_labels()
     required = PRESENTATION_REQUIRED_ACTIONS
     if not required.issubset(set(parser.scoped_actions)):
         parser.problems.append(

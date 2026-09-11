@@ -12,6 +12,7 @@ import {
 import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
 import { screens, type PreviewControl } from "./presentationDesign";
 import DesignViewport from "./DesignViewport";
+import { mockVideoPoster } from "./mockVideoPoster";
 import "../../../../player/ivb/static/interaction-runtime.js";
 import "../../../../player/ivb/static/authored-player.js";
 
@@ -28,23 +29,58 @@ type Selection = {
   action?: PresentationActionId;
 };
 
+// Polling/status updates must not reload the iframe or restart CSS animations.
+export function presentationPreviewKey(
+  project: ProjectDocument,
+  review: boolean,
+) {
+  const ids = selectLiveTimelineIds(project);
+  return JSON.stringify({
+    id: project.project_id,
+    name: project.name,
+    brief: project.strategy.creative_brief,
+    motion: project.interactive_presentation?.motion,
+    edges: project.narrative_edges,
+    nodes: ids.map((id) => {
+      const node = project.timelines.items[id];
+      return {
+        id,
+        title: node.title,
+        synopsis: node.synopsis,
+        ticks: node.ticks_per_second,
+        points: Object.values(node.elements_by_id).filter(
+          (e) => e.enabled && e.creation.type === "interaction",
+        ),
+      };
+    }),
+    assets: review ? undefined : project.assets,
+  });
+}
+
 export function PresentationPreview({
   project,
   review = true,
   selection,
   onInspect,
   onControls,
+  reviewPointId,
+  onChoiceInspect,
 }: {
   project: ProjectDocument;
   review?: boolean;
   selection?: Selection;
   onInspect?: (selection: Selection) => void;
   onControls?: (controls: PreviewControl[]) => void;
+  reviewPointId?: string;
+  onChoiceInspect?: (edgeRef: string) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const handle = useRef<Handle | null>(null);
-  const callbacks = useRef({ onInspect, onControls });
-  callbacks.current = { onInspect, onControls };
+  const callbacks = useRef({ onInspect, onControls, onChoiceInspect });
+  callbacks.current = { onInspect, onControls, onChoiceInspect };
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const previewKey = presentationPreviewKey(project, review);
   const [localScreen, setLocalScreen] = useState<PresentationScreenId>("title");
   const [mobile, setMobile] = useState(false);
   const selected = selection ?? { screen: localScreen };
@@ -52,6 +88,7 @@ export function PresentationPreview({
   selectedRef.current = selected;
   const [error, setError] = useState("");
   useEffect(() => {
+    const project = projectRef.current;
     let cancelled = false;
     const load = async () => {
       const motion = project.interactive_presentation?.motion;
@@ -88,8 +125,11 @@ export function PresentationPreview({
               );
               return {
                 ...e.creation,
+                element_id: e.element_id,
                 source_timeline_id: id,
-                base_frame_url: frameRef
+                base_frame_url: review
+                  ? mockVideoPoster
+                  : frameRef
                   ? (project.assets.artifact_versions_by_id[frameRef]
                       ? getArtifactVersionMediaUrl
                       : getAssetVersionMediaUrl)(frameRef)
@@ -125,10 +165,18 @@ export function PresentationPreview({
         },
         {
           review,
+          reviewPoster: review ? mockVideoPoster : undefined,
+          reviewPoint: review
+            ? interactions.find((p) => p?.element_id === reviewPointId)
+            : undefined,
+          onChoiceInspect(edgeRef: string) {
+            if (!cancelled) callbacks.current.onChoiceInspect?.(edgeRef);
+          },
           progress: review
             ? { visited: ids, endings: [], current_timeline: ids[0] }
             : undefined,
           segmentUrl(id: string) {
+            if (review) return "";
             const selectedVersion =
               project.assets.artifact_slots_by_id[`timeline:${id}:render`]
                 ?.selected_version_id;
@@ -166,7 +214,7 @@ export function PresentationPreview({
       handle.current?.dispose();
       handle.current = null;
     };
-  }, [project, review]);
+  }, [previewKey, review, reviewPointId]);
   useEffect(() => {
     handle.current?.show(selected.screen);
     handle.current?.inspect(selected.screen, selected.action);
@@ -189,7 +237,7 @@ export function PresentationPreview({
               ))}
             </div>
           )}
-          <span>实际生成页面 · 点击按钮可定位设计 · 此处不推进剧情</span>
+          <span>实际生成界面 · 视频画面为示意 · 点击按钮查看详情</span>
           <div className="flex gap-1">
             {[false, true].map((value) => (
               <button
@@ -209,7 +257,7 @@ export function PresentationPreview({
         <p role="status" className="my-4 text-sm">
           {error}
           {!project.interactive_presentation?.motion &&
-            "，保存设计并生成后可在这里查看实际效果。"}
+            "，在右侧编辑提示词并生成后可查看效果。"}
         </p>
       )}
       <DesignViewport mobile={mobile} active={review}>
