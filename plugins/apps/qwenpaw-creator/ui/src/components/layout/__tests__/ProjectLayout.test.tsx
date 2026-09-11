@@ -217,4 +217,28 @@ describe("ProjectLayout visible shell", () => {
       "element:r2v-window",
     );
   });
+
+  it("settles a stale session after manual production finishes without lifecycle SSE", async () => {
+    installMockFetch(commonRoutes());
+    renderShell("manual-generation-route");
+    await screen.findByTestId("manual-generation-route");
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session?.status).toBe("IDLE"),
+    );
+    await waitFor(() =>
+      expect(useCreatorTaskViewStore.getState().loading).toBe(false),
+    );
+    act(() => {
+      useCreatorSessionStore.setState({
+        session: { ...sessionState, status: "WAITING_RUNTIME" },
+      });
+    });
+    // Returning to a visible tab performs the same production revalidation as
+    // its periodic tick; the server has no running tasks and an IDLE session.
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session?.status).toBe("IDLE"),
+    );
+    expect(document.querySelector("[data-agent-wait-hint]")).toBeNull();
+  });
 });

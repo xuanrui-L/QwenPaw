@@ -1355,7 +1355,7 @@ def _resolve_request(
         raise ValidationError("R2V ratio/resolution 不能为空")
     # No provider watermark by default; enabled only on explicit request.
     watermark = arguments.get("watermark", False)
-    generate_audio = arguments.get("generateAudio", True)
+    generate_audio = arguments.get("generateAudio", creation.generate_audio)
     if not isinstance(watermark, bool) or not isinstance(generate_audio, bool):
         raise ValidationError("R2V watermark/generateAudio 必须是 boolean")
 
@@ -4078,7 +4078,7 @@ class FileR2VExecutionService:
         delays = self.materialize_retry_delays
         for attempt in range(len(delays) + 1):
             try:
-                return await materialize_r2v_video(
+                materialized = await materialize_r2v_video(
                     claim.provider_result,
                     project_root=self.services.projects.project_root(
                         task.project_id,
@@ -4094,6 +4094,14 @@ class FileR2VExecutionService:
                         _provider_trusted_private_origins()
                     ),
                 )
+                if claim.request.get("generateAudio", True) is False:
+                    from .silent_video import silence_materialized_video
+
+                    materialized = await asyncio.to_thread(
+                        silence_materialized_video,
+                        materialized,
+                    )
+                return materialized
             except Exception as error:
                 if attempt >= len(delays) or not (
                     _is_transient_materialize_error(error)

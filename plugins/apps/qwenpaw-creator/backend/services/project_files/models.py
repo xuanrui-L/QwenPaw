@@ -813,6 +813,10 @@ class R2VCreation(StrictModel):
         default_factory=list,
     )
     video_prompt: str = ""
+    generate_audio: bool = Field(
+        default=True,
+        description="Generate native video audio. Set false for silent footage.",
+    )
     prompt_sync: R2VPromptSync | None = None
     video_reference_version_ids: list[EntityId] = Field(default_factory=list)
 
@@ -859,6 +863,10 @@ class T2VCreation(StrictModel):
     narrative: str = ""
     continuity: str = ""
     video_prompt: str = ""
+    generate_audio: bool = Field(
+        default=True,
+        description="Generate native video audio. Set false for silent footage.",
+    )
     recipe: GenerationRecipe | None = None
 
 
@@ -875,6 +883,10 @@ class I2VCreation(StrictModel):
     continuity: str = ""
     first_frame_version_id: EntityId | None = None
     video_prompt: str = ""
+    generate_audio: bool = Field(
+        default=True,
+        description="Generate native video audio. Set false for silent footage.",
+    )
     recipe: GenerationRecipe | None = None
 
 

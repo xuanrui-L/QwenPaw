@@ -25,7 +25,7 @@ export const screens: {
   {
     id: "map",
     label: "剧情地图",
-    purpose: "已探索的剧情节点与分支关系",
+    purpose: "剧情节点、分支关系与探索进度",
     required: ["map_back"],
   },
   {
@@ -50,7 +50,7 @@ export const actions: Record<
   },
   map: {
     label: "剧情地图",
-    behavior: "打开已探索的剧情地图，并暂停视频和抉择倒计时",
+    behavior: "打开剧情地图，并暂停视频和抉择倒计时",
   },
   map_back: { label: "返回", behavior: "关闭地图，回到此前的页面" },
   replay: {

@@ -4056,6 +4056,7 @@ class FileCreatorAgentRuntime:
 
         async def execute_one(plan):
             node = plan.node
+            task_id = None
             is_compose = node.kind == "compose"
             identity = {"nodeId": node.node_id, "targetRef": node.target_ref}
             provider, model = (
@@ -4258,6 +4259,33 @@ class FileCreatorAgentRuntime:
                     node.node_id,
                     exc,
                 )
+                failed_task_id = task_id or getattr(
+                    exc,
+                    "creator_task_id",
+                    None,
+                )
+                if isinstance(failed_task_id, str) and failed_task_id:
+                    try:
+                        failed_task = await asyncio.to_thread(
+                            self.executions.get_task,
+                            project_id,
+                            failed_task_id,
+                        )
+                    except RecordNotFoundError:
+                        failed_task = None
+                    if failed_task is not None and failed_task.status in {
+                        TaskStatus.FAILED,
+                        TaskStatus.CANCELLED,
+                        TaskStatus.QUARANTINED,
+                    }:
+                        return {
+                            **identity,
+                            "status": failed_task.status.value,
+                            "taskId": failed_task.task_id,
+                            "executionAuthorizationId": authorization_id,
+                            "outputRefs": list(failed_task.output_refs),
+                            "error": failed_task.error,
+                        }
                 return {
                     **identity,
                     "status": "BLOCKED",

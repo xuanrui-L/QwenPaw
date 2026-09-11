@@ -38,6 +38,7 @@ export function presentationPreviewKey(
   return JSON.stringify({
     id: project.project_id,
     name: project.name,
+    description: project.description,
     brief: project.strategy.creative_brief,
     motion: project.interactive_presentation?.motion,
     edges: project.narrative_edges,
@@ -154,7 +155,9 @@ export function PresentationPreview({
           authored_html: html,
           meta: {
             title: project.name,
-            synopsis: project.strategy.creative_brief,
+            synopsis:
+              project.description.trim() ||
+              project.strategy.creative_brief.trim(),
           },
           nodes,
           edges: Object.fromEntries(edges.map((e) => [e.edge_id, e])),

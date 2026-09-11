@@ -353,7 +353,7 @@ def _bundle_meta(project: Project) -> dict[str, str]:
         "bundle_id": project.project_id,
         "title": project.name,
         "tagline": tagline,
-        "synopsis": (project.strategy.creative_brief or "").strip(),
+        "synopsis": description or project.strategy.creative_brief.strip(),
         "accent": DEFAULT_ACCENT,
     }
 

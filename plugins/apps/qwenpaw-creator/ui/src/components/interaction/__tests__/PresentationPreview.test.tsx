@@ -15,6 +15,7 @@ it("keeps the preview mounted across identical snapshots and unrelated productio
   const mount = vi.spyOn(runtime, "mount").mockReturnValue(handle);
   const value = {
     ...structuredClone(projectDocument),
+    description: "One light, two routes.",
     interactive_presentation: {
       design_prompt: "page design",
       screens: {},
@@ -39,6 +40,14 @@ it("keeps the preview mounted across identical snapshots and unrelated productio
   const adapter = mount.mock.calls[0][2];
   expect(adapter.segmentUrl("timeline:main")).toBe("");
   expect(adapter.reviewPoster).toMatch(/^data:image\/svg\+xml/);
+  expect(mount.mock.calls[0][1].meta.synopsis).toBe("One light, two routes.");
+  view.rerender(
+    <PresentationPreview
+      project={{ ...value, description: "Follow a light home." }}
+    />,
+  );
+  await waitFor(() => expect(mount).toHaveBeenCalledTimes(2));
+  expect(mount.mock.calls[1][1].meta.synopsis).toBe("Follow a light home.");
   view.rerender(
     <PresentationPreview
       project={{
@@ -53,6 +62,6 @@ it("keeps the preview mounted across identical snapshots and unrelated productio
       }}
     />,
   );
-  await waitFor(() => expect(mount).toHaveBeenCalledTimes(2));
-  expect(handle.dispose).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(mount).toHaveBeenCalledTimes(3));
+  expect(handle.dispose).toHaveBeenCalledTimes(2);
 });

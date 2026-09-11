@@ -19,7 +19,8 @@
     }
     container.append(root);
     let closed = false, chosen = false, paused = false, frame = null;
-    let remaining = Number(point.countdown_seconds || 0), last = performance.now();
+    const duration = Number(point.countdown_seconds || 0);
+    let remaining = duration, last = performance.now();
     const select = (ref) => {
       if (closed || chosen || paused || document.hidden || !point.options.some(o => o.edge_ref === ref) || !edges[ref]) return;
       chosen = !point.review;
@@ -38,7 +39,14 @@
       root.setAttribute("role", "alert");
     }
     let count = null, ready = false;
-    const showCount = () => { if (count) count.textContent = Math.ceil(Math.max(0, remaining)) + "s"; };
+    const showCount = () => {
+      if (count) count.textContent = Math.ceil(Math.max(0, remaining)) + "s";
+      // Authored progress visuals share the same clock as the authoritative
+      // seconds and default branch, including review, map and visibility pauses.
+      frame?.contentDocument?.documentElement.style.setProperty(
+        "--interaction-countdown-ratio", String(duration > 0 ? remaining / duration : 0),
+      );
+    };
     if (point.motion_html) {
       frame = document.createElement("iframe");
       frame.title = point.question || "交互动效预览";
@@ -74,7 +82,7 @@
         });
         count = doc.querySelector("[data-interaction-countdown]");
         if (remaining > 0 && point.default_edge_ref && !count) valid = false;
-        ready = valid; showCount();
+        ready = valid; last = performance.now(); showCount();
         if (!valid) { frame.remove(); frame = null; invalid(); }
         else doc.documentElement.toggleAttribute("data-paused", paused || document.hidden);
       };

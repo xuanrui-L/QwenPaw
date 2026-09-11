@@ -878,7 +878,7 @@ def test_non_r2v_modes_schedule_video_only_when_inputs_ready(
         assert node.status is WorkNodeStatus.READY
         assert node.command == command
         assert node.dispatch_arguments == (
-            {} if mode == "s2v" else {"mode": mode}
+            {} if mode == "s2v" else {"mode": mode, "generateAudio": True}
         )
     else:
         assert node.status is WorkNodeStatus.GATED

@@ -3,8 +3,9 @@ html,body{margin:0;width:100%;height:100%}
 #player{height:100%;width:100%}#player:empty{display:none}
 [hidden],.hidden{display:none!important}
 #screen-library{padding:32px;font:16px system-ui;background:#f6f6f6;min-height:100%;box-sizing:border-box}
-.lib-head{display:flex;justify-content:space-between;align-items:center}
+.lib-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.lib-scope{display:flex;gap:8px;flex-wrap:wrap}
 .lib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:20px}
 .lib-card{text-align:left;border:1px solid #ccc;background:white;border-radius:8px;padding:24px;cursor:pointer}
-.lib-card-meta,.lib-card-owner{color:#555;font-size:13px}.scope-btn{padding:8px}.scope-btn.active{font-weight:700}
+.lib-card-meta,.lib-card-owner{color:#555;font-size:13px}.scope-btn{padding:10px 16px;min-height:44px;background:#fff;border:1px solid #222;border-radius:6px;cursor:pointer}.scope-btn.active,#lib-upload{background:#111;color:#fff}.scope-btn:disabled{opacity:.5;cursor:wait}
 #fatal{position:fixed;inset:0;padding:40px;background:white;color:#900;font:16px system-ui}

@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import "../../../../../player/ivb/static/interaction-runtime.js";
 
 type Runtime = {
@@ -7,7 +7,7 @@ type Runtime = {
     point: object,
     edges: object,
     select: (ref: string) => void,
-  ): { dispose(): void };
+  ): { dispose(): void; pause(value: boolean): void };
 };
 const runtime = (globalThis as typeof globalThis & { IVBInteraction: Runtime })
   .IVBInteraction;
@@ -15,6 +15,8 @@ let dispose: (() => void) | undefined;
 afterEach(() => {
   dispose?.();
   document.body.replaceChildren();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 it.each([false, true])(
@@ -53,5 +55,72 @@ it.each([false, true])(
     button.click();
     button.click();
     expect(selected).toEqual(review ? ["edge:a", "edge:a"] : ["edge:a"]);
+  },
+);
+
+it.each([false, true])(
+  "keeps authored countdown visuals and branch timing synchronized (%s review)",
+  (review) => {
+    vi.useFakeTimers({
+      toFake: ["setInterval", "clearInterval", "performance"],
+    });
+    let hidden = false;
+    vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const html =
+      '<span data-interaction-countdown></span><button data-edge-ref="edge:a">A</button>';
+    const selected = vi.fn();
+    const view = runtime.mount(
+      container,
+      {
+        question: "Choose",
+        options: [{ edge_ref: "edge:a" }],
+        motion_html: html,
+        countdown_seconds: 6,
+        default_edge_ref: "edge:a",
+        review,
+      },
+      { "edge:a": { label: "A" } },
+      selected,
+    );
+    dispose = () => view.dispose();
+    vi.advanceTimersByTime(900); // Loading the iframe must not spend choice time.
+    const frame = container.querySelector("iframe")!;
+    const doc = frame.contentDocument!;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    frame.dispatchEvent(new Event("load"));
+    const ratio = () =>
+      Number(
+        doc.documentElement.style.getPropertyValue(
+          "--interaction-countdown-ratio",
+        ),
+      );
+    const seconds = () =>
+      doc.querySelector("[data-interaction-countdown]")!.textContent;
+    expect(ratio()).toBe(1);
+    expect(seconds()).toBe("6s");
+    vi.advanceTimersByTime(2000);
+    expect(ratio()).toBeCloseTo(review ? 1 : 2 / 3);
+    const held = ratio();
+    view.pause(true); // Opening the story map pauses both outputs.
+    vi.advanceTimersByTime(8000);
+    expect(ratio()).toBe(held);
+    expect(selected).not.toHaveBeenCalled();
+    view.pause(false);
+    hidden = true;
+    document.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(8000);
+    expect(ratio()).toBe(held);
+    hidden = false;
+    document.dispatchEvent(new Event("visibilitychange"));
+    vi.advanceTimersByTime(4100);
+    expect(ratio()).toBe(review ? 1 : 0);
+    expect(seconds()).toBe(review ? "6s" : "0s");
+    expect(selected).toHaveBeenCalledTimes(review ? 0 : 1);
+    vi.advanceTimersByTime(8000);
+    expect(selected).toHaveBeenCalledTimes(review ? 0 : 1);
   },
 );

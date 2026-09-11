@@ -89,11 +89,22 @@ _INTERACTION_SYSTEM_PROMPT = (
     "- 从零设计布局、色彩、排版、装饰与动画，根据故事和用户要求独立创作，不套模板。"
     "响应式铺满宿主容器；视频画幅不是交互容器的固定比例。"
     "宿主不提供任何兜底视觉。\n"
+    "- 本层覆盖在暂停的视频或背景帧上；默认 html/body 和整屏舞台透明，"
+    "局部遮罩可提升可读性。仅在用户明确要求全屏背景时遮住原画面。\n"
+    "- 存在 hotspot 的按钮由宿主强制 position:fixed 定位，脱离文档流；"
+    "left=(x-width*anchor_x)、top=(y-height*anchor_y)，"
+    "坐标和尺寸均乘以整个交互容器的宽高。"
+    "不要依赖这些按钮在 flex/grid 中占位来排列问句或倒计时。"
+    "按给定热点矩形安排其余元素，窄屏也不自行移动或覆盖热点；"
+    "按钮祖先禁止 transform/filter/perspective/contain 改变 fixed 定位参照。\n"
     "- 必须适配桌面 1280×720 与手机 390×640；问句、全部选项和倒计时完整可见。"
     "禁止用固定 16:9、max-height:calc(100vw*9/16) 等限制根舞台导致手机内容裁切。"
     "窄屏调整字号、间距和按钮布局；高度不足时允许容器内滚动，不能隐藏必要内容。\n"
     "- 若有倒计时，必须自行设计一个带 data-interaction-countdown 的文本节点；"
-    "宿主只填入剩余秒数，不绘制外观。\n"
+    "宿主填入剩余秒数，并在根元素提供 CSS 变量 --interaction-countdown-ratio，"
+    "数值从 1 递减到 0，随暂停同步，审阅时保持 1。"
+    "如需进度条，使用该变量驱动自己设计的外观，"
+    "不得用独立 CSS 动画计时，以免与地图暂停、审阅或默认分支不同步。\n"
     "- 问句文字节点带 data-question，不要标在包裹按钮的容器上；"
     "每个 button 内用 span data-option-label 表达权威文案；\n"
     "- 不用 CSS 注释、转义、url()、@import；不使用事件属性、外部图片或链接；\n"
@@ -286,10 +297,10 @@ def _publish_interaction_motion(
                 "Interaction inputs changed during generation; "
                 "stale result was discarded",
             )
-        if services.reviews.all_pending(project_id):
-            raise ConflictError(
-                "Project has pending review; interaction result was discarded",
-            )
+        # Admission binds approved creative inputs. Parallel video/page
+        # publications may now be awaiting their own review; they do not
+        # invalidate this result. The semantic check above rejects changes
+        # to this target's inputs without throwing away independent work.
         task = ProjectExecutionStore(services.root).get_task(
             project_id,
             task_id,
@@ -572,6 +583,9 @@ async def execute_file_interaction_command(
                 status=status.value,
                 error={"message": str(exc), "retryable": False},
             )
+        # Preserve the admitted task identity for batch callers that need
+        # its durable failure, while retaining the public exception type.
+        exc.creator_task_id = task_id
         raise
     finally:
         _ACTIVE_TASKS.discard(active_key)

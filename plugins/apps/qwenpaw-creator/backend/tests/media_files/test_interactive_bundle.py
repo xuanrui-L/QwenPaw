@@ -232,7 +232,7 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         assert manifest["meta"]["bundle_id"] == "project-branching"
         assert manifest["meta"]["title"] == "雾山谜案"
         assert manifest["meta"]["tagline"] == "雾山深处的双重身份悬疑剧。"
-        assert manifest["meta"]["synopsis"] == ("互动悬疑短剧《雾山谜案》创意简报。")
+        assert manifest["meta"]["synopsis"] == project.description
         assert manifest["meta"]["accent"] == "#b8ff2e"
         assert manifest["nodes"]["tl:ep3"] == {
             "title": "第3集 · 双重身份",
