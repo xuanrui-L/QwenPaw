@@ -229,6 +229,12 @@ export default function ProjectLayout() {
       requests.push(refreshTasks(id));
     if (graph.projectId !== id || !graph.loading)
       requests.push(graph.refresh(id));
+    // Manual/detached production can settle without a session lifecycle SSE
+    // event. Revalidate the session alongside the authoritative task lists so
+    // a stale WAITING_RUNTIME status cannot keep the dock spinning forever.
+    const sessionState = useCreatorSessionStore.getState();
+    if (sessionState.projectId === id && sessionState.session)
+      requests.push(refreshSession());
     const promise = Promise.allSettled(requests)
       .then(() => undefined)
       .finally(() => {
@@ -237,7 +243,7 @@ export default function ProjectLayout() {
       });
     productionRequest.current = { projectId: id, promise };
     return promise;
-  }, [id, refreshTasks]);
+  }, [id, refreshTasks, refreshSession]);
 
   useEffect(() => {
     setPendingReviewNavigation(null);

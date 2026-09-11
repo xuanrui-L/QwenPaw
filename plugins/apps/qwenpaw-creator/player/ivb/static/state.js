@@ -19,7 +19,9 @@
 
   async function request(method, path, body) {
     const options = { method, headers: {} };
-    if (body !== undefined) {
+    if (body instanceof FormData) {
+      options.body = body;
+    } else if (body !== undefined) {
       options.headers["Content-Type"] = "application/json";
       options.body = JSON.stringify(body);
     }
@@ -28,7 +30,10 @@
     const payload = text ? JSON.parse(text) : null;
     if (!response.ok) {
       const detail = payload && (payload.detail || payload.message);
-      throw new Error(path + " → " + response.status + (detail ? " " + JSON.stringify(detail) : ""));
+      const error = new Error(path + " → " + response.status + (detail ? " " + JSON.stringify(detail) : ""));
+      error.status = response.status;
+      error.diagnostics = payload && payload.diagnostics;
+      throw error;
     }
     return payload;
   }
@@ -39,6 +44,11 @@
     // 库页:scope=mine|all
     projects: (scope) =>
       request("GET", "/api/projects?scope=" + encodeURIComponent(scope || "all")),
+    upload: (file) => {
+      const body = new FormData();
+      body.append("file", file);
+      return request("POST", "/api/projects", body);
+    },
     bundle: (pid) => request("GET", projectPath(pid) + "/bundle"),
     progress: (pid) => request("GET", projectPath(pid) + "/state/progress"),
     stats: (pid) => request("GET", projectPath(pid) + "/state/stats"),

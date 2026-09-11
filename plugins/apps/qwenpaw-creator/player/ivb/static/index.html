@@ -15,10 +15,13 @@
     <div class="lib-scope">
       <button id="lib-scope-all" class="scope-btn" type="button">全部</button>
       <button id="lib-scope-mine" class="scope-btn" type="button">我的</button>
+      <button id="lib-upload" class="scope-btn" type="button">导入互动包</button>
+      <input id="lib-upload-file" type="file" accept=".zip,application/zip" aria-label="互动视频包" hidden/>
     </div>
   </header>
+  <p id="lib-upload-status" role="status" aria-live="polite" hidden></p>
   <div id="lib-grid" class="lib-grid"></div>
-  <p id="lib-empty" class="lib-empty hidden">还没有项目。通过 POST /api/projects 上传 Creator 导出的互动视频包。</p>
+  <p id="lib-empty" class="lib-empty hidden">还没有作品。点击“导入互动包”，选择 Creator 导出的 ZIP 文件。</p>
 </section>
 
 <main id="player"></main><div id="fatal" role="alert" hidden></div>

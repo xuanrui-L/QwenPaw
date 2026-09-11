@@ -44,10 +44,14 @@
         const visited = progress.visited.includes(el.dataset.nodeRef);
         el.toggleAttribute("data-visited", visited);
         el.toggleAttribute("data-current", el.dataset.nodeRef === current);
-        el.toggleAttribute("data-host-hidden", !visited);
+        // The authored map owns disclosure/appearance of unvisited nodes.
+        // Keep its route structure visible; navigation still requires a visit.
         if (el.dataset.action === "jump") el.disabled = !visited;
       });
-      all('[data-action="resume"]').forEach(el => { el.disabled = !bundle.nodes[progress.current_timeline]; });
+      all('[data-action="resume"]').forEach(el => {
+        el.disabled = !bundle.nodes[progress.current_timeline];
+        el.toggleAttribute("data-host-hidden", el.disabled);
+      });
     }
     function show(name) {
       screen = name;

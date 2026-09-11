@@ -14,7 +14,9 @@ PRESENTATION_SYSTEM_PROMPT = """你负责从零设计这部互动作品的全部
 支持 html/head/body/title/meta/style/div/span/p/h1-h6/button，
 section/main/article/header/footer/nav/aside/figure/figcaption，
 strong/b/em/i/small/br/hr/ul/ol/li/dl/dt/dd/code/pre/time/video，
-以及基本 SVG 图形。完整闭合所有非空标签。
+SVG 只允许 svg/g/path/circle/rect/line/polyline/polygon/ellipse/defs，
+以及 linearGradient/radialGradient/stop/clipPath/text/tspan；
+不允许 pattern/use/filter/mask，不允许 url(#...)，装饰线条需直接绘制。完整闭合所有非空标签。
 宿主只绑定以下协议，不提供任何页面视觉或兜底样式。请自行设计响应式布局和视频/抉择层容器。
 四个互不嵌套的区域 data-screen="title|play|map|ending" 各一个，宿主切换可见性。
 title 内必须有四个 button：data-action="start"（开始）、"map"（剧情地图）、
@@ -26,7 +28,10 @@ play 内必须有 button data-action="toggle_play"、"map" 和 "replay"（重新
 map 内必须有 button data-action="map_back"。
 为输入的每个真实节点手写一个 data-node-ref="节点ID" 区域，
 并可配 button data-action="jump" data-node-ref="节点ID"。
-地图宿主仅显示已访问节点；未访问节点将隐藏，切勿在区域外泄露未访问分支。用 data-visited 属性设计已访问样式。
+地图宿主通过 data-visited/data-current 标记状态，不强制隐藏未访问节点；jump 仅允许跳转已访问节点。
+请让首次观看前的地图也有可见的航线结构或说明。用 data-visited 设计已访问样式；
+如剧情需防剧透，可自行隐藏未访问节点的详情，保留待探索的图形标记。
+无进度时宿主隐藏 resume 按钮。
 ending 内必须有 button data-action="replay" 和 "title"。
 其他可选按钮动作：map、title、reset；所有动作均使用 button，无 href，不写跳转地址。
 开始、重新开始、剧情地图属于必备能力，不能因剧本或风格省略。其他交互根据剧本需要设计，不虚构功能。

@@ -213,8 +213,17 @@ def test_persistently_bad_output_raises_model_error(tmp_path, monkeypatch):
         [BAD_HTML_MISSING_REF, BAD_HTML_MISSING_REF],
     )
 
-    with pytest.raises(ModelError, match="data-edge-ref"):
+    with pytest.raises(ModelError, match="data-edge-ref") as failed:
         _execute(services)
+
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    task = ProjectExecutionStore(services.root).get_task(
+        PROJECT_ID,
+        failed.value.creator_task_id,
+    )
+    assert task.status.value == "FAILED"
+    assert "data-edge-ref" in task.error["message"]
 
     assert len(calls) == 2
     # 失败不写回：element.motion 保持为空。
@@ -860,6 +869,84 @@ def _presentation_html(color="#f4efdf"):
             ),
         )
     )
+
+
+def test_parallel_page_review_does_not_discard_finished_choice(
+    tmp_path,
+    monkeypatch,
+):
+    from services.project_files.review import ReviewDecisionItem
+
+    services = _services(tmp_path)
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def chat(_prompt, *, system_prompt="", **_kwargs):
+            calls.append(system_prompt)
+            if "全部页面" in system_prompt:
+                return _presentation_html()
+            entered.set()
+            await release.wait()
+            return GOOD_HTML
+
+        monkeypatch.setattr(
+            interaction_execution.text_model,
+            "chat_completion",
+            chat,
+        )
+        choice = asyncio.create_task(
+            execute_file_interaction_command(
+                services,
+                project_id=PROJECT_ID,
+                target_ref=f"element:{ELEMENT_ID}",
+                arguments={},
+                idempotency_key="parallel-choice",
+            ),
+        )
+        await entered.wait()
+        await execute_file_interaction_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"project:{PROJECT_ID}",
+            arguments={},
+            idempotency_key="parallel-page",
+        )
+        page_review = services.reviews.all_pending(PROJECT_ID)[0]
+        release.set()
+        await choice
+        assert len(calls) == 2
+        assert len(services.reviews.all_pending(PROJECT_ID)) == 2
+        page_review = next(
+            review
+            for review in services.reviews.all_pending(PROJECT_ID)
+            if review.review_id == page_review.review_id
+        )
+        services.reviews.decide(
+            project_id=PROJECT_ID,
+            review_id=page_review.review_id,
+            decision_token=page_review.decision_token,
+            decisions=[
+                ReviewDecisionItem(
+                    operation_id=op.operation_id,
+                    decision="REJECT",
+                )
+                for op in page_review.operations
+            ],
+        )
+        after = services.projects.read(PROJECT_ID).project
+        assert after.interactive_presentation.motion is None
+        assert (
+            after.timelines.items["timeline:main"]
+            .elements_by_id[ELEMENT_ID]
+            .creation.motion.html
+            == GOOD_HTML
+        )
+        _decide_all(services)
+        assert not services.reviews.all_pending(PROJECT_ID)
+
+    asyncio.run(scenario())
 
 
 def test_project_interface_review_revision_and_stability(

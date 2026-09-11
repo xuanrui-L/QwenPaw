@@ -1,7 +1,7 @@
 /* System library UI and the adapter for the Agent-authored work player. */
 (function (global) {
   "use strict";
-  const dom = Object.fromEntries(["screen-library", "lib-grid", "lib-empty", "lib-scope-all", "lib-scope-mine", "fatal"].map(id => [id, document.getElementById(id)]));
+  const dom = Object.fromEntries(["screen-library", "lib-grid", "lib-empty", "lib-scope-all", "lib-scope-mine", "lib-upload", "lib-upload-file", "lib-upload-status", "fatal"].map(id => [id, document.getElementById(id)]));
   function fail(title, items) { dom.fatal.hidden = false; dom.fatal.textContent = title + "：" + items.join("；"); }
   function projectCard(project) {
     const card = document.createElement("button");
@@ -50,6 +50,29 @@
   function wireLibrary() {
     dom["lib-scope-all"].addEventListener("click", () => renderLibrary("all"));
     dom["lib-scope-mine"].addEventListener("click", () => renderLibrary("mine"));
+    const button = dom["lib-upload"], input = dom["lib-upload-file"], status = dom["lib-upload-status"];
+    button.addEventListener("click", () => input.click());
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      if (!file || button.disabled) return;
+      button.disabled = true;
+      status.hidden = false;
+      status.textContent = "正在导入并检查互动包…";
+      try {
+        const result = await global.Api.upload(file);
+        await renderLibrary("mine");
+        status.textContent = "已导入《" + result.title + "》，点击作品开始观看。";
+      } catch (error) {
+        const details = Array.isArray(error.diagnostics)
+          ? error.diagnostics.map(item => item.message).filter(Boolean).join("；") : "";
+        status.textContent = error.status === 401
+          ? "请登录后再导入互动包。"
+          : "导入失败：" + (details || error.message || "请稍后重试。");
+      } finally {
+        input.value = "";
+        button.disabled = false;
+      }
+    });
   }
 
 

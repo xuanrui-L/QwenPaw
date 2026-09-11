@@ -41,7 +41,8 @@ Project
 页面功能按钮的文案、外观与动效合并为同一个“按钮生成提示词”编辑区；其中“按钮文案：”与“外观与动效：”分别映射 control 的 label 和 design_prompt，一次保存同时更新。Agent 修改按钮也应同步维护这两个字段，避免新文案与旧 label 冲突。
 必备能力不能删除：首页有 start（开始）、map（剧情地图）、replay（重新开始）、resume（继续）；播放页有 toggle_play（播放/暂停）、map（剧情地图）、replay（重新开始）；地图有 map_back（返回）；结局有 replay、title（首页）。必备按钮即使没有单独配置也必须生成；首页开始、剧情地图、重新开始必须带可辨认的可见文字，不能只用图标。replay 从故事入口重新播放但保留探索记录；reset 清空全部探索记录回首页。可选功能按剧本需要：首页可加 reset，播放可加 title，地图可加 jump/title/reset，结局可加 map/reset；jump 只回看已访问节点。不可虚构其他动作。
 页面 HTML 用 `data-screen=title|play|map|ending`、`video data-player-video`、`data-slot=interaction` 和 `button data-action` 声明宿主绑定；首页文本绑定 `project.title/project.synopsis`，结局绑定 `node.title/node.synopsis`，不能用项目名替代当前结局。所有视觉和 CSS 动画来自生成结果，播放器控制动作、视频、状态、安全边界，不补齐模板。缺少页面、过期或待审阅时不能导出。修改已有界面时，生成服务以本项目已有的 Agent HTML 为修改依据，保留未受影响的页面设计。
-用户可在蓝图“交互设计”里切换首页、播放、地图、结局的实际预览，抉择在播放页中选择并编辑，切换桌面/手机，并点击按钮定位其文案与设计要求。右侧详情栏展示持久化提示词，使用与分镜图/视觉图相同的编辑弹窗；完成即保存，再在右侧明确重新生成并审阅。设计预览的视频画面全部为 mock，不依赖视频已生成；作品页面 HTML 仍为本项目 Agent 产物。只改页面无需重新生成视频。抉择的 `creation.design_prompt` 控制对应交互层，`options[*].design_prompt` 可单独描述每个交互按钮的形态与动效；按钮文案和目标仍以 narrative_edges 为准。前端显示抉择时间、倒计时/默认走向和选项对应的剧情节点。带倒计时的 HTML 必须自行设计 `data-interaction-countdown` 文本节点，宿主仅更新数字。`static_endcard` 不会触发模板兜底，静态视觉也需要生成 HTML。
+首页 `project.synopsis` 优先使用根级 `description`，它是面向观众的简短作品简介；创作要求、模型与制作参数保留在 `strategy.creative_brief` 等制作字段，不写进观众简介。旧项目没有简介时才回退使用创意简报。
+用户可在蓝图“交互设计”里切换首页、播放、地图、结局的实际预览，抉择在播放页中选择并编辑，切换桌面/手机，并点击按钮定位其文案与设计要求。右侧详情栏展示持久化提示词，使用与分镜图/视觉图相同的编辑弹窗；完成即保存，再在右侧明确重新生成并审阅。设计预览的视频画面全部为 mock，不依赖视频已生成；作品页面 HTML 仍为本项目 Agent 产物。只改页面无需重新生成视频。抉择的 `creation.design_prompt` 控制对应交互层，`options[*].design_prompt` 可单独描述每个交互按钮的形态与动效；按钮文案和目标仍以 narrative_edges 为准。前端显示抉择时间、倒计时/默认走向和选项对应的剧情节点。抉择层默认透明以保留暂停画面；hotspot 按钮由宿主相对整个交互容器固定定位且脱离文档流，问句/倒计时需避开热点矩形，按钮祖先不能用 transform 等改变定位参照。带倒计时的 HTML 必须自行设计 `data-interaction-countdown` 文本节点；宿主同步更新秒数和根元素 CSS 变量 `--interaction-countdown-ratio`（1 到 0），进度条使用该变量而非独立 CSS 计时动画，确保审阅、地图和后台暂停时一致。`static_endcard` 不会触发模板兜底，静态视觉也需要生成 HTML。
 
 ### 基础不变量
 
@@ -75,7 +76,8 @@ Project
 - R2V Creation 用 `creation.narrative` 保存生成单元的完整叙述，包括动作、运镜、节奏、衔接、对白和旁白。`creation.storyboard_prompt` 和 `creation.video_prompt` 分别描述实际图像和视频生成要求；`creation.storyboard_reference_version_ids` 和 `creation.video_reference_version_ids` 是同级的有序图片版本引用字段。以上字段都在 `creation` 内，不能放到 Element 顶层；例如视频提示词的 patch 路径是 `/timelines/items/<timelineId>/elements_by_id/<elementId>/creation/video_prompt`。
 - 视频生成按 creation 类型区分，每个类型只包含其模型真正消费的字段：
   - `type=r2v`（参考生视频）：完整片段叙述、分镜图提示词、视频提示词及图片引用。
-  - `type=t2v`（纯文本生视频）：只有 intent/narrative/continuity/video_prompt/recipe，无分镜、无参考。
+  - `type=t2v`（纯文本生视频）：只有 intent/narrative/continuity/video_prompt/generate_audio/recipe，无分镜、无参考。
+  - r2v/t2v/i2v 的 `creation.generate_audio` 控制视频原生声音，默认 true。用户要求完全静音、无声画面时必须写 false；只在提示词中写“静音”不能关闭供应商的声音生成。该字段会进入制作授权和执行参数，修改后需明确重新生成并审阅视频。
   - `type=i2v`（首帧生视频）：在 t2v 字段基础上增加 `first_frame_version_id`（exact 图片 version id）。
   - `type=s2v`（数字人口播）：`character_ref`（角色实体）、`portrait_version_id`（人物图 exact version，s2v 的 reference）、`script`（台词，经 TTS 变成驱动音频）、`audio_version_id`（驱动音频 exact version）、recipe；无分镜 prompt。
   类型声明即生成模式：提交工具的 mode 必须与 creation 类型一致，不得在提交时替换。

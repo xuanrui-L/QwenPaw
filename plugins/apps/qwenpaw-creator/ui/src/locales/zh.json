@@ -1173,6 +1173,7 @@
     "creativeBrief": "创作总纲",
     "creativeDirection": "创作方向",
     "prompt": "提示词",
+    "nativeAudio": "视频原声",
     "camera": "运镜",
     "framing": "景别",
     "duration": "时长",
@@ -2233,7 +2234,12 @@
     "sourceResultFailed": "理解结果读取失败",
     "sourceResultLoading": "正在读取理解结果",
     "pausePreview": "暂停预览",
-    "previewPosition": "预览进度"
+    "previewPosition": "预览进度",
+    "playFullInteractive": "播放整个互动包",
+    "exportBundle": "导出互动包",
+    "exportBundleFailed": "互动包暂时无法导出",
+    "downloadBundleTitle": "导出互动包或导出项目",
+    "previewChoice": "选择故事走向"
   },
   "sidebar": {
     "assistant": "创作助手",
