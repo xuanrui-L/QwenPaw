@@ -893,9 +893,21 @@ def _with_remote_variant_refs(
     )
 
 
+@pytest.mark.parametrize(
+    ("model_name", "limit"),
+    [
+        ("qwen-image-3.0", 3),
+        ("wan2.7-image-pro", 9),
+        ("wan2.7-image", 9),
+        ("wan2.6-image", 4),
+        ("z-image-turbo", 0),
+    ],
+)
 def test_resolved_reference_budget_reports_automatic_and_explicit_refs(
     tmp_path,
     monkeypatch,
+    model_name,
+    limit,
 ) -> None:
     snapshot = _snapshot(
         variants={
@@ -908,7 +920,7 @@ def test_resolved_reference_budget_reports_automatic_and_explicit_refs(
             "order": ["var:budget"],
         },
     )
-    budget_snapshot = _with_remote_variant_refs(snapshot, "var:budget", 3)
+    budget_snapshot = _with_remote_variant_refs(snapshot, "var:budget", limit)
     monkeypatch.setattr(
         image_execution,
         "_validate_public_remote_url",
@@ -925,9 +937,12 @@ def test_resolved_reference_budget_reports_automatic_and_explicit_refs(
             image_model_name=model_name,
         )
 
+    request = resolve(model_name, {"variantId": "var:budget"})
+    assert len(request.reference_image_urls) == limit
+
     with pytest.raises(ImageReferenceBudgetError) as captured:
         resolve(
-            "qwen-image-3.0",
+            model_name,
             {
                 "variantId": "var:budget",
                 "referenceImageUrls": ["https://images.example/explicit.png"],
@@ -936,12 +951,10 @@ def test_resolved_reference_budget_reports_automatic_and_explicit_refs(
 
     error = captured.value
     assert error.code == "IMAGE_REFERENCE_BUDGET_EXCEEDED"
-    assert error.details["limit"] == 3
-    assert error.details["resolvedCount"] == 4
+    assert error.details["limit"] == limit
+    assert error.details["resolvedCount"] == limit + 1
     assert error.details["automaticReferenceVersionIds"] == [
-        "ref-1",
-        "ref-2",
-        "ref-3",
+        f"ref-{index}" for index in range(1, limit + 1)
     ]
     assert error.details["explicitReferenceUrls"] == [
         "https://images.example/explicit.png",
@@ -949,13 +962,17 @@ def test_resolved_reference_budget_reports_automatic_and_explicit_refs(
     assert error.details["documentationUrl"].startswith("https://")
 
     openai_request = resolve("gpt-image-2", {"variantId": "var:budget"})
-    assert len(openai_request.reference_image_urls) == 3
+    assert len(openai_request.reference_image_urls) == limit
 
+    unknown_arguments = {
+        "variantId": "var:budget",
+        "referenceImageUrls": ["https://images.example/explicit.png"],
+    }
     with pytest.raises(ImageModelCapabilityError):
-        resolve("private-gateway-alias", {"variantId": "var:budget"})
+        resolve("private-gateway-alias", unknown_arguments)
 
     with pytest.raises(ImageModelCapabilityError) as empty_model:
-        resolve("", {"variantId": "var:budget"})
+        resolve("", unknown_arguments)
     assert empty_model.value.details["modelName"] == "未配置"
 
 
@@ -1084,11 +1101,18 @@ def test_image_reference_marker_spec_follows_provider_docs() -> None:
         assert spec.render_index(2) == "图2"
         assert "qwen-image-edit-guide" in spec.documentation_url
 
+    for model in ("wan2.7-image-pro", "wan2.7-image", "wan2.6-image"):
+        spec = image_reference_marker_spec(model)
+        assert spec is not None
+        assert spec.render_index(2) == "图2"
+        assert "wan-image-generation" in spec.documentation_url
+
     # gpt-image takes many references but documents array order only, so
     # inventing a marker would be text it has no contract for.
     assert image_reference_marker_spec("gpt-image-2") is None
     assert image_reference_marker_spec("gpt-image-1") is None
     # Nothing to disambiguate at zero or one reference.
+    assert image_reference_marker_spec("z-image-turbo") is None
     assert image_reference_marker_spec("qwen-image") is None
     assert image_reference_marker_spec("qwen-mt-image") is None
     assert (
