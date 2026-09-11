@@ -684,8 +684,8 @@ def _resolved_artifact_reference_ids(
         anchor = visual_style_anchor(project.visual.entities, ref)
         if anchor is None:
             refs.append(ref)
-        elif anchor.selected_artifact_version_id:
-            refs.append(anchor.selected_artifact_version_id)
+        elif anchor[1].selected_artifact_version_id:
+            refs.append(anchor[1].selected_artifact_version_id)
         else:
             raise ValidationError(
                 f"风格锚点 {ref} 还没有已选图片；先生成并确认基准场景",

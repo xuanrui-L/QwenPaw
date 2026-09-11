@@ -910,28 +910,40 @@ function variantReferenceTokens(
 
 /** A style anchor `visual:<entityId>:<variantId>` presents as the base
     entity itself; before the base image exists the token has no thumb. */
-function visualAnchorToken(
+function resolveVisualAnchor(
   project: ProjectDocument,
   ref: string,
-): Omit<PromptRichToken, "index"> | null {
+): { name: string; versionId: string | null } | null {
   if (!ref.startsWith("visual:")) return null;
   for (const entityId of project.visual.entities.order) {
     const entity = project.visual.entities.items[entityId];
     if (!entity) continue;
     for (const variantId of entity.variants.order) {
       if (ref !== `visual:${entityId}:${variantId}`) continue;
-      const selected =
-        entity.variants.items[variantId]?.selected_artifact_version_id;
       return {
         name: entity.name || entityId,
-        kind: "artifact" as const,
-        thumbUrl: selected
-          ? refImageThumbUrl(project, null, `artifact-version:${selected}`)
-          : null,
+        versionId:
+          entity.variants.items[variantId]?.selected_artifact_version_id ??
+          null,
       };
     }
   }
-  return { name: ref, kind: "artifact" as const, thumbUrl: null };
+  return { name: ref, versionId: null };
+}
+
+function visualAnchorToken(
+  project: ProjectDocument,
+  ref: string,
+): Omit<PromptRichToken, "index"> | null {
+  const anchor = resolveVisualAnchor(project, ref);
+  if (!anchor) return null;
+  return {
+    name: anchor.name,
+    kind: "artifact" as const,
+    thumbUrl: anchor.versionId
+      ? refImageThumbUrl(project, null, `artifact-version:${anchor.versionId}`)
+      : null,
+  };
 }
 
 /** Project image assets not yet referenced by this variant — pickable in the
@@ -945,6 +957,12 @@ function variantReferenceCandidates(
     ...variant.reference_artifact_version_ids,
     ...variant.generated_artifact_version_ids,
   ]);
+  // A style anchor occupies its base image's slot: offering that image
+  // again would duplicate the reference and break [Image N] numbering.
+  for (const ref of variant.reference_artifact_version_ids) {
+    const versionId = resolveVisualAnchor(project, ref)?.versionId;
+    if (versionId) taken.add(versionId);
+  }
   // Artifact versions produced by a visual entity's variants carry that
   // entity's kind so the condensed asset-library picker can offer real
   // category tabs; loose versions stay "material".

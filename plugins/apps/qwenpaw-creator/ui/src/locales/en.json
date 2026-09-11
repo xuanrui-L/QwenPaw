@@ -922,6 +922,8 @@
     "inputPlaceholder": "Enter modification intent, @ to reference objects...",
     "uploadAsset": "Upload asset",
     "uploadOnlyMessage": "Uploaded assets: {{names}}",
+    "unsentInstruction": "Unsent instruction",
+    "restoreDraft": "Restore to composer",
     "stopAllAgents": "Stop All Agents",
     "stopAllSuccess": "All Agent activity stopped",
     "stopRequested": "Stop request sent, click to force stop",

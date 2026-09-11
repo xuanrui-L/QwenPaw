@@ -922,6 +922,8 @@
     "inputPlaceholder": "输入修改意图，@ 可引用对象…",
     "uploadAsset": "上传素材",
     "uploadOnlyMessage": "上传素材：{{names}}",
+    "unsentInstruction": "未发送的正文",
+    "restoreDraft": "恢复到输入框",
     "stopAllAgents": "停止所有 Agent",
     "stopAllSuccess": "已停止所有 Agent 活动",
     "stopRequested": "停止请求已发送，点击再次停止",

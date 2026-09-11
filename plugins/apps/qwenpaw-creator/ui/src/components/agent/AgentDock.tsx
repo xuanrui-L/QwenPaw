@@ -1260,6 +1260,7 @@ export default function AgentDock({
     setRateLimitResuming(false);
     setPendingUploads([]);
     setUploadingAssets(false);
+    setInterruptedDraft(null);
     submissionVersion.current += 1;
     projectLifecycleVersion.current += 1;
   }, [projectId]);
@@ -1276,6 +1277,21 @@ export default function AgentDock({
     { id: string; name: string; file?: File; ref?: string }[]
   >([]);
   const [uploadingAssets, setUploadingAssets] = useState(false);
+  // Live view of the chips for the async submit pipeline: an X-removal
+  // during the upload phase must keep the file out of the message.
+  const pendingUploadsRef = useRef(pendingUploads);
+  useEffect(() => {
+    pendingUploadsRef.current = pendingUploads;
+  }, [pendingUploads]);
+  // Instruction captured by a submission whose upload failed after the
+  // user had already rewritten the composer — recoverable, never silent.
+  const [interruptedDraft, setInterruptedDraft] = useState<{
+    text: string;
+    draft: ReturnType<MentionInputHandle["getDraft"]>;
+    contextRefs: RefSearchItem[];
+    selectedRef: string | null;
+    editingField: string | null;
+  } | null>(null);
   const stageUploads = (files: File[]) => {
     if (files.length === 0) return;
     setPendingUploads((prev) => [
@@ -1808,6 +1824,18 @@ export default function AgentDock({
     ];
     const version = ++submissionVersion.current;
     const submittedProject = projectId;
+    const composerSignature = (
+      value: ReturnType<NonNullable<typeof inputRef.current>["getContent"]>,
+      extra: { ref: string }[],
+    ) =>
+      JSON.stringify({
+        t: value.text.trim(),
+        r: value.refs.map((item) => item.ref),
+        s: value.selections,
+        e: extra.map((item) => item.ref),
+      });
+    const submittedSignature = composerSignature(content, extraRefs);
+    const submittedDraft = inputRef.current?.getDraft() ?? [];
     // Fresh files ingest now (silently: their refs ride this message, so the
     // run itself triggers per-asset understanding — the same contract
     // launch-time uploads use). Chips stay visible the whole way: a finished
@@ -1824,6 +1852,12 @@ export default function AgentDock({
       setUploadingAssets(true);
       try {
         for (const item of filesToUpload) {
+          // Honour a mid-upload X-removal: the chip is gone, so the file
+          // must neither upload nor ride the message.
+          if (
+            !pendingUploadsRef.current.some((pending) => pending.id === item.id)
+          )
+            continue;
           const accepted = await ingestAssetFile(
             submittedProject,
             item.file as File,
@@ -1850,6 +1884,24 @@ export default function AgentDock({
             error instanceof Error ? error.message : t("assets.uploadFailed"),
             6,
           );
+          // The batch keeps its chips, but a rewritten composer would lose
+          // the captured instruction silently — park it for recovery.
+          const currentContent = inputRef.current?.getContent();
+          if (
+            currentContent &&
+            composerSignature(
+              currentContent,
+              useCreatorInteractionStore.getState().extraRefs,
+            ) !== submittedSignature
+          ) {
+            setInterruptedDraft({
+              text,
+              draft: submittedDraft,
+              contextRefs: contextChips,
+              selectedRef,
+              editingField,
+            });
+          }
         }
         return;
       } finally {
@@ -1876,10 +1928,15 @@ export default function AgentDock({
       submissionVersion.current !== version
     )
       return;
+    const liveChipIds = new Set(
+      pendingUploadsRef.current.map((pending) => pending.id),
+    );
     const attachments = batch.flatMap((item) => {
+      if (!liveChipIds.has(item.id)) return [];
       const ref = uploaded.get(item.id);
       return ref ? [{ ref, name: item.name }] : [];
     });
+    if (!text && attachments.length === 0) return;
     const assetVersionRefs = attachments.map((item) => item.ref);
     const messageText =
       text ||
@@ -1892,12 +1949,21 @@ export default function AgentDock({
       .getState()
       .consumeContext(projectId);
     // The batch is handed to the message now: its chips leave the composer,
-    // and the text clears only when the user hasn't rewritten it while the
-    // uploads ran — edits made meanwhile belong to the next message.
+    // and the composed input clears only when nothing about it — text,
+    // selections, mention refs or context refs — changed while the uploads
+    // ran; anything the user reshaped meanwhile belongs to the next message.
     setPendingUploads((prev) =>
       prev.filter((pending) => !uploaded.has(pending.id)),
     );
-    if ((inputRef.current?.getContent().text ?? "").trim() === text) {
+    const currentContent = inputRef.current?.getContent() ?? {
+      text: "",
+      refs: [],
+      selections: [],
+    };
+    const currentExtraRefs = useCreatorInteractionStore.getState().extraRefs;
+    if (
+      composerSignature(currentContent, currentExtraRefs) === submittedSignature
+    ) {
       inputRef.current?.clear();
       setCanSend(false);
       setInlineRefs([]);
@@ -2514,6 +2580,45 @@ export default function AgentDock({
               {originalsGate && (
                 <div className="mb-2">
                   <SourceCacheGate status={sourceCache} compact />
+                </div>
+              )}
+              {interruptedDraft && (
+                <div
+                  className="mb-2 flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] px-2.5 py-1.5 text-[11px]"
+                  data-agent-interrupted-text
+                >
+                  <span className="shrink-0 font-medium text-[var(--color-danger)]">
+                    {t("agent.unsentInstruction")}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)]">
+                    {interruptedDraft.text}
+                  </span>
+                  <button
+                    type="button"
+                    className="shrink-0 font-medium text-[var(--color-accent)] hover:underline"
+                    onClick={() => {
+                      inputRef.current?.setDraft(interruptedDraft.draft);
+                      const interaction = useCreatorInteractionStore.getState();
+                      interaction.setExtraRefs(interruptedDraft.contextRefs);
+                      interaction.select(interruptedDraft.selectedRef);
+                      interaction.setEditingField(
+                        interruptedDraft.editingField,
+                      );
+                      setRemovedContextRefs([]);
+                      setCanSend(true);
+                      setInterruptedDraft(null);
+                    }}
+                  >
+                    {t("agent.restoreDraft")}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("common.close")}
+                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full hover:bg-[var(--color-border)]"
+                    onClick={() => setInterruptedDraft(null)}
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
                 </div>
               )}
               {pendingUploads.length > 0 && (

@@ -1070,7 +1070,24 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             entry.state === "failed",
         );
         if (!item?.request) return;
+        const projectId = get().projectId;
         await get().sendMessage({ ...item.request, clientMessageId });
+        // The Dock flushes delivered userEdits after its own send; a card
+        // retry delivers the same context, so it must flush too or the
+        // edits ride the next message twice.
+        const edits = (
+          item.request.context as
+            | { userEdits?: { lastEntryAt?: string | null } }
+            | undefined
+        )?.userEdits;
+        if (projectId && edits) {
+          const { useCreatorEditBufferStore } = await import(
+            "@/store/creatorEditBufferStore"
+          );
+          useCreatorEditBufferStore
+            .getState()
+            .markFlushed(projectId, edits.lastEntryAt ?? null);
+        }
       },
 
       stopAllAgents: async () => {

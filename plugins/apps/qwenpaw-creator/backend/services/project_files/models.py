@@ -494,18 +494,22 @@ class VisualVariant(StrictModel):
 VISUAL_ANCHOR_REF_PREFIX = "visual:"
 
 
-def visual_style_anchor(entities: Any, ref: str) -> VisualVariant | None:
+def visual_style_anchor(
+    entities: Any,
+    ref: str,
+) -> tuple[str, VisualVariant] | None:
     """Resolve a style-anchor ref ``visual:<entityId>:<variantId>``.
 
     Entity and variant ids may themselves contain colons, so the ref is
-    matched against constructed ids instead of being split apart.
+    matched against constructed ids instead of being split apart. Returns
+    the owning entity id together with the variant.
     """
     if not ref.startswith(VISUAL_ANCHOR_REF_PREFIX):
         return None
     for entity_id, entity in entities.items.items():
         for variant_id, variant in entity.variants.items.items():
             if ref == f"{VISUAL_ANCHOR_REF_PREFIX}{entity_id}:{variant_id}":
-                return variant
+                return entity_id, variant
     return None
 
 
@@ -1519,6 +1523,7 @@ class Project(StrictModel):
             "scene": set(),
             "prop": set(),
         }
+        anchor_edges: dict[str, list[str]] = {}
         for entity in self.visual.entities.items.values():
             visual_ids[entity.kind].add(entity.entity_id)
             _require_collection_identity(
@@ -1540,10 +1545,15 @@ class Project(StrictModel):
                             ref,
                             "visual artifact reference",
                         )
-                    elif anchor is variant:
+                    elif anchor[1] is variant:
                         raise ValueError(
                             f"visual style anchor {ref} references itself",
                         )
+                    else:
+                        anchor_edges.setdefault(
+                            f"visual:{entity.entity_id}:{variant.variant_id}",
+                            [],
+                        ).append(ref)
                 _require_all(
                     artifact_versions,
                     variant.generated_artifact_version_ids,
@@ -1600,6 +1610,7 @@ class Project(StrictModel):
                     entity.voice.sample_source_version_id,
                     "character voice sample version",
                 )
+        _reject_anchor_cycles(anchor_edges)
 
         _require_collection_identity(
             self.visual.cast_lineups,
@@ -1971,6 +1982,40 @@ def _require_key(mapping: dict[str, T], key: str, label: str) -> T:
         return mapping[key]
     except KeyError as exc:
         raise ValueError(f"{label} references missing id {key}") from exc
+
+
+def _reject_anchor_cycles(edges: dict[str, list[str]]) -> None:
+    """A style-anchor cycle gates every member forever: with no image on
+    either side, nothing dispatches and no repair queue names the deadlock,
+    so the commit itself must refuse it."""
+
+    state: dict[str, int] = {}  # 1 = on the current path, 2 = settled
+    for start in edges:
+        if state.get(start):
+            continue
+        stack: list[tuple[str, int]] = [(start, 0)]
+        path: list[str] = []
+        while stack:
+            node, index = stack.pop()
+            if index == 0:
+                state[node] = 1
+                path.append(node)
+            targets = edges.get(node, [])
+            if index < len(targets):
+                stack.append((node, index + 1))
+                nxt = targets[index]
+                mark = state.get(nxt)
+                if mark == 1:
+                    cycle = [*path[path.index(nxt) :], nxt]
+                    raise ValueError(
+                        "visual style anchors form a cycle: "
+                        + " -> ".join(cycle),
+                    )
+                if not mark:
+                    stack.append((nxt, 0))
+            else:
+                state[node] = 2
+                path.pop()
 
 
 def _require_all(mapping: dict[str, Any], keys: list[str], label: str) -> None:

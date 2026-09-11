@@ -16,6 +16,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -372,8 +373,39 @@ def _failure_inputs_changed(
     )
 
 
+def _as_moment(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            return _as_moment(
+                datetime.fromisoformat(value.replace("Z", "+00:00")),
+            )
+        except ValueError:
+            return None
+    return None
+
+
+def _failure_after_selected(
+    project: Project,
+    variant: Any,
+    failure: Any,
+) -> bool:
+    artifact = project.assets.artifact_versions_by_id.get(
+        variant.selected_artifact_version_id or "",
+    )
+    failed_at = _as_moment(getattr(failure, "updated_at", None))
+    if failed_at is None:
+        return False
+    made_at = (
+        _as_moment(getattr(artifact, "created_at", None)) if artifact else None
+    )
+    return made_at is None or failed_at > made_at
+
+
 def _variant_status(
     *,
+    project: Project,
     entity: Any,
     variant: Any,
     active: Mapping[tuple[str, str], Any],
@@ -385,12 +417,22 @@ def _variant_status(
         (task.metadata or {}).get("variantId") in (None, variant.variant_id)
     ):
         return WorkNodeStatus.RUNNING, task
-    if variant.selected_artifact_version_id:
-        return WorkNodeStatus.DONE, None
     failure = failed.get(key)
-    if failure is not None and (
-        (failure.metadata or {}).get("variantId") in (None, variant.variant_id)
-    ):
+    if failure is not None and (failure.metadata or {}).get(
+        "variantId",
+    ) not in (None, variant.variant_id):
+        failure = None
+    if variant.selected_artifact_version_id:
+        if failure is not None and _failure_after_selected(
+            project,
+            variant,
+            failure,
+        ):
+            # A re-roll or repair failed after this node completed: the old
+            # artifact must not mask the failure or announce success.
+            return WorkNodeStatus.FAILED, failure
+        return WorkNodeStatus.DONE, None
+    if failure is not None:
         return WorkNodeStatus.FAILED, failure
     return WorkNodeStatus.READY, None
 
@@ -608,13 +650,29 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 if anchor is None:
                     resolved_artifact_refs.append(ref)
                     continue
+                anchor_entity_id, anchor_variant = anchor
                 anchor_deps.append(ref)
-                if anchor.selected_artifact_version_id:
-                    resolved_artifact_refs.append(
-                        anchor.selected_artifact_version_id,
-                    )
-                else:
+                anchor_task = active.get(
+                    (
+                        TaskKind.IMAGE_GENERATION.value,
+                        f"asset:{anchor_entity_id}",
+                    ),
+                )
+                anchor_rendering = anchor_task is not None and (
+                    (anchor_task.metadata or {}).get("variantId")
+                    in (None, anchor_variant.variant_id)
+                )
+                if anchor_rendering or (
+                    not anchor_variant.selected_artifact_version_id
+                ):
+                    # No image yet, or the base is being repainted right
+                    # now: rendering against the outgoing image wastes a
+                    # paid call that the base update then quarantines.
                     anchor_waiting.append(ref)
+                if anchor_variant.selected_artifact_version_id:
+                    resolved_artifact_refs.append(
+                        anchor_variant.selected_artifact_version_id,
+                    )
             fingerprint = _fingerprint(
                 node_id,
                 variant.prompt,
@@ -622,24 +680,43 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 resolved_artifact_refs,
             )
             status, task = _variant_status(
+                project=project,
                 entity=entity,
                 variant=variant,
                 active=active,
                 failed=failed,
             )
-            if status is WorkNodeStatus.FAILED and _failure_inputs_changed(
-                task,
-                node_id,
-                fingerprint,
-                media_models,
+            if (
+                status is WorkNodeStatus.FAILED
+                and not variant.selected_artifact_version_id
+                and _failure_inputs_changed(
+                    task,
+                    node_id,
+                    fingerprint,
+                    media_models,
+                )
             ):
                 status, task = WorkNodeStatus.READY, None
             missing: tuple[str, ...] = ()
             authored_text_gap = False
-            if status is WorkNodeStatus.READY and anchor_waiting:
-                # The base image is the whole point of the reference: hold
-                # the render until the anchor variant has a selected image.
-                status = WorkNodeStatus.GATED
+            if status is WorkNodeStatus.DONE and _artifact_is_stale(
+                project,
+                variant.selected_artifact_version_id,
+                [
+                    *sorted(variant.reference_asset_version_ids),
+                    *resolved_artifact_refs,
+                ],
+                node_id=node_id,
+                dispatch_fingerprint=fingerprint,
+                tasks=tasks,
+                media_models=media_models,
+            ):
+                status = WorkNodeStatus.STALE
+            if anchor_waiting and status is not WorkNodeStatus.RUNNING:
+                # Manual re-rolls also dispatch DONE/STALE/FAILED nodes, so
+                # every idle dependent must expose its unsettled anchors.
+                if status in (WorkNodeStatus.READY, WorkNodeStatus.DONE):
+                    status = WorkNodeStatus.GATED
                 missing = tuple(anchor_waiting)
             if status is WorkNodeStatus.READY and visual_story_missing(
                 project,
@@ -695,6 +772,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                     target_ref=f"asset:{entity_id}",
                     dispatch_arguments={"variantId": variant_id},
                     dispatch_fingerprint=fingerprint,
+                    regeneration_of=(
+                        variant.selected_artifact_version_id
+                        if status
+                        in (WorkNodeStatus.STALE, WorkNodeStatus.FAILED)
+                        else None
+                    ),
                 ),
             )
 
