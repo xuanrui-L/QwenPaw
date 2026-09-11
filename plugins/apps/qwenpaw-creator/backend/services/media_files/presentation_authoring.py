@@ -31,6 +31,7 @@ ending 内必须有 button data-action="replay" 和 "title"。
 其他可选按钮动作：map、title、reset；所有动作均使用 button，无 href，不写跳转地址。
 开始、重新开始、剧情地图属于必备能力，不能因剧本或风格省略。其他交互根据剧本需要设计，不虚构功能。
 输入 screens 是逐页的设计意图，controls 是该页按钮的文案和外观要求，不是视觉模板。
+design_prompt 提供共享风格背景；每页以 screens 中自己的 design_prompt 为准，局部要求与共享风格冲突时优先实现该页要求。
 必须实现 screens 中声明的全部 controls；非空 label 逐字用作按钮的可见文案（可包 span，不添加额外文字）。
 没有配置的页面或必备按钮仍需你独立设计。不要自行隐藏 data-screen，宿主负责页面显隐；不要使用 active 类模拟页面切换。
 用 CSS 媒体查询保证窄屏可操作，使用 prefers-reduced-motion 尊重减少动态效果设置；预留交互层和页面导航各自空间，不能挡住导航按钮。
