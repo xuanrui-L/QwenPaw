@@ -1205,6 +1205,17 @@ export default function AgentDock({
   currentProject.current = projectId;
   const submissionVersion = useRef(0);
   const projectLifecycleVersion = useRef(0);
+  // Unmounting must invalidate in-flight submissions: the refs above keep
+  // their last values after unmount, so project/version guards alone let a
+  // late upload callback refresh stores and send into whatever session is
+  // globally current by then.
+  const dockAlive = useRef(true);
+  useEffect(() => {
+    dockAlive.current = true;
+    return () => {
+      dockAlive.current = false;
+    };
+  }, []);
   const [removedContextRefs, setRemovedContextRefs] = useState<string[]>([]);
   const [canSend, setCanSend] = useState(false);
   const [rateLimitResuming, setRateLimitResuming] = useState(false);
@@ -1768,10 +1779,32 @@ export default function AgentDock({
     const version = ++submissionVersion.current;
     const submittedProject = projectId;
     const submittedExtraRefs = extraRefs;
+    // This submission claims the retry refs: concurrent sends must not share
+    // attachments, and an older send finishing must not clear a newer batch.
+    const uploadedRefs = stagedSentRefs.current;
+    stagedSentRefs.current = [];
+    // Clear the composer right away: anything typed while the uploads are in
+    // flight belongs to the next message, not to this one.
+    inputRef.current?.clear();
+    setCanSend(false);
+    setInlineRefs([]);
+    setDraft("");
+    setMentionQuery(null);
+    useCreatorInteractionStore.getState().setExtraRefs([]);
+    // Only reachable while this is the latest live submission (guards below),
+    // so stagedSentRefs is still the empty array this batch claimed.
+    const restoreComposer = (restoreText: string) => {
+      stagedSentRefs.current = uploadedRefs;
+      if (restoreText && !inputRef.current?.getContent().text.trim()) {
+        inputRef.current?.setText(restoreText);
+        setCanSend(true);
+        setDraft(restoreText);
+        useCreatorInteractionStore.getState().setExtraRefs(submittedExtraRefs);
+      }
+    };
     // Staged attachments ingest now (silently: their refs ride this message,
     // so the run itself triggers per-asset understanding — the same contract
     // launch-time uploads use).
-    const uploadedRefs = [...stagedSentRefs.current];
     if (staged.length > 0) {
       setUploadingAssets(true);
       try {
@@ -1786,16 +1819,17 @@ export default function AgentDock({
             ref: `asset-version:${accepted.assetVersionId}`,
             name: item.file.name,
           });
-          stagedSentRefs.current = uploadedRefs;
           setPendingUploads((prev) =>
             prev.filter((pending) => pending.id !== item.id),
           );
         }
       } catch (error) {
         if (
+          dockAlive.current &&
           currentProject.current === submittedProject &&
           submissionVersion.current === version
         ) {
+          restoreComposer(text);
           message.error(
             error instanceof Error ? error.message : t("assets.uploadFailed"),
             6,
@@ -1806,9 +1840,11 @@ export default function AgentDock({
         setUploadingAssets(false);
       }
       // The snapshot/task stores hold only the current project's state: a
-      // stale refresh after switching projects would clobber the new page,
-      // and sendMessage below reads the store's current project.
+      // stale refresh after unmounting or switching projects would clobber
+      // the new page, and sendMessage below reads the store's current
+      // project.
       if (
+        !dockAlive.current ||
         currentProject.current !== submittedProject ||
         submissionVersion.current !== version
       )
@@ -1819,6 +1855,7 @@ export default function AgentDock({
       ]);
     }
     if (
+      !dockAlive.current ||
       currentProject.current !== submittedProject ||
       submissionVersion.current !== version
     )
@@ -1862,14 +1899,7 @@ export default function AgentDock({
           userEdits: userEdits ?? undefined,
         },
       });
-      inputRef.current?.clear();
-      setCanSend(false);
-      setInlineRefs([]);
-      setDraft("");
-      setMentionQuery(null);
-      useCreatorInteractionStore.getState().setExtraRefs([]);
       await pending;
-      stagedSentRefs.current = [];
       if (userEdits) {
         useCreatorEditBufferStore
           .getState()
@@ -1877,18 +1907,14 @@ export default function AgentDock({
       }
     } catch (error) {
       if (
+        !dockAlive.current ||
         currentProject.current !== submittedProject ||
         submissionVersion.current !== version
       )
         return;
       // Restore the composed text (upload-only sends included) so retry is
       // one click; the already-ingested refs ride along via stagedSentRefs.
-      if (!inputRef.current?.getContent().text.trim()) {
-        inputRef.current?.setText(messageText);
-        setCanSend(true);
-        setDraft(messageText);
-        useCreatorInteractionStore.getState().setExtraRefs(submittedExtraRefs);
-      }
+      restoreComposer(messageText);
       message.error(t("agentActivity.failureHint"));
     }
   };

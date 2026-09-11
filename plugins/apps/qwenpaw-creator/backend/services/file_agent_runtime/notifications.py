@@ -779,6 +779,14 @@ class RuntimeNotificationBus:
                 continue
             if item.source not in RUNTIME_AUTONOMOUS_SOURCES:
                 break
+            if (
+                item.metadata.get("notificationKind")
+                == RuntimeEventKind.SOURCE_ASSETS_UPLOADED.value
+            ):
+                # A delivered upload is a human act carried by the bus: it
+                # replenishes the flush budget exactly like a typed message
+                # (same judgement as the autonomous-streak fuse above).
+                break
             if item.metadata.get("idleFlush"):
                 flushes += 1
         return NOTIFY_IDLE_FLUSH_BUDGET - flushes

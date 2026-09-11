@@ -666,10 +666,12 @@ def test_idle_flush_lifecycle_delivers_parked_terminals(
     assert bus.store.undelivered_records(PROJECT_ID) == []
 
 
+@pytest.mark.parametrize("human_act", ["typed", "upload"])
 def test_idle_flush_budget_exhausts_and_resets_on_human(
     tmp_path,
     monkeypatch,
     caplog,
+    human_act,
 ) -> None:
     services = _services(tmp_path, monkeypatch)
     bus, _wakes = _bus(services)
@@ -710,14 +712,31 @@ def test_idle_flush_budget_exhausts_and_resets_on_human(
     )
     assert len(bus.store.pending_records(PROJECT_ID)) == 1
 
-    services.sessions.append_message(
-        PROJECT_ID,
-        SESSION_ID,
-        CONVERSATION_ID,
-        role="user",
-        content_parts=[{"type": "text", "text": "请继续"}],
-        source="user",
-    )
+    if human_act == "typed":
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": "请继续"}],
+            source="user",
+        )
+    else:
+        # A delivered upload replenishes the budget like a typed message
+        # (CR 2026-09-11: it only reset the hard cap, so pending terminals
+        # stayed parked until the user happened to type).
+        assert (
+            asyncio.run(
+                bus.steer(
+                    PROJECT_ID,
+                    kind=RuntimeEventKind.SOURCE_ASSETS_UPLOADED,
+                    request_id="assets-uploaded-flush-1",
+                    text="用户刚上传了 1 个素材：budget.png。",
+                    payload={"assetVersionRefs": ["asset-version:v9"]},
+                ),
+            )
+            is True
+        )
 
     assert asyncio.run(bus.flush_pending_on_idle(PROJECT_ID)) is True
     assert bus.store.undelivered_records(PROJECT_ID) == []

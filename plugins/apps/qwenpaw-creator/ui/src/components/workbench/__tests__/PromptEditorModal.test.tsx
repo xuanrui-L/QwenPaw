@@ -152,5 +152,14 @@ describe("prompt image interactions", () => {
     rerender(<PromptRichBlock {...props} value="一段写好的提示词" />);
     expect(document.querySelector("[data-prompt-edit]")).toBeEnabled();
     expect(document.querySelector("[data-prompt-regenerate]")).toBeEnabled();
+
+    // Clearing a written prompt is an edit in progress, not a hand-back to
+    // the agent: the editor must stay usable or the user is locked out.
+    rerender(<PromptRichBlock {...props} value="" />);
+    expect(
+      screen.queryByText("等待 Agent 编写生成提示词"),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector("[data-prompt-edit]")).toBeEnabled();
+    expect(document.querySelector("[data-prompt-regenerate]")).toBeEnabled();
   });
 });

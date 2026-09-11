@@ -146,9 +146,12 @@ function PromptTextArea({
   regenerateLabel?: string;
 }) {
   const { t } = useTranslation();
-  // An empty prompt is a planned-but-unwritten field: the agent still owes
-  // it, so editing or regenerating would dispatch an unplanned generation.
-  const awaitingAgent = !value.trim();
+  // An empty prompt is a planned-but-unwritten field only until someone
+  // writes it: a user clearing the draft to rewrite must not lock the box,
+  // so the awaiting state is sticky-off once the value has been non-empty.
+  const everWritten = useRef(!!value.trim());
+  if (value.trim()) everWritten.current = true;
+  const awaitingAgent = !everWritten.current;
   return (
     <div
       data-creator-field={field}
@@ -164,7 +167,11 @@ function PromptTextArea({
           disabled={disabled || awaitingAgent}
           onChange={(event) => onChange(event.target.value)}
           autoSize={{ minRows: 2, maxRows: 10 }}
-          placeholder={t("r2v.awaitAgentPrompt")}
+          placeholder={
+            awaitingAgent
+              ? t("r2v.awaitAgentPrompt")
+              : t("r2v.generateAndEdit", { label })
+          }
           className="!rounded-none !border-0 !bg-transparent !text-xs !shadow-none"
         />
         {onRegenerate && (

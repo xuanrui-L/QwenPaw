@@ -96,10 +96,12 @@ export default function PromptRichBlock({
   const { t } = useTranslation();
   const project = useProjectSnapshotStore((state) => state.project);
   const presentedValue = presentPromptEntityNames(value, project);
-  // An empty prompt is a planned-but-unwritten node: the agent still owes
-  // the prompt (or its upstream reference), so editing and regenerating
-  // would dispatch an unplanned generation.
-  const awaitingAgent = !value.trim();
+  // An empty prompt is a planned-but-unwritten node only until someone
+  // writes it: a user clearing the prompt to rewrite must not lock the
+  // editor out, so the awaiting state is sticky-off once non-empty.
+  const everWritten = useRef(!!value.trim());
+  if (value.trim()) everWritten.current = true;
+  const awaitingAgent = !everWritten.current;
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
@@ -221,7 +223,9 @@ export default function PromptRichBlock({
             </div>
           ) : (
             <span className="text-[var(--color-text-tertiary)]">
-              {t("r2v.awaitAgentPrompt")}
+              {awaitingAgent
+                ? t("r2v.awaitAgentPrompt")
+                : placeholder ?? t("r2v.generateAndEdit", { label })}
             </span>
           )}
           {collapsed && (
