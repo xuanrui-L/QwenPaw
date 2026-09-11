@@ -9,35 +9,30 @@ export const screens: {
   label: string;
   purpose: string;
   required: PresentationActionId[];
-  optional: PresentationActionId[];
 }[] = [
   {
     id: "title",
     label: "首页",
     purpose: "作品介绍与观看入口",
     required: ["start", "map", "replay", "resume"],
-    optional: ["reset"],
   },
   {
     id: "play",
     label: "播放页",
     purpose: "视频画面、基本操作与剧情抉择",
     required: ["toggle_play", "map", "replay"],
-    optional: ["title"],
   },
   {
     id: "map",
     label: "剧情地图",
     purpose: "已探索的剧情节点与分支关系",
     required: ["map_back"],
-    optional: ["jump", "title", "reset"],
   },
   {
     id: "ending",
     label: "结局页",
     purpose: "本次结局与再次观看入口",
     required: ["replay", "title"],
-    optional: ["map", "reset"],
   },
 ];
 export const actions: Record<

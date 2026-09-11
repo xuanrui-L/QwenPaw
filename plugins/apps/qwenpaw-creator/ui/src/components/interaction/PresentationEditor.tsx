@@ -252,7 +252,7 @@ export default function PresentationEditor({
                 value:
                   (selection.action
                     ? chosen?.design_prompt
-                    : pageDesign?.design_prompt) ?? "",
+                    : pageDesign?.design_prompt || design?.design_prompt) ?? "",
               }}
               saving={generation.locked}
               regenerateLabel={
@@ -269,64 +269,10 @@ export default function PresentationEditor({
               }
               onRegenerate={() => generation.generate("interaction:project")}
             />
-            <details className="text-xs">
-              <summary className="cursor-pointer">整体视觉与动效提示词</summary>
-              <div className="mt-3">
-                <GenerationPromptEditor
-                  target={{
-                    pointer: "/interactive_presentation/design_prompt",
-                    label: "整体生成提示词",
-                    value: design?.design_prompt ?? "",
-                  }}
-                  saving={generation.locked}
-                  regenerateLabel=""
-                  onSave={(_, next) =>
-                    generation.save([
-                      {
-                        op: "replace",
-                        path: "/interactive_presentation/design_prompt",
-                        before: design?.design_prompt ?? "",
-                        value: next,
-                      },
-                    ])
-                  }
-                />
-              </div>
-            </details>
-            {page.optional.some((id) => !buttonIds.includes(id)) && (
-              <label className="block text-xs">
-                按剧情需要增加功能
-                <select
-                  aria-label="增加可选功能"
-                  disabled={generation.locked}
-                  value=""
-                  className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-2"
-                  onChange={(event) => {
-                    const action = event.target.value as PresentationActionId;
-                    if (!action) return;
-                    void updateScreen({
-                      controls: {
-                        ...pageDesign?.controls,
-                        [action]: { label: "", design_prompt: "" },
-                      },
-                    })
-                      .then(() => setSelection({ screen: page.id, action }))
-                      .catch(() => {});
-                  }}
-                >
-                  <option value="">选择功能</option>
-                  {page.optional
-                    .filter((id) => !buttonIds.includes(id))
-                    .map((id) => (
-                      <option key={id} value={id}>
-                        {actions[id].label}
-                      </option>
-                    ))}
-                </select>
-              </label>
-            )}
             <p className="text-xs text-[var(--color-text-secondary)]">
-              编辑完成后保存提示词；重新生成更新作品页面，完成后进入审阅。
+              {selection.action
+                ? "编辑按钮文案或外观提示词，完成后重新生成并审阅。"
+                : "在提示词中描述界面、动效或需要增加的功能；编辑完成后重新生成并审阅。"}
             </p>
             {status === "waiting_review" && (
               <p className="text-xs">请先在审阅面板批准或拒绝本次生成。</p>
