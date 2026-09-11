@@ -3,7 +3,7 @@ html,body{margin:0;width:100%;height:100%;background:#f4efdf;color:#244435;font-
 [data-screen]{height:100%;box-sizing:border-box;padding:24px}button{padding:12px;margin:8px}
 .stage{height:70%;position:relative}video{width:100%;height:100%}[data-slot]{position:absolute;inset:0}
 </style></head><body>
-<section data-screen="title"><h1 data-bind="project.title"></h1><p data-bind="project.synopsis"></p><button data-action="start">开始</button><button data-action="resume">继续</button></section>
+<section data-screen="title"><h1 data-bind="project.title"></h1><p data-bind="project.synopsis"></p><button data-action="start">开始</button><button data-action="resume">继续</button><button data-action="map">剧情地图</button><button data-action="replay">重新开始</button></section>
 <section data-screen="play"><p data-bind="node.title"></p><div class="stage"><video data-player-video controls></video><div data-slot="interaction"></div></div><button data-action="map">地图</button><button data-action="toggle_play">暂停或播放</button><button data-action="replay">重新开始</button></section>
 <section data-screen="map"><button data-action="map_back">返回</button>__NODES__</section>
 <section data-screen="ending"><h1 data-bind="node.title"></h1><p data-bind="node.synopsis"></p><button data-action="replay">重看</button><button data-action="title">首页</button></section>

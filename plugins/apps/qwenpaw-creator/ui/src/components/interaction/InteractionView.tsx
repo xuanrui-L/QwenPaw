@@ -9,6 +9,7 @@ import {
   getAssetVersionMediaUrl,
 } from "@/api/creator";
 import "../../../../player/ivb/static/interaction-runtime.js";
+import { mockVideoPoster } from "./mockVideoPoster";
 
 type Runtime = {
   mount: (
@@ -67,7 +68,9 @@ export default function InteractionView({
       {
         ...creation,
         motion_html: html,
-        base_frame_url: creation.base_frame_ref
+        base_frame_url: !countdown
+          ? mockVideoPoster
+          : creation.base_frame_ref
           ? (project.assets.artifact_versions_by_id[
               creation.base_frame_ref.replace(/^artifact-version:/, "")
             ]

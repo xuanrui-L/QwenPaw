@@ -393,9 +393,19 @@ async def execute_file_interaction_command(
         f"{idempotency_key}:{fingerprint}",
     )
     motion = creation.motion
+    execution = ProjectExecutionStore(services.root)
+    task_id = _stable_id("task", project_id, idempotency_key)
+    try:
+        existing = execution.get_task(project_id, task_id)
+    except RecordNotFoundError:
+        existing = None
     if (
         _motion_is_drafted(motion)
         and f"{_FINGERPRINT_MARKER}{fingerprint}" in motion.design_notes
+        and (
+            not arguments.get("regenerate")
+            or (existing and existing.status == TaskStatus.SUCCEEDED)
+        )
     ):
         logger.info(
             "interaction draft semantic replay: project=%s element=%s",
@@ -411,17 +421,11 @@ async def execute_file_interaction_command(
             replayed=True,
         )
 
-    execution = ProjectExecutionStore(services.root)
-    task_id = _stable_id("task", project_id, idempotency_key)
     if services.reviews.all_pending(project_id):
         raise ConflictError(
             "Approve or reject pending project changes "
             "before generating interaction motion",
         )
-    try:
-        existing = execution.get_task(project_id, task_id)
-    except RecordNotFoundError:
-        existing = None
     if existing is not None:
         if existing.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
             raise ConflictError("Interaction generation already running")

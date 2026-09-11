@@ -155,6 +155,17 @@ describe("BlueprintPage narrative shapes", () => {
       container.querySelector('[data-blueprint-shape="branching"]'),
     ).toBeInTheDocument();
     expect(container.querySelector("[data-export-bundle]")).toBeInTheDocument();
+    const title = screen.getByText("视频脚本");
+    const entry = screen.getByRole("button", { name: "交互设计" });
+    expect(entry.parentElement).toBe(title.parentElement);
+    fireEvent.click(entry);
+    expect(
+      screen.getByRole("region", { name: "交互设计工作台" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "返回蓝图" }));
+    expect(
+      container.querySelector("[data-interaction-design-panel]"),
+    ).not.toBeVisible();
     expect(
       screen.getByRole("button", { name: "下载 / 导出" }),
     ).toBeInTheDocument();

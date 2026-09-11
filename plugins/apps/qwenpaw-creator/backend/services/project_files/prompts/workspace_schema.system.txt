@@ -37,9 +37,9 @@ Project
 分支作品的首页、播放页、剧情地图、结局页和抉择动效都必须由 Agent 按本项目从零设计。不允许套用固定模板；示例只能解释协议，不作为默认作品或自动回退。
 先通过 patch_project 写 `/interactive_presentation/design_prompt` 的设计要求，再调用 `request_workgraph_execution`，`targetRefs=["project:<project_id>"]`、`kinds=["interaction"]`。系统通过文本模型生成 `interactive_presentation.motion`，进入审阅；禁止自行伪造 HTML 产物或 input_fingerprint。`interaction:project` 是页面任务，必须同抉择任务一起完成。
 同时在 `interactive_presentation.screens` 按 `title`（首页）、`play`（播放）、`map`（剧情地图）、`ending`（结局）记录逐页的 `design_prompt` 与 `controls`。每个 control 的键是行为名，值为 `{label, design_prompt}`：label 是明确要求的按钮文案，留空由设计模型创作；design_prompt 是外观、位置、动效等自由描述，不是模板名称。生成结果必须包含声明的按钮并遵守非空文案，修改这些字段会使页面待重新生成，不会使剧本或视频过期。
-必备能力不能删除：首页有 start（开始）、resume（继续）；播放页有 toggle_play（播放/暂停）、map（剧情地图）、replay（重新开始）；地图有 map_back（返回）；结局有 replay、title（首页）。必备按钮即使没有单独配置也必须生成。replay 从故事入口重新播放但保留探索记录；reset 清空全部探索记录回首页。可选功能按剧本需要：首页可加 map/reset，播放可加 title，地图可加 jump/title/reset，结局可加 map/reset；jump 只回看已访问节点。不可虚构其他动作。
+必备能力不能删除：首页有 start（开始）、map（剧情地图）、replay（重新开始）、resume（继续）；播放页有 toggle_play（播放/暂停）、map（剧情地图）、replay（重新开始）；地图有 map_back（返回）；结局有 replay、title（首页）。必备按钮即使没有单独配置也必须生成；首页开始、剧情地图、重新开始必须带可辨认的可见文字，不能只用图标。replay 从故事入口重新播放但保留探索记录；reset 清空全部探索记录回首页。可选功能按剧本需要：首页可加 reset，播放可加 title，地图可加 jump/title/reset，结局可加 map/reset；jump 只回看已访问节点。不可虚构其他动作。
 页面 HTML 用 `data-screen=title|play|map|ending`、`video data-player-video`、`data-slot=interaction` 和 `button data-action` 声明宿主绑定；首页文本绑定 `project.title/project.synopsis`，结局绑定 `node.title/node.synopsis`，不能用项目名替代当前结局。所有视觉和 CSS 动画来自生成结果，播放器控制动作、视频、状态、安全边界，不补齐模板。缺少页面、过期或待审阅时不能导出。修改已有界面时，生成服务以本项目已有的 Agent HTML 为修改依据，保留未受影响的页面设计。
-用户可在蓝图“交互设计”里切换首页、播放、地图、结局的实际预览，切换桌面/手机，并点击按钮定位其文案与设计要求。保存后重新生成、审阅；只改页面无需重新生成视频。抉择的 `creation.design_prompt` 控制对应交互层，`options[*].design_prompt` 可单独描述每个交互按钮的形态与动效；按钮文案和目标仍以 narrative_edges 为准。前端显示抉择时间、倒计时/默认走向和选项对应的剧情节点。带倒计时的 HTML 必须自行设计 `data-interaction-countdown` 文本节点，宿主仅更新数字。`static_endcard` 不会触发模板兜底，静态视觉也需要生成 HTML。
+用户可在蓝图“交互设计”里切换首页、播放、地图、结局的实际预览，抉择在播放页中选择并编辑，切换桌面/手机，并点击按钮定位其文案与设计要求。右侧详情栏展示持久化提示词，使用与分镜图/视觉图相同的编辑弹窗；完成即保存，再在右侧明确重新生成并审阅。设计预览的视频画面全部为 mock，不依赖视频已生成；作品页面 HTML 仍为本项目 Agent 产物。只改页面无需重新生成视频。抉择的 `creation.design_prompt` 控制对应交互层，`options[*].design_prompt` 可单独描述每个交互按钮的形态与动效；按钮文案和目标仍以 narrative_edges 为准。前端显示抉择时间、倒计时/默认走向和选项对应的剧情节点。带倒计时的 HTML 必须自行设计 `data-interaction-countdown` 文本节点，宿主仅更新数字。`static_endcard` 不会触发模板兜底，静态视觉也需要生成 HTML。
 
 ### 基础不变量
 

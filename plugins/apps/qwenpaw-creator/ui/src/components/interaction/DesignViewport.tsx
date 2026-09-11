@@ -15,7 +15,7 @@ export default function DesignViewport({
   useEffect(() => {
     if (!active || !root.current) return;
     const element = root.current;
-    const measure = () => setAvailable(element.getBoundingClientRect().width);
+    const measure = () => setAvailable(element.clientWidth);
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
@@ -25,12 +25,15 @@ export default function DesignViewport({
   if (!active) return children;
   const width = mobile ? 390 : 1280;
   const height = 720;
-  const scale = available > 0 ? Math.min(1, available / width) : 1;
+  const scale = available > 0 ? Math.min(1, available / width) : 0;
   return (
     <div
       ref={root}
-      className="relative w-full overflow-hidden rounded-lg border border-[var(--color-border)]"
-      style={{ height: height * scale }}
+      className="relative mx-auto w-full overflow-hidden rounded-lg border border-[var(--color-border)]"
+      style={{
+        aspectRatio: `${width} / ${height}`,
+        maxWidth: mobile ? width : undefined,
+      }}
       data-design-viewport={mobile ? "mobile" : "desktop"}
     >
       <div

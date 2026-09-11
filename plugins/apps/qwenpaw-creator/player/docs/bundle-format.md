@@ -241,16 +241,18 @@ interaction → 包无效。**
 
 | 页面 | 必备控件 | 可选动作 |
 |---|---|---|
-| title 首页 | start、resume | map、reset |
+| title 首页 | start、map、replay、resume | reset |
 | play 播放 | video[data-player-video]、空 data-slot=interaction、toggle_play、map、replay | title |
 | map 剧情地图 | map_back、每个真实剧情节点的 data-node-ref | jump、title、reset |
 | ending 结局 | replay、title | map、reset |
+
+首页 start、map、replay 必须带可见文字，不能只用图标、title 或 aria-label 代替。
 
 控件均以 `button[data-action]` 绑定。开始、重新开始与剧情地图不可因剧本省略。`replay` 从故事入口重新播放，保留探索记录；`reset` 清空探索记录回首页。未访问地图节点由宿主隐藏，`jump` 仅回看已访问节点。地图打开时暂停视频与倒计时。其余布局、文案、装饰、响应式样式与动效全部由生成 HTML 决定。
 
 Creator 的 `interactive_presentation` 保存 `design_prompt`、逐页 `screens` 和生成结果 `motion`。`screens[title|play|map|ending]` 有独立的 `design_prompt` 与 `controls[action] = {label, design_prompt}`。这是 Agent 与前端共享的设计意图模型。显式按钮文案会在生成时校验，不满足时先尝试修正；必备按钮没有单独配置时仍由 Agent 设计。逐页或按钮修改使页面待重新生成，不会让视频、剧本过期。
 
-抉择的 `creation.design_prompt` 描述该选择层，`options[*].design_prompt` 描述单个选项按钮。选项文案与走向仍来自 narrative_edges。前端“交互设计”提供四页实际预览、桌面/手机切换、按钮定位和抉择走向说明，保存设计后生成、审阅，再导出。
+抉择的 `creation.design_prompt` 描述该选择层，`options[*].design_prompt` 描述单个选项按钮。选项文案与走向仍来自 narrative_edges。前端“交互设计”位于“视频脚本”右侧，仅提供首页、播放页、剧情地图、结局页四个页面标签；抉择在播放页下选择并预览，点击抉择按钮可定位右侧详情。支持桌面/手机切换与剧情走向说明。视频画面始终使用 mock，不依赖素材生成。右侧详情复用分镜图/视觉图的提示词编辑与重新生成组件，编辑完成即持久化；明确重新生成后进入审阅，再导出。手动重新生成允许同提示词的新版本，自动调度继续按语义指纹去重。
 
 ## 6. 状态层 — SQLite
 

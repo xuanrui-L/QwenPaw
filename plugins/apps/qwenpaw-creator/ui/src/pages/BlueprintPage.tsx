@@ -1,6 +1,8 @@
-import InteractionWorkbench from "@/components/interaction/InteractionWorkbench";
+import InteractionWorkbench, {
+  hasInteractionDesign,
+} from "@/components/interaction/InteractionWorkbench";
 import { useEffect, useMemo, useState } from "react";
-import { FolderSearch, Palette } from "lucide-react";
+import { FolderSearch, Palette, MousePointer2 } from "lucide-react";
 import { MenuUnfoldOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
@@ -74,6 +76,7 @@ export default function BlueprintPage() {
   const sidebarOpen = useAgentDockUiStore((state) => state.open);
   const setSidebarOpen = useAgentDockUiStore((state) => state.setOpen);
   const [scriptOpen, setScriptOpen] = useState(false);
+  const [interactionOpen, setInteractionOpen] = useState(false);
   const [prepOpen, setPrepOpen] = useState(false);
   const [prepTab, setPrepTab] = useState<PreproductionTab>("visual");
   const [prepFocus, setPrepFocus] = useState<PrepFocus | null>(null);
@@ -171,6 +174,17 @@ export default function BlueprintPage() {
           <h2 className="truncate text-sm font-medium text-[var(--color-text-primary)]">
             {t("blueprint.pageTitle")}
           </h2>
+          {hasInteractionDesign(project) && (
+            <button
+              type="button"
+              className="btn-secondary"
+              data-interaction-design-entry
+              onClick={() => setInteractionOpen(true)}
+            >
+              <MousePointer2 className="h-3.5 w-3.5" />
+              交互设计
+            </button>
+          )}
         </div>
         <span className="flex flex-wrap items-center justify-end gap-3">
           <button
@@ -251,7 +265,11 @@ export default function BlueprintPage() {
         </div>
       )}
 
-      <InteractionWorkbench project={project} />
+      <InteractionWorkbench
+        project={project}
+        open={interactionOpen}
+        onOpenChange={setInteractionOpen}
+      />
       <BlueprintRoughCutStrip project={project} onSelectTimeline={openScript} />
 
       {/* Inline panels: only the workspace column, AgentDock stays visible. */}

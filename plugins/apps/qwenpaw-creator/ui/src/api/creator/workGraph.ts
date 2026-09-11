@@ -13,6 +13,7 @@ export function getWorkGraph(projectId: string): Promise<WorkGraphView> {
 export function dispatchWorkGraphNode(
   projectId: string,
   nodeId: string,
+  options?: { regenerate: boolean },
 ): Promise<{
   ok: boolean;
   nodeId: string;
@@ -23,6 +24,6 @@ export function dispatchWorkGraphNode(
     `${project(projectId)}/work-graph/nodes/${encodeURIComponent(
       nodeId,
     )}/dispatch`,
-    { method: "POST" },
+    { method: "POST", ...(options ? { body: JSON.stringify(options) } : {}) },
   );
 }

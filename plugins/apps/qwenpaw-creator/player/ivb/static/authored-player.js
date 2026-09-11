@@ -131,13 +131,19 @@
       doc = frame.contentDocument;
       if (adapter.review) {
         const selectionStyle = doc.createElement("style");
-        selectionStyle.textContent = "[data-editor-selected]{outline:3px solid #1677ff!important;outline-offset:3px!important}";
+        selectionStyle.textContent = "[data-editor-selected]{outline:2px solid #171717!important;outline-offset:3px!important;box-shadow:0 0 0 3px #fff!important}video::-webkit-media-controls{display:none!important}";
         doc.head.append(selectionStyle);
       }
       video = doc.querySelector("video[data-player-video]");
       slot = doc.querySelector('[data-slot="interaction"]');
       if (!video || !slot) { report(new Error("作品 HTML 播放接口缺失")); return; }
       video.playsInline = true;
+      if (adapter.review) {
+        // The Creator editor supplies sample media independently of generation.
+        // Offline/hosted playback never receives this editor-only adapter.
+        if (adapter.reviewPoster) video.poster = adapter.reviewPoster;
+        video.controls = false;
+      }
       all("button[data-action]").forEach(button => {
         button.type = "button";
         button.addEventListener("click", e => {
@@ -173,11 +179,12 @@
     return { dispose() { closed = true; choice?.dispose(); video?.pause(); owner.removeEventListener("visibilitychange", visibility); frame.remove(); },
       show(name) { if (doc && ["title", "play", "map", "ending"].includes(name)) {
         if (adapter.review) {
-          current = name === "ending" ? Object.keys(bundle.nodes).find(id => !(bundle.nodes[id].children || []).length) : bundle.entry_timeline_id;
-          if (name === "play") {
-            const source = adapter.segmentUrl?.(current);
-            if (source && video.getAttribute("src") !== source) { video.src = source; video.load(); }
-          }
+          current = name === "ending" ? Object.keys(bundle.nodes).find(id => !(bundle.nodes[id].children || []).length) : adapter.reviewPoint?.source_timeline_id || bundle.entry_timeline_id;
+          if (name === "play" && adapter.reviewPoint && !choice) {
+            slot.removeAttribute("data-host-hidden");
+            choice = global.IVBInteraction.mount(slot, {...adapter.reviewPoint, review: true}, edges,
+              ref => adapter.onChoiceInspect?.(ref));
+          } else if (name !== "play" && choice) clearChoice();
         } else if (name === "ending" && !current) current = Object.keys(bundle.nodes).find(id => !(bundle.nodes[id].children || []).length);
         show(name);
       } },
