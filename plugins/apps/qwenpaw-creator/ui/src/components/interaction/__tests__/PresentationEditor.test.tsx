@@ -6,7 +6,9 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
+import { message } from "antd";
 import PresentationEditor from "../PresentationEditor";
+import { formatControlPrompt, parseControlPrompt } from "../controlPrompt";
 import { projectDocument } from "@/test/creatorFixtures";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
@@ -29,7 +31,7 @@ vi.mock("@/pages/AssetsPage", () => ({
     saving,
   }: any) => (
     <div data-testid={target.pointer}>
-      <input
+      <textarea
         aria-label={target.label}
         value={target.value}
         disabled={saving}
@@ -76,12 +78,16 @@ beforeEach(() => {
   });
 });
 
-it("saves a selected button prompt with CAS, then explicitly regenerates from right details", async () => {
+it("saves button copy and appearance together with CAS before explicit regeneration", async () => {
   const value = project();
   const view = render(<PresentationEditor project={value} status="ready" />);
   fireEvent.click(screen.getByText("选择实际开始按钮"));
-  fireEvent.change(screen.getByLabelText("按钮外观与动效提示词"), {
-    target: { value: "黑色细线，悬停时轻微上移" },
+  expect(screen.queryByLabelText("按钮文案")).not.toBeInTheDocument();
+  expect(screen.getAllByRole("textbox")).toHaveLength(1);
+  fireEvent.change(screen.getByLabelText("按钮生成提示词"), {
+    target: {
+      value: "按钮文案：沿海出发\n\n外观与动效：黑色细线，悬停时轻微上移",
+    },
   });
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
   const operations = patch.mock.calls[0][1];
@@ -95,13 +101,31 @@ it("saves a selected button prompt with CAS, then explicitly regenerates from ri
         title: {
           design_prompt: "",
           controls: {
-            start: { label: "", design_prompt: "黑色细线，悬停时轻微上移" },
+            start: {
+              label: "沿海出发",
+              design_prompt: "黑色细线，悬停时轻微上移",
+            },
           },
         },
       },
     },
   ]);
   expect(dispatch).not.toHaveBeenCalled();
+  view.rerender(
+    <PresentationEditor
+      project={{
+        ...value,
+        interactive_presentation: {
+          ...value.interactive_presentation,
+          screens: operations[0].value,
+        },
+      }}
+      status="ready"
+    />,
+  );
+  expect(screen.getByLabelText("按钮生成提示词")).toHaveValue(
+    "按钮文案：沿海出发\n\n外观与动效：黑色细线，悬停时轻微上移",
+  );
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "生成作品页面" })).toBeEnabled(),
   );
@@ -121,6 +145,31 @@ it("saves a selected button prompt with CAS, then explicitly regenerates from ri
   expect(
     screen.queryByRole("button", { name: "保存设计" }),
   ).not.toBeInTheDocument();
+});
+
+it.each([
+  { label: "沿海\n出发", design_prompt: "黑色细线\n悬停时轻微上移" },
+  { label: "", design_prompt: "" },
+])(
+  "preserves multiline or empty button fields in one editor: %j",
+  (control) => {
+    expect(
+      parseControlPrompt(
+        formatControlPrompt(control.label, control.design_prompt),
+      ),
+    ).toEqual(control);
+  },
+);
+
+it("keeps incomplete combined input from overwriting button fields", async () => {
+  render(<PresentationEditor project={project()} />);
+  fireEvent.click(screen.getByText("选择实际开始按钮"));
+  fireEvent.change(screen.getByLabelText("按钮生成提示词"), {
+    target: { value: "按钮文案：沿海出发" },
+  });
+  await waitFor(() => expect(message.error).toHaveBeenCalled());
+  expect(patch).not.toHaveBeenCalled();
+  expect(dispatch).not.toHaveBeenCalled();
 });
 
 it("shows start, map and restart as required on the homepage before any media exists", () => {

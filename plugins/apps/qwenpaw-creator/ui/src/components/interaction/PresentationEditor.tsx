@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { message } from "antd";
 import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
 import ChoiceEditor from "./ChoiceEditor";
 import type {
@@ -10,6 +11,7 @@ import type {
 import { GenerationPromptEditor } from "@/pages/AssetsPage";
 import { actions, screens, type PreviewControl } from "./presentationDesign";
 import { PresentationPreview } from "./PresentationPreview";
+import { formatControlPrompt, parseControlPrompt } from "./controlPrompt";
 import {
   generationLabels,
   useInteractionGeneration,
@@ -110,6 +112,16 @@ export default function PresentationEditor({
   const promptPath = selection.action
     ? `${pagePath}/controls/${selection.action}/design_prompt`
     : `${pagePath}/design_prompt`;
+  const saveControlPrompt = async (next: string) => {
+    let value: ReturnType<typeof parseControlPrompt>;
+    try {
+      value = parseControlPrompt(next);
+    } catch (error) {
+      message.error((error as Error).message);
+      throw error;
+    }
+    await updateControl(value);
+  };
   return (
     <article
       data-creator-path="/interactive_presentation/motion"
@@ -230,16 +242,6 @@ export default function PresentationEditor({
                     当前生成结果尚未包含此按钮，重新生成时会补齐并校验。
                   </p>
                 )}
-                <GenerationPromptEditor
-                  target={{
-                    pointer: `${pagePath}/controls/${selection.action}/label`,
-                    label: "按钮文案",
-                    value: chosen?.label || actual?.label || "",
-                  }}
-                  saving={generation.locked}
-                  regenerateLabel=""
-                  onSave={(_, next) => updateControl({ label: next })}
-                />
               </div>
             )}
             <GenerationPromptEditor
@@ -247,11 +249,14 @@ export default function PresentationEditor({
               target={{
                 pointer: promptPath,
                 label: selection.action
-                  ? "按钮外观与动效提示词"
+                  ? "按钮生成提示词"
                   : `${page.label}生成提示词`,
                 value:
                   (selection.action
-                    ? chosen?.design_prompt
+                    ? formatControlPrompt(
+                        chosen?.label || actual?.label || "",
+                        chosen?.design_prompt ?? "",
+                      )
                     : pageDesign?.design_prompt || design?.design_prompt) ?? "",
               }}
               saving={generation.locked}
@@ -264,14 +269,14 @@ export default function PresentationEditor({
               }
               onSave={(_, next) =>
                 selection.action
-                  ? updateControl({ design_prompt: next })
+                  ? saveControlPrompt(next)
                   : updateScreen({ design_prompt: next })
               }
               onRegenerate={() => generation.generate("interaction:project")}
             />
             <p className="text-xs text-[var(--color-text-secondary)]">
               {selection.action
-                ? "编辑按钮文案或外观提示词，完成后重新生成并审阅。"
+                ? "在同一处编辑按钮文案、外观与动效，完成后重新生成并审阅。"
                 : "在提示词中描述界面、动效或需要增加的功能；编辑完成后重新生成并审阅。"}
             </p>
             {status === "waiting_review" && (
