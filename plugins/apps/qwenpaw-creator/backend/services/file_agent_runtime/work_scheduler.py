@@ -909,7 +909,21 @@ class WorkGraphScheduler:
                 node.timeline_id,
                 element_id,
             )
-            if status["status"] not in {"needs_update", "needs_confirmation"}:
+            # For legacy elements with empty prompts, treat as needing sync
+            # so the scheduler can auto-generate prompts from the narrative.
+            is_legacy_with_empty_prompts = (
+                status["status"] == "legacy"
+                and not status.get("storyboardPrompt", "").strip()
+                and not status.get("videoPrompt", "").strip()
+            )
+            if (
+                status["status"]
+                not in {
+                    "needs_update",
+                    "needs_confirmation",
+                }
+                and not is_legacy_with_empty_prompts
+            ):
                 continue
             fingerprint = "prepare-" + status["baselineToken"]
             ledger_key = (project_id, node.node_id, fingerprint)
@@ -937,7 +951,12 @@ class WorkGraphScheduler:
                     project_id,
                     node.timeline_id,
                     element_id,
-                    source=status.get("suggestedSource") or "storyboardPrompt",
+                    source=(
+                        "currentPlan"
+                        if is_legacy_with_empty_prompts
+                        else status.get("suggestedSource")
+                        or "storyboardPrompt"
+                    ),
                 )
                 if not await asyncio.to_thread(self.enabled):
                     return

@@ -209,8 +209,11 @@ def _validate_prompts(
         [path + "/storyboard_prompt", path + "/video_prompt"],
     )
     if not report["passed"]:
+        finding_summary = "; ".join(
+            f"{f['code']}: {f['message']}" for f in report["findings"]
+        )
         raise ValidationError(
-            "提示词尚未满足画幅或引用要求",
+            f"提示词尚未满足画幅或引用要求：{finding_summary}",
             details={"findings": report["findings"]},
         )
     for stage in ("storyboard", "video"):

@@ -2034,6 +2034,8 @@ class FileR2VExecutionService:
                 existing = None
                 idempotency_key = slot_key
                 break
+            if existing.status is TaskStatus.QUARANTINED:
+                continue
             self._assert_replay(existing, target_ref, command_hash)
             if existing.status is TaskStatus.FAILED:
                 if is_transient_task_error(existing.error):

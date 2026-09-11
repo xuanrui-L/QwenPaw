@@ -1122,7 +1122,13 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                         ),
                         missing=missing,
                         authored_text_gap=authored_text_gap,
-                        prompt_sync_required=bool(storyboard_sync_gap),
+                        prompt_sync_required=(
+                            bool(storyboard_sync_gap)
+                            or (
+                                not (creation.storyboard_prompt or "").strip()
+                                and (creation.narrative or "").strip()
+                            )
+                        ),
                         locator={"page": "plan", "elementId": element_id},
                         command="GENERATE_STORYBOARD_IMAGE",
                         target_ref=f"element:{element_id}",

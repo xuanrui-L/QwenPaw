@@ -577,6 +577,33 @@ def test_redispatch_rescues_quarantined_stale_result(
     assert result.artifact_version_id
 
 
+def test_unrescuable_quarantine_allows_fresh_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """When a quarantined task's stored result can't be imported (inputs
+    changed permanently), the next dispatch creates a fresh task instead
+    of raising CONFLICT."""
+
+    services = _services(tmp_path, monkeypatch)
+
+    def permanently_change_inputs(candidate: dict) -> None:
+        timeline = candidate["timelines"]["items"]["timeline:main"]
+        timeline["elements_by_id"][ELEMENT_ID]["creation"][
+            "storyboard_prompt"
+        ] = "完全不同的提示词，旧结果无法复用"
+
+    provider = _MutatingImageProvider(services, permanently_change_inputs)
+    with pytest.raises(ConflictError, match="结果已隔离"):
+        _execute(services, provider)
+    assert provider.calls == 1
+
+    result = _execute(services, provider)
+    assert provider.calls == 2
+    assert not result.replayed
+    assert result.artifact_version_id
+
+
 @pytest.mark.parametrize(
     "field,stale",
     [

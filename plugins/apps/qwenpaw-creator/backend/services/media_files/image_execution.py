@@ -1920,6 +1920,7 @@ class FileImageExecutionService:
                 )
                 if rescued is not None:
                     return rescued
+                continue
             raise _terminated_task_conflict(existing_task)
         else:
             raise _terminated_task_conflict(

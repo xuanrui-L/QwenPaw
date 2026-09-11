@@ -1145,8 +1145,11 @@ class AgentProjectTools:
             base.project.model_dump(mode="json"),
             candidate,
         )
-        normalized_pointers = normalize_project_candidate(candidate)
         base_data = base.project.model_dump(mode="json")
+        normalized_pointers = normalize_project_candidate(
+            candidate,
+            base=base_data,
+        )
         changed_protected = [
             pointer
             for pointer in sorted(PROTECTED_EXACT_POINTERS)
@@ -1559,7 +1562,11 @@ class AgentProjectTools:
             base.project.model_dump(mode="json"),
             candidate,
         )
-        normalized_pointers = normalize_project_candidate(candidate)
+        base_data = base.project.model_dump(mode="json")
+        normalized_pointers = normalize_project_candidate(
+            candidate,
+            base=base_data,
+        )
         sync_fence = self._begin_sync_review_fence(
             base.project.model_dump(mode="json"),
             candidate,
