@@ -21,6 +21,27 @@ SMOKE_PID = "project-smoke-0001"
 P = f"/api/projects/{SMOKE_PID}"
 
 
+def test_local_player_upload_uses_os_owner_without_a_gateway(
+    library,
+    bundle_zip,
+):
+    app = create_app(library.data_dir, local_owner="local:creator-user")
+    with TestClient(app) as client:
+        with bundle_zip.open("rb") as stream:
+            response = client.post(
+                "/api/projects",
+                files={"file": ("story.zip", stream)},
+                headers={"X-User-Id": "browser-cannot-change-owner"},
+            )
+        assert response.status_code == 201, response.text
+        assert app.state.library.list_projects(
+            owner_user_id="local:creator-user",
+        )
+        assert not app.state.library.list_projects(
+            owner_user_id="browser-cannot-change-owner",
+        )
+
+
 @pytest.fixture
 def client(library, bundle_zip):
     library.install(bundle_zip, owner_user_id=ANONYMOUS_USER_ID)

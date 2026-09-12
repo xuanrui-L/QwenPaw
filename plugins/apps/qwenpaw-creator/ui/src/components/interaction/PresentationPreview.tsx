@@ -12,7 +12,6 @@ import {
 import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
 import { screens, type PreviewControl } from "./presentationDesign";
 import DesignViewport from "./DesignViewport";
-import { mockVideoPoster } from "./mockVideoPoster";
 import "../../../../player/ivb/static/interaction-runtime.js";
 import "../../../../player/ivb/static/authored-player.js";
 
@@ -37,6 +36,7 @@ export function presentationPreviewKey(
   const ids = selectLiveTimelineIds(project);
   return JSON.stringify({
     id: project.project_id,
+    review,
     name: project.name,
     description: project.description,
     brief: project.strategy.creative_brief,
@@ -54,7 +54,13 @@ export function presentationPreviewKey(
         ),
       };
     }),
-    assets: review ? undefined : project.assets,
+    // Only selected playback media changes should replace the preview.
+    // Unrelated media tasks/reviews must not restart its authored animations.
+    segments: ids.map(
+      (id) =>
+        project.assets.artifact_slots_by_id[`timeline:${id}:render`]
+          ?.selected_version_id,
+    ),
   });
 }
 
@@ -128,9 +134,7 @@ export function PresentationPreview({
                 ...e.creation,
                 element_id: e.element_id,
                 source_timeline_id: id,
-                base_frame_url: review
-                  ? mockVideoPoster
-                  : frameRef
+                base_frame_url: frameRef
                   ? (project.assets.artifact_versions_by_id[frameRef]
                       ? getArtifactVersionMediaUrl
                       : getAssetVersionMediaUrl)(frameRef)
@@ -168,7 +172,6 @@ export function PresentationPreview({
         },
         {
           review,
-          reviewPoster: review ? mockVideoPoster : undefined,
           reviewPoint: review
             ? interactions.find((p) => p?.element_id === reviewPointId)
             : undefined,
@@ -179,7 +182,6 @@ export function PresentationPreview({
             ? { visited: ids, endings: [], current_timeline: ids[0] }
             : undefined,
           segmentUrl(id: string) {
-            if (review) return "";
             const selectedVersion =
               project.assets.artifact_slots_by_id[`timeline:${id}:render`]
                 ?.selected_version_id;
@@ -240,7 +242,7 @@ export function PresentationPreview({
               ))}
             </div>
           )}
-          <span>实际生成界面 · 视频画面为示意 · 点击按钮查看详情</span>
+          <span>实际生成界面与视频 · 点击按钮查看详情</span>
           <div className="flex gap-1">
             {[false, true].map((value) => (
               <button

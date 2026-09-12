@@ -342,6 +342,7 @@ def create_app(
     db_path: str | Path | None = None,
     root_path: str = "",
     max_upload_bytes: int | None = None,
+    local_owner: str | None = None,
 ) -> FastAPI:
     """建多包放映应用。``data_dir`` 是持久卷根(含 ``ivb.db`` 与 ``bundles/``)。
 
@@ -349,11 +350,25 @@ def create_app(
     请求按 pid 查目录表定位磁盘包(见 :class:`ProjectLibrary`)。``root_path``
     供挂子路径时用(第 6 步前端 ``<base href>`` 依赖它);``max_upload_bytes``
     限制上传包大小(None = 不限)。
+
+    ``local_owner`` 仅供绑定回环地址的本机单用户入口使用，归属来自系统
+    账户，浏览器不能覆盖。默认仍由可信网关注入身份，匿名上传返回 401。
     """
 
     # FastAPI 工厂天然在此集中注册十余个路由,每个 @app.* 都计入语句数,
     # 与函数复杂度无关 —— 拆成 APIRouter 只为凑 R0915 反而更碎,故就地豁免。
     # pylint: disable=too-many-statements
+    if local_owner is not None and not local_owner.strip():
+        raise ValueError("local_owner must identify the local OS account")
+
+    def viewer(x_user_id: str | None = Header(default=None)) -> str:
+        # Explicit single-user local mode belongs to the server's OS account.
+        # Browser-supplied identity headers cannot change that ownership.
+        return local_owner or current_user(x_user_id)
+
+    def uploader(x_user_id: str | None = Header(default=None)) -> str:
+        return local_owner or require_user(x_user_id)
+
     library = ProjectLibrary(data_dir, db_path=db_path)
 
     def service_for(
@@ -418,7 +433,7 @@ def create_app(
     @app.get("/api/projects")
     def list_projects(
         scope: str = "all",
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, Any]:
         """库列表。``scope=mine`` 只看当前用户上传的,``all``(默认)看全部。"""
 
@@ -443,7 +458,7 @@ def create_app(
     async def upload_project(
         file: UploadFile = File(...),
         title: str | None = Form(default=None),
-        user_id: str = Depends(require_user),
+        user_id: str = Depends(uploader),
     ) -> Response:
         """接收 Creator 导出的 zip:校验 → 落盘 → 登记目录。
 
@@ -549,7 +564,7 @@ def create_app(
     @app.get("/api/projects/{project_id}/state/progress")
     def progress(
         project_id: str,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, Any]:
         service = service_for(project_id, user_id)
         payload = service.store.progress(project_id).as_dict()
@@ -562,7 +577,7 @@ def create_app(
     def visit(
         project_id: str,
         body: VisitIn,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, str]:
         service = service_for(project_id, user_id)
         _require_known(service.bundle, body.timeline_id, "timeline_id")
@@ -578,7 +593,7 @@ def create_app(
     def watch(
         project_id: str,
         body: WatchIn,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, Any]:
         """离开节点时回填真实观看秒数。"""
 
@@ -595,7 +610,7 @@ def create_app(
     def choice(
         project_id: str,
         body: ChoiceIn,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, Any]:
         service = service_for(project_id, user_id)
         _require_known(
@@ -622,7 +637,7 @@ def create_app(
     def ending(
         project_id: str,
         body: EndingIn,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, Any]:
         service = service_for(project_id, user_id)
         _require_known(service.bundle, body.timeline_id, "timeline_id")
@@ -648,7 +663,7 @@ def create_app(
     @app.get("/api/projects/{project_id}/state/stats")
     def stats(
         project_id: str,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, Any]:
         service = service_for(project_id, user_id)
         payload: dict[str, Any] = service.store.stats(project_id)
@@ -665,7 +680,7 @@ def create_app(
     @app.post("/api/projects/{project_id}/state/reset")
     def reset(
         project_id: str,
-        user_id: str = Depends(current_user),
+        user_id: str = Depends(viewer),
     ) -> dict[str, Any]:
         deleted = service_for(project_id, user_id).store.clear(project_id)
         return {"ok": "cleared", "deleted": deleted}

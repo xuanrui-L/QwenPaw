@@ -1480,6 +1480,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
         key = (
             TaskKind.INTERACTION_DRAFT.value,
             f"project:{project.project_id}",
+            None,
         )
         task, failure = active.get(key), failed.get(key)
         missing = _upstream_missing(deps, statuses)
@@ -1510,6 +1511,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 deps=deps,
                 lane="interaction",
                 task_id=getattr(task, "task_id", None),
+                progress=getattr(task, "progress", None),
                 error=_task_error_summary(failure)
                 if status is WorkNodeStatus.FAILED
                 else None,
@@ -1540,6 +1542,7 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             key = (
                 TaskKind.INTERACTION_DRAFT.value,
                 f"element:{element_id}",
+                None,
             )
             task = active.get(key)
             failure = failed.get(key)

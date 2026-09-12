@@ -91,3 +91,61 @@ it("keeps an unexplored map visible, gates jumps and reveals resume after starti
   expect(ending).not.toHaveAttribute("data-visited");
   expect(ending).toBeDisabled();
 });
+
+it.each(["", "/real-generated.mp4"])(
+  "shows actual review media or an honest missing state (%s)",
+  async (url) => {
+    const html = readFileSync(
+      resolve(
+        process.cwd(),
+        "../player/tests/fixtures/authored-presentation.html",
+      ),
+      "utf8",
+    ).replace("__NODES__", "");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const inspect = vi.fn(),
+      ending = vi.fn(),
+      visit = vi.fn();
+    const view = runtime.mount(
+      container,
+      {
+        authored_html: html,
+        meta: { title: "Story" },
+        entry_timeline_id: "entry",
+        nodes: { entry: { title: "Entry", children: [] } },
+      },
+      {
+        review: true,
+        segmentUrl: () => url,
+        onInspect: inspect,
+        ending,
+        visit,
+      },
+    );
+    dispose = () => view.dispose();
+    const frame = container.querySelector("iframe")!;
+    const doc = frame.contentDocument!;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    const video = doc.querySelector("video")!;
+    vi.spyOn(video, "pause").mockImplementation(() => {});
+    const load = vi.spyOn(video, "load").mockImplementation(() => {});
+    frame.dispatchEvent(new Event("load"));
+    view.show("play");
+    expect(video.getAttribute("src") || "").toBe(url);
+    expect(video.poster).toBe("");
+    expect(video.controls).toBe(true);
+    expect(
+      doc.querySelector("[data-editor-missing-media]")?.textContent || "",
+    ).toBe(url ? "" : "当前片段尚未生成视频");
+    view.show("play");
+    expect(load).toHaveBeenCalledTimes(url ? 1 : 0);
+    video.dispatchEvent(new Event("ended"));
+    doc.querySelector<HTMLButtonElement>('[data-action="start"]')!.click();
+    expect(inspect).toHaveBeenCalledWith({ screen: "title", action: "start" });
+    expect(visit).not.toHaveBeenCalled();
+    expect(ending).not.toHaveBeenCalled();
+  },
+);
