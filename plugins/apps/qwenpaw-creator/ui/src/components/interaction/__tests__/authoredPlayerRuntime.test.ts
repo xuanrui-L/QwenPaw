@@ -139,7 +139,7 @@ it.each(["", "/real-generated.mp4"])(
     expect(video.controls).toBe(true);
     expect(
       doc.querySelector("[data-editor-missing-media]")?.textContent || "",
-    ).toBe(url ? "" : "当前片段尚未生成视频");
+    ).toBe(url ? "" : "当前节点尚未合成视频");
     view.show("play");
     expect(load).toHaveBeenCalledTimes(url ? 1 : 0);
     video.dispatchEvent(new Event("ended"));
@@ -147,5 +147,63 @@ it.each(["", "/real-generated.mp4"])(
     expect(inspect).toHaveBeenCalledWith({ screen: "title", action: "start" });
     expect(visit).not.toHaveBeenCalled();
     expect(ending).not.toHaveBeenCalled();
+  },
+);
+
+it.each([true, false])(
+  "preserves the viewer's playback state across map navigation (paused=%s)",
+  async (userPaused) => {
+    const html = readFileSync(
+      resolve(
+        process.cwd(),
+        "../player/tests/fixtures/authored-presentation.html",
+      ),
+      "utf8",
+    ).replace("__NODES__", "");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const view = runtime.mount(
+      container,
+      {
+        authored_html: html,
+        meta: { title: "Story" },
+        entry_timeline_id: "entry",
+        nodes: { entry: { title: "Entry", children: [] } },
+        segments: { entry: "/entry.mp4" },
+      },
+      {},
+    );
+    dispose = () => view.dispose();
+    const frame = container.querySelector("iframe")!;
+    const doc = frame.contentDocument!;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    const video = doc.querySelector("video")!;
+    let paused = true;
+    vi.spyOn(video, "paused", "get").mockImplementation(() => paused);
+    vi.spyOn(video, "pause").mockImplementation(() => {
+      paused = true;
+    });
+    vi.spyOn(video, "load").mockImplementation(() => {});
+    vi.spyOn(video, "play").mockImplementation(async () => {
+      paused = false;
+    });
+    frame.dispatchEvent(new Event("load"));
+    const click = async (action: string) => {
+      doc
+        .querySelector<HTMLButtonElement>(`button[data-action="${action}"]`)!
+        .click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    await click("start");
+    expect(paused).toBe(false);
+    if (userPaused) await click("toggle_play");
+    await click("map");
+    expect(paused).toBe(true);
+    expect(doc.documentElement.dataset.currentScreen).toBe("map");
+    await click("map_back");
+    expect(doc.documentElement.dataset.currentScreen).toBe("play");
+    expect(paused).toBe(userPaused);
   },
 );

@@ -2,6 +2,7 @@
 """Library replacement preserves ownership, playback and progress."""
 
 import json
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -94,6 +95,36 @@ def test_concurrent_first_install_has_one_owner(tmp_path):
     with ThreadPoolExecutor(2) as pool:
         results = list(pool.map(attempt, (0, 1)))
     assert len([result for result in results if result]) == 1
+
+
+def test_offline_player_only_update_preserves_progress(tmp_path):
+    source = write_bundle_dir(tmp_path / "src", BundleSpec())
+    (source / "index.html").write_text("offline host v1")
+    library = ProjectLibrary(tmp_path / "data")
+    first = library.install(source, owner_user_id="alice")
+    for user in ("alice", "bob"):
+        library.store_for(user).record_visit(first.project_id, "timeline:open")
+    (source / "index.html").write_text("offline host with pause fix")
+    second = library.install(source, owner_user_id="alice")
+    assert second.storage_path != first.storage_path
+    for user in ("alice", "bob"):
+        assert library.store_for(user).visited(first.project_id) == [
+            "timeline:open",
+        ]
+
+
+def test_progress_preservation_requires_the_compared_revision(tmp_path):
+    source = write_bundle_dir(tmp_path / "src", BundleSpec())
+    library = ProjectLibrary(tmp_path / "data")
+    first = library.install(source, owner_user_id="alice")
+    concurrent = replace(first, storage_path="concurrent-story")
+    library.store.upsert_project(concurrent)
+    library.store_for("bob").record_visit(first.project_id, "timeline:open")
+    library.store.upsert_project(
+        replace(first, storage_path="player-fix"),
+        preserve_progress_from=first.storage_path,
+    )
+    assert not library.store_for("bob").visited(first.project_id)
 
 
 def test_duplicate_zip_and_segment_paths_are_fatal(tmp_path):

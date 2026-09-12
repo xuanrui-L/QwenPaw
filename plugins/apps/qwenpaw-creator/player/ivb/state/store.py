@@ -183,7 +183,12 @@ class StateStore(Protocol):
         ...
 
     # -- 目录(owner_user_id 显式传入) --------------------------------
-    def upsert_project(self, record: ProjectRecord) -> None:
+    def upsert_project(
+        self,
+        record: ProjectRecord,
+        *,
+        preserve_progress_from: str | None = None,
+    ) -> None:
         ...
 
     def get_project(self, project_id: str) -> ProjectRecord | None:
@@ -532,7 +537,12 @@ class ProgressStore:
 
     # -- 目录(catalog) --------------------------------------------------
 
-    def upsert_project(self, record: ProjectRecord) -> None:
+    def upsert_project(
+        self,
+        record: ProjectRecord,
+        *,
+        preserve_progress_from: str | None = None,
+    ) -> None:
         """登记/更新目录行。
 
         ``owner_user_id`` 只在首次插入时落库;重复上传(同 project_id)更新标题、
@@ -555,7 +565,13 @@ class ProgressStore:
                     raise PermissionError(
                         "Only the owner may replace this project",
                     )
-                if previous["storage_path"] != record.storage_path:
+                # Only a server-verified identical content revision may keep
+                # progress. Check the compared path inside the transaction so
+                # a concurrent replacement cannot inherit a stale exemption.
+                if previous["storage_path"] not in (
+                    record.storage_path,
+                    preserve_progress_from,
+                ):
                     for table in (
                         "progress",
                         "visits",
