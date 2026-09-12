@@ -516,6 +516,17 @@ async def execute_file_interaction_command(
                 if is_presentation
                 else _validate_motion_html(candidate, creation)
             )
+            if (
+                is_presentation
+                and motion
+                and motion.html
+                and candidate.strip() == motion.html.strip()
+                and f"{_FINGERPRINT_MARKER}{fingerprint}"
+                not in motion.design_notes
+            ):
+                problems.append(
+                    "设计要求已修改，但页面与上一版完全相同；请落实新要求，不要原样复制 previous_html",
+                )
             if not problems:
                 html = candidate
                 break
