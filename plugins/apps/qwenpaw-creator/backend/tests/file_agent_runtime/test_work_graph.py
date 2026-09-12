@@ -1413,21 +1413,31 @@ def test_interaction_node_reopens_when_options_change_after_draft() -> None:
     assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.READY
 
 
-def test_running_interaction_task_projects_running_status() -> None:
+@pytest.mark.parametrize("scope", ["element", "project"])
+def test_running_interaction_task_projects_running_status(scope) -> None:
     project = _project()
     _make_branching(project)
+    target = (
+        "element:el:choice"
+        if scope == "element"
+        else f"project:{project.project_id}"
+    )
     graph = derive_work_graph(
         project,
         tasks=[
             _task(
                 "interaction_draft",
-                "element:el:choice",
+                target,
                 TaskStatus.RUNNING,
                 progress=0.3,
             ),
         ],
     )
-    node = graph.by_id["interaction:el:choice"]
+    node = graph.by_id[
+        "interaction:el:choice"
+        if scope == "element"
+        else "interaction:project"
+    ]
     assert node.status is WorkNodeStatus.RUNNING
     assert node.progress == 0.3
 

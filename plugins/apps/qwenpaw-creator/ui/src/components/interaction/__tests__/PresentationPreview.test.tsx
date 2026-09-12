@@ -38,8 +38,8 @@ it("keeps the preview mounted across identical snapshots and unrelated productio
   await waitFor(() => expect(mount).toHaveBeenCalledTimes(1));
   expect(handle.dispose).not.toHaveBeenCalled();
   const adapter = mount.mock.calls[0][2];
-  expect(adapter.segmentUrl("timeline:main")).toBe("");
-  expect(adapter.reviewPoster).toMatch(/^data:image\/svg\+xml/);
+  expect(adapter.segmentUrl("timeline:main")).toContain("final-v1");
+  expect(adapter.reviewPoster).toBeUndefined();
   expect(mount.mock.calls[0][1].meta.synopsis).toBe("One light, two routes.");
   view.rerender(
     <PresentationPreview
@@ -64,4 +64,41 @@ it("keeps the preview mounted across identical snapshots and unrelated productio
   );
   await waitFor(() => expect(mount).toHaveBeenCalledTimes(3));
   expect(handle.dispose).toHaveBeenCalledTimes(2);
+});
+
+it("uses selected real media in design review and refreshes when that selection changes", async () => {
+  const mount = vi.spyOn(runtime, "mount").mockReturnValue({
+    dispose: vi.fn(),
+    show: vi.fn(),
+    inspect: vi.fn(),
+  });
+  const value = structuredClone(projectDocument);
+  value.assets.artifact_slots_by_id[
+    "timeline:timeline:main:render"
+  ].selected_version_id = null;
+  value.interactive_presentation = {
+    design_prompt: "Original page",
+    screens: {},
+    motion: {
+      format: "html_css",
+      html: "<html>Original</html>",
+      fps: 24,
+      loop: true,
+      design_notes: "",
+    },
+  };
+  const view = render(<PresentationPreview project={value} />);
+  await waitFor(() => expect(mount).toHaveBeenCalledTimes(1));
+  expect(mount.mock.calls[0][2].segmentUrl("timeline:main")).toBe("");
+  const next = structuredClone(value);
+  next.assets.artifact_slots_by_id["timeline:timeline:main:render"] = {
+    ...next.assets.artifact_slots_by_id["timeline:timeline:main:render"],
+    selected_version_id: "actual-video",
+  };
+  view.rerender(<PresentationPreview project={next} />);
+  await waitFor(() => expect(mount).toHaveBeenCalledTimes(2));
+  expect(mount.mock.calls[1][2].segmentUrl("timeline:main")).toContain(
+    "actual-video",
+  );
+  expect(mount.mock.calls[1][2].reviewPoster).toBeUndefined();
 });

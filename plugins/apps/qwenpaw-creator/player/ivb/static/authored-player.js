@@ -95,7 +95,7 @@
       choice.pause(screen !== "play");
     }
     async function end() {
-      if (busy || screen !== "play") return;
+      if (adapter.review || busy || screen !== "play") return;
       const point = pointHere();
       if (point && !answered) { openChoice(point); return; }
       const children = bundle.nodes[current].children || [];
@@ -135,7 +135,7 @@
       doc = frame.contentDocument;
       if (adapter.review) {
         const selectionStyle = doc.createElement("style");
-        selectionStyle.textContent = "[data-editor-selected]{outline:2px solid #171717!important;outline-offset:3px!important;box-shadow:0 0 0 3px #fff!important}video::-webkit-media-controls{display:none!important}";
+        selectionStyle.textContent = "[data-editor-selected]{outline:2px solid #171717!important;outline-offset:3px!important;box-shadow:0 0 0 3px #fff!important}";
         doc.head.append(selectionStyle);
       }
       video = doc.querySelector("video[data-player-video]");
@@ -143,10 +143,9 @@
       if (!video || !slot) { report(new Error("作品 HTML 播放接口缺失")); return; }
       video.playsInline = true;
       if (adapter.review) {
-        // The Creator editor supplies sample media independently of generation.
-        // Offline/hosted playback never receives this editor-only adapter.
-        if (adapter.reviewPoster) video.poster = adapter.reviewPoster;
-        video.controls = false;
+        // Design review consumes the same selected media as final playback.
+        // Authored buttons still select their editor instead of navigating.
+        video.controls = true;
       }
       all("button[data-action]").forEach(button => {
         button.type = "button";
@@ -157,8 +156,12 @@
           } else void run(() => action(button));
         });
       });
-      video.addEventListener("play", () => { if (adapter.review || choice || screen !== "play") video.pause(); });
-      video.addEventListener("loadedmetadata", () => { previousTime = 0; });
+      video.addEventListener("play", () => { if (choice || screen !== "play") video.pause(); });
+      video.addEventListener("loadedmetadata", () => {
+        previousTime = 0;
+        if (adapter.review) video.currentTime = Math.max(0, Math.min(
+          adapter.reviewPoint?.at_seconds || 0.04, video.duration - 0.04));
+      });
       video.addEventListener("timeupdate", () => {
         const t = video.currentTime, delta = t - previousTime; previousTime = t;
         if (adapter.review || screen !== "play") return;
@@ -184,6 +187,24 @@
       show(name) { if (doc && ["title", "play", "map", "ending"].includes(name)) {
         if (adapter.review) {
           current = name === "ending" ? Object.keys(bundle.nodes).find(id => !(bundle.nodes[id].children || []).length) : adapter.reviewPoint?.source_timeline_id || bundle.entry_timeline_id;
+          if (name === "play") {
+            const url = adapter.segmentUrl?.(current, bundle.nodes[current]) || "";
+            const previousUrl = video.getAttribute("src") || "";
+            if (url !== previousUrl) {
+              if (url) video.setAttribute("src", url);
+              else video.removeAttribute("src");
+              video.load();
+            }
+            let missing = doc.querySelector("[data-editor-missing-media]");
+            if (!url && !missing) {
+              missing = doc.createElement("p");
+              missing.setAttribute("data-editor-missing-media", "");
+              missing.setAttribute("role", "status");
+              missing.textContent = "当前片段尚未生成视频";
+              video.after(missing);
+            }
+            if (url) missing?.remove();
+          }
           if (name === "play" && adapter.reviewPoint && !choice) {
             slot.removeAttribute("data-host-hidden");
             choice = global.IVBInteraction.mount(slot, {...adapter.reviewPoint, review: true}, edges,
