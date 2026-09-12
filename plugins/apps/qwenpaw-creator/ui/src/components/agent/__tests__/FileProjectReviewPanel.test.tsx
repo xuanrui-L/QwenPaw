@@ -83,6 +83,59 @@ afterEach(() => {
 });
 
 describe("FileProjectReviewPanel", () => {
+  it.each(["ACCEPT", "REJECT"] as const)(
+    "decides generated HTML and provenance together on %s without including other edits",
+    async (decision) => {
+      const pointer = "/interactive_presentation/motion";
+      const value = makeReviewRecord({
+        operations: [
+          makeReviewOperation({
+            operation_id: "html",
+            json_pointer: `${pointer}/html`,
+            before: "old HTML",
+            after: "new HTML",
+            ui_locator: { page: "blueprint", field: `${pointer}/html` },
+          }),
+          makeReviewOperation({
+            operation_id: "provenance",
+            json_pointer: `${pointer}/design_notes`,
+            before: "old fingerprint",
+            after: "new fingerprint",
+          }),
+          makeReviewOperation({
+            operation_id: "description",
+            json_pointer: "/description",
+            before: "Old story",
+            after: "New story",
+          }),
+        ],
+      });
+      const decide = setup(value);
+      expect(reviewPendingUnits(value)).toBe(2);
+      expect(screen.getAllByTitle("作品页面 · 界面效果")).toHaveLength(1);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: `${
+            decision === "ACCEPT" ? "保留" : "撤销"
+          } 作品页面 · 界面效果`,
+        }),
+      );
+      if (decision === "REJECT") {
+        expect(screen.getByRole("dialog")).toHaveTextContent("将撤销 1 项内容");
+        fireEvent.click(screen.getByRole("button", { name: "仅撤销" }));
+      }
+      await waitFor(() => expect(decide).toHaveBeenCalled());
+      expect(decide.mock.calls[0].slice(0, 3)).toEqual([
+        "p1",
+        "review-1",
+        [
+          { operation_id: "html", decision },
+          { operation_id: "provenance", decision },
+        ],
+      ]);
+    },
+  );
+
   it.each([
     ["/interactive_presentation/motion", "作品页面 · 界面效果"],
     [
