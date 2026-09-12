@@ -1238,6 +1238,70 @@ def test_explicit_regeneration_is_reviewed_and_deduped(tmp_path, monkeypatch):
     assert services.projects.read(PROJECT_ID).generation == after.generation
 
 
+@pytest.mark.parametrize("recovers", [True, False])
+def test_changed_page_prompt_cannot_publish_identical_old_interface(
+    tmp_path,
+    monkeypatch,
+    recovers,
+):
+    from services.media_files.presentation_authoring import (
+        presentation_is_current,
+    )
+    from services.runtime_files.models import ChangeOrigin
+
+    services = _services(tmp_path, with_runtime=True)
+    revised_html = _presentation_html("#fff2dc")
+    calls = _mock_chat(
+        monkeypatch,
+        [
+            _presentation_html(),
+            _presentation_html(),
+            revised_html if recovers else _presentation_html(),
+        ],
+    )
+
+    def execute(key):
+        return asyncio.run(
+            execute_file_interaction_command(
+                services,
+                project_id=PROJECT_ID,
+                target_ref=f"project:{PROJECT_ID}",
+                arguments={"regenerate": True},
+                idempotency_key=key,
+            ),
+        )
+
+    execute("initial-page")
+    _decide_all(services)
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_copy(deep=True)
+    candidate.interactive_presentation.design_prompt = "背景改为 #fff2dc"
+    changed = services.commits.commit(
+        base=base,
+        candidate=candidate.model_dump(mode="json"),
+        origin=ChangeOrigin.FRONTEND_EDIT,
+    ).snapshot
+    assert not presentation_is_current(changed.project)
+
+    if recovers:
+        execute("revised-page")
+        assert services.reviews.all_pending(PROJECT_ID)
+        _decide_all(services)
+        after = services.projects.read(PROJECT_ID).project
+        assert after.interactive_presentation.motion.html == revised_html
+        assert presentation_is_current(after)
+    else:
+        with pytest.raises(ModelError, match="页面与上一版完全相同"):
+            execute("revised-page")
+        after = services.projects.read(PROJECT_ID)
+        assert after.etag == changed.etag
+        assert after.project == changed.project
+        assert not presentation_is_current(after.project)
+        assert not services.reviews.all_pending(PROJECT_ID)
+    assert len(calls) == 3
+    assert "页面与上一版完全相同" in calls[2]["prompt"]
+
+
 def test_http_manual_regeneration_uses_new_slot_without_changing_prompt(
     tmp_path,
     monkeypatch,
