@@ -81,13 +81,33 @@ export function reviewMediaLocator(
   return null;
 }
 
+/** A generated interface and its provenance are one reviewable result. */
+function reviewOperationGroups(operations: FileProjectReviewOperation[]) {
+  const groups = new Map<string, FileProjectReviewOperation[]>();
+  for (const operation of operations) {
+    const motion = operation.json_pointer?.match(
+      /^(\/interactive_presentation\/motion|\/timelines\/items\/[^/]+\/elements_by_id\/[^/]+\/creation\/motion)(?:\/|$)/u,
+    )?.[1];
+    // Preserve already-decided rows and keep unrelated edits independent.
+    const key = motion
+      ? `${motion}:${operation.decision}`
+      : operation.operation_id;
+    const group = groups.get(key) ?? [];
+    group.push(operation);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
 /**
  * Number of pending "units": the internal operations of a media-generation
  * review (file/version/slot/bookkeeping fields) are one artifact to the user,
  * so they count as 1; text reviews count pending operations individually.
  */
 export function reviewPendingUnits(review: FileProjectReviewRecord): number {
-  const pending = pendingUserReviewOperations(review).length;
+  const pending = reviewOperationGroups(
+    pendingUserReviewOperations(review),
+  ).length;
   if (pending === 0) return 0;
   return reviewMediaLocator(review) ? 1 : pending;
 }
@@ -106,7 +126,9 @@ export function reviewTrayLabel(review: FileProjectReviewRecord): string {
   const locator = reviewMediaLocator(review);
   if (locator)
     return `${mediaLabel(locator)}${i18n.t("fileReview.reviewLabel")}`;
-  const pending = pendingUserReviewOperations(review).length;
+  const pending = reviewOperationGroups(
+    pendingUserReviewOperations(review),
+  ).length;
   return `${i18n.t("fileReview.textReview")}${pending} ${i18n.t(
     "fileReview.places",
   )}`;
@@ -155,9 +177,7 @@ export default function FileProjectReviewPanel({
   if (pending.length === 0) return null;
   const busy = decisionInFlight || localBusy;
   const mediaLocator = reviewMediaLocator(review);
-  const pendingUnits = mediaLocator
-    ? Math.min(pending.length, 1)
-    : pending.length;
+  const pendingUnits = reviewPendingUnits(review);
 
   const submit = async (
     operations: FileProjectReviewOperation[],
@@ -168,7 +188,9 @@ export default function FileProjectReviewPanel({
       (operation) => !isSystemVersionReviewOperation(operation),
     );
     if (operations.length === 0) return false;
-    const affectedUnits = mediaLocator ? 1 : operations.length;
+    const affectedUnits = mediaLocator
+      ? 1
+      : reviewOperationGroups(operations).length;
     setLocalBusy(true);
     try {
       const decisionItems = operations.map((operation) => ({
@@ -244,7 +266,7 @@ export default function FileProjectReviewPanel({
           <p className="mt-0.5 truncate text-[11px] text-[var(--color-text-tertiary)]">
             {mediaLocator
               ? mediaOwnerLine(mediaLocator)
-              : `${pending.length} ${t("fileReview.textChangesPending")}`}
+              : `${pendingUnits} ${t("fileReview.textChangesPending")}`}
           </p>
         </div>
         <div className="flex shrink-0 gap-1">
@@ -284,7 +306,11 @@ export default function FileProjectReviewPanel({
         />
       ) : (
         <ul className="mt-2 space-y-2">
-          {operations.map((operation) => {
+          {reviewOperationGroups(operations).map((group) => {
+            const operation =
+              group.find((item) =>
+                /\/motion(?:\/html)?$/u.test(item.json_pointer ?? ""),
+              ) ?? group[0];
             const operationPending = operation.decision === "PENDING";
             const presentation = fileReviewPresentation(operation, project);
             const locator = operation.ui_locator ?? {};
@@ -345,7 +371,7 @@ export default function FileProjectReviewPanel({
                             presentation.title
                           }`}
                           disabled={busy}
-                          onClick={() => void submit([operation], "ACCEPT")}
+                          onClick={() => void submit(group, "ACCEPT")}
                           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-accent-soft)] disabled:opacity-50"
                         >
                           <Check className="h-3 w-3" />
@@ -357,7 +383,7 @@ export default function FileProjectReviewPanel({
                             presentation.title
                           }`}
                           disabled={busy}
-                          onClick={() => setRejectionOperations([operation])}
+                          onClick={() => setRejectionOperations(group)}
                           className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--color-text-tertiary)] hover:text-[var(--color-danger)] disabled:opacity-50"
                         >
                           <Undo2 className="h-3 w-3" />
@@ -385,7 +411,9 @@ export default function FileProjectReviewPanel({
       <RejectionFeedbackModal
         open={rejectionOperations.length > 0}
         busy={busy}
-        targetCount={mediaLocator ? 1 : rejectionOperations.length}
+        targetCount={
+          mediaLocator ? 1 : reviewOperationGroups(rejectionOperations).length
+        }
         onCancel={() => setRejectionOperations([])}
         onSubmit={(feedback) => {
           void (async () => {
