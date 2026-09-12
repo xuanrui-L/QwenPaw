@@ -245,7 +245,12 @@ describe("ProjectLayout visible shell", () => {
     expect(document.querySelector("[data-agent-wait-hint]")).toBeNull();
   });
 
-  it.each(["before completion", "while polling", "navigate away"])(
+  it.each([
+    "before completion",
+    "while polling",
+    "navigate away",
+    "closed media banner",
+  ])(
     "preserves manual navigation %s instead of opening the first Review item",
     async (timing) => {
       const review = elementReview();
@@ -272,8 +277,24 @@ describe("ProjectLayout visible shell", () => {
         expect(useFileProjectReviewStore.getState().reviews).toHaveLength(1),
       );
       const openSecond = () =>
-        navigateToLocator("p1", secondLocator, { review: true });
+        navigateToLocator(
+          "p1",
+          timing === "closed media banner"
+            ? { page: "assets", assetId: "character-alice", versionId: "v1" }
+            : secondLocator,
+          {
+            review: true,
+            reviewId:
+              timing === "closed media banner" ? review.review_id : undefined,
+          },
+        );
       if (timing === "before completion") act(openSecond);
+      if (timing === "closed media banner") {
+        act(openSecond);
+        // The visible banner's close action clears navigation-stack state,
+        // but the chosen media review remains open in the route.
+        act(() => useNavigationStore.getState().clear());
+      }
 
       let finishPoll!: () => void;
       const pendingPoll = new Promise<void>((resolve) => {
@@ -311,7 +332,11 @@ describe("ProjectLayout visible shell", () => {
         });
         expect(poll).toHaveBeenCalledTimes(2);
         expect(router.state.location.search).toBe(manualSearch);
-        if (timing !== "navigate away") {
+        if (timing === "closed media banner") {
+          expect(new URLSearchParams(manualSearch).get("reviewId")).toBe(
+            review.review_id,
+          );
+        } else if (timing !== "navigate away") {
           expect(new URLSearchParams(manualSearch).get("field")).toBe(
             secondPointer,
           );
