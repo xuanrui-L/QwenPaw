@@ -1306,6 +1306,35 @@ def _draft_choice_motion(project: Project) -> None:
     )
 
 
+def _draft_presentation(project: Project) -> None:
+    """Use the shared HTML fixture without importing another test module."""
+    from pathlib import Path
+
+    from services.media_files.presentation_authoring import (
+        presentation_fingerprint,
+    )
+    from services.project_files.models import (
+        MotionGraphic,
+        narrative_timeline_ids,
+    )
+
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "player/tests/fixtures/authored-presentation.html"
+    )
+    html = fixture.read_text().replace(
+        "__NODES__",
+        "".join(
+            f'<button data-action="jump" data-node-ref="{tid}">{tid}</button>'
+            for tid in narrative_timeline_ids(project)
+        ),
+    )
+    project.interactive_presentation.motion = MotionGraphic(
+        html=html,
+        design_notes=f"input_fingerprint={presentation_fingerprint(project)}",
+    )
+
+
 def _select_final_video(project: Project, timeline_id: str) -> None:
     _select_slot(
         project,
@@ -1355,8 +1384,6 @@ def test_interaction_node_done_when_motion_is_drafted() -> None:
     project = _project()
     _make_branching(project)
     _draft_choice_motion(project)
-    from tests.media_files.test_interactive_bundle import _draft_presentation
-
     _draft_presentation(project)
 
     graph = derive_work_graph(project)
@@ -1375,8 +1402,6 @@ def test_interaction_node_reopens_when_options_change_after_draft() -> None:
     project = _project()
     _make_branching(project)
     _draft_choice_motion(project)
-    from tests.media_files.test_interactive_bundle import _draft_presentation
-
     _draft_presentation(project)
     _select_slot(
         project,
@@ -1467,8 +1492,6 @@ def test_bundle_node_gates_until_segments_and_interactions_done() -> None:
     }
 
     _draft_choice_motion(project)
-    from tests.media_files.test_interactive_bundle import _draft_presentation
-
     _draft_presentation(project)
     for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
         _select_final_video(project, timeline_id)
@@ -1480,8 +1503,6 @@ def test_bundle_node_goes_stale_when_a_segment_final_is_stale() -> None:
     project = _project()
     _make_branching(project)
     _draft_choice_motion(project)
-    from tests.media_files.test_interactive_bundle import _draft_presentation
-
     _draft_presentation(project)
     for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
         _select_final_video(project, timeline_id)
@@ -1742,8 +1763,6 @@ def test_completed_branching_graph_has_no_permanent_ready_bundle():
         ].description = "Published complete scene."
         _select_final_video(project, timeline_id)
     _draft_choice_motion(project)
-    from tests.media_files.test_interactive_bundle import _draft_presentation
-
     _draft_presentation(project)
     graph = derive_work_graph(project)
     assert not graph.unfinished(), [

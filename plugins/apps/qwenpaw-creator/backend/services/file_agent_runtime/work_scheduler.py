@@ -393,7 +393,8 @@ class WorkGraphScheduler:
             key = f"dag-{node.node_id}-{cls._dispatch_slot(fingerprint)}"
             previous = by_key.get(key)
             retryable = previous is not None and (
-                previous.status in (
+                previous.status
+                in (
                     TaskStatus.CANCELLED,
                     TaskStatus.FAILED,
                     TaskStatus.SUCCEEDED,
