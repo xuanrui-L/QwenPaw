@@ -423,6 +423,13 @@ export default function ProjectLayout() {
     );
     if (!targetReview) return;
     setPendingReviewNavigation(null);
+    // Media and whole-entity views may not have a field pointer. The route
+    // also preserves the user's choice after closing the return banner.
+    if (
+      new URLSearchParams(location.search).get("reviewId") ===
+      targetReview.review_id
+    )
+      return;
     // The user can also open a streamed change just before the completion
     // event arrives. Keep that choice instead of jumping to the first item.
     if (
@@ -452,6 +459,7 @@ export default function ProjectLayout() {
     fileReviewSyncStatus,
     id,
     location.key,
+    location.search,
     pendingReviewNavigation,
   ]);
 
