@@ -85,6 +85,12 @@ export function authorizationOperation(
         : CHECKPOINT_LABELS[checkpoint],
     );
   const operation = authorization.scope.operation;
+  if (operation === "interaction_draft")
+    return i18n.t(
+      authorization.targetRef?.startsWith("project:")
+        ? "executionAuth.generatePresentation"
+        : "executionAuth.generateInteraction",
+    );
   return typeof operation === "string" &&
     AUTHORIZATION_OPERATIONS.has(operation)
     ? creatorToolLabel(operation)
@@ -95,6 +101,11 @@ function authorizationTarget(
   authorization: ExecutionAuthorizationView,
   project?: ProjectDocument | null,
 ): string {
+  if (
+    authorization.scope.operation === "interaction_draft" &&
+    authorization.targetRef?.startsWith("project:")
+  )
+    return i18n.t("executionAuth.presentationTarget");
   return creatorReferenceLabel(
     { ref: authorization.targetRef, name: "" },
     project,
@@ -203,6 +214,13 @@ export function authorizationJumpTarget(
     };
   }
   const targetRef = authorization.targetRef ?? "";
+  if (
+    authorization.scope.operation === "interaction_draft" &&
+    targetRef.startsWith("project:")
+  ) {
+    const field = "/interactive_presentation/design_prompt";
+    return { locator: { page: "blueprint", field }, field };
+  }
   if (targetRef.startsWith("element:")) {
     const elementId = targetRef.slice("element:".length);
     const locator = resolveCreatorLocator(
@@ -213,9 +231,12 @@ export function authorizationJumpTarget(
       typeof authorization.scope.operation === "string"
         ? authorization.scope.operation.toLowerCase()
         : "";
-    const promptField = ["r2v_generation", "s2v_generation"].includes(operation)
-      ? "video_prompt"
-      : "storyboard_prompt";
+    const promptField =
+      operation === "interaction_draft"
+        ? "design_prompt"
+        : ["r2v_generation", "s2v_generation"].includes(operation)
+        ? "video_prompt"
+        : "storyboard_prompt";
     const field = locator.timelineId
       ? projectJsonPointer(
           "timelines",

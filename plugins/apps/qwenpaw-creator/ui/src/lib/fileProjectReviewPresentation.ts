@@ -255,6 +255,28 @@ export function fileReviewPresentation(
     };
   }
 
+  if (tokens[0] === "interactive_presentation" && tokens[1] === "motion") {
+    return {
+      ...base,
+      title: i18n.t("fileReview.public.presentationEffect"),
+      preview: i18n.t("fileReview.public.effectUpdated"),
+    };
+  }
+  if (
+    elementId &&
+    timelineId &&
+    project?.timelines.items[timelineId]?.elements_by_id[elementId]?.creation
+      .type === "interaction" &&
+    tokens[elementIndex + 2] === "creation" &&
+    tokens[elementIndex + 3] === "motion"
+  ) {
+    return {
+      ...base,
+      title: `${owner} · ${i18n.t("fileReview.public.interactionEffect")}`,
+      preview: i18n.t("fileReview.public.effectUpdated"),
+    };
+  }
+
   if (operation.kind === "reorder" || last === "order") {
     return {
       ...base,

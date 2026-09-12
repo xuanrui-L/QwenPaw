@@ -6,6 +6,7 @@ import FileProjectReviewPanel, {
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { makeReviewOperation, makeReviewRecord } from "@/test/agentFixtures";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { projectDocument } from "@/test/creatorFixtures";
 
 const navigateToLocator = vi.fn();
 
@@ -82,6 +83,60 @@ afterEach(() => {
 });
 
 describe("FileProjectReviewPanel", () => {
+  it.each([
+    ["/interactive_presentation/motion", "作品页面 · 界面效果"],
+    [
+      "/timelines/items/timeline:main/elements_by_id/el-1/creation/motion",
+      "月台抉择 · 抉择动效",
+    ],
+  ])(
+    "identifies generated interfaces without exposing HTML: %s",
+    (pointer, title) => {
+      const project = structuredClone(projectDocument);
+      const timeline = project.timelines.items["timeline:main"];
+      timeline.elements_by_id["el-1"] = {
+        ...timeline.elements_by_id["r2v-window"],
+        element_id: "el-1",
+        label: "月台抉择",
+        creation: {
+          type: "interaction",
+          question: "向哪边走？",
+          design_prompt: "两张车票作为选择按钮",
+          options: [{ edge_ref: "edge:left" }, { edge_ref: "edge:right" }],
+        },
+      };
+      useProjectSnapshotStore.setState({ projectId: "p1", project });
+      setup(
+        makeReviewRecord({
+          operations: [
+            makeReviewOperation({
+              json_pointer: pointer,
+              after: {
+                html: '<html><button data-action="start">Start</button></html>',
+              },
+              ui_locator: {
+                page: "blueprint",
+                field: pointer,
+                mediaType: "text",
+              },
+            }),
+          ],
+        }),
+      );
+      expect(screen.getByTitle(title)).toBeInTheDocument();
+      expect(
+        screen.getByText("界面效果已更新，点击查看预览"),
+      ).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("data-action");
+      fireEvent.click(screen.getByRole("button", { name: `查看 ${title}` }));
+      expect(navigateToLocator).toHaveBeenCalledWith(
+        "p1",
+        expect.objectContaining({ field: pointer }),
+        expect.objectContaining({ review: true, field: pointer }),
+      );
+    },
+  );
+
   it("shows the authored native-audio change in readable review text", () => {
     setup(
       makeReviewRecord({
