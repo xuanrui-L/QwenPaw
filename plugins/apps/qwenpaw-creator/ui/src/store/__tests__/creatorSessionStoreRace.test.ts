@@ -191,6 +191,69 @@ describe("Creator Session async project/conversation isolation", () => {
     expect(useCreatorEditBufferStore.getState().entries).toEqual([later]);
   });
 
+  it("keeps a failed request in its original conversation when switching and retrying", async () => {
+    bind("p1", "conversation-old");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.reject(new Error("offline"))),
+    );
+    await expect(
+      store().sendMessage({ message: "old instruction" }),
+    ).rejects.toThrow("offline");
+    const failed = store().queuedUi[0];
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+      Promise.resolve(
+        response(
+          init?.method === "POST"
+            ? {
+                appendState: "queued_until_message_boundary",
+                messageSeq: 1,
+                eventSeq: 1,
+              }
+            : { items: [] },
+        ),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await store().setConversation("conversation-new");
+    await store().retryQueuedMessage(failed.clientMessageId);
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
+    expect(store().queuedUi[0]).toMatchObject({
+      state: "failed",
+      conversationId: "conversation-old",
+    });
+    await store().setConversation("conversation-old");
+    await store().retryQueuedMessage(failed.clientMessageId);
+    const [, init] = fetchMock.mock.calls.find(
+      ([, options]) => options?.method === "POST",
+    )!;
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      conversationId: "conversation-old",
+      clientMessageId: failed.clientMessageId,
+      message: "old instruction",
+    });
+  });
+
+  it("records an in-flight failure for recovery after returning to that conversation", async () => {
+    bind("p1", "conversation-old");
+    const pending = stubPending();
+    const send = store().sendMessage({ message: "old instruction" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(response({ items: [] }))),
+    );
+    await store().setConversation("conversation-new");
+    pending.resolve(response({ message: "offline" }, 500));
+    await expect(send).rejects.toThrow();
+    await store().setConversation("conversation-old");
+    expect(store().queuedUi[0]).toMatchObject({
+      state: "failed",
+      text: "old instruction",
+    });
+  });
+
   it("does not merge an old pagination response into a new project", async () => {
     const pending = stubPending();
     bind("p1", "conversation-p1");

@@ -1454,3 +1454,88 @@ def test_failed_reroll_is_not_masked_by_the_old_success() -> None:
         WorkNodeStatus.FAILED
     )
     assert status_with_failure("2026-08-04T00:00:00Z") is WorkNodeStatus.DONE
+
+
+@pytest.mark.parametrize("reverse_tasks", [False, True])
+@pytest.mark.parametrize("status", [TaskStatus.RUNNING, TaskStatus.FAILED])
+def test_visual_tasks_keep_each_variant_and_anchor_isolated(
+    reverse_tasks: bool,
+    status: TaskStatus,
+) -> None:
+    project = _project()
+    entity = _entity("scene:room", {"var:base": "art:base", "var:alt": None})
+    dependent = _entity("scene:door", {"var:door": None})
+    anchor_ref = "visual:scene:room:var:base"
+    dependent.variants.items["var:door"].reference_artifact_version_ids = [
+        anchor_ref,
+    ]
+    project.visual.entities.items.update(
+        {entity.entity_id: entity, dependent.entity_id: dependent},
+    )
+    project.visual.entities.order.extend(
+        [entity.entity_id, dependent.entity_id],
+    )
+    tasks = [
+        _task(
+            "image_generation",
+            "asset:scene:room",
+            status,
+            metadata={"variantId": variant_id},
+            updated_at=f"2026-08-0{6 + index}T00:00:00Z",
+        )
+        for index, variant_id in enumerate(entity.variants.order)
+    ]
+    graph = derive_work_graph(
+        project,
+        list(reversed(tasks)) if reverse_tasks else tasks,
+    )
+    expected = (
+        WorkNodeStatus.RUNNING
+        if status is TaskStatus.RUNNING
+        else WorkNodeStatus.FAILED
+    )
+    assert graph.by_id[anchor_ref].status is expected
+    assert graph.by_id["visual:scene:room:var:alt"].status is expected
+    assert (
+        graph.by_id["visual:scene:door:var:door"].status
+        is WorkNodeStatus.GATED
+    )
+    assert graph.by_id["visual:scene:door:var:door"].missing == (anchor_ref,)
+
+
+@pytest.mark.parametrize("reverse_entities", [False, True])
+def test_anchor_chain_waits_for_stale_intermediate_before_initial_render(
+    reverse_entities: bool,
+) -> None:
+    project = _project()
+    ids = ["scene:base", "scene:middle", "scene:leaf"]
+    for entity_id, selected in zip(ids, ["art:base-2", "art:middle-1", None]):
+        project.visual.entities.items[entity_id] = _entity(
+            entity_id,
+            {"var:x": selected},
+        )
+    project.visual.entities.order.extend(
+        reversed(ids) if reverse_entities else ids,
+    )
+    middle_ref = "visual:scene:middle:var:x"
+    for entity_id, anchor in zip(ids[1:], ids):
+        project.visual.entities.items[entity_id].variants.items[
+            "var:x"
+        ].reference_artifact_version_ids = [f"visual:{anchor}:var:x"]
+    _select_slot(
+        project,
+        slot_id="asset:scene:middle:variant:var:x:image",
+        kind="visual_asset_image",
+        owner_ref="asset:scene:middle",
+        version_id="art:middle-1",
+        provenance=["artifact-version:art:base-1"],
+    )
+    graph = derive_work_graph(project)
+    assert graph.by_id[middle_ref].status is WorkNodeStatus.STALE
+    leaf = graph.by_id["visual:scene:leaf:var:x"]
+    assert leaf.status is WorkNodeStatus.GATED
+    assert leaf.missing == (middle_ref,)
+    assert graph.ready_media_nodes() == ()
+    assert [node.node_id for node in graph.regeneration_nodes()] == [
+        middle_ref,
+    ]

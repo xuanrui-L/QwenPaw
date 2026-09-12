@@ -1166,7 +1166,15 @@ export default function AgentDock({
     (state) => state.streamingAssistantMessages,
   );
   const events = useCreatorSessionStore((state) => state.events);
-  const queued = useCreatorSessionStore((state) => state.queuedUi);
+  const queuedUi = useCreatorSessionStore((state) => state.queuedUi);
+  const activeConversationId = useCreatorSessionStore(
+    (state) => state.activeConversationId,
+  );
+  const queued = useMemo(
+    () =>
+      queuedUi.filter((item) => item.conversationId === activeConversationId),
+    [queuedUi, activeConversationId],
+  );
   const hasMoreMessages = useCreatorSessionStore(
     (state) => state.hasMoreMessages,
   );
@@ -1291,6 +1299,7 @@ export default function AgentDock({
     contextRefs: RefSearchItem[];
     selectedRef: string | null;
     editingField: string | null;
+    panel: typeof interactionPanel;
   } | null>(null);
   const stageUploads = (files: File[]) => {
     if (files.length === 0) return;
@@ -1522,6 +1531,15 @@ export default function AgentDock({
     extraRefs.forEach(add);
     return chips;
   }, [extraRefs, project, removedContextRefs, selectedRef, timeline]);
+  const composerContextSignature = JSON.stringify({
+    conversationId: activeConversationId,
+    panel: interactionPanel,
+    selectedRef,
+    editingField,
+    refs: contextChips.map((item) => item.ref),
+  });
+  const currentComposerContext = useRef(composerContextSignature);
+  currentComposerContext.current = composerContextSignature;
   const visibleChips = useMemo(
     () => contextChips.filter((chip) => !inlineRefs.includes(chip.ref)),
     [contextChips, inlineRefs],
@@ -1807,7 +1825,7 @@ export default function AgentDock({
   };
 
   const submit = async () => {
-    if (originalsGate || uploadingAssets) return;
+    if (originalsGate || uploadingAssets || !activeConversationId) return;
     const content = inputRef.current?.getContent() ?? {
       text: "",
       refs: [],
@@ -1824,17 +1842,27 @@ export default function AgentDock({
     ];
     const version = ++submissionVersion.current;
     const submittedProject = projectId;
+    const isCurrentSubmission = () =>
+      dockAlive.current &&
+      currentProject.current === submittedProject &&
+      submissionVersion.current === version;
     const composerSignature = (
       value: ReturnType<NonNullable<typeof inputRef.current>["getContent"]>,
       extra: { ref: string }[],
+      context: string,
     ) =>
       JSON.stringify({
         t: value.text.trim(),
         r: value.refs.map((item) => item.ref),
         s: value.selections,
         e: extra.map((item) => item.ref),
+        context,
       });
-    const submittedSignature = composerSignature(content, extraRefs);
+    const submittedSignature = composerSignature(
+      content,
+      extraRefs,
+      composerContextSignature,
+    );
     const submittedDraft = inputRef.current?.getDraft() ?? [];
     // Fresh files ingest now (silently: their refs ride this message, so the
     // run itself triggers per-asset understanding — the same contract
@@ -1864,6 +1892,7 @@ export default function AgentDock({
             "ATTACH_SOURCE",
             { notifyAgent: false },
           );
+          if (!isCurrentSubmission()) return;
           const ref = `asset-version:${accepted.assetVersionId}`;
           uploaded.set(item.id, ref);
           setPendingUploads((prev) =>
@@ -1875,11 +1904,7 @@ export default function AgentDock({
           );
         }
       } catch (error) {
-        if (
-          dockAlive.current &&
-          currentProject.current === submittedProject &&
-          submissionVersion.current === version
-        ) {
+        if (isCurrentSubmission()) {
           message.error(
             error instanceof Error ? error.message : t("assets.uploadFailed"),
             6,
@@ -1892,6 +1917,7 @@ export default function AgentDock({
             composerSignature(
               currentContent,
               useCreatorInteractionStore.getState().extraRefs,
+              currentComposerContext.current,
             ) !== submittedSignature
           ) {
             setInterruptedDraft({
@@ -1900,34 +1926,25 @@ export default function AgentDock({
               contextRefs: contextChips,
               selectedRef,
               editingField,
+              panel: interactionPanel,
             });
           }
         }
         return;
       } finally {
-        setUploadingAssets(false);
+        if (isCurrentSubmission()) setUploadingAssets(false);
       }
       // The snapshot/task stores hold only the current project's state: a
       // stale refresh after unmounting or switching projects would clobber
       // the new page, and sendMessage below reads the store's current
       // project.
-      if (
-        !dockAlive.current ||
-        currentProject.current !== submittedProject ||
-        submissionVersion.current !== version
-      )
-        return;
+      if (!isCurrentSubmission()) return;
       void Promise.allSettled([
         useProjectSnapshotStore.getState().pollOnce(submittedProject),
         useCreatorTaskViewStore.getState().refresh(submittedProject),
       ]);
     }
-    if (
-      !dockAlive.current ||
-      currentProject.current !== submittedProject ||
-      submissionVersion.current !== version
-    )
-      return;
+    if (!isCurrentSubmission()) return;
     const liveChipIds = new Set(
       pendingUploadsRef.current.map((pending) => pending.id),
     );
@@ -1962,7 +1979,11 @@ export default function AgentDock({
     };
     const currentExtraRefs = useCreatorInteractionStore.getState().extraRefs;
     if (
-      composerSignature(currentContent, currentExtraRefs) === submittedSignature
+      composerSignature(
+        currentContent,
+        currentExtraRefs,
+        currentComposerContext.current,
+      ) === submittedSignature
     ) {
       inputRef.current?.clear();
       setCanSend(false);
@@ -1973,6 +1994,7 @@ export default function AgentDock({
     }
     try {
       await sendMessage({
+        conversationId: activeConversationId,
         message: messageText,
         assetVersionRefs:
           assetVersionRefs.length > 0 ? assetVersionRefs : undefined,
@@ -2008,12 +2030,7 @@ export default function AgentDock({
       // The failed request lives on its queuedUi card with the verbatim
       // payload and a retry entry — never backfilled into whatever draft
       // the composer holds by now.
-      if (
-        !dockAlive.current ||
-        currentProject.current !== submittedProject ||
-        submissionVersion.current !== version
-      )
-        return;
+      if (!isCurrentSubmission()) return;
       message.error(t("agentActivity.failureHint"));
     }
   };
@@ -2604,6 +2621,7 @@ export default function AgentDock({
                       interaction.setEditingField(
                         interruptedDraft.editingField,
                       );
+                      interaction.setPanel(interruptedDraft.panel);
                       setRemovedContextRefs([]);
                       setCanSend(true);
                       setInterruptedDraft(null);

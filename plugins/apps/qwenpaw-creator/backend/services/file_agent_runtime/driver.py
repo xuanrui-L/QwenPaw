@@ -3397,6 +3397,9 @@ class FileCreatorAgentRuntime:
                 # 2026-09-11: a mid-run video upload produced no
                 # source_intelligence run at all).
                 if item.metadata.get("assetVersionRefs"):
+                    # Every incoming message reaches this loop separately.
+                    # No batch_tail here: the following messages start their
+                    # own delegations without merging independent requests.
                     joined_activity = (
                         await self._start_attached_source_understanding(
                             project_id=project_id,

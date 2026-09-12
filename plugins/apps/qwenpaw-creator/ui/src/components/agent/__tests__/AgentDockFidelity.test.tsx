@@ -1,4 +1,4 @@
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import {
   act,
   fireEvent,
@@ -24,9 +24,10 @@ import {
   seedCreatorSession,
 } from "@/test/agentFixtures";
 
-function renderDock() {
+function renderDock(switchProjects = false) {
   return render(
     <MemoryRouter initialEntries={["/project/p1/plan"]}>
+      {switchProjects && <Link to="/project/p2/plan">切到第二项目</Link>}
       <Routes>
         <Route path="/project/:id/plan" element={<AgentDock />} />
       </Routes>
@@ -83,7 +84,7 @@ const ACCEPTED = {
   conversationId: "conversation-1",
 };
 
-function stagedSubmission(names = ["a.png"]) {
+function stagedSubmission(names = ["a.png"], switchProjects = false) {
   const { calls, fetchMock } = installMockFetch([
     { match: "/messages", method: "POST", response: { json: ACCEPTED } },
     { match: "/specialist-runs", response: { json: { items: [] } } },
@@ -114,7 +115,7 @@ function stagedSubmission(names = ["a.png"]) {
       : fetchMock(input, init),
   );
   useAgentDockUiStore.getState().setOpen(true);
-  renderDock();
+  renderDock(switchProjects);
   fireEvent.change(document.querySelector("[data-agent-upload-input]")!, {
     target: {
       files: names.map((name) => new File([name], name, { type: "image/png" })),
@@ -480,6 +481,84 @@ describe("AgentDock public output and interactions", () => {
     ).toContain("指令 A");
   });
 
+  it("preserves a draft retargeted to another editing field while uploading", async () => {
+    const { uploads, calls } = stagedSubmission();
+    act(() =>
+      useCreatorInteractionStore
+        .getState()
+        .setEditingField("storyboard_prompt"),
+    );
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    act(() =>
+      useCreatorInteractionStore.getState().setEditingField("video_prompt"),
+    );
+    await act(async () => uploads[0].resolve({ assetVersionId: "uploaded" }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
+        context: { editingField: "storyboard_prompt" },
+      }),
+    );
+    expect(composerBox()).toHaveTextContent("指令 A");
+    expect(useCreatorInteractionStore.getState().editingField).toBe(
+      "video_prompt",
+    );
+  });
+
+  it("finishes an upload in its original conversation after the user switches", async () => {
+    const { uploads, calls, write } = stagedSubmission();
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    act(() =>
+      useCreatorSessionStore.setState({
+        activeConversationId: "conversation-other",
+      }),
+    );
+    write("指令 B");
+    await act(async () => uploads[0].resolve({ assetVersionId: "uploaded" }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
+        conversationId: "conversation-1",
+        message: "指令 A",
+      }),
+    );
+    expect(composerBox()).toHaveTextContent("指令 B");
+    expect(
+      screen.queryByText("指令 A", { selector: "p" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the new project's upload locked when an old upload finishes", async () => {
+    const { uploads, calls, write } = stagedSubmission(["a.png"], true);
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    fireEvent.click(screen.getByRole("link", { name: "切到第二项目" }));
+    act(() =>
+      useCreatorSessionStore.setState({
+        projectId: "p2",
+        activeConversationId: "conversation-p2",
+        session: {
+          ...useCreatorSessionStore.getState().session!,
+          projectId: "p2",
+        },
+      }),
+    );
+    fireEvent.change(document.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["b"], "b.png", { type: "image/png" })] },
+    });
+    write("指令 B");
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    expect(uploads).toHaveLength(2);
+    await act(async () => uploads[0].resolve({ assetVersionId: "a" }));
+    fireEvent.keyDown(composerBox(), { key: "Enter" });
+    expect(uploads).toHaveLength(2);
+    await act(async () => uploads[1].resolve({ assetVersionId: "b" }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.method === "POST")?.body).toMatchObject({
+        message: "指令 B",
+        assetVersionRefs: ["asset-version:b"],
+        conversationId: "conversation-p2",
+      }),
+    );
+  });
+
   it("excludes removed files from both the remaining uploads and final message", async () => {
     const { uploads, calls } = stagedSubmission(["a.png", "b.png", "c.png"]);
     fireEvent.keyDown(composerBox(), { key: "Enter" });
@@ -504,6 +583,7 @@ describe("AgentDock public output and interactions", () => {
       queuedUi: [
         {
           clientMessageId: "failed-message",
+          conversationId: "conversation-1",
           requestSignature: "failed-signature",
           text: "重新生成视频",
           state: "failed",
@@ -520,6 +600,18 @@ describe("AgentDock public output and interactions", () => {
     expect(
       screen.queryByText(/internal\/path\/project\.json/),
     ).not.toBeInTheDocument();
+    act(() =>
+      useCreatorSessionStore.setState({
+        activeConversationId: "conversation-other",
+      }),
+    );
+    expect(screen.queryByText("重新生成视频")).not.toBeInTheDocument();
+    act(() =>
+      useCreatorSessionStore.setState({
+        activeConversationId: "conversation-1",
+      }),
+    );
+    expect(screen.getByText("重新生成视频")).toBeInTheDocument();
   });
 
   it("morphs the composer button between send and stop across idle/running states", async () => {
