@@ -19,6 +19,27 @@ function withWholeFilm(project: ProjectDocument): ProjectDocument {
   return project;
 }
 
+/** Two outgoing edges from the entry timeline = a branching choice point. */
+function withBranching(project: ProjectDocument): ProjectDocument {
+  project.narrative_edges = [
+    {
+      edge_id: "edge:a",
+      source_timeline_id: "timeline:main",
+      target_timeline_id: "timeline:ep2",
+      label: "选择A · 星夜归途",
+      prompt: "此刻，你决定——",
+    },
+    {
+      edge_id: "edge:b",
+      source_timeline_id: "timeline:main",
+      target_timeline_id: "timeline:ep2",
+      label: "选择B · 回到晨光",
+      prompt: "",
+    },
+  ];
+  return project;
+}
+
 function renderStrip(project: ProjectDocument) {
   return render(
     <BlueprintRoughCutStrip project={project} onSelectTimeline={vi.fn()} />,
@@ -107,6 +128,31 @@ describe("BlueprintRoughCutStrip whole-film preview", () => {
     const { container } = renderStrip(project);
     expect(container.querySelectorAll("[data-roughcut-frame]")).toHaveLength(0);
     expect(container.querySelector("[data-roughcut-play-film]")).toBeTruthy();
+  });
+
+  it("branching works require generated pages and never fall back to a fixed interface", async () => {
+    const project = withBranching(cloneProject());
+    const { container, baseElement, findByText } = renderStrip(project);
+    const chip = container.querySelector("[data-roughcut-play-film]");
+    expect(chip).toBeTruthy();
+    expect(chip!.textContent).toContain("播放整个互动包");
+    fireEvent.click(chip!);
+    expect(baseElement.querySelector("[data-authored-cinema]")).toBeTruthy();
+    expect(await findByText(/作品页面尚未生成/)).toBeInTheDocument();
+    expect(
+      baseElement.querySelector("[data-roughcut-player] video"),
+    ).toBeNull();
+    expect(baseElement.querySelector("[data-edge-ref]")).toBeNull();
+  });
+
+  it("a composed film cannot substitute for missing authored interactive pages", async () => {
+    const project = withBranching(withWholeFilm(cloneProject()));
+    const { container, baseElement, findByText } = renderStrip(project);
+    fireEvent.click(container.querySelector("[data-roughcut-play-film]")!);
+    expect(await findByText(/作品页面尚未生成/)).toBeInTheDocument();
+    expect(
+      baseElement.querySelector("[data-roughcut-player] video"),
+    ).toBeNull();
   });
 });
 

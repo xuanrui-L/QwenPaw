@@ -6,6 +6,7 @@ import FileProjectReviewPanel, {
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { makeReviewOperation, makeReviewRecord } from "@/test/agentFixtures";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { projectDocument } from "@/test/creatorFixtures";
 
 const navigateToLocator = vi.fn();
 
@@ -82,6 +83,130 @@ afterEach(() => {
 });
 
 describe("FileProjectReviewPanel", () => {
+  it.each(["ACCEPT", "REJECT"] as const)(
+    "decides generated HTML and provenance together on %s without including other edits",
+    async (decision) => {
+      const pointer = "/interactive_presentation/motion";
+      const value = makeReviewRecord({
+        operations: [
+          makeReviewOperation({
+            operation_id: "html",
+            json_pointer: `${pointer}/html`,
+            before: "old HTML",
+            after: "new HTML",
+            ui_locator: { page: "blueprint", field: `${pointer}/html` },
+          }),
+          makeReviewOperation({
+            operation_id: "provenance",
+            json_pointer: `${pointer}/design_notes`,
+            before: "old fingerprint",
+            after: "new fingerprint",
+          }),
+          makeReviewOperation({
+            operation_id: "description",
+            json_pointer: "/description",
+            before: "Old story",
+            after: "New story",
+          }),
+        ],
+      });
+      const decide = setup(value);
+      expect(reviewPendingUnits(value)).toBe(2);
+      expect(screen.getAllByTitle("作品页面 · 界面效果")).toHaveLength(1);
+      fireEvent.click(
+        screen.getByRole("button", {
+          name: `${
+            decision === "ACCEPT" ? "保留" : "撤销"
+          } 作品页面 · 界面效果`,
+        }),
+      );
+      if (decision === "REJECT") {
+        expect(screen.getByRole("dialog")).toHaveTextContent("将撤销 1 项内容");
+        fireEvent.click(screen.getByRole("button", { name: "仅撤销" }));
+      }
+      await waitFor(() => expect(decide).toHaveBeenCalled());
+      expect(decide.mock.calls[0].slice(0, 3)).toEqual([
+        "p1",
+        "review-1",
+        [
+          { operation_id: "html", decision },
+          { operation_id: "provenance", decision },
+        ],
+      ]);
+    },
+  );
+
+  it.each([
+    ["/interactive_presentation/motion", "作品页面 · 界面效果"],
+    [
+      "/timelines/items/timeline:main/elements_by_id/el-1/creation/motion",
+      "月台抉择 · 抉择动效",
+    ],
+  ])(
+    "identifies generated interfaces without exposing HTML: %s",
+    (pointer, title) => {
+      const project = structuredClone(projectDocument);
+      const timeline = project.timelines.items["timeline:main"];
+      timeline.elements_by_id["el-1"] = {
+        ...timeline.elements_by_id["r2v-window"],
+        element_id: "el-1",
+        label: "月台抉择",
+        creation: {
+          type: "interaction",
+          question: "向哪边走？",
+          design_prompt: "两张车票作为选择按钮",
+          options: [{ edge_ref: "edge:left" }, { edge_ref: "edge:right" }],
+        },
+      };
+      useProjectSnapshotStore.setState({ projectId: "p1", project });
+      setup(
+        makeReviewRecord({
+          operations: [
+            makeReviewOperation({
+              json_pointer: pointer,
+              after: {
+                html: '<html><button data-action="start">Start</button></html>',
+              },
+              ui_locator: {
+                page: "blueprint",
+                field: pointer,
+                mediaType: "text",
+              },
+            }),
+          ],
+        }),
+      );
+      expect(screen.getByTitle(title)).toBeInTheDocument();
+      expect(
+        screen.getByText("界面效果已更新，点击查看预览"),
+      ).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("data-action");
+      fireEvent.click(screen.getByRole("button", { name: `查看 ${title}` }));
+      expect(navigateToLocator).toHaveBeenCalledWith(
+        "p1",
+        expect.objectContaining({ field: pointer }),
+        expect.objectContaining({ review: true, field: pointer }),
+      );
+    },
+  );
+
+  it("shows the authored native-audio change in readable review text", () => {
+    setup(
+      makeReviewRecord({
+        operations: [
+          makeReviewOperation({
+            json_pointer:
+              "/timelines/items/timeline:main/elements_by_id/shot/creation/generate_audio",
+            before: true,
+            after: false,
+          }),
+        ],
+      }),
+    );
+    expect(screen.getByText("有声 → 无声")).toBeInTheDocument();
+    expect(screen.queryByText("内容已更新")).toBeNull();
+  });
+
   it("renders a text summary and navigates to the ui_locator on inspect", () => {
     setup();
     expect(screen.getByText("创作修改")).toBeInTheDocument();

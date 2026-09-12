@@ -14,7 +14,11 @@ export function resolveCreatorLocator(
           .split("/")
           .map((part) => part.replace(/~1/gu, "/").replace(/~0/gu, "~"))
       : [];
-  if (
+  if (tokens[0] === "interactive_presentation") {
+    resolved.page = "blueprint";
+    delete resolved.timelineId;
+    delete resolved.elementId;
+  } else if (
     tokens[0] === "visual" &&
     tokens[1] === "entities" &&
     tokens[2] === "items" &&
@@ -35,6 +39,11 @@ export function resolveCreatorLocator(
       // Plan exposes intent/narrative; generation prompts and shot editing
       // exist in the dedicated Element workbench, not Plan's compact rail.
       if (
+        project?.timelines.items[tokens[2]]?.elements_by_id[tokens[4]]?.creation
+          .type === "interaction"
+      )
+        resolved.page = "blueprint";
+      else if (
         tokens[5] === "creation" &&
         [
           "storyboard_prompt",

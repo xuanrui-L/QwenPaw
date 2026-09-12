@@ -158,7 +158,10 @@
     "saveAsTemplateFailed": "Failed to save template",
     "deleteTemplateConfirm": "Delete template \"{{name}}\"?",
     "deleteTemplateSuccess": "Template deleted",
-    "deleteTemplateFailed": "Failed to delete template"
+    "deleteTemplateFailed": "Failed to delete template",
+    "videoTemplateNone": "No Template",
+    "videoTemplateHint": "Choose a preset to get started quickly",
+    "videoTemplateUserSection": "My Templates"
   },
   "nav": {
     "videoPlan": "Video Plan",
@@ -627,7 +630,8 @@
     "railOverviewTab": "Video Overview",
     "noStoryboard": "No storyboard yet",
     "scriptPlan": "Back to video script",
-    "expandSidebar": "Expand sidebar"
+    "expandSidebar": "Expand sidebar",
+    "railStoryboardTab": "Storyboard Preview"
   },
   "r2v": {
     "title": "Video Plan / {{element}} / Production Workbench",
@@ -800,7 +804,9 @@
     "editorReferencesChanged": "The reference images or editing target have changed. Reload before continuing so image references stay accurate. Your current draft is preserved.",
     "editorReload": "Reload latest",
     "editorKeep": "Keep my edits",
-    "narrativeTitle": "Clip narrative"
+    "narrativeTitle": "Clip narrative",
+    "subtitle": "AI-generated frame sub-interface, inheriting storyboards, reference assets and artifact versions.",
+    "tokenClickRemove": "Click to remove this reference"
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",
@@ -1100,6 +1106,9 @@
   },
   "executionAuth": {
     "title": "High-cost Media Execution",
+    "generatePresentation": "Generate work pages",
+    "generateInteraction": "Generate choice animation",
+    "presentationTarget": "Home, playback, story map and ending pages",
     "duration": "Duration {{duration}}s",
     "resolutionLabel": "Resolution {{resolution}}",
     "ratio": "Ratio {{ratio}}",
@@ -1147,6 +1156,7 @@
     "creativeBrief": "Creative Brief",
     "creativeDirection": "Creative Direction",
     "prompt": "Prompt",
+    "nativeAudio": "Native video audio",
     "camera": "Camera",
     "framing": "Framing",
     "duration": "Duration",
@@ -1208,6 +1218,9 @@
       "videoVersion": "Video version",
       "editPlan": "Edit plan",
       "contentUpdated": "Content updated",
+      "presentationEffect": "Experience pages · Interface",
+      "interactionEffect": "Choice animation",
+      "effectUpdated": "Interface updated. View the preview to review it.",
       "mediaSelection": "Selected media",
       "selectionUpdated": "Media selection updated",
       "text": "Copy",
@@ -2199,7 +2212,12 @@
     "sourceResultFailed": "Could not load understanding",
     "sourceResultLoading": "Loading understanding",
     "pausePreview": "Pause preview",
-    "previewPosition": "Preview position"
+    "previewPosition": "Preview position",
+    "playFullInteractive": "Play full interactive story",
+    "exportBundle": "Export interactive bundle",
+    "exportBundleFailed": "Interactive bundle export failed",
+    "downloadBundleTitle": "Export interactive bundle or project",
+    "previewChoice": "Choose a path"
   },
   "sidebar": {
     "assistant": "Assistant",

@@ -17,6 +17,8 @@ const FIELD_KEYS: Record<string, string> = {
   prompt: "fileReview.prompt",
   storyboard_prompt: "fileReview.prompt",
   video_prompt: "fileReview.prompt",
+  generate_audio: "fileReview.nativeAudio",
+  design_prompt: "fileReview.prompt",
   camera: "fileReview.camera",
   framing: "fileReview.framing",
   narration: "fileReview.narration",
@@ -253,6 +255,28 @@ export function fileReviewPresentation(
     };
   }
 
+  if (tokens[0] === "interactive_presentation" && tokens[1] === "motion") {
+    return {
+      ...base,
+      title: i18n.t("fileReview.public.presentationEffect"),
+      preview: i18n.t("fileReview.public.effectUpdated"),
+    };
+  }
+  if (
+    elementId &&
+    timelineId &&
+    project?.timelines.items[timelineId]?.elements_by_id[elementId]?.creation
+      .type === "interaction" &&
+    tokens[elementIndex + 2] === "creation" &&
+    tokens[elementIndex + 3] === "motion"
+  ) {
+    return {
+      ...base,
+      title: `${owner} · ${i18n.t("fileReview.public.interactionEffect")}`,
+      preview: i18n.t("fileReview.public.effectUpdated"),
+    };
+  }
+
   if (operation.kind === "reorder" || last === "order") {
     return {
       ...base,
@@ -281,6 +305,10 @@ export function fileReviewPresentation(
   // unknown fields, ids and bookkeeping values stay as semantic summaries.
   if (field) {
     const fieldText = (value: unknown): string | null => {
+      if (last === "generate_audio" && typeof value === "boolean")
+        return i18n.t(
+          value ? "executionAuth.withAudio" : "executionAuth.withoutAudio",
+        );
       if (
         last.endsWith("duration_seconds") &&
         typeof value === "number" &&

@@ -208,6 +208,7 @@ export interface R2VCreationDocument extends ProjectJsonRecord {
   storyboard_prompt: string;
   storyboard_reference_version_ids: string[];
   video_prompt: string;
+  generate_audio?: boolean;
   video_reference_version_ids: string[];
   /** Server-owned provenance. Presentation consumes the prompt-sync API. */
   prompt_sync?: {
@@ -224,6 +225,7 @@ export interface T2VCreationDocument extends ProjectJsonRecord {
   narrative: string;
   continuity: string;
   video_prompt: string;
+  generate_audio?: boolean;
   recipe: GenerationRecipeDocument | null;
 }
 
@@ -234,6 +236,7 @@ export interface I2VCreationDocument extends ProjectJsonRecord {
   continuity: string;
   first_frame_version_id: string | null;
   video_prompt: string;
+  generate_audio?: boolean;
   recipe: GenerationRecipeDocument | null;
 }
 
@@ -320,6 +323,57 @@ export interface AudioCreationDocument extends ProjectJsonRecord {
   pan: number;
 }
 
+export interface InteractionOptionDocument extends ProjectJsonRecord {
+  /** Points at Project.narrative_edges.edge_id: label/target derive from the edge. */
+  edge_ref: string;
+  design_prompt?: string;
+  hotspot?: ElementLocationDocument | null;
+}
+
+/** Audience-choice element at the end of a branching source timeline (schema v9). */
+export interface InteractionCreationDocument extends ProjectJsonRecord {
+  type: "interaction";
+  question: string;
+  design_prompt?: string;
+  options: InteractionOptionDocument[];
+  countdown_seconds?: number | null;
+  /** Edge taken when the countdown expires without a click. */
+  default_edge_ref?: string | null;
+  /** Base frame: last element_video frame of the previous segment (artifact ref). */
+  base_frame_ref?: string | null;
+  motion?: MotionGraphicDocument | null;
+  fallback?: "static_endcard" | "split_publish";
+}
+
+export type PresentationScreenId = "title" | "play" | "map" | "ending";
+export type PresentationActionId =
+  | "start"
+  | "resume"
+  | "toggle_play"
+  | "map"
+  | "map_back"
+  | "replay"
+  | "title"
+  | "jump"
+  | "reset";
+export interface InteractiveControlDesignDocument extends ProjectJsonRecord {
+  label: string;
+  design_prompt: string;
+}
+export interface InteractiveScreenDesignDocument extends ProjectJsonRecord {
+  design_prompt: string;
+  controls: Partial<
+    Record<PresentationActionId, InteractiveControlDesignDocument>
+  >;
+}
+export interface InteractivePresentationDocument extends ProjectJsonRecord {
+  design_prompt: string;
+  screens?: Partial<
+    Record<PresentationScreenId, InteractiveScreenDesignDocument>
+  >;
+  motion: MotionGraphicDocument | null;
+}
+
 export type ElementCreationDocument =
   | R2VCreationDocument
   | T2VCreationDocument
@@ -329,7 +383,8 @@ export type ElementCreationDocument =
   | OverlayCreationDocument
   | MotionClipCreationDocument
   | TransitionCreationDocument
-  | AudioCreationDocument;
+  | AudioCreationDocument
+  | InteractionCreationDocument;
 
 // Creation types produced by a video generation provider.
 export type VideoCreationDocument =
@@ -437,6 +492,17 @@ export interface TimelineDocument extends ProjectJsonRecord {
   elements_by_id: Record<string, TimelineElementDocument>;
 }
 
+/** Branching narrative edge between two Timelines (schema v9). */
+export interface NarrativeEdgeDocument extends ProjectJsonRecord {
+  edge_id: string;
+  source_timeline_id: string;
+  target_timeline_id: string;
+  /** Option copy, e.g. 「选择A · 揭发真相」. */
+  label: string;
+  /** Choice question copy (shared by edges of the same source). */
+  prompt: string;
+}
+
 export interface ProjectDocument extends ProjectJsonRecord {
   schema_version: number;
   project_id: string;
@@ -451,6 +517,9 @@ export interface ProjectDocument extends ProjectJsonRecord {
   sources: ProjectSourceCatalogDocument;
   visual: VisualDevelopmentDocument;
   timelines: ProjectEntityCollection<TimelineDocument>;
+  /** Branching edges between timelines (schema v9; [] / absent = no branches). */
+  narrative_edges?: NarrativeEdgeDocument[];
+  interactive_presentation?: InteractivePresentationDocument;
   assets: ProjectAssetIndexDocument;
 }
 

@@ -270,7 +270,7 @@ def auto_snapshot_timelines(
     order) do not trigger a snapshot, and a timeline whose newest
     auto-snapshot is younger than ten minutes is not snapshotted again, so
     an editing session leaves one pre-session baseline instead of one
-    snapshot per commit.
+    snapshot per commit.  Auto-snapshots are never themselves snapshotted.
 
     The returned ids let the caller settle pending rollback marks with
     :func:`snapshot_restore_hold.settle_snapshot_restore` *after* the commit

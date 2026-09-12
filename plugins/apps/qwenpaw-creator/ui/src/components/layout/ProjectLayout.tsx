@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "react-i18next";
-import { useParams, usePathname } from "@/routing/navigation";
+import { useParams } from "@/routing/navigation";
 import LaunchUploadProgressCard from "@/components/creator/LaunchUploadProgressCard";
 import { navigateToLocator } from "@/routing/locators";
 import type { FileProjectReviewOperation } from "@/contracts/creator";
@@ -13,7 +13,10 @@ import {
   useCreatorInteractionStore,
 } from "@/store/creatorInteractionStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
-import { useNavigationStore } from "@/store/navigationStore";
+import {
+  useNavigationStore,
+  type ReviewFocusRequest,
+} from "@/store/navigationStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useWorkGraphStore } from "@/store/workGraphStore";
@@ -142,7 +145,8 @@ function LayoutSkeleton() {
 export default function ProjectLayout() {
   const { t } = useTranslation();
   const { id = "" } = useParams();
-  const pathname = usePathname();
+  const location = useLocation();
+  const pathname = location.pathname;
   const bootstrap = useCreatorSessionStore((state) => state.bootstrap);
   const refreshSession = useCreatorSessionStore(
     (state) => state.refreshSession,
@@ -207,6 +211,8 @@ export default function ProjectLayout() {
   const [pendingReviewNavigation, setPendingReviewNavigation] = useState<{
     reviewId: string;
     ready: boolean;
+    locationKey: string;
+    focus: ReviewFocusRequest | null;
   } | null>(null);
   const lastConsumedEvent = useRef(0);
   const currentProjectId = useRef(id);
@@ -229,6 +235,12 @@ export default function ProjectLayout() {
       requests.push(refreshTasks(id));
     if (graph.projectId !== id || !graph.loading)
       requests.push(graph.refresh(id));
+    // Manual/detached production can settle without a session lifecycle SSE
+    // event. Revalidate the session alongside the authoritative task lists so
+    // a stale WAITING_RUNTIME status cannot keep the dock spinning forever.
+    const sessionState = useCreatorSessionStore.getState();
+    if (sessionState.projectId === id && sessionState.session)
+      requests.push(refreshSession());
     const promise = Promise.allSettled(requests)
       .then(() => undefined)
       .finally(() => {
@@ -237,7 +249,7 @@ export default function ProjectLayout() {
       });
     productionRequest.current = { projectId: id, promise };
     return promise;
-  }, [id, refreshTasks]);
+  }, [id, refreshTasks, refreshSession]);
 
   useEffect(() => {
     setPendingReviewNavigation(null);
@@ -338,7 +350,12 @@ export default function ProjectLayout() {
       .flatMap((event) => reviewIdsFromEvent(event.data));
     const completedReviewId = completedReviewIds.at(-1);
     if (completedReviewId) {
-      setPendingReviewNavigation({ reviewId: completedReviewId, ready: false });
+      setPendingReviewNavigation({
+        reviewId: completedReviewId,
+        ready: false,
+        locationKey: location.key,
+        focus: useNavigationStore.getState().reviewFocus,
+      });
       const reviewStore = useFileProjectReviewStore.getState();
       void reviewStore
         .pollOnce(id)
@@ -381,11 +398,21 @@ export default function ProjectLayout() {
     // useFileProjectReviewStore.  Runtime events can refresh Session/Task
     // projections, but must never be interpreted as legacy Transaction IDs or
     // trigger requests to the removed Transaction/Review API.
-  }, [events, id, refreshSession, refreshProduction]);
+  }, [events, id, location.key, refreshSession, refreshProduction]);
 
   useEffect(() => {
     if (!pendingReviewNavigation?.ready || fileReviewSyncStatus !== "healthy")
       return;
+    const focus = useNavigationStore.getState().reviewFocus;
+    // Completion waits for Review polling. A user's navigation during that
+    // wait owns the screen, including a same-page click on another field.
+    if (
+      location.key !== pendingReviewNavigation.locationKey ||
+      focus !== pendingReviewNavigation.focus
+    ) {
+      setPendingReviewNavigation(null);
+      return;
+    }
     // Batched specialist work leaves several PENDING Reviews at once, so
     // the freshly completed one is not necessarily the head of the list —
     // requiring reviews[0] to match swallowed the popup whenever older
@@ -396,6 +423,25 @@ export default function ProjectLayout() {
     );
     if (!targetReview) return;
     setPendingReviewNavigation(null);
+    // Media and whole-entity views may not have a field pointer. The route
+    // also preserves the user's choice after closing the return banner.
+    if (
+      new URLSearchParams(location.search).get("reviewId") ===
+      targetReview.review_id
+    )
+      return;
+    // The user can also open a streamed change just before the completion
+    // event arrives. Keep that choice instead of jumping to the first item.
+    if (
+      focus?.query.review === "1" &&
+      focus.query.field &&
+      targetReview.operations.some(
+        (operation) =>
+          operation.json_pointer === focus.query.field ||
+          operation.ui_locator?.field === focus.query.field,
+      )
+    )
+      return;
     const locator = primaryReviewLocator(targetReview.operations);
     if (!locator) return;
     if (locator.elementId) {
@@ -408,7 +454,14 @@ export default function ProjectLayout() {
       field: locator.field ?? undefined,
       description: t("lib.reviewOrViewChanges"),
     });
-  }, [fileReviews, fileReviewSyncStatus, id, pendingReviewNavigation]);
+  }, [
+    fileReviews,
+    fileReviewSyncStatus,
+    id,
+    location.key,
+    location.search,
+    pendingReviewNavigation,
+  ]);
 
   // A background Header revalidation must not unmount the active route.  The
   // initial skeleton is only needed before the first authoritative Header is

@@ -1,3 +1,5 @@
+import InteractionView from "@/components/interaction/InteractionView";
+import { PresentationPreview } from "@/components/interaction/PresentationEditor";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -16,6 +18,7 @@ import type { ProjectDocument, TimelineDocument } from "@/contracts/creator";
 import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
+  getTimelineRoughCutUrl,
 } from "@/api/creator";
 import {
   selectFinalFilmVersionId,
@@ -105,8 +108,15 @@ const FULL_FILM_ID = "__full_film__";
 /* ------------------------------------------------------------------ */
 /* Cinema preview: a near-fullscreen floating overlay. The whole-film  */
 /* chip plays the composed mp4; timeline chips play the story in       */
-/* narrative order.                                                    */
+/* narrative order — at branch points the audience choice surfaces so  */
+/* every fork is previewable.                                          */
 /* ------------------------------------------------------------------ */
+
+interface CinemaOption {
+  edgeId: string;
+  label: string;
+  target: string;
+}
 
 function PreviewCinema({
   project,
@@ -125,19 +135,36 @@ function PreviewCinema({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const wholeFilm = startId === FULL_FILM_ID;
-  const initialId = startId;
+  // Branching projects have no meaningful composed whole film: the
+  // whole-film sentinel enters the branch-following playback instead,
+  // starting from the entry timeline (same test as selectNarrativeShape).
+  const branching = (project.narrative_edges ?? []).length > 0;
+  const wholeFilm = startId === FULL_FILM_ID && !branching;
+  const initialId =
+    startId === FULL_FILM_ID && branching
+      ? selectLiveTimelineIds(project)[0] ?? startId
+      : startId;
   const [currentId, setCurrentId] = useState(initialId);
   const [segmentIndex, setSegmentIndex] = useState(1);
+  const [options, setOptions] = useState<CinemaOption[] | null>(null);
   const [ended, setEnded] = useState(false);
   const [error, setError] = useState(false);
   const [replayNonce, setReplayNonce] = useState(0);
   /** Intrinsic aspect ratio of the playing video; lets the frame hug it. */
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
 
+  // A branching story is followed by the audience's clicks, so the DOM draft
+  // player can't carry it across a fork: fall back to the on-the-fly
+  // rough-cut assembly. Linear projects keep null so DraftTimelinePlayer
+  // previews planned-duration design frames instead.
+  const srcFor = (timelineId: string) =>
+    srcOf(timelineId) ??
+    (branching ? getTimelineRoughCutUrl(project.project_id, timelineId) : null);
+
   useEffect(() => {
     setCurrentId(initialId);
     setSegmentIndex(1);
+    setOptions(null);
     setEnded(false);
     setError(false);
     setAspectRatio(null);
@@ -153,9 +180,51 @@ function PreviewCinema({
 
   const liveOrder = useMemo(() => selectLiveTimelineIds(project), [project]);
 
+  const edges = useMemo(
+    () => project.narrative_edges ?? [],
+    [project.narrative_edges],
+  );
+
+  const interactionElement = useMemo(
+    () =>
+      Object.values(
+        project.timelines.items[currentId]?.elements_by_id ?? {},
+      ).find(
+        (element) => element.enabled && element.creation.type === "interaction",
+      ),
+    [project, currentId],
+  );
+  const creation =
+    interactionElement?.creation.type === "interaction"
+      ? interactionElement.creation
+      : null;
+  const openChoice = useCallback(() => {
+    if (!creation) return false;
+    setOptions(
+      creation.options.flatMap((option) => {
+        const edge = edges.find(
+          (edge) =>
+            edge.edge_id === option.edge_ref &&
+            edge.source_timeline_id === currentId,
+        );
+        return edge
+          ? [
+              {
+                edgeId: edge.edge_id,
+                label: edge.label,
+                target: edge.target_timeline_id,
+              },
+            ]
+          : [];
+      }),
+    );
+    return true;
+  }, [creation, edges, currentId]);
+
   const advanceTo = useCallback((timelineId: string) => {
     setCurrentId(timelineId);
     setSegmentIndex((index) => index + 1);
+    setOptions(null);
     setEnded(false);
     setError(false);
     setAspectRatio(null);
@@ -166,14 +235,34 @@ function PreviewCinema({
       setEnded(true);
       return;
     }
-    // Linear story: fall through the live timelines in narrative order.
-    const next = liveOrder[liveOrder.indexOf(currentId) + 1];
-    if (next) {
-      advanceTo(next);
+    if (openChoice()) return;
+    const outgoing = edges.filter(
+      (edge) => edge.source_timeline_id === currentId,
+    );
+    if (outgoing.length > 1) {
+      setOptions(
+        outgoing.map((edge) => ({
+          edgeId: edge.edge_id,
+          label: edge.label || edge.prompt || labelOf(edge.target_timeline_id),
+          target: edge.target_timeline_id,
+        })),
+      );
       return;
     }
+    if (outgoing.length === 1) {
+      advanceTo(outgoing[0].target_timeline_id);
+      return;
+    }
+    if (edges.length === 0) {
+      // Linear story: fall through the live timelines in narrative order.
+      const next = liveOrder[liveOrder.indexOf(currentId) + 1];
+      if (next) {
+        advanceTo(next);
+        return;
+      }
+    }
     setEnded(true);
-  }, [wholeFilm, currentId, liveOrder, advanceTo]);
+  }, [wholeFilm, edges, liveOrder, currentId, labelOf, advanceTo, openChoice]);
 
   const replay = useCallback(() => {
     setReplayNonce((nonce) => nonce + 1);
@@ -208,7 +297,7 @@ function PreviewCinema({
             {t("blueprint.roughCutFailed")}
           </div>
         ) : !wholeFilm &&
-          !srcOf(currentId) &&
+          !srcFor(currentId) &&
           project.timelines.items[currentId] ? (
           <DraftTimelinePlayer
             key={`${currentId}:${replayNonce}`}
@@ -222,7 +311,7 @@ function PreviewCinema({
           // in either orientation.
           <video
             key={`${currentId}:${replayNonce}`}
-            src={(wholeFilm ? filmUrl : srcOf(currentId)) ?? undefined}
+            src={(wholeFilm ? filmUrl : srcFor(currentId)) ?? undefined}
             controls
             autoPlay
             playsInline
@@ -231,6 +320,21 @@ function PreviewCinema({
               if (videoWidth > 0 && videoHeight > 0) {
                 setAspectRatio(videoWidth / videoHeight);
               }
+            }}
+            onTimeUpdate={(event) => {
+              if (
+                interactionElement &&
+                !options &&
+                event.currentTarget.currentTime >=
+                  interactionElement.span.start_tick /
+                    project.timelines.items[currentId].ticks_per_second
+              ) {
+                event.currentTarget.pause();
+                openChoice();
+              }
+            }}
+            onPlay={(event) => {
+              if (options) event.currentTarget.pause();
             }}
             onEnded={handleEnded}
             onError={() => setError(true)}
@@ -247,6 +351,25 @@ function PreviewCinema({
                 ? "h-auto max-h-[82vh] max-w-[92vw]"
                 : "h-[min(82vh,900px)] w-auto max-w-full object-contain"
             }`}
+          />
+        )}
+
+        {/* Branch choice overlay — every fork stays previewable. */}
+        {options && (
+          <InteractionView
+            creation={
+              creation ?? {
+                type: "interaction",
+                question: t("blueprint.previewChoice"),
+                options: options.map((option) => ({ edge_ref: option.edgeId })),
+              }
+            }
+            project={project}
+            onSelect={(ref) => {
+              const target = options.find((option) => option.edgeId === ref)
+                ?.target;
+              if (target) advanceTo(target);
+            }}
           />
         )}
 
@@ -308,6 +431,7 @@ export default function BlueprintRoughCutStrip({
     () => [...new Set(frames.map((frame) => frame.timelineId))],
     [frames],
   );
+  const isBranching = (project.narrative_edges ?? []).length > 0;
   const filmVersionId = useMemo(
     () => selectFinalFilmVersionId(project),
     [project],
@@ -315,7 +439,11 @@ export default function BlueprintRoughCutStrip({
   const filmUrl = filmVersionId
     ? getArtifactVersionMediaUrl(filmVersionId)
     : null;
-  if (!frames.length && !filmUrl) return null;
+  const hasSegment = selectLiveTimelineIds(project).some((id) => {
+    const slot = project.assets.artifact_slots_by_id[`timeline:${id}:render`];
+    return slot?.kind === "final_video" && Boolean(slot.selected_version_id);
+  });
+  if (!frames.length && !filmUrl && !hasSegment) return null;
 
   const timelineLabelOf = (timelineId: string) => {
     const timeline = project.timelines.items[timelineId];
@@ -365,12 +493,18 @@ export default function BlueprintRoughCutStrip({
           })}
         </span>
         <span className="ml-auto flex min-w-0 shrink items-center gap-1.5 overflow-x-auto py-0.5 [scrollbar-width:none]">
-          {Boolean(filmUrl) && (
+          {(isBranching
+            ? selectLiveTimelineIds(project).length > 0
+            : Boolean(filmUrl)) && (
             <button
               type="button"
               data-roughcut-play-film
               onClick={() => togglePlay(FULL_FILM_ID)}
-              title={t("blueprint.playFullFilm")}
+              title={
+                isBranching
+                  ? t("blueprint.playFullInteractive")
+                  : t("blueprint.playFullFilm")
+              }
               className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
                 playingId === FULL_FILM_ID
                   ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
@@ -378,10 +512,14 @@ export default function BlueprintRoughCutStrip({
               }`}
             >
               <Film className="h-3 w-3" />
-              {t("blueprint.playFullFilm")}
-              <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
-                {t("blueprint.finalCutBadge")}
-              </span>
+              {isBranching
+                ? t("blueprint.playFullInteractive")
+                : t("blueprint.playFullFilm")}
+              {!isBranching && (
+                <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
+                  {t("blueprint.finalCutBadge")}
+                </span>
+              )}
             </button>
           )}
           <button
@@ -402,16 +540,39 @@ export default function BlueprintRoughCutStrip({
           </button>
         </span>
       </div>
-      {playingId && (
-        <PreviewCinema
-          project={project}
-          startId={playingId}
-          filmUrl={filmUrl}
-          labelOf={timelineLabelOf}
-          srcOf={finalCutUrlOf}
-          onClose={() => setPlayingId(null)}
-        />
-      )}
+      {playingId === FULL_FILM_ID && isBranching
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/70 p-5"
+              role="dialog"
+              aria-label="互动作品预览"
+              data-authored-cinema
+            >
+              <div className="w-[94vw] overflow-hidden rounded-lg bg-[var(--color-bg-primary)]">
+                <div className="flex justify-end p-2">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setPlayingId(null)}
+                  >
+                    关闭预览
+                  </button>
+                </div>
+                <PresentationPreview project={project} review={false} />
+              </div>
+            </div>,
+            document.body,
+          )
+        : playingId && (
+            <PreviewCinema
+              project={project}
+              startId={playingId}
+              filmUrl={filmUrl}
+              labelOf={timelineLabelOf}
+              srcOf={finalCutUrlOf}
+              onClose={() => setPlayingId(null)}
+            />
+          )}
       {!collapsed && (
         <div className="mt-2 flex items-stretch gap-3 overflow-x-auto pb-1.5">
           {timelineIds.map((timelineId) => {

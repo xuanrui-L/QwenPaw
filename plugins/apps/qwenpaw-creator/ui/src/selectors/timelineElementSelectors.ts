@@ -47,7 +47,7 @@ export function selectTimelineById(
   return project.timelines.items[timelineId] ?? null;
 }
 
-export type NarrativeShape = "single" | "linear";
+export type NarrativeShape = "single" | "linear" | "branching";
 
 /**
  * Live narrative timelines in order; `snapshot:*` frozen history excluded.
@@ -65,12 +65,14 @@ export function selectLiveTimelineIds(
 
 /**
  * The blueprint's only fork point, derived purely from data (plan §4.5):
- * several timelines → linear episode list; otherwise the single-node
- * production board.
+ * edges → branching graph; several timelines → linear episode list;
+ * otherwise the single-node production board.
  */
 export function selectNarrativeShape(
   project: ProjectDocument | null | undefined,
 ): NarrativeShape {
+  if (!project) return "single";
+  if ((project.narrative_edges ?? []).length > 0) return "branching";
   return selectLiveTimelineIds(project).length > 1 ? "linear" : "single";
 }
 
@@ -500,6 +502,8 @@ export function elementCreationSummary(
         creation.intent ||
         i18n.t("timeline.trackTypes.motion")
       );
+    case "interaction":
+      return creation.question || i18n.t("timeline.elementTypes.interaction");
   }
 }
 
@@ -550,5 +554,10 @@ export const ELEMENT_TYPE_META: Record<
     label: "timeline.elementTypes.audio",
     color: "#12b76a",
     soft: "rgba(18,183,106,.12)",
+  },
+  interaction: {
+    label: "timeline.elementTypes.interaction",
+    color: "#8b5cf6",
+    soft: "rgba(139,92,246,.12)",
   },
 };

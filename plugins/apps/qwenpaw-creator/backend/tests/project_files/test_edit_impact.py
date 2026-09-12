@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import copy
+import pytest
 
 
 from services.project_files.edit_impact import (
@@ -81,6 +83,7 @@ def _project() -> dict:
                 },
                 "timeline:timeline:main:render": {
                     "slot_id": "timeline:timeline:main:render",
+                    "kind": "final_video",
                     "owner_ref": "timeline:timeline:main",
                     "selected_version_id": "final-v1",
                 },
@@ -123,6 +126,75 @@ def _element_pointer(element_id: str, *suffix: str) -> str:
     )
 
 
+@pytest.mark.parametrize(
+    "pointer",
+    [
+        _element_pointer("overlay-1", "creation", "text"),
+        _element_pointer("r2v-1", "creation", "video_prompt"),
+        "/assets/artifact_slots_by_id/element:r2v-1:video/selected_version_id",
+        "/timelines/items/timeline:main/color_grade",
+    ],
+)
+def test_production_edits_do_not_invalidate_upstream_script(pointer):
+    project = _project()
+    project["assets"]["artifact_slots_by_id"]["script:timeline:main"] = {
+        "kind": "timeline_script",
+        "owner_ref": "timeline:timeline:main",
+        "selected_version_id": "script-v1",
+    }
+    project["assets"]["artifact_versions_by_id"]["script-v1"] = {
+        "stale": False,
+        "stale_reason": None,
+    }
+    updated, impact = apply_frontend_edit_impacts(project, [pointer])
+    assert (
+        updated["assets"]["artifact_versions_by_id"]["script-v1"]["stale"]
+        is False
+    )
+    assert (
+        updated["assets"]["artifact_versions_by_id"]["final-v1"]["stale"]
+        is True
+    )
+    assert "script-v1" not in impact.invalidated_artifact_version_ids
+
+
+def test_synopsis_invalidates_script_but_adding_frozen_history_does_not():
+    base = _project()
+    base["timelines"]["order"] = ["timeline:main"]
+    base["assets"]["artifact_slots_by_id"]["script:timeline:main"] = {
+        "kind": "timeline_script",
+        "owner_ref": "timeline:timeline:main",
+        "selected_version_id": "script-v1",
+    }
+    base["assets"]["artifact_versions_by_id"]["script-v1"] = {"stale": False}
+    candidate = copy.deepcopy(base)
+    candidate["timelines"]["items"][
+        "snapshot:timeline:main:1"
+    ] = copy.deepcopy(
+        candidate["timelines"]["items"]["timeline:main"],
+    )
+    candidate["timelines"]["order"].append("snapshot:timeline:main:1")
+    updated, _ = apply_frontend_edit_impacts(
+        candidate,
+        ["/timelines/order"],
+        base=base,
+    )
+    assert (
+        updated["assets"]["artifact_versions_by_id"]["script-v1"]["stale"]
+        is False
+    )
+    candidate["timelines"]["items"]["timeline:main"]["synopsis"] = "New story"
+    updated, _ = apply_frontend_edit_impacts(
+        candidate,
+        ["/timelines/items/timeline:main/synopsis"],
+        base=base,
+    )
+    assert (
+        updated["assets"]["artifact_versions_by_id"]["script-v1"]["stale"]
+        is True
+    )
+
+
 def test_overlay_copy_edit_invalidates_only_timeline_render() -> None:
     base = _project()
     candidate = _project()
@@ -153,12 +225,19 @@ def test_overlay_copy_edit_invalidates_only_timeline_render() -> None:
     ]
 
 
-def test_r2v_video_prompt_invalidates_video_and_final_but_not_storyboard() -> (
-    None
-):
+@pytest.mark.parametrize("mode", ["r2v", "t2v", "i2v"])
+@pytest.mark.parametrize("field", ["video_prompt", "generate_audio"])
+def test_video_input_invalidates_video_and_final_but_not_storyboard(
+    mode,
+    field,
+) -> None:
+    document = _project()
+    document["timelines"]["items"]["timeline:main"]["elements_by_id"]["r2v-1"][
+        "creation"
+    ]["type"] = mode
     project, impact = apply_frontend_edit_impacts(
-        _project(),
-        [_element_pointer("r2v-1", "creation", "video_prompt")],
+        document,
+        [_element_pointer("r2v-1", "creation", field)],
     )
 
     versions = project["assets"]["artifact_versions_by_id"]

@@ -1,10 +1,12 @@
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CREATOR_ROUTE_OBJECTS } from "@/app/router";
 import type { FileProjectReviewRecord } from "@/contracts/creator";
 import ProjectLayout from "@/components/layout/ProjectLayout";
 import { NavigationRuntime } from "@/routing/navigation";
+import { navigateToLocator } from "@/routing/locators";
+import { useNavigationStore } from "@/store/navigationStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
@@ -128,7 +130,7 @@ function elementReview() {
   });
 }
 
-/** Mounts ProjectLayout with a stub /plan child route. */
+/** Mounts ProjectLayout with a stub workspace for all locator destinations. */
 function renderShell(testId: string) {
   const router = createMemoryRouter(
     [
@@ -141,7 +143,7 @@ function renderShell(testId: string) {
           </>
         ),
         children: [
-          { path: "plan", element: <div data-testid={testId}>route</div> },
+          { path: "*", element: <div data-testid={testId}>route</div> },
         ],
       },
     ],
@@ -159,6 +161,7 @@ describe("ProjectLayout visible shell", () => {
     useCreatorInteractionStore.getState().reset();
     useProjectSnapshotStore.getState().reset();
     useFileProjectReviewStore.getState().reset();
+    useNavigationStore.getState().clear();
     seedProject();
   });
 
@@ -217,4 +220,130 @@ describe("ProjectLayout visible shell", () => {
       "element:r2v-window",
     );
   });
+
+  it("settles a stale session after manual production finishes without lifecycle SSE", async () => {
+    installMockFetch(commonRoutes());
+    renderShell("manual-generation-route");
+    await screen.findByTestId("manual-generation-route");
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session?.status).toBe("IDLE"),
+    );
+    await waitFor(() =>
+      expect(useCreatorTaskViewStore.getState().loading).toBe(false),
+    );
+    act(() => {
+      useCreatorSessionStore.setState({
+        session: { ...sessionState, status: "WAITING_RUNTIME" },
+      });
+    });
+    // Returning to a visible tab performs the same production revalidation as
+    // its periodic tick; the server has no running tasks and an IDLE session.
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session?.status).toBe("IDLE"),
+    );
+    expect(document.querySelector("[data-agent-wait-hint]")).toBeNull();
+  });
+
+  it.each([
+    "before completion",
+    "while polling",
+    "navigate away",
+    "closed media banner",
+  ])(
+    "preserves manual navigation %s instead of opening the first Review item",
+    async (timing) => {
+      const review = elementReview();
+      const secondPointer = changedPointer.replace(
+        "video_prompt",
+        "storyboard_prompt",
+      );
+      const secondLocator = {
+        ...review.operations[0].ui_locator,
+        field: secondPointer,
+      };
+      review.operations.push(
+        makeReviewOperation({
+          operation_id: "operation-2",
+          json_pointer: secondPointer,
+          target_ref: "element:r2v-window",
+          ui_locator: secondLocator,
+        }),
+      );
+      installMockFetch(commonRoutes(review));
+      const router = renderShell("manual-review-route");
+      await screen.findByTestId("manual-review-route");
+      await waitFor(() =>
+        expect(useFileProjectReviewStore.getState().reviews).toHaveLength(1),
+      );
+      const openSecond = () =>
+        navigateToLocator(
+          "p1",
+          timing === "closed media banner"
+            ? { page: "assets", assetId: "character-alice", versionId: "v1" }
+            : secondLocator,
+          {
+            review: true,
+            reviewId:
+              timing === "closed media banner" ? review.review_id : undefined,
+          },
+        );
+      if (timing === "before completion") act(openSecond);
+      if (timing === "closed media banner") {
+        act(openSecond);
+        // The visible banner's close action clears navigation-stack state,
+        // but the chosen media review remains open in the route.
+        act(() => useNavigationStore.getState().clear());
+      }
+
+      let finishPoll!: () => void;
+      const pendingPoll = new Promise<void>((resolve) => {
+        finishPoll = resolve;
+      });
+      const poll = vi
+        .spyOn(useFileProjectReviewStore.getState(), "pollOnce")
+        .mockReturnValue(pendingPoll);
+      try {
+        act(() =>
+          useCreatorSessionStore.getState().ingestEvents([
+            {
+              eventId: "run-with-review",
+              seq: 1,
+              type: "agent.run.completed",
+              projectId: "p1",
+              creatorSessionId: "s1",
+              at: "now",
+              data: {
+                runId: "run-element-1",
+                reviewIds: ["review-element-1"],
+              },
+            },
+          ]),
+        );
+        await waitFor(() => expect(poll).toHaveBeenCalledTimes(1));
+        if (timing === "while polling") act(openSecond);
+        if (timing === "navigate away") {
+          await act(() => router.navigate("/project/p1/plan?user=selected"));
+        }
+        const manualSearch = router.state.location.search;
+        await act(async () => {
+          finishPoll();
+          await pendingPoll;
+        });
+        expect(poll).toHaveBeenCalledTimes(2);
+        expect(router.state.location.search).toBe(manualSearch);
+        if (timing === "closed media banner") {
+          expect(new URLSearchParams(manualSearch).get("reviewId")).toBe(
+            review.review_id,
+          );
+        } else if (timing !== "navigate away") {
+          expect(new URLSearchParams(manualSearch).get("field")).toBe(
+            secondPointer,
+          );
+        }
+      } finally {
+        poll.mockRestore();
+      }
+    },
+  );
 });

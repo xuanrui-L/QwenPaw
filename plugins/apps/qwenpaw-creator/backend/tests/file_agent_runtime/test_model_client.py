@@ -268,6 +268,60 @@ def test_default_client_constructs_real_agentscope_dashscope_model(
 
 
 @pytest.mark.parametrize(
+    ("name", "override", "expected"),
+    [
+        ("qwen3.8-max", None, 4096),
+        ("qwen3-vl-plus", "8192", 8192),
+        ("qwen3.8-max", "invalid", 4096),
+        ("qwen3.8-max", "0", 4096),
+        ("other-compatible-model", None, None),
+    ],
+)
+def test_reasoning_budget_reaches_sdk_request_without_limiting_tool_output(
+    monkeypatch,
+    name,
+    override,
+    expected,
+):
+    _configure_text_model(monkeypatch)
+    monkeypatch.setattr(
+        model_client.model_config,
+        "get_text_model_name",
+        lambda: name,
+    )
+    if override is None:
+        monkeypatch.delenv("CREATOR_AGENT_THINKING_BUDGET", raising=False)
+    else:
+        monkeypatch.setenv("CREATOR_AGENT_THINKING_BUDGET", override)
+    configured = AgentScopeAgentChatClient()._configured_model()
+    captured = {}
+
+    async def capture(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("request captured before transport")
+
+    monkeypatch.setattr(configured.client.chat.completions, "create", capture)
+    with pytest.raises(RuntimeError, match="request captured"):
+        asyncio.run(
+            configured._call_api(
+                model_name=name,
+                messages=records_to_agentscope_messages(
+                    [
+                        {
+                            "role": "user",
+                            "content": "Plan a short branching story",
+                        },
+                    ],
+                ),
+                tools=_tools(),
+            ),
+        )
+    assert captured["extra_body"].get("thinking_budget") == expected
+    assert "max_tokens" not in captured
+    assert captured["tools"][0]["function"]["name"] == "read_project"
+
+
+@pytest.mark.parametrize(
     ("protocol", "base_url"),
     [
         ("Anthropic Claude", "https://api.anthropic.com"),

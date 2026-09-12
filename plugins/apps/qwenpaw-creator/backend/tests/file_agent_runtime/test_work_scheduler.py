@@ -424,6 +424,31 @@ def test_dispatched_idempotency_key_is_a_safe_runtime_segment(
     )
 
 
+def test_idempotency_key_is_a_safe_runtime_segment(tmp_path, monkeypatch):
+    """Regression: the ledger fingerprint carries "|img:<model>|vid:<model>"
+    and "|" is rejected by require_safe_runtime_segment. Media executors
+    persist the dispatch key verbatim as Task idempotency_key /
+    caused_by_request_id, so a raw fingerprint in the key failed every
+    work-graph dispatch ("caused_by_request_id is not a safe path
+    segment") and media generation never started."""
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    dispatch = _RecordingDispatch()
+    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
+
+    async def scenario():
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+
+    asyncio.run(scenario())
+
+    key = dispatch.calls[0]["idempotency_key"]
+    assert "|" not in key
+    assert (
+        require_safe_runtime_segment(key, label="caused_by_request_id") == key
+    )
+
+
 def test_quarantined_stale_result_reopens_dispatch(tmp_path, monkeypatch):
     """Field run 2026-08-07: the first commit of a four-wide storyboard
     wave staled the other three; their tasks went QUARANTINED (invisible
@@ -1059,7 +1084,13 @@ def test_transient_hard_cap_emits_steer_once(tmp_path, monkeypatch):
 def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     state = {"index": 0}
 
-    def fake_derive(_project, tasks=(), *, media_models=None):
+    def fake_derive(
+        _project,
+        tasks=(),
+        *,
+        media_models=None,
+        pending_reviews=(),
+    ):
         del tasks
         index = min(state["index"], len(graphs) - 1)
         state["index"] += 1
@@ -1073,6 +1104,7 @@ def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     [
         ("video", "video:e1", "视频 e1", "node_succeeded"),
         ("compose", "compose:final", "成片", "compose_completed"),
+        ("bundle", "bundle:project", "互动包准备", "node_succeeded"),
     ],
 )
 def test_done_edge_emits_milestone_once_across_ticks(
@@ -1482,3 +1514,54 @@ def test_manual_fingerprint_re_rolls_a_succeeded_slot() -> None:
     assert WorkGraphScheduler.manual_retry_fingerprint(node, [succeeded]) == (
         fresh
     )
+
+
+def test_media_budget_does_not_block_interaction_or_final_assembly(
+    tmp_path,
+    monkeypatch,
+):
+    from services.media_files.call_budget import MediaCallBudgetExhausted
+
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    _enable_yolo(monkeypatch)
+
+    def spent(*_args):
+        raise MediaCallBudgetExhausted("spent")
+
+    monkeypatch.setattr(work_scheduler, "ensure_media_call_budget", spent)
+    graph = WorkGraph(
+        nodes=tuple(
+            WorkNode(
+                node_id=kind + ":test",
+                kind=kind,
+                label=kind,
+                status=WorkNodeStatus.READY,
+                command=command,
+                target_ref="timeline:main"
+                if kind == "compose"
+                else "element:test",
+            )
+            for kind, command in [
+                ("video", "GENERATE_R2V_VIDEO"),
+                ("interaction", "GENERATE_INTERACTION_MOTION"),
+                ("compose", "COMPOSE_FINAL_VIDEO"),
+            ]
+        ),
+        generation=1,
+    )
+    _graph_sequence(monkeypatch, [graph])
+    scheduler = WorkGraphScheduler(services)
+    calls = []
+
+    async def dispatch(_project, node, *_args, **_kwargs):
+        calls.append(node.kind)
+
+    scheduler.dispatch_node = dispatch
+
+    async def scenario():
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+    assert sorted(calls) == ["compose", "interaction"]

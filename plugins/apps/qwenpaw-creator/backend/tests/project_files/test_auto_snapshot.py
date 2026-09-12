@@ -220,6 +220,32 @@ class TestAutoSnapshotTimelines:
         assert "timeline:main" not in snapshot["name"]
         assert "时间线" in snapshot["name"]
 
+    def test_snapshot_timeline_is_never_resnapshotted(self):
+        """快照是冻结副本：改动落在快照线上也不再留底，否则会生成
+        ``snapshot:snapshot:...`` 这种永不绑定的 id。"""
+        sid = "snapshot:timeline:main:1"
+        snapped = f"{sid}:{ELEM}"
+        base = _minimal_project(elements={ELEM: _element(ELEM)})
+        base["timelines"]["items"][sid] = {
+            "timeline_id": sid,
+            "name": "快照 · 主时间轴 · 2026-09-04 10:00",
+            "description": "自动快照：修改前的时间轴副本",
+            "ticks_per_second": 30,
+            "elements_by_id": {snapped: _element(snapped)},
+            "order": [snapped],
+        }
+        base["timelines"]["order"].append(sid)
+        candidate = copy.deepcopy(base)
+        _elems(candidate, sid)[snapped]["label"] = "Edited in snapshot"
+
+        auto_snapshot_timelines(base, candidate)
+
+        items = candidate["timelines"]["items"]
+        assert not any(k.startswith("snapshot:snapshot:") for k in items)
+        assert _elems(candidate, sid)[snapped]["label"] == (
+            "Edited in snapshot"
+        )
+
     def _age_snapshot(self, doc: dict, sid: str) -> None:
         snapshot = doc["timelines"]["items"][sid]
         snapshot["name"] = f"{snapshot['name'][:-16]}2020-01-01 00:00"

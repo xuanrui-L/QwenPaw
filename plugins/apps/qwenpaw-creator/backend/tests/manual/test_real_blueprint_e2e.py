@@ -3,7 +3,7 @@
 """Manual real-key acceptance for the project-blueprint slice.
 
 Drives the REAL HTTP surface (create → v9 snapshot → narrative structure
-patch → real Qwen synopsis drafting → work graph → rough-cut
+patch → real Qwen synopsis drafting → work graph → interactive-bundle
 fail-closed gate) against an isolated CREATOR_DATA_ROOT, using the real
 DashScope key. Opt-in::
 
@@ -141,6 +141,7 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
     snapshot = _snapshot(client, project_id)
     project = snapshot["project"] if "project" in snapshot else snapshot
     assert project["schema_version"] == 9
+    assert project["narrative_edges"] == []
     primary_id = project["timelines"]["order"][0]
 
     # 3. Real model call: draft a two-episode structure synopsis.
@@ -161,7 +162,7 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
     assert synopses["ep1"].strip() and synopses["ep2"].strip()
 
     # 4. Persist the drafted structure through the real patch channel:
-    #    title/synopsis on the primary node plus a second timeline.
+    #    title/synopsis on the primary node, a second timeline, one edge.
     second_id = "tl:ep2"
     _patch(
         client,
@@ -191,6 +192,18 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
                 },
             ),
             _op(project, "add", "/timelines/order/1", second_id),
+            _op(
+                project,
+                "add",
+                "/narrative_edges/0",
+                {
+                    "edge_id": "edge:1",
+                    "source_timeline_id": primary_id,
+                    "target_timeline_id": second_id,
+                    "label": "选择 · 进入旧宅",
+                    "prompt": "是否进入旧宅？",
+                },
+            ),
         ],
     )
     updated = _snapshot(client, project_id)
@@ -199,6 +212,7 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
         updated_project["timelines"]["items"][second_id]["synopsis"]
         == synopses["ep2"].strip()
     )
+    assert len(updated_project["narrative_edges"]) == 1
 
     # 4b. Add one r2v element BEFORE script drafting so the script node
     #     stays fresh when the storyboard later depends on it.
@@ -297,7 +311,11 @@ def test_blueprint_slice_end_to_end_with_real_model(client) -> None:
     assert "场" in script_markdown or "#" in script_markdown
     print("REAL-SCRIPT-DRAFT chars:", len(script_markdown))
 
-    # 8. Rough-cut fails closed (no artifacts yet).
+    # 7. Interactive bundle still fails closed before any final cut exists.
+    bundle = client.get(f"/projects/{project_id}/interactive-bundle")
+    assert bundle.status_code == 409, bundle.text
+
+    # 8. Rough-cut fails closed too (no artifacts yet).
     rough = client.get(
         f"/projects/{project_id}/timelines/{primary_id}/rough-cut",
     )

@@ -33,7 +33,7 @@ from services.specialist_tools import SpecialistToolSpec
 
 REQUEST_WORKGRAPH_EXECUTION = "request_workgraph_execution"
 MEDIA_NODE_KINDS = frozenset(
-    {"visual", "lineup", "storyboard", "video", "compose"},
+    {"visual", "lineup", "storyboard", "video", "compose", "interaction"},
 )
 
 
@@ -47,6 +47,11 @@ def request_workgraph_tool_manifest() -> dict[str, Any]:
                 "角色/场景/道具用 asset:<entity_id>，阵容用 lineup:<id>，"
                 "分镜/视频用 element:<element_id>；本地成片用 timeline:<timeline_id>"
                 "并指定 kinds=[compose]。可一次列出多个独立目标；"
+                "交互动效用 element:<element_id> 并指定 kinds=[interaction]，"
+                "整部作品的首页/播放页/地图/结局页用 project:<project_id>、kinds=[interaction]，"
+                "先写 interactive_presentation.design_prompt，再请求生成；"
+                "全部视觉由 Agent 从零创作，不套模板。"
+                "读取 creation.design_prompt 生成 HTML/CSS，产物必须审阅后才能导出。"
                 "媒体生成并行提出真实授权请求，用户批准后才执行；本地合成不新增付费授权。"
                 "不修改项目、不修改权限、不自动纳入其他目标、不重试失败任务。"
                 "用户只要求写剧本/设定或等待确认时不要调用；"
@@ -226,7 +231,7 @@ def parse_request_targets(
         )
     ):
         raise ValueError(
-            "制作请求仅支持设计图、阵容图、分镜、视频和本地成片合成",
+            "制作请求仅支持设计图、阵容图、分镜、视频、交互动效和本地成片合成",
         )
     return set(refs), set(kinds)
 
@@ -427,6 +432,12 @@ def requested_work_node(snapshot: Any, node: WorkNode) -> RequestedWorkNode:
         timeline = project.timelines.items.get(node.timeline_id)
         if timeline is not None:
             authored_inputs["timeline"] = timeline.model_dump(mode="json")
+    if node.kind == "interaction":
+        kind, operation = "text", "interaction_draft"
+        role = SpecialistRole.AI_EDITING_DIRECTOR
+        # The graph fingerprint binds the complete semantic input contract;
+        # generation/ETag and published HTML must not change this identity.
+        authored_inputs["interactionFingerprint"] = node.dispatch_fingerprint
     if node.kind == "visual":
         entity = project.visual.entities.items.get(
             (node.target_ref or "").removeprefix("asset:"),
@@ -572,6 +583,7 @@ async def ready_request_context(
     graph = derive_work_graph(
         snapshot.project,
         tasks=tasks,
+        pending_reviews=reviews,
         media_models=(get_image_model_name(), get_video_model_name()),
     )
     publications = [_publication_artifacts(review) for review in reviews]

@@ -746,6 +746,23 @@ def default_model_turn_timeout_seconds() -> float:
 DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = default_model_turn_timeout_seconds()
 
 
+def _qwen_thinking_budget(model_name: str) -> int | None:
+    """Bound planning latency without truncating authored JSON/tool output.
+
+    Qwen3 defaults to the model's full reasoning allowance, which can keep a
+    small interactive project thinking for ten minutes before its first draft.
+    Other compatible providers must not receive this Qwen-specific parameter.
+    """
+    if not model_name.lower().startswith("qwen3"):
+        return None
+    raw = os.environ.get("CREATOR_AGENT_THINKING_BUDGET", "4096")
+    try:
+        budget = int(raw)
+    except ValueError:
+        budget = 4096
+    return budget if 0 < budget <= 32768 else 4096
+
+
 class AgentScopeAgentChatClient:
     """Direct AgentScope 2.0.4 model adapter for file Runtime turns.
 
@@ -844,6 +861,7 @@ class AgentScopeAgentChatClient:
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     thinking_enable=True,
+                    thinking_budget=_qwen_thinking_budget(model_name),
                     parallel_tool_calls=False,
                 )
                 self.model = _build_chat_model(
@@ -1482,6 +1500,7 @@ class AgentScopeVlmChatClient(AgentScopeAgentChatClient):
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     thinking_enable=True,
+                    thinking_budget=_qwen_thinking_budget(model_name),
                     parallel_tool_calls=False,
                 )
                 self.model = _build_chat_model(

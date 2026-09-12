@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { Dropdown, message } from "antd";
-import { ChevronDown, Download, FileOutput } from "lucide-react";
+import { ChevronDown, Download, FileOutput, Package } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectDocument } from "@/contracts/creator";
-import { getArtifactVersionMediaUrl } from "@/api/creator";
+import {
+  getArtifactVersionMediaUrl,
+  getInteractiveBundleUrl,
+} from "@/api/creator";
 import { selectTimelineFilmVersionId } from "@/selectors/blueprintSelectors";
-import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
+import {
+  selectLiveTimelineIds,
+  selectNarrativeShape,
+} from "@/selectors/timelineElementSelectors";
 import {
   ExportProgressCard,
   saveExportFile,
@@ -24,6 +30,8 @@ export default function ProjectExportActions({
 }) {
   const { t } = useTranslation();
   const projectId = project.project_id;
+  const shape = useMemo(() => selectNarrativeShape(project), [project]);
+  const [bundleBusy, setBundleBusy] = useState(false);
   const [exportProgress, setExportProgress] =
     useState<ExportProgressState | null>(null);
   const exporting = exportProgress?.status === "running";
@@ -108,13 +116,44 @@ export default function ProjectExportActions({
     return () => window.clearTimeout(timer);
   }, [exportProgress]);
 
+  const exportBundle = async () => {
+    setBundleBusy(true);
+    try {
+      const response = await fetch(getInteractiveBundleUrl(projectId));
+      if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(
+          error?.error?.message ||
+            error?.message ||
+            error?.detail ||
+            `HTTP ${response.status}`,
+        );
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${projectId}-interactive.zip`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      message.error(
+        `${t("blueprint.exportBundleFailed")}：${(error as Error).message}`,
+      );
+    } finally {
+      setBundleBusy(false);
+    }
+  };
+
   return (
     <>
       <Dropdown
         trigger={["click"]}
         menu={{
           items: [
-            ...(films.length > 1
+            ...(shape === "branching"
+              ? []
+              : films.length > 1
               ? [
                   {
                     type: "group" as const,
@@ -154,7 +193,9 @@ export default function ProjectExportActions({
           type="button"
           data-download-render
           title={
-            hasFilm
+            shape === "branching"
+              ? t("blueprint.exportProject")
+              : hasFilm
               ? t("blueprint.downloadFinalTitle")
               : t("blueprint.waitingForFinalCut")
           }
@@ -165,6 +206,19 @@ export default function ProjectExportActions({
           <ChevronDown className="h-3.5 w-3.5" />
         </button>
       </Dropdown>
+      {shape === "branching" && (
+        <button
+          type="button"
+          data-export-bundle
+          disabled={bundleBusy}
+          title={t("blueprint.downloadBundleTitle")}
+          onClick={() => void exportBundle()}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)] transition hover:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-70"
+        >
+          <Package className="h-3.5 w-3.5" />
+          {bundleBusy ? t("blueprint.exporting") : t("blueprint.exportBundle")}
+        </button>
+      )}
       {exportProgress && (
         <ExportProgressCard
           projectName={project.name}

@@ -275,6 +275,7 @@ ARTIFACT_SLOT_KINDS = frozenset(
         "cast_lineup_image",
         "element_video",
         "final_video",
+        "interactive_bundle",
         "r2v_storyboard_image",
         "research_report",
         "timeline_script",
@@ -812,6 +813,10 @@ class R2VCreation(StrictModel):
         default_factory=list,
     )
     video_prompt: str = ""
+    generate_audio: bool = Field(
+        default=True,
+        description="Generate native video audio. Set false for silent footage.",
+    )
     prompt_sync: R2VPromptSync | None = None
     video_reference_version_ids: list[EntityId] = Field(default_factory=list)
 
@@ -858,6 +863,10 @@ class T2VCreation(StrictModel):
     narrative: str = ""
     continuity: str = ""
     video_prompt: str = ""
+    generate_audio: bool = Field(
+        default=True,
+        description="Generate native video audio. Set false for silent footage.",
+    )
     recipe: GenerationRecipe | None = None
 
 
@@ -874,6 +883,10 @@ class I2VCreation(StrictModel):
     continuity: str = ""
     first_frame_version_id: EntityId | None = None
     video_prompt: str = ""
+    generate_audio: bool = Field(
+        default=True,
+        description="Generate native video audio. Set false for silent footage.",
+    )
     recipe: GenerationRecipe | None = None
 
 
@@ -1116,6 +1129,61 @@ class AudioCreation(StrictModel):
         return value
 
 
+class InteractionOption(StrictModel):
+    """One tappable audience choice; copy/target derive from the edge."""
+
+    # Points at Project.narrative_edges[*].edge_id — the edge is the single
+    # source of truth for option label and target timeline.
+    edge_ref: str = Field(min_length=1)
+    # Appearance only; copy and navigation still belong to the story edge.
+    design_prompt: str = ""
+    # Tap hotspot in normalized canvas space; None = auto layout by the
+    # generated motion.
+    hotspot: ElementLocation | None = None
+
+
+class InteractionCreation(StrictModel):
+    """Audience-choice element: a clickable html_css motion rendered on the
+    last frame of the source episode. Exported through InteractiveManifest
+    (never baked into a plain mp4)."""
+
+    type: Literal["interaction"]
+    question: str = Field(min_length=1)
+    design_prompt: str = ""
+    options: list[InteractionOption] = Field(min_length=1)
+    countdown_seconds: float | None = Field(default=None, gt=0)
+    # Edge taken when the countdown expires without a tap.
+    default_edge_ref: str | None = None
+    # Anchor frame: artifact-version ref of the source episode's last frame.
+    base_frame_ref: str | None = None
+    motion: MotionGraphic | None = None
+    fallback: Literal["static_endcard", "split_publish"] = "split_publish"
+
+    @model_validator(mode="after")
+    def _validate_options(self) -> InteractionCreation:
+        if self.motion is not None and self.motion.format != "html_css":
+            raise ValueError("interaction motion must use html_css")
+        if self.countdown_seconds is not None and not math.isfinite(
+            self.countdown_seconds,
+        ):
+            raise ValueError("interaction countdown must be finite")
+        if (
+            self.countdown_seconds is not None
+            and self.default_edge_ref is None
+        ):
+            raise ValueError("interaction countdown requires default_edge_ref")
+        refs = [option.edge_ref for option in self.options]
+        if len(refs) != len(set(refs)):
+            raise ValueError("interaction options cannot repeat edge_ref")
+        if self.default_edge_ref is not None and (
+            self.default_edge_ref not in refs
+        ):
+            raise ValueError(
+                "interaction default_edge_ref must be one of its options",
+            )
+        return self
+
+
 ElementCreation = Annotated[
     R2VCreation
     | T2VCreation
@@ -1125,7 +1193,8 @@ ElementCreation = Annotated[
     | OverlayCreation
     | MotionClipCreation
     | TransitionCreation
-    | AudioCreation,
+    | AudioCreation
+    | InteractionCreation,
     Field(discriminator="type"),
 ]
 
@@ -1341,6 +1410,54 @@ class Timeline(StrictModel):
         )
 
 
+class NarrativeEdge(StrictModel):
+    """Branch link between two narrative nodes (Timelines). Linear projects
+    keep this empty; the blueprint derives its structure shape from
+    len(timelines) x bool(narrative_edges) — no extra enum."""
+
+    edge_id: EntityId
+    source_timeline_id: EntityId
+    target_timeline_id: EntityId
+    # Option label shown to the audience, e.g. "选择A · 揭发真相".
+    label: str = ""
+    # Choice question copy; edges sharing a source share the prompt.
+    prompt: str = ""
+    # Risk tier drives what the audience *expects* when they tap. Two axes:
+    # relation to the character's goal, and reversibility of the cost.
+    #   safe   aligned, cheap/reversible       — the obvious pick
+    #   risky  aligned, cost unknown or high   — a deliberate gamble
+    #   danger against the goal, irreversible  — walking into it on purpose
+    # Tiebreaker for the drafting model: "does this *almost certainly* end
+    # badly?" yes -> danger, "it might" -> risky. Absent = neutral card, so
+    # pre-tone projects stay valid and players keep working.
+    tone: Literal["safe", "risky", "danger"] | None = None
+
+
+class InteractionPoint(StrictModel):
+    """One choice point inside the interactive manifest."""
+
+    source_timeline_id: EntityId
+    at_seconds: float = Field(ge=0)
+    question: str = ""
+    options: list[InteractionOption] = Field(min_length=1)
+    countdown_seconds: float | None = Field(default=None, gt=0)
+    default_edge_ref: str | None = None
+    motion_html: str | None = None
+    base_frame_data_uri: str | None = None
+
+
+class InteractiveManifest(StrictModel):
+    """Content of an interactive_bundle artifact: segment videos + choice
+    points. The final deliverable of a branching project is this bundle
+    (html player + manifest + segment mp4s), not a single mp4."""
+
+    schema_version: Literal[1] = 1
+    entry_timeline_id: EntityId
+    # timeline_id -> final_video ArtifactVersion ref for that segment.
+    segments: dict[EntityId, str] = Field(default_factory=dict)
+    interactions: list[InteractionPoint] = Field(default_factory=list)
+
+
 SNAPSHOT_TIMELINE_PREFIX = "snapshot:"
 
 
@@ -1367,6 +1484,54 @@ def narrative_timeline_ids(project: "Project") -> tuple[str, ...]:
     )
 
 
+PresentationScreen = Literal["title", "play", "map", "ending"]
+PresentationAction = Literal[
+    "start",
+    "resume",
+    "toggle_play",
+    "map",
+    "map_back",
+    "replay",
+    "title",
+    "jump",
+    "reset",
+]
+
+
+class InteractiveControlDesign(StrictModel):
+    label: str = ""
+    design_prompt: str = ""
+
+
+class InteractiveScreenDesign(StrictModel):
+    design_prompt: str = ""
+    controls: dict[PresentationAction, InteractiveControlDesign] = Field(
+        default_factory=dict,
+    )
+
+
+class InteractivePresentation(StrictModel):
+    """Project-specific interface, authored by the agent and reviewed as HTML."""
+
+    design_prompt: str = ""
+    # Semantic design intentions, never a layout preset or HTML template.
+    screens: dict[PresentationScreen, InteractiveScreenDesign] = Field(
+        default_factory=dict,
+    )
+    motion: MotionGraphic | None = None
+
+    @model_validator(mode="after")
+    def _css_only(self):
+        from .presentation_html import PRESENTATION_ACTIONS
+
+        if self.motion is not None and self.motion.format != "html_css":
+            raise ValueError("interactive presentation must use html_css")
+        for screen, design in self.screens.items():
+            if set(design.controls) - PRESENTATION_ACTIONS[screen]:
+                raise ValueError(f"unsupported control for {screen}")
+        return self
+
+
 class Project(StrictModel):
     schema_version: Literal[9] = CURRENT_PROJECT_SCHEMA_VERSION
     project_id: EntityId
@@ -1388,7 +1553,50 @@ class Project(StrictModel):
             order=[DEFAULT_TIMELINE_ID],
         ),
     )
+    narrative_edges: list[NarrativeEdge] = Field(default_factory=list)
+    interactive_presentation: InteractivePresentation = Field(
+        default_factory=InteractivePresentation,
+    )
     assets: AssetIndex = Field(default_factory=AssetIndex)
+
+    @model_validator(mode="after")
+    def _validate_narrative_edges(self) -> Project:
+        seen: set[str] = set()
+        for edge in self.narrative_edges:
+            if edge.edge_id in seen:
+                raise ValueError("narrative edge ids must be unique")
+            seen.add(edge.edge_id)
+            for ref in (edge.source_timeline_id, edge.target_timeline_id):
+                if ref not in narrative_timeline_ids(self):
+                    raise ValueError(
+                        f"narrative edge references unknown timeline {ref!r}",
+                    )
+            if edge.source_timeline_id == edge.target_timeline_id:
+                raise ValueError("narrative edge cannot loop onto itself")
+        edges = {edge.edge_id: edge for edge in self.narrative_edges}
+        for tid in narrative_timeline_ids(self):
+            points = [
+                element
+                for element in self.timelines.items[
+                    tid
+                ].elements_by_id.values()
+                if element.enabled
+                and isinstance(element.creation, InteractionCreation)
+            ]
+            if len(points) > 1:
+                raise ValueError(
+                    f"{tid}: only one enabled interaction per narrative node",
+                )
+            for element in points:
+                for option in element.creation.options:
+                    edge = edges.get(option.edge_ref)
+                    if edge is None or edge.source_timeline_id != tid:
+                        raise ValueError(
+                            f"{element.element_id}: interaction option must "
+                            f"reference an outgoing edge of {tid}: "
+                            f"{option.edge_ref}",
+                        )
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -1772,6 +1980,34 @@ class Project(StrictModel):
                     creation.motion,
                     require_externalized=True,
                 )
+            elif isinstance(creation, InteractionCreation):
+                if creation.base_frame_ref is not None:
+                    _require_version_refs(
+                        source_versions,
+                        artifact_versions,
+                        [
+                            creation.base_frame_ref.removeprefix(
+                                "artifact-version:",
+                            ),
+                        ],
+                        "interaction base frame",
+                    )
+                self._validate_committed_motion_document(
+                    element_id,
+                    creation.motion,
+                )
+                if creation.motion is not None and creation.motion.html:
+                    from .interaction_html import validate_interaction_html
+
+                    problems = validate_interaction_html(
+                        creation.motion.html,
+                        None,
+                    )
+                    if creation.motion.format != "html_css" or problems:
+                        raise ValueError(
+                            "invalid interaction motion: "
+                            + "; ".join(problems),
+                        )
             elif isinstance(creation, AudioCreation):
                 _require_key(
                     source_versions,

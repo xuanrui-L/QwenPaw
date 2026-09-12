@@ -158,7 +158,10 @@
     "saveAsTemplateFailed": "保存模板失败",
     "deleteTemplateConfirm": "删除模板「{{name}}」？",
     "deleteTemplateSuccess": "模板已删除",
-    "deleteTemplateFailed": "删除模板失败"
+    "deleteTemplateFailed": "删除模板失败",
+    "videoTemplateNone": "不使用模板",
+    "videoTemplateHint": "选择预设模板快速开始",
+    "videoTemplateUserSection": "我的模板"
   },
   "nav": {
     "videoPlan": "视频方案",
@@ -627,7 +630,8 @@
     "railOverviewTab": "视频概览",
     "noStoryboard": "暂无分镜图",
     "scriptPlan": "返回视频脚本",
-    "expandSidebar": "展开侧边栏"
+    "expandSidebar": "展开侧边栏",
+    "railStoryboardTab": "分镜图预览"
   },
   "r2v": {
     "title": "视频方案 / {{element}} / 制作工作台",
@@ -800,7 +804,9 @@
     "editorReferencesChanged": "引用图片或编辑对象已变化。为避免引用到错误图片，请重新载入后继续编辑。当前编辑暂时保留。",
     "editorReload": "重新载入最新内容",
     "editorKeep": "保留我的编辑",
-    "narrativeTitle": "片段内容"
+    "narrativeTitle": "片段内容",
+    "subtitle": "AI 生成画面子界面，继承分镜、引用资产和产物版本。",
+    "tokenClickRemove": "点击移除该引用"
   },
   "elementDetail": {
     "selectElement": "选择一项时间线内容",
@@ -1100,6 +1106,9 @@
   },
   "executionAuth": {
     "title": "高成本媒体执行",
+    "generatePresentation": "生成作品页面",
+    "generateInteraction": "生成抉择动效",
+    "presentationTarget": "首页、播放页、剧情地图与结局页",
     "duration": "时长 {{duration}}秒",
     "resolutionLabel": "分辨率 {{resolution}}",
     "ratio": "比例 {{ratio}}",
@@ -1147,6 +1156,7 @@
     "creativeBrief": "创作总纲",
     "creativeDirection": "创作方向",
     "prompt": "提示词",
+    "nativeAudio": "视频原声",
     "camera": "运镜",
     "framing": "景别",
     "duration": "时长",
@@ -1208,6 +1218,9 @@
       "videoVersion": "视频版本",
       "editPlan": "剪辑方案",
       "contentUpdated": "内容已更新",
+      "presentationEffect": "作品页面 · 界面效果",
+      "interactionEffect": "抉择动效",
+      "effectUpdated": "界面效果已更新，点击查看预览",
       "mediaSelection": "使用的素材",
       "selectionUpdated": "素材选择已更新",
       "text": "文案",
@@ -2199,7 +2212,12 @@
     "sourceResultFailed": "理解结果读取失败",
     "sourceResultLoading": "正在读取理解结果",
     "pausePreview": "暂停预览",
-    "previewPosition": "预览进度"
+    "previewPosition": "预览进度",
+    "playFullInteractive": "播放整个互动包",
+    "exportBundle": "导出互动包",
+    "exportBundleFailed": "互动包暂时无法导出",
+    "downloadBundleTitle": "导出互动包或导出项目",
+    "previewChoice": "选择故事走向"
   },
   "sidebar": {
     "assistant": "创作助手",

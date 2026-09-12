@@ -9,10 +9,14 @@ import {
   SquarePen,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { ProjectDocument } from "@/contracts/creator";
+import type {
+  NarrativeEdgeDocument,
+  ProjectDocument,
+} from "@/contracts/creator";
 import {
   isVideoProductionElement,
   isVoiceOnlyVisualEntity,
+  layoutNarrativeGraph,
   roughCutFrameForElement,
   selectResearchSlots,
   selectTimelineRenderSlot,
@@ -36,6 +40,7 @@ interface StructureAreaProps extends StructureAreaCallbacks {
   project: ProjectDocument;
   shape: NarrativeShape;
   summaries: TimelineSummary[];
+  edges: NarrativeEdgeDocument[];
   selectedTimelineId: string | null;
 }
 
@@ -511,7 +516,196 @@ function EpisodeList({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Branching: layered graph canvas                                     */
+/* ------------------------------------------------------------------ */
+
+const NODE_WIDTH = 218;
+const NODE_HEIGHT = 132;
+const LAYER_GAP = 120;
+const ROW_GAP = 42;
+const CANVAS_PADDING = 28;
+
+function GraphCanvas({
+  summaries,
+  edges,
+  selectedTimelineId,
+  onSelectTimeline,
+  onOpenTimeline,
+}: StructureAreaProps) {
+  const { t } = useTranslation();
+  const layout = useMemo(
+    () => layoutNarrativeGraph(summaries, edges),
+    [edges, summaries],
+  );
+  const positions = useMemo(() => {
+    const map = new Map<string, { x: number; y: number }>();
+    for (const summary of summaries) {
+      const cell = layout.get(summary.timelineId);
+      if (!cell) continue;
+      map.set(summary.timelineId, {
+        x: CANVAS_PADDING + cell.layer * (NODE_WIDTH + LAYER_GAP),
+        y: CANVAS_PADDING + cell.row * (NODE_HEIGHT + ROW_GAP),
+      });
+    }
+    return map;
+  }, [layout, summaries]);
+  const width =
+    CANVAS_PADDING * 2 +
+    (Math.max(0, ...[...layout.values()].map((cell) => cell.layer)) + 1) *
+      (NODE_WIDTH + LAYER_GAP) -
+    LAYER_GAP;
+  const height =
+    CANVAS_PADDING * 2 +
+    (Math.max(0, ...[...layout.values()].map((cell) => cell.row)) + 1) *
+      (NODE_HEIGHT + ROW_GAP) -
+    ROW_GAP;
+  const endingIds = useMemo(() => {
+    const withOutgoing = new Set(edges.map((edge) => edge.source_timeline_id));
+    return new Set(
+      summaries
+        .map((summary) => summary.timelineId)
+        .filter((id) => !withOutgoing.has(id)),
+    );
+  }, [edges, summaries]);
+
+  return (
+    <div
+      data-blueprint-shape="branching"
+      className="h-full overflow-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]"
+      style={{
+        backgroundImage:
+          "radial-gradient(circle, var(--color-border) 1px, transparent 1px)",
+        backgroundSize: "22px 22px",
+      }}
+    >
+      <div className="relative" style={{ width, height }}>
+        <svg className="pointer-events-none absolute inset-0 h-full w-full">
+          {edges.map((edge) => {
+            const source = positions.get(edge.source_timeline_id);
+            const target = positions.get(edge.target_timeline_id);
+            if (!source || !target) return null;
+            const x1 = source.x + NODE_WIDTH;
+            const y1 = source.y + NODE_HEIGHT / 2;
+            const x2 = target.x;
+            const y2 = target.y + NODE_HEIGHT / 2;
+            const dx = Math.max(40, (x2 - x1) / 2);
+            return (
+              <path
+                key={edge.edge_id}
+                d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${
+                  x2 - dx
+                } ${y2}, ${x2} ${y2}`}
+                fill="none"
+                stroke="var(--color-border-strong)"
+                strokeWidth={1.5}
+              />
+            );
+          })}
+        </svg>
+        {edges.map((edge) => {
+          const source = positions.get(edge.source_timeline_id);
+          const target = positions.get(edge.target_timeline_id);
+          if (!source || !target || !edge.label) return null;
+          const x = (source.x + NODE_WIDTH + target.x) / 2;
+          const y = (source.y + target.y + NODE_HEIGHT) / 2;
+          return (
+            <span
+              key={`label:${edge.edge_id}`}
+              className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-primary)]/80 px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text-secondary)] shadow-[var(--shadow-sm)] backdrop-blur-md"
+              style={{ left: x, top: y }}
+              title={edge.prompt}
+            >
+              {edge.label}
+            </span>
+          );
+        })}
+        {summaries.map((summary) => {
+          const position = positions.get(summary.timelineId);
+          if (!position) return null;
+          const selected = summary.timelineId === selectedTimelineId;
+          const status = summaryStatus(summary);
+          const ending = endingIds.has(summary.timelineId);
+          return (
+            <button
+              key={summary.timelineId}
+              type="button"
+              data-blueprint-node={summary.timelineId}
+              onClick={() => onSelectTimeline(summary.timelineId)}
+              className={`group absolute rounded-2xl border bg-[var(--color-bg-card)]/85 p-3 text-left shadow-[var(--shadow-sm)] backdrop-blur-md transition-all duration-200 hover:-translate-y-1 hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-lg)] ${
+                selected
+                  ? "border-[var(--color-accent)] shadow-[0_0_0_3px_var(--color-accent-soft)]"
+                  : "border-[var(--color-border)]"
+              }`}
+              style={{
+                left: position.x,
+                top: position.y,
+                width: NODE_WIDTH,
+                minHeight: NODE_HEIGHT,
+              }}
+            >
+              <div className="mb-1.5 flex items-center justify-between gap-1.5">
+                <span
+                  className={`badge font-bold ${
+                    ending
+                      ? "bg-[rgba(139,92,246,.12)] text-[#8b5cf6]"
+                      : "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  }`}
+                >
+                  {ending
+                    ? t("blueprint.endingNode")
+                    : t("blueprint.episodeN", { n: summary.index + 1 })}
+                </span>
+                <span
+                  className={`rounded px-1.5 text-[9px] font-semibold leading-[16px] ${
+                    TONE_CHIP[status.tone]
+                  }`}
+                >
+                  {t(`blueprint.episodeStatus.${status.key}`)}
+                </span>
+              </div>
+              <h4 className="mb-1 text-[13px] font-semibold text-[var(--color-text-primary)]">
+                {episodeTitle(summary, t)}
+              </h4>
+              <p className="mb-2 line-clamp-2 text-[11px] leading-normal text-[var(--color-text-secondary)]">
+                {summary.synopsis || t("blueprint.noSynopsis")}
+              </p>
+              <div className="border-t border-dashed border-[var(--color-border)] pt-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                    {t("blueprint.nodeMeta", {
+                      ready: summary.videoReady,
+                      total: summary.videoTotal,
+                    })}
+                  </span>
+                  <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                    {formatDuration(summary.durationSeconds)}
+                  </span>
+                </div>
+                {/* 查看剧本 / 制作台编辑 (design 84:30317 node-card pills). */}
+                <div className="mt-2 flex items-center gap-3">
+                  <NodeActionPill
+                    icon={<FileText className="h-3.5 w-3.5" />}
+                    label={t("blueprint.viewScript")}
+                    onClick={() => onSelectTimeline(summary.timelineId)}
+                  />
+                  <NodeActionPill
+                    icon={<SquarePen className="h-3.5 w-3.5" />}
+                    label={t("blueprint.editTimeline")}
+                    onClick={() => onOpenTimeline(summary.timelineId)}
+                  />
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function BlueprintStructureArea(props: StructureAreaProps) {
+  if (props.shape === "branching") return <GraphCanvas {...props} />;
   if (props.shape === "linear") return <EpisodeList {...props} />;
   return <SingleBoard {...props} />;
 }

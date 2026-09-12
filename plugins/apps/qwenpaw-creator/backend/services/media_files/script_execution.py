@@ -139,7 +139,7 @@ def _intelligence_digest(
 
 
 def _narrative_context(project: Project, timeline_id: str) -> str:
-    """本集在整体结构中的位置：前后集。"""
+    """本集在整体结构中的位置：前后集与分支边。"""
 
     lines: list[str] = []
     for index, other_id in enumerate(
@@ -152,6 +152,14 @@ def _narrative_context(project: Project, timeline_id: str) -> str:
             f"{index}. {other.title or other_id}"
             f"（{other.synopsis or '暂无梗概'}）{marker}",
         )
+    for edge in project.narrative_edges:
+        if timeline_id in (edge.source_timeline_id, edge.target_timeline_id):
+            lines.append(
+                f"分支边 {edge.edge_id}: {edge.source_timeline_id} → "
+                f"{edge.target_timeline_id}"
+                + (f" · 选项「{edge.label}」" if edge.label else "")
+                + (f" · 抉择「{edge.prompt}」" if edge.prompt else ""),
+            )
     return "\n".join(lines)
 
 
@@ -228,6 +236,10 @@ def _request_fingerprint(
                 timeline.title,
                 timeline.synopsis,
                 str(timeline.planned_duration_seconds or ""),
+                project.name,
+                project.description,
+                project.scenario,
+                str(project.settings.target_duration_seconds or ""),
                 project.strategy.creative_brief,
                 project.strategy.audience,
                 project.strategy.creative_direction,
@@ -289,6 +301,7 @@ def _publish_script_version(
     idempotency_key: str,
     fingerprint: str,
     provenance_refs: list[str],
+    guidance: str,
 ) -> FileScriptExecutionResult:
     """落盘 markdown 文件并通过提交边界写回索引（commit 时全量校验）。"""
 
@@ -302,8 +315,17 @@ def _publish_script_version(
 
     with services.projects.lifecycle_lock(project_id):
         base = services.projects.read(project_id)
-        if timeline_id not in base.project.timelines.items:
+        if timeline_id not in narrative_timeline_ids(base.project):
             raise ValidationError(f"timeline 已不存在: {timeline_id}")
+        if (
+            _request_fingerprint(
+                base.project,
+                base.project.timelines.items[timeline_id],
+                guidance=guidance,
+            )
+            != fingerprint
+        ):
+            raise ValidationError("剧本生成期间创作依据已变更，旧结果未发布")
         working = base.project.model_copy(deep=True)
         version = add_script_version(
             working,
@@ -378,7 +400,7 @@ async def execute_file_script_command(
     snapshot = await asyncio.to_thread(services.projects.read, project_id)
     project = snapshot.project
     timeline = project.timelines.items.get(timeline_id)
-    if timeline is None:
+    if timeline is None or timeline_id not in narrative_timeline_ids(project):
         raise ValidationError(f"timeline 不存在: {timeline_id}")
 
     guidance = str(arguments.get("guidance") or "").strip()
@@ -440,6 +462,7 @@ async def execute_file_script_command(
         idempotency_key=idempotency_key,
         fingerprint=fingerprint,
         provenance_refs=intelligence_refs,
+        guidance=guidance,
     )
 
 
