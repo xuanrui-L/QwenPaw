@@ -16,6 +16,8 @@
     frame.style.cssText = "width:100%;height:100%;border:0;display:block";
     container.append(frame);
     let doc, video, slot, choice, screen = "title", returnScreen = "title";
+    // Returning from the map must respect a viewer's manual pause.
+    let returnWasPlaying = false;
     let current = null, closed = false, busy = false, answered = false, watched = 0;
     const edges = bundle.edges || bundle.edge_index || {};
     const progress = Object.assign({visited: [], endings: [], current_timeline: ""}, adapter.progress || {});
@@ -118,8 +120,11 @@
         case "start": case "replay": await go(bundle.entry_timeline_id); break;
         case "resume": await go(progress.current_timeline); break;
         case "jump": if (progress.visited.includes(button.dataset.nodeRef)) await go(button.dataset.nodeRef); break;
-        case "map": returnScreen = screen; show("map"); await flush(); break;
-        case "map_back": show(returnScreen); play(); break;
+        case "map":
+          returnScreen = screen;
+          returnWasPlaying = screen === "play" && !video.paused;
+          show("map"); await flush(); break;
+        case "map_back": show(returnScreen); if (returnWasPlaying) play(); break;
         case "title": show("title"); await flush(); break;
         case "toggle_play": if (video.paused) play(); else video.pause(); break;
         case "reset":
@@ -200,7 +205,7 @@
               missing = doc.createElement("p");
               missing.setAttribute("data-editor-missing-media", "");
               missing.setAttribute("role", "status");
-              missing.textContent = "当前片段尚未生成视频";
+              missing.textContent = "当前节点尚未合成视频";
               video.after(missing);
             }
             if (url) missing?.remove();

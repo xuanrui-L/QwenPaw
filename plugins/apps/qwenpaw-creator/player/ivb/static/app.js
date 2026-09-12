@@ -94,5 +94,11 @@
       });
     } catch (error) { fail("包无法放映", [error.message]); }
   }
+  global.addEventListener("pageshow", event => {
+    if (event.persisted && !new URLSearchParams(location.search).get("p")) {
+      const scope = dom["lib-scope-mine"].classList.contains("active") ? "mine" : "all";
+      void renderLibrary(scope);
+    }
+  });
   void boot();
 })(window);

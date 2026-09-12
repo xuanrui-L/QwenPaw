@@ -38,6 +38,27 @@ DB_NAME = "ivb.db"
 BUNDLES_DIRNAME = "bundles"
 
 
+def _directory_digests(root: Path) -> tuple[str, str]:
+    """Hash immutable bytes and, separately, content consumed by the player."""
+    archive = hashlib.sha256()
+    content = hashlib.sha256()
+    for member in sorted(p for p in root.rglob("*") if p.is_file()):
+        relative = member.relative_to(root).as_posix()
+        name = relative.encode()
+        entry = (
+            len(name).to_bytes(8, "big")
+            + name
+            + hashlib.sha256(member.read_bytes()).digest()
+        )
+        archive.update(entry)
+        # The service renders the validated manifest/presentation and media.
+        # index.html packages the offline host runtime; fixing that host alone
+        # does not change the story or invalidate anyone's explored paths.
+        if relative != "index.html":
+            content.update(entry)
+    return archive.hexdigest(), content.hexdigest()
+
+
 class ProjectNotFound(KeyError):
     """目录表里没有这个 ``project_id``(没上传过,或拼错)。"""
 
@@ -144,6 +165,7 @@ class ProjectLibrary:
         # A failed copy/validation/SQL transaction leaves the previous revision
         # available, including to requests which already resolved its path.
         staged = self.data_dir / BUNDLES_DIRNAME / f".stage-{uuid4().hex}"
+        preserve_progress_from = None
         try:
             _materialize(origin, staged)
             verified = inspect_bundle(staged)
@@ -160,19 +182,15 @@ class ProjectLibrary:
                     ],
                 )
             bundle = verified.bundle
-            digest = hashlib.sha256()
-            for member in sorted(p for p in staged.rglob("*") if p.is_file()):
-                name = member.relative_to(staged).as_posix().encode()
-                digest.update(len(name).to_bytes(8, "big"))
-                digest.update(name)
-                digest.update(hashlib.sha256(member.read_bytes()).digest())
+            digest, content_digest = _directory_digests(staged)
+            if existing is not None:
+                previous_path = self.data_dir / existing.storage_path
+                if previous_path.is_dir() and (
+                    _directory_digests(previous_path)[1] == content_digest
+                ):
+                    preserve_progress_from = existing.storage_path
             namespace = hashlib.sha256(project_id.encode()).hexdigest()
-            dest = (
-                self.data_dir
-                / BUNDLES_DIRNAME
-                / namespace
-                / digest.hexdigest()
-            )
+            dest = self.data_dir / BUNDLES_DIRNAME / namespace / digest
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 staged.rename(dest)
@@ -193,7 +211,10 @@ class ProjectLibrary:
             interaction_count=len(bundle.interactions),
             storage_path=dest.relative_to(self.data_dir).as_posix(),
         )
-        self.store.upsert_project(record)
+        self.store.upsert_project(
+            record,
+            preserve_progress_from=preserve_progress_from,
+        )
         with self._lock:
             self._cache.pop(project_id, None)  # 重新安装立即让旧缓存失效
         # 回读一行:拿到 DB 填好的 created_at/updated_at(见 ProjectRecord 文档)。
