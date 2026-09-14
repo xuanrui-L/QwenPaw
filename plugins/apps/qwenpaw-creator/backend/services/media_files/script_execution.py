@@ -245,13 +245,17 @@ def _request_fingerprint(
                 project.name,
                 project.description,
                 project.scenario,
-                str(project.settings.target_duration_seconds or ""),
+                str(
+                    project.settings.target_duration_seconds or ""
+                    if not timeline.planned_duration_seconds
+                    else ""
+                ),
                 project.strategy.creative_brief,
                 project.strategy.audience,
                 project.strategy.creative_direction,
                 project.strategy.constraints,
-                # The prompt embeds the whole narrative structure (episode
-                # list + branch edges); new episodes/edges must re-draft.
+                # The prompt embeds the live outline and this node's
+                # incident edges, not branches between distant endings.
                 _narrative_context(project, timeline.timeline_id),
                 guidance,
                 *_intelligence_version_ids(project),

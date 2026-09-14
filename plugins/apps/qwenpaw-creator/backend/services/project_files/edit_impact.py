@@ -668,13 +668,16 @@ def _pointer_unchanged(
     return base_found == candidate_found and base_value == candidate_value
 
 
-def _script_inputs(document: Mapping[str, Any]) -> Any:
+def _script_inputs(document: Mapping[str, Any], timeline_id: str) -> Any:
     """Only authoring inputs, never downstream elements or frozen history.
 
-    The script prompt embeds the live narrative structure, so changing a
-    synopsis/edge can invalidate scripts in other episodes too.
+    Match script_execution's prompt scope: the live title/synopsis outline
+    is shared, but the saved body, duration and incident branch edges belong
+    to this node. Rewiring a distant ending must not expire the prologue.
+    Edge presentation fields (currently tone) are not script inputs.
     """
     timelines = _items(document, "timelines", "items")
+    timeline = _record(timelines.get(timeline_id))
     order = _record(document.get("timelines")).get("order", [])
     strategy = _record(document.get("strategy"))
     sources = _items(document, "sources", "sources")
@@ -692,23 +695,35 @@ def _script_inputs(document: Mapping[str, Any]) -> Any:
                 "constraints",
             )
         ),
-        _record(document.get("settings")).get("target_duration_seconds"),
+        timeline.get("description", ""),
+        timeline.get("planned_duration_seconds")
+        or _record(document.get("settings")).get("target_duration_seconds"),
         [
             (
                 tid,
                 *(
                     _record(timelines.get(tid)).get(key)
-                    for key in (
-                        "title",
-                        "synopsis",
-                        "planned_duration_seconds",
-                    )
+                    for key in ("title", "synopsis")
                 ),
             )
             for tid in order
             if not tid.startswith("snapshot:")
         ],
-        document.get("narrative_edges", []),
+        [
+            tuple(
+                edge.get(key, "")
+                for key in (
+                    "edge_id",
+                    "source_timeline_id",
+                    "target_timeline_id",
+                    "label",
+                    "prompt",
+                )
+            )
+            for edge in document.get("narrative_edges", [])
+            if timeline_id
+            in (edge.get("source_timeline_id"), edge.get("target_timeline_id"))
+        ],
         [
             _record(source_items.get(sid)).get(
                 "current_intelligence_version_id",
@@ -728,16 +743,24 @@ def apply_frontend_edit_impacts(
 
     document = copy.deepcopy(dict(candidate))
     impact = EditImpact()
-    if base is not None and _script_inputs(base) != _script_inputs(document):
+    if base is not None:
         for slot_id, raw_slot in _items(
             document,
             "assets",
             "artifact_slots_by_id",
         ).items():
             slot = _record(raw_slot)
-            if slot.get("kind") == "timeline_script" and not str(
-                slot.get("owner_ref", ""),
-            ).startswith("timeline:snapshot:"):
+            owner_ref = str(slot.get("owner_ref", ""))
+            if slot.get("kind") != "timeline_script" or not (
+                owner_ref.startswith("timeline:")
+                and not owner_ref.startswith("timeline:snapshot:")
+            ):
+                continue
+            timeline_id = owner_ref.removeprefix("timeline:")
+            if _script_inputs(base, timeline_id) != _script_inputs(
+                document,
+                timeline_id,
+            ):
                 _mark_selected_stale(
                     document,
                     slot_id,
