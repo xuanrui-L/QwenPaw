@@ -156,29 +156,101 @@ describe("BlueprintRoughCutStrip whole-film preview", () => {
   });
 });
 
-it("previews the full planned duration with design images before any shot video exists", () => {
+function beforeStoryboards(): ProjectDocument {
   const project = cloneProject();
   project.timelines.order = ["timeline:main"];
+  const timeline = project.timelines.items["timeline:main"];
+  // Keep only the generated shot, with character references but no shot media.
+  timeline.elements_by_id = {
+    "r2v-window": timeline.elements_by_id["r2v-window"],
+  };
   for (const [id, slot] of Object.entries(
     project.assets.artifact_slots_by_id,
   )) {
-    if (slot.kind === "final_video" || slot.owner_ref.startsWith("element:"))
+    if (
+      slot.owner_ref.startsWith("timeline:") ||
+      slot.owner_ref.startsWith("element:")
+    )
       delete project.assets.artifact_slots_by_id[id];
   }
+  return project;
+}
+
+function addStoryboard(project: ProjectDocument) {
+  project.assets.artifact_slots_by_id["element:r2v-window:storyboard"] = {
+    slot_id: "element:r2v-window:storyboard",
+    kind: "r2v_storyboard_image",
+    owner_ref: "element:r2v-window",
+    version_ids: ["storyboard-v1"],
+    selected_version_id: "storyboard-v1",
+    metadata: {},
+  };
+  project.assets.artifact_versions_by_id["storyboard-v1"] = {
+    ...project.assets.artifact_versions_by_id["cat-anchor-v1"],
+    version_id: "storyboard-v1",
+    slot_id: "element:r2v-window:storyboard",
+    owner_ref: "element:r2v-window",
+    kind: "r2v_storyboard_image",
+  };
+}
+
+it("disables all playback and explains the missing storyboard when only character reference images exist", () => {
+  const project = beforeStoryboards();
+  withBranching(project);
+  const { container, baseElement, getByText } = renderStrip(project);
+  expect(getByText("分镜图尚未生成，暂时无法预览")).toBeInTheDocument();
+  const buttons = container.querySelectorAll(
+    "[data-roughcut-preview-all], [data-roughcut-play], [data-roughcut-play-film]",
+  );
+  expect(buttons.length).toBeGreaterThanOrEqual(2);
+  for (const button of buttons) {
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+  }
+  expect(
+    baseElement.querySelector(
+      "[data-roughcut-cinema], [data-authored-cinema], video, audio, img",
+    ),
+  ).toBeNull();
+});
+
+it("previews generated storyboard images over the planned duration before shot video exists", () => {
+  const project = beforeStoryboards();
+  addStoryboard(project);
   const { container, baseElement } = renderStrip(project);
+  expect(container.querySelector("[data-roughcut-preview-all]")).toBeEnabled();
   fireEvent.click(container.querySelector("[data-roughcut-preview-all]")!);
   expect(baseElement.querySelector("[data-roughcut-live]")).toBeTruthy();
   const scrubber = baseElement.querySelector<HTMLInputElement>(
     '[data-roughcut-live] input[type="range"]',
   )!;
-  expect(Number(scrubber.max)).toBe(20000);
   fireEvent.change(scrubber, { target: { value: "6000" } });
+  const image = baseElement.querySelector('img[data-live-layer="r2v-window"]');
+  expect(image).toBeTruthy();
+  expect(image!.getAttribute("src")).toContain(
+    "/media/artifacts/storyboard-v1",
+  );
+  expect(baseElement.querySelector('img[src*="cat-anchor-v1"]')).toBeNull();
+});
+
+it("follows a narrative edge after a storyboard preview and stops at an ungenerated node", () => {
+  const project = withBranching(beforeStoryboards());
+  project.timelines.order.push("timeline:ep2");
+  project.timelines.items["timeline:ep2"].elements_by_id = {};
+  addStoryboard(project);
+  project.narrative_edges = project.narrative_edges!.slice(0, 1);
+  const { container, baseElement } = renderStrip(project);
+  fireEvent.click(container.querySelector("[data-roughcut-preview-all]")!);
+  const scrubber = baseElement.querySelector<HTMLInputElement>(
+    '[data-roughcut-live] input[type="range"]',
+  )!;
+  fireEvent.change(scrubber, { target: { value: scrubber.max } });
   expect(
-    baseElement.querySelector('img[data-live-layer="r2v-window"]'),
-  ).toBeTruthy();
+    baseElement.querySelector("[data-roughcut-unavailable]"),
+  ).toHaveTextContent("分镜图尚未生成");
   expect(
-    baseElement.querySelector("[data-live-preview-incomplete]"),
+    baseElement.querySelector(
+      "[data-roughcut-cinema] video, [data-roughcut-cinema] audio",
+    ),
   ).toBeNull();
-  fireEvent.change(scrubber, { target: { value: "15000" } });
-  expect(scrubber.value).toBe("15000");
 });

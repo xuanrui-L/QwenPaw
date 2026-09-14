@@ -85,6 +85,17 @@ function expectRoutesClear(
   expect(routes).toHaveLength(links.length);
   for (const route of routes) {
     expect(route.path).not.toMatch(/NaN|Infinity/);
+    for (const sample of route.samples) {
+      for (const p of positions.values()) {
+        expect(
+          sample.x > p.x + 0.001 &&
+            sample.x < p.x + GRAPH_NODE_WIDTH - 0.001 &&
+            sample.y > p.y + 0.001 &&
+            sample.y < p.y + GRAPH_NODE_HEIGHT - 0.001,
+          `${route.edge.edge_id} curve passes through a card`,
+        ).toBe(false);
+      }
+    }
     for (let i = 1; i < route.points.length; i++) {
       const a = route.points[i - 1],
         b = route.points[i];
@@ -110,6 +121,17 @@ function expectRoutesClear(
 }
 
 describe("story map layout", () => {
+  it("uses a smooth cubic connection with a visible choice label between unobstructed nodes", () => {
+    const positions = new Map([
+      ["a", { x: 48, y: 300 }],
+      ["b", { x: 480, y: 120 }],
+    ]);
+    const [route] = expectRoutesClear([edge("a", "b")], positions);
+    expect(route.path).toContain(" C ");
+    expect(route.label.x).toBeGreaterThan(48 + GRAPH_NODE_WIDTH);
+    expect(route.label.x).toBeLessThan(480);
+    expect(route.labelWidth).toBeGreaterThan(0);
+  });
   it("keeps all 37 nodes separate and routes all 62 choices outside cards", () => {
     expect(ids).toHaveLength(37);
     expect(edges).toHaveLength(62);

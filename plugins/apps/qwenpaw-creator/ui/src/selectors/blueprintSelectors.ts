@@ -179,7 +179,7 @@ export function isVoiceOnlyVisualEntity(
   );
 }
 
-export type RoughCutSource = "final" | "storyboard" | "design" | "none";
+export type RoughCutSource = "final" | "storyboard" | "none";
 
 /** Media namespace of RoughCutFrame.versionId: generated artifact vs uploaded/recorded source asset. */
 export type RoughCutVersionKind = "artifact" | "source";
@@ -201,8 +201,8 @@ export interface RoughCutFrame {
  * Rough-cut frame of one element, derived purely from existing artifacts
  * (plan §4.8): selected element_video ▸ render_source media (real clips of
  * the video_edit path / pinned artifact) ▸ motion_clip's carried motion
- * document ▸ r2v_storyboard_image ▸ the referenced entity's visual design
- * image ▸ empty placeholder.
+ * document ▸ r2v_storyboard_image ▸ empty placeholder. Character / scene
+ * reference sheets are inputs to generation, never a picture of the shot.
  */
 export function roughCutFrameForElement(
   project: ProjectDocument,
@@ -217,6 +217,16 @@ export function roughCutFrameForElement(
   for (const output of Object.values(element.outputs)) {
     const slot = project.assets.artifact_slots_by_id[output.slot_id];
     if (!slot || slot.kind !== "element_video" || !slot.selected_version_id)
+      continue;
+    const version =
+      project.assets.artifact_versions_by_id[slot.selected_version_id];
+    if (
+      !version ||
+      version.stale ||
+      !project.assets.files_by_id[version.file_id]?.media_type?.startsWith(
+        "video/",
+      )
+    )
       continue;
     return {
       versionId: slot.selected_version_id,
@@ -247,8 +257,12 @@ export function roughCutFrameForElement(
   } else if (renderSource?.type === "artifact_version") {
     const version =
       project.assets.artifact_versions_by_id[renderSource.version_id];
-    if (version && !version.stale) {
-      const file = project.assets.files_by_id[version.file_id];
+    const file = version ? project.assets.files_by_id[version.file_id] : null;
+    if (
+      version &&
+      !version.stale &&
+      /^(image|video)\//.test(file?.media_type ?? "")
+    ) {
       return {
         versionId: version.version_id,
         versionKind: "artifact",
@@ -280,7 +294,18 @@ export function roughCutFrameForElement(
       slot.owner_ref === `element:${element.element_id}` &&
       (slot.kind === "r2v_storyboard_image" ||
         slot.slot_id.endsWith(":storyboard")) &&
-      slot.selected_version_id,
+      slot.selected_version_id &&
+      (() => {
+        const version =
+          project.assets.artifact_versions_by_id[slot.selected_version_id];
+        return (
+          version &&
+          !version.stale &&
+          project.assets.files_by_id[version.file_id]?.media_type?.startsWith(
+            "image/",
+          )
+        );
+      })(),
   );
   if (storyboard?.selected_version_id) {
     return {
@@ -290,33 +315,27 @@ export function roughCutFrameForElement(
       source: "storyboard",
     };
   }
-  // 5. Referenced visual entity design image.
-  const creation = element.creation;
-  const entityRefs: string[] = [];
-  if (creation.type === "r2v") {
-    entityRefs.push(...creation.character_refs);
-    if (creation.scene_ref) entityRefs.push(creation.scene_ref);
-  } else if (creation.type === "s2v" && creation.character_ref) {
-    entityRefs.push(creation.character_ref);
-  }
-  for (const ref of entityRefs) {
-    const entity =
-      project.visual.entities.items[ref.replace(/^visual-entity:/, "")];
-    const versionId = selectedEntityVersionId(entity);
-    if (versionId)
-      return {
-        versionId,
-        versionKind: "artifact",
-        mediaKind: "image",
-        source: "design",
-      };
-  }
   return {
     versionId: null,
     versionKind: null,
     mediaKind: null,
     source: "none",
   };
+}
+
+/** A preview needs a shot picture, not merely a script, reference or overlay. */
+export function hasTimelinePreviewContent(
+  project: ProjectDocument,
+  timeline: TimelineDocument,
+): boolean {
+  return orderedTimelineElements(timeline).some(
+    (element) =>
+      element.enabled &&
+      ["r2v", "t2v", "i2v", "s2v", "edit", "motion_clip"].includes(
+        element.creation.type,
+      ) &&
+      roughCutFrameForElement(project, element).source !== "none",
+  );
 }
 
 /** All frames of the live timelines (history snapshots excluded). */

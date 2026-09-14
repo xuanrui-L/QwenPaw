@@ -2076,6 +2076,7 @@
     },
     "episodeList": "Episode list · Linear {{count}} episodes",
     "graph": {
+      "title": "Story map",
       "expand": "Expand story map",
       "collapse": "Collapse story map",
       "locateNode": "Locate story node",
@@ -2122,6 +2123,7 @@
     "playFullFilm": "Play full film",
     "playFullInteractive": "Play full interactive story",
     "closeRoughCutPlayer": "Close player",
+    "previewUnavailable": "Storyboard images have not been generated yet. Preview is unavailable.",
     "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
     "finalCutBadge": "Final cut",
     "downloadFinalCut": "Download final cut",
@@ -2358,6 +2360,10 @@
     "activeWork": "In progress"
   },
   "agentProgress": {
+    "visualState": "State {{index}}",
+    "waitingForUpdate": "Waiting for {{target}} to be updated",
+    "waitingForTarget": "Waiting for {{target}} to finish",
+    "waitingForPrompt": "Waiting for the generation prompt",
     "composeNeedsUpdate": "Final cut needs updating",
     "lastAttemptFailed": "Last attempt failed",
     "lastAttemptCancelled": "Last attempt stopped",

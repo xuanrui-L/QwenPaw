@@ -172,10 +172,14 @@ export interface GraphRoute {
   path: string;
   source: GraphPoint;
   target: GraphPoint;
+  samples: GraphPoint[];
+  label: GraphPoint;
+  labelWidth: number;
 }
 
 function roundedPath(points: GraphPoint[]) {
   let path = `M ${points[0].x} ${points[0].y}`;
+  const samples = [points[0]];
   for (let i = 1; i < points.length - 1; i++) {
     const a = points[i - 1],
       b = points[i],
@@ -183,16 +187,75 @@ function roundedPath(points: GraphPoint[]) {
     const before = Math.hypot(b.x - a.x, b.y - a.y);
     const after = Math.hypot(c.x - b.x, c.y - b.y);
     if (!before || !after) continue;
-    const radius = Math.min(8, before / 2, after / 2);
-    path += ` L ${b.x + ((a.x - b.x) * radius) / before} ${
-      b.y + ((a.y - b.y) * radius) / before
-    }`;
-    path += ` Q ${b.x} ${b.y} ${b.x + ((c.x - b.x) * radius) / after} ${
-      b.y + ((c.y - b.y) * radius) / after
-    }`;
+    const radius = Math.min(32, before / 2, after / 2);
+    const entry = {
+      x: b.x + ((a.x - b.x) * radius) / before,
+      y: b.y + ((a.y - b.y) * radius) / before,
+    };
+    const exit = {
+      x: b.x + ((c.x - b.x) * radius) / after,
+      y: b.y + ((c.y - b.y) * radius) / after,
+    };
+    path += ` L ${entry.x} ${entry.y} Q ${b.x} ${b.y} ${exit.x} ${exit.y}`;
+    samples.push(entry);
+    for (let j = 1; j <= 12; j++) {
+      const t = j / 12,
+        u = 1 - t;
+      samples.push({
+        x: u * u * entry.x + 2 * u * t * b.x + t * t * exit.x,
+        y: u * u * entry.y + 2 * u * t * b.y + t * t * exit.y,
+      });
+    }
   }
   const end = points[points.length - 1];
-  return `${path} L ${end.x} ${end.y}`;
+  return { path: `${path} L ${end.x} ${end.y}`, samples: [...samples, end] };
+}
+
+function smoothCurve(
+  source: GraphPoint,
+  target: GraphPoint,
+  obstacles: GraphPoint[],
+  points: GraphPoint[],
+) {
+  const gap = target.x - source.x;
+  const bend = Math.max(40, gap * 0.48);
+  const c1 = { x: source.x + bend, y: source.y },
+    c2 = { x: target.x - bend, y: target.y };
+  const samples = Array.from({ length: 81 }, (_, i) => {
+    const t = i / 80,
+      u = 1 - t;
+    return {
+      x:
+        u * u * u * source.x +
+        3 * u * u * t * c1.x +
+        3 * u * t * t * c2.x +
+        t * t * t * target.x,
+      y:
+        u * u * u * source.y +
+        3 * u * u * t * c1.y +
+        3 * u * t * t * c2.y +
+        t * t * t * target.y,
+    };
+  });
+  if (
+    gap > 32 &&
+    samples.every((p) =>
+      obstacles.every(
+        (o) =>
+          p.x <= o.x ||
+          p.x >= o.x + GRAPH_NODE_WIDTH ||
+          p.y <= o.y ||
+          p.y >= o.y + GRAPH_NODE_HEIGHT,
+      ),
+    )
+  ) {
+    return {
+      path: `M ${source.x} ${source.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${target.x} ${target.y}`,
+      samples,
+    };
+  }
+  // Keep loops and manually moved nodes clear of cards, rounding the detour.
+  return roundedPath(points);
 }
 
 function segmentClear(a: GraphPoint, b: GraphPoint, obstacles: GraphPoint[]) {
@@ -344,6 +407,7 @@ export function routeStoryEdges(
           positions.get(b.target_timeline_id)!.y,
     );
   const obstacles = [...positions.values()];
+  const labels: { x: number; y: number; width: number }[] = [];
   return valid.map((edge) => {
     const a = positions.get(edge.source_timeline_id)!,
       b = positions.get(edge.target_timeline_id)!;
@@ -368,6 +432,35 @@ export function routeStoryEdges(
     )
       middle = detour(start, end, obstacles);
     const points = [source, ...middle, target];
-    return { edge, source, target, points, path: roundedPath(points) };
+    const curve = smoothCurve(source, target, obstacles, points);
+    const labelWidth = Math.max(
+      52,
+      Math.min(
+        160,
+        [...(edge.label || "继续")].reduce(
+          (sum, char) => sum + (/[^\x00-\x7f]/.test(char) ? 11 : 6.5),
+          0,
+        ) + 20,
+      ),
+    );
+    const candidates = [0.46, 0.32, 0.64, 0.2, 0.78].map(
+      (t) => curve.samples[Math.round(t * (curve.samples.length - 1))],
+    );
+    const clear = (p: GraphPoint) =>
+      obstacles.every(
+        (o) =>
+          p.x + labelWidth / 2 + 4 <= o.x ||
+          p.x - labelWidth / 2 - 4 >= o.x + GRAPH_NODE_WIDTH ||
+          p.y + 15 <= o.y ||
+          p.y - 15 >= o.y + GRAPH_NODE_HEIGHT,
+      ) &&
+      labels.every(
+        (l) =>
+          Math.abs(p.y - l.y) >= 28 ||
+          Math.abs(p.x - l.x) >= (labelWidth + l.width) / 2 + 8,
+      );
+    const label = candidates.find(clear) ?? candidates[0];
+    labels.push({ ...label, width: labelWidth });
+    return { edge, source, target, points, ...curve, label, labelWidth };
   });
 }

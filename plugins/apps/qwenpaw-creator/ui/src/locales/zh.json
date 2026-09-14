@@ -2076,6 +2076,7 @@
     },
     "episodeList": "剧集列表 · 线性 {{count}} 集",
     "graph": {
+      "title": "剧情地图",
       "expand": "展开剧情地图",
       "collapse": "收起剧情地图",
       "locateNode": "定位剧情节点",
@@ -2122,6 +2123,7 @@
     "playFullFilm": "播放整个成片",
     "playFullInteractive": "播放整个互动包",
     "closeRoughCutPlayer": "关闭播放",
+    "previewUnavailable": "分镜图尚未生成，暂时无法预览",
     "roughCutFailed": "粗剪拼接失败：该时间线还没有可用的镜头素材",
     "finalCutBadge": "成片",
     "downloadFinalCut": "下载成片",
@@ -2358,6 +2360,10 @@
     "activeWork": "当前进行中"
   },
   "agentProgress": {
+    "visualState": "状态 {{index}}",
+    "waitingForUpdate": "等待「{{target}}」更新",
+    "waitingForTarget": "等待「{{target}}」完成",
+    "waitingForPrompt": "等待补全生成提示词",
     "composeNeedsUpdate": "成片需更新",
     "lastAttemptFailed": "上次尝试失败",
     "lastAttemptCancelled": "上次尝试已停止",

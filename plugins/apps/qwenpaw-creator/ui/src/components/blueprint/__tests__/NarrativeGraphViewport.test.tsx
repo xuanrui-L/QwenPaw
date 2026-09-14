@@ -60,6 +60,26 @@ describe("story map viewport", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it("shows the choice label on its curve before focus and groups navigation controls with the map title", () => {
+    const input = props();
+    const { container } = render(<BlueprintStructureArea {...input} />);
+    const label = container.querySelector('[data-graph-edge-label="a"]')!;
+    expect(label).toHaveTextContent("公开真相");
+    expect(label).toBeVisible();
+    const toolbar = container.querySelector("[data-graph-toolbar]")!;
+    expect(toolbar).toHaveTextContent("剧情地图");
+    expect(toolbar).toContainElement(
+      screen.getByRole("combobox", { name: "定位剧情节点" }),
+    );
+    expect(toolbar).toContainElement(
+      screen.getByRole("button", { name: "放大剧情地图" }),
+    );
+    fireEvent.click(label);
+    expect(screen.getByRole("region", { name: "节点分支去向" })).toBeVisible();
+    expect(input.onSelectTimeline).not.toHaveBeenCalled();
+    expect(readStoryPositions(input.project.project_id)).toEqual({});
+  });
+
   it("maps Shift-wheel to horizontal scroll, including native deltaX and line mode", () => {
     const { container } = render(<BlueprintStructureArea {...props()} />);
     const viewport = container.querySelector<HTMLElement>(
@@ -173,7 +193,11 @@ describe("story map viewport", () => {
     pointer(node, "pointerup", 100, 100);
     fireEvent.click(node);
     expect(screen.getByRole("region", { name: "节点分支去向" })).toBeVisible();
-    expect(screen.getByText("公开真相")).toBeVisible();
+    expect(
+      screen
+        .getAllByText("公开真相")
+        .every((item) => item.textContent === "公开真相"),
+    ).toBe(true);
     expect(input.onSelectTimeline).not.toHaveBeenCalled();
     fireEvent.click(node.querySelector("[data-graph-action]")!);
     expect(input.onSelectTimeline).toHaveBeenCalledWith("timeline:main");

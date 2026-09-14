@@ -18,6 +18,8 @@ import {
   Shrink,
   Palette,
   SquarePen,
+  Search,
+  ChevronDown,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
@@ -624,7 +626,7 @@ function GraphCanvas({
     onSelectTimeline(id);
   }
   const toolbarButton =
-    "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40";
+    "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-secondary)] hover:text-[var(--color-text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 disabled:opacity-35";
 
   const content = (
     <div
@@ -637,36 +639,38 @@ function GraphCanvas({
         }
       }}
       className={`${
-        expanded ? "fixed inset-3 z-[250]" : "h-full"
+        expanded ? "fixed inset-x-3 bottom-3 top-16 z-[250]" : "h-full"
       } flex min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]`}
     >
-      <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 py-3">
-        <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-[var(--color-text-primary)]">
+      <div
+        data-graph-toolbar
+        className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-2.5"
+      >
+        <div
+          className="flex shrink-0 items-center gap-1.5 text-sm font-semibold text-[var(--color-text-primary)]"
+          title={t("blueprint.graph.navigationHint")}
+        >
           <GitBranch className="h-4 w-4" />
-          <span>{t("blueprint.interactiveStoryMap")}</span>
-          <span className="text-xs text-[var(--color-text-secondary)]">
-            {t("blueprint.chips.branching", { count: summaries.length })}
+          <span>{t("blueprint.graph.title")}</span>
+          <span className="rounded-md bg-[var(--color-bg-secondary)] px-1.5 py-0.5 text-[10px] font-normal text-[var(--color-text-tertiary)]">
+            {summaries.length}
           </span>
-          {structurePending && (
-            <span className="rounded border border-[var(--color-border)] px-2 py-0.5 text-xs">
-              {t("blueprint.branchesPending")}
-            </span>
-          )}
         </div>
         {structurePending ? (
-          <p className="mt-2 text-xs leading-relaxed text-[var(--color-text-secondary)]">
-            {t("blueprint.branchesPendingHint")}
-          </p>
+          <span className="ml-auto text-xs text-[var(--color-text-secondary)]">
+            {t("blueprint.branchesPending")}
+          </span>
         ) : (
-          <>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <div className="ml-auto flex min-w-0 items-center gap-1.5">
+            <div className="relative flex h-8 min-w-20 max-w-44 flex-1 items-center rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/40 focus-within:border-[var(--color-text-secondary)]">
+              <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-text-tertiary)]" />
               <select
                 aria-label={t("blueprint.graph.locateNode")}
                 value={focused?.timelineId ?? ""}
                 onChange={(event) =>
                   event.target.value && jump(event.target.value)
                 }
-                className="h-7 min-w-0 max-w-52 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 text-xs text-[var(--color-text-primary)]"
+                className="h-full w-full min-w-0 appearance-none truncate rounded-md bg-transparent pl-7 pr-6 text-[11px] text-[var(--color-text-secondary)] outline-none"
               >
                 <option value="">{t("blueprint.graph.locateNode")}</option>
                 {summaries.map((summary) => (
@@ -675,6 +679,9 @@ function GraphCanvas({
                   </option>
                 ))}
               </select>
+              <ChevronDown className="pointer-events-none absolute right-2 h-3 w-3 text-[var(--color-text-tertiary)]" />
+            </div>
+            <div className="flex shrink-0 items-center rounded-md border border-[var(--color-border)] bg-[var(--color-bg-secondary)]/40">
               <button
                 type="button"
                 className={toolbarButton}
@@ -687,7 +694,7 @@ function GraphCanvas({
               </button>
               <button
                 type="button"
-                className={`${toolbarButton} min-w-12 tabular-nums`}
+                className="h-8 w-11 text-[11px] tabular-nums text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
                 title={t("blueprint.graph.actualSize")}
                 onClick={() => graph.zoom(1)}
               >
@@ -703,57 +710,62 @@ function GraphCanvas({
               >
                 <Plus className="h-3.5 w-3.5" />
               </button>
-              <button
-                type="button"
-                className={toolbarButton}
-                onClick={() => {
-                  setLocalFocus(null);
-                  graph.fit();
-                }}
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-                {t("blueprint.graph.fit")}
-              </button>
-              <button
-                type="button"
-                className={toolbarButton}
-                title={t("blueprint.graph.localLayout")}
-                onClick={graph.resetLayout}
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                {t("blueprint.graph.arrange")}
-              </button>
-              <button
-                type="button"
-                className={toolbarButton}
-                aria-label={t(
-                  expanded
-                    ? "blueprint.graph.collapse"
-                    : "blueprint.graph.expand",
-                )}
-                title={t(
-                  expanded
-                    ? "blueprint.graph.collapse"
-                    : "blueprint.graph.expand",
-                )}
-                autoFocus={expanded}
-                onClick={() => {
-                  graph.rememberView();
-                  setExpanded((value) => !value);
-                }}
-              >
-                {expanded ? (
-                  <Shrink className="h-3.5 w-3.5" />
-                ) : (
-                  <Expand className="h-3.5 w-3.5" />
-                )}
-              </button>
             </div>
-            <p className="mt-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)]">
-              {t("blueprint.graph.navigationHint")}
-            </p>
-          </>
+            <button
+              type="button"
+              className={toolbarButton}
+              aria-label={t("blueprint.graph.fit")}
+              title={t("blueprint.graph.fit")}
+              onClick={() => {
+                setLocalFocus(null);
+                graph.fit();
+              }}
+            >
+              <Maximize2 className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              className={toolbarButton}
+              aria-label={t("blueprint.graph.arrange")}
+              title={t("blueprint.graph.arrange")}
+              onClick={graph.resetLayout}
+            >
+              <RotateCcw className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              className={toolbarButton}
+              aria-label={t(
+                expanded
+                  ? "blueprint.graph.collapse"
+                  : "blueprint.graph.expand",
+              )}
+              title={t(
+                expanded
+                  ? "blueprint.graph.collapse"
+                  : "blueprint.graph.expand",
+              )}
+              autoFocus={expanded}
+              onClick={() => {
+                graph.rememberView();
+                setExpanded((v) => !v);
+              }}
+            >
+              {expanded ? (
+                <Shrink className="h-4 w-4" />
+              ) : (
+                <Expand className="h-4 w-4" />
+              )}
+            </button>
+          </div>
         )}
+        <p className="sr-only">
+          {t(
+            structurePending
+              ? "blueprint.branchesPendingHint"
+              : "blueprint.graph.navigationHint",
+          )}
+        </p>
       </div>
       <div
         ref={graph.viewportRef}
@@ -893,28 +905,34 @@ function GraphCanvas({
                               route.edge.target_timeline_id,
                             )}`}</title>
                           </path>
-                          {focused &&
-                            route.edge.source_timeline_id === focusedId && (
-                              <g
-                                transform={`translate(${route.source.x + 18}, ${
-                                  route.source.y
-                                })`}
-                              >
-                                <circle
-                                  r="9"
-                                  fill="var(--color-bg-primary)"
-                                  stroke="var(--color-text-primary)"
-                                />
-                                <text
-                                  textAnchor="middle"
-                                  dominantBaseline="central"
-                                  fontSize="10"
-                                  fill="var(--color-text-primary)"
-                                >
-                                  {outgoing.indexOf(route) + 1}
-                                </text>
-                              </g>
-                            )}
+                          <foreignObject
+                            x={route.label.x - route.labelWidth / 2}
+                            y={route.label.y - 12}
+                            width={route.labelWidth}
+                            height={24}
+                            className="pointer-events-auto overflow-visible"
+                          >
+                            <button
+                              type="button"
+                              data-graph-edge-label={route.edge.edge_id}
+                              title={`${
+                                route.edge.label ||
+                                t("blueprint.graph.continue")
+                              } → ${nodeName(route.edge.target_timeline_id)}`}
+                              onMouseEnter={() =>
+                                setHoveredEdge(route.edge.edge_id)
+                              }
+                              onMouseLeave={() => setHoveredEdge(null)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setLocalFocus(route.edge.source_timeline_id);
+                              }}
+                              className="block h-6 w-full truncate rounded-full border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 text-center text-[11px] font-medium text-[var(--color-text-secondary)] shadow-sm hover:border-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+                            >
+                              {route.edge.label ||
+                                t("blueprint.graph.continue")}
+                            </button>
+                          </foreignObject>
                         </g>
                       );
                     })}
