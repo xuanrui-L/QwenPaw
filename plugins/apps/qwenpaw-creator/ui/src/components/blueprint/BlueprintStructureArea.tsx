@@ -4,6 +4,7 @@ import {
   Clapperboard,
   FileText,
   Film,
+  GitBranch,
   ListVideo,
   Palette,
   SquarePen,
@@ -26,6 +27,7 @@ import {
 import { orderedTimelineElements } from "@/selectors/timelineElementSelectors";
 import type { NarrativeShape } from "@/selectors/timelineElementSelectors";
 import { TONE_CHIP, TONE_TEXT, type BlueprintTone } from "./tones";
+import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
 
 export interface StructureAreaCallbacks {
   onSelectTimeline: (timelineId: string) => void;
@@ -527,6 +529,7 @@ const ROW_GAP = 42;
 const CANVAS_PADDING = 28;
 
 function GraphCanvas({
+  project,
   summaries,
   edges,
   selectedTimelineId,
@@ -534,6 +537,7 @@ function GraphCanvas({
   onOpenTimeline,
 }: StructureAreaProps) {
   const { t } = useTranslation();
+  const structurePending = edges.length === 0;
   const layout = useMemo(
     () => layoutNarrativeGraph(summaries, edges),
     [edges, summaries],
@@ -563,142 +567,185 @@ function GraphCanvas({
   const endingIds = useMemo(() => {
     const withOutgoing = new Set(edges.map((edge) => edge.source_timeline_id));
     return new Set(
-      summaries
-        .map((summary) => summary.timelineId)
+      edges
+        .map((edge) => edge.target_timeline_id)
         .filter((id) => !withOutgoing.has(id)),
     );
-  }, [edges, summaries]);
+  }, [edges]);
 
   return (
     <div
       data-blueprint-shape="branching"
-      className="h-full overflow-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]"
-      style={{
-        backgroundImage:
-          "radial-gradient(circle, var(--color-border) 1px, transparent 1px)",
-        backgroundSize: "22px 22px",
-      }}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]"
     >
-      <div className="relative" style={{ width, height }}>
-        <svg className="pointer-events-none absolute inset-0 h-full w-full">
-          {edges.map((edge) => {
-            const source = positions.get(edge.source_timeline_id);
-            const target = positions.get(edge.target_timeline_id);
-            if (!source || !target) return null;
-            const x1 = source.x + NODE_WIDTH;
-            const y1 = source.y + NODE_HEIGHT / 2;
-            const x2 = target.x;
-            const y2 = target.y + NODE_HEIGHT / 2;
-            const dx = Math.max(40, (x2 - x1) / 2);
-            return (
-              <path
-                key={edge.edge_id}
-                d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${
-                  x2 - dx
-                } ${y2}, ${x2} ${y2}`}
-                fill="none"
-                stroke="var(--color-border-strong)"
-                strokeWidth={1.5}
-              />
-            );
-          })}
-        </svg>
-        {edges.map((edge) => {
-          const source = positions.get(edge.source_timeline_id);
-          const target = positions.get(edge.target_timeline_id);
-          if (!source || !target || !edge.label) return null;
-          const x = (source.x + NODE_WIDTH + target.x) / 2;
-          const y = (source.y + target.y + NODE_HEIGHT) / 2;
-          return (
-            <span
-              key={`label:${edge.edge_id}`}
-              className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-primary)]/80 px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text-secondary)] shadow-[var(--shadow-sm)] backdrop-blur-md"
-              style={{ left: x, top: y }}
-              title={edge.prompt}
-            >
-              {edge.label}
+      <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 py-3">
+        <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-[var(--color-text-primary)]">
+          <GitBranch className="h-4 w-4" />
+          <span>{t("blueprint.interactiveStoryMap")}</span>
+          <span className="text-xs text-[var(--color-text-secondary)]">
+            {t("blueprint.chips.branching", { count: summaries.length })}
+          </span>
+          {structurePending && (
+            <span className="rounded border border-[var(--color-border)] px-2 py-0.5 text-xs">
+              {t("blueprint.branchesPending")}
             </span>
-          );
-        })}
-        {summaries.map((summary) => {
-          const position = positions.get(summary.timelineId);
-          if (!position) return null;
-          const selected = summary.timelineId === selectedTimelineId;
-          const status = summaryStatus(summary);
-          const ending = endingIds.has(summary.timelineId);
-          return (
-            <button
-              key={summary.timelineId}
-              type="button"
-              data-blueprint-node={summary.timelineId}
-              onClick={() => onSelectTimeline(summary.timelineId)}
-              className={`group absolute rounded-2xl border bg-[var(--color-bg-card)]/85 p-3 text-left shadow-[var(--shadow-sm)] backdrop-blur-md transition-all duration-200 hover:-translate-y-1 hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-lg)] ${
-                selected
-                  ? "border-[var(--color-accent)] shadow-[0_0_0_3px_var(--color-accent-soft)]"
-                  : "border-[var(--color-border)]"
-              }`}
-              style={{
-                left: position.x,
-                top: position.y,
-                width: NODE_WIDTH,
-                minHeight: NODE_HEIGHT,
-              }}
-            >
-              <div className="mb-1.5 flex items-center justify-between gap-1.5">
-                <span
-                  className={`badge font-bold ${
-                    ending
-                      ? "bg-[rgba(139,92,246,.12)] text-[#8b5cf6]"
-                      : "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                  }`}
-                >
-                  {ending
-                    ? t("blueprint.endingNode")
-                    : t("blueprint.episodeN", { n: summary.index + 1 })}
-                </span>
-                <span
-                  className={`rounded px-1.5 text-[9px] font-semibold leading-[16px] ${
-                    TONE_CHIP[status.tone]
-                  }`}
-                >
-                  {t(`blueprint.episodeStatus.${status.key}`)}
-                </span>
-              </div>
-              <h4 className="mb-1 text-[13px] font-semibold text-[var(--color-text-primary)]">
-                {episodeTitle(summary, t)}
-              </h4>
-              <p className="mb-2 line-clamp-2 text-[11px] leading-normal text-[var(--color-text-secondary)]">
-                {summary.synopsis || t("blueprint.noSynopsis")}
-              </p>
-              <div className="border-t border-dashed border-[var(--color-border)] pt-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    {t("blueprint.nodeMeta", {
-                      ready: summary.videoReady,
-                      total: summary.videoTotal,
-                    })}
-                  </span>
-                  <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                    {formatDuration(summary.durationSeconds)}
-                  </span>
-                </div>
-                {/* 查看剧本 / 制作台编辑 (design 84:30317 node-card pills). */}
-                <div className="mt-2 flex items-center gap-3">
-                  <NodeActionPill
-                    icon={<FileText className="h-3.5 w-3.5" />}
-                    label={t("blueprint.viewScript")}
-                    onClick={() => onSelectTimeline(summary.timelineId)}
+          )}
+        </div>
+        {structurePending && (
+          <p className="mt-2 text-xs leading-relaxed text-[var(--color-text-secondary)]">
+            {t("blueprint.branchesPendingHint")}
+          </p>
+        )}
+      </div>
+      <div
+        className="min-h-0 flex-1 overflow-auto"
+        style={{
+          backgroundImage:
+            "radial-gradient(circle, var(--color-border) 1px, transparent 1px)",
+          backgroundSize: "22px 22px",
+        }}
+      >
+        {summaries.length === 0 ? (
+          <WorkspaceEmptyState
+            projectId={project.project_id}
+            area="interactive"
+          />
+        ) : (
+          <div
+            className={
+              structurePending
+                ? "grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3 p-4"
+                : "relative"
+            }
+            style={structurePending ? undefined : { width, height }}
+          >
+            <svg className="pointer-events-none absolute inset-0 h-full w-full">
+              {edges.map((edge) => {
+                const source = positions.get(edge.source_timeline_id);
+                const target = positions.get(edge.target_timeline_id);
+                if (!source || !target) return null;
+                const x1 = source.x + NODE_WIDTH;
+                const y1 = source.y + NODE_HEIGHT / 2;
+                const x2 = target.x;
+                const y2 = target.y + NODE_HEIGHT / 2;
+                const dx = Math.max(40, (x2 - x1) / 2);
+                return (
+                  <path
+                    key={edge.edge_id}
+                    d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${
+                      x2 - dx
+                    } ${y2}, ${x2} ${y2}`}
+                    fill="none"
+                    stroke="var(--color-border-strong)"
+                    strokeWidth={1.5}
                   />
-                  <NodeActionPill
-                    icon={<SquarePen className="h-3.5 w-3.5" />}
-                    label={t("blueprint.editTimeline")}
-                    onClick={() => onOpenTimeline(summary.timelineId)}
-                  />
-                </div>
-              </div>
-            </button>
-          );
-        })}
+                );
+              })}
+            </svg>
+            {edges.map((edge) => {
+              const source = positions.get(edge.source_timeline_id);
+              const target = positions.get(edge.target_timeline_id);
+              if (!source || !target || !edge.label) return null;
+              const x = (source.x + NODE_WIDTH + target.x) / 2;
+              const y = (source.y + target.y + NODE_HEIGHT) / 2;
+              return (
+                <span
+                  key={`label:${edge.edge_id}`}
+                  className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-primary)]/80 px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text-secondary)] shadow-[var(--shadow-sm)] backdrop-blur-md"
+                  style={{ left: x, top: y }}
+                  title={edge.prompt}
+                >
+                  {edge.label}
+                </span>
+              );
+            })}
+            {summaries.map((summary) => {
+              const position = positions.get(summary.timelineId);
+              if (!position) return null;
+              const selected = summary.timelineId === selectedTimelineId;
+              const status = summaryStatus(summary);
+              const ending = endingIds.has(summary.timelineId);
+              return (
+                <button
+                  key={summary.timelineId}
+                  type="button"
+                  data-blueprint-node={summary.timelineId}
+                  onClick={() => onSelectTimeline(summary.timelineId)}
+                  className={`group ${
+                    structurePending ? "relative" : "absolute"
+                  } rounded-2xl border bg-[var(--color-bg-card)]/85 p-3 text-left shadow-[var(--shadow-sm)] backdrop-blur-md transition-all duration-200 hover:-translate-y-1 hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-lg)] ${
+                    selected
+                      ? "border-[var(--color-accent)] shadow-[0_0_0_3px_var(--color-accent-soft)]"
+                      : "border-[var(--color-border)]"
+                  }`}
+                  style={
+                    structurePending
+                      ? undefined
+                      : {
+                          left: position.x,
+                          top: position.y,
+                          width: NODE_WIDTH,
+                          minHeight: NODE_HEIGHT,
+                        }
+                  }
+                >
+                  <div className="mb-1.5 flex items-center justify-between gap-1.5">
+                    <span
+                      className={`badge font-bold ${
+                        ending
+                          ? "bg-[rgba(139,92,246,.12)] text-[#8b5cf6]"
+                          : "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                      }`}
+                    >
+                      {ending
+                        ? t("blueprint.endingNode")
+                        : t("blueprint.episodeN", { n: summary.index + 1 })}
+                    </span>
+                    <span
+                      className={`rounded px-1.5 text-[9px] font-semibold leading-[16px] ${
+                        TONE_CHIP[status.tone]
+                      }`}
+                    >
+                      {t(`blueprint.episodeStatus.${status.key}`)}
+                    </span>
+                  </div>
+                  <h4 className="mb-1 text-[13px] font-semibold text-[var(--color-text-primary)]">
+                    {episodeTitle(summary, t)}
+                  </h4>
+                  <p className="mb-2 line-clamp-2 text-[11px] leading-normal text-[var(--color-text-secondary)]">
+                    {summary.synopsis || t("blueprint.noSynopsis")}
+                  </p>
+                  <div className="border-t border-dashed border-[var(--color-border)] pt-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                        {t("blueprint.nodeMeta", {
+                          ready: summary.videoReady,
+                          total: summary.videoTotal,
+                        })}
+                      </span>
+                      <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
+                        {formatDuration(summary.durationSeconds)}
+                      </span>
+                    </div>
+                    {/* 查看剧本 / 制作台编辑 (design 84:30317 node-card pills). */}
+                    <div className="mt-2 flex items-center gap-3">
+                      <NodeActionPill
+                        icon={<FileText className="h-3.5 w-3.5" />}
+                        label={t("blueprint.viewScript")}
+                        onClick={() => onSelectTimeline(summary.timelineId)}
+                      />
+                      <NodeActionPill
+                        icon={<SquarePen className="h-3.5 w-3.5" />}
+                        label={t("blueprint.editTimeline")}
+                        onClick={() => onOpenTimeline(summary.timelineId)}
+                      />
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

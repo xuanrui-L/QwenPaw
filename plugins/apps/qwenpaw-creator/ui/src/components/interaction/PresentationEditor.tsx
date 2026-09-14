@@ -272,8 +272,17 @@ export default function PresentationEditor({
                   ? saveControlPrompt(next)
                   : updateScreen({ design_prompt: next })
               }
-              onRegenerate={() => generation.generate("interaction:project")}
+              onRegenerate={
+                project.narrative_edges?.length
+                  ? () => generation.generate("interaction:project")
+                  : undefined
+              }
             />
+            {!project.narrative_edges?.length && (
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                分支连接尚未建立，剧情结构就绪后可生成作品页面。
+              </p>
+            )}
             <p className="text-xs text-[var(--color-text-secondary)]">
               {selection.action
                 ? "在同一处编辑按钮文案、外观与动效，完成后重新生成并审阅。"

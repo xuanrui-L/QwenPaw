@@ -1430,6 +1430,7 @@
     "reviewRound": "Round {{round}}"
   },
   "workspaceEmpty": {
+    "interactive": "Story nodes awaiting a draft",
     "preparingHint": "Creation starts automatically once your materials are ready. Follow progress in the assistant; there is no need to submit again.",
     "blueprint": "Video script",
     "script": "Script",
@@ -2070,6 +2071,9 @@
       "idle": "To draft"
     },
     "episodeList": "Episode list · Linear {{count}} episodes",
+    "interactiveStoryMap": "Interactive drama · Story map",
+    "branchesPending": "Branch connections not yet created",
+    "branchesPendingHint": "Story nodes appear here as they are drafted. Choices and connections will show the story paths once created. You can read existing scripts or open Interaction Design to review the page requirements.",
     "noSynopsis": "No synopsis yet",
     "timelineQuick": "Timeline",
     "endingNode": "Ending",
@@ -2248,6 +2252,7 @@
     "previewChoice": "Choose a path"
   },
   "sidebar": {
+    "nodes": "Story nodes",
     "assistant": "Assistant",
     "episodes": "Episodes"
   },

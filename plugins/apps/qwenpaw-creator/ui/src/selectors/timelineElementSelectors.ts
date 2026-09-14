@@ -12,6 +12,10 @@ import {
   type TransitionJunction,
 } from "@/lib/timelineEditing";
 import i18n from "@/i18n";
+import {
+  interactiveContentTypeFromBrief,
+  isInteractiveContentType,
+} from "@/lib/interactiveProject";
 
 export interface DisplayLane {
   id: string;
@@ -64,14 +68,25 @@ export function selectLiveTimelineIds(
 }
 
 /**
- * The blueprint's only fork point, derived purely from data (plan §4.5):
- * edges → branching graph; several timelines → linear episode list;
- * otherwise the single-node production board.
+ * An interactive brief remains interactive while its graph is being drafted.
+ * Existing graph/choice data also identifies older branching projects.
  */
 export function selectNarrativeShape(
   project: ProjectDocument | null | undefined,
 ): NarrativeShape {
-  if ((project?.narrative_edges ?? []).length > 0) return "branching";
+  if (!project) return "single";
+  if ((project.narrative_edges ?? []).length > 0) return "branching";
+  if (
+    isInteractiveContentType(project.settings.content_type) ||
+    (!project.settings.content_type &&
+      interactiveContentTypeFromBrief(project.description)) ||
+    selectLiveTimelineIds(project).some((id) =>
+      Object.values(project.timelines.items[id].elements_by_id).some(
+        (element) => element.enabled && element.creation.type === "interaction",
+      ),
+    )
+  )
+    return "branching";
   return selectLiveTimelineIds(project).length > 1 ? "linear" : "single";
 }
 

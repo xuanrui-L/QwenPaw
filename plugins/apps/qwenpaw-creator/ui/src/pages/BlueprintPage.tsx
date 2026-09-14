@@ -233,7 +233,7 @@ export default function BlueprintPage() {
 
       {/* First screen: single projects read as the script document itself
           (design 84:37778); multi-episode / branching keep the structure. */}
-      {!hasBlueprintContent(project) ? (
+      {!hasBlueprintContent(project) && shape !== "branching" ? (
         <div
           className="workspace-decor-grid flex min-h-0 flex-1 overflow-y-auto p-4"
           data-blueprint-initial
@@ -256,7 +256,7 @@ export default function BlueprintPage() {
           <BlueprintStructureArea
             project={project}
             shape={shape}
-            summaries={summaries}
+            summaries={hasBlueprintContent(project) ? summaries : []}
             edges={edges}
             selectedTimelineId={scriptOpen ? selectedTimelineId : null}
             onSelectTimeline={openScript}

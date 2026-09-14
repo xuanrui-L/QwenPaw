@@ -1430,6 +1430,7 @@
     "reviewRound": "第 {{round}} 轮"
   },
   "workspaceEmpty": {
+    "interactive": "剧情节点待起草",
     "preparingHint": "素材准备完成后会自动开始创作。你可以在创作助手中查看进展，无需重复提交。",
     "blueprint": "视频脚本",
     "script": "剧本内容",
@@ -2070,6 +2071,9 @@
       "idle": "待起草"
     },
     "episodeList": "剧集列表 · 线性 {{count}} 集",
+    "interactiveStoryMap": "互动式短剧 · 剧情地图",
+    "branchesPending": "分支连接尚未建立",
+    "branchesPendingHint": "剧情节点将在这里逐步展开，抉择和分支连接建立后会显示完整的剧情走向。可先查看已有节点的剧本，或进入交互设计查看页面要求。",
     "noSynopsis": "暂无梗概",
     "timelineQuick": "时间线",
     "endingNode": "结局",
@@ -2248,6 +2252,7 @@
     "previewChoice": "选择故事走向"
   },
   "sidebar": {
+    "nodes": "剧情节点",
     "assistant": "创作助手",
     "episodes": "剧集列表"
   },

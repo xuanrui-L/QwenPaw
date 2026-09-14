@@ -262,7 +262,9 @@ export function PresentationPreview({
         <p role="status" className="my-4 text-sm">
           {error}
           {!project.interactive_presentation?.motion &&
-            "，在右侧编辑提示词并生成后可查看效果。"}
+            (project.narrative_edges?.length
+              ? "，在右侧编辑提示词并生成后可查看效果。"
+              : "。剧情结构和页面提示词就绪后，可在这里预览各个交互页面。")}
         </p>
       )}
       <DesignViewport mobile={mobile} active={review}>

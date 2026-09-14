@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import BlueprintPage from "@/pages/BlueprintPage";
@@ -190,6 +190,84 @@ describe("BlueprintPage narrative shapes", () => {
     expect(
       screen.getByRole("button", { name: "下载 / 导出" }),
     ).toBeInTheDocument();
+  });
+
+  it("presents an explicit interactive request before the first Agent patch or story node", () => {
+    const project = singleProject();
+    project.settings.content_type = null;
+    project.description =
+      "我想做一个互动式视频，要求和剧本如下：\n\n《七日夺嫡》";
+    project.visual.entities = { order: [], items: {} };
+    project.assets.artifact_slots_by_id = {};
+    Object.assign(project.timelines.items["timeline:main"], {
+      title: "",
+      synopsis: "",
+      description: "",
+      elements_by_id: {},
+    });
+    seedProject(project);
+    const { container } = renderPage();
+
+    expect(screen.getByText("互动式短剧 · 剧情地图")).toBeInTheDocument();
+    expect(screen.getByText("分支连接尚未建立")).toBeInTheDocument();
+    expect(
+      container.querySelector('[data-workspace-empty="interactive"]'),
+    ).toBeInTheDocument();
+    expect(container.querySelectorAll("[data-blueprint-node]")).toHaveLength(0);
+    expect(container.querySelector("[data-export-bundle]")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "交互设计" }));
+    expect(
+      screen.getByRole("region", { name: "交互设计工作台" }),
+    ).toBeVisible();
+    expect(screen.getByRole("tab", { name: "首页" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "剧情地图" })).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "生成作品页面" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps unconnected interactive drafts as story nodes and adds paths when a later snapshot supplies edges", () => {
+    const project = cloneProject();
+    project.settings.content_type = "interactive_branching_drama";
+    project.description = "皇帝暴毙于御书房，七日封城。";
+    seedProject(project);
+    const { container } = renderPage();
+
+    expect(
+      container.querySelector('[data-blueprint-shape="branching"]'),
+    ).toBeInTheDocument();
+    expect(
+      container.querySelector('[data-blueprint-shape="linear"]'),
+    ).not.toBeInTheDocument();
+    expect(container.querySelectorAll("[data-blueprint-node]")).toHaveLength(2);
+    expect(screen.queryByText("结局")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-export-bundle]")).toBeDisabled();
+    fireEvent.click(
+      container.querySelector(
+        '[data-blueprint-node="timeline:ep2"]',
+      ) as HTMLElement,
+    );
+    expect(useCreatorInteractionStore.getState().selectedRef).toBe(
+      "timeline:timeline:ep2",
+    );
+
+    const connected = structuredClone(project);
+    connected.narrative_edges = [
+      {
+        edge_id: "edge:a",
+        source_timeline_id: "timeline:main",
+        target_timeline_id: "timeline:ep2",
+        label: "公开保留",
+        prompt: "血诏怎么办？",
+      },
+    ];
+    act(() => seedProject(connected));
+    expect(screen.queryByText("分支连接尚未建立")).not.toBeInTheDocument();
+    expect(screen.getByText("公开保留")).toBeInTheDocument();
+    expect(screen.getAllByText("结局")).toHaveLength(1);
+    expect(
+      container.querySelector('[data-blueprint-shape="linear"]'),
+    ).not.toBeInTheDocument();
   });
 
   /**

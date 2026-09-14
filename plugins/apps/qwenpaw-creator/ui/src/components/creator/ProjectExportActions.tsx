@@ -202,8 +202,12 @@ export default function ProjectExportActions({
         <button
           type="button"
           data-export-bundle
-          disabled={bundleBusy}
-          title={t("blueprint.downloadBundleTitle")}
+          disabled={bundleBusy || !project.narrative_edges?.length}
+          title={t(
+            project.narrative_edges?.length
+              ? "blueprint.downloadBundleTitle"
+              : "blueprint.branchesPending",
+          )}
           onClick={() => void exportBundle()}
           className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)] transition hover:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-70"
         >

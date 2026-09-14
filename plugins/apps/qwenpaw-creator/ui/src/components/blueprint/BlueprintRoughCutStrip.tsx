@@ -26,6 +26,7 @@ import {
 } from "@/selectors/blueprintSelectors";
 import {
   selectLiveTimelineIds,
+  selectNarrativeShape,
   timelineEndTick,
 } from "@/selectors/timelineElementSelectors";
 import TimelineLivePreview from "@/components/timeline/TimelineLivePreview";
@@ -137,7 +138,7 @@ function PreviewCinema({
   // Branching projects have no meaningful composed whole film: the
   // whole-film sentinel enters the branch-following playback instead,
   // starting from the entry timeline (same test as selectNarrativeShape).
-  const branching = (project.narrative_edges ?? []).length > 0;
+  const branching = selectNarrativeShape(project) === "branching";
   const wholeFilm = startId === FULL_FILM_ID && !branching;
   const initialId =
     startId === FULL_FILM_ID && branching
@@ -424,7 +425,7 @@ export default function BlueprintRoughCutStrip({
     () => [...new Set(frames.map((frame) => frame.timelineId))],
     [frames],
   );
-  const isBranching = (project.narrative_edges ?? []).length > 0;
+  const isBranching = selectNarrativeShape(project) === "branching";
   const filmVersionId = useMemo(
     () => selectFinalFilmVersionId(project),
     [project],

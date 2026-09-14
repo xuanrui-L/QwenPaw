@@ -1,20 +1,16 @@
 import { useEffect, useState } from "react";
 import type { ProjectDocument } from "@/contracts/creator";
 import { getWorkGraph } from "@/api/creator/workGraph";
-import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
+import {
+  selectLiveTimelineIds,
+  selectNarrativeShape,
+} from "@/selectors/timelineElementSelectors";
 import { useSearchParams } from "@/routing/navigation";
 import PresentationEditor from "./PresentationEditor";
 import "./interactionDesign.css";
 
 export function hasInteractionDesign(project: ProjectDocument) {
-  return (
-    Boolean(project.narrative_edges?.length) ||
-    selectLiveTimelineIds(project).some((id) =>
-      Object.values(project.timelines.items[id].elements_by_id).some(
-        (element) => element.enabled && element.creation.type === "interaction",
-      ),
-    )
-  );
+  return selectNarrativeShape(project) === "branching";
 }
 
 export default function InteractionWorkbench({
@@ -65,7 +61,7 @@ export default function InteractionWorkbench({
       clearInterval(timer);
     };
   }, [project.project_id, open]);
-  if (!points.length && !project.narrative_edges?.length) return null;
+  if (!hasInteractionDesign(project)) return null;
   return (
     <>
       <section

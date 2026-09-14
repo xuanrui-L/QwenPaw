@@ -1,6 +1,8 @@
 import { useTranslation } from "react-i18next";
 import { AgentDock } from "@/components/agent";
 import EpisodeListPanel from "@/components/blueprint/EpisodeListPanel";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { selectNarrativeShape } from "@/selectors/timelineElementSelectors";
 import {
   useAgentDockUiStore,
   type WorkspaceSidebarTab,
@@ -17,10 +19,16 @@ export default function WorkspaceSidebar() {
   const { t } = useTranslation();
   const tab = useAgentDockUiStore((state) => state.sidebarTab);
   const setTab = useAgentDockUiStore((state) => state.setSidebarTab);
+  const shape = useProjectSnapshotStore((state) =>
+    selectNarrativeShape(state.project),
+  );
 
   const tabs: { key: WorkspaceSidebarTab; label: string }[] = [
     { key: "assistant", label: t("sidebar.assistant") },
-    { key: "episodes", label: t("sidebar.episodes") },
+    {
+      key: "episodes",
+      label: t(shape === "branching" ? "sidebar.nodes" : "sidebar.episodes"),
+    },
   ];
 
   const headerTabs = (

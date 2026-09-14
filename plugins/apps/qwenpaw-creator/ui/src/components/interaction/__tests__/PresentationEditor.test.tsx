@@ -60,6 +60,15 @@ vi.mock("../PresentationPreview", () => ({
 const patch = vi.fn().mockResolvedValue({});
 const project = () => ({
   ...structuredClone(projectDocument),
+  narrative_edges: [
+    {
+      edge_id: "edge:a",
+      source_timeline_id: "timeline:main",
+      target_timeline_id: "timeline:ep2",
+      label: "继续",
+      prompt: "下一步",
+    },
+  ],
   interactive_presentation: {
     design_prompt: "已有的 Agent 设计提示词",
     screens: {},
@@ -76,6 +85,23 @@ beforeEach(() => {
   useCreatorTaskViewStore.setState({
     refresh: vi.fn().mockResolvedValue(undefined),
   });
+});
+
+it("keeps page requirements visible before branches exist without offering an unavailable generation action", () => {
+  render(
+    <PresentationEditor project={{ ...project(), narrative_edges: [] }} />,
+  );
+  expect(screen.getByRole("tab", { name: "首页" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "播放页" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "剧情地图" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "结局页" })).toBeInTheDocument();
+  expect(
+    screen.getByText("分支连接尚未建立，剧情结构就绪后可生成作品页面。"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "生成作品页面" }),
+  ).not.toBeInTheDocument();
+  expect(dispatch).not.toHaveBeenCalled();
 });
 
 it("saves button copy and appearance together with CAS before explicit regeneration", async () => {
