@@ -263,6 +263,12 @@ describe("BlueprintPage narrative shapes", () => {
     ];
     act(() => seedProject(connected));
     expect(screen.queryByText("分支连接尚未建立")).not.toBeInTheDocument();
+    expect(container.querySelectorAll("[data-graph-edge]")).toHaveLength(1);
+    fireEvent.click(
+      container.querySelector(
+        '[data-blueprint-node="timeline:main"]',
+      ) as HTMLElement,
+    );
     expect(screen.getByText("公开保留")).toBeInTheDocument();
     expect(screen.getAllByText("结局")).toHaveLength(1);
     expect(

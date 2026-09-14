@@ -2071,6 +2071,23 @@
       "idle": "待起草"
     },
     "episodeList": "剧集列表 · 线性 {{count}} 集",
+    "graph": {
+      "expand": "展开剧情地图",
+      "collapse": "收起剧情地图",
+      "locateNode": "定位剧情节点",
+      "zoomOut": "缩小剧情地图",
+      "zoomIn": "放大剧情地图",
+      "actualSize": "恢复 100%",
+      "fit": "总览",
+      "arrange": "自动整理",
+      "localLayout": "重新排布节点，布局仅保存在当前浏览器",
+      "navigationHint": "拖动节点整理 · 拖动空白平移 · Shift + 滚轮横移 · 点击节点查看去向",
+      "connections": "节点分支去向",
+      "clearFocus": "取消节点聚焦",
+      "continue": "继续",
+      "noOutgoing": "此节点没有后续分支。",
+      "incoming": "查看 {{count}} 条来路"
+    },
     "interactiveStoryMap": "互动式短剧 · 剧情地图",
     "branchesPending": "分支连接尚未建立",
     "branchesPendingHint": "剧情节点将在这里逐步展开，抉择和分支连接建立后会显示完整的剧情走向。可先查看已有节点的剧本，或进入交互设计查看页面要求。",

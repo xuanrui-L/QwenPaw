@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import { useId, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Brain,
   Clapperboard,
@@ -6,6 +7,15 @@ import {
   Film,
   GitBranch,
   ListVideo,
+  Maximize2,
+  Minus,
+  Plus,
+  RotateCcw,
+  X,
+  ArrowRight,
+  GripVertical,
+  Expand,
+  Shrink,
   Palette,
   SquarePen,
 } from "lucide-react";
@@ -17,7 +27,6 @@ import type {
 import {
   isVideoProductionElement,
   isVoiceOnlyVisualEntity,
-  layoutNarrativeGraph,
   roughCutFrameForElement,
   selectResearchSlots,
   selectTimelineRenderSlot,
@@ -28,6 +37,13 @@ import { orderedTimelineElements } from "@/selectors/timelineElementSelectors";
 import type { NarrativeShape } from "@/selectors/timelineElementSelectors";
 import { TONE_CHIP, TONE_TEXT, type BlueprintTone } from "./tones";
 import WorkspaceEmptyState from "@/components/WorkspaceEmptyState";
+import {
+  GRAPH_NODE_HEIGHT,
+  GRAPH_NODE_WIDTH,
+  layoutStoryNodes,
+  routeStoryEdges,
+} from "./narrativeGraphLayout";
+import { useNarrativeGraphViewport } from "./useNarrativeGraphViewport";
 
 export interface StructureAreaCallbacks {
   onSelectTimeline: (timelineId: string) => void;
@@ -89,6 +105,7 @@ function NodeActionPill({
   return (
     <span
       role="button"
+      data-graph-action
       tabIndex={0}
       title={label}
       className="inline-flex h-6 items-center gap-1 rounded-full bg-[var(--color-bg-secondary)] px-2.5 text-[10px] font-semibold text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
@@ -522,12 +539,6 @@ function EpisodeList({
 /* Branching: layered graph canvas                                     */
 /* ------------------------------------------------------------------ */
 
-const NODE_WIDTH = 218;
-const NODE_HEIGHT = 132;
-const LAYER_GAP = 120;
-const ROW_GAP = 42;
-const CANVAS_PADDING = 28;
-
 function GraphCanvas({
   project,
   summaries,
@@ -537,33 +548,54 @@ function GraphCanvas({
   onOpenTimeline,
 }: StructureAreaProps) {
   const { t } = useTranslation();
+  const markerId = useId().replace(/:/g, "");
   const structurePending = edges.length === 0;
-  const layout = useMemo(
-    () => layoutNarrativeGraph(summaries, edges),
-    [edges, summaries],
+  const topology = JSON.stringify([
+    summaries.map((summary) => summary.timelineId),
+    edges.map((edge) => [
+      edge.edge_id,
+      edge.source_timeline_id,
+      edge.target_timeline_id,
+    ]),
+  ]);
+  const automatic = useMemo(() => {
+    const [ids, links] = JSON.parse(topology) as [string[], string[][]];
+    return layoutStoryNodes(
+      ids,
+      links.map(([edge_id, source_timeline_id, target_timeline_id]) => ({
+        edge_id,
+        source_timeline_id,
+        target_timeline_id,
+      })),
+    );
+  }, [topology]);
+  const [expanded, setExpanded] = useState(false);
+  const graph = useNarrativeGraphViewport(
+    project.project_id,
+    automatic,
+    expanded,
   );
-  const positions = useMemo(() => {
-    const map = new Map<string, { x: number; y: number }>();
-    for (const summary of summaries) {
-      const cell = layout.get(summary.timelineId);
-      if (!cell) continue;
-      map.set(summary.timelineId, {
-        x: CANVAS_PADDING + cell.layer * (NODE_WIDTH + LAYER_GAP),
-        y: CANVAS_PADDING + cell.row * (NODE_HEIGHT + ROW_GAP),
-      });
-    }
-    return map;
-  }, [layout, summaries]);
-  const width =
-    CANVAS_PADDING * 2 +
-    (Math.max(0, ...[...layout.values()].map((cell) => cell.layer)) + 1) *
-      (NODE_WIDTH + LAYER_GAP) -
-    LAYER_GAP;
-  const height =
-    CANVAS_PADDING * 2 +
-    (Math.max(0, ...[...layout.values()].map((cell) => cell.row)) + 1) *
-      (NODE_HEIGHT + ROW_GAP) -
-    ROW_GAP;
+  const routes = useMemo(
+    () => routeStoryEdges(edges, graph.positions),
+    [edges, graph.positions],
+  );
+  const [localFocus, setLocalFocus] = useState<string | null | undefined>(
+    undefined,
+  );
+  const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
+  const focusedId = localFocus === undefined ? selectedTimelineId : localFocus;
+  const focused = summaries.find((summary) => summary.timelineId === focusedId);
+  const incoming = routes.filter(
+    (route) => route.edge.target_timeline_id === focusedId,
+  );
+  const outgoing = routes.filter(
+    (route) => route.edge.source_timeline_id === focusedId,
+  );
+  const connected = new Set([
+    focusedId,
+    ...incoming.map((route) => route.edge.source_timeline_id),
+    ...outgoing.map((route) => route.edge.target_timeline_id),
+  ]);
   const endingIds = useMemo(() => {
     const withOutgoing = new Set(edges.map((edge) => edge.source_timeline_id));
     return new Set(
@@ -572,11 +604,41 @@ function GraphCanvas({
         .filter((id) => !withOutgoing.has(id)),
     );
   }, [edges]);
+  const nodeName = (id: string) => {
+    const summary = summaries.find((item) => item.timelineId === id);
+    return summary
+      ? `${t("blueprint.episodeN", { n: summary.index + 1 })} · ${episodeTitle(
+          summary,
+          t,
+        )}`
+      : id;
+  };
+  function jump(id: string) {
+    setLocalFocus(id);
+    setHoveredEdge(null);
+    graph.focusNode(id);
+  }
+  function openScript(id: string) {
+    graph.rememberView();
+    setExpanded(false);
+    onSelectTimeline(id);
+  }
+  const toolbarButton =
+    "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40";
 
-  return (
+  const content = (
     <div
       data-blueprint-shape="branching"
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]"
+      data-graph-expanded={expanded}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          graph.rememberView();
+          setExpanded(false);
+        }
+      }}
+      className={`${
+        expanded ? "fixed inset-3 z-[250]" : "h-full"
+      } flex min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] shadow-[var(--shadow-xs)]`}
     >
       <div className="shrink-0 border-b border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-[var(--color-text-primary)]">
@@ -591,18 +653,134 @@ function GraphCanvas({
             </span>
           )}
         </div>
-        {structurePending && (
+        {structurePending ? (
           <p className="mt-2 text-xs leading-relaxed text-[var(--color-text-secondary)]">
             {t("blueprint.branchesPendingHint")}
           </p>
+        ) : (
+          <>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <select
+                aria-label={t("blueprint.graph.locateNode")}
+                value={focused?.timelineId ?? ""}
+                onChange={(event) =>
+                  event.target.value && jump(event.target.value)
+                }
+                className="h-7 min-w-0 max-w-52 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-2 text-xs text-[var(--color-text-primary)]"
+              >
+                <option value="">{t("blueprint.graph.locateNode")}</option>
+                {summaries.map((summary) => (
+                  <option key={summary.timelineId} value={summary.timelineId}>
+                    {nodeName(summary.timelineId)}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={toolbarButton}
+                aria-label={t("blueprint.graph.zoomOut")}
+                title={t("blueprint.graph.zoomOut")}
+                disabled={graph.scale <= 0.1}
+                onClick={() => graph.zoom(graph.scale / 1.25)}
+              >
+                <Minus className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                className={`${toolbarButton} min-w-12 tabular-nums`}
+                title={t("blueprint.graph.actualSize")}
+                onClick={() => graph.zoom(1)}
+              >
+                {Math.round(graph.scale * 100)}%
+              </button>
+              <button
+                type="button"
+                className={toolbarButton}
+                aria-label={t("blueprint.graph.zoomIn")}
+                title={t("blueprint.graph.zoomIn")}
+                disabled={graph.scale >= 1.5}
+                onClick={() => graph.zoom(graph.scale * 1.25)}
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                className={toolbarButton}
+                onClick={() => {
+                  setLocalFocus(null);
+                  graph.fit();
+                }}
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+                {t("blueprint.graph.fit")}
+              </button>
+              <button
+                type="button"
+                className={toolbarButton}
+                title={t("blueprint.graph.localLayout")}
+                onClick={graph.resetLayout}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                {t("blueprint.graph.arrange")}
+              </button>
+              <button
+                type="button"
+                className={toolbarButton}
+                aria-label={t(
+                  expanded
+                    ? "blueprint.graph.collapse"
+                    : "blueprint.graph.expand",
+                )}
+                title={t(
+                  expanded
+                    ? "blueprint.graph.collapse"
+                    : "blueprint.graph.expand",
+                )}
+                autoFocus={expanded}
+                onClick={() => {
+                  graph.rememberView();
+                  setExpanded((value) => !value);
+                }}
+              >
+                {expanded ? (
+                  <Shrink className="h-3.5 w-3.5" />
+                ) : (
+                  <Expand className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)]">
+              {t("blueprint.graph.navigationHint")}
+            </p>
+          </>
         )}
       </div>
       <div
-        className="min-h-0 flex-1 overflow-auto"
+        ref={graph.viewportRef}
+        data-graph-viewport
+        tabIndex={0}
+        aria-label={t("blueprint.interactiveStoryMap")}
+        className={`min-h-0 flex-1 overflow-auto overscroll-contain ${
+          structurePending
+            ? ""
+            : graph.panning
+            ? "cursor-grabbing"
+            : "cursor-grab"
+        }`}
         style={{
+          touchAction: structurePending ? "auto" : "none",
           backgroundImage:
             "radial-gradient(circle, var(--color-border) 1px, transparent 1px)",
           backgroundSize: "22px 22px",
+        }}
+        {...(structurePending ? {} : graph.handlers)}
+        onClick={(event) => {
+          if (
+            !(event.target as HTMLElement).closest(
+              "[data-blueprint-node], [data-graph-edge]",
+            )
+          )
+            setLocalFocus(null);
         }}
       >
         {summaries.length === 0 ? (
@@ -615,144 +793,319 @@ function GraphCanvas({
             className={
               structurePending
                 ? "grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3 p-4"
-                : "relative"
+                : "relative select-none"
             }
-            style={structurePending ? undefined : { width, height }}
+            style={
+              structurePending
+                ? undefined
+                : {
+                    width: graph.width * graph.scale,
+                    height: graph.height * graph.scale,
+                  }
+            }
           >
-            <svg className="pointer-events-none absolute inset-0 h-full w-full">
-              {edges.map((edge) => {
-                const source = positions.get(edge.source_timeline_id);
-                const target = positions.get(edge.target_timeline_id);
-                if (!source || !target) return null;
-                const x1 = source.x + NODE_WIDTH;
-                const y1 = source.y + NODE_HEIGHT / 2;
-                const x2 = target.x;
-                const y2 = target.y + NODE_HEIGHT / 2;
-                const dx = Math.max(40, (x2 - x1) / 2);
+            <div
+              className={
+                structurePending
+                  ? "contents"
+                  : "absolute left-0 top-0 origin-top-left"
+              }
+              data-graph-canvas
+              style={
+                structurePending
+                  ? undefined
+                  : {
+                      width: graph.width,
+                      height: graph.height,
+                      transform: `scale(${graph.scale})`,
+                    }
+              }
+            >
+              {!structurePending && (
+                <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
+                  <defs>
+                    <marker
+                      id={`${markerId}-arrow`}
+                      viewBox="0 0 10 10"
+                      refX="9"
+                      refY="5"
+                      markerWidth="7"
+                      markerHeight="7"
+                      orient="auto-start-reverse"
+                    >
+                      <path d="M 0 1 L 9 5 L 0 9 z" fill="context-stroke" />
+                    </marker>
+                  </defs>
+                  {[...routes]
+                    .sort(
+                      (a, b) =>
+                        Number(b.edge.edge_id !== hoveredEdge) -
+                        Number(a.edge.edge_id !== hoveredEdge),
+                    )
+                    .map((route) => {
+                      const related =
+                        route.edge.source_timeline_id === focusedId ||
+                        route.edge.target_timeline_id === focusedId;
+                      const emphasized = hoveredEdge
+                        ? route.edge.edge_id === hoveredEdge
+                        : Boolean(focused && related);
+                      const dim = hoveredEdge
+                        ? !emphasized
+                        : focused && !related;
+                      return (
+                        <g
+                          key={route.edge.edge_id}
+                          data-graph-edge={route.edge.edge_id}
+                          style={{ opacity: dim ? 0.12 : 1 }}
+                        >
+                          <path
+                            d={route.path}
+                            fill="none"
+                            stroke={
+                              emphasized
+                                ? "var(--color-text-primary)"
+                                : "var(--color-text-secondary)"
+                            }
+                            strokeWidth={emphasized ? 2.3 : 1.5}
+                            vectorEffect="non-scaling-stroke"
+                            markerEnd={`url(#${markerId}-arrow)`}
+                          />
+                          <path
+                            d={route.path}
+                            fill="none"
+                            stroke="transparent"
+                            strokeWidth={14}
+                            className="pointer-events-auto cursor-pointer"
+                            onMouseEnter={() =>
+                              setHoveredEdge(route.edge.edge_id)
+                            }
+                            onMouseLeave={() => setHoveredEdge(null)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setLocalFocus(route.edge.source_timeline_id);
+                            }}
+                          >
+                            <title>{`${nodeName(
+                              route.edge.source_timeline_id,
+                            )} — ${
+                              route.edge.label || t("blueprint.graph.continue")
+                            } → ${nodeName(
+                              route.edge.target_timeline_id,
+                            )}`}</title>
+                          </path>
+                          {focused &&
+                            route.edge.source_timeline_id === focusedId && (
+                              <g
+                                transform={`translate(${route.source.x + 18}, ${
+                                  route.source.y
+                                })`}
+                              >
+                                <circle
+                                  r="9"
+                                  fill="var(--color-bg-primary)"
+                                  stroke="var(--color-text-primary)"
+                                />
+                                <text
+                                  textAnchor="middle"
+                                  dominantBaseline="central"
+                                  fontSize="10"
+                                  fill="var(--color-text-primary)"
+                                >
+                                  {outgoing.indexOf(route) + 1}
+                                </text>
+                              </g>
+                            )}
+                        </g>
+                      );
+                    })}
+                </svg>
+              )}
+              {summaries.map((summary) => {
+                const position = graph.positions.get(summary.timelineId);
+                if (!position) return null;
+                const selected = summary.timelineId === focusedId;
+                const status = summaryStatus(summary);
+                const ending = endingIds.has(summary.timelineId);
                 return (
-                  <path
-                    key={edge.edge_id}
-                    d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${
-                      x2 - dx
-                    } ${y2}, ${x2} ${y2}`}
-                    fill="none"
-                    stroke="var(--color-border-strong)"
-                    strokeWidth={1.5}
-                  />
+                  <button
+                    key={summary.timelineId}
+                    type="button"
+                    data-blueprint-node={summary.timelineId}
+                    aria-pressed={!structurePending && selected}
+                    onClick={() =>
+                      structurePending
+                        ? openScript(summary.timelineId)
+                        : setLocalFocus(summary.timelineId)
+                    }
+                    className={`group ${
+                      structurePending
+                        ? "relative"
+                        : "absolute cursor-grab active:cursor-grabbing"
+                    } flex flex-col rounded-xl border bg-[var(--color-bg-card)] p-3 text-left shadow-[var(--shadow-sm)] transition-[border-color,box-shadow,opacity] hover:border-[var(--color-text-secondary)] ${
+                      selected
+                        ? "border-[var(--color-text-primary)] ring-2 ring-[var(--color-text-primary)]/15"
+                        : "border-[var(--color-border-strong)]"
+                    }`}
+                    style={{
+                      ...(structurePending
+                        ? {}
+                        : {
+                            left: position.x,
+                            top: position.y,
+                            width: GRAPH_NODE_WIDTH,
+                          }),
+                      height: GRAPH_NODE_HEIGHT,
+                      opacity:
+                        focused && !connected.has(summary.timelineId)
+                          ? 0.45
+                          : 1,
+                      zIndex: graph.draggedId === summary.timelineId ? 3 : 1,
+                    }}
+                  >
+                    <div className="mb-1.5 flex h-[18px] shrink-0 items-center justify-between gap-1.5">
+                      <span className="flex items-center gap-1 text-[10px] font-semibold text-[var(--color-text-primary)]">
+                        <GripVertical className="h-3 w-3 text-[var(--color-text-tertiary)]" />
+                        {t("blueprint.episodeN", { n: summary.index + 1 })}
+                        {ending && (
+                          <span className="ml-1 rounded bg-[var(--color-bg-tertiary)] px-1.5">
+                            {t("blueprint.endingNode")}
+                          </span>
+                        )}
+                      </span>
+                      <span
+                        className={`rounded px-1.5 text-[9px] font-semibold leading-[16px] ${
+                          TONE_CHIP[status.tone]
+                        }`}
+                      >
+                        {t(`blueprint.episodeStatus.${status.key}`)}
+                      </span>
+                    </div>
+                    <h4
+                      title={episodeTitle(summary, t)}
+                      className="mb-1 line-clamp-2 h-9 shrink-0 text-[13px] font-semibold leading-[18px] text-[var(--color-text-primary)]"
+                    >
+                      {episodeTitle(summary, t)}
+                    </h4>
+                    <p
+                      title={summary.synopsis}
+                      className="line-clamp-2 h-8 shrink-0 text-[11px] leading-4 text-[var(--color-text-secondary)]"
+                    >
+                      {summary.synopsis || t("blueprint.noSynopsis")}
+                    </p>
+                    <div className="mt-auto w-full border-t border-dashed border-[var(--color-border)] pt-2">
+                      <div className="flex items-center justify-between text-[10px] text-[var(--color-text-tertiary)]">
+                        <span>
+                          {t("blueprint.nodeMeta", {
+                            ready: summary.videoReady,
+                            total: summary.videoTotal,
+                          })}
+                        </span>
+                        <span className="tabular-nums">
+                          {formatDuration(summary.durationSeconds)}
+                        </span>
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <NodeActionPill
+                          icon={<FileText className="h-3.5 w-3.5" />}
+                          label={t("blueprint.viewScript")}
+                          onClick={() => openScript(summary.timelineId)}
+                        />
+                        <NodeActionPill
+                          icon={<SquarePen className="h-3.5 w-3.5" />}
+                          label={t("blueprint.editTimeline")}
+                          onClick={() => onOpenTimeline(summary.timelineId)}
+                        />
+                      </div>
+                    </div>
+                  </button>
                 );
               })}
-            </svg>
-            {edges.map((edge) => {
-              const source = positions.get(edge.source_timeline_id);
-              const target = positions.get(edge.target_timeline_id);
-              if (!source || !target || !edge.label) return null;
-              const x = (source.x + NODE_WIDTH + target.x) / 2;
-              const y = (source.y + target.y + NODE_HEIGHT) / 2;
-              return (
-                <span
-                  key={`label:${edge.edge_id}`}
-                  className="absolute -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full border border-[var(--color-border-strong)] bg-[var(--color-bg-primary)]/80 px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text-secondary)] shadow-[var(--shadow-sm)] backdrop-blur-md"
-                  style={{ left: x, top: y }}
-                  title={edge.prompt}
-                >
-                  {edge.label}
-                </span>
-              );
-            })}
-            {summaries.map((summary) => {
-              const position = positions.get(summary.timelineId);
-              if (!position) return null;
-              const selected = summary.timelineId === selectedTimelineId;
-              const status = summaryStatus(summary);
-              const ending = endingIds.has(summary.timelineId);
-              return (
-                <button
-                  key={summary.timelineId}
-                  type="button"
-                  data-blueprint-node={summary.timelineId}
-                  onClick={() => onSelectTimeline(summary.timelineId)}
-                  className={`group ${
-                    structurePending ? "relative" : "absolute"
-                  } rounded-2xl border bg-[var(--color-bg-card)]/85 p-3 text-left shadow-[var(--shadow-sm)] backdrop-blur-md transition-all duration-200 hover:-translate-y-1 hover:border-[var(--color-accent)] hover:shadow-[var(--shadow-lg)] ${
-                    selected
-                      ? "border-[var(--color-accent)] shadow-[0_0_0_3px_var(--color-accent-soft)]"
-                      : "border-[var(--color-border)]"
-                  }`}
-                  style={
-                    structurePending
-                      ? undefined
-                      : {
-                          left: position.x,
-                          top: position.y,
-                          width: NODE_WIDTH,
-                          minHeight: NODE_HEIGHT,
-                        }
-                  }
-                >
-                  <div className="mb-1.5 flex items-center justify-between gap-1.5">
-                    <span
-                      className={`badge font-bold ${
-                        ending
-                          ? "bg-[rgba(139,92,246,.12)] text-[#8b5cf6]"
-                          : "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-                      }`}
-                    >
-                      {ending
-                        ? t("blueprint.endingNode")
-                        : t("blueprint.episodeN", { n: summary.index + 1 })}
-                    </span>
-                    <span
-                      className={`rounded px-1.5 text-[9px] font-semibold leading-[16px] ${
-                        TONE_CHIP[status.tone]
-                      }`}
-                    >
-                      {t(`blueprint.episodeStatus.${status.key}`)}
-                    </span>
-                  </div>
-                  <h4 className="mb-1 text-[13px] font-semibold text-[var(--color-text-primary)]">
-                    {episodeTitle(summary, t)}
-                  </h4>
-                  <p className="mb-2 line-clamp-2 text-[11px] leading-normal text-[var(--color-text-secondary)]">
-                    {summary.synopsis || t("blueprint.noSynopsis")}
-                  </p>
-                  <div className="border-t border-dashed border-[var(--color-border)] pt-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        {t("blueprint.nodeMeta", {
-                          ready: summary.videoReady,
-                          total: summary.videoTotal,
-                        })}
-                      </span>
-                      <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)]">
-                        {formatDuration(summary.durationSeconds)}
-                      </span>
-                    </div>
-                    {/* 查看剧本 / 制作台编辑 (design 84:30317 node-card pills). */}
-                    <div className="mt-2 flex items-center gap-3">
-                      <NodeActionPill
-                        icon={<FileText className="h-3.5 w-3.5" />}
-                        label={t("blueprint.viewScript")}
-                        onClick={() => onSelectTimeline(summary.timelineId)}
-                      />
-                      <NodeActionPill
-                        icon={<SquarePen className="h-3.5 w-3.5" />}
-                        label={t("blueprint.editTimeline")}
-                        onClick={() => onOpenTimeline(summary.timelineId)}
-                      />
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
+            </div>
           </div>
         )}
       </div>
+      {!structurePending && focused && (
+        <section
+          aria-label={t("blueprint.graph.connections")}
+          className="max-h-[32%] shrink-0 overflow-auto border-t border-[var(--color-border)] bg-[var(--color-bg-primary)] px-4 py-3"
+        >
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <h4 className="text-xs font-semibold text-[var(--color-text-primary)]">
+              {nodeName(focused.timelineId)}
+            </h4>
+            <button
+              type="button"
+              className="shrink-0 text-[var(--color-text-secondary)]"
+              aria-label={t("blueprint.graph.clearFocus")}
+              onClick={() => {
+                setLocalFocus(null);
+                setHoveredEdge(null);
+              }}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="space-y-1">
+            {outgoing.length ? (
+              outgoing.map((route, index) => (
+                <button
+                  key={route.edge.edge_id}
+                  type="button"
+                  data-graph-connection={route.edge.edge_id}
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-xs text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]"
+                  onMouseEnter={() => setHoveredEdge(route.edge.edge_id)}
+                  onMouseLeave={() => setHoveredEdge(null)}
+                  onFocus={() => setHoveredEdge(route.edge.edge_id)}
+                  onBlur={() => setHoveredEdge(null)}
+                  onClick={() => jump(route.edge.target_timeline_id)}
+                >
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[var(--color-border-strong)] text-[10px]">
+                    {index + 1}
+                  </span>
+                  <span className="shrink-0 font-medium">
+                    {route.edge.label || t("blueprint.graph.continue")}
+                  </span>
+                  <ArrowRight className="h-3.5 w-3.5 shrink-0" />
+                  <span>{nodeName(route.edge.target_timeline_id)}</span>
+                </button>
+              ))
+            ) : (
+              <p className="text-xs text-[var(--color-text-secondary)]">
+                {t("blueprint.graph.noOutgoing")}
+              </p>
+            )}
+          </div>
+          {incoming.length > 0 && (
+            <details className="mt-2 border-t border-[var(--color-border)] pt-2 text-xs text-[var(--color-text-secondary)]">
+              <summary className="cursor-pointer">
+                {t("blueprint.graph.incoming", { count: incoming.length })}
+              </summary>
+              {incoming.map((route) => (
+                <button
+                  key={route.edge.edge_id}
+                  type="button"
+                  className="mt-1 block w-full rounded-md px-2 py-1.5 text-left hover:bg-[var(--color-bg-secondary)]"
+                  onMouseEnter={() => setHoveredEdge(route.edge.edge_id)}
+                  onMouseLeave={() => setHoveredEdge(null)}
+                  onClick={() => jump(route.edge.source_timeline_id)}
+                >
+                  {nodeName(route.edge.source_timeline_id)} ·{" "}
+                  {route.edge.label || t("blueprint.graph.continue")}
+                </button>
+              ))}
+            </details>
+          )}
+        </section>
+      )}
     </div>
   );
+  // Escape the workspace animation transform so expanded mode uses the full app.
+  return expanded ? createPortal(content, document.body) : content;
 }
 
 export default function BlueprintStructureArea(props: StructureAreaProps) {
-  if (props.shape === "branching") return <GraphCanvas {...props} />;
+  if (props.shape === "branching")
+    return <GraphCanvas key={props.project.project_id} {...props} />;
   if (props.shape === "linear") return <EpisodeList {...props} />;
   return <SingleBoard {...props} />;
 }

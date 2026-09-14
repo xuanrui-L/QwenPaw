@@ -2071,6 +2071,23 @@
       "idle": "To draft"
     },
     "episodeList": "Episode list · Linear {{count}} episodes",
+    "graph": {
+      "expand": "Expand story map",
+      "collapse": "Collapse story map",
+      "locateNode": "Locate story node",
+      "zoomOut": "Zoom out story map",
+      "zoomIn": "Zoom in story map",
+      "actualSize": "Reset to 100%",
+      "fit": "Overview",
+      "arrange": "Auto arrange",
+      "localLayout": "Reset node positions. Layout is saved in this browser only.",
+      "navigationHint": "Drag nodes to arrange · Drag background to pan · Shift + wheel to scroll sideways · Select a node to trace choices",
+      "connections": "Node connections",
+      "clearFocus": "Clear node focus",
+      "continue": "Continue",
+      "noOutgoing": "This node has no outgoing branches.",
+      "incoming": "Show {{count}} incoming paths"
+    },
     "interactiveStoryMap": "Interactive drama · Story map",
     "branchesPending": "Branch connections not yet created",
     "branchesPendingHint": "Story nodes appear here as they are drafted. Choices and connections will show the story paths once created. You can read existing scripts or open Interaction Design to review the page requirements.",
