@@ -205,6 +205,9 @@ export default function ProjectLayout() {
     (state) => state.startPolling,
   );
   const fileReviews = useFileProjectReviewStore((state) => state.reviews);
+  const autoReviewIds = useFileProjectReviewStore(
+    (state) => state.autoReviewIds,
+  );
   const fileReviewSyncStatus = useFileProjectReviewStore(
     (state) => state.syncStatus,
   );
@@ -422,6 +425,10 @@ export default function ProjectLayout() {
       (review) => review.review_id === pendingReviewNavigation.reviewId,
     );
     if (!targetReview) return;
+    // Interactive output from older runtimes may carry a human gate under
+    // YOLO. Let the persisted-mode check/normal decision finish before any
+    // review popup takes the user away from their current work.
+    if (autoReviewIds.includes(targetReview.review_id)) return;
     setPendingReviewNavigation(null);
     // Media and whole-entity views may not have a field pointer. The route
     // also preserves the user's choice after closing the return banner.
@@ -456,6 +463,7 @@ export default function ProjectLayout() {
     });
   }, [
     fileReviews,
+    autoReviewIds,
     fileReviewSyncStatus,
     id,
     location.key,

@@ -1203,9 +1203,15 @@ export default function AgentDock({
     useFileProjectReviewStore((state) =>
       state.projectId === projectId ? state.reviews : null,
     ) ?? [];
+  const autoReviewIds = useFileProjectReviewStore(
+    (state) => state.autoReviewIds,
+  );
   const pendingFileReviewCount = fileReviews.reduce(
     (total, review) =>
-      total + (review.status === "PENDING" ? reviewPendingUnits(review) : 0),
+      total +
+      (review.status === "PENDING" && !autoReviewIds.includes(review.review_id)
+        ? reviewPendingUnits(review)
+        : 0),
     0,
   );
   const selectedRef = useCreatorInteractionStore((state) => state.selectedRef);

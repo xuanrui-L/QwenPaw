@@ -146,6 +146,11 @@ export default function FileProjectReviewPanel({
     (state) => state.decisionInFlight,
   );
   const syncError = useFileProjectReviewStore((state) => state.syncError);
+  const autoReviewing = useFileProjectReviewStore(
+    (state) =>
+      state.projectId === projectId &&
+      state.autoReviewIds.includes(review.review_id),
+  );
   const decide = useFileProjectReviewStore((state) => state.decide);
   const project = useProjectSnapshotStore((state) => state.project);
   const [localBusy, setLocalBusy] = useState(false);
@@ -172,6 +177,15 @@ export default function FileProjectReviewPanel({
   };
 
   if (review.status !== "PENDING") return null;
+  if (autoReviewing)
+    return (
+      <div
+        role="status"
+        className="rounded-lg border border-[var(--color-border)] px-3 py-3 text-xs leading-relaxed text-[var(--color-text-secondary)]"
+      >
+        {t("fileReview.applyingExecutionMode")}
+      </div>
+    );
   const operations = userReviewOperations(review);
   const pending = pendingUserReviewOperations(review);
   if (pending.length === 0) return null;

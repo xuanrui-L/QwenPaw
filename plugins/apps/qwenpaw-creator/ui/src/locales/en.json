@@ -1159,6 +1159,8 @@
     "checkpointCancelled": "Confirmation cancelled."
   },
   "fileReview": {
+    "applyingExecutionMode": "Applying the saved execution mode to the interaction design…",
+    "autoModeFailed": "The interaction design could not be accepted automatically. Retry or review it manually: {{detail}}",
     "pending": "Pending",
     "kept": "Kept",
     "undone": "Undone",
@@ -2052,6 +2054,8 @@
     "dismiss": "Dismiss upload progress"
   },
   "blueprint": {
+    "scriptSyncExplanation": "The creative inputs have changed and this script has not yet been synchronized. Story branches or creative requirements added during generation can also trigger this state; it does not imply you requested an edit. The existing script remains readable.",
+    "scriptSyncReason": "Update reason: {{reason}}",
     "timelineEdit": "Timeline Editing",
     "episodeN": "Node {{n}}",
     "episodesCount": "Nodes · {{count}}",
@@ -2067,7 +2071,7 @@
       "done": "Final cut ready",
       "run": "Generating",
       "wait": "Script written",
-      "scriptStale": "Script stale",
+      "scriptStale": "Script needs syncing",
       "idle": "To draft"
     },
     "episodeList": "Episode list · Linear {{count}} episodes",
@@ -2159,7 +2163,7 @@
       "researchReady": "Research done",
       "researchRunning": "Researching",
       "scriptReady": "{{count}} versions",
-      "scriptStale": "Script stale, re-review needed",
+      "scriptStale": "Creative inputs updated; script needs syncing",
       "visualReady": "Design generated",
       "visualPending": "To generate",
       "elementReady": "Generated",
@@ -2178,7 +2182,7 @@
     "finalCut": "Final cut",
     "scriptPanelTitle": "Script · {{title}}",
     "scriptVersion": "{{count}} versions",
-    "scriptStaleChip": "Stale",
+    "scriptStaleChip": "Needs syncing",
     "requestChanges": "Request changes",
     "requestChangesDraft": "Please revise the script of “{{title}}”: ",
     "requestChangesPrefilled": "Drafted in the assistant composer — add your feedback and send",

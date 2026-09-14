@@ -245,6 +245,58 @@ describe("ProjectLayout visible shell", () => {
     expect(document.querySelector("[data-agent-wait-hint]")).toBeNull();
   });
 
+  it.each(["accepted", "manual fallback"])(
+    "defers review navigation during mode handling and respects %s",
+    async (outcome) => {
+      installMockFetch(commonRoutes());
+      const router = renderShell("auto-review-route");
+      await screen.findByTestId("auto-review-route");
+      await waitFor(() =>
+        expect(useFileProjectReviewStore.getState().syncStatus).toBe("healthy"),
+      );
+      const value = elementReview();
+      const poll = vi
+        .spyOn(useFileProjectReviewStore.getState(), "pollOnce")
+        .mockResolvedValue();
+      try {
+        await act(async () => {
+          useFileProjectReviewStore.setState({
+            reviews: [value],
+            autoReviewIds: [value.review_id],
+          });
+          useCreatorSessionStore.getState().ingestEvents([
+            {
+              eventId: "design-completed",
+              seq: 1,
+              type: "agent.run.completed",
+              projectId: "p1",
+              creatorSessionId: "s1",
+              at: "now",
+              data: { runId: "run-element-1", reviewIds: [value.review_id] },
+            },
+          ]);
+        });
+        await waitFor(() => expect(poll).toHaveBeenCalled());
+        expect(router.state.location.search).toBe("");
+        await act(async () =>
+          useFileProjectReviewStore.setState({
+            autoReviewIds: [],
+            reviews: outcome === "accepted" ? [] : [value],
+          }),
+        );
+        if (outcome === "accepted") {
+          expect(router.state.location.search).toBe("");
+        } else {
+          await waitFor(() =>
+            expect(router.state.location.search).toContain("review=1"),
+          );
+        }
+      } finally {
+        poll.mockRestore();
+      }
+    },
+  );
+
   it.each([
     "before completion",
     "while polling",

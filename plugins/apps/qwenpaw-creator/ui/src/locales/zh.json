@@ -1159,6 +1159,8 @@
     "checkpointCancelled": "已取消本次确认"
   },
   "fileReview": {
+    "applyingExecutionMode": "正在按已保存的执行模式处理交互设计…",
+    "autoModeFailed": "交互设计自动处理未完成，请重试或手动处理：{{detail}}",
     "pending": "待审",
     "kept": "已保留",
     "undone": "已撤销",
@@ -2052,6 +2054,8 @@
     "dismiss": "关闭上传进度"
   },
   "blueprint": {
+    "scriptSyncExplanation": "创作依据已更新，当前剧本尚未同步。生成过程中补全剧情分支或创作要求也会触发此状态，并不表示你提出过修改。已有正文仍可查看。",
+    "scriptSyncReason": "更新原因：{{reason}}",
     "timelineEdit": "时间线编辑",
     "episodeN": "节点 {{n}}",
     "episodesCount": "叙事节点 · {{count}}",
@@ -2067,7 +2071,7 @@
       "done": "已成片",
       "run": "生成中",
       "wait": "剧本已写入",
-      "scriptStale": "剧本已过期",
+      "scriptStale": "剧本待同步",
       "idle": "待起草"
     },
     "episodeList": "剧集列表 · 线性 {{count}} 集",
@@ -2159,7 +2163,7 @@
       "researchReady": "调研完成",
       "researchRunning": "调研中",
       "scriptReady": "共 {{count}} 个版本",
-      "scriptStale": "剧本已过期，需要重审",
+      "scriptStale": "创作依据已更新，剧本待同步",
       "visualReady": "设计已生成",
       "visualPending": "待生成",
       "elementReady": "已生成",
@@ -2178,7 +2182,7 @@
     "finalCut": "最终成片",
     "scriptPanelTitle": "剧本 · {{title}}",
     "scriptVersion": "共 {{count}} 版",
-    "scriptStaleChip": "已过期",
+    "scriptStaleChip": "待同步",
     "requestChanges": "提出修改",
     "requestChangesDraft": "请修改《{{title}}》的剧本：",
     "requestChangesPrefilled": "已写入创作助手输入框，补充修改意见后发送",

@@ -83,6 +83,17 @@ afterEach(() => {
 });
 
 describe("FileProjectReviewPanel", () => {
+  it("shows mode processing instead of manual review buttons during automatic handling", () => {
+    const value = review();
+    useFileProjectReviewStore.setState({ autoReviewIds: [value.review_id] });
+    const decide = setup(value);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "正在按已保存的执行模式处理交互设计",
+    );
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(decide).not.toHaveBeenCalled();
+  });
+
   it.each(["ACCEPT", "REJECT"] as const)(
     "decides generated HTML and provenance together on %s without including other edits",
     async (decision) => {
