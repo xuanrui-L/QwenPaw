@@ -378,7 +378,9 @@ def _gate_visual_anchors(nodes: list[WorkNode]) -> list[WorkNode]:
 def _task_error_summary(task: Any) -> str | None:
     error = getattr(task, "error", None)
     if isinstance(error, Mapping) and error.get("message"):
-        return str(error["message"])[:200]
+        # Provider context often precedes the actionable repair instructions.
+        # Truncating at 200 characters hid instructions from the Agent.
+        return str(error["message"])[:2000]
     return None
 
 
@@ -1005,6 +1007,9 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 command="GENERATE_TIMELINE_SCRIPT",
                 target_ref=f"timeline:{timeline_id}",
                 dispatch_fingerprint=fingerprint,
+                regeneration_of=(
+                    selected if status is WorkNodeStatus.STALE else None
+                ),
             ),
         )
         script_node_by_timeline[timeline_id] = node_id

@@ -1164,8 +1164,12 @@ def test_stale_script_version_marks_script_node_stale() -> None:
     graph = derive_work_graph(project)
     node = graph.by_id["script:timeline:ep2"]
     assert node.status is WorkNodeStatus.STALE
-    # STALE is terminal for the scheduler: not READY, not dispatched.
+    # Regeneration is separate from READY and still requires authorization.
     assert node not in graph.ready_media_nodes()
+    assert node in graph.regeneration_nodes()
+    assert node.regeneration_of == "art:script-ep2"
+    assert node not in graph.model_required_nodes(automatic_regeneration=True)
+    assert node in graph.model_required_nodes(automatic_regeneration=False)
 
 
 @pytest.mark.parametrize("body", ["已发布正文：孙老四端茶，说完台词。", "", "  \n"])

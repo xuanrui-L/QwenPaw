@@ -3082,6 +3082,155 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
     assert (
         len(repairs) == driver.PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE
     ), "notification messages must not reset the resume fuse streak"
+    notices = [
+        item
+        for item in services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+        if item.source == "creator_execution_notice"
+    ]
+    assert len(notices) == 1
+    assert notices[0].role == "assistant"
+    assert "自动创作已暂停" in notices[0].content_parts[0].text
+    assert "5 轮" in notices[0].content_parts[0].text
+    assert "第一场" in notices[0].content_parts[0].text
+    assert (
+        notices[0].metadata["executionPause"]["reason"]
+        == "consecutive_resume_limit"
+    )
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-fuse-again",
+        ),
+    )
+    assert (
+        len(
+            [
+                item
+                for item in services.sessions.list_messages(
+                    PROJECT_ID, SESSION_ID
+                )
+                if item.source == "creator_execution_notice"
+            ]
+        )
+        == 1
+    )
+    assert any(
+        event.event_type == "message.completed"
+        and event.payload.get("messageId") == notices[0].message_id
+        for event in services.sessions.list_events(PROJECT_ID, SESSION_ID)
+    )
+
+
+@pytest.mark.parametrize(
+    "reason", ["no_committed_progress", "media_budget_exhausted"]
+)
+def test_yolo_pause_reasons_are_durable_not_new_model_requests(
+    tmp_path, monkeypatch, reason
+):
+    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda *_args: AgentModelTurn())
+    node = WorkNode(
+        node_id="visual:hero",
+        kind="visual",
+        label="角色状态图",
+        status=WorkNodeStatus.FAILED,
+        error="请修改输入文本",
+    )
+    monkeypatch.setattr(
+        driver_module, "get_media_review_mode", lambda: "auto_approve"
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_a, **_kw: WorkGraph(
+            nodes=(node,), generation=snapshot.generation
+        ),
+    )
+    monkeypatch.setattr(
+        driver.work_scheduler, "wake", lambda _project_id: None
+    )
+    if reason == "no_committed_progress":
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            source=driver.YOLO_RESUME_SOURCE,
+            content_parts=[{"type": "text", "text": "修正输入文本"}],
+            metadata={"projectGeneration": snapshot.generation},
+        )
+    else:
+
+        def exhausted(*_args):
+            raise driver_module.MediaCallBudgetExhausted("used budget")
+
+        monkeypatch.setattr(
+            driver_module, "ensure_media_call_budget", exhausted
+        )
+    before = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="paused-run",
+        )
+    )
+    after = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    assert [m.message_id for m in before if m.role == "user"] == [
+        m.message_id for m in after if m.role == "user"
+    ]
+    assert after[-1].source == "creator_execution_notice"
+    assert after[-1].metadata["executionPause"]["reason"] == reason
+    assert not driver._wake.is_set()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [WorkNodeStatus.READY, WorkNodeStatus.RUNNING, WorkNodeStatus.STALE],
+)
+def test_yolo_does_not_resume_while_scheduler_owns_remaining_work(
+    tmp_path, monkeypatch, status
+):
+    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda *_args: AgentModelTurn())
+    node = WorkNode(
+        node_id="script:main",
+        kind="script",
+        label="序章剧本",
+        status=status,
+        command="GENERATE_TIMELINE_SCRIPT",
+        target_ref="timeline:main",
+        regeneration_of="old-script"
+        if status is WorkNodeStatus.STALE
+        else None,
+    )
+    monkeypatch.setattr(
+        driver_module, "get_media_review_mode", lambda: "auto_approve"
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_a, **_kw: WorkGraph(
+            nodes=(node,), generation=snapshot.generation
+        ),
+    )
+    monkeypatch.setattr(driver.work_scheduler, "enabled", lambda: True)
+    woke = []
+    monkeypatch.setattr(driver.work_scheduler, "wake", woke.append)
+    before = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="machine-owned-run",
+        )
+    )
+    assert woke == [PROJECT_ID]
+    assert services.sessions.list_messages(PROJECT_ID, SESSION_ID) == before
 
 
 def test_idle_session_flushes_parked_notification_and_consumes_it(

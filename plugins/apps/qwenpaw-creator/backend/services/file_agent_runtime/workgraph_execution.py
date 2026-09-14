@@ -54,6 +54,9 @@ def request_workgraph_tool_manifest() -> dict[str, Any]:
                 "返回 BLOCKED 且 reason=WAITING_REVIEW 表示本次未启动，"
                 "需先完成已有审阅；请求已结束、没有排队或自动续跑。"
                 "PARTIAL 须逐项读取 items，不能把阻塞目标说成已提交。"
+                "失败项的 error 和 missing 给出实际原因，应先保存针对性的输入修改。"
+                "productionStatus 是当前产物的核实结果；bundle 未 done 时不能声称"
+                "互动包可下载，unplannedTimelines 列出的剧情节点仍需拆分镜头。"
             ),
             "parameters": {
                 "type": "object",

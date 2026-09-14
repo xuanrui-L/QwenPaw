@@ -596,18 +596,23 @@ def _resolved_reference_ids(resolved: _ResolvedRequest) -> tuple[str, ...]:
 
 def _safety_rejection_note(resolved: _ResolvedRequest) -> str:
     refs = _resolved_reference_ids(resolved)
-    if refs:
-        listed = ", ".join(refs[:6])
-        return (
-            f"本次调用携带了图片参考 [{listed}]。safety 拒绝通常由含真人照片的"
-            "参考图触发：在移除这些参考（先更新项目中的参考图选择，"
-            "或改用已生成的风格化 artifact-version id）之前，仅修改 prompt 的"
-            "重试不会成功。"
-        )
     return (
-        "本次调用未携带参考图，拒绝来自 prompt 文本本身：请移除对真实人物的"
-        "可识别描述（姓名、球队/机构名、可定位的真实事件），改用虚构化的"
-        "外貌与气质描述。"
+        (f"本次调用携带了图片参考 [{', '.join(refs[:6])}]。" if refs else "本次调用未携带参考图。")
+        + "请依据模型返回的具体拒绝原因修改内容：若指出输入文本，修改项目中"
+        "的 prompt；若指出参考图片，检查并调整参考图选择。未明确指出原因时，"
+        "不能认定参考图或某个词一定有问题。保存实际修改后再请求生成；"
+        "完全相同的 prompt 和参考图不会重复提交。"
+    )
+
+
+def _safety_request_fingerprint(resolved: _ResolvedRequest) -> str:
+    # A text-input refusal is not evidence that the references are unsafe.
+    # Fence the rejected input as a whole, including requests without refs.
+    return _fingerprint(
+        {
+            "prompt": resolved.prompt,
+            "references": sorted(set(_resolved_reference_ids(resolved))),
+        },
     )
 
 
@@ -1849,10 +1854,9 @@ class FileImageExecutionService:
         # keyed by Task id so one Task is never supervised twice.
         self._resume_jobs: dict[str, asyncio.Task] = {}
         self._resume_projects: dict[str, str] = {}
-        # (project_id, target_ref) -> reference ids of the last safety-
-        # rejected call. Process-local: worth losing on restart, priceless
-        # for cutting off same-refs resend loops within a session.
-        self._safety_rejected_refs: dict[tuple[str, str], frozenset[str]] = {}
+        # Block repeated rejected inputs within this process. A saved prompt
+        # or reference repair gets its own input identity and may proceed.
+        self._safety_rejected_requests: dict[tuple[str, str], set[str]] = {}
 
     async def execute(
         self,
@@ -2137,7 +2141,7 @@ class FileImageExecutionService:
                     ids,
                     "IMAGE_GENERATION_FAILED",
                     message=(
-                        "IMAGE_GENERATION_FAILED"
+                        str(exc)
                         + _accepted_provider_task_hint(
                             ids["task_id"],
                             project_id,
@@ -2178,23 +2182,16 @@ class FileImageExecutionService:
         project_id: str,
         resolved: _ResolvedRequest,
     ) -> None:
-        """Refuse locally when a safety-rejected ref set is resent verbatim.
+        """Block unchanged rejected inputs, while admitting actual repairs."""
 
-        The provider's answer is deterministic for the same references, so
-        replaying them with a reworded prompt only burns quota and turns.
-        """
-
-        refs = frozenset(_resolved_reference_ids(resolved))
-        if not refs:
-            return
-        rejected = self._safety_rejected_refs.get(
+        rejected = self._safety_rejected_requests.get(
             (project_id, resolved.target_ref),
+            set(),
         )
-        if rejected is not None and refs == rejected:
+        if _safety_request_fingerprint(resolved) in rejected:
             raise ConflictError(
-                "已本地拦截：上一次 safety 拒绝时携带的是完全相同的图片参考 "
-                f"[{', '.join(sorted(refs)[:6])}]。"
-                + _safety_rejection_note(resolved),
+                "已本地拦截，未调用图片模型：本次 prompt 和参考图与已被拒绝的"
+                "输入完全相同。" + _safety_rejection_note(resolved),
             )
 
     def _note_safety_rejection(
@@ -2202,11 +2199,10 @@ class FileImageExecutionService:
         project_id: str,
         resolved: _ResolvedRequest,
     ) -> None:
-        refs = frozenset(_resolved_reference_ids(resolved))
-        if refs:
-            self._safety_rejected_refs[
-                (project_id, resolved.target_ref)
-            ] = refs
+        self._safety_rejected_requests.setdefault(
+            (project_id, resolved.target_ref),
+            set(),
+        ).add(_safety_request_fingerprint(resolved))
 
     async def _defer_to_resume_supervisor(
         self,

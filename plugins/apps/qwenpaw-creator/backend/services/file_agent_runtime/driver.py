@@ -208,6 +208,11 @@ from .notifications import (
     RuntimeNotificationBus,
 )
 from .prompts import render_creator_system_prompt
+from .production_status import (
+    node_feedback,
+    production_evidence,
+    production_summary,
+)
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
 from .work_graph import WorkNodeStatus, derive_work_graph
 from .model_context import compact_conversation_history
@@ -3289,6 +3294,9 @@ class FileCreatorAgentRuntime:
         tool_call_count = 0
         review_ids: list[str] = []
         waiting_review_summary: str | None = None
+        production_turn = request.source == self.YOLO_RESUME_SOURCE
+        production_node_ids: set[str] = set()
+        production_receipt = ""
         malformed_jq_attempts = 0
         malformed_jq_fingerprints: set[str] = set()
         deterministic_failure_counts: dict[str, int] = {}
@@ -3463,7 +3471,7 @@ class FileCreatorAgentRuntime:
                 # and resume contract. Suppress the model's free-form final
                 # CTA so it cannot ask the user to send "continue"; the
                 # canonical review summary is emitted after the turn ends.
-                if review_ids:
+                if review_ids or production_turn:
                     return
                 await persist_message_delta("text", delta)
 
@@ -3583,6 +3591,23 @@ class FileCreatorAgentRuntime:
                     usage=turn.usage,
                 )
                 await persist_message_delta("text", canonical_summary)
+            elif not turn.tool_calls and production_turn:
+                evidence = await self._production_evidence(
+                    project_id,
+                    production_node_ids,
+                )
+                canonical_summary = production_summary(
+                    evidence,
+                    production_receipt,
+                )
+                turn = AgentModelTurn(
+                    content=canonical_summary,
+                    thinking=turn.thinking,
+                    provider_message_id=turn.provider_message_id,
+                    finish_reason=turn.finish_reason,
+                    usage=turn.usage,
+                )
+                await persist_message_delta("text", canonical_summary)
             await self._persist_assistant_turn(
                 project_id,
                 session_id,
@@ -3610,6 +3635,8 @@ class FileCreatorAgentRuntime:
 
             for call in turn.tool_calls:
                 tool_call_count += 1
+                if call.name == REQUEST_WORKGRAPH_EXECUTION:
+                    production_turn = True
                 tool_failed = False
                 malformed_budget_exhausted = False
                 repeated_failure_exhausted = False
@@ -3783,6 +3810,13 @@ class FileCreatorAgentRuntime:
                             and candidate_summary.strip()
                         ):
                             waiting_review_summary = candidate_summary
+                    if call.name == REQUEST_WORKGRAPH_EXECUTION:
+                        production_receipt = str(result.get("summary") or "")
+                        production_node_ids.update(
+                            item["nodeId"]
+                            for item in result.get("items", [])
+                            if item.get("nodeId")
+                        )
                     await self._persist_tool_result(
                         project_id,
                         session_id,
@@ -4008,6 +4042,7 @@ class FileCreatorAgentRuntime:
             elif node.node_id in blocked:
                 items.append(
                     {
+                        **node_feedback(node, graph),
                         "nodeId": node.node_id,
                         "targetRef": node.target_ref,
                         "status": "BLOCKED",
@@ -4291,6 +4326,7 @@ class FileCreatorAgentRuntime:
                     "taskId": task_id,
                     "executionAuthorizationId": authorization_id,
                     "outputRefs": list(task.output_refs),
+                    "error": task.error,
                 }
             except ExecutionAuthorizationBlocked as exc:
                 return {
@@ -4312,6 +4348,7 @@ class FileCreatorAgentRuntime:
                     "status": "BLOCKED",
                     "reason": "EXECUTION_NOT_COMPLETED",
                     "executionAuthorizationId": authorization_id,
+                    "error": str(exc),
                 }
 
         async def await_running_compose(node):
@@ -4348,7 +4385,27 @@ class FileCreatorAgentRuntime:
             ),
             "items": items,
             "summary": summarize_workgraph_results(items),
+            "productionStatus": await self._production_evidence(
+                project_id,
+                [item["nodeId"] for item in items if item.get("nodeId")],
+            ),
         }
+
+    async def _production_evidence(
+        self,
+        project_id: str,
+        requested_node_ids=(),
+    ) -> dict[str, Any]:
+        snapshot, tasks = await asyncio.gather(
+            asyncio.to_thread(self.services.projects.read, project_id),
+            asyncio.to_thread(self.executions.list_tasks, project_id),
+        )
+        graph = derive_work_graph(
+            snapshot.project,
+            tasks=tasks,
+            media_models=(get_image_model_name(), get_video_model_name()),
+        )
+        return production_evidence(graph, snapshot.project, requested_node_ids)
 
     async def _run_mainline_character_voice(
         self,
@@ -7987,6 +8044,86 @@ class FileCreatorAgentRuntime:
     YOLO_RESUME_MAX_CONSECUTIVE = 5
     PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE = 5
 
+    async def _notify_auto_resume_paused(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        conversation_id: str,
+        run_id: str,
+        reason: str,
+        explanation: str,
+        unfinished: list[str],
+    ) -> None:
+        """Persist a visible pause once per human request/reason.
+
+        This is an assistant notice, not another user-shaped runtime request:
+        it must neither wake the model nor reset the unattended resume fuse.
+        Existing message.completed delivery also restores it after reconnect.
+        """
+        messages = await asyncio.to_thread(
+            self.sessions.list_messages,
+            project_id,
+            session_id,
+            after_seq=0,
+            limit=None,
+        )
+        automatic_sources = {
+            self.YOLO_RESUME_SOURCE,
+            self.PROMPT_CONTRACT_RESUME_SOURCE,
+            self.MAINLINE_RESUME_SOURCE,
+            NOTIFICATION_SOURCE,
+        }
+        anchor = next(
+            (
+                item.message_seq
+                for item in reversed(messages)
+                if item.role == "user" and item.source not in automatic_sources
+            ),
+            0,
+        )
+        pause_key = f"{conversation_id}:{anchor}:{reason}"
+        if any(
+            item.metadata.get("executionPauseKey") == pause_key
+            for item in messages
+        ):
+            return
+        text = "自动创作已暂停，作品尚未完成。\n\n" + explanation
+        if unfinished:
+            text += "\n\n仍待处理：" + "、".join(unfinished[:6]) + "。"
+        text += "\n已提交的后台任务仍会继续处理，可在创作总览查看结果。" "修复阻塞后，发送新的创作指令即可继续。"
+        appended = await self._persist_session_append(
+            f"{project_id}: automatic creation paused",
+            self.sessions.append_message,
+            project_id,
+            session_id,
+            conversation_id,
+            role="assistant",
+            content_parts=[{"type": "text", "text": text}],
+            source="creator_execution_notice",
+            metadata={
+                "runId": run_id,
+                "executionPauseKey": pause_key,
+                "executionPause": {
+                    "reason": reason,
+                    "unfinishedElements": unfinished,
+                },
+            },
+        )
+        await self._event(
+            project_id,
+            session_id,
+            "message.completed",
+            run_id,
+            appended.message,
+            {
+                "runId": run_id,
+                "messageId": appended.message.message_id,
+                "messageSeq": appended.message.message_seq,
+                "openActionIds": [],
+            },
+        )
+
     async def _queue_yolo_completion_resume(  # pylint: disable=too-many-return-statements
         self,
         *,
@@ -8082,6 +8219,15 @@ class FileCreatorAgentRuntime:
                     project_id,
                     exc,
                 )
+                await self._notify_auto_resume_paused(
+                    project_id=project_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    reason="media_budget_exhausted",
+                    explanation="本项目的媒体生成次数已达到上限，需要先调整生成预算。",
+                    unfinished=[node.label for node in unfinished_nodes],
+                )
                 return
         if (
             not after_failure
@@ -8155,6 +8301,18 @@ class FileCreatorAgentRuntime:
                 project_id,
                 resume_streak,
             )
+            await self._notify_auto_resume_paused(
+                project_id=project_id,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                reason="consecutive_resume_limit",
+                explanation=(
+                    f"已连续自动处理 {resume_limit} 轮，仍有未解决的内容。"
+                    "为避免重复生成和继续消耗，本次停止自动续跑。"
+                ),
+                unfinished=unfinished,
+            )
             return
         # Fuse 2: the previous auto-resume produced no committed progress,
         # so another identical nudge would only burn model turns.
@@ -8164,6 +8322,15 @@ class FileCreatorAgentRuntime:
                 "previous resume (generation %d)",
                 project_id,
                 snapshot.generation,
+            )
+            await self._notify_auto_resume_paused(
+                project_id=project_id,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                reason="no_committed_progress",
+                explanation="上一轮自动处理没有保存新的进展，已停止重复尝试。",
+                unfinished=unfinished,
             )
             return
         if after_failure and auto_approve:

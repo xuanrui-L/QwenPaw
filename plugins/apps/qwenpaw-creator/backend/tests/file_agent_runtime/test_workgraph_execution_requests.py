@@ -114,6 +114,120 @@ def pin(monkeypatch):
     )
 
 
+def test_failed_receipt_reaches_agent_and_cannot_be_narrated_as_submitted(
+    tmp_path,
+    monkeypatch,
+):
+    pin(monkeypatch)
+    failure = "已本地拦截，未调用图片模型：请修改项目中的 prompt，再请求生成。"
+    graph = WorkGraph(
+        generation=1,
+        nodes=(
+            WorkNode(
+                node_id="visual:hero:v:base",
+                kind="visual",
+                label="角色基础图",
+                status=WorkNodeStatus.DONE,
+                target_ref="asset:hero",
+            ),
+            WorkNode(
+                node_id="visual:hero:v:battle",
+                kind="visual",
+                label="角色状态图",
+                status=WorkNodeStatus.FAILED,
+                target_ref="asset:hero",
+                error=failure,
+            ),
+            WorkNode(
+                node_id="script:main",
+                kind="script",
+                label="序章剧本",
+                status=WorkNodeStatus.STALE,
+            ),
+            WorkNode(
+                node_id="bundle:project",
+                kind="bundle",
+                label="互动包",
+                status=WorkNodeStatus.GATED,
+                missing=("script:main",),
+            ),
+        ),
+    )
+    monkeypatch.setattr(dm, "derive_work_graph", lambda *_a, **_kw: graph)
+
+    async def context(*_args, **_kwargs):
+        return (
+            services.projects.read("probe-project"),
+            [],
+            graph,
+            {
+                "visual:hero:v:battle": "FAILED",
+            },
+        )
+
+    monkeypatch.setattr(dm, "ready_request_context", context)
+    turns = 0
+
+    async def model(messages, _tools):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="blocked-request",
+                        name="request_workgraph_execution",
+                        arguments={
+                            "projectId": "probe-project",
+                            "targetRefs": ["asset:hero"],
+                            "kinds": ["visual"],
+                        },
+                    ),
+                )
+            )
+        result = json.loads(messages[-1]["content"])
+        assert result["status"] == "PARTIAL"
+        assert result["items"][1]["error"] == failure
+        assert result["productionStatus"]["bundle"]["status"] == "gated"
+        # Reproduce the observed model mistake, including streaming deltas.
+        return AgentModelTurn(content="状态图正在提交制作，序章已合成，互动包可以下载。")
+
+    services = create(tmp_path)
+    runtime = FileCreatorAgentRuntime(
+        services,
+        model_client=CallbackAgentChatClient(model),
+        poll_interval_seconds=0.01,
+    )
+
+    async def scenario():
+        try:
+            await runtime.start()
+            runtime.notify("probe-project")
+            await wait_for(lambda: turns == 2)
+            await runtime.wait_until_idle("probe-project")
+        finally:
+            await runtime.stop()
+
+    asyncio.run(scenario())
+    records = services.sessions.list_messages("probe-project", "probe-session")
+    final = [item for item in records if item.role == "assistant"][-1]
+    text = final.content_parts[0].text
+    assert "互动包尚未就绪" in text
+    assert "角色状态图：生成失败" in text
+    assert "正在提交制作" not in text
+    assert "互动包可以下载" not in text
+    deltas = [
+        event.payload.get("delta", "")
+        for event in services.sessions.list_events(
+            "probe-project", "probe-session"
+        )
+        if event.event_type == "agent.message_delta"
+        and event.payload.get("streamKind") == "text"
+    ]
+    assert "正在提交制作" not in "".join(deltas)
+    assert not runtime.executions.list_tasks("probe-project")
+
+
 @pytest.mark.parametrize("cancel_first", [False, True])
 def test_required_approval_and_repeated_tool_only_one_real_admission(
     tmp_path,

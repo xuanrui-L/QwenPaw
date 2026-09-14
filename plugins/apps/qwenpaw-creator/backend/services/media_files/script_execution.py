@@ -192,6 +192,11 @@ def _build_script_prompt(
         "整体结构：\n" + _narrative_context(project, timeline.timeline_id),
         genre_hint,
     ]
+    if timeline.description.strip():
+        sections.append(
+            "本节点已保存的剧本正文（保留其剧情、人物行动与分支约束，"
+            "根据当前创作依据和修改意见修订，不要忽略已写好的内容）：\n" + timeline.description
+        )
     if intelligence_digest:
         sections.append(intelligence_digest)
     sections.append("请为本集撰写完整剧本 markdown。")
@@ -227,6 +232,7 @@ def _request_fingerprint(
                 timeline.timeline_id,
                 timeline.title,
                 timeline.synopsis,
+                timeline.description,
                 str(timeline.planned_duration_seconds or ""),
                 project.strategy.creative_brief,
                 project.strategy.audience,
