@@ -1358,8 +1358,14 @@ def test_stale_script_version_marks_script_node_stale() -> None:
     assert node not in graph.ready_media_nodes()
     assert node in graph.regeneration_nodes()
     assert node.regeneration_of == "art:script-ep2"
+    assert node.dispatch_arguments == {"source": "timeline"}
+    assert node in graph.model_required_nodes()
     assert node not in graph.model_required_nodes(automatic_regeneration=True)
     assert node in graph.model_required_nodes(automatic_regeneration=False)
+
+    project.timelines.items["timeline:ep2"].description = ""
+    generated = derive_work_graph(project).by_id["script:timeline:ep2"]
+    assert generated.dispatch_arguments == {}
 
 
 @pytest.mark.parametrize("body", ["已发布正文：孙老四端茶，说完台词。", "", "  \n"])

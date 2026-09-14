@@ -668,20 +668,37 @@ def _pointer_unchanged(
     return base_found == candidate_found and base_value == candidate_value
 
 
-def _script_inputs(document: Mapping[str, Any], timeline_id: str) -> Any:
+def _script_inputs(
+    document: Mapping[str, Any],
+    timeline_id: str,
+    *,
+    source: str | None = None,
+) -> Any:
     """Only authoring inputs, never downstream elements or frozen history.
 
     Match script_execution's prompt scope: the live title/synopsis outline
     is shared, but the saved body, duration and incident branch edges belong
     to this node. Rewiring a distant ending must not expire the prologue.
     Edge presentation fields (currently tone) are not script inputs.
+    Timeline-sourced scripts mirror only the authoritative body verbatim.
     """
     timelines = _items(document, "timelines", "items")
     timeline = _record(timelines.get(timeline_id))
+    if source == "timeline":
+        return timeline.get("description", "")
     order = _record(document.get("timelines")).get("order", [])
     strategy = _record(document.get("strategy"))
     sources = _items(document, "sources", "sources")
     source_items = _record(sources.get("items"))
+    intelligence_ids = []
+    for source_id in sources.get("order", []):
+        version_id = _record(source_items.get(source_id)).get(
+            "current_intelligence_version_id",
+        )
+        if version_id is not None:
+            intelligence_ids.append(version_id)
+        if len(intelligence_ids) == 3:
+            break
     return (
         tuple(
             document.get(key) for key in ("name", "description", "scenario")
@@ -711,7 +728,7 @@ def _script_inputs(document: Mapping[str, Any], timeline_id: str) -> Any:
         ],
         [
             tuple(
-                edge.get(key, "")
+                _record(edge).get(key, "")
                 for key in (
                     "edge_id",
                     "source_timeline_id",
@@ -722,14 +739,12 @@ def _script_inputs(document: Mapping[str, Any], timeline_id: str) -> Any:
             )
             for edge in document.get("narrative_edges", [])
             if timeline_id
-            in (edge.get("source_timeline_id"), edge.get("target_timeline_id"))
-        ],
-        [
-            _record(source_items.get(sid)).get(
-                "current_intelligence_version_id",
+            in (
+                _record(edge).get("source_timeline_id"),
+                _record(edge).get("target_timeline_id"),
             )
-            for sid in sources.get("order", [])
         ],
+        intelligence_ids,
     )
 
 
@@ -750,21 +765,41 @@ def apply_frontend_edit_impacts(
             "artifact_slots_by_id",
         ).items():
             slot = _record(raw_slot)
-            owner_ref = str(slot.get("owner_ref", ""))
-            if slot.get("kind") != "timeline_script" or not (
-                owner_ref.startswith("timeline:")
-                and not owner_ref.startswith("timeline:snapshot:")
+            owner_ref = slot.get("owner_ref")
+            if (
+                slot.get("kind") != "timeline_script"
+                or not isinstance(owner_ref, str)
+                or not owner_ref.startswith("timeline:")
             ):
                 continue
             timeline_id = owner_ref.removeprefix("timeline:")
-            if _script_inputs(base, timeline_id) != _script_inputs(
+            if timeline_id.startswith(
+                "snapshot:",
+            ) or timeline_id not in _items(document, "timelines", "items"):
+                continue
+            version = _record(
+                _items(document, "assets", "artifact_versions_by_id").get(
+                    slot.get("selected_version_id"),
+                ),
+            )
+            source = _record(version.get("metadata")).get("scriptSource")
+            if _script_inputs(
+                base,
+                timeline_id,
+                source=source,
+            ) != _script_inputs(
                 document,
                 timeline_id,
+                source=source,
             ):
                 _mark_selected_stale(
                     document,
                     slot_id,
-                    reason="剧本创作依据已修改，需要重新起草",
+                    reason=(
+                        "剧本正文已修改，需要同步"
+                        if source == "timeline"
+                        else "剧本创作依据已修改，需要重新起草"
+                    ),
                     impact=impact,
                 )
     for pointer in dict.fromkeys(submitted_pointers):

@@ -139,73 +139,407 @@ def _element_pointer(element_id: str, *suffix: str) -> str:
     )
 
 
+def _script_project() -> dict:
+    project = _project()
+    project["timelines"]["order"] = [
+        "timeline:main",
+        "timeline:next",
+        "timeline:end",
+    ]
+    for timeline_id in project["timelines"]["order"]:
+        timeline = project["timelines"]["items"].setdefault(
+            timeline_id,
+            {"timeline_id": timeline_id, "elements_by_id": {}},
+        )
+        timeline.update(
+            title=timeline_id,
+            synopsis=f"Story for {timeline_id}",
+            planned_duration_seconds=300,
+        )
+        project["assets"]["artifact_slots_by_id"][f"script:{timeline_id}"] = {
+            "kind": "timeline_script",
+            "owner_ref": f"timeline:{timeline_id}",
+            "selected_version_id": f"script:{timeline_id}:v1",
+        }
+        project["assets"]["artifact_versions_by_id"][
+            f"script:{timeline_id}:v1"
+        ] = {"stale": False, "stale_reason": None}
+    return project
+
+
 @pytest.mark.parametrize(
-    "pointer",
+    ("path", "value", "invalidates"),
     [
-        _element_pointer("overlay-1", "creation", "text"),
-        _element_pointer("r2v-1", "creation", "video_prompt"),
-        "/assets/artifact_slots_by_id/element:r2v-1:video/selected_version_id",
-        "/timelines/items/timeline:main/color_grade",
+        (("strategy", "constraints"), "所有视频不要生成字幕", False),
+        (
+            (
+                "timelines",
+                "items",
+                "timeline:main",
+                "planned_duration_seconds",
+            ),
+            142,
+            False,
+        ),
+        (("timelines", "items", "timeline:main", "synopsis"), "新的梗概", False),
+        (
+            ("timelines", "items", "timeline:main", "description"),
+            "明确修改后的正文",
+            True,
+        ),
+        (
+            ("timelines", "items", "timeline:next", "description"),
+            "其他集正文",
+            False,
+        ),
     ],
 )
-def test_production_edits_do_not_invalidate_upstream_script(pointer):
-    project = _project()
-    project["assets"]["artifact_slots_by_id"]["script:timeline:main"] = {
-        "kind": "timeline_script",
-        "owner_ref": "timeline:timeline:main",
-        "selected_version_id": "script-v1",
+def test_authored_script_mirror_only_tracks_its_source_body(
+    path,
+    value,
+    invalidates,
+):
+    base = _script_project()
+    base["timelines"]["items"]["timeline:main"]["description"] = "已经确认的正文"
+    version_id = "script:timeline:main:v1"
+    base["assets"]["artifact_versions_by_id"][version_id]["metadata"] = {
+        "scriptSource": "timeline",
     }
-    project["assets"]["artifact_versions_by_id"]["script-v1"] = {
-        "stale": False,
-        "stale_reason": None,
-    }
-    updated, impact = apply_frontend_edit_impacts(project, [pointer])
-    assert (
-        updated["assets"]["artifact_versions_by_id"]["script-v1"]["stale"]
-        is False
-    )
-    assert (
-        updated["assets"]["artifact_versions_by_id"]["final-v1"]["stale"]
-        is True
-    )
-    assert "script-v1" not in impact.invalidated_artifact_version_ids
-
-
-def test_synopsis_invalidates_script_but_adding_frozen_history_does_not():
-    base = _project()
-    base["timelines"]["order"] = ["timeline:main"]
-    base["assets"]["artifact_slots_by_id"]["script:timeline:main"] = {
-        "kind": "timeline_script",
-        "owner_ref": "timeline:timeline:main",
-        "selected_version_id": "script-v1",
-    }
-    base["assets"]["artifact_versions_by_id"]["script-v1"] = {"stale": False}
     candidate = copy.deepcopy(base)
-    candidate["timelines"]["items"][
-        "snapshot:timeline:main:1"
-    ] = copy.deepcopy(
-        candidate["timelines"]["items"]["timeline:main"],
-    )
-    candidate["timelines"]["order"].append("snapshot:timeline:main:1")
-    updated, _ = apply_frontend_edit_impacts(
+    node = candidate
+    for token in path[:-1]:
+        node = node.setdefault(token, {})
+    node[path[-1]] = value
+    updated, impact = apply_frontend_edit_impacts(
         candidate,
-        ["/timelines/order"],
+        ["/" + "/".join(path)],
         base=base,
     )
     assert (
-        updated["assets"]["artifact_versions_by_id"]["script-v1"]["stale"]
+        updated["assets"]["artifact_versions_by_id"][version_id]["stale"]
+        is invalidates
+    )
+    assert (
+        version_id in impact.invalidated_artifact_version_ids
+    ) is invalidates
+
+
+@pytest.mark.parametrize(
+    ("pointer", "value"),
+    [
+        (_element_pointer("overlay-1", "creation", "text"), "new copy"),
+        (_element_pointer("r2v-1", "creation", "video_prompt"), "new shot"),
+        (_element_pointer("r2v-1", "span", "start_tick"), 1_000),
+        (_element_pointer("r2v-1", "span", "duration_tick"), 5_000),
+        (
+            (
+                "/assets/artifact_slots_by_id/element:r2v-1:video/"
+                "selected_version_id"
+            ),
+            None,
+        ),
+        ("/timelines/items/timeline:main/color_grade", {"exposure": 0.2}),
+    ],
+)
+def test_production_edits_do_not_invalidate_upstream_script(pointer, value):
+    base = _script_project()
+    candidate = copy.deepcopy(base)
+    tokens = pointer.lstrip("/").split("/")
+    node = candidate
+    for token in tokens[:-1]:
+        node = node[token]
+    node[tokens[-1]] = value
+    assert candidate != base
+
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        [pointer],
+        base=base,
+    )
+    versions = updated["assets"]["artifact_versions_by_id"]
+    for timeline_id in base["timelines"]["order"]:
+        version_id = f"script:{timeline_id}:v1"
+        assert versions[version_id]["stale"] is False
+        assert version_id not in impact.invalidated_artifact_version_ids
+    assert versions["final-v1"]["stale"] is True
+
+
+@pytest.mark.parametrize("timeline_id", ["timeline:main", "timeline:next"])
+def test_duration_change_invalidates_only_own_script(timeline_id):
+    base = _script_project()
+    candidate = copy.deepcopy(base)
+    candidate["timelines"]["items"][timeline_id][
+        "planned_duration_seconds"
+    ] = 142
+    element = copy.deepcopy(
+        base["timelines"]["items"]["timeline:main"]["elements_by_id"]["r2v-1"],
+    )
+    element["element_id"] = "r2v-2"
+    candidate["timelines"]["items"][timeline_id]["elements_by_id"][
+        "r2v-2"
+    ] = element
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        [
+            f"/timelines/items/{timeline_id}/planned_duration_seconds",
+            f"/timelines/items/{timeline_id}/elements_by_id/r2v-2",
+        ],
+        base=base,
+    )
+    versions = updated["assets"]["artifact_versions_by_id"]
+    for other_id in base["timelines"]["order"]:
+        assert versions[f"script:{other_id}:v1"]["stale"] is (
+            other_id == timeline_id
+        )
+    assert (
+        f"script:{timeline_id}:v1" in impact.invalidated_artifact_version_ids
+    )
+    assert (
+        base["assets"]["artifact_versions_by_id"][f"script:{timeline_id}:v1"][
+            "stale"
+        ]
         is False
     )
+
+
+@pytest.mark.parametrize("timeline_id", ["timeline:main", "timeline:next"])
+@pytest.mark.parametrize("field", ["title", "synopsis"])
+def test_live_narrative_changes_invalidate_own_and_sibling_scripts(
+    timeline_id,
+    field,
+):
+    base = _script_project()
+    candidate = copy.deepcopy(base)
+    candidate["timelines"]["items"][timeline_id][field] = "New story"
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        [f"/timelines/items/{timeline_id}/{field}"],
+        base=base,
+    )
+    assert impact.invalidated_artifact_version_ids == {
+        f"script:{tid}:v1" for tid in base["timelines"]["order"]
+    }
+    assert (
+        updated["assets"]["artifact_versions_by_id"]["final-v1"]["stale"]
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "invalidates"),
+    [
+        (("name",), "New project", True),
+        (("description",), "New description", True),
+        (("scenario",), "video_edit", True),
+        (("strategy", "creative_brief"), "New brief", True),
+        (("strategy", "audience"), "New audience", True),
+        (("strategy", "creative_direction"), "New direction", True),
+        (("strategy", "constraints"), "The protagonist must survive", True),
+        # Every timeline overrides the project default in this fixture.
+        (("settings", "target_duration_seconds"), 600, False),
+        (
+            ("timelines", "order"),
+            ["timeline:end", "timeline:next", "timeline:main"],
+            True,
+        ),
+    ],
+)
+def test_shared_story_inputs_invalidate_only_consuming_scripts(
+    path,
+    value,
+    invalidates,
+):
+    base = _script_project()
+    candidate = copy.deepcopy(base)
+    node = candidate
+    for token in path[:-1]:
+        node = node.setdefault(token, {})
+    node[path[-1]] = value
+    _, impact = apply_frontend_edit_impacts(
+        candidate,
+        ["/" + "/".join(path)],
+        base=base,
+    )
+    expected = (
+        {f"script:{tid}:v1" for tid in base["timelines"]["order"]}
+        if invalidates
+        else set()
+    )
+    assert impact.invalidated_artifact_version_ids == expected
+
+
+@pytest.mark.parametrize(
+    ("edge_index", "field", "value", "affected"),
+    [
+        (0, "edge_id", "new-edge", {"main", "next"}),
+        (0, "label", "Stay", {"main", "next"}),
+        (0, "prompt", "Which path?", {"main", "next"}),
+        (0, "source_timeline_id", "timeline:end", {"main", "next", "end"}),
+        (0, "target_timeline_id", "timeline:end", {"main", "next", "end"}),
+        (1, "label", "Leave", {"next", "end"}),
+        (0, "tone", "danger", set()),
+    ],
+)
+def test_only_consumed_incident_edge_fields_invalidate_scripts(
+    edge_index,
+    field,
+    value,
+    affected,
+):
+    base = _script_project()
+    base["narrative_edges"] = [
+        {
+            "edge_id": "main-next",
+            "source_timeline_id": "timeline:main",
+            "target_timeline_id": "timeline:next",
+            "label": "Go",
+            "prompt": "What next?",
+        },
+        {
+            "edge_id": "next-end",
+            "source_timeline_id": "timeline:next",
+            "target_timeline_id": "timeline:end",
+            "label": "Continue",
+        },
+    ]
+    candidate = copy.deepcopy(base)
+    candidate["narrative_edges"][edge_index][field] = value
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        [f"/narrative_edges/{edge_index}/{field}"],
+        base=base,
+    )
+    assert impact.invalidated_artifact_version_ids == {
+        f"script:timeline:{name}:v1" for name in affected
+    }
+    for name in ("main", "next", "end"):
+        assert updated["assets"]["artifact_versions_by_id"][
+            f"script:timeline:{name}:v1"
+        ]["stale"] is (name in affected)
+
+
+@pytest.mark.parametrize("existing_snapshot", [False, True])
+def test_snapshot_history_is_excluded_from_script_inputs(existing_snapshot):
+    base = _script_project()
+    snapshot_id = "snapshot:timeline:main:1"
+    snapshot = copy.deepcopy(base["timelines"]["items"]["timeline:main"])
+    snapshot["timeline_id"] = snapshot_id
+    if existing_snapshot:
+        base["timelines"]["items"][snapshot_id] = copy.deepcopy(snapshot)
+        base["timelines"]["order"].append(snapshot_id)
+    candidate = copy.deepcopy(base)
+    snapshot.update(
+        title="Archived",
+        synopsis="Old story",
+        planned_duration_seconds=10,
+    )
+    candidate["timelines"]["items"][snapshot_id] = snapshot
+    candidate["timelines"]["order"] = [
+        snapshot_id,
+        *base["timelines"]["order"][:3],
+    ]
+    candidate["assets"]["artifact_slots_by_id"]["snapshot-script"] = {
+        "kind": "timeline_script",
+        "owner_ref": f"timeline:{snapshot_id}",
+        "selected_version_id": "snapshot-v1",
+    }
+    candidate["assets"]["artifact_versions_by_id"]["snapshot-v1"] = {
+        "stale": False,
+    }
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        ["/timelines"],
+        base=base,
+    )
+    assert not impact.invalidated_artifact_version_ids
+    versions = updated["assets"]["artifact_versions_by_id"]
+    assert all(version["stale"] is False for version in versions.values())
+
     candidate["timelines"]["items"]["timeline:main"]["synopsis"] = "New story"
-    updated, _ = apply_frontend_edit_impacts(
+    updated, impact = apply_frontend_edit_impacts(
         candidate,
         ["/timelines/items/timeline:main/synopsis"],
         base=base,
     )
-    assert (
-        updated["assets"]["artifact_versions_by_id"]["script-v1"]["stale"]
-        is True
+    assert impact.invalidated_artifact_version_ids == {
+        f"script:{tid}:v1" for tid in base["timelines"]["order"][:3]
+    }
+    versions = updated["assets"]["artifact_versions_by_id"]
+    assert versions["snapshot-v1"]["stale"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "invalidates"),
+    [
+        (("items", "s4", "current_intelligence_version_id"), "new", False),
+        (("items", "s3", "current_intelligence_version_id"), "new", True),
+        (("items", "s1", "current_intelligence_version_id"), None, True),
+        (("items", "empty", "current_intelligence_version_id"), "new", True),
+        (("order",), ["s1", "s2", "s3", "empty", "s4"], False),
+        (("order",), ["empty", "s2", "s1", "s3", "s4"], True),
+        (("order",), ["empty", "s1", "s2", "s3"], False),
+    ],
+)
+def test_script_intelligence_uses_first_three_non_null_versions(
+    path,
+    value,
+    invalidates,
+):
+    base = _script_project()
+    source_ids = ["empty", "s1", "s2", "s3", "s4"]
+    base["sources"] = {
+        "sources": {
+            "order": source_ids,
+            "items": {
+                sid: {
+                    "current_intelligence_version_id": (
+                        None if sid == "empty" else sid
+                    ),
+                }
+                for sid in reversed(source_ids)
+            },
+        },
+    }
+    candidate = copy.deepcopy(base)
+    node = candidate["sources"]["sources"]
+    for token in path[:-1]:
+        node = node[token]
+    node[path[-1]] = value
+    _, impact = apply_frontend_edit_impacts(
+        candidate,
+        ["/sources/sources/" + "/".join(path)],
+        base=base,
     )
+    expected = (
+        {f"script:{tid}:v1" for tid in base["timelines"]["order"]}
+        if invalidates
+        else set()
+    )
+    assert impact.invalidated_artifact_version_ids == expected
+
+
+def test_unchanged_script_inputs_preserve_existing_staleness():
+    base = _script_project()
+    version_id = "script:timeline:main:v1"
+    base["assets"]["artifact_versions_by_id"][version_id].update(
+        stale=True,
+        stale_reason="Earlier story edit",
+    )
+    candidate = copy.deepcopy(base)
+    candidate["timelines"]["items"]["timeline:next"][
+        "planned_duration_seconds"
+    ] = 142
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        ["/timelines/items/timeline:next/planned_duration_seconds"],
+        base=base,
+    )
+    assert updated["assets"]["artifact_versions_by_id"][version_id] == (
+        base["assets"]["artifact_versions_by_id"][version_id]
+    )
+    assert impact.invalidated_artifact_version_ids == {
+        "script:timeline:next:v1",
+    }
 
 
 def test_overlay_copy_edit_invalidates_only_timeline_render() -> None:

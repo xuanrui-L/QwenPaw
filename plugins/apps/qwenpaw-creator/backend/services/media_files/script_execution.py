@@ -203,7 +203,7 @@ def _build_script_prompt(
     if timeline.description.strip():
         sections.append(
             "本节点已保存的剧本正文（保留其剧情、人物行动与分支约束，"
-            "根据当前创作依据和修改意见修订，不要忽略已写好的内容）：\n" + timeline.description
+            "根据当前创作依据和修改意见修订，不要忽略已写好的内容）：\n" + timeline.description,
         )
     if intelligence_digest:
         sections.append(intelligence_digest)
@@ -229,11 +229,14 @@ def _request_fingerprint(
     timeline: Timeline,
     *,
     guidance: str,
+    source: str = "generate",
 ) -> str:
-    # Every persisted input that reaches the prompt must be covered here;
-    # otherwise an edited input silently replays a stale version. The user's
-    # explicit rewrite guidance is an input too — identical retries of the
-    # same guidance still replay, but new guidance must reach the model.
+    if source == "timeline":
+        content = "\x1f".join(
+            ("timeline-script", timeline.timeline_id, timeline.description),
+        )
+        return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+    # Every persisted input consumed by the model must fence publication.
     digest = hashlib.sha256(
         "\x1f".join(
             [
@@ -248,7 +251,7 @@ def _request_fingerprint(
                 str(
                     project.settings.target_duration_seconds or ""
                     if not timeline.planned_duration_seconds
-                    else ""
+                    else "",
                 ),
                 project.strategy.creative_brief,
                 project.strategy.audience,
@@ -312,6 +315,7 @@ def _publish_script_version(
     fingerprint: str,
     provenance_refs: list[str],
     guidance: str,
+    source: str,
 ) -> FileScriptExecutionResult:
     """落盘 markdown 文件并通过提交边界写回索引（commit 时全量校验）。"""
 
@@ -332,6 +336,7 @@ def _publish_script_version(
                 base.project,
                 base.project.timelines.items[timeline_id],
                 guidance=guidance,
+                source=source,
             )
             != fingerprint
         ):
@@ -352,6 +357,7 @@ def _publish_script_version(
             provenance_refs=provenance_refs,
             input_fingerprint=fingerprint,
         )
+        version.metadata = {**version.metadata, "scriptSource": source}
         indexed = working.assets.files_by_id[version.file_id]
         if version.file_id == file_id:
             staged = file_store.stage_bytes(
@@ -414,7 +420,17 @@ async def execute_file_script_command(
         raise ValidationError(f"timeline 不存在: {timeline_id}")
 
     guidance = str(arguments.get("guidance") or "").strip()
-    fingerprint = _request_fingerprint(project, timeline, guidance=guidance)
+    source = str(arguments.get("source") or "generate")
+    if source not in {"generate", "timeline"}:
+        raise ValidationError("不支持的剧本来源")
+    if source == "timeline" and (guidance or not timeline.description.strip()):
+        raise ValidationError("正文同步需要已有剧本，修改意见请通过剧本生成提交")
+    fingerprint = _request_fingerprint(
+        project,
+        timeline,
+        guidance=guidance,
+        source=source,
+    )
     # Stale re-drafts share the node's dispatch idempotency key but must not
     # reuse a previous publish transaction. Staleness triggers on more inputs
     # than the fingerprint covers (e.g. element edits), so scope the durable
@@ -444,33 +460,35 @@ async def execute_file_script_command(
         )
         return replay
 
-    intelligence_digest, intelligence_refs = await asyncio.to_thread(
-        _intelligence_digest,
-        services,
-        project,
-    )
-    prompt = _build_script_prompt(project, timeline, intelligence_digest)
-    if guidance:
-        prompt += f"\n\n额外修改意见（必须遵循）：{guidance}"
-    from services.file_agent_runtime.manual_regeneration_hold import (
-        mark_untracked_admission,
-    )
+    if source == "timeline":
+        markdown_text = timeline.description
+        intelligence_refs = []
+    else:
+        intelligence_digest, intelligence_refs = await asyncio.to_thread(
+            _intelligence_digest,
+            services,
+            project,
+        )
+        prompt = _build_script_prompt(project, timeline, intelligence_digest)
+        if guidance:
+            prompt += f"\n\n额外修改意见（必须遵循）：{guidance}"
+        from services.file_agent_runtime.manual_regeneration_hold import (
+            mark_untracked_admission,
+        )
 
-    await asyncio.to_thread(
-        mark_untracked_admission,
-        services.root,
-        project_id,
-    )
-    raw = await text_model.chat_completion(
-        prompt,
-        system_prompt=_SCRIPT_SYSTEM_PROMPT,
-        temperature=0.4,
-    )
-    # 归一化到约定块格式：解析/序列化双向无损，保证前端块级渲染与
-    # 块级 diff 有稳定基线。
-    markdown_text = serialize_script_blocks(parse_script_markdown(raw))
-    if not markdown_text.strip():
-        raise ValidationError("剧本起草结果为空，请调整策略/梗概后重试")
+        await asyncio.to_thread(
+            mark_untracked_admission,
+            services.root,
+            project_id,
+        )
+        raw = await text_model.chat_completion(
+            prompt,
+            system_prompt=_SCRIPT_SYSTEM_PROMPT,
+            temperature=0.4,
+        )
+        markdown_text = serialize_script_blocks(parse_script_markdown(raw))
+        if not markdown_text.strip():
+            raise ValidationError("剧本起草结果为空，请调整策略/梗概后重试")
 
     return await asyncio.to_thread(
         _publish_script_version,
@@ -482,6 +500,7 @@ async def execute_file_script_command(
         fingerprint=fingerprint,
         provenance_refs=intelligence_refs,
         guidance=guidance,
+        source=source,
     )
 
 

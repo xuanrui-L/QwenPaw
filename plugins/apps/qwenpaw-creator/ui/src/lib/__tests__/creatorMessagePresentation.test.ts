@@ -111,6 +111,20 @@ describe("Creator conversation presentation", () => {
     }
   });
 
+  it("shows execution pause notices without granting user authority", () => {
+    const notice = creatorMessage({
+      role: "assistant",
+      source: "creator_execution_notice",
+      content: text("【自动执行已暂停】项目仍有待处理事项，请检查后继续。"),
+      metadata: { executionPause: { reason: "no_committed_progress" } },
+    });
+    expect(shouldRenderConversationMessage(notice)).toBe(true);
+    expect(isUserAuthorityMessage(notice)).toBe(false);
+    expect(shouldRenderConversationMessage({ ...notice, role: "user" })).toBe(
+      false,
+    );
+  });
+
   it("renders one review feedback message per durable decision", () => {
     const first = creatorMessage({
       messageId: "feedback-first",

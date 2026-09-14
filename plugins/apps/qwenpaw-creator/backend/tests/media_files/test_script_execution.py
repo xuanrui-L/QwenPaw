@@ -16,6 +16,7 @@ from services.file_agent_runtime.work_graph import (
 from services.file_agent_runtime import work_scheduler
 from services.media_files import script_execution
 from services.media_files.script_execution import (
+    _build_script_prompt,
     execute_file_script_command,
 )
 from services.project_files.facade import CreatorFileServices
@@ -224,11 +225,11 @@ def test_initial_agent_ending_edit_keeps_script_and_replays_without_model(
         )
     project = result.project
     assert project.settings.aspect_ratio == "9:16"
-    assert script_execution._build_script_prompt(
+    assert _build_script_prompt(
         base.project,
         base.project.timelines.items["timeline:ep2"],
         "",
-    ) == script_execution._build_script_prompt(
+    ) == _build_script_prompt(
         project,
         project.timelines.items["timeline:ep2"],
         "",
@@ -263,7 +264,7 @@ def test_remote_branch_edit_during_model_call_keeps_valid_result(
         tools = AgentProjectTools(
             services.projects,
             context=AgentProjectToolContext(
-                origin=ChangeOrigin.INITIAL_CREATION
+                origin=ChangeOrigin.INITIAL_CREATION,
             ),
         )
         tools.read_project(PROJECT_ID)
@@ -289,7 +290,8 @@ def test_remote_branch_edit_during_model_call_keeps_valid_result(
 
 
 def test_unused_default_duration_does_not_redraft_script(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     services = _services(tmp_path)
     calls = _mock_chat(monkeypatch, [DRAFT])
@@ -390,8 +392,13 @@ def test_scheduler_regenerates_stale_script_once_and_keeps_saved_body(
                 assert not project.assets.artifact_versions_by_id[
                     selected
                 ].stale
-                assert len(calls) == 2
-                assert "必须保留这个动作" in calls[-1]["prompt"]
+                assert len(calls) == 1
+                version = project.assets.artifact_versions_by_id[selected]
+                file = project.assets.files_by_id[version.file_id]
+                assert (
+                    services.projects.project_root(PROJECT_ID)
+                    / file.relative_uri
+                ).read_text(encoding="utf-8") == episode["description"]
             else:
                 assert selected == first.artifact_version_id
                 assert len(calls) == 1
@@ -570,9 +577,11 @@ def test_identical_redraft_is_fresh_and_next_retry_does_not_regenerate(
     assert services.projects.read(PROJECT_ID).etag == snapshot.etag
 
 
+@pytest.mark.parametrize("field", ["synopsis", "description"])
 def test_changed_inputs_during_model_call_do_not_publish_old_script(
     tmp_path,
     monkeypatch,
+    field,
 ):
     services = _services(tmp_path)
 
@@ -580,7 +589,7 @@ def test_changed_inputs_during_model_call_do_not_publish_old_script(
         base = services.projects.read(PROJECT_ID)
         candidate = base.project.model_dump(mode="json")
         candidate["timelines"]["items"]["timeline:ep2"][
-            "synopsis"
+            field
         ] = "New story during generation"
         services.commits.commit(
             base=base,
@@ -606,3 +615,74 @@ def test_changed_inputs_during_model_call_do_not_publish_old_script(
             PROJECT_ID,
         ).project.assets.artifact_slots_by_id
     )
+
+
+def test_stale_script_sync_preserves_authored_body_without_model_call(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    first = _draft(services, key="initial")
+    authored = "\n  原稿的空格与台词都要保留。\n\n陈默：还有七天以后，他们全部倒下。\n"
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["timelines"]["items"]["timeline:ep2"]["description"] = authored
+    candidate["assets"]["artifact_versions_by_id"][first.artifact_version_id][
+        "stale"
+    ] = True
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.FRONTEND_EDIT,
+    )
+
+    def sync(key):
+        return asyncio.run(
+            execute_file_script_command(
+                services,
+                project_id=PROJECT_ID,
+                target_ref="timeline:timeline:ep2",
+                arguments={"source": "timeline"},
+                idempotency_key=key,
+            ),
+        )
+
+    result = sync("sync-body")
+    current = services.projects.read(PROJECT_ID)
+    version = current.project.assets.artifact_versions_by_id[
+        result.artifact_version_id
+    ]
+    file = current.project.assets.files_by_id[version.file_id]
+    assert (
+        services.projects.project_root(PROJECT_ID) / file.relative_uri
+    ).read_bytes() == authored.encode("utf-8")
+    assert (
+        current.project.timelines.items["timeline:ep2"].description == authored
+    )
+    assert version.metadata["scriptSource"] == "timeline"
+    assert not version.stale
+    assert current.project.assets.artifact_versions_by_id[
+        first.artifact_version_id
+    ].stale
+    assert sync("sync-again").replayed
+    assert len(calls) == 1
+
+
+def test_explicit_script_revision_includes_existing_authored_body(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["timelines"]["items"]["timeline:ep2"]["description"] = DRAFT
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.FRONTEND_EDIT,
+    )
+    _draft(services, key="revise", guidance="只调整开场动作")
+    assert DRAFT in calls[0]["prompt"]
+    assert "只调整开场动作" in calls[0]["prompt"]

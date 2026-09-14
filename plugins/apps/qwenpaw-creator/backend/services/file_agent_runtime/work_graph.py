@@ -1054,6 +1054,12 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 locator={"page": "blueprint", "timelineId": timeline_id},
                 command="GENERATE_TIMELINE_SCRIPT",
                 target_ref=f"timeline:{timeline_id}",
+                dispatch_arguments=(
+                    {"source": "timeline"}
+                    if status is WorkNodeStatus.STALE
+                    and timeline.description.strip()
+                    else {}
+                ),
                 dispatch_fingerprint=fingerprint,
                 regeneration_of=(
                     selected if status is WorkNodeStatus.STALE else None

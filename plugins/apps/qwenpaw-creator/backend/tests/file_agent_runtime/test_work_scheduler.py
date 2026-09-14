@@ -304,6 +304,64 @@ def test_tick_dispatches_up_to_media_parallelism(tmp_path, monkeypatch):
     assert len(variant_ids) == 3  # three distinct nodes, no duplicates
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_stale_script_dispatch_requires_automatic_execution(
+    tmp_path,
+    monkeypatch,
+    enabled,
+):
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    node = WorkNode(
+        node_id="script:timeline:main",
+        kind="script",
+        label="Script",
+        status=WorkNodeStatus.STALE,
+        timeline_id="timeline:main",
+        command="GENERATE_TIMELINE_SCRIPT",
+        target_ref="timeline:timeline:main",
+        dispatch_fingerprint="script-inputs",
+        regeneration_of="script-old",
+    )
+    graph = WorkGraph(nodes=(node,), generation=1)
+    monkeypatch.setattr(
+        work_scheduler,
+        "derive_work_graph",
+        lambda *a, **k: graph,
+    )
+    scheduler = WorkGraphScheduler(services)
+    monkeypatch.setattr(scheduler, "enabled", lambda: enabled)
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
+    dispatch = _RecordingDispatch()
+
+    async def scenario():
+        dispatched = asyncio.Event()
+
+        async def script_dispatch(*args, **kwargs):
+            result = await dispatch(*args, **kwargs)
+            dispatched.set()
+            return result
+
+        monkeypatch.setattr(
+            work_scheduler,
+            "_default_script_dispatch",
+            script_dispatch,
+        )
+        try:
+            await scheduler.tick(PROJECT_ID)
+            if enabled:
+                await asyncio.wait_for(dispatched.wait(), timeout=2)
+        finally:
+            await scheduler.shutdown()
+
+    asyncio.run(scenario())
+    assert len(dispatch.calls) == int(enabled)
+    if enabled:
+        call = dispatch.calls[0]
+        assert call["target_ref"] == "timeline:timeline:main"
+        assert call["command"] == "GENERATE_TIMELINE_SCRIPT"
+        assert "-regen-" in call["idempotency_key"]
+
+
 def _failed_record(dispatch: _RecordingDispatch, *, error: str):
     """The durable FAILED record a real executor leaves after admission."""
     call = dispatch.calls[0]
