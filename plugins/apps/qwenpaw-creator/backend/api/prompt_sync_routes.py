@@ -74,3 +74,19 @@ async def accept_prompts(
         element_id,
         proposal_id,
     )
+
+
+@router.post("/prompt-sync/confirm")
+async def confirm_current_prompts(
+    project_id: str,
+    timeline_id: str,
+    element_id: str,
+    services=Depends(project_file_services),
+):
+    # Keep the existing plan/prompts and only re-stamp the sync baseline, so a
+    # user can clear the gate without commissioning an AI rewrite (#7720).
+    return await PromptSyncService(services).confirm_current(
+        project_id,
+        timeline_id,
+        element_id,
+    )

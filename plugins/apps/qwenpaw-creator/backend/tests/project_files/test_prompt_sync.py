@@ -14,6 +14,10 @@ from services.file_agent_runtime.model_client import (
     AgentModelTurn,
     CallbackAgentChatClient,
 )
+from services.file_agent_runtime.work_graph import (
+    WorkNodeStatus,
+    derive_work_graph,
+)
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
     ElementLocation,
@@ -159,7 +163,6 @@ def test_storyboard_readiness_does_not_wait_for_video_rewrite(services):
     from api.dependencies import project_file_services
     from api.prompt_sync_routes import router
     from services.project_files.prompt_sync import prompt_sync_status
-    from services.file_agent_runtime.work_graph import derive_work_graph
 
     edit(services, "narrative", "女子把钥匙放入包内。")
     before = services.projects.read(PID).project
@@ -320,3 +323,88 @@ def test_first_prompt_pair_publishes_with_existing_narrative(services):
             origin="frontend_edit",
         )
     assert service.status(PID, TID, first_id)["status"] == "needs_confirmation"
+
+
+def test_confirm_current_keeps_edited_prompt_without_rewrite(services):
+    """Keep-current clears the sync gate, no AI rewrite (#7720 finding #3)."""
+    service = sync_service(services)
+
+    async def run():
+        # Establish a synchronized baseline through the normal propose/accept.
+        edit(services, "video_prompt", UPDATED["videoPrompt"])
+        proposal = await service.propose(PID, TID, EID, source="videoPrompt")
+        await service.accept(PID, TID, EID, proposal["proposalId"])
+        assert service.status(PID, TID, EID)["status"] == "current"
+
+        # The user hand-edits the prompt and wants to keep their own wording.
+        edited = UPDATED["videoPrompt"] + "（用户手动补充：镜头缓慢推近）"
+        edit(services, "video_prompt", edited)
+        assert service.status(PID, TID, EID)["status"] == "needs_confirmation"
+
+        before = services.projects.read(PID)
+        result = await service.confirm_current(PID, TID, EID)
+        assert result["generation"] == before.generation + 1
+        current = service.status(PID, TID, EID)
+        assert current["status"] == "current"
+        # Kept wording survives verbatim; the callback's rewrite never runs.
+        assert current["videoPrompt"] == edited
+
+    asyncio.run(run())
+
+
+def _storyboard_node(services):
+    """Derive the real work graph; return this element's storyboard node."""
+    graph = derive_work_graph(
+        services.projects.read(PID).project,
+        media_models=(
+            model_config.get_image_model_name(),
+            model_config.get_video_model_name(),
+        ),
+    )
+    return graph.by_id[f"storyboard:{EID}"]
+
+
+def test_confirm_current_makes_storyboard_eligible_without_new_image(
+    services,
+):
+    """#7720 recovery chain, end to end at the work-graph level.
+
+    Real prompt-sync + real ``derive_work_graph`` (no mocks) lock the issue's
+    suggested sequence: a synchronized storyboard is eligible; editing the
+    plan beneath it raises the precise prompt-sync gate (finding #1);
+    confirming the current content (finding #3) clears the gate and the
+    storyboard is eligible again -- from the confirmation alone, with no
+    scene-image task.
+    """
+    service = sync_service(services)
+    edited_plan = UPDATED["narrative"]
+
+    async def run():
+        # A synchronized baseline: the storyboard node is directly eligible.
+        await service.confirm_current(PID, TID, EID)
+        node = _storyboard_node(services)
+        assert node.status is WorkNodeStatus.READY
+        assert node.prompt_sync_required is False
+        assert node.missing == ()
+
+        # Editing the plan beneath the storyboard stalens its stage baseline
+        # and gates the node with the precise prompt-sync reason, not a bare
+        # GATED. (A direct storyboard_prompt edit is treated as authored and
+        # stays current; the plan edit is what reopens the gate.)
+        edit(services, "narrative", edited_plan)
+        gated = _storyboard_node(services)
+        assert gated.status is WorkNodeStatus.GATED
+        assert gated.prompt_sync_required is True
+        assert gated.missing == ("分镜内容与提示词待同步",)
+
+        # Keeping the current content clears the gate: eligible again, and
+        # the user's wording survives (no AI rewrite); nothing is generated.
+        await service.confirm_current(PID, TID, EID)
+        ready = _storyboard_node(services)
+        assert ready.status is WorkNodeStatus.READY
+        assert ready.prompt_sync_required is False
+        assert ready.missing == ()
+        assert ready.task_id is None
+        assert service.status(PID, TID, EID)["narrative"] == edited_plan
+
+    asyncio.run(run())
