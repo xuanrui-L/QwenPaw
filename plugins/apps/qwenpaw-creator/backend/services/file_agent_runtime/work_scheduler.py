@@ -34,10 +34,6 @@ from models.config import (
     get_video_model_name,
     get_vlm_timeout_seconds,
 )
-from services.media_files.call_budget import (
-    MediaCallBudgetExhausted,
-    ensure_media_call_budget,
-)
 from services.media_files.image_execution import (
     recover_unclaimed_image_tasks,
 )
@@ -723,23 +719,6 @@ class WorkGraphScheduler:
             if delay is not None:
                 self._schedule_sync_gate_recheck(project_id, delay)
         inflight = self._inflight.setdefault(project_id, set())
-        media_budget_exhausted = False
-        try:
-            # Wallet fuse: a spent budget pauses automatic dispatch; the
-            # media entry points enforce it too, this just avoids creating
-            # failed tasks.
-            await asyncio.to_thread(
-                ensure_media_call_budget,
-                self.services,
-                project_id,
-            )
-        except MediaCallBudgetExhausted as exc:
-            logger.warning(
-                "work-graph dispatch paused for %s: %s",
-                project_id,
-                exc,
-            )
-            media_budget_exhausted = True
         active_media = {
             node.node_id
             for node in graph.nodes
@@ -755,12 +734,6 @@ class WorkGraphScheduler:
             await asyncio.to_thread(self.manual_holds.read, project_id)
         ).node_ids
         for node in self._dispatch_candidates(project_id, graph, tasks):
-            if media_budget_exhausted and node.kind not in {
-                "compose",
-                "interaction",
-                "script",
-            }:
-                continue
             if capacity <= 0:
                 break
             if node.node_id in manually_held:
@@ -870,7 +843,7 @@ class WorkGraphScheduler:
         """Prepare one edited R2V representation before automatic media work.
 
         Uses the same source-preserving, CAS-checked service as a workbench
-        regeneration click. Existing review/authorization/edit/budget gates
+        regeneration click. Existing review/authorization/edit gates
         are checked before the model call and again before publication.
         """
         from domain.errors import ConflictError

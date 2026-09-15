@@ -14,6 +14,7 @@ import pytest
 from PIL import Image
 
 from api.file_asset_routes import _AssetInput, _ingest_many_sync
+from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime import (
     AgentModelConfigurationError,
     AgentModelTurn,
@@ -61,6 +62,7 @@ from services.runtime_files.models import (
 )
 from services.runtime_files.execution_models import (
     ExecutionAuthorizationStatus,
+    TaskRecord,
 )
 from services.specialist_tools import SpecialistToolResult
 
@@ -249,7 +251,12 @@ def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
     assert "file_id=null" in _specialist_tool_recovery("ai_edit")
 
 
-def _create_project(tmp_path, *, initial_goal: str | None):
+def _create_project(
+    tmp_path,
+    *,
+    initial_goal: str | None,
+    historical_media_tasks: int = 0,
+):
     services = CreatorFileServices.create(tmp_path.resolve())
 
     def initialize(staged_root) -> None:
@@ -267,6 +274,20 @@ def _create_project(tmp_path, *, initial_goal: str | None):
                 "client-initial" if initial_goal is not None else None
             ),
         )
+        for index in range(historical_media_tasks):
+            task = TaskRecord(
+                task_id=f"historical-media-{index}",
+                project_id=PROJECT_ID,
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.SUCCEEDED,
+                request_fingerprint=f"historical-{index}",
+            )
+            task_root = staged_root / "runtime" / "tasks" / task.task_id
+            task_root.mkdir(parents=True)
+            (task_root / "task.json").write_text(
+                task.model_dump_json(),
+                encoding="utf-8",
+            )
 
     project = Project.new(project_id=PROJECT_ID, name="Initial")
     project.visual.entities.items["hero"] = VisualEntity(
@@ -2802,8 +2823,12 @@ def test_completion_resume_preserves_manual_regeneration_pause(
 
 
 @pytest.fixture(name="completion_resume_runtime")
-def _completion_resume_runtime(tmp_path, monkeypatch):
-    services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
+def _completion_resume_runtime(tmp_path, monkeypatch, request):
+    services, snapshot = _create_project(
+        tmp_path,
+        initial_goal="完成短剧",
+        historical_media_tasks=getattr(request, "param", 0),
+    )
     driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
     state = {
         "generation": snapshot.generation,
@@ -2825,11 +2850,6 @@ def _completion_resume_runtime(tmp_path, monkeypatch):
         driver_module,
         "get_media_review_mode",
         lambda: "auto_approve",
-    )
-    monkeypatch.setattr(
-        driver_module,
-        "ensure_media_call_budget",
-        lambda *_args: None,
     )
     monkeypatch.setattr(
         services.projects,
@@ -3653,14 +3673,29 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
     )
 
 
-@pytest.mark.parametrize(
-    "reason",
-    ["no_committed_progress", "media_budget_exhausted"],
-)
-def test_yolo_pause_reasons_are_durable_not_new_model_requests(
+@pytest.mark.parametrize("completion_resume_runtime", [250], indirect=True)
+def test_yolo_resumes_after_many_historical_media_tasks(
+    completion_resume_runtime,
+):
+    _services, driver, state = completion_resume_runtime
+    history = driver.executions.list_tasks(PROJECT_ID)
+    assert len(history) == 250
+    assert all(task.kind is TaskKind.IMAGE_GENERATION for task in history)
+
+    messages = _queue_completion_resume(driver)
+
+    assert state["wakes"] == [PROJECT_ID]
+    assert messages[-1].source == driver.YOLO_RESUME_SOURCE
+    assert messages[-1].metadata["modelRequiredNodes"] == ["video:ep1"]
+    assert not any(
+        item.source == "creator_execution_notice" for item in messages
+    )
+    assert driver._wake.is_set()
+
+
+def test_yolo_no_progress_pause_is_durable_not_a_new_model_request(
     tmp_path,
     monkeypatch,
-    reason,
 ):
     services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
     driver = _driver(services, lambda *_args: AgentModelTurn())
@@ -3689,26 +3724,15 @@ def test_yolo_pause_reasons_are_durable_not_new_model_requests(
         "wake",
         lambda _project_id: None,
     )
-    if reason == "no_committed_progress":
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            source=driver.YOLO_RESUME_SOURCE,
-            content_parts=[{"type": "text", "text": "修正输入文本"}],
-            metadata={"projectGeneration": snapshot.generation},
-        )
-    else:
-
-        def exhausted(*_args):
-            raise driver_module.MediaCallBudgetExhausted("used budget")
-
-        monkeypatch.setattr(
-            driver_module,
-            "ensure_media_call_budget",
-            exhausted,
-        )
+    services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        source=driver.YOLO_RESUME_SOURCE,
+        content_parts=[{"type": "text", "text": "修正输入文本"}],
+        metadata={"projectGeneration": snapshot.generation},
+    )
     before = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
     asyncio.run(
         driver._queue_yolo_completion_resume(
@@ -3723,7 +3747,10 @@ def test_yolo_pause_reasons_are_durable_not_new_model_requests(
         m.message_id for m in after if m.role == "user"
     ]
     assert after[-1].source == "creator_execution_notice"
-    assert after[-1].metadata["executionPause"]["reason"] == reason
+    assert (
+        after[-1].metadata["executionPause"]["reason"]
+        == "no_committed_progress"
+    )
     assert not driver._wake.is_set()
 
 

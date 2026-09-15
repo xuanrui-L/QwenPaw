@@ -1059,8 +1059,6 @@
     "generate": "生成",
     "productionProgress": "制作进度 {{done}}/{{total}}",
     "parallel": "并行 {{count}}",
-    "mediaCallBudgetTitle": "已发起的付费媒体生成调用次数 / 项目上限（可在配置 agent_runtime.media_call_budget 调整）",
-    "mediaCalls": "媒体调用 {{used}}/{{budget}}",
     "progress": "进度 {{done}}/{{total}}",
     "failed": "失败 {{count}}",
     "listSeparator": "、",

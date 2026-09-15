@@ -117,10 +117,6 @@ from services.runtime_files.errors import (
     RecordNotFoundError,
 )
 from services.runtime_files.atomic_store import atomic_replace_bytes
-from services.media_files.call_budget import (
-    MediaCallBudgetExhausted,
-    ensure_media_call_budget,
-)
 from services.media_files.live_operation import (
     LiveOperationError,
     LiveOperationRun,
@@ -4003,7 +3999,6 @@ class FileCreatorAgentRuntime:
             self.services,
             self.executions,
             project_id,
-            check_media_budget=False,
         )
         selected = [
             node
@@ -4059,14 +4054,6 @@ class FileCreatorAgentRuntime:
                 )
             else:
                 plans.append(requested_work_node(snapshot, node))
-        if any(
-            plan.node.kind not in {"compose", "interaction"} for plan in plans
-        ):
-            await asyncio.to_thread(
-                ensure_media_call_budget,
-                self.services,
-                project_id,
-            )
         common = {
             "runId": run_id,
             "parentRunId": run_id,
@@ -4204,8 +4191,6 @@ class FileCreatorAgentRuntime:
                     self.services,
                     self.executions,
                     project_id,
-                    check_media_budget=node.kind
-                    not in {"compose", "interaction"},
                     confirmed_project_etag=confirmed_project_etag,
                     confirmed_node_id=confirmed_node_id,
                 )
@@ -8249,30 +8234,6 @@ class FileCreatorAgentRuntime:
         # spend a model turn: the scheduler fans out READY media nodes.
         if auto_approve:
             self.work_scheduler.wake(project_id)
-            try:
-                await asyncio.to_thread(
-                    ensure_media_call_budget,
-                    self.services,
-                    project_id,
-                )
-            except MediaCallBudgetExhausted as exc:
-                # A spent wallet fuse paralyzes every media path — a resume
-                # would only make the model walk into the same wall.
-                logger.warning(
-                    "YOLO auto-resume stopped for %s: %s",
-                    project_id,
-                    exc,
-                )
-                await self._notify_auto_resume_paused(
-                    project_id=project_id,
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    reason="media_budget_exhausted",
-                    explanation="本项目的媒体生成次数已达到上限，需要先调整生成预算。",
-                    unfinished=[node.label for node in unfinished_nodes],
-                )
-                return
         deterministic_failures = (
             self.work_scheduler.deterministic_failure_nodes_for_project(
                 project_id,

@@ -65,7 +65,6 @@ function model(
       nodes,
       counts: {},
       mediaCalls: 0,
-      mediaCallBudget: 100,
     },
   });
 }

@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 
 from domain.errors import NotFoundError, ValidationError
 from models.config import (
-    get_media_call_budget,
     get_image_model_name,
     get_video_model_name,
 )
@@ -63,9 +62,7 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
         "manualHold": hold.payload(),
         "generation": graph.generation,
         "counts": graph.counts(),
-        # Honest spend metric: billable provider calls, never estimated money.
         "mediaCalls": media_call_count(services, project_id),
-        "mediaCallBudget": get_media_call_budget(),
         "nodes": [
             {
                 "id": node.node_id,

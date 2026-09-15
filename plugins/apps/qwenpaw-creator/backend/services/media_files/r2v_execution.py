@@ -76,7 +76,6 @@ from services.project_files.models import (
     S2VCreation,
     T2VCreation,
 )
-from services.media_files.call_budget import ensure_media_call_budget
 from services.media_files.publication_retry import (
     commit_with_lock_retry,
     record_materialized_result,
@@ -5599,9 +5598,6 @@ async def execute_file_r2v_command(
     idempotency_key: str,
     expected_object_versions: Sequence[str] = (),
 ) -> FileR2VDispatch:
-    # Wallet fuse: every dispatch path (specialist delegation, work-graph
-    # scheduler, manual retry) funnels through here.
-    ensure_media_call_budget(services, project_id)
     return await file_r2v_execution_service(services).dispatch(
         project_id=project_id,
         target_ref=target_ref,
@@ -5622,9 +5618,6 @@ async def execute_file_s2v_command(
 ) -> FileR2VDispatch:
     """Digital-human (wan2.2-s2v) dispatch through the R2V durable poller."""
 
-    # Same wallet fuse as the r2v/image entry points: the scheduler now
-    # auto-dispatches s2v nodes with no per-call human authorization.
-    ensure_media_call_budget(services, project_id)
     return await file_r2v_execution_service(services).dispatch(
         project_id=project_id,
         target_ref=target_ref,

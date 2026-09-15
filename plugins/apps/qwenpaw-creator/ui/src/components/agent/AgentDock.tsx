@@ -81,6 +81,7 @@ import {
   creatorActionEnvelope,
   deduplicateReviewFeedbackMessages,
   isReviewFeedbackMessage,
+  isUserAuthorityMessage,
   shouldRenderConversationMessage,
   toolCallPresentations,
   type CreatorActionEnvelope,
@@ -1157,6 +1158,7 @@ export default function AgentDock({
     (state) => state.setDecisionTrayCollapsed,
   );
 
+  const sessionProjectId = useCreatorSessionStore((state) => state.projectId);
   const session = useCreatorSessionStore((state) => state.session);
   const agentStatusBar = useCreatorSessionStore(
     (state) => state.agentStatusBar,
@@ -1322,13 +1324,60 @@ export default function AgentDock({
   const stickBottom = useRef(true);
   const previousPendingAuthorizationCount = useRef(0);
   const lastOpenedFileReviewToken = useRef<string | null>(null);
-  const lastOpenedExecutionPause = useRef<string | null>(null);
+  const openedExecutionPauses = useRef(new Set<string>());
   const resizeRef = useRef<{
     startX: number;
     startY: number;
     startW: number;
     startH: number;
   } | null>(null);
+
+  const activeExecutionPause = useMemo(() => {
+    if (
+      sessionProjectId !== projectId ||
+      session?.projectId !== projectId ||
+      !activeConversationId ||
+      streaming ||
+      session.status === "WAITING_RUNTIME" ||
+      queued.some((item) => item.state !== "failed")
+    )
+      return null;
+    // The store loads messages for the current session/conversation and clears
+    // them on a switch. Later runtime rows or summaries do not end a pause.
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const notice = messages[index];
+      if (isUserAuthorityMessage(notice)) break;
+      const pause = recordValue(notice.metadata.executionPause);
+      if (
+        notice.role !== "assistant" ||
+        notice.source !== "creator_execution_notice" ||
+        !pause ||
+        pause.reason === "media_budget_exhausted"
+      )
+        continue;
+      const text = conversationContent(notice, project)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .filter(Boolean)
+        .join("\n\n");
+      return text
+        ? {
+            key: `${projectId}:${session.id}:${activeConversationId}:${notice.messageId}`,
+            text,
+          }
+        : null;
+    }
+    return null;
+  }, [
+    activeConversationId,
+    messages,
+    project,
+    projectId,
+    queued,
+    session,
+    sessionProjectId,
+    streaming,
+    t,
+  ]);
 
   const orderedMessages = useMemo(() => {
     const nextMessageSeq = (messages.at(-1)?.messageSeq ?? 0) + 1;
@@ -1591,19 +1640,15 @@ export default function AgentDock({
   }, [fileReviews, pendingFileReviewCount, setOpen]);
 
   useEffect(() => {
-    const notice = messages.at(-1);
     if (
-      session?.projectId !== projectId ||
-      notice?.source !== "creator_execution_notice" ||
-      !notice.metadata.executionPause
+      !activeExecutionPause ||
+      openedExecutionPauses.current.has(activeExecutionPause.key)
     )
       return;
-    const token = `${projectId}:${notice.messageId}`;
-    if (lastOpenedExecutionPause.current === token) return;
-    lastOpenedExecutionPause.current = token;
+    openedExecutionPauses.current.add(activeExecutionPause.key);
     stickBottom.current = true;
     setOpen(true);
-  }, [messages, projectId, session?.projectId, setOpen]);
+  }, [activeExecutionPause, setOpen]);
 
   useEffect(() => {
     const stored = loadDockSize(sidebar);
@@ -2242,6 +2287,20 @@ export default function AgentDock({
           </div>
 
           <AgentProgressOverview projectId={projectId} />
+
+          {activeExecutionPause && (
+            <div
+              key={activeExecutionPause.key}
+              data-agent-execution-pause
+              role="alert"
+              tabIndex={0}
+              className="mx-4 mt-3 max-h-36 shrink-0 overflow-y-auto rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-xs leading-5 text-[var(--color-text-primary)]"
+            >
+              <p className="whitespace-pre-wrap break-words">
+                {activeExecutionPause.text}
+              </p>
+            </div>
+          )}
 
           {showWorkspace && (
             <div className="max-h-56 overflow-y-auto border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/40 px-4 py-3">

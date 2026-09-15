@@ -1059,8 +1059,6 @@
     "generate": "Generate",
     "productionProgress": "Production progress {{done}}/{{total}}",
     "parallel": "Parallel {{count}}",
-    "mediaCallBudgetTitle": "Paid media generation calls issued / project budget (adjust via agent_runtime.media_call_budget)",
-    "mediaCalls": "Media calls {{used}}/{{budget}}",
     "progress": "Progress {{done}}/{{total}}",
     "failed": "Failed {{count}}",
     "listSeparator": ", ",
