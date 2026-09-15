@@ -392,3 +392,28 @@ def test_prompts_preserve_explicit_paid_image_ceiling() -> None:
         "全部图片调用上限”不足以覆盖这些 storyboard",
     ):
         assert contract in prompt
+
+
+def test_execution_guidance_explains_prompt_sync_gate(monkeypatch) -> None:
+    """A prompt-sync gate must read as sync-pending, not a review cooldown,
+    and must not promise an automatic retry (#7720 finding #1)."""
+    monkeypatch.setattr(
+        model_config,
+        "get_execution_authorization_mode",
+        lambda: model_config.EXECUTION_AUTHORIZATION_REQUIRED,
+    )
+    prompt = render_creator_system_prompt(project_id="project-guidance-test")
+    assert "promptSyncRequired" in prompt
+    assert "并非审阅冷却" in prompt
+    assert "保留现有内容并生成" in prompt
+    assert "不要声称会自动重试" in prompt
+
+    # The guidance is scoped to per-item authorization; the auto-execution
+    # branch lets the scheduler resolve prompt-sync without agent reading.
+    monkeypatch.setattr(
+        model_config,
+        "get_execution_authorization_mode",
+        lambda: model_config.EXECUTION_AUTHORIZATION_ALLOW_ALL,
+    )
+    auto = render_creator_system_prompt(project_id="project-guidance-test")
+    assert "并非审阅冷却" not in auto

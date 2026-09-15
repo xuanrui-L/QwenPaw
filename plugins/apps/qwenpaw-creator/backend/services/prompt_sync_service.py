@@ -738,6 +738,50 @@ class PromptSyncService:
             model_fingerprint=model_fingerprint,
         )
 
+    async def confirm_current(
+        self,
+        project_id: str,
+        timeline_id: str,
+        element_id: str,
+    ) -> dict:
+        """Clear the sync gate while keeping the current plan/prompts verbatim.
+
+        The user explicitly accepts the existing content as the authoritative
+        baseline instead of commissioning an AI rewrite (#7720 finding #3). No
+        proposal text is applied: the current prompts are re-validated, then
+        the sync baseline is re-stamped through the same atomic commit path as
+        accept(). Technical validation (contracts, reference existence, time
+        budget) is preserved and the separate paid-generation authorization is
+        untouched -- this only records the user's keep-current decision.
+        """
+
+        snapshot, document = await asyncio.to_thread(
+            self._read,
+            project_id,
+            timeline_id,
+            element_id,
+        )
+        references = _references(snapshot.project, element_id)
+        model_fingerprint = _model_fingerprint()
+        _validate_proposal_references(references)
+        _validate_plan(document, timeline_id, element_id)
+        # proposal=False: keep the user's own wording; enforce the technical
+        # contract/reference/time checks but never force an AI rewrite.
+        _validate_prompts(
+            document,
+            timeline_id,
+            element_id,
+            references,
+            proposal=False,
+        )
+        return await self._commit(
+            snapshot,
+            document,
+            timeline_id,
+            element_id,
+            model_fingerprint=model_fingerprint,
+        )
+
     async def _commit(
         self,
         snapshot,

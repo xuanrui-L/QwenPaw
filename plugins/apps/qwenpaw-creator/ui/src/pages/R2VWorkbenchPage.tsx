@@ -35,6 +35,7 @@ import {
 import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
 import {
   acceptPromptProposal,
+  confirmCurrentPrompts,
   createPromptProposal,
   getPromptSync,
 } from "@/api/creator/promptSync";
@@ -765,7 +766,10 @@ export function WorkbenchSurface({
   // Apply the draft and verify its synchronization before dispatching. The
   // response distinguishes an existing running task from an up-to-date result;
   // a newly dispatched request can finish only after provider execution.
-  const regenerateNode = async (kind: "storyboard" | "video") => {
+  const regenerateNode = async (
+    kind: "storyboard" | "video",
+    opts?: { keepCurrent?: boolean },
+  ) => {
     if (regenerationRequest.current) {
       message.info(t("r2v.regenRunning"));
       return;
@@ -812,31 +816,46 @@ export function WorkbenchSurface({
           sync.status === "needs_confirmation"
         ) {
           setSynchronizing(true);
-          const proposal = await createPromptProposal(
-            scope,
-            sync.suggestedSource ??
-              (sync.narrative.trim() ? "currentPlan" : "videoPrompt"),
-          );
-          // A new edit or route change cancels this generation intent before
-          // the proposal can publish. The backend also checks its saved baseline.
-          if (!isCurrent() || submittedInput !== inputSignature()) return;
-          await acceptPromptProposal(scope, proposal.proposalId);
-          if (!isCurrent()) return;
-          await pollOnce(projectId);
-          if (!isCurrent()) return;
-          submittedInput = inputSignature();
-          sync = await getPromptSync(scope, undefined, kind);
-          if (!isCurrent() || submittedInput !== inputSignature()) return;
-          // Dispatch only the exact synchronized content returned by this
-          // operation; an unrelated concurrent edit must not inherit its click.
-          if (
-            sync.status !== "current" ||
-            sync.storyboardPrompt !== proposal.storyboardPrompt ||
-            sync.videoPrompt !== proposal.videoPrompt ||
-            sync.narrative !== proposal.narrative
-          )
-            throw new Error(t("r2v.sync.changedBeforeGeneration"));
-          setSynchronizing(false);
+          if (opts?.keepCurrent) {
+            // Keep the user's existing plan/prompts verbatim; only re-stamp the
+            // sync baseline so the gate clears without an AI rewrite (#7720).
+            await confirmCurrentPrompts(scope);
+            if (!isCurrent()) return;
+            await pollOnce(projectId);
+            if (!isCurrent()) return;
+            submittedInput = inputSignature();
+            sync = await getPromptSync(scope, undefined, kind);
+            if (!isCurrent() || submittedInput !== inputSignature()) return;
+            if (sync.status !== "current")
+              throw new Error(t("r2v.sync.changedBeforeGeneration"));
+            setSynchronizing(false);
+          } else {
+            const proposal = await createPromptProposal(
+              scope,
+              sync.suggestedSource ??
+                (sync.narrative.trim() ? "currentPlan" : "videoPrompt"),
+            );
+            // A new edit or route change cancels this generation intent before
+            // the proposal can publish. The backend also checks its saved baseline.
+            if (!isCurrent() || submittedInput !== inputSignature()) return;
+            await acceptPromptProposal(scope, proposal.proposalId);
+            if (!isCurrent()) return;
+            await pollOnce(projectId);
+            if (!isCurrent()) return;
+            submittedInput = inputSignature();
+            sync = await getPromptSync(scope, undefined, kind);
+            if (!isCurrent() || submittedInput !== inputSignature()) return;
+            // Dispatch only the exact synchronized content returned by this
+            // operation; an unrelated concurrent edit must not inherit its click.
+            if (
+              sync.status !== "current" ||
+              sync.storyboardPrompt !== proposal.storyboardPrompt ||
+              sync.videoPrompt !== proposal.videoPrompt ||
+              sync.narrative !== proposal.narrative
+            )
+              throw new Error(t("r2v.sync.changedBeforeGeneration"));
+            setSynchronizing(false);
+          }
         }
       }
       // This endpoint can remain pending through the provider execution.
@@ -1943,6 +1962,22 @@ export function WorkbenchSurface({
                       })
                     }
                   />
+                  <div className="mt-2 flex justify-end">
+                    <Button
+                      size="small"
+                      disabled={
+                        patching ||
+                        synchronizing ||
+                        regeneratingNode === `storyboard:${element.element_id}`
+                      }
+                      onClick={() =>
+                        void regenerateNode("storyboard", { keepCurrent: true })
+                      }
+                      className="!text-[11px]"
+                    >
+                      {t("r2v.keepCurrentAndGenerate")}
+                    </Button>
+                  </div>
                 </div>
               </div>
 

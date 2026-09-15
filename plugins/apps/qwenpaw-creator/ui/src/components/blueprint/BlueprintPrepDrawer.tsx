@@ -14,6 +14,7 @@ import {
   getAssetVersionMediaUrl,
 } from "@/api/creator";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
+import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import {
   isVoiceOnlyVisualEntity,
@@ -21,6 +22,10 @@ import {
   type ResolvedSlot,
 } from "@/selectors/blueprintSelectors";
 import { visualVariantLabel } from "@/lib/visualVariants";
+import {
+  findPendingReviewForVersion,
+  pendingUserReviewOperations,
+} from "@/lib/fileProjectReviewDecisions";
 import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
 import { nodeGenerating } from "@/lib/generationActivity";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
@@ -146,6 +151,19 @@ function VisualDetail({
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
   const pollOnce = useProjectSnapshotStore((state) => state.pollOnce);
+  const reviews = useFileProjectReviewStore((state) => state.reviews);
+  const decideReview = useFileProjectReviewStore((state) => state.decide);
+  const reviewDecisionInFlight = useFileProjectReviewStore(
+    (state) => state.decisionInFlight,
+  );
+  // The automated creative-review that gates this exact design image, if any.
+  // Let the user accept the chosen version here instead of only from the
+  // decision card (#7720): resolving it clears the media review-admission block
+  // while leaving technical validation and paid-generation authorization intact.
+  const gatingReview = useMemo(
+    () => findPendingReviewForVersion(reviews, displayedVersionId),
+    [reviews, displayedVersionId],
+  );
 
   const regenerate = () => {
     if (!regenerateNodeId) return;
@@ -182,6 +200,26 @@ function VisualDetail({
     } catch (error) {
       message.error(
         t("blueprint.promptSaveFailed", { detail: (error as Error).message }),
+      );
+    }
+  };
+
+  const acceptGatingReview = async () => {
+    if (!gatingReview) return;
+    const items = pendingUserReviewOperations(gatingReview).map(
+      (operation) => ({
+        operation_id: operation.operation_id,
+        decision: "ACCEPT" as const,
+      }),
+    );
+    if (items.length === 0) return;
+    try {
+      await decideReview(projectId, gatingReview.review_id, items);
+      message.success(t("blueprint.designAccepted"));
+      void pollOnce(projectId);
+    } catch (error) {
+      message.error(
+        t("blueprint.designAcceptFailed", { detail: (error as Error).message }),
       );
     }
   };
@@ -309,9 +347,25 @@ function VisualDetail({
           />
         )}
         <div className="mt-auto flex items-center gap-2 pt-1">
-          <span className="text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
-            {t("blueprint.visualApproveHint")}
-          </span>
+          {gatingReview ? (
+            <>
+              <button
+                type="button"
+                disabled={reviewDecisionInFlight}
+                onClick={() => void acceptGatingReview()}
+                className="shrink-0 rounded-md bg-[var(--color-text-primary)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-bg-primary)] disabled:opacity-50"
+              >
+                {t("blueprint.acceptThisDesign")}
+              </button>
+              <span className="text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
+                {t("blueprint.acceptThisDesignHint")}
+              </span>
+            </>
+          ) : (
+            <span className="text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
+              {t("blueprint.visualApproveHint")}
+            </span>
+          )}
         </div>
       </div>
     </div>

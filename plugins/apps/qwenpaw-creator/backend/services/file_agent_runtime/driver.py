@@ -4009,6 +4009,14 @@ class FileCreatorAgentRuntime:
                         "targetRef": node.target_ref,
                         "status": "BLOCKED",
                         "reason": blocked[node.node_id],
+                        # Surface the precise gate instead of a bare GATED so the
+                        # agent stops misattributing it to a review timeout and
+                        # promising a retry that was never queued (#7720 finding
+                        # #1): `missing` carries the human-readable blocker (e.g.
+                        # "分镜内容与提示词待同步") and promptSyncRequired marks the
+                        # plan/prompt synchronization gate.
+                        "missing": list(node.missing),
+                        "promptSyncRequired": node.prompt_sync_required,
                     },
                 )
             else:
@@ -4148,7 +4156,7 @@ class FileCreatorAgentRuntime:
                     }
                 current_node = current_graph.by_id.get(node.node_id)
                 if current_node is None or node.node_id in current_blocked:
-                    return {
+                    blocked_item = {
                         **identity,
                         "status": "BLOCKED",
                         "reason": current_blocked.get(
@@ -4156,6 +4164,16 @@ class FileCreatorAgentRuntime:
                             "INPUTS_NOT_READY",
                         ),
                     }
+                    # Mirror the pre-dispatch item (#7720 finding #1): a node
+                    # gated after approval must still name its precise gate,
+                    # not a bare reason the agent misreads as a cooldown.
+                    # A vanished node has no fields left to read.
+                    if current_node is not None:
+                        blocked_item["missing"] = list(current_node.missing)
+                        blocked_item[
+                            "promptSyncRequired"
+                        ] = current_node.prompt_sync_required
+                    return blocked_item
                 current_plan = requested_work_node(fresh, current_node)
                 if (
                     current_plan.fingerprint != plan.fingerprint
