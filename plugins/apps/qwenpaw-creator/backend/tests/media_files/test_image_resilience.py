@@ -826,13 +826,7 @@ def _execute_safety(service, *, key, reference_urls=()):
     )
 
 
-def test_safety_rejection_blocks_verbatim_refs_until_dropped(
-    tmp_path,
-    monkeypatch,
-):
-    """The refusal names the refs it saw, resending the same refs is
-    intercepted locally, and dropping them unblocks generation."""
-
+def _safety_services(tmp_path, monkeypatch):
     services = _services(tmp_path, monkeypatch)
     # Exercise the generic image safety fence. Storyboard references now
     # belong to the persisted project order and reject inline overrides.
@@ -864,28 +858,79 @@ def test_safety_rejection_blocks_verbatim_refs_until_dropped(
         origin=ChangeOrigin.FRONTEND_EDIT,
         review_policy=ReviewPolicy.AUTO_FIX,
     )
-    provider = _CountingProvider(fail_with=_SAFETY_MESSAGE)
+    return services
+
+
+@pytest.mark.parametrize("repair", ["prompt", "references"])
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        _SAFETY_MESSAGE,
+        "Green net check failed for text (input): Input data may contain inappropriate content",
+    ],
+)
+def test_safety_rejection_blocks_unchanged_inputs_and_accepts_repairs(
+    tmp_path,
+    monkeypatch,
+    repair,
+    refusal,
+):
+    services = _safety_services(tmp_path, monkeypatch)
+    provider = _CountingProvider(fail_with=refusal)
     service = FileImageExecutionService(services, provider=provider)
 
     with pytest.raises(ModelError) as caught:
         _execute_safety(service, key="k1", reference_urls=[_PHOTO_URL])
     message = str(caught.value)
     assert _PHOTO_URL in message
-    assert "仅修改 prompt 的重试不会成功" in message
+    assert "若指出输入文本" in message
+    assert "不能认定参考图" in message
     assert caught.value.retryable is False
     assert provider.calls == 1
 
-    # Reworded prompt, identical refs, fresh idempotency key: the provider
-    # must not be consulted again.
+    # A new request id alone does not fix the input or spend another call.
     with pytest.raises(ConflictError, match="已本地拦截"):
         _execute_safety(service, key="k2", reference_urls=[_PHOTO_URL])
     assert provider.calls == 1
+    failed = service.executions.list_tasks(PROJECT_ID)
+    assert any(
+        "已本地拦截" in task.error["message"] for task in failed if task.error
+    )
 
-    # Same service, refs removed: the local block must not apply.
+    # An actual prompt repair must reach the model even with identical refs.
+    if repair == "prompt":
+        base = services.projects.read(PROJECT_ID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["visual"]["entities"]["items"]["illustration"]["variants"][
+            "items"
+        ]["default"]["prompt"] = "原创动画成年角色，灰色便服，中性站姿"
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin=ChangeOrigin.FRONTEND_EDIT,
+            review_policy=ReviewPolicy.AUTO_FIX,
+        )
     provider._fail_with = None  # pylint: disable=protected-access
-    result = _execute_safety(service, key="k3")
+    result = _execute_safety(
+        service,
+        key="k3",
+        reference_urls=[_PHOTO_URL] if repair == "prompt" else [],
+    )
     assert result.artifact_version_id
     assert provider.calls == 2
+
+
+def test_unchanged_text_only_refusal_is_also_locally_blocked(
+    tmp_path, monkeypatch
+):
+    services = _safety_services(tmp_path, monkeypatch)
+    provider = _CountingProvider(fail_with=_SAFETY_MESSAGE)
+    service = FileImageExecutionService(services, provider=provider)
+    with pytest.raises(ModelError):
+        _execute_safety(service, key="text-first")
+    with pytest.raises(ConflictError, match="已本地拦截"):
+        _execute_safety(service, key="text-repeat")
+    assert provider.calls == 1
 
 
 def _snapshot(*, variants: dict | None) -> ProjectSnapshot:

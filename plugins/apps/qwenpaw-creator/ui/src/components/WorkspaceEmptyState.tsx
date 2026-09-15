@@ -1,11 +1,19 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { BookOpen, FolderOpen, Layers3, Palette, Search } from "lucide-react";
+import {
+  BookOpen,
+  FolderOpen,
+  GitBranch,
+  Layers3,
+  Palette,
+  Search,
+} from "lucide-react";
 import { useAgentWorkingState } from "@/selectors/agentWorkingSelectors";
 import AgentActivityIndicator from "@/components/agent/AgentActivityIndicator";
 
 type WorkspaceArea =
   | "blueprint"
+  | "interactive"
   | "script"
   | "episodes"
   | "assets"
@@ -13,6 +21,7 @@ type WorkspaceArea =
   | "research";
 const icons = {
   blueprint: BookOpen,
+  interactive: GitBranch,
   script: BookOpen,
   episodes: Layers3,
   assets: FolderOpen,

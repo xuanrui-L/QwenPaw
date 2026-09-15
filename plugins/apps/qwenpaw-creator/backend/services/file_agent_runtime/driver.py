@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -117,10 +117,6 @@ from services.runtime_files.errors import (
     RecordNotFoundError,
 )
 from services.runtime_files.atomic_store import atomic_replace_bytes
-from services.media_files.call_budget import (
-    MediaCallBudgetExhausted,
-    ensure_media_call_budget,
-)
 from services.media_files.live_operation import (
     LiveOperationError,
     LiveOperationRun,
@@ -208,6 +204,11 @@ from .notifications import (
     RuntimeNotificationBus,
 )
 from .prompts import render_creator_system_prompt
+from .production_status import (
+    node_feedback,
+    production_evidence,
+    production_summary,
+)
 from .run_store import AgentRunStateConflict, CreatorAgentRunStore
 from .work_graph import WorkNodeStatus, derive_work_graph
 from .model_context import compact_conversation_history
@@ -3286,6 +3287,9 @@ class FileCreatorAgentRuntime:
         tool_call_count = 0
         review_ids: list[str] = []
         waiting_review_summary: str | None = None
+        production_turn = request.source == self.YOLO_RESUME_SOURCE
+        production_node_ids: set[str] = set()
+        production_receipt = ""
         malformed_jq_attempts = 0
         malformed_jq_fingerprints: set[str] = set()
         deterministic_failure_counts: dict[str, int] = {}
@@ -3460,7 +3464,7 @@ class FileCreatorAgentRuntime:
                 # and resume contract. Suppress the model's free-form final
                 # CTA so it cannot ask the user to send "continue"; the
                 # canonical review summary is emitted after the turn ends.
-                if review_ids:
+                if review_ids or production_turn:
                     return
                 await persist_message_delta("text", delta)
 
@@ -3580,6 +3584,23 @@ class FileCreatorAgentRuntime:
                     usage=turn.usage,
                 )
                 await persist_message_delta("text", canonical_summary)
+            elif not turn.tool_calls and production_turn:
+                evidence = await self._production_evidence(
+                    project_id,
+                    production_node_ids,
+                )
+                canonical_summary = production_summary(
+                    evidence,
+                    production_receipt,
+                )
+                turn = AgentModelTurn(
+                    content=canonical_summary,
+                    thinking=turn.thinking,
+                    provider_message_id=turn.provider_message_id,
+                    finish_reason=turn.finish_reason,
+                    usage=turn.usage,
+                )
+                await persist_message_delta("text", canonical_summary)
             await self._persist_assistant_turn(
                 project_id,
                 session_id,
@@ -3607,6 +3628,8 @@ class FileCreatorAgentRuntime:
 
             for call in turn.tool_calls:
                 tool_call_count += 1
+                if call.name == REQUEST_WORKGRAPH_EXECUTION:
+                    production_turn = True
                 tool_failed = False
                 malformed_budget_exhausted = False
                 repeated_failure_exhausted = False
@@ -3780,6 +3803,13 @@ class FileCreatorAgentRuntime:
                             and candidate_summary.strip()
                         ):
                             waiting_review_summary = candidate_summary
+                    if call.name == REQUEST_WORKGRAPH_EXECUTION:
+                        production_receipt = str(result.get("summary") or "")
+                        production_node_ids.update(
+                            item["nodeId"]
+                            for item in result.get("items", [])
+                            if item.get("nodeId")
+                        )
                     await self._persist_tool_result(
                         project_id,
                         session_id,
@@ -3962,11 +3992,10 @@ class FileCreatorAgentRuntime:
         targets, kinds = parse_request_targets(arguments, project_id)
         fence = _EpochFence(self, project_id, run_id, epoch)
         fence.assert_alive()
-        snapshot, _, graph, blocked = await ready_request_context(
+        snapshot, request_tasks, graph, blocked = await ready_request_context(
             self.services,
             self.executions,
             project_id,
-            check_media_budget=False,
         )
         selected = [
             node
@@ -4005,6 +4034,7 @@ class FileCreatorAgentRuntime:
             elif node.node_id in blocked:
                 items.append(
                     {
+                        **node_feedback(node, graph),
                         "nodeId": node.node_id,
                         "targetRef": node.target_ref,
                         "status": "BLOCKED",
@@ -4013,12 +4043,6 @@ class FileCreatorAgentRuntime:
                 )
             else:
                 plans.append(requested_work_node(snapshot, node))
-        if any(plan.node.kind != "compose" for plan in plans):
-            await asyncio.to_thread(
-                ensure_media_call_budget,
-                self.services,
-                project_id,
-            )
         common = {
             "runId": run_id,
             "parentRunId": run_id,
@@ -4054,6 +4078,7 @@ class FileCreatorAgentRuntime:
 
         async def execute_one(plan):
             node = plan.node
+            task_id = None
             is_compose = node.kind == "compose"
             identity = {"nodeId": node.node_id, "targetRef": node.target_ref}
             provider, model = (
@@ -4061,8 +4086,13 @@ class FileCreatorAgentRuntime:
                 if is_compose
                 else _execution_provider_model(plan.spec, plan.parameters)
             )
-            dispatch_fingerprint = self.work_scheduler._ledger_fingerprint(
-                node,
+            dispatch_fingerprint = (
+                self.work_scheduler.manual_retry_fingerprint(
+                    node,
+                    request_tasks,
+                )
+                if node.kind == "interaction"
+                else self.work_scheduler._ledger_fingerprint(node)
             )
             key = (
                 f"dag-{node.node_id}-"
@@ -4116,7 +4146,6 @@ class FileCreatorAgentRuntime:
                     self.services,
                     self.executions,
                     project_id,
-                    check_media_budget=not is_compose,
                 )
                 # An already admitted slot must never enter the image
                 # executor's paid transient-retry slot search a second time.
@@ -4167,7 +4196,16 @@ class FileCreatorAgentRuntime:
                         )
                         != (provider, model)
                     )
-                    or self.work_scheduler._ledger_fingerprint(current_node)
+                    or (
+                        self.work_scheduler.manual_retry_fingerprint(
+                            current_node,
+                            tasks,
+                        )
+                        if current_node.kind == "interaction"
+                        else self.work_scheduler._ledger_fingerprint(
+                            current_node,
+                        )
+                    )
                     != dispatch_fingerprint
                 ):
                     return {
@@ -4225,6 +4263,7 @@ class FileCreatorAgentRuntime:
                     "taskId": task_id,
                     "executionAuthorizationId": authorization_id,
                     "outputRefs": list(task.output_refs),
+                    "error": task.error,
                 }
             except ExecutionAuthorizationBlocked as exc:
                 return {
@@ -4241,11 +4280,39 @@ class FileCreatorAgentRuntime:
                     node.node_id,
                     exc,
                 )
+                failed_task_id = task_id or getattr(
+                    exc,
+                    "creator_task_id",
+                    None,
+                )
+                if isinstance(failed_task_id, str) and failed_task_id:
+                    try:
+                        failed_task = await asyncio.to_thread(
+                            self.executions.get_task,
+                            project_id,
+                            failed_task_id,
+                        )
+                    except RecordNotFoundError:
+                        failed_task = None
+                    if failed_task is not None and failed_task.status in {
+                        TaskStatus.FAILED,
+                        TaskStatus.CANCELLED,
+                        TaskStatus.QUARANTINED,
+                    }:
+                        return {
+                            **identity,
+                            "status": failed_task.status.value,
+                            "taskId": failed_task.task_id,
+                            "executionAuthorizationId": authorization_id,
+                            "outputRefs": list(failed_task.output_refs),
+                            "error": failed_task.error,
+                        }
                 return {
                     **identity,
                     "status": "BLOCKED",
                     "reason": "EXECUTION_NOT_COMPLETED",
                     "executionAuthorizationId": authorization_id,
+                    "error": str(exc),
                 }
 
         async def await_running_compose(node):
@@ -4282,7 +4349,27 @@ class FileCreatorAgentRuntime:
             ),
             "items": items,
             "summary": summarize_workgraph_results(items),
+            "productionStatus": await self._production_evidence(
+                project_id,
+                [item["nodeId"] for item in items if item.get("nodeId")],
+            ),
         }
+
+    async def _production_evidence(
+        self,
+        project_id: str,
+        requested_node_ids=(),
+    ) -> dict[str, Any]:
+        snapshot, tasks = await asyncio.gather(
+            asyncio.to_thread(self.services.projects.read, project_id),
+            asyncio.to_thread(self.executions.list_tasks, project_id),
+        )
+        graph = derive_work_graph(
+            snapshot.project,
+            tasks=tasks,
+            media_models=(get_image_model_name(), get_video_model_name()),
+        )
+        return production_evidence(graph, snapshot.project, requested_node_ids)
 
     async def _run_mainline_character_voice(
         self,
@@ -7826,10 +7913,89 @@ class FileCreatorAgentRuntime:
     MAINLINE_RESUME_SOURCE = "mainline_resume"
     YOLO_RESUME_SOURCE = "yolo_auto_resume"
     PROMPT_CONTRACT_RESUME_SOURCE = "prompt_contract_resume"
-    # Fuse 1: never chain more unattended resumes than this since the last
-    # human message — a stuck project must fall back to a human.
     YOLO_RESUME_MAX_CONSECUTIVE = 5
+    YOLO_RESUME_MAX_UNATTENDED = 10
     PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE = 5
+
+    async def _notify_auto_resume_paused(
+        self,
+        *,
+        project_id: str,
+        session_id: str,
+        conversation_id: str,
+        run_id: str,
+        reason: str,
+        explanation: str,
+        unfinished: list[str],
+    ) -> None:
+        """Persist a visible pause once per human request/reason.
+
+        This is an assistant notice, not another user-shaped runtime request:
+        it must neither wake the model nor reset the unattended resume fuse.
+        Existing message.completed delivery also restores it after reconnect.
+        """
+        messages = await asyncio.to_thread(
+            self.sessions.list_messages,
+            project_id,
+            session_id,
+            after_seq=0,
+            limit=None,
+        )
+        automatic_sources = {
+            self.YOLO_RESUME_SOURCE,
+            self.PROMPT_CONTRACT_RESUME_SOURCE,
+            self.MAINLINE_RESUME_SOURCE,
+            NOTIFICATION_SOURCE,
+        }
+        anchor = next(
+            (
+                item.message_seq
+                for item in reversed(messages)
+                if item.role == "user" and item.source not in automatic_sources
+            ),
+            0,
+        )
+        pause_key = f"{conversation_id}:{anchor}:{reason}"
+        if any(
+            item.metadata.get("executionPauseKey") == pause_key
+            for item in messages
+        ):
+            return
+        text = "自动创作已暂停，作品尚未完成。\n\n" + explanation
+        if unfinished:
+            text += "\n\n仍待处理：" + "、".join(unfinished[:6]) + "。"
+        text += "\n已提交的后台任务仍会继续处理，可在创作总览查看结果。" "请检查并修复阻塞后，发送新的创作指令即可继续。"
+        appended = await self._persist_session_append(
+            f"{project_id}: automatic creation paused",
+            self.sessions.append_message,
+            project_id,
+            session_id,
+            conversation_id,
+            role="assistant",
+            content_parts=[{"type": "text", "text": text}],
+            source="creator_execution_notice",
+            metadata={
+                "runId": run_id,
+                "executionPauseKey": pause_key,
+                "executionPause": {
+                    "reason": reason,
+                    "unfinishedElements": unfinished,
+                },
+            },
+        )
+        await self._event(
+            project_id,
+            session_id,
+            "message.completed",
+            run_id,
+            appended.message,
+            {
+                "runId": run_id,
+                "messageId": appended.message.message_id,
+                "messageSeq": appended.message.message_seq,
+                "openActionIds": [],
+            },
+        )
 
     async def _queue_yolo_completion_resume(  # pylint: disable=too-many-return-statements
         self,
@@ -7846,8 +8012,8 @@ class FileCreatorAgentRuntime:
         proof the project reached its goal. Deterministic authored-prompt gaps
         are returned in every review mode because repairing Project text is
         free and never authorizes a media call. Other unfinished work is
-        resumed only under media_review auto_approve. Two fuses stop runaway
-        loops: a consecutive-resume cap and a no-progress breaker.
+        resumed only under media_review auto_approve. Persisted DONE evidence
+        bounds unproductive repairs independently of the unattended ceiling.
 
         ``after_failure`` covers retryable faults (empty model turns,
         transport blips): the failure itself proves the work is unfinished,
@@ -7904,38 +8070,54 @@ class FileCreatorAgentRuntime:
         # spend a model turn: the scheduler fans out READY media nodes.
         if auto_approve:
             self.work_scheduler.wake(project_id)
-            try:
-                await asyncio.to_thread(
-                    ensure_media_call_budget,
-                    self.services,
-                    project_id,
-                )
-            except MediaCallBudgetExhausted as exc:
-                # A spent wallet fuse paralyzes every media path — a resume
-                # would only make the model walk into the same wall.
-                logger.warning(
-                    "YOLO auto-resume stopped for %s: %s",
-                    project_id,
-                    exc,
-                )
-                return
-        if (
-            not after_failure
-            and auto_approve
-            and self.work_scheduler.enabled()
-            and not model_required
-            and not self.work_scheduler.deterministic_failure_nodes_for_project(
+        deterministic_failures = (
+            self.work_scheduler.deterministic_failure_nodes_for_project(
                 project_id,
             )
-        ):
+            if auto_approve
+            else {}
+        )
+        feedback_by_id = {node.node_id: node for node in model_required}
+        for node in unfinished_nodes:
+            if node.node_id in deterministic_failures and node.status not in {
+                WorkNodeStatus.RUNNING,
+                WorkNodeStatus.WAITING_REVIEW,
+            }:
+                feedback_by_id[node.node_id] = replace(
+                    node,
+                    error=deterministic_failures[node.node_id],
+                )
+        if not after_failure and automatic_regeneration and not feedback_by_id:
             # Every remaining gap is machine-dispatchable (READY/RUNNING):
             # the scheduler owns it; a resume would only burn model turns.
             return
-        feedback_nodes = (
-            model_required or unfinished_nodes
-            if auto_approve
-            else prompt_required
+        feedback_nodes = sorted(
+            (
+                (
+                    tuple(feedback_by_id.values())
+                    or (() if automatic_regeneration else unfinished_nodes)
+                )
+                if auto_approve
+                else prompt_required
+            ),
+            key=lambda node: (
+                node.node_id not in deterministic_failures,
+                not (node.error or node.status is WorkNodeStatus.FAILED),
+                node.node_id,
+            ),
         )
+        reasons = []
+        for node in feedback_nodes[:8]:
+            why = (
+                node.error
+                or "、".join(node.missing[:3])
+                or (
+                    "已有产物需更新；按当前执行方式请求重新生成，不要清除旧产物的 stale 标志"
+                    if node.status is WorkNodeStatus.STALE
+                    else "待处理"
+                )
+            )
+            reasons.append(f"{node.label}（{why}）")
         unfinished = [node.label for node in feedback_nodes]
         messages = await asyncio.to_thread(
             self.sessions.list_messages,
@@ -7955,51 +8137,125 @@ class FileCreatorAgentRuntime:
             else self.PROMPT_CONTRACT_RESUME_MAX_CONSECUTIVE
         )
         resume_streak = 0
-        last_resume_generation: int | None = None
+        unattended_resumes = 0
+        in_active_streak = True
+        last_resume = None
+        completed_before: set[str] = set()
         for item in reversed(messages):
             if item.role != "user":
-                continue
-            if item.source == active_resume_source:
-                if resume_streak == 0:
-                    generation = item.metadata.get("projectGeneration")
-                    if isinstance(generation, int):
-                        last_resume_generation = generation
-                resume_streak += 1
                 continue
             if item.source in {
                 self.YOLO_RESUME_SOURCE,
                 self.PROMPT_CONTRACT_RESUME_SOURCE,
             }:
-                # A review-mode transition starts a distinct repair streak.
-                # Paid YOLO continuation and free prompt repair must never
-                # consume one another's fuse allowance.
-                break
-            if item.source == self.MAINLINE_RESUME_SOURCE:
+                unattended_resumes += 1
+                if item.source != active_resume_source:
+                    in_active_streak = False
+                if in_active_streak:
+                    if last_resume is None:
+                        last_resume = item
+                    resume_streak += 1
+                previous = item.metadata.get("completionCheckpoint")
+                if isinstance(previous, dict) and previous.get("version") == 1:
+                    ids = previous.get("completedNodeIds")
+                    if isinstance(ids, list) and all(
+                        isinstance(i, str) for i in ids
+                    ):
+                        completed_before.update(ids)
                 continue
-            if item.source == NOTIFICATION_SOURCE:
-                # A runtime notification carries a new external fact, so it
-                # does not spend resume-fuse allowance; but it must not
-                # reset the streak either, or interleaved notifications
-                # would let resumes chain past the fuse forever.
+            if item.source in {
+                self.MAINLINE_RESUME_SOURCE,
+                NOTIFICATION_SOURCE,
+            }:
                 continue
             break
-        if resume_streak >= resume_limit:
+        previous = (
+            last_resume.metadata.get("completionCheckpoint")
+            if last_resume is not None and auto_approve
+            else None
+        )
+        checkpoint_valid = (
+            isinstance(previous, dict)
+            and previous.get("version") == 1
+            and isinstance(previous.get("completedNodeIds"), list)
+            and all(isinstance(i, str) for i in previous["completedNodeIds"])
+            and isinstance(previous.get("actionableFingerprint"), str)
+            and isinstance(previous.get("unproductiveResumes"), int)
+            and previous["unproductiveResumes"] >= 0
+        )
+        completed_now = {
+            node.node_id
+            for node in graph.nodes
+            if node.status is WorkNodeStatus.DONE
+        }
+        actionable_fingerprint = hashlib.sha256(
+            json.dumps(
+                [
+                    (
+                        node.node_id,
+                        node.status.value,
+                        sorted(node.missing),
+                        node.error,
+                        node.dispatch_fingerprint,
+                        node.regeneration_of,
+                    )
+                    for node in sorted(
+                        feedback_nodes,
+                        key=lambda node: node.node_id,
+                    )
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        ).hexdigest()[:32]
+        unproductive_resumes = resume_streak
+        no_progress = False
+        if checkpoint_valid:
+            new_done = bool(completed_now - completed_before)
+            unproductive_resumes = (
+                0 if new_done else previous["unproductiveResumes"] + 1
+            )
+            no_progress = (
+                not new_done
+                and previous["actionableFingerprint"] == actionable_fingerprint
+            )
+        elif last_resume is not None:
+            # Legacy resumes have no DONE evidence; retain their persisted fuse.
+            no_progress = (
+                last_resume.metadata.get("projectGeneration")
+                == snapshot.generation
+            )
+        checkpoint = {
+            "version": 1,
+            "completedNodeIds": sorted(completed_before | completed_now),
+            "actionableFingerprint": actionable_fingerprint,
+            "unproductiveResumes": unproductive_resumes,
+        }
+        pause_reason = None
+        if unattended_resumes >= self.YOLO_RESUME_MAX_UNATTENDED:
+            pause_reason = "unattended_budget"
+            pause_explanation = "自上次人工输入以来，已达到 10 次自动续跑上限。"
+        elif unproductive_resumes >= resume_limit:
+            pause_reason = "consecutive_resume_limit"
+            pause_explanation = "自动修复预算已耗尽，连续 5 轮续跑未确认新的节点完成进展。"
+        elif no_progress:
+            pause_reason = "no_committed_progress"
+            pause_explanation = "未检测到新的节点完成进展，待处理状态未变；已停止重复的自动修复提醒。"
+        if pause_reason is not None:
             logger.warning(
-                "%s stopped for %s: %d consecutive resumes without a "
-                "human message",
+                "%s stopped for %s: %s",
                 active_resume_source,
                 project_id,
-                resume_streak,
+                pause_reason,
             )
-            return
-        # Fuse 2: the previous auto-resume produced no committed progress,
-        # so another identical nudge would only burn model turns.
-        if last_resume_generation == snapshot.generation:
-            logger.warning(
-                "YOLO auto-resume stopped for %s: no progress since the "
-                "previous resume (generation %d)",
-                project_id,
-                snapshot.generation,
+            await self._notify_auto_resume_paused(
+                project_id=project_id,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                reason=pause_reason,
+                explanation=pause_explanation,
+                unfinished=reasons,
             )
             return
         if after_failure and auto_approve:
@@ -8011,22 +8267,10 @@ class FileCreatorAgentRuntime:
             if unfinished:
                 text += (
                     "\n以下环节尚未完成："
-                    + "、".join(unfinished[:8])
+                    + "、".join(reasons)
                     + "。Runtime 会按授权与审阅条件派发可执行任务；只有真实任务回执才表示已提交。"
                 )
         else:
-            reasons = []
-            for node in feedback_nodes[:8]:
-                why = (
-                    node.error
-                    or "、".join(node.missing[:3])
-                    or (
-                        "已有产物需更新；按当前执行方式请求重新生成，不要清除旧产物的 stale 标志"
-                        if node.status is WorkNodeStatus.STALE
-                        else "待处理"
-                    )
-                )
-                reasons.append(f"{node.label}（{why}）")
             if auto_approve:
                 text = (
                     "【系统自动消息 · YOLO 持续执行】主线回合已结束，但以下环节需要"
@@ -8074,6 +8318,11 @@ class FileCreatorAgentRuntime:
                 "modelRequiredNodes": [
                     node.node_id for node in feedback_nodes[:12]
                 ],
+                **(
+                    {"completionCheckpoint": checkpoint}
+                    if auto_approve
+                    else {}
+                ),
             },
         )
         await self.notifications.settle_resume(
@@ -9846,6 +10095,8 @@ def _execution_provider_model(
         from models.config import get_tts_model_name
 
         return "dashscope", get_tts_model_name()
+    if spec.provider_kind == "text":
+        return "text", get_text_model_name()
     if spec.provider_kind == "s2v":
         from models.config import get_s2v_model_name
 
@@ -9854,6 +10105,7 @@ def _execution_provider_model(
 
 
 _AUTHORIZATION_OPERATION_LABELS = {
+    "interaction_draft": "生成交互动效",
     "image_generation": "生成图片",
     "r2v_generation": "生成视频",
     "s2v_generation": "生成数字人视频",

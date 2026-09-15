@@ -348,6 +348,15 @@ export function creatorWorkNodeLabel(
   const kindLabel = i18n.t(kindKeys[node.kind] ?? "agentActivity.currentStage");
   const locator = node.locator ?? {};
   const timelineId = node.timelineId ?? locator.timelineId;
+  const entity = locator.assetId
+    ? project?.visual.entities.items[locator.assetId]
+    : null;
+  const variantId =
+    node.kind === "visual" && entity
+      ? entity.variants.order.find(
+          (id) => node.id === `visual:${locator.assetId}:${id}`,
+        )
+      : null;
   const ref = locator.elementId
     ? `element:${locator.elementId}`
     : locator.assetId
@@ -362,8 +371,15 @@ export function creatorWorkNodeLabel(
     : "";
   if (ref && project) {
     const objectLabel = creatorTargetLabel(ref, project);
-    if (objectLabel !== creatorTargetLabel(ref))
-      return `${objectLabel} · ${kindLabel}`;
+    if (objectLabel !== creatorTargetLabel(ref)) {
+      const state =
+        variantId && entity && entity.variants.order.length > 1
+          ? i18n.t("agentProgress.visualState", {
+              index: entity.variants.order.indexOf(variantId) + 1,
+            })
+          : null;
+      return [objectLabel, kindLabel, state].filter(Boolean).join(" · ");
+    }
   }
   const internalIds = [
     node.id,

@@ -1297,9 +1297,14 @@ export function GenerationPromptEditor({
         disabled={saving}
         onCancel={() => setEditOpen(false)}
         onDone={(next, addedReferenceIds) => {
-          setEditOpen(false);
-          if (next !== target.value || addedReferenceIds.length > 0)
-            void onSave(target, next, addedReferenceIds);
+          if (next === target.value && !addedReferenceIds.length) {
+            setEditOpen(false);
+            return;
+          }
+          // Preserve the modal draft when persistence or a CAS check fails.
+          void onSave(target, next, addedReferenceIds)
+            .then(() => setEditOpen(false))
+            .catch(() => {});
         }}
       />
     </div>

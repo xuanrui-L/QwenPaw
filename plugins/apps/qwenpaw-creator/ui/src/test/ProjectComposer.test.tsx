@@ -143,6 +143,44 @@ describe("ProjectComposer ingest boundary", () => {
     ).toBe(false);
   });
 
+  it.each([
+    [
+      "我想做一个互动式视频，要求和剧本如下：\n\n《七日夺嫡》",
+      "interactive_branching_drama",
+    ],
+    ["制作一个非常有趣的互动短剧", "interactive_branching_drama"],
+    [
+      "Create an interactive film with two endings",
+      "interactive_branching_drama",
+    ],
+    ["制作一个线性短剧，不要互动式视频", null],
+    ["Create a non-interactive video", null],
+    ["制作一部短剧，人物之间需要自然的互动", null],
+    ["制作线性剧集\n\n剧本对白：我想做互动式视频。", null],
+  ])(
+    "persists the narrative format at creation for %s",
+    async (brief, contentType) => {
+      const { calls } = installComposerMockFetch([
+        {
+          match: "/projects",
+          response: { json: created("p-format", "s-format", "c-format") },
+        },
+      ]);
+      renderComposer();
+      fill(/^例：霸道总裁短剧/, brief!);
+      fireEvent.click(screen.getByRole("button", { name: /启动 Agent/ }));
+      await waitFor(() =>
+        expect(
+          calls.find((call) => call.url.endsWith("/projects"))?.body,
+        ).toMatchObject({
+          scenario: "short_drama",
+          contentType,
+          initialGoal: brief,
+        }),
+      );
+    },
+  );
+
   it("navigates immediately and keeps ingest + first message in the background", async () => {
     let acceptMessage: (() => void) | undefined;
     const messageAccepted = new Promise<void>((resolve) => {
