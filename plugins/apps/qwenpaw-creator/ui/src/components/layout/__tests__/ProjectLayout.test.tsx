@@ -11,6 +11,7 @@ import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import {
@@ -163,6 +164,49 @@ describe("ProjectLayout visible shell", () => {
     useNavigationStore.getState().clear();
     seedProject();
   });
+
+  it.each(["resolved", "rejected"])(
+    "does not pile up authorization polls while a slow request is pending (%s)",
+    async (outcome) => {
+      installMockFetch(commonRoutes());
+      let resolveRequest!: () => void;
+      let rejectRequest!: (error: Error) => void;
+      const pending = new Promise<void>((resolve, reject) => {
+        resolveRequest = resolve;
+        rejectRequest = reject;
+      });
+      const load = vi
+        .spyOn(useExecutionAuthorizationStore.getState(), "load")
+        .mockReturnValueOnce(pending)
+        .mockResolvedValue();
+      try {
+        vi.useFakeTimers();
+        await act(async () => {
+          renderShell("slow-authorization-route");
+        });
+        expect(
+          screen.getByTestId("slow-authorization-route"),
+        ).toBeInTheDocument();
+        await act(() => vi.advanceTimersByTimeAsync(12_000));
+        act(() => {
+          document.dispatchEvent(new Event("visibilitychange"));
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+        expect(load).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          if (outcome === "resolved") resolveRequest();
+          else rejectRequest(new Error("temporary failure"));
+          await pending.catch(() => undefined);
+        });
+        await act(() => vi.advanceTimersByTimeAsync(2_000));
+        expect(load).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+        load.mockRestore();
+      }
+    },
+  );
 
   it("preserves the 58px shell and default-open 340px left AgentDock beside the Element Plan", async () => {
     const { calls } = installMockFetch(commonRoutes());

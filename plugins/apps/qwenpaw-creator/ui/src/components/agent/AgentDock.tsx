@@ -1,5 +1,6 @@
 import {
   Fragment,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,6 +14,7 @@ import type {
   ReactNode,
 } from "react";
 import { Button, Tooltip, message } from "antd";
+import { useShallow } from "zustand/react/shallow";
 import { ArrowUpOutlined, MenuFoldOutlined } from "@ant-design/icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -84,7 +86,6 @@ import {
   isUserAuthorityMessage,
   shouldRenderConversationMessage,
   toolCallPresentations,
-  type CreatorActionEnvelope,
   type ToolCallPresentation,
 } from "@/lib/creatorMessagePresentation";
 import {
@@ -391,94 +392,31 @@ function MessageParts({
   );
 }
 
-function ThinkingDisclosure({
-  children,
-  active,
-}: {
-  children: string;
-  active: boolean;
-}) {
-  const { t } = useTranslation();
-  if (!children || !active) return null;
-  // Thinking is intentionally status-only, including when legacy detail settings are enabled.
-  return (
-    <div data-agent-thinking className="agent-activity-row">
-      <AgentActivityIndicator phase="running" />
-      <span>{t("agentActivity.thinking")}</span>
-    </div>
-  );
-}
-
 function simplifyErrorMessage(_text: string): string {
   // Provider/runtime errors may contain prompts, local paths and protocol data.
   return i18n.t("agentActivity.failureHint");
 }
 
-function ActionDisclosure({
-  envelope,
-  active,
+const ConversationMessage = memo(function ConversationMessage({
+  item,
 }: {
-  envelope: CreatorActionEnvelope;
-  active: boolean;
+  item: CreatorMessage;
 }) {
-  const { t } = useTranslation();
-  const session = useCreatorSessionStore((state) => state.session);
-  const waiting =
-    envelope.action === "yield_until_runtime_event" &&
-    session?.status === "WAITING_RUNTIME";
-  if (!active && !waiting) return null;
-  return (
-    <div data-agent-action={envelope.action} className="agent-activity-row">
-      <AgentActivityIndicator phase="waiting" />
-      <span>
-        {waiting ? t("agentActivity.background") : t("agentActivity.preparing")}
-      </span>
-    </div>
-  );
-}
-
-function ConversationMessage({ item }: { item: CreatorMessage }) {
+  useTranslation();
   const project = useProjectSnapshotStore((state) => state.project);
-  const waitingForRuntime = useCreatorSessionStore(
-    (state) => state.session?.status === "WAITING_RUNTIME",
-  );
   if (isReviewFeedbackMessage(item)) return <ReviewFeedbackCard item={item} />;
   if (item.role === "tool") return null;
   const envelope =
     item.role === "assistant" ? creatorActionEnvelope(item) : null;
   const streaming = item.metadata?.streaming === true;
-  const parts =
+  const content =
     item.role === "assistant"
       ? actionAwareConversationContent(item, envelope, project)
       : conversationContent(item, project);
-  const content =
-    item.role === "assistant"
-      ? parts
-          .map((part) =>
-            part.type === "text"
-              ? {
-                  ...part,
-                  text: publicAssistantText(part.text, { streaming, project }),
-                }
-              : part,
-          )
-          .filter((part) => part.type !== "text" || part.text)
-      : parts;
-  const thinking =
-    typeof item.metadata?.providerThinking === "string"
-      ? item.metadata.providerThinking
-      : "";
-  const showThinking = !content.length && streaming && Boolean(thinking);
-  const showAction =
-    !content.length &&
-    !thinking &&
-    envelope &&
-    !(envelope.syntax === "native" && envelope.action === "tool_call") &&
-    (streaming ||
-      (envelope.action === "yield_until_runtime_event" && waitingForRuntime));
-  // A persisted tool envelope or hidden thinking has no conversation body.
-  // Do not leave an empty sibling between otherwise consecutive tool rows.
-  if (!content.length && !showThinking && !showAction) return null;
+  // Transient thinking/preparation belongs in the fixed live-status row.
+  // Inserting then removing a message for each tool round shrinks the feed
+  // and makes bottom-following scroll backwards when the result is persisted.
+  if (!content.length) return null;
   if (item.role === "user") {
     // Sent attachments must stay visible on the message itself — the
     // composer chips are consumed by the send.
@@ -523,16 +461,10 @@ function ConversationMessage({ item }: { item: CreatorMessage }) {
       data-streaming={streaming && content.length > 0}
       className="agent-assistant-message"
     >
-      {showThinking && (
-        <ThinkingDisclosure active={streaming}>{thinking}</ThinkingDisclosure>
-      )}
-      {content.length > 0 && <MessageParts parts={content} richText />}
-      {showAction && (
-        <ActionDisclosure envelope={envelope} active={streaming} />
-      )}
+      <MessageParts parts={content} richText />
     </div>
   );
-}
+});
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -1167,7 +1099,11 @@ export default function AgentDock({
   const streamingAssistantMessages = useCreatorSessionStore(
     (state) => state.streamingAssistantMessages,
   );
-  const events = useCreatorSessionStore((state) => state.events);
+  const events = useCreatorSessionStore(
+    useShallow((state) =>
+      state.events.filter((event) => !event.type.endsWith("message_delta")),
+    ),
+  );
   const queuedUi = useCreatorSessionStore((state) => state.queuedUi);
   const activeConversationId = useCreatorSessionStore(
     (state) => state.activeConversationId,
@@ -1245,6 +1181,7 @@ export default function AgentDock({
   );
   const stoppable =
     Object.values(subagentActivities).some((activity) => !activity.completed) ||
+    tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
     runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
     Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status));
   const showWorkspace = tab === "activity";
@@ -1459,6 +1396,17 @@ export default function AgentDock({
     [toolCalls],
   );
 
+  const mainThinking = useMemo(
+    () =>
+      Object.values(streamingAssistantMessages).some(
+        (item) =>
+          !item.toolCall &&
+          Object.keys(item.thinkingDeltas).length > 0 &&
+          Object.keys(item.deltas).length === 0,
+      ),
+    [streamingAssistantMessages],
+  );
+
   // Live status row above the input: derived purely on the frontend, no data
   // structures are mutated. `t` must stay in the deps: the labels come from
   // the global i18n singleton, so a runtime language switch has to recompute
@@ -1474,6 +1422,7 @@ export default function AgentDock({
         isReplaying,
         subagentActivities,
         toolCalls,
+        mainThinking,
         tasks,
         project,
         rateLimitRetry,
@@ -1488,6 +1437,7 @@ export default function AgentDock({
       isReplaying,
       subagentActivities,
       toolCalls,
+      mainThinking,
       tasks,
       project,
       rateLimitRetry,
@@ -1694,7 +1644,7 @@ export default function AgentDock({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mentionQuery, open, setOpen]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (open && feedSlot == null && scrollRef.current && stickBottom.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
@@ -2789,7 +2739,9 @@ export default function AgentDock({
                     danger
                     aria-label={t("agent.stopAllAgents")}
                     icon={<Square className="h-3 w-3 fill-current" />}
-                    disabled={stopping}
+                    disabled={
+                      stopping || session?.status === "INTERRUPT_REQUESTED"
+                    }
                     onClick={() => {
                       const stopProject = projectId;
                       const stopVersion = submissionVersion.current;
@@ -2798,8 +2750,14 @@ export default function AgentDock({
                         submissionVersion.current === stopVersion;
                       void stopAllAgents()
                         .then(() => {
-                          if (isCurrent())
-                            message.success(t("agent.stopAllSuccess"));
+                          if (isCurrent()) {
+                            if (
+                              useCreatorSessionStore.getState().session
+                                ?.status === "CANCELLED"
+                            )
+                              message.success(t("agent.stopAllSuccess"));
+                            else message.info(t("agent.stopRequested"));
+                          }
                         })
                         .catch(() => {
                           if (isCurrent())

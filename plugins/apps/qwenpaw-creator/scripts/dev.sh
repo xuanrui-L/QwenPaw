@@ -49,6 +49,9 @@ install_plugin() {
   rsync -a --exclude '__pycache__' --exclude '*.pyc' \
     "$PLUGIN_DIR/backend/" "$STAGE_DIR/backend/"
   rsync -a "$PLUGIN_DIR/ui/dist/" "$STAGE_DIR/ui/dist/"
+  mkdir -p "$STAGE_DIR/player/ivb"
+  rsync -a "$PLUGIN_DIR/player/ivb/static/" "$STAGE_DIR/player/ivb/static/"
+  node "$PLUGIN_DIR/ui/scripts/verify-package.mjs" "$STAGE_DIR"
   du -sh "$STAGE_DIR" | awk '{print "==> Staged package size: " $1}'
 
   echo "==> Installing via qwenpaw plugin install --force ..."

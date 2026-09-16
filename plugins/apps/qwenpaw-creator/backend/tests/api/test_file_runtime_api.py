@@ -13,7 +13,12 @@ from api.dependencies import creator_error_handler, project_file_services
 from api.file_execution_routes import router as execution_router
 from api.file_session_routes import router as session_router, stream_events
 from api.project_file_routes import router as project_router
-from domain.enums import SpecialistRole, TaskKind, TaskStatus
+from domain.enums import (
+    SpecialistRole,
+    SpecialistRunStatus,
+    TaskKind,
+    TaskStatus,
+)
 from domain.errors import CreatorError
 from services.project_files import frontend_edit_hold
 from services.project_files.json_pointer import hash_json_value
@@ -255,6 +260,74 @@ def test_interrupt_response_does_not_wait_for_terminal_task_cleanup(
     stopped = services.sessions.get_project_session("project-1")
     assert stopped.status.value == "CANCELLED"
     release_cleanup.set()
+
+
+@pytest.mark.parametrize(
+    "task_status", [TaskStatus.RUNNING, TaskStatus.CANCELLED]
+)
+def test_stop_cleanup_settles_media_run_after_worker_is_gone(
+    tmp_path,
+    task_status,
+) -> None:
+    from api.file_session_routes import _cancel_active_project_tasks_sync
+
+    _app_instance, services, snapshot, _bootstrap = _app(tmp_path)
+    executions = ProjectExecutionStore(services.root)
+    run = executions.create_run(
+        SpecialistRunRecord(
+            run_id="run-stopped-image",
+            project_id="project-1",
+            round_id="round-image",
+            role=SpecialistRole.R2V_GENERATION_DIRECTOR,
+            input_generation=snapshot.generation,
+            input_etag=snapshot.etag,
+            metadata={"commandType": "GENERATE_STORYBOARD_IMAGE"},
+        ),
+    )
+    executions.transition_run(
+        "project-1",
+        run.run_id,
+        expected_status=SpecialistRunStatus.QUEUED,
+        status=SpecialistRunStatus.RUNNING_MODEL,
+    )
+    executions.transition_run(
+        "project-1",
+        run.run_id,
+        expected_status=SpecialistRunStatus.RUNNING_MODEL,
+        status=SpecialistRunStatus.WAITING_RUNTIME,
+    )
+    task = executions.create_task(
+        TaskRecord(
+            task_id="task-stopped-image",
+            project_id="project-1",
+            run_id=run.run_id,
+            round_id=run.round_id,
+            input_generation=snapshot.generation,
+            input_etag=snapshot.etag,
+            kind=TaskKind.IMAGE_GENERATION,
+            request_fingerprint="stopped-image",
+        ),
+    )
+    executions.transition_task(
+        "project-1",
+        task.task_id,
+        expected_status=TaskStatus.QUEUED,
+        status=task_status,
+    )
+
+    # No worker remains to execute its finally block. Repeated stop must also
+    # repair a Task already cancelled by a previous interrupted cleanup.
+    _cancel_active_project_tasks_sync(services, "project-1")
+    _cancel_active_project_tasks_sync(services, "project-1")
+
+    assert (
+        executions.get_task("project-1", task.task_id).status
+        is TaskStatus.CANCELLED
+    )
+    stopped_run = executions.get_run("project-1", run.run_id)
+    assert stopped_run.status is SpecialistRunStatus.CANCELLED
+    assert stopped_run.final_marker == "CANCELLED"
+    assert services.projects.read("project-1").etag == snapshot.etag
 
 
 def test_message_history_pages_backward_with_tail_and_before(

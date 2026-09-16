@@ -152,6 +152,7 @@ export default function ProjectLayout() {
     (state) => state.refreshSession,
   );
   const disconnect = useCreatorSessionStore((state) => state.disconnect);
+  const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const sessionActive = useCreatorSessionStore(
     (state) =>
       state.projectId === id &&
@@ -278,15 +279,22 @@ export default function ProjectLayout() {
     if (!id) return;
     const authorizationStore = useExecutionAuthorizationStore.getState();
     authorizationStore.bindProject(id);
+    let request: Promise<void> | null = null;
     const poll = () => {
-      void useExecutionAuthorizationStore
+      if (request) return request;
+      request = useExecutionAuthorizationStore
         .getState()
         .load(id)
-        .catch(() => undefined);
+        .catch(() => undefined)
+        .finally(() => {
+          request = null;
+        });
+      return request;
     };
     poll();
     // Every poll holds the shared project lock; slower, visibility-aware
-    // ticks keep the reader stream from starving project writers.
+    // ticks keep the reader stream from starving project writers. Join slow
+    // reads instead of adding another request on every interval/focus event.
     const stop = startVisiblePolling(poll, 2_000);
     return () => {
       stop();
@@ -345,6 +353,9 @@ export default function ProjectLayout() {
     );
     if (!pendingEvents.length) return;
     lastConsumedEvent.current = pendingEvents.at(-1)!.seq;
+    // Bootstrap loads current production/review state independently. Replaying
+    // old lifecycle events must not keep re-fetching expensive current graphs.
+    if (isReplaying) return;
     pendingEvents.forEach((event) =>
       useCreatorTaskViewStore.getState().consumeEvent(event),
     );
@@ -401,7 +412,14 @@ export default function ProjectLayout() {
     // useFileProjectReviewStore.  Runtime events can refresh Session/Task
     // projections, but must never be interpreted as legacy Transaction IDs or
     // trigger requests to the removed Transaction/Review API.
-  }, [events, id, location.key, refreshSession, refreshProduction]);
+  }, [
+    events,
+    id,
+    isReplaying,
+    location.key,
+    refreshSession,
+    refreshProduction,
+  ]);
 
   useEffect(() => {
     if (!pendingReviewNavigation?.ready || fileReviewSyncStatus !== "healthy")

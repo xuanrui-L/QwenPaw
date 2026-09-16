@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import AgentDock from "@/components/agent/AgentDock";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
+import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
@@ -20,6 +21,7 @@ import {
   evt,
   makePendingAuthorization,
   makeReviewRecord,
+  makeRun,
   msg,
   seedCreatorSession,
 } from "@/test/agentFixtures";
@@ -502,6 +504,76 @@ describe("AgentDock public output and interactions", () => {
     expect(document.body).not.toHaveTextContent("SECRET_THINKING");
   });
 
+  it("keeps transient thinking out of the conversation through tool-result persistence", () => {
+    useAgentDockUiStore.getState().setOpen(true);
+    const narration = asst({
+      messageId: "narration",
+      text: "我先检查当前剧本。",
+    });
+    seedSession("RUNNING", {
+      messages: [narration],
+      streamingAssistantMessages: {
+        reasoning: {
+          messageId: "reasoning",
+          firstEventSeq: 10,
+          deltas: {},
+          thinkingDeltas: { 0: "PRIVATE_REASONING" },
+          createdAt: "now",
+        },
+      },
+    });
+    renderDock();
+    const flow = document.querySelector("[data-agent-response-flow]")!;
+    const liveStatus = document.querySelector("[data-agent-live-status]")!;
+    expect(flow.children).toHaveLength(1);
+    expect(liveStatus).toHaveTextContent("正在思考");
+
+    const progress = evt("agent.tool_progress", 11, {
+      toolCallId: "read-plan",
+      tool: "read_project",
+    });
+    const started = evt("agent.tool_started", 12, {
+      toolCallId: "read-plan",
+      tool: "read_project",
+    });
+    act(() => useCreatorSessionStore.setState({ events: [progress, started] }));
+    expect(flow.children).toHaveLength(2);
+    expect(flow).not.toHaveTextContent("正在思考");
+    expect(liveStatus).toHaveTextContent("处理中");
+
+    // The durable envelope arrives later, with the reasoning placeholder
+    // cleared in the same publication. No temporary row may disappear.
+    act(() =>
+      useCreatorSessionStore.setState({
+        streamingAssistantMessages: {},
+        messages: [
+          narration,
+          asst({
+            messageId: "read-plan-message",
+            messageSeq: 3,
+            text: "",
+            metadata: {
+              actionId: "read-plan",
+              toolCall: { id: "read-plan", name: "read_project" },
+            },
+          }),
+        ],
+        events: [
+          progress,
+          started,
+          evt("agent.tool_completed", 13, {
+            toolCallId: "read-plan",
+            tool: "read_project",
+          }),
+        ],
+      }),
+    );
+    expect(flow.children).toHaveLength(2);
+    expect(flow.querySelectorAll("[data-agent-tool]")).toHaveLength(1);
+    expect(flow).toHaveTextContent("已完成");
+    expect(document.body).not.toHaveTextContent("PRIVATE_REASONING");
+  });
+
   it("shows public waiting narration without internal wait reasons or identifiers", () => {
     useAgentDockUiStore.getState().setOpen(true);
     seedSession("WAITING_RUNTIME", {
@@ -919,6 +991,81 @@ describe("AgentDock public output and interactions", () => {
     expect(
       calls.find((call) => call.url.includes("/projects/p1/interrupt"))?.method,
     ).toBe("POST");
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().stopping).toBe(false),
+    );
+    expect(stop).toBeDisabled();
+    fireEvent.click(stop);
+    expect(
+      calls.filter((call) => call.url.includes("/interrupt")),
+    ).toHaveLength(1);
+  });
+
+  it("settles the stop button with cancelled media Tasks and still allows stopping newly started work", async () => {
+    const task = {
+      id: "task-stopped-image",
+      projectId: "p1",
+      transactionId: null,
+      specialistRunId: "run-1",
+      kind: "image_generation" as const,
+      targetRef: "element:one",
+      status: "CANCELLED" as const,
+      progress: null,
+      resultRefs: [],
+    };
+    const staleRun = makeRun({
+      status: "WAITING_RUNTIME",
+      taskRefs: [task.id],
+      metadata: { commandType: "GENERATE_STORYBOARD_IMAGE" },
+    });
+    installMockFetch([
+      {
+        match: "/interrupt",
+        method: "POST",
+        response: {
+          json: {
+            creatorSessionId: "session-1",
+            status: "CANCELLED",
+            stopRequested: true,
+          },
+        },
+      },
+      { match: "/specialist-runs", response: { json: { items: [staleRun] } } },
+      { match: "/tasks", response: { json: { items: [task] } } },
+    ]);
+    seedSession("RUNNING");
+    useCreatorTaskViewStore.setState({ projectId: "p1", runs: [staleRun] });
+    useAgentDockUiStore.getState().setOpen(true);
+    renderDock();
+    fireEvent.click(screen.getByRole("button", { name: "停止所有 Agent" }));
+    await waitFor(() =>
+      expect(useCreatorSessionStore.getState().session?.status).toBe(
+        "CANCELLED",
+      ),
+    );
+    await act(() => useCreatorTaskViewStore.getState().refresh("p1"));
+    expect(
+      screen.queryByRole("button", { name: "停止所有 Agent" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+
+    // A later manual generation can run independently of the stopped chat.
+    act(() =>
+      useCreatorTaskViewStore.setState({
+        tasks: [
+          task,
+          {
+            ...task,
+            id: "new-manual-task",
+            specialistRunId: null,
+            status: "RUNNING",
+          },
+        ],
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: "停止所有 Agent" }),
+    ).toBeEnabled();
   });
 
   it("keeps file-native review feedback on the Session message API", async () => {

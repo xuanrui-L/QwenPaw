@@ -65,6 +65,7 @@ from services.runtime_files.session_store import (
     SessionStateConflict,
     SessionStoreError,
 )
+from services.runtime_files.reconciliation import reconcile_terminal_task_runs
 from services.runtime_files.status_projection import build_agent_status_bar
 
 from .dependencies import (
@@ -134,6 +135,12 @@ def _cancel_active_project_tasks_sync(
         # Process-local workers were synchronously signalled before this
         # detached durable pass. No event-loop notification is needed here.
         _ = cancelled
+
+    # Workers have already been cancelled and may never reach their normal
+    # Run finalizer. Settle the derived execution heads too, including Tasks
+    # cancelled by an earlier stop whose detached cleanup was interrupted.
+    # This only reconciles durable terminal results; it cannot submit work.
+    reconcile_terminal_task_runs(services.root, [project_id])
 
 
 def _cancel_detached_project_tasks(
