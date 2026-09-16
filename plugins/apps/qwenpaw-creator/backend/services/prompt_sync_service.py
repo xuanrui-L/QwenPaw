@@ -352,6 +352,7 @@ class PromptSyncService:
         guidance: str = "",
         *,
         source: PromptSyncSource = "currentPlan",
+        error_guidance: str = "",
     ) -> dict:
         snapshot, document = await asyncio.to_thread(
             self._read,
@@ -483,6 +484,7 @@ class PromptSyncService:
             },
             "referenceOrder": references,
             "userGuidance": guidance,
+            **({"previousError": error_guidance} if error_guidance else {}),
         }
         authority = {
             "authoritativeInputs": authoritative_inputs,

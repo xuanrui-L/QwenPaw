@@ -78,6 +78,11 @@ _TRANSIENT_RETRY_LIMIT = 2
 _TRANSIENT_RETRY_HARD_CAP = 6
 _TRANSIENT_RETRY_COOLDOWN_SECONDS = 300.0
 
+# Preparation validation retries: when the LLM generates a prompt that
+# fails contract checks (aspect ratio, reference format), feed the error
+# back as guidance so the model can self-correct.
+_PREPARATION_VALIDATION_RETRIES = 2
+
 # Scheduler-only transient markers; the shared media-side classifier
 # (is_transient_error_message) supplies the common ones (connection,
 # timeout, service unavailable, bad file descriptor, status 5xx, ...).
@@ -301,6 +306,10 @@ class WorkGraphScheduler:
         self._dispatch_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._preparation_tasks: dict[str, asyncio.Task[None]] = {}
         self._preparing: dict[str, set[str]] = {}
+        self._preparation_validation_errors: dict[
+            tuple[str, str],
+            tuple[str, int],
+        ] = {}
         self._closed = False
         self._sync_gate_rechecks: dict[str, asyncio.TimerHandle] = {}
         self._cancelled_projects: set[str] = set()
@@ -851,6 +860,15 @@ class WorkGraphScheduler:
                 and graph.by_id[key[1]].prompt_sync_required
             )
         }
+        self._preparation_validation_errors = {
+            key: value
+            for key, value in self._preparation_validation_errors.items()
+            if key[0] != project_id
+            or (
+                key[1] in graph.by_id
+                and graph.by_id[key[1]].prompt_sync_required
+            )
+        }
         for node in graph.nodes:
             if (
                 # pylint: disable-next=too-many-boolean-expressions
@@ -929,6 +947,12 @@ class WorkGraphScheduler:
             ledger_key = (project_id, node.node_id, fingerprint)
             if ledger_key in self._deterministic_failure_nodes:
                 continue
+            if not self._transient_budget_available(ledger_key):
+                self._schedule_sync_gate_recheck(
+                    project_id,
+                    _TRANSIENT_RETRY_COOLDOWN_SECONDS,
+                )
+                continue
             self._deterministic_failure_nodes = {
                 key: value
                 for key, value in self._deterministic_failure_nodes.items()
@@ -957,6 +981,12 @@ class WorkGraphScheduler:
                         else status.get("suggestedSource")
                         or "storyboardPrompt"
                     ),
+                    error_guidance=(
+                        self._preparation_validation_errors.get(
+                            (project_id, node.node_id),
+                            ("", 0),
+                        )[0]
+                    ),
                 )
                 if not await asyncio.to_thread(self.enabled):
                     return
@@ -982,20 +1012,86 @@ class WorkGraphScheduler:
                     element_id,
                     proposal["proposalId"],
                 )
+                self._preparation_validation_errors.pop(
+                    (project_id, node.node_id),
+                    None,
+                )
             except ConflictError:
                 # A concurrent edit invalidated the proposal. The next wake
                 # reads that edit; never publish the older generated plan.
                 pass
             except Exception as exc:
-                self._deterministic_failure_nodes[ledger_key] = str(exc)[:200]
-                await self._notify(
-                    project_id,
-                    kind=RuntimeEventKind.NODE_DETERMINISTIC_FAILURE,
-                    request_id=f"failed-{fingerprint}-{node.node_id}",
-                    text=f"生成准备需要调整：{node.label}。{str(exc)[:200]}",
-                    node=node,
-                    error_code="PROMPT_PREPARATION_FAILED",
-                )
+                is_validation = type(exc).__name__ == "ValidationError"
+                if is_validation:
+                    val_key = (project_id, node.node_id)
+                    _prev = self._preparation_validation_errors.get(
+                        val_key,
+                        ("", 0),
+                    )
+                    retry_count = _prev[1]
+                    if retry_count < _PREPARATION_VALIDATION_RETRIES:
+                        self._preparation_validation_errors[val_key] = (
+                            str(exc)[:300],
+                            retry_count + 1,
+                        )
+                        self._schedule_sync_gate_recheck(
+                            project_id,
+                            5.0,
+                        )
+                        logger.warning(
+                            "Preparation validation error for %s "
+                            "(retry %d/%d); will retry with feedback: %s",
+                            node.node_id,
+                            retry_count + 1,
+                            _PREPARATION_VALIDATION_RETRIES,
+                            exc,
+                        )
+                    else:
+                        self._preparation_validation_errors.pop(
+                            val_key,
+                            None,
+                        )
+                        self._deterministic_failure_nodes[ledger_key] = str(
+                            exc,
+                        )[:200]
+                        await self._notify(
+                            project_id,
+                            kind=RuntimeEventKind.NODE_DETERMINISTIC_FAILURE,
+                            request_id=(
+                                f"failed-{fingerprint}-{node.node_id}"
+                            ),
+                            text=(
+                                f"生成准备需要调整：{node.label}。" f"{str(exc)[:200]}"
+                            ),
+                            node=node,
+                            error_code="PROMPT_PREPARATION_FAILED",
+                        )
+                elif _is_transient_dispatch_error(
+                    exc,
+                ) and self._transient_budget_available(ledger_key):
+                    self._note_transient_retry(ledger_key)
+                    self._schedule_sync_gate_recheck(
+                        project_id,
+                        _TRANSIENT_RETRY_COOLDOWN_SECONDS,
+                    )
+                    logger.warning(
+                        "Transient preparation failure for %s (%s); "
+                        "will retry after cooldown",
+                        node.node_id,
+                        exc,
+                    )
+                else:
+                    self._deterministic_failure_nodes[ledger_key] = str(exc)[
+                        :200
+                    ]
+                    await self._notify(
+                        project_id,
+                        kind=RuntimeEventKind.NODE_DETERMINISTIC_FAILURE,
+                        request_id=f"failed-{fingerprint}-{node.node_id}",
+                        text=(f"生成准备需要调整：{node.label}。" f"{str(exc)[:200]}"),
+                        node=node,
+                        error_code="PROMPT_PREPARATION_FAILED",
+                    )
             finally:
                 self._inflight.get(project_id, set()).discard(node.node_id)
                 self._preparing.get(project_id, set()).discard(node.node_id)

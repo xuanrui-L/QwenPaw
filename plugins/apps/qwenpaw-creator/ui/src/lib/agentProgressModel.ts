@@ -641,7 +641,13 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
     )
       continue;
     const tid = timelineOf(task.targetRef);
-    if (task.targetRef.startsWith("timeline:") && !tid && project) continue;
+    if (
+      (task.targetRef.startsWith("timeline:") ||
+        task.targetRef.startsWith("element:")) &&
+      !tid &&
+      project
+    )
+      continue;
     const locator: Record<string, string> | null = tid
       ? {
           page: "plan",
