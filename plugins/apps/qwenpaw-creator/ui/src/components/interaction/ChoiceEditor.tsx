@@ -7,6 +7,7 @@ import type {
 import { GenerationPromptEditor } from "@/pages/AssetsPage";
 import InteractionView from "./InteractionView";
 import DesignViewport from "./DesignViewport";
+import GenerationFailure from "./GenerationFailure";
 import {
   generationLabels,
   useInteractionGeneration,
@@ -17,16 +18,22 @@ export default function ChoiceEditor({
   timelineId,
   element,
   status,
+  error = "",
   renderPreview,
 }: {
   project: ProjectDocument;
   timelineId: string;
   element: TimelineElementDocument;
   status: string;
+  error?: string;
   renderPreview?: (onSelect: (edgeRef: string) => void) => ReactNode;
 }) {
   const creation = element.creation as InteractionCreationDocument;
-  const generation = useInteractionGeneration(project.project_id, status);
+  const generation = useInteractionGeneration(
+    project.project_id,
+    status,
+    error,
+  );
   const [mobile, setMobile] = useState(false);
   const [selected, setSelected] = useState<string>();
   const selectedIndex = creation.options.findIndex(
@@ -121,6 +128,7 @@ export default function ChoiceEditor({
           className="min-w-0 space-y-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-4"
           data-interaction-details
         >
+          <GenerationFailure error={generation.error} />
           <strong className="text-sm">交互按钮与剧情走向</strong>
           <div className="grid gap-2">
             <button
@@ -164,8 +172,9 @@ export default function ChoiceEditor({
                   : creation.design_prompt) ?? "",
             }}
             saving={generation.locked}
+            regenerating={generation.generating}
             regenerateLabel={
-              generation.busy || status === "running"
+              generation.generating
                 ? "生成中…"
                 : creation.motion
                 ? "重新生成抉择"

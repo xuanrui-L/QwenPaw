@@ -25,6 +25,8 @@ export default function InteractionWorkbench({
   const query = useSearchParams();
   const field = query.get("field") || "";
   const [statuses, setStatuses] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [pollError, setPollError] = useState("");
   const points = selectLiveTimelineIds(project).flatMap((tid) =>
     Object.values(project.timelines.items[tid].elements_by_id)
       .filter(
@@ -41,19 +43,36 @@ export default function InteractionWorkbench({
     }
   }, [field, onOpenChange]);
   useEffect(() => {
+    setStatuses({});
+    setErrors({});
+    setPollError("");
+  }, [project.project_id]);
+  useEffect(() => {
     if (!open) return;
     let live = true;
     const refresh = () =>
       getWorkGraph(project.project_id)
         .then((graph) => {
-          if (live)
+          if (live) {
             setStatuses(
               Object.fromEntries(
                 graph.nodes.map((node) => [node.id, node.status]),
               ),
             );
+            setErrors(
+              Object.fromEntries(
+                graph.nodes.map((node) => [node.id, node.error ?? ""]),
+              ),
+            );
+            setPollError("");
+          }
         })
-        .catch(() => {});
+        .catch((error) => {
+          if (live)
+            setPollError(
+              error instanceof Error ? error.message : String(error),
+            );
+        });
     void refresh();
     const timer = setInterval(refresh, 3000);
     return () => {
@@ -86,11 +105,17 @@ export default function InteractionWorkbench({
           </button>
         </header>
         <div className="interaction-design-scroll min-h-0 flex-1 overflow-y-auto p-4">
+          {pollError && (
+            <p role="alert" className="mb-3 text-sm text-red-500">
+              无法更新生成状态：{pollError}。正在重试，当前状态可能已过期。
+            </p>
+          )}
           <PresentationEditor
             key={project.project_id}
             project={project}
             status={statuses["interaction:project"]}
             statuses={statuses}
+            errors={errors}
             focusField={field}
           />
         </div>

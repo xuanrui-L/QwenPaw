@@ -8,6 +8,7 @@ import {
 import { beforeEach, expect, it, vi } from "vitest";
 import { message } from "antd";
 import PresentationEditor from "../PresentationEditor";
+import InteractionWorkbench from "../InteractionWorkbench";
 import { formatControlPrompt, parseControlPrompt } from "../controlPrompt";
 import { projectDocument } from "@/test/creatorFixtures";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
@@ -16,10 +17,17 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 const dispatch = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ dispatched: true }),
 );
+const getWorkGraph = vi.hoisted(() => vi.fn());
 vi.mock("antd", () => ({
   message: { info: vi.fn(), success: vi.fn(), error: vi.fn() },
 }));
-vi.mock("@/api/creator/workGraph", () => ({ dispatchWorkGraphNode: dispatch }));
+vi.mock("@/api/creator/workGraph", () => ({
+  dispatchWorkGraphNode: dispatch,
+  getWorkGraph,
+}));
+vi.mock("@/routing/navigation", () => ({
+  useSearchParams: () => new URLSearchParams(),
+}));
 // The shared modal has its own UI tests. Exercise the actual persisted-prompt
 // callbacks here; Chromium covers the same modal in the complete workspace.
 vi.mock("@/pages/AssetsPage", () => ({
@@ -29,6 +37,7 @@ vi.mock("@/pages/AssetsPage", () => ({
     onRegenerate,
     regenerateLabel,
     saving,
+    regenerating,
   }: any) => (
     <div data-testid={target.pointer}>
       <textarea
@@ -40,7 +49,11 @@ vi.mock("@/pages/AssetsPage", () => ({
         }
       />
       {onRegenerate && (
-        <button disabled={saving} onClick={onRegenerate}>
+        <button
+          disabled={saving}
+          aria-busy={regenerating}
+          onClick={onRegenerate}
+        >
           {regenerateLabel}
         </button>
       )}
@@ -77,6 +90,7 @@ const project = () => ({
 });
 beforeEach(() => {
   vi.clearAllMocks();
+  dispatch.mockResolvedValue({ dispatched: true });
   patch.mockResolvedValue({});
   useProjectSnapshotStore.setState({
     patch,
@@ -250,7 +264,8 @@ it("keeps four page tabs and opens the choice inspector inside the play page", (
   render(
     <PresentationEditor
       project={value}
-      statuses={{ "interaction:choice:one": "done" }}
+      statuses={{ "interaction:choice:one": "failed" }}
+      errors={{ "interaction:choice:one": "抉择模型返回空内容" }}
     />,
   );
   expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
@@ -266,8 +281,79 @@ it("keeps four page tabs and opens the choice inspector inside the play page", (
     target: { value: "choice:one" },
   });
   expect(screen.getByLabelText("抉择生成提示词")).toHaveValue("旗帜形选项");
+  expect(screen.getByRole("alert")).toHaveTextContent("抉择模型返回空内容");
   expect(
     screen.getByRole("button", { name: "生成抉择动效" }),
   ).toBeInTheDocument();
   expect(screen.getByTestId("preview-screen")).toHaveTextContent("play");
+});
+
+it("shows immediate progress, retains a rejected generation and clears it on retry", async () => {
+  let reject!: (error: Error) => void;
+  dispatch.mockReturnValueOnce(
+    new Promise((_, fail) => {
+      reject = fail;
+    }),
+  );
+  render(<PresentationEditor project={project()} status="ready" />);
+  fireEvent.click(screen.getByRole("button", { name: "生成作品页面" }));
+  expect(screen.getByRole("button", { name: "生成中…" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "生成中…" })).toHaveAttribute(
+    "aria-busy",
+    "true",
+  );
+  reject(new Error("Text model 返回空内容"));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Text model 返回空内容",
+  );
+  fireEvent.click(screen.getByRole("tab", { name: "剧情地图" }));
+  expect(screen.getByRole("alert")).toHaveTextContent("Text model 返回空内容");
+  fireEvent.click(screen.getByRole("button", { name: "生成作品页面" }));
+  await waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+  await waitFor(() =>
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+  );
+});
+
+it("does not report success when generation was not admitted", async () => {
+  dispatch.mockResolvedValueOnce({ dispatched: false });
+  render(<PresentationEditor project={project()} />);
+  fireEvent.click(screen.getByRole("button", { name: "生成作品页面" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("生成未能启动");
+  expect(message.success).not.toHaveBeenCalled();
+});
+
+it("restores durable generation failures from the work graph after reopening the workspace", async () => {
+  getWorkGraph.mockResolvedValue({
+    nodes: [
+      {
+        id: "interaction:project",
+        status: "failed",
+        error: "服务端保存的失败原因",
+      },
+    ],
+  });
+  const view = render(
+    <InteractionWorkbench project={project()} open onOpenChange={vi.fn()} />,
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "服务端保存的失败原因",
+  );
+  view.unmount();
+  render(
+    <InteractionWorkbench project={project()} open onOpenChange={vi.fn()} />,
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "服务端保存的失败原因",
+  );
+});
+
+it("reports failures to fetch generation status instead of silently dropping them", async () => {
+  getWorkGraph.mockRejectedValue(new Error("连接中断"));
+  render(
+    <InteractionWorkbench project={project()} open onOpenChange={vi.fn()} />,
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "无法更新生成状态：连接中断",
+  );
 });

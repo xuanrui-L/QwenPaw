@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { message } from "antd";
 import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
 import ChoiceEditor from "./ChoiceEditor";
+import GenerationFailure from "./GenerationFailure";
 import type {
   InteractiveScreenDesignDocument,
   PresentationActionId,
@@ -23,15 +24,21 @@ export default function PresentationEditor({
   project,
   status = "",
   statuses = {},
+  errors = {},
   focusField = "",
 }: {
   project: ProjectDocument;
   status?: string;
   statuses?: Record<string, string>;
+  errors?: Record<string, string>;
   focusField?: string;
 }) {
   const design = project.interactive_presentation;
-  const generation = useInteractionGeneration(project.project_id, status);
+  const generation = useInteractionGeneration(
+    project.project_id,
+    status,
+    errors["interaction:project"],
+  );
   const [selection, setSelection] = useState<{
     screen: PresentationScreenId;
     action?: PresentationActionId;
@@ -176,6 +183,7 @@ export default function PresentationEditor({
           timelineId={point.tid}
           element={point.element}
           status={statuses[`interaction:${point.element.element_id}`] ?? ""}
+          error={errors[`interaction:${point.element.element_id}`] ?? ""}
           renderPreview={(onSelect) => (
             <PresentationPreview
               project={project}
@@ -199,6 +207,7 @@ export default function PresentationEditor({
             aria-label={`${page.label}设计`}
             data-interaction-details
           >
+            <GenerationFailure error={generation.error} />
             <div>
               <strong className="text-sm">{page.label}</strong>
               <span className="ml-2 text-xs">
@@ -260,8 +269,9 @@ export default function PresentationEditor({
                     : pageDesign?.design_prompt || design?.design_prompt) ?? "",
               }}
               saving={generation.locked}
+              regenerating={generation.generating}
               regenerateLabel={
-                generation.busy || status === "running"
+                generation.generating
                   ? "生成中…"
                   : design?.motion
                   ? "重新生成页面"

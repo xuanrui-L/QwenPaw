@@ -497,9 +497,8 @@ async def execute_file_interaction_command(
                     else _INTERACTION_SYSTEM_PROMPT
                 ),
                 temperature=0.5,
-                max_tokens=12000 if is_presentation else 6000,
-                # A presentation contains four complete screens. Keep its
-                # response bounded while allowing more time than one choice.
+                # A presentation contains four screens and needs more time
+                # than one choice. The provider controls its output budget.
                 timeout=300.0 if is_presentation else 180.0,
                 thinking_budget=2048,
             )
@@ -592,7 +591,10 @@ async def execute_file_interaction_command(
                 event_id=f"{attempt_id}-end",
                 attempt_id=attempt_id,
                 status=status.value,
-                error={"message": str(exc), "retryable": False},
+                error={
+                    "message": str(exc),
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                },
             )
         # Preserve the admitted task identity for batch callers that need
         # its durable failure, while retaining the public exception type.

@@ -234,6 +234,30 @@ def test_persistently_bad_output_raises_model_error(tmp_path, monkeypatch):
     assert element.creation.motion is None
 
 
+@pytest.mark.parametrize("retryable", [True, False])
+def test_model_failure_preserves_reason_and_retryability(
+    tmp_path, monkeypatch, retryable
+):
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    services = _services(tmp_path)
+
+    async def fail(prompt, **kwargs):
+        assert "max_tokens" not in kwargs
+        raise ModelError("模型仅返回了推理内容，没有最终结果", retryable=retryable)
+
+    monkeypatch.setattr(
+        interaction_execution.text_model, "chat_completion", fail
+    )
+    with pytest.raises(ModelError) as failed:
+        _execute(services)
+    task = ProjectExecutionStore(services.root).get_task(
+        PROJECT_ID, failed.value.creator_task_id
+    )
+    assert task.error == {"message": str(failed.value), "retryable": retryable}
+    assert task.status.value == "FAILED"
+
+
 def test_bad_inputs_are_rejected_fail_closed(tmp_path, monkeypatch):
     services = _services(tmp_path)
     # Model output smuggling a <script> is a deterministic model error.
