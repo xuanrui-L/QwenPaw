@@ -575,10 +575,9 @@ def test_prompt_sync_gated_request_surfaces_diagnostic_fields(
         )
         graph = WorkGraph(nodes=(node,), generation=1)
 
-        async def fake_context(svcs, _execs, pid, **_kwargs):
+        async def fake_context(svcs, _execs, pid):
             # Only the request path reads this; hand back the GATED node and
-            # its pre-dispatch block reason (extra kwargs like
-            # ``check_media_budget`` are irrelevant to this canned graph).
+            # its pre-dispatch block reason.
             return (
                 svcs.projects.read(pid),
                 [],

@@ -206,7 +206,6 @@ function seedWorkGraph(...nodes: WorkGraphNode[]) {
       generation: 1,
       counts: {},
       mediaCalls: 0,
-      mediaCallBudget: 20,
       nodes,
     },
   });
