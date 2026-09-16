@@ -1691,6 +1691,20 @@ export function WorkbenchSurface({
     ),
   );
 
+  // Show "keep current & generate" only where the work graph actually flags a
+  // prompt-sync gate; when sync is current it would just duplicate the
+  // "regenerate" action already offered above.
+  const storyboardSyncRequired = useWorkGraphStore(
+    (s) =>
+      s.graph?.nodes.find((n) => n.id === `storyboard:${element.element_id}`)
+        ?.promptSyncRequired === true,
+  );
+  const videoSyncRequired = useWorkGraphStore(
+    (s) =>
+      s.graph?.nodes.find((n) => n.id === `video:${element.element_id}`)
+        ?.promptSyncRequired === true,
+  );
+
   // The storyboard the backend will lock as [Image 1] is the *selected*
   // version, not whichever one is being viewed.
   const currentStoryboard =
@@ -1962,22 +1976,29 @@ export function WorkbenchSurface({
                       })
                     }
                   />
-                  <div className="mt-2 flex justify-end">
-                    <Button
-                      size="small"
-                      disabled={
-                        patching ||
-                        synchronizing ||
-                        regeneratingNode === `storyboard:${element.element_id}`
-                      }
-                      onClick={() =>
-                        void regenerateNode("storyboard", { keepCurrent: true })
-                      }
-                      className="!text-[11px]"
-                    >
-                      {t("r2v.keepCurrentAndGenerate")}
-                    </Button>
-                  </div>
+                  {storyboardSyncRequired && (
+                    <div className="mt-2 flex justify-end">
+                      <Button
+                        size="small"
+                        disabled={
+                          patching ||
+                          synchronizing ||
+                          referenceDraftChanged ||
+                          storyboardReferenceOrder?.ready === false ||
+                          regeneratingNode ===
+                            `storyboard:${element.element_id}`
+                        }
+                        onClick={() =>
+                          void regenerateNode("storyboard", {
+                            keepCurrent: true,
+                          })
+                        }
+                        className="!text-[11px]"
+                      >
+                        {t("r2v.keepCurrentAndGenerate")}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2052,6 +2073,25 @@ export function WorkbenchSurface({
                       })
                     }
                   />
+                  {videoSyncRequired && (
+                    <div className="mt-2 flex justify-end">
+                      <Button
+                        size="small"
+                        disabled={
+                          patching ||
+                          synchronizing ||
+                          referenceDraftChanged ||
+                          regeneratingNode === `video:${element.element_id}`
+                        }
+                        onClick={() =>
+                          void regenerateNode("video", { keepCurrent: true })
+                        }
+                        className="!text-[11px]"
+                      >
+                        {t("r2v.keepCurrentAndGenerate")}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

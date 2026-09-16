@@ -77,3 +77,42 @@ def test_summary_mixed_branch_names_prompt_sync() -> None:
     assert "已完成制作 1 项" in summary
     assert "1 项需先同步分镜/提示词内容，尚未开始" in summary
     assert "制作条件尚未满足" not in summary
+
+
+def test_summary_waiting_review_with_sync_flag_not_double_counted() -> None:
+    # P1 regression: a creative review outranks the prompt-sync gate, so the
+    # same node must never count as both (that once yielded "-1 项").
+    summary = summarize_workgraph_results(
+        [
+            {
+                "status": "BLOCKED",
+                "reason": "WAITING_REVIEW",
+                "promptSyncRequired": True,
+            },
+        ],
+    )
+    assert "1 项需要先完成现有审阅" in summary
+    assert "同步分镜/提示词" not in summary
+    assert "制作条件尚未满足" not in summary
+    assert "-1" not in summary
+
+
+def test_summary_mixed_branch_review_sync_not_double_counted() -> None:
+    # Same P1 guard on the mixed branch the review reproduced: a completed
+    # task beside a review-blocked node that also carries the sync flag.
+    summary = summarize_workgraph_results(
+        [
+            {"status": "SUCCEEDED", "taskId": "task-1"},
+            {
+                "status": "BLOCKED",
+                "reason": "WAITING_REVIEW",
+                "promptSyncRequired": True,
+            },
+        ],
+    )
+    assert "尚未启动制作" not in summary
+    assert "已完成制作 1 项" in summary
+    assert "1 项等待现有审阅，尚未开始" in summary
+    assert "需先同步分镜/提示词" not in summary
+    assert "制作条件尚未满足" not in summary
+    assert "-1" not in summary

@@ -348,19 +348,14 @@ function VisualDetail({
         )}
         <div className="mt-auto flex items-center gap-2 pt-1">
           {gatingReview ? (
-            <>
-              <button
-                type="button"
-                disabled={reviewDecisionInFlight}
-                onClick={() => void acceptGatingReview()}
-                className="shrink-0 rounded-md bg-[var(--color-text-primary)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-bg-primary)] disabled:opacity-50"
-              >
-                {t("blueprint.acceptThisDesign")}
-              </button>
-              <span className="text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
-                {t("blueprint.acceptThisDesignHint")}
-              </span>
-            </>
+            <button
+              type="button"
+              disabled={reviewDecisionInFlight}
+              onClick={() => void acceptGatingReview()}
+              className="shrink-0 rounded-md bg-[var(--color-text-primary)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-bg-primary)] disabled:opacity-50"
+            >
+              {t("blueprint.acceptThisDesign")}
+            </button>
           ) : (
             <span className="text-[10px] leading-relaxed text-[var(--color-text-tertiary)]">
               {t("blueprint.visualApproveHint")}

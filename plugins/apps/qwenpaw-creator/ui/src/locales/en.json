@@ -2179,7 +2179,6 @@
     "promptSaveFailed": "Save failed: {{detail}}",
     "visualApproveHint": "Design confirmation happens in the assistant's decision tray; edit only here",
     "acceptThisDesign": "Accept this image, skip auto-review",
-    "acceptThisDesignHint": "Use the current design as-is and clear the creative auto-review block; technical validation and paid-generation authorization are unaffected",
     "designAccepted": "Design accepted",
     "designAcceptFailed": "Accept failed: {{detail}}",
     "noDesignYet": "Design image pending",

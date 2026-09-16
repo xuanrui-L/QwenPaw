@@ -2179,7 +2179,6 @@
     "promptSaveFailed": "保存失败：{{detail}}",
     "visualApproveHint": "设计确认在创作助手的待决策卡中完成，此处仅编辑",
     "acceptThisDesign": "接受此图，忽略自动审阅",
-    "acceptThisDesignHint": "直接采用当前设计图并解除创意自动审阅的拦截；技术校验与付费生成授权不受影响",
     "designAccepted": "已接受该设计图",
     "designAcceptFailed": "接受失败：{{detail}}",
     "noDesignYet": "设计图待生成",

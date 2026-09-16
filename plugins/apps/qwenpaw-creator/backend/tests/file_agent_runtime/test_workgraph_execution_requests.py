@@ -549,6 +549,9 @@ def test_post_approval_prompt_sync_gate_surfaces_diagnostic_fields(
                 return snapshot, tasks, graph, blocked
             # Post-approval re-check: flip the selected node to prompt-sync
             # GATED, as if the prompts were edited while approval was open.
+            # ``asset:hero`` is a visual node; prompt_sync_required is forced
+            # here only to exercise the diagnostic path -- in production the
+            # field is set on storyboard/video nodes, never on a bare visual.
             gated_nodes = tuple(
                 dataclasses.replace(
                     node,

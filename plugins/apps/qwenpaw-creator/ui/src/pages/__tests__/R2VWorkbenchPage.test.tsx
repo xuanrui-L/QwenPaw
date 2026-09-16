@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import R2VWorkbenchPage from "@/pages/R2VWorkbenchPage";
@@ -12,6 +18,7 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { projectDocument } from "@/test/creatorFixtures";
 import { installMockFetch } from "@/test/mockFetch";
 import type { ProjectDocument } from "@/contracts/creator";
+import type { WorkGraphNode } from "@/contracts/creator/workGraph";
 
 function cloneProject(): ProjectDocument {
   return structuredClone(projectDocument);
@@ -171,6 +178,47 @@ function renderWorkbench(entry = "/project/p1/plan/element/r2v-window") {
   );
 }
 
+/** A work-graph node for ``element:r2v-window`` with the sync gate set. */
+function syncNode(
+  kind: "storyboard" | "video",
+  promptSyncRequired: boolean,
+): WorkGraphNode {
+  return {
+    id: `${kind}:r2v-window`,
+    kind,
+    label: kind,
+    status: promptSyncRequired ? "gated" : "ready",
+    deps: [],
+    lane: "main",
+    taskId: null,
+    progress: null,
+    error: null,
+    missing: promptSyncRequired ? ["分镜内容与提示词待同步"] : [],
+    locator: {},
+    dispatchable: false,
+    promptSyncRequired,
+  };
+}
+
+/**
+ * Seed the work-graph store the page reads ``promptSyncRequired`` from. The
+ * workbench never refreshes the graph itself (only the agent dock's
+ * WorkGraphPanel does), so this state is exactly what the render sees.
+ */
+function seedWorkGraph(...nodes: WorkGraphNode[]) {
+  useWorkGraphStore.setState({
+    projectId: "p1",
+    graph: {
+      projectId: "p1",
+      generation: 1,
+      counts: {},
+      mediaCalls: 0,
+      mediaCallBudget: 20,
+      nodes,
+    },
+  });
+}
+
 describe("R2V Workbench page", () => {
   beforeEach(() => {
     useProjectSnapshotStore.getState().reset();
@@ -207,6 +255,36 @@ describe("R2V Workbench page", () => {
     expect(useCreatorInteractionStore.getState().selectedRef).toBe(
       "element:r2v-window",
     );
+  });
+
+  it("hides 保留现有内容并生成 while the sync is current", () => {
+    // No prompt-sync gate: keep-current would only duplicate 重新生成图片, so
+    // it stays hidden (#7720 CR P2.1).
+    seedWorkGraph(syncNode("storyboard", false), syncNode("video", false));
+    const { container } = renderWorkbench();
+    // The storyboard stage did render (its regenerate control is present).
+    expect(
+      container.querySelector(
+        '[data-prompt-regenerate="element:r2v-window/creation/storyboard_prompt"]',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("保留现有内容并生成")).toBeNull();
+  });
+
+  it("shows 保留现有内容并生成 on the storyboard stage when gated", () => {
+    seedWorkGraph(syncNode("storyboard", true), syncNode("video", false));
+    const { container } = renderWorkbench();
+    const sb = container.querySelector<HTMLElement>('[data-stage-panel="sb"]')!;
+    expect(within(sb).getByText("保留现有内容并生成")).toBeInTheDocument();
+  });
+
+  it("shows 保留现有内容并生成 on the video stage when gated", () => {
+    // The video node carries prompt_sync_required too (#7720 CR P2.2); the
+    // recovery action must exist there, not only on the storyboard stage.
+    seedWorkGraph(syncNode("storyboard", false), syncNode("video", true));
+    const { container } = renderWorkbench();
+    const vd = container.querySelector<HTMLElement>('[data-stage-panel="vd"]')!;
+    expect(within(vd).getByText("保留现有内容并生成")).toBeInTheDocument();
   });
 
   it("round-trips between the Plan detail CTA and the workbench", async () => {

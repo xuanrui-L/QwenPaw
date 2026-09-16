@@ -132,7 +132,7 @@ def _summarize_unstarted(
         detail.append(f"{review} 项需要先完成现有审阅")
     if prompt_sync:
         detail.append(
-            f"{prompt_sync} 项需要先同步分镜/提示词内容" "（可在计划页保留现有内容并生成，或重新同步后再制作）",
+            f"{prompt_sync} 项需要先同步分镜/提示词内容" "（可在制作工作台保留现有内容并生成，或重新同步后再制作）",
         )
     if other := known_unstarted - review - prompt_sync:
         detail.append(f"{other} 项制作条件尚未满足")
@@ -167,13 +167,16 @@ def summarize_workgraph_results(items: list[dict[str, Any]]) -> str:
         and not item.get("taskId")
         for item in items
     )
-    # promptSyncRequired is only set on the pre-dispatch BLOCKED item, where
-    # the driver surfaces the precise gate (#7720 finding #1). The wording
-    # stays public: never echo ``missing`` here, it can carry internal refs
-    # like "visual:scene:home:var:day".
+    # The driver stamps promptSyncRequired on both the pre-dispatch BLOCKED
+    # item and the post-approval re-check item (#7720 finding #1). A pending
+    # creative review wins, so a WAITING_REVIEW item counts as review only;
+    # the sync gate is re-named on the next request once the review clears.
+    # The wording stays public: never echo ``missing`` here, it can carry
+    # internal refs like "visual:scene:home:var:day".
     prompt_sync = sum(
         item.get("status") == "BLOCKED"
         and item.get("reason") in _PRE_DISPATCH_BLOCKERS
+        and item.get("reason") != "WAITING_REVIEW"
         and item.get("promptSyncRequired") is True
         and not item.get("taskId")
         for item in items
@@ -276,6 +279,11 @@ def _publication_artifacts(review: Any) -> tuple[ArtifactVersion, ...] | None:
     records identify the exact index entries and output-selection fields a
     publication can change. Every operation must belong to that whitelist.
     Unknown operations remain a project-wide creative review fence.
+
+    A review may carry several artifacts; accepting the image accepts the
+    whole review (every pending operation at once). That equivalence holds
+    under the current one-task-one-commit practice, where a publication
+    review owns exactly one generation's artifacts.
     """
     operations = getattr(review, "operations", ())
     artifacts = []
