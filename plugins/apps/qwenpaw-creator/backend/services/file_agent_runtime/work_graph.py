@@ -29,6 +29,9 @@ from services.prompt_text import (
     video_prompt_time_error,
 )
 from services.project_files.prompt_sync import prompt_sync_status
+from services.project_files.media_selection import (
+    accepted_video_selection_is_current,
+)
 from services.project_files.blueprint_readiness import (
     STORY_BEFORE_VISUAL_MESSAGE,
     visual_story_missing,
@@ -610,6 +613,9 @@ def _artifact_is_stale(
         # STALE is intentionally excluded from ready_media_nodes(). This is a
         # visible review signal, never permission to regenerate manual media.
         return True
+    accepted = accepted_video_selection_is_current(project, artifact)
+    if accepted is not None:
+        return not accepted
     if artifact.provenance_refs:
         provenance = {
             ref.removeprefix("artifact-version:").removeprefix(
