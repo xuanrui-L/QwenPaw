@@ -159,6 +159,7 @@ def validate_presentation_html(
         parser.close()
     except Exception:
         parser.problems.append("malformed presentation HTML")
+    parser.validate_document_text()
     if parser.stack:
         parser.problems.append("unclosed presentation HTML tags")
     if parser.roots != Counter({"html": 1, "head": 1, "body": 1}):

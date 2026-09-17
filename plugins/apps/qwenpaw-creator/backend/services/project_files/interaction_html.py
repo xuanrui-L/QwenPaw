@@ -26,8 +26,14 @@ class _InteractionParser(HTMLParser):
         self.problems = []
         self.in_style = False
         self.countdowns = 0
+        self.has_document = False
+        self.in_document = False
+        self.outside_text = []
 
     def handle_starttag(self, tag, attrs):
+        if tag == "html":
+            self.has_document = True
+            self.in_document = True
         if tag not in _ALLOWED:
             self.problems.append(f"forbidden HTML tag: {tag}")
         values = dict(attrs)
@@ -59,12 +65,23 @@ class _InteractionParser(HTMLParser):
         self.in_style = tag == "style"
 
     def handle_endtag(self, tag):
+        if tag == "html":
+            self.in_document = False
         if tag == "style":
             self.in_style = False
 
     def handle_data(self, data):
+        if not self.in_document:
+            self.outside_text.append(data)
         if self.in_style:
             self.check_css(data)
+
+    def validate_document_text(self):
+        # Browsers reparent prose outside <html> into the visible body.
+        # Keep legacy choice fragments valid, but never accept a document
+        # wrapped in model commentary or Markdown code fences.
+        if self.has_document and any(s.strip() for s in self.outside_text):
+            self.problems.append("text outside the HTML document is forbidden")
 
     def check_css(self, css):
         # CSS escapes/comments can disguise url()/@import; allow neither.
@@ -93,6 +110,7 @@ def validate_interaction_html(
         parser.close()
     except Exception:
         parser.problems.append("malformed HTML")
+    parser.validate_document_text()
     if edge_refs is not None and sorted(
         str(ref) for ref in parser.refs
     ) != sorted(edge_refs):

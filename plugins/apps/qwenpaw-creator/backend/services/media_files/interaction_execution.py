@@ -43,6 +43,7 @@ from services.runtime_files.models import (
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
 
+from .html_document import extract_html_document
 from .interaction_fingerprint import (
     FINGERPRINT_MARKER as _FINGERPRINT_MARKER,
     interaction_request_fingerprint,
@@ -208,19 +209,6 @@ def _build_interaction_prompt(
         "请输出这份抉择动效的完整 HTML 文档。",
     ]
     return "\n\n".join(sections)
-
-
-def _strip_code_fences(raw: str) -> str:
-    """剥掉 markdown 代码围栏（```html ... ```），只留 HTML 文档本体。"""
-
-    text = raw.strip()
-    if text.startswith("```"):
-        newline = text.find("\n")
-        text = text[newline + 1 :] if newline >= 0 else ""
-        stripped = text.rstrip()
-        if stripped.endswith("```"):
-            text = stripped[: -len("```")]
-    return text.strip()
 
 
 def _validate_motion_html(
@@ -502,7 +490,17 @@ async def execute_file_interaction_command(
                 timeout=300.0 if is_presentation else 180.0,
                 thinking_budget=2048,
             )
-            candidate = _strip_code_fences(raw)
+            try:
+                candidate = extract_html_document(raw)
+            except ValueError as exc:
+                problems = [str(exc)]
+                attempt_prompt = (
+                    prompt
+                    + "\n\n上一次输出不合格（"
+                    + "；".join(problems)
+                    + "），请重新输出完整 HTML。"
+                )
+                continue
             problems = (
                 validate_presentation_html(
                     candidate,

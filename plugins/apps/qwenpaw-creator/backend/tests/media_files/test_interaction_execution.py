@@ -146,10 +146,16 @@ def _execute(services, key: str = "dag-interaction-1"):
     )
 
 
-def test_interaction_command_writes_motion_back(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_commentary", [False, True])
+def test_interaction_command_writes_motion_back(
+    tmp_path, monkeypatch, with_commentary
+):
     services = _services(tmp_path)
     # 模型输出裹了 markdown 代码围栏：必须被剥掉后再校验/写回。
-    calls = _mock_chat(monkeypatch, [f"```html\n{GOOD_HTML}\n```"])
+    reply = f"```html\n{GOOD_HTML}\n```"
+    if with_commentary:
+        reply = "这是完整的动效页面。\n" + reply + "\n### 优化建议\n调整按钮样式。"
+    calls = _mock_chat(monkeypatch, [reply])
 
     result = _execute(services)
 
@@ -168,6 +174,7 @@ def test_interaction_command_writes_motion_back(tmp_path, monkeypatch):
     assert 'data-edge-ref="edge:a"' in motion.html
     assert 'data-edge-ref="edge:b"' in motion.html
     assert "```" not in motion.html
+    assert motion.html == GOOD_HTML
     # design_notes = prompt 摘要 + 指纹标记。
     assert "是否当众揭发沈修？" in motion.design_notes
     assert f"input_fingerprint={result.input_fingerprint}" in (
@@ -893,6 +900,79 @@ def _presentation_html(color="#f4efdf"):
             ),
         )
     )
+
+
+def test_project_interface_discards_model_commentary(tmp_path, monkeypatch):
+    services = _services(tmp_path)
+    html = _presentation_html()
+    calls = _mock_chat(
+        monkeypatch,
+        [f"这是完整的页面。\n```html\n{html}\n```\n### 分支选择与状态回看\n优化建议。"],
+    )
+    asyncio.run(
+        execute_file_interaction_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"project:{PROJECT_ID}",
+            arguments={},
+            idempotency_key="wrapped-page",
+        ),
+    )
+    saved = services.projects.read(PROJECT_ID).project
+    assert saved.interactive_presentation.motion.html == html
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("project_interface", [False, True])
+@pytest.mark.parametrize("recovers", [False, True])
+def test_incomplete_html_retries_or_persists_failure(
+    tmp_path, monkeypatch, project_interface, recovers
+):
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    services = _services(tmp_path)
+    html = _presentation_html() if project_interface else GOOD_HTML
+    incomplete = html.removesuffix("</html>")
+    calls = _mock_chat(
+        monkeypatch, [incomplete, html if recovers else incomplete]
+    )
+
+    def execute():
+        return asyncio.run(
+            execute_file_interaction_command(
+                services,
+                project_id=PROJECT_ID,
+                target_ref=(
+                    f"project:{PROJECT_ID}"
+                    if project_interface
+                    else f"element:{ELEMENT_ID}"
+                ),
+                arguments={},
+                idempotency_key="incomplete-html",
+            ),
+        )
+
+    if recovers:
+        execute()
+    else:
+        with pytest.raises(ModelError, match="完整的 HTML 文档") as failed:
+            execute()
+        task = ProjectExecutionStore(services.root).get_task(
+            PROJECT_ID, failed.value.creator_task_id
+        )
+        assert task.status.value == "FAILED"
+        assert "完整的 HTML 文档" in task.error["message"]
+    saved = services.projects.read(PROJECT_ID).project
+    motion = (
+        saved.interactive_presentation.motion
+        if project_interface
+        else saved.timelines.items["timeline:main"]
+        .elements_by_id[ELEMENT_ID]
+        .creation.motion
+    )
+    assert (motion.html if motion else None) == (html if recovers else None)
+    assert len(calls) == 2
+    assert "完整的 HTML 文档" in calls[1]["prompt"]
 
 
 def test_parallel_page_review_does_not_discard_finished_choice(

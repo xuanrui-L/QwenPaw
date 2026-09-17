@@ -270,6 +270,29 @@ def test_no_generated_interface_means_no_export():
         )
 
 
+@pytest.mark.parametrize(
+    "prefix,suffix", [("前言\n```html\n", ""), ("", "\n```\n### 优化建议")]
+)
+@pytest.mark.parametrize("project_interface", [False, True])
+def test_export_rejects_model_prose_outside_document(
+    prefix, suffix, project_interface
+):
+    project, payloads = _branching_project()
+    motion = (
+        project.interactive_presentation.motion
+        if project_interface
+        else project.timelines.items["tl:ep3"]
+        .elements_by_id["el:choice"]
+        .creation.motion
+    )
+    motion.html = prefix + motion.html + suffix
+    with pytest.raises(InteractiveBundleError, match="text outside"):
+        assemble_interactive_bundle(
+            project,
+            read_artifact_file=payloads.__getitem__,
+        )
+
+
 def test_interface_style_is_not_in_the_runtime_shell():
     assert "#b8ff2e" not in PLAYER_HTML
     assert "data-screen" not in PLAYER_HTML
