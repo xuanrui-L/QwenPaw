@@ -1,10 +1,4 @@
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it } from "vitest";
 import R2VWorkbenchPage from "@/pages/R2VWorkbenchPage";
@@ -257,34 +251,44 @@ describe("R2V Workbench page", () => {
     );
   });
 
-  it("hides 保留现有内容并生成 while the sync is current", () => {
-    // No prompt-sync gate: keep-current would only duplicate 重新生成图片, so
-    // it stays hidden (#7720 CR P2.1).
+  it("always offers keep-current vs regenerate-all on the storyboard stage", async () => {
+    // Human clicks always open the choice dialog, gated or not; the unattended
+    // agent resolves gates on its own backend path and never reaches this.
     seedWorkGraph(syncNode("storyboard", false), syncNode("video", false));
     const { container } = renderWorkbench();
-    // The storyboard stage did render (its regenerate control is present).
-    expect(
+    fireEvent.click(
       container.querySelector(
         '[data-prompt-regenerate="element:r2v-window/creation/storyboard_prompt"]',
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("保留现有内容并生成")).toBeNull();
+      )!,
+    );
+    expect(await screen.findByText("保留当前内容并生成")).toBeInTheDocument();
+    expect(screen.getByText("全部重新生成")).toBeInTheDocument();
   });
 
-  it("shows 保留现有内容并生成 on the storyboard stage when gated", () => {
+  it("always offers keep-current vs regenerate-all on the video stage", async () => {
+    seedWorkGraph(syncNode("storyboard", false), syncNode("video", false));
+    const { container } = renderWorkbench();
+    fireEvent.click(container.querySelector('[data-stage-tab="vd"]')!);
+    fireEvent.click(
+      container.querySelector(
+        '[data-prompt-regenerate="element:r2v-window/creation/video_prompt"]',
+      )!,
+    );
+    expect(await screen.findByText("保留当前内容并生成")).toBeInTheDocument();
+    expect(screen.getByText("全部重新生成")).toBeInTheDocument();
+  });
+
+  it("shows the gate hint when the sync is gated", async () => {
     seedWorkGraph(syncNode("storyboard", true), syncNode("video", false));
     const { container } = renderWorkbench();
-    const sb = container.querySelector<HTMLElement>('[data-stage-panel="sb"]')!;
-    expect(within(sb).getByText("保留现有内容并生成")).toBeInTheDocument();
-  });
-
-  it("shows 保留现有内容并生成 on the video stage when gated", () => {
-    // The video node carries prompt_sync_required too (#7720 CR P2.2); the
-    // recovery action must exist there, not only on the storyboard stage.
-    seedWorkGraph(syncNode("storyboard", false), syncNode("video", true));
-    const { container } = renderWorkbench();
-    const vd = container.querySelector<HTMLElement>('[data-stage-panel="vd"]')!;
-    expect(within(vd).getByText("保留现有内容并生成")).toBeInTheDocument();
+    fireEvent.click(
+      container.querySelector(
+        '[data-prompt-regenerate="element:r2v-window/creation/storyboard_prompt"]',
+      )!,
+    );
+    expect(
+      await screen.findByText(/与上游内容存在同步门控/),
+    ).toBeInTheDocument();
   });
 
   it("round-trips between the Plan detail CTA and the workbench", async () => {
@@ -435,6 +439,8 @@ describe("R2V Workbench page", () => {
         '[data-prompt-regenerate="element:r2v-window/creation/video_prompt"]',
       )!,
     );
+    // The choice dialog always opens now; keep-current re-renders without AI.
+    fireEvent.click(await screen.findByText("保留当前内容并生成"));
     await waitFor(() =>
       expect(
         calls.some(
@@ -493,6 +499,9 @@ describe("R2V Workbench page", () => {
         '[data-prompt-regenerate="element:r2v-window/creation/storyboard_prompt"]',
       )!,
     );
+    // The choice dialog always opens now; keep-current applies the dirty draft
+    // then re-renders without an AI rewrite.
+    fireEvent.click(await screen.findByText("保留当前内容并生成"));
     await waitFor(() =>
       expect(
         calls.some(

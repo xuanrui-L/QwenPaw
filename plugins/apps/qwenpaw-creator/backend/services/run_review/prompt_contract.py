@@ -97,9 +97,131 @@ def _finding(
     }
 
 
+def _canonical_type_roles(creation: Mapping[str, Any]) -> list[str]:
+    """Reference roles in the automatic-chain order.
+
+    With no authored ``video_reference_version_ids`` the runtime falls back to
+    the canonical chain (storyboard → lineup → character → scene → prop), so
+    counting each bound reference type reconstructs the real ``[Image N]``
+    order exactly.
+    """
+
+    roles = ["storyboard"]
+    roles.extend("lineup" for _ in (creation.get("cast_lineup_refs") or []))
+    roles.extend("character" for _ in (creation.get("character_refs") or []))
+    if creation.get("scene_ref"):
+        roles.append("scene")
+    roles.extend("prop" for _ in (creation.get("prop_refs") or []))
+    return roles
+
+
+def _bound_entity_roles(creation: Mapping[str, Any]) -> dict[str, str]:
+    """Map each entity this Element binds to its semantic reference role."""
+
+    roles: dict[str, str] = {}
+    for ref in creation.get("cast_lineup_refs") or []:
+        roles[str(ref)] = "lineup"
+    for ref in creation.get("character_refs") or []:
+        roles[str(ref)] = "character"
+    scene_ref = creation.get("scene_ref")
+    if scene_ref:
+        roles[str(scene_ref)] = "scene"
+    for ref in creation.get("prop_refs") or []:
+        roles[str(ref)] = "prop"
+    return roles
+
+
+def _version_owner_entities(project_json: Mapping[str, Any]) -> dict[str, str]:
+    """Map every asset-owned version ID to its owner entity ID."""
+
+    assets = project_json.get("assets")
+    assets = assets if isinstance(assets, Mapping) else {}
+    owners: dict[str, str] = {}
+    for registry in ("artifact_versions_by_id", "source_versions_by_id"):
+        table = assets.get(registry)
+        if not isinstance(table, Mapping):
+            continue
+        for version_id, version in table.items():
+            if not isinstance(version, Mapping):
+                continue
+            owner = version.get("owner_ref")
+            if isinstance(owner, str) and owner.startswith("asset:"):
+                owners[str(version_id)] = owner.removeprefix("asset:")
+    return owners
+
+
+def _expected_reference_roles(
+    project_json: Mapping[str, Any],
+    element: Mapping[str, Any],
+    creation: Mapping[str, Any],
+    element_id: str,
+) -> list[str | None]:
+    """Resolve the role actually bound to each runtime ``[Image N]`` slot.
+
+    An explicit ``video_reference_version_ids`` list is submitted exactly as
+    authored (this Element's storyboard reserved first, its own storyboard
+    versions dropped), so the canonical type order no longer predicts the
+    positions. Mirror that authored order and label each slot from its owner
+    entity; a slot whose owner cannot be resolved stays ``None`` and is never
+    gated, because a false block on a paid call is worse than a missed label.
+    """
+
+    explicit = list(
+        dict.fromkeys(
+            str(version_id)
+            for version_id in (
+                creation.get("video_reference_version_ids") or []
+            )
+        ),
+    )
+    if not explicit:
+        return _canonical_type_roles(creation)
+
+    assets = project_json.get("assets")
+    assets = assets if isinstance(assets, Mapping) else {}
+    slots = assets.get("artifact_slots_by_id")
+    slots = slots if isinstance(slots, Mapping) else {}
+    outputs = element.get("outputs")
+    outputs = outputs if isinstance(outputs, Mapping) else {}
+    storyboard_output = outputs.get("storyboard")
+    storyboard_output = (
+        storyboard_output if isinstance(storyboard_output, Mapping) else {}
+    )
+    slot_id = str(
+        storyboard_output.get("slot_id") or f"element:{element_id}:storyboard",
+    )
+    slot = slots.get(slot_id)
+    slot = slot if isinstance(slot, Mapping) else {}
+    selected = slot.get("selected_version_id")
+    storyboard_id = str(selected) if selected else None
+    own_versions = {
+        str(version_id) for version_id in (slot.get("version_ids") or ())
+    }
+    if storyboard_id:
+        own_versions.add(storyboard_id)
+
+    order: list[str] = []
+    if storyboard_id:
+        order.append(storyboard_id)
+    order.extend(
+        version_id for version_id in explicit if version_id not in own_versions
+    )
+
+    entity_roles = _bound_entity_roles(creation)
+    version_owners = _version_owner_entities(project_json)
+    roles: list[str | None] = []
+    for version_id in order:
+        if storyboard_id and version_id == storyboard_id:
+            roles.append("storyboard")
+            continue
+        entity = version_owners.get(version_id)
+        roles.append(entity_roles.get(entity) if entity else None)
+    return roles
+
+
 def _reference_role_mismatches(
     prompt: str,
-    creation: Mapping[str, Any],
+    expected_roles: Sequence[str | None],
     *,
     model_name: str,
     protocol_backend: str,
@@ -108,20 +230,11 @@ def _reference_role_mismatches(
     """Find explicit numbered-reference role declarations that are swapped.
 
     Natural-language prompts are allowed to omit role labels. When the author
-    does label a mapping, however, a declared prop in the Runtime's scene slot
-    is provably wrong and must not reach a paid call.
+    does label a mapping, however, a declared prop in the Runtime's scene
+    slot is provably wrong and must not reach a paid call. ``expected_roles``
+    carries the role bound to each real ``[Image N]`` slot; an unresolved
+    (``None``) slot is skipped rather than guessed.
     """
-
-    expected_roles = ["storyboard"]
-    expected_roles.extend(
-        "lineup" for _ in (creation.get("cast_lineup_refs") or [])
-    )
-    expected_roles.extend(
-        "character" for _ in (creation.get("character_refs") or [])
-    )
-    if creation.get("scene_ref"):
-        expected_roles.append("scene")
-    expected_roles.extend("prop" for _ in (creation.get("prop_refs") or []))
 
     # Prompts are authored canonically now and rendered per provider at
     # submit, so review sees [Image N]. Legacy prompts still hold the
@@ -147,6 +260,9 @@ def _reference_role_mismatches(
         first_markers.setdefault(index, (offset, literal))
     mismatches: list[tuple[str, str, str]] = []
     for index, expected in enumerate(expected_roles, start=1):
+        if expected is None:
+            # Unresolved owner: never guess a role for a paid-call gate.
+            continue
         marker = first_markers.get(index)
         if marker is None:
             continue
@@ -344,9 +460,15 @@ def check_changed_r2v_prompt_contracts(
                             ),
                         ),
                     )
+                expected_roles = _expected_reference_roles(
+                    project_json,
+                    element,
+                    creation,
+                    str(element_id),
+                )
                 for literal, expected, actual in _reference_role_mismatches(
                     video_prompt,
-                    creation,
+                    expected_roles,
                     model_name=video_model,
                     protocol_backend=video_backend,
                     language=language,
