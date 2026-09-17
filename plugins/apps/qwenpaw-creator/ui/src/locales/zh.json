@@ -2273,6 +2273,7 @@
     "title": "创作总览",
     "collapse": "收起创作总览",
     "expand": "展开创作总览",
+    "dragHeight": "拖动调整创作总览高度",
     "filters": "筛选创作操作",
     "parallelGroups": "{{count}} 组工作正在并行",
     "runningOperations": "{{count}} 项操作正在进行",

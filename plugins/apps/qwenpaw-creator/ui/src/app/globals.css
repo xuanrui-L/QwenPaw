@@ -1567,9 +1567,10 @@ a {
   line-height: 1.65;
 }
 .agent-progress-overview {
+  --agent-overview-cap: min(200px, 28%);
   flex: 0 1 auto;
   min-height: 0;
-  max-height: min(200px, 28%);
+  max-height: var(--agent-overview-cap);
   display: flex;
   flex-direction: column;
   margin: 8px 12px 4px;
@@ -1582,14 +1583,21 @@ a {
 .agent-progress-overview[data-expanded="false"] {
   flex-shrink: 0;
 }
+/* A dragged height replaces the automatic caps but still leaves the dock
+   header, composer and a sliver of conversation room. */
+.agent-progress-overview[data-resized="true"] {
+  --agent-overview-cap: min(var(--agent-overview-height), calc(100% - 280px));
+  flex-basis: var(--agent-overview-height);
+}
 .agent-progress-body {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
 }
 [data-agent-dock]:has([data-decision-tray] > button[aria-expanded="true"])
-  .agent-progress-overview {
-  max-height: min(144px, 20%);
+  .agent-progress-overview:not([data-resized="true"]) {
+  --agent-overview-cap: min(144px, 20%);
 }
 [data-agent-dock] > [data-decision-tray] {
   display: flex;
@@ -1612,11 +1620,11 @@ a {
 }
 @media (max-height: 800px) {
   .agent-progress-overview {
-    max-height: min(180px, 28%);
+    --agent-overview-cap: min(180px, 28%);
   }
   [data-agent-dock]:has([data-decision-tray] > button[aria-expanded="true"])
-    .agent-progress-overview {
-    max-height: min(104px, 17%);
+    .agent-progress-overview:not([data-resized="true"]) {
+    --agent-overview-cap: min(104px, 17%);
   }
   [data-agent-dock] > [data-decision-tray] {
     max-height: min(160px, 22vh);
@@ -1739,11 +1747,33 @@ a {
   color: var(--color-text-secondary);
 }
 .agent-progress-details {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 4px 8px;
   scrollbar-width: thin;
+}
+.agent-progress-resize {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  height: 8px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.agent-progress-resize::before {
+  content: "";
+  width: 28px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--color-border);
+  transition: background-color 160ms ease;
+}
+.agent-progress-resize:hover::before,
+.agent-progress-resize:focus-visible::before {
+  background: var(--color-accent);
 }
 .agent-progress-groups {
   display: grid;
@@ -1907,7 +1937,8 @@ button.agent-work-group-name:hover {
   font-size: 12px;
 }
 .agent-progress-overview button:focus-visible,
-.agent-progress-details:focus-visible {
+.agent-progress-details:focus-visible,
+.agent-progress-resize:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
@@ -1979,7 +2010,8 @@ button.agent-work-group-name:hover {
     animation: none;
   }
   .agent-progress-header,
-  .agent-progress-chevron {
+  .agent-progress-chevron,
+  .agent-progress-resize::before {
     transition: none;
   }
 }

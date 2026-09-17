@@ -1,4 +1,13 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -13,6 +22,7 @@ import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
+import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { navigateToLocator } from "@/routing/locators";
 import {
   buildAgentProgressModel,
@@ -31,6 +41,35 @@ const filters: ProgressFilter[] = [
   "preparing",
   "completed",
 ];
+
+const OVERVIEW_MIN_HEIGHT = 96;
+const FEED_MIN_HEIGHT = 120;
+const OVERVIEW_KEYBOARD_STEP = 16;
+
+function overviewHeightBounds(section: HTMLElement) {
+  const dock = section.closest<HTMLElement>("[data-agent-dock]");
+  if (!dock || !dock.clientHeight) {
+    return { min: OVERVIEW_MIN_HEIGHT, max: Number.POSITIVE_INFINITY };
+  }
+  // Only the dock's flex-growing children (the conversation feed) can give up
+  // space, so the ceiling is the current height plus that slack.
+  let slack = 0;
+  for (const child of Array.from(dock.children)) {
+    if (child === section) continue;
+    if (Number.parseFloat(getComputedStyle(child).flexGrow) > 0) {
+      slack += child.getBoundingClientRect().height;
+    }
+  }
+  const max = section.getBoundingClientRect().height + slack - FEED_MIN_HEIGHT;
+  return { min: OVERVIEW_MIN_HEIGHT, max: Math.max(OVERVIEW_MIN_HEIGHT, max) };
+}
+
+function clampOverviewHeight(
+  height: number,
+  bounds: { min: number; max: number },
+) {
+  return Math.round(Math.min(bounds.max, Math.max(bounds.min, height)));
+}
 
 function OperationRow({
   item,
@@ -180,6 +219,51 @@ export default function AgentProgressOverview({
   const [filter, setFilter] = useState<ProgressFilter>("all");
   const [expanded, setExpanded] = useState(true);
   const detailsId = useId();
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const overviewHeight = useAgentDockUiStore((state) => state.overviewHeight);
+  const setOverviewHeight = useAgentDockUiStore(
+    (state) => state.setOverviewHeight,
+  );
+  const beginOverviewResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const section = sectionRef.current;
+    if (!section || event.button !== 0) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = section.getBoundingClientRect().height;
+    const bounds = overviewHeightBounds(section);
+    const onMove = (moveEvent: PointerEvent) => {
+      setOverviewHeight(
+        clampOverviewHeight(startHeight + (moveEvent.clientY - startY), bounds),
+      );
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+  const nudgeOverviewHeight = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const section = sectionRef.current;
+    if (!section) return;
+    const direction =
+      event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    if (!direction) return;
+    event.preventDefault();
+    setOverviewHeight(
+      clampOverviewHeight(
+        section.getBoundingClientRect().height +
+          direction * OVERVIEW_KEYBOARD_STEP,
+        overviewHeightBounds(section),
+      ),
+    );
+  };
+  const resized = expanded && overviewHeight != null;
+  const sectionStyle = resized
+    ? ({ "--agent-overview-height": `${overviewHeight}px` } as CSSProperties)
+    : undefined;
   const graph = useWorkGraphStore((state) =>
     state.projectId === projectId ? state.graph : null,
   );
@@ -317,8 +401,11 @@ export default function AgentProgressOverview({
   );
   return (
     <section
+      ref={sectionRef}
       data-agent-progress-overview
       data-expanded={expanded}
+      data-resized={resized || undefined}
+      style={sectionStyle}
       className="agent-progress-overview"
       aria-label={t("progressOverview.title")}
     >
@@ -411,6 +498,18 @@ export default function AgentProgressOverview({
               </p>
             )}
           </div>
+          <div
+            data-agent-overview-resize
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label={t("progressOverview.dragHeight")}
+            tabIndex={0}
+            title={t("progressOverview.dragHeight")}
+            className="agent-progress-resize"
+            onPointerDown={beginOverviewResize}
+            onKeyDown={nudgeOverviewHeight}
+            onDoubleClick={() => setOverviewHeight(null)}
+          />
         </div>
       )}
     </section>
