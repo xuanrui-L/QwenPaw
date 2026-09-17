@@ -2529,6 +2529,9 @@ class FileCreatorAgentRuntime:
                 # run to ride into on an idle session; the poll-driven
                 # reconcile is their bounded escape valve.
                 await self._maybe_flush_idle_notifications(project_id)
+                # Auto-wake for unfinished work: preparation failures,
+                # ready-but-undispatched nodes, etc.
+                await self._maybe_wake_for_unfinished_work(project_id, session)
             return
         message = user_messages[0]
         # An explicit human revision supersedes earlier automated followups
@@ -8115,6 +8118,73 @@ class FileCreatorAgentRuntime:
             },
         )
         self._wake.set()
+
+    async def _maybe_wake_for_unfinished_work(
+        self,
+        project_id: str,
+        session: Any,
+    ) -> None:
+        """Wake scheduler or queue resume for unfinished work on IDLE session.
+
+        The poll-driven reconcile observes IDLE sessions with no pending user
+        messages. If the work graph still has unfinished nodes (preparation
+        failures, ready-but-undispatched nodes, etc.), this method:
+        1. Wakes the scheduler for dispatchable items
+        2. Queues a YOLO resume for items requiring model intervention
+
+        The existing fuse mechanisms in `_queue_yolo_completion_resume`
+        (consecutive-resume cap, no-progress breaker) prevent runaway loops.
+        """
+
+        if not self.work_scheduler.enabled():
+            return
+        records = await asyncio.to_thread(self.runs.list, project_id)
+        if not records:
+            return
+        last = records[-1]
+        if last.status is not AgentRunStatus.SUCCEEDED:
+            # Only resume after a clean exit; failed/interrupted runs have
+            # their own recovery paths.
+            return
+        try:
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            return
+        try:
+            task_records = await asyncio.to_thread(
+                self.executions.list_tasks,
+                project_id,
+            )
+        except Exception:  # pylint: disable=broad-except
+            task_records = []
+        graph = derive_work_graph(
+            snapshot.project,
+            tasks=task_records,
+            media_models=(get_image_model_name(), get_video_model_name()),
+        )
+        unfinished_nodes = graph.unfinished()
+        if not unfinished_nodes:
+            # Check for deterministic failures that may need scheduler wake-up
+            # for preparation retries.
+            deterministic_failures = (
+                self.work_scheduler.deterministic_failure_nodes_for_project(
+                    project_id,
+                )
+            )
+            if not deterministic_failures:
+                return
+        # Wake the scheduler to dispatch any READY nodes or retry preparations.
+        self.work_scheduler.wake(project_id)
+        # Queue a YOLO resume for items requiring model intervention.
+        await self._queue_yolo_completion_resume(
+            project_id=project_id,
+            session_id=session.session_id,
+            conversation_id=last.conversation_id,
+            run_id=last.run_id,
+        )
 
     async def _queue_mainline_resume(
         self,
