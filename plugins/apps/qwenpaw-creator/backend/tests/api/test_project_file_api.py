@@ -94,10 +94,12 @@ def _pending_review(services, base, *, interrupted_run_id="run-1"):
 
 
 @pytest.mark.parametrize("already_selected", [False, True])
+@pytest.mark.parametrize("final_already_stale", [False, True])
 def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
     tmp_path,
     run_scenario,
     already_selected,
+    final_already_stale,
 ):
     from services.file_agent_runtime.work_graph import derive_work_graph
 
@@ -163,7 +165,8 @@ def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
                 "file_id": version_id,
                 "checksum": checksum,
                 "based_on_generation": 0,
-                "stale": version_id == "old",
+                "stale": version_id == "old"
+                or (version_id == "final" and final_already_stale),
                 "stale_reason": "Old inputs" if version_id == "old" else None,
                 "created_at": "2026-09-17T00:00:00Z",
             }
@@ -213,6 +216,10 @@ def test_video_selection_patch_accepts_history_and_only_invalidates_compose(
     assert graph.by_id["video:clip"].status.value == "done"
     assert graph.by_id["compose:timeline:main"].status.value == "ready"
     assert not response.json()["editImpact"]["regenerationRequired"]
+    assert response.json()["editImpact"]["renderTimelineIds"] == [
+        "timeline:main",
+    ]
+    assert response.json()["editImpact"]["affectedElementIds"] == ["clip"]
 
 
 def _decisions_url(review):

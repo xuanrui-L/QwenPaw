@@ -700,7 +700,25 @@ def summarize_committed_edit_impact(
     # Re-running the classifier on a copy is deterministic and also covers
     # the no-selected-artifact case where the commit contains no induced
     # stale path.
-    _, classified = apply_frontend_edit_impacts(project, changed_pointers)
+    document, classified = apply_frontend_edit_impacts(
+        project,
+        changed_pointers,
+    )
+    for pointer in changed_pointers:
+        tokens = split_pointer(pointer)
+        if (
+            len(tokens) >= 5
+            and tokens[:2] == ("assets", "artifact_slots_by_id")
+            and tokens[3:5] == ("metadata", "selectionAcceptance")
+        ):
+            # Re-adopting the current stale video may change only this
+            # stamp: its selection and final's stale flag already match.
+            # The UI still needs to report the downstream compose action.
+            _apply_slot_selection_path(
+                document,
+                (*tokens[:3], "selected_version_id"),
+                classified,
+            )
     impact.affected_element_ids.update(classified.affected_element_ids)
     impact.affected_timeline_ids.update(classified.affected_timeline_ids)
     impact.invalidated_artifact_version_ids.update(
