@@ -81,6 +81,7 @@ it("reveals only visited nodes and their masked frontier, including connections"
   expect(entry.textContent).toBe("？");
   expect(entry).toBeDisabled();
   expect(ending).toHaveAttribute("data-host-hidden");
+  expect(ending).toHaveStyle({ display: "none" });
   expect(ending).not.toHaveAttribute("title");
   const future = doc.querySelector('[data-node-ref="future"]')!;
   expect(future).toHaveAttribute("data-host-hidden");
@@ -99,6 +100,7 @@ it("reveals only visited nodes and their masked frontier, including connections"
   expect(ending).not.toHaveAttribute("data-visited");
   expect(ending).toBeDisabled();
   expect(ending).not.toHaveAttribute("data-host-hidden");
+  expect(ending.style.display).not.toBe("none");
   expect(ending.textContent).toBe("？");
   expect(entry.textContent).toBe("来信");
   expect(future).toHaveAttribute("data-host-hidden");

@@ -430,9 +430,10 @@ async def execute_file_interaction_command(
     if existing is not None:
         if existing.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
             raise ConflictError("Interaction generation already running")
+        reason = (existing.error or {}).get("message")
         raise ModelError(
-            "Interaction task already finished; "
-            "edit the design or explicitly retry with a new key",
+            (f"此前生成失败：{reason}。" if reason else "此生成任务已结束。")
+            + "请点击重新生成以发起新的请求。",
             retryable=False,
         )
     execution.create_task(
@@ -491,7 +492,7 @@ async def execute_file_interaction_command(
                 temperature=0.5,
                 # A presentation contains four screens and needs more time
                 # than one choice. The provider controls its output budget.
-                timeout=300.0 if is_presentation else 180.0,
+                timeout=600.0 if is_presentation else 300.0,
                 thinking_budget=2048,
             )
             try:

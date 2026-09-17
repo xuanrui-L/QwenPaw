@@ -1569,3 +1569,24 @@ def test_title_policy_keeps_user_names_and_recognizes_legacy_auto_names(
         presentation_prompt(project, project.interactive_presentation)
     )
     assert prompt["title_policy"] == {"source": expected, "title": name}
+
+
+def test_replaying_failed_generation_retains_the_provider_error(
+    tmp_path, monkeypatch
+):
+    services = _services(tmp_path)
+    calls = []
+
+    async def fail(*args, **kwargs):
+        calls.append(kwargs)
+        raise ModelError(
+            "ReadTimeout: provider did not finish", retryable=True
+        )
+
+    monkeypatch.setattr(
+        interaction_execution.text_model, "chat_completion", fail
+    )
+    for _ in range(2):
+        with pytest.raises(ModelError, match="ReadTimeout"):
+            _execute(services, key="same-timeout")
+    assert len(calls) == 1

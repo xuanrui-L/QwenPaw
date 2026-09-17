@@ -38,6 +38,20 @@
       const name = String(value || "片段").trim().split(/[：:。\n]/)[0];
       return /^结局[\s\d一二三四五六七八九十A-Z]/i.test(name) ? "结局" : [...name].slice(0, 12).join("");
     }
+    const hiddenMapStyles = new WeakMap();
+    function setMapHidden(el, hidden) {
+      el.toggleAttribute("data-host-hidden", hidden);
+      if (hidden) {
+        if (!hiddenMapStyles.has(el)) hiddenMapStyles.set(el, [el.style.getPropertyValue("display"), el.style.getPropertyPriority("display")]);
+        // Authored !important layout rules must not expose future nodes.
+        el.style.setProperty("display", "none", "important");
+      } else if (hiddenMapStyles.has(el)) {
+        const [value, priority] = hiddenMapStyles.get(el);
+        if (value) el.style.setProperty("display", value, priority);
+        else el.style.removeProperty("display");
+        hiddenMapStyles.delete(el);
+      }
+    }
     function bindMap() {
       const visited = new Set(progress.visited.filter(id => bundle.nodes[id]));
       const visible = new Set(visited);
@@ -45,7 +59,7 @@
       visited.forEach(id => (bundle.nodes[id].children || []).forEach(child => visible.add(child)));
       mapNodes.forEach(({el, id, label, jump, jumpLabel}) => {
         const known = visited.has(id);
-        el.toggleAttribute("data-host-hidden", !visible.has(id));
+        setMapHidden(el, !visible.has(id));
         el.toggleAttribute("data-visited", known);
         el.toggleAttribute("data-current", id === current);
         el.toggleAttribute("data-unknown", !known);
@@ -65,7 +79,7 @@
         if (control.matches('button[data-action="jump"]')) control.disabled = !known;
       });
       all('[data-screen="map"] [data-map-from], [data-screen="map"] [data-map-to]').forEach(el => {
-        el.toggleAttribute("data-host-hidden", !(visited.has(el.dataset.mapFrom) && visible.has(el.dataset.mapTo)));
+        setMapHidden(el, !(visited.has(el.dataset.mapFrom) && visible.has(el.dataset.mapTo)));
       });
     }
     function bind() {
@@ -252,7 +266,7 @@
       // Old graphs can draw all routes as one SVG. Hide unbound paths rather
       // than revealing the shape or number of unexplored descendants.
       all('[data-screen="map"] svg, [data-screen="map"] path, [data-screen="map"] line, [data-screen="map"] polyline').forEach(el => {
-        if (!el.closest("[data-node-ref], [data-map-from]") && !el.querySelector("[data-map-from]")) el.setAttribute("data-host-hidden", "");
+        if (!el.closest("[data-node-ref], [data-map-from]") && !el.querySelector("[data-map-from]")) setMapHidden(el, true);
       });
       const visibilityStyle = doc.createElement("style");
       visibilityStyle.textContent = '[data-host-hidden]{display:none!important}[data-screen="map"] [data-node-ref]::before,[data-screen="map"] [data-node-ref]::after,[data-screen="map"] [data-node-ref] *::before,[data-screen="map"] [data-node-ref] *::after{content:none!important}';
