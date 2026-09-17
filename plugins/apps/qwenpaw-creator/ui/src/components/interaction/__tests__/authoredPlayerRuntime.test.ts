@@ -406,3 +406,19 @@ it("reports fullscreen failure without starting an invisible countdown", async (
     "fullscreen failed",
   );
 });
+
+it("keeps unknown placeholders visible when authored CSS hides labels and disabled controls", async () => {
+  const { doc, view } = setupPlayer();
+  const style = doc.createElement("style");
+  style.textContent =
+    "[data-unknown] [data-node-label]{display:none!important;opacity:0;visibility:hidden}[data-unknown] button{display:none}";
+  doc.head.append(style);
+  view.show("map");
+  const node = doc.querySelector(
+    '[data-screen="map"] [data-node-ref="entry"]',
+  )!;
+  expect(node.textContent).toBe("？");
+  const label = node.querySelector<HTMLElement>("[data-node-label]")!;
+  expect(doc.defaultView!.getComputedStyle(label).display).not.toBe("none");
+  expect(label).toHaveStyle({ visibility: "visible", opacity: "1" });
+});

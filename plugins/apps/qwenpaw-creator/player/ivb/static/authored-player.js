@@ -57,7 +57,7 @@
       const visible = new Set(visited);
       if (!visited.size) visible.add(bundle.entry_timeline_id);
       visited.forEach(id => (bundle.nodes[id].children || []).forEach(child => visible.add(child)));
-      mapNodes.forEach(({el, id, label, jump, jumpLabel}) => {
+      mapNodes.forEach(({el, id, label, template, jumpLabel}) => {
         const known = visited.has(id);
         setMapHidden(el, !visible.has(id));
         el.toggleAttribute("data-visited", known);
@@ -65,18 +65,40 @@
         el.toggleAttribute("data-unknown", !known);
         el.removeAttribute("title");
         el.setAttribute("aria-label", known ? label.textContent : "未探索");
-        // Only a short label is disclosed, including to assistive technology.
-        // Rebuild this small content surface so legacy synopsis markup cannot leak.
-        const text = label.cloneNode(false);
-        text.removeAttribute("title"); text.removeAttribute("aria-label");
-        text.removeAttribute("data-bind");
+        // Preserve the author's layout/chips/connectors, but disclose only
+        // the short label and the navigation control. No synopsis or tooltip
+        // survives, even when old HTML mixed them into the node container.
+        const copy = template.cloneNode(true);
+        const scrub = node => {
+          if (node.nodeType === 3) { node.textContent = ""; return; }
+          if (node.nodeType === 1) {
+            node.removeAttribute("title"); node.removeAttribute("aria-label");
+            node.removeAttribute("data-bind");
+          }
+          [...node.childNodes].forEach(scrub);
+        };
+        scrub(copy);
+        let text = copy.querySelector("[data-node-label]");
+        if (!text) { text = label.cloneNode(false); copy.prepend(text); }
+        // Legacy templates put the node name inside their jump button. Keep
+        // the name independently visible when that control is removed or
+        // rewritten, without flattening the rest of the authored layout.
+        const labelButton = text.closest("button[data-action]");
+        if (labelButton && labelButton !== copy) labelButton.before(text);
         text.textContent = known ? label.textContent : "？";
-        const control = jump ? jump.cloneNode(false) : el;
-        control.removeAttribute("title"); control.removeAttribute("aria-label");
-        if (jump && known) { control.textContent = jumpLabel; el.replaceChildren(text, control); }
-        else if (jump) { control.replaceChildren(text); el.replaceChildren(control); }
-        else el.replaceChildren(text);
-        if (control.matches('button[data-action="jump"]')) control.disabled = !known;
+        if (!known) {
+          // Authors sometimes hide real labels and draw a separate question
+          // mark. The host owns this placeholder and must keep it visible.
+          text.style.setProperty("display", "inline-block", "important");
+          text.style.setProperty("visibility", "visible", "important");
+          text.style.setProperty("opacity", "1", "important");
+        }
+        copy.querySelectorAll("button[data-action]").forEach(button => {
+          if (!known) button.remove();
+          else { button.disabled = false; button.textContent = jumpLabel; }
+        });
+        el.replaceChildren(...copy.childNodes);
+        if (el.matches('button[data-action="jump"]')) el.disabled = !known;
       });
       all('[data-screen="map"] [data-map-from], [data-screen="map"] [data-map-to]').forEach(el => {
         setMapHidden(el, !(visited.has(el.dataset.mapFrom) && visible.has(el.dataset.mapTo)));
@@ -261,7 +283,7 @@
         label.textContent = shortName(el.querySelector("[data-node-label]")?.textContent || bundle.nodes[el.dataset.nodeRef]?.title);
         const jump = el.querySelector('button[data-action="jump"]');
         const jumpLabel = jump?.querySelector("[data-node-label]") ? "回看" : shortName(jump?.textContent || "回看");
-        return {el, id: el.dataset.nodeRef, label, jump, jumpLabel};
+        return {el, id: el.dataset.nodeRef, label, template: el.cloneNode(true), jumpLabel};
       });
       // Old graphs can draw all routes as one SVG. Hide unbound paths rather
       // than revealing the shape or number of unexplored descendants.
