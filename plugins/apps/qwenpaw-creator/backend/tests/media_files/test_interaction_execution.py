@@ -1590,3 +1590,95 @@ def test_replaying_failed_generation_retains_the_provider_error(
         with pytest.raises(ModelError, match="ReadTimeout"):
             _execute(services, key="same-timeout")
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_task_finalization_does_not_block_review_coroutines(
+    tmp_path, monkeypatch, failed
+):
+    import threading
+    from services.runtime_files.execution_store import ProjectExecutionStore
+
+    services = _services(tmp_path)
+    original = ProjectExecutionStore.append_task_attempt
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+
+        def append(store, *args, **kwargs):
+            if kwargs.get("status") in {"SUCCEEDED", "FAILED"}:
+                # A review holding the project lock must be able to resume
+                # on the event loop before the task writer acquires it.
+                released = threading.Event()
+                loop.call_soon_threadsafe(released.set)
+                assert released.wait(
+                    0.5
+                ), "task writer blocked the review loop"
+            return original(store, *args, **kwargs)
+
+        async def chat(*args, **kwargs):
+            if failed:
+                raise ModelError("provider timeout", retryable=True)
+            return GOOD_HTML
+
+        monkeypatch.setattr(
+            ProjectExecutionStore, "append_task_attempt", append
+        )
+        monkeypatch.setattr(
+            interaction_execution.text_model, "chat_completion", chat
+        )
+        call = execute_file_interaction_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"element:{ELEMENT_ID}",
+            arguments={},
+            idempotency_key="review-contention",
+        )
+        if failed:
+            with pytest.raises(ModelError, match="provider timeout"):
+                await call
+        else:
+            result = await call
+            assert (
+                ProjectExecutionStore(services.root)
+                .get_task(PROJECT_ID, result.task_id)
+                .status.value
+                == "SUCCEEDED"
+            )
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_identical_generation_admits_only_one_provider_call(
+    tmp_path, monkeypatch
+):
+    services = _services(tmp_path)
+    calls = []
+
+    async def chat(*args, **kwargs):
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return GOOD_HTML
+
+    monkeypatch.setattr(
+        interaction_execution.text_model, "chat_completion", chat
+    )
+
+    async def scenario():
+        return await asyncio.gather(
+            *[
+                execute_file_interaction_command(
+                    services,
+                    project_id=PROJECT_ID,
+                    target_ref=f"element:{ELEMENT_ID}",
+                    arguments={},
+                    idempotency_key="concurrent-identical",
+                )
+                for _ in range(2)
+            ],
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(scenario())
+    assert len(calls) == 1
+    assert any(not isinstance(result, Exception) for result in results)

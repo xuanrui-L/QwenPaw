@@ -396,73 +396,85 @@ async def execute_file_interaction_command(
     motion = creation.motion
     execution = ProjectExecutionStore(services.root)
     task_id = _stable_id("task", project_id, idempotency_key)
-    try:
-        existing = execution.get_task(project_id, task_id)
-    except RecordNotFoundError:
-        existing = None
-    if (
-        _motion_is_drafted(motion)
-        and f"{_FINGERPRINT_MARKER}{fingerprint}" in motion.design_notes
-        and (
-            not arguments.get("regenerate")
-            or (existing and existing.status == TaskStatus.SUCCEEDED)
-        )
-    ):
-        logger.info(
-            "interaction draft semantic replay: project=%s element=%s",
-            project_id,
-            element_id,
-        )
-        return FileInteractionExecutionResult(
-            timeline_id=timeline_id,
-            element_id=element_id,
-            input_fingerprint=fingerprint,
-            project_etag=snapshot.etag,
-            project_generation=snapshot.generation,
-            replayed=True,
-        )
-
-    if services.reviews.all_pending(project_id):
-        raise ConflictError(
-            "Approve or reject pending project changes "
-            "before generating interaction motion",
-        )
-    if existing is not None:
-        if existing.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
-            raise ConflictError("Interaction generation already running")
-        reason = (existing.error or {}).get("message")
-        raise ModelError(
-            (f"此前生成失败：{reason}。" if reason else "此生成任务已结束。")
-            + "请点击重新生成以发起新的请求。",
-            retryable=False,
-        )
-    execution.create_task(
-        TaskRecord(
-            task_id=task_id,
-            project_id=project_id,
-            kind=TaskKind.INTERACTION_DRAFT,
-            request_fingerprint=fingerprint,
-            idempotency_key=dispatch_key,
-            input_generation=snapshot.generation,
-            input_etag=snapshot.etag,
-            input_refs=[target_ref],
-            metadata={
-                "targetRef": target_ref,
-                "timelineId": timeline_id,
-                "elementId": element_id,
-                "inputFingerprint": input_fingerprint,
-            },
-        ),
-    )
     attempt_id = f"{task_id}-attempt-1"
-    execution.append_task_attempt(
-        project_id,
-        task_id,
-        event_id=f"{attempt_id}-start",
-        attempt_id=attempt_id,
-        status="RUNNING",
-        input={"fingerprint": fingerprint},
-    )
+
+    def admit():
+        with services.projects.lifecycle_lock(project_id):
+            try:
+                existing = execution.get_task(project_id, task_id)
+            except RecordNotFoundError:
+                existing = None
+            if (
+                _motion_is_drafted(motion)
+                and f"{_FINGERPRINT_MARKER}{fingerprint}"
+                in motion.design_notes
+                and (
+                    not arguments.get("regenerate")
+                    or (existing and existing.status == TaskStatus.SUCCEEDED)
+                )
+            ):
+                logger.info(
+                    "interaction draft semantic replay: project=%s element=%s",
+                    project_id,
+                    element_id,
+                )
+                return FileInteractionExecutionResult(
+                    timeline_id=timeline_id,
+                    element_id=element_id,
+                    input_fingerprint=fingerprint,
+                    project_etag=snapshot.etag,
+                    project_generation=snapshot.generation,
+                    replayed=True,
+                )
+
+            if services.reviews.all_pending(project_id):
+                raise ConflictError(
+                    "Approve or reject pending project changes "
+                    "before generating interaction motion",
+                )
+            if existing is not None:
+                if existing.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+                    raise ConflictError(
+                        "Interaction generation already running"
+                    )
+                reason = (existing.error or {}).get("message")
+                raise ModelError(
+                    (f"此前生成失败：{reason}。" if reason else "此生成任务已结束。")
+                    + "请点击重新生成以发起新的请求。",
+                    retryable=False,
+                )
+            execution.create_task(
+                TaskRecord(
+                    task_id=task_id,
+                    project_id=project_id,
+                    kind=TaskKind.INTERACTION_DRAFT,
+                    request_fingerprint=fingerprint,
+                    idempotency_key=dispatch_key,
+                    input_generation=snapshot.generation,
+                    input_etag=snapshot.etag,
+                    input_refs=[target_ref],
+                    metadata={
+                        "targetRef": target_ref,
+                        "timelineId": timeline_id,
+                        "elementId": element_id,
+                        "inputFingerprint": input_fingerprint,
+                    },
+                ),
+                _lifecycle_lock_held=True,
+            )
+            execution.append_task_attempt(
+                project_id,
+                task_id,
+                event_id=f"{attempt_id}-start",
+                attempt_id=attempt_id,
+                status="RUNNING",
+                input={"fingerprint": fingerprint},
+                _lifecycle_lock_held=True,
+            )
+
+    replay = await asyncio.to_thread(admit)
+    if replay is not None:
+        return replay
     prompt = (
         presentation_prompt(project, creation)
         if is_presentation
@@ -569,7 +581,8 @@ async def execute_file_interaction_command(
             design_prompt=creation.design_prompt,
             task_id=task_id,
         )
-        execution.append_task_attempt(
+        await asyncio.to_thread(
+            execution.append_task_attempt,
             project_id,
             task_id,
             event_id=f"{attempt_id}-end",
@@ -593,9 +606,14 @@ async def execute_file_interaction_command(
                 else TaskStatus.FAILED
             )
         )
-        current = execution.get_task(project_id, task_id)
+        current = await asyncio.to_thread(
+            execution.get_task,
+            project_id,
+            task_id,
+        )
         if current.status is TaskStatus.RUNNING:
-            execution.append_task_attempt(
+            await asyncio.to_thread(
+                execution.append_task_attempt,
                 project_id,
                 task_id,
                 event_id=f"{attempt_id}-end",
