@@ -2004,6 +2004,10 @@ class Project(StrictModel):
                     problems = validate_interaction_html(
                         creation.motion.html,
                         None,
+                        # Frozen project/transaction snapshots may predate
+                        # output normalization. Keep them readable; generation
+                        # and export enforce the strict document boundary.
+                        allow_legacy_wrapping=True,
                     )
                     if creation.motion.format != "html_css" or problems:
                         raise ValueError(

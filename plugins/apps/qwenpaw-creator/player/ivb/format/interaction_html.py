@@ -101,6 +101,7 @@ def validate_interaction_html(
     edge_refs: list[str] | None,
     *,
     require_countdown: bool = False,
+    allow_legacy_wrapping: bool = False,
 ) -> list[str]:
     parser = _InteractionParser()
     if not 32 <= len(html) <= 200_000:
@@ -110,7 +111,8 @@ def validate_interaction_html(
         parser.close()
     except Exception:
         parser.problems.append("malformed HTML")
-    parser.validate_document_text()
+    if not allow_legacy_wrapping:
+        parser.validate_document_text()
     if edge_refs is not None and sorted(
         str(ref) for ref in parser.refs
     ) != sorted(edge_refs):

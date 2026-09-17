@@ -188,6 +188,34 @@ def test_interaction_command_writes_motion_back(
     assert "data-edge-ref" in calls[0]["system"]
 
 
+def test_legacy_wrapped_interaction_transaction_remains_recoverable(tmp_path):
+    from services.project_files.models import MotionGraphic
+
+    services = _services(tmp_path)
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_copy(deep=True)
+    legacy = f"这是完整的动效。\n```html\n{GOOD_HTML}\n```\n优化建议。"
+    candidate.timelines.items["timeline:main"].elements_by_id[
+        ELEMENT_ID
+    ].creation.motion = MotionGraphic(html=legacy)
+    services.commits.commit(
+        base=base,
+        candidate=candidate.model_dump(mode="json"),
+        origin="frontend_edit",
+        transaction_id="legacy-wrapped-motion",
+    )
+
+    report = services.recovery.recover_project(PROJECT_ID)
+
+    assert report.ok, report.integrity_errors
+    assert (
+        services.projects.read(PROJECT_ID)
+        .project.timelines.items["timeline:main"]
+        .elements_by_id[ELEMENT_ID]
+        .creation.motion.html
+    ) == legacy
+
+
 def test_same_inputs_replay_without_second_model_call(tmp_path, monkeypatch):
     services = _services(tmp_path)
     calls = _mock_chat(monkeypatch, [GOOD_HTML])

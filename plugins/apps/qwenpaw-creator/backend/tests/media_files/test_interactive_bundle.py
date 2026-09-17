@@ -286,6 +286,9 @@ def test_export_rejects_model_prose_outside_document(
         .creation.motion
     )
     motion.html = prefix + motion.html + suffix
+    # Historical snapshots must still round-trip through the Project schema
+    # during recovery, while the output boundary rejects the same artifact.
+    project = Project.model_validate(project.model_dump(mode="json"))
     with pytest.raises(InteractiveBundleError, match="text outside"):
         assemble_interactive_bundle(
             project,
