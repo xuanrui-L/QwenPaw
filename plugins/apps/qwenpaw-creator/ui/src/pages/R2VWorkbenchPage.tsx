@@ -33,12 +33,7 @@ import {
   getR2VReferenceOrder,
 } from "@/api/creator";
 import { dispatchWorkGraphNode } from "@/api/creator/workGraph";
-import {
-  acceptPromptProposal,
-  confirmCurrentPrompts,
-  createPromptProposal,
-  getPromptSync,
-} from "@/api/creator/promptSync";
+import { confirmCurrentPrompts, getPromptSync } from "@/api/creator/promptSync";
 import { useWorkGraphStore } from "@/store/workGraphStore";
 import { startVisiblePolling } from "@/lib/visiblePolling";
 import { taskProgressPercent } from "@/lib/taskPresentation";
@@ -323,9 +318,6 @@ export function WorkbenchSurface({
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const [regeneratingNode, setRegeneratingNode] = useState<string | null>(null);
   const [synchronizing, setSynchronizing] = useState(false);
-  const [regenerateChoice, setRegenerateChoice] = useState<
-    "storyboard" | "video" | null
-  >(null);
   const [regenerationError, setRegenerationError] = useState("");
   const [preparationSeconds, setPreparationSeconds] = useState(0);
   useEffect(() => {
@@ -769,10 +761,7 @@ export function WorkbenchSurface({
   // Apply the draft and verify its synchronization before dispatching. The
   // response distinguishes an existing running task from an up-to-date result;
   // a newly dispatched request can finish only after provider execution.
-  const regenerateNode = async (
-    kind: "storyboard" | "video",
-    opts?: { keepCurrent?: boolean },
-  ) => {
+  const regenerateNode = async (kind: "storyboard" | "video") => {
     if (regenerationRequest.current) {
       message.info(t("r2v.regenRunning"));
       return;
@@ -817,51 +806,22 @@ export function WorkbenchSurface({
         const gated =
           sync.status === "needs_update" ||
           sync.status === "needs_confirmation";
-        if (opts?.keepCurrent) {
-          // 保留当前内容并生成: never rewrite the authored prompts. A pending
-          // gate only needs re-stamping (confirm_current keeps all three bodies
-          // verbatim, #7720); with no gate this is a plain re-render.
-          if (gated) {
-            setSynchronizing(true);
-            await confirmCurrentPrompts(scope);
-            if (!isCurrent()) return;
-            await pollOnce(projectId);
-            if (!isCurrent()) return;
-            submittedInput = inputSignature();
-            sync = await getPromptSync(scope, undefined, kind);
-            if (!isCurrent() || submittedInput !== inputSignature()) return;
-            if (sync.status !== "current")
-              throw new Error(t("r2v.sync.changedBeforeGeneration"));
-            setSynchronizing(false);
-          }
-        } else {
-          // 全部重新生成: always commission an AI re-derivation of the whole
-          // element (narrative/storyboard/video), gated or not, so the choice
-          // stays distinct and meaningful in every state.
+        // Regeneration is node-scoped: re-render only the clicked stage from its
+        // current content, never rewriting the authored prompts. A pending gate
+        // only needs re-stamping (confirm_current keeps all three bodies
+        // verbatim, #7720); with no gate this is a plain re-render. The
+        // downstream stage is deliberately left alone — its node goes stale for
+        // a separate manual click — instead of cascading a paid re-generation.
+        if (gated) {
           setSynchronizing(true);
-          const proposal = await createPromptProposal(
-            scope,
-            sync.suggestedSource ??
-              (sync.narrative.trim() ? "currentPlan" : "videoPrompt"),
-          );
-          // A new edit or route change cancels this generation intent before
-          // the proposal can publish. The backend also checks its saved baseline.
-          if (!isCurrent() || submittedInput !== inputSignature()) return;
-          await acceptPromptProposal(scope, proposal.proposalId);
+          await confirmCurrentPrompts(scope);
           if (!isCurrent()) return;
           await pollOnce(projectId);
           if (!isCurrent()) return;
           submittedInput = inputSignature();
           sync = await getPromptSync(scope, undefined, kind);
           if (!isCurrent() || submittedInput !== inputSignature()) return;
-          // Dispatch only the exact synchronized content returned by this
-          // operation; an unrelated concurrent edit must not inherit its click.
-          if (
-            sync.status !== "current" ||
-            sync.storyboardPrompt !== proposal.storyboardPrompt ||
-            sync.videoPrompt !== proposal.videoPrompt ||
-            sync.narrative !== proposal.narrative
-          )
+          if (sync.status !== "current")
             throw new Error(t("r2v.sync.changedBeforeGeneration"));
           setSynchronizing(false);
         }
@@ -1699,24 +1659,22 @@ export function WorkbenchSurface({
     ),
   );
 
-  // The work-graph gate flag only drives the choice dialog's contextual hint
-  // (whether the prompts are currently out of sync with upstream).
-  const storyboardSyncRequired = useWorkGraphStore(
-    (s) =>
-      s.graph?.nodes.find((n) => n.id === `storyboard:${element.element_id}`)
-        ?.promptSyncRequired === true,
-  );
-  const videoSyncRequired = useWorkGraphStore(
+  // The video node goes stale once its upstream (the selected storyboard
+  // version) changes. Surface it so a manual storyboard re-render leaves a
+  // visible pending-regeneration marker instead of silently cascading.
+  const videoNodeStale = useWorkGraphStore(
     (s) =>
       s.graph?.nodes.find((n) => n.id === `video:${element.element_id}`)
-        ?.promptSyncRequired === true,
+        ?.status === "stale",
   );
 
-  // Human-initiated regeneration always offers the keep-vs-rewrite choice. The
-  // unattended agent never reaches this handler; it resolves prompt-sync gates
-  // on its own in the backend scheduler (_prepare_changed_prompts).
+  // Human-initiated regeneration is node-scoped: it re-renders only the clicked
+  // stage from its current content, never rewrites prompts, and never cascades
+  // to the downstream stage. The unattended agent never reaches this handler;
+  // it resolves prompt-sync gates and cascades on its own in the backend
+  // scheduler (_prepare_changed_prompts).
   const handleRegenerate = (kind: "storyboard" | "video") =>
-    setRegenerateChoice(kind);
+    void regenerateNode(kind);
 
   // The storyboard the backend will lock as [Image 1] is the *selected*
   // version, not whichever one is being viewed.
@@ -2041,6 +1999,11 @@ export function WorkbenchSurface({
                       </span>
                     </button>
                   )}
+                  {videoNodeStale && (
+                    <p className="text-[11px] leading-relaxed text-[var(--color-text-tertiary)]">
+                      {t("r2v.videoStaleHint")}
+                    </p>
+                  )}
                   <PromptRichBlock
                     label={t("r2v.videoPrompt")}
                     value={creation.video_prompt}
@@ -2331,58 +2294,6 @@ export function WorkbenchSurface({
         onCancel={() => setAssetPickerOpen(false)}
         onConfirm={handlePickerConfirm}
       />
-      <Modal
-        open={regenerateChoice !== null}
-        title={
-          regenerateChoice === "video"
-            ? t("r2v.regenerateChoiceTitleVideo")
-            : t("r2v.regenerateChoiceTitleStoryboard")
-        }
-        onCancel={() => setRegenerateChoice(null)}
-        footer={null}
-        width={460}
-      >
-        <p className="mb-3 text-xs leading-relaxed text-[var(--color-text-secondary)]">
-          {(
-            regenerateChoice === "video"
-              ? videoSyncRequired
-              : storyboardSyncRequired
-          )
-            ? t("r2v.regenerateChoiceHintGated")
-            : t("r2v.regenerateChoiceHintCurrent")}
-        </p>
-        <div className="flex flex-col gap-1">
-          <Button
-            type="primary"
-            block
-            disabled={Boolean(regeneratingNode) || synchronizing || patching}
-            onClick={() => {
-              const kind = regenerateChoice;
-              setRegenerateChoice(null);
-              if (kind) void regenerateNode(kind, { keepCurrent: true });
-            }}
-          >
-            {t("r2v.keepCurrentAndRegenerate")}
-          </Button>
-          <p className="mb-2 text-[11px] leading-relaxed text-[var(--color-text-tertiary)]">
-            {t("r2v.keepCurrentHint")}
-          </p>
-          <Button
-            block
-            disabled={Boolean(regeneratingNode) || synchronizing || patching}
-            onClick={() => {
-              const kind = regenerateChoice;
-              setRegenerateChoice(null);
-              if (kind) void regenerateNode(kind);
-            }}
-          >
-            {t("r2v.regenerateAll")}
-          </Button>
-          <p className="text-[11px] leading-relaxed text-[var(--color-text-tertiary)]">
-            {t("r2v.regenerateAllHint")}
-          </p>
-        </div>
-      </Modal>
       {lightbox}
     </div>
   );
