@@ -148,7 +148,7 @@ class Runtime:
             # catching CancelledError, causing the next await to raise
             # CancelledError again.  Wrap ON_ERROR hooks so that
             # cancel_envelope is always yielded — the frontend SDK
-            # needs the {object:response, status:completed} event to
+            # needs a terminal {object:response} event to
             # exit loading state.
             try:
                 await hooks.run(Phase.ON_ERROR, ctx)
@@ -180,9 +180,8 @@ class Runtime:
                 yield ev
             raise
         except BaseException as e:
-            await self._try_save_on_cancel(ctx)
-
             ctx.error = e
+            await self._try_save_on_cancel(ctx)
             logger.error(
                 "runtime: unhandled error session=%s: %s",
                 getattr(ctx, "session_id", ""),
@@ -255,13 +254,12 @@ class Runtime:
            This runs *outside* the ``try/except`` that wraps
            ``hooks.run(Phase.ON_ERROR)``, so it executes even when
            re-cancellation skips all ON_ERROR hooks.  The synchronous
-           parts (inject + state_dict) complete before any ``await``,
+           parts (inject + restore + state_dict) complete before any ``await``,
            and ``asyncio.shield`` protects the I/O — guarantees that a
            generic hook framework cannot provide.
 
-        TODO: Currently only ``SessionSaveHook`` has a cancel-path
-         equivalent here.  Other ``POST_RESPONSE`` hooks (e.g.
-         ``CronMemoryRestoreHook``) and plugin-registered hooks are
+        TODO: Session saving and cron history restoration have cancel-path
+         equivalents here. Other ``POST_RESPONSE`` and plugin hooks are
          skipped on /stop.  A future improvement should unify the
          cancel and normal paths — e.g. via a dedicated ``ON_CANCEL``
          phase with per-hook shield execution — so plugins can
@@ -290,11 +288,33 @@ class Runtime:
             if envelope is not None:
                 self._inject_partial_response(agent, envelope)
 
+            from ..hooks.cron.cron_hook import restore_cron_context
             from ._state_utils import StateProxy
 
+            restore_cron_context(ctx)
             proxy = StateProxy()
             proxy.data = agent.state_dict()
             request = ctx.request
+            from .console_turn_state import REGENERATE_FROM, stamp_console_turn
+
+            # A failed replacement must not destroy the previously saved turn.
+            if (getattr(request, "request_context", None) or {}).get(
+                REGENERATE_FROM,
+            ):
+                return
+            stamp_console_turn(
+                proxy.data,
+                request,
+                (
+                    "canceled"
+                    if isinstance(
+                        ctx.error,
+                        (asyncio.CancelledError, KeyboardInterrupt),
+                    )
+                    else "failed"
+                ),
+                ctx.error,
+            )
             user_id = getattr(request, "user_id", "") or ctx.session_id
             channel = getattr(request, "channel", "") or ""
             await asyncio.shield(
