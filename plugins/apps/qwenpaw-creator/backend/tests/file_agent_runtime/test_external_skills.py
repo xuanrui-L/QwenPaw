@@ -104,6 +104,7 @@ def test_broken_entries_stay_isolated(tmp_path, monkeypatch) -> None:
     ("skill_name", "body_fields"),
     [
         ("professional-media-prompts", ("[Image 1]",)),
+        ("interactive-interface-design", ("data-node-label", "title_policy")),
         (
             "visual-asset-design",
             ("canonical_variant_id", "derived_from_variant_id"),

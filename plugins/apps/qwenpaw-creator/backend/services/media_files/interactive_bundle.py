@@ -347,11 +347,14 @@ def _bundle_meta(project: Project) -> dict[str, str]:
     copy in the player. The cover is the entry segment's first frame drawn by
     the <video> element at runtime (no thumbnail artifacts exist to reuse)."""
 
+    from .presentation_authoring import presentation_title_policy
+
     description = (project.description or "").strip()
     tagline = description.splitlines()[0].strip() if description else ""
     return {
         "bundle_id": project.project_id,
         "title": project.name,
+        "title_source": presentation_title_policy(project)["source"],
         "tagline": tagline,
         "synopsis": description or project.strategy.creative_brief.strip(),
         "accent": DEFAULT_ACCENT,

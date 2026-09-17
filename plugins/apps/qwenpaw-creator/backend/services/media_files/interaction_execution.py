@@ -53,6 +53,8 @@ from .presentation_authoring import (
     PRESENTATION_SYSTEM_PROMPT,
     presentation_fingerprint,
     presentation_prompt,
+    interface_design_skill,
+    presentation_title_policy,
 )
 
 
@@ -483,7 +485,9 @@ async def execute_file_interaction_command(
                     PRESENTATION_SYSTEM_PROMPT
                     if is_presentation
                     else _INTERACTION_SYSTEM_PROMPT
-                ),
+                )
+                + "\n\n"
+                + interface_design_skill(),
                 temperature=0.5,
                 # A presentation contains four screens and needs more time
                 # than one choice. The provider controls its output budget.
@@ -509,6 +513,13 @@ async def execute_file_interaction_command(
                         key: value.model_dump(mode="json")
                         for key, value in creation.screens.items()
                     },
+                    authored_copy=True,
+                    expected_title=(
+                        project.name
+                        if presentation_title_policy(project)["source"]
+                        == "user"
+                        else None
+                    ),
                 )
                 if is_presentation
                 else _validate_motion_html(candidate, creation)

@@ -640,3 +640,14 @@ def test_committed_impact_can_be_reconstructed_for_idempotent_replay() -> None:
     assert impact.render_timeline_ids == {"timeline:main"}
     assert impact.invalidated_artifact_version_ids == {"video-v1", "final-v1"}
     assert impact.regeneration_required is True
+
+
+def test_manual_rename_marks_the_title_as_user_supplied():
+    before = _project()
+    before.update(name="自动截取", name_source="auto")
+    candidate = copy.deepcopy(before)
+    candidate["name"] = "深夜来信"
+    after, _ = apply_frontend_edit_impacts(candidate, ["/name"], base=before)
+    assert after["name_source"] == "user"
+    unchanged, _ = apply_frontend_edit_impacts(before, ["/description"])
+    assert unchanged["name_source"] == "auto"

@@ -43,6 +43,7 @@ class _PresentationParser(_InteractionParser):
         self.button = None
         self.labels = {}
         self.bindings = set()
+        self.binding_text = {}
 
     def handle_starttag(self, tag, attrs):
         # Each independent protocol rule contributes a diagnostic.
@@ -121,6 +122,10 @@ class _PresentationParser(_InteractionParser):
         super().handle_data(data)
         if self.button is not None:
             self.button[2].append(data)
+        scope = next((s for _, s, _ in reversed(self.stack) if s), None)
+        for _, _, binding in self.stack:
+            if binding:
+                self.binding_text.setdefault((scope, binding), []).append(data)
 
     def validate_homepage_labels(self):
         for action in ("start", "map", "replay"):
@@ -150,6 +155,9 @@ def validate_presentation_html(
     html: str,
     node_ids=None,
     screens=None,
+    *,
+    authored_copy=False,
+    expected_title=None,
 ) -> list[str]:
     parser = _PresentationParser()
     if not 32 <= len(html) <= 200_000:
@@ -172,6 +180,29 @@ def validate_presentation_html(
         parser.problems.append("one video and one interaction slot required")
     parser.validate_text_bindings()
     parser.validate_homepage_labels()
+    if authored_copy:
+        copy = {
+            key: "".join(chunks).strip()
+            for key, chunks in parser.binding_text.items()
+        }
+        for binding in ("project.title", "project.synopsis"):
+            if not copy.get(("title", binding)):
+                parser.problems.append(
+                    f"homepage {binding} needs authored text"
+                )
+        if (
+            expected_title
+            and copy.get(("title", "project.title")) != expected_title
+        ):
+            parser.problems.append("homepage must preserve the user title")
+        if copy.get(("ending", "node.title")) != "结局":
+            parser.problems.append(
+                "ending heading must be 结局 without numbering"
+            )
+        if any(
+            binding == "progress.endings" for _, binding in parser.bindings
+        ):
+            parser.problems.append("ending counts must not be disclosed")
     required = PRESENTATION_REQUIRED_ACTIONS
     if not required.issubset(set(parser.scoped_actions)):
         parser.problems.append(

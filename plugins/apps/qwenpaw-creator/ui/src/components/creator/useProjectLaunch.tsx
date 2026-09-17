@@ -403,8 +403,8 @@ export function useProjectLaunch(options?: {
       scenario === "short_drama" && !scriptOnly
         ? ["llm", "vlm", "image", "video"]
         : scenario === "video_edit" || hasAttachments
-        ? ["llm", "vlm"]
-        : ["llm"];
+          ? ["llm", "vlm"]
+          : ["llm"];
     const missing: string[] = [];
     for (const type of required) {
       const item = config[type];
@@ -538,6 +538,7 @@ export function useProjectLaunch(options?: {
           ? "script"
           : "media") as "script" | "media",
         name: resolvedProjectName,
+        nameSource: projectName.trim() ? ("user" as const) : ("auto" as const),
         description: projectDescription.trim(),
         scenario,
         resolution,

@@ -920,6 +920,17 @@ def _presentation_html(color="#f4efdf"):
         .strip()
         .replace("#f4efdf", color)
         .replace(
+            'data-bind="project.title"></',
+            'data-bind="project.title">Interaction Exec</',
+        )
+        .replace(
+            'data-bind="project.synopsis"></',
+            'data-bind="project.synopsis">一条意外消息，你会如何选择？</',
+        )
+        .replace(
+            'data-bind="node.title"></h1>', 'data-bind="node.title">结局</h1>'
+        )
+        .replace(
             "__NODES__",
             "".join(
                 '<button data-action="jump" '
@@ -1492,3 +1503,69 @@ def test_http_manual_regeneration_uses_new_slot_without_changing_prompt(
         )
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "bad_copy", ["empty", "wrong_title", "numbered_ending"]
+)
+def test_page_copy_contract_retries_and_loads_design_skill(
+    tmp_path, monkeypatch, bad_copy
+):
+    from services.media_files.presentation_authoring import (
+        interface_design_skill,
+    )
+
+    services = _services(tmp_path)
+    good = _presentation_html()
+    bad = {
+        "empty": good.replace("一条意外消息，你会如何选择？", ""),
+        "wrong_title": good.replace(">Interaction Exec<", ">改掉用户标题<"),
+        "numbered_ending": good.replace(">结局<", ">结局3<"),
+    }[bad_copy]
+    calls = _mock_chat(monkeypatch, [bad, good])
+    asyncio.run(
+        execute_file_interaction_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref=f"project:{PROJECT_ID}",
+            arguments={},
+            idempotency_key=f"copy-{bad_copy}",
+        )
+    )
+    assert len(calls) == 2
+    assert interface_design_skill() in calls[0]["system"]
+    assert (
+        services.projects.read(
+            PROJECT_ID
+        ).project.interactive_presentation.motion.html
+        == good
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "source", "expected"),
+    [
+        ("制作一个互动故事", None, "auto"),
+        ("制作一个互动故事", "user", "user"),
+        ("用户标题", None, "user"),
+        ("临时项目", "auto", "auto"),
+    ],
+)
+def test_title_policy_keeps_user_names_and_recognizes_legacy_auto_names(
+    name, source, expected
+):
+    import json
+    from services.media_files.presentation_authoring import (
+        presentation_prompt,
+        presentation_title_policy,
+    )
+
+    project = Project.new(
+        project_id="title-policy", name=name, description="制作一个互动故事"
+    )
+    project.name_source = source
+    assert presentation_title_policy(project)["source"] == expected
+    prompt = json.loads(
+        presentation_prompt(project, project.interactive_presentation)
+    )
+    assert prompt["title_policy"] == {"source": expected, "title": name}

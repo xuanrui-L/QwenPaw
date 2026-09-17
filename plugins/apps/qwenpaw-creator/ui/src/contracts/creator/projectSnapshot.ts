@@ -512,6 +512,7 @@ export interface ProjectDocument extends ProjectJsonRecord {
   created_at: string;
   updated_at: string;
   name: string;
+  name_source?: "user" | "auto" | null;
   description: string;
   scenario: "short_drama" | "video_edit" | "general";
   settings: ProjectSettingsDocument;

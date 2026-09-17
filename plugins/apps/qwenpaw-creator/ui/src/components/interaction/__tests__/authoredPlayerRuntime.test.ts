@@ -23,9 +23,10 @@ afterEach(() => {
   dispose?.();
   document.body.replaceChildren();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
-it("keeps an unexplored map visible, gates jumps and reveals resume after starting", async () => {
+it("reveals only visited nodes and their masked frontier, including connections", async () => {
   const html = readFileSync(
     resolve(
       process.cwd(),
@@ -34,7 +35,7 @@ it("keeps an unexplored map visible, gates jumps and reveals resume after starti
     "utf8",
   ).replace(
     "__NODES__",
-    '<button data-action="jump" data-node-ref="entry">Entry</button><button data-action="jump" data-node-ref="ending">Ending</button>',
+    '<button data-action="jump" data-node-ref="entry"><span data-node-label>来信</span><p>不要泄漏这段剧情</p></button><button data-action="jump" data-node-ref="ending" title="隐藏真相">Ending</button><button data-action="jump" data-node-ref="future">Future</button><svg data-map-from="entry" data-map-to="ending"></svg><svg data-map-from="ending" data-map-to="future"></svg>',
   );
   const container = document.createElement("div");
   document.body.append(container);
@@ -47,7 +48,8 @@ it("keeps an unexplored map visible, gates jumps and reveals resume after starti
       entry_timeline_id: "entry",
       nodes: {
         entry: { title: "Entry", children: ["ending"] },
-        ending: { title: "Ending", children: [] },
+        ending: { title: "Ending", children: ["future"] },
+        future: { title: "Future", children: [] },
       },
       segments: { entry: "/entry.mp4", ending: "/ending.mp4" },
     },
@@ -75,10 +77,16 @@ it("keeps an unexplored map visible, gates jumps and reveals resume after starti
   )!;
   expect(resume).toHaveAttribute("data-host-hidden");
   view.show("map");
-  for (const node of [entry, ending]) {
-    expect(node).not.toHaveAttribute("data-host-hidden");
-    expect(node).toBeDisabled();
-  }
+  expect(entry).not.toHaveAttribute("data-host-hidden");
+  expect(entry.textContent).toBe("？");
+  expect(entry).toBeDisabled();
+  expect(ending).toHaveAttribute("data-host-hidden");
+  expect(ending).not.toHaveAttribute("title");
+  const future = doc.querySelector('[data-node-ref="future"]')!;
+  expect(future).toHaveAttribute("data-host-hidden");
+  expect(doc.querySelector('[data-map-from="entry"]')).toHaveAttribute(
+    "data-host-hidden",
+  );
   ending.click();
   expect(visit).not.toHaveBeenCalled();
   view.show("title");
@@ -90,6 +98,19 @@ it("keeps an unexplored map visible, gates jumps and reveals resume after starti
   expect(entry).toBeEnabled();
   expect(ending).not.toHaveAttribute("data-visited");
   expect(ending).toBeDisabled();
+  expect(ending).not.toHaveAttribute("data-host-hidden");
+  expect(ending.textContent).toBe("？");
+  expect(entry.textContent).toBe("来信");
+  expect(future).toHaveAttribute("data-host-hidden");
+  expect(doc.querySelector('[data-map-from="entry"]')).not.toHaveAttribute(
+    "data-host-hidden",
+  );
+  expect(doc.querySelector('[data-map-from="ending"]')).toHaveAttribute(
+    "data-host-hidden",
+  );
+  expect(doc.querySelector('[data-screen="map"]')!.textContent).not.toContain(
+    "不要泄漏",
+  );
 });
 
 it.each(["", "/real-generated.mp4"])(
@@ -207,3 +228,179 @@ it.each([true, false])(
     expect(paused).toBe(userPaused);
   },
 );
+
+function setupPlayer(extra: object = {}, adapter: object = {}) {
+  const html = readFileSync(
+    resolve(
+      process.cwd(),
+      "../player/tests/fixtures/authored-presentation.html",
+    ),
+    "utf8",
+  )
+    .replace(
+      "__NODES__",
+      '<div data-node-ref="entry"><button data-action="jump" data-node-ref="entry"><span data-node-label>来信</span><p>剧情梗概</p></button></div>',
+    )
+    .replace(
+      'data-bind="project.title"></',
+      'data-bind="project.title">未发送</',
+    )
+    .replace(
+      'data-bind="project.synopsis"></',
+      'data-bind="project.synopsis">这一刻，你会按下发送吗？</',
+    )
+    .replace('data-action="resume"', 'data-action="reset"');
+  const container = document.createElement("div");
+  document.body.append(container);
+  const view = runtime.mount(
+    container,
+    {
+      authored_html: html,
+      meta: {
+        title: "制作一个关于消息的故事",
+        title_source: "auto",
+        synopsis: "全部剧透",
+      },
+      entry_timeline_id: "entry",
+      nodes: { entry: { title: "结局3：剧透", children: [] } },
+      segments: { entry: "/entry.mp4" },
+      ...extra,
+    },
+    adapter,
+  );
+  dispose = () => view.dispose();
+  const frame = container.querySelector("iframe")!;
+  const doc = frame.contentDocument!;
+  doc.open();
+  doc.write(html);
+  doc.close();
+  const video = doc.querySelector("video")!;
+  vi.spyOn(video, "pause").mockImplementation(() => {});
+  vi.spyOn(video, "load").mockImplementation(() => {});
+  vi.spyOn(video, "play").mockResolvedValue();
+  frame.dispatchEvent(new Event("load"));
+  const click = async (action: string) => {
+    doc.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  return { doc, video, view, click, container };
+}
+
+it.each(["user", "auto"])(
+  "uses the %s title policy, authored teaser and generic ending heading",
+  async (source) => {
+    const { doc, video, click } = setupPlayer({
+      meta: { title: "用户项目名", title_source: source, synopsis: "全部剧透" },
+    });
+    expect(doc.querySelector('[data-bind="project.title"]')!.textContent).toBe(
+      source === "user" ? "用户项目名" : "未发送",
+    );
+    expect(
+      doc.querySelector('[data-bind="project.synopsis"]')!.textContent,
+    ).toBe("这一刻，你会按下发送吗？");
+    await click("start");
+    video.dispatchEvent(new Event("ended"));
+    await waitFor(() =>
+      expect(doc.documentElement.dataset.currentScreen).toBe("ending"),
+    );
+    expect(
+      doc.querySelector('[data-screen="ending"] [data-bind="node.title"]')!
+        .textContent,
+    ).toBe("结局");
+    await click("reset");
+    expect(doc.querySelector('[data-node-ref="entry"]')!.textContent).toBe(
+      "？",
+    );
+  },
+);
+
+it("restores a short nested map label after visiting and supports delegated jump buttons", async () => {
+  const visit = vi.fn();
+  const { doc, click, view } = setupPlayer({}, { visit });
+  await click("start");
+  view.show("map");
+  expect(doc.querySelector('[data-node-ref="entry"]')!.textContent).toBe(
+    "来信回看",
+  );
+  expect(doc.querySelector('[data-action="jump"]')).toBeEnabled();
+  await click("jump");
+  expect(visit).toHaveBeenCalledTimes(2);
+});
+
+it.each(["standard", "webkit"])(
+  "waits for %s fullscreen to close before mounting choices and ignores duplicate events",
+  async (mode) => {
+    const mount = vi.fn(() => ({ pause: vi.fn(), dispose: vi.fn() }));
+    vi.stubGlobal("IVBInteraction", { mount });
+    const { doc, video, click } = setupPlayer({
+      interactions: [
+        { source_timeline_id: "entry", at_seconds: 1, options: [] },
+      ],
+    });
+    await click("start");
+    let finish!: () => void;
+    const exit = vi.fn();
+    if (mode === "standard") {
+      Object.defineProperty(doc, "fullscreenElement", {
+        configurable: true,
+        get: () => video,
+      });
+      Object.defineProperty(doc, "exitFullscreen", {
+        configurable: true,
+        value: exit.mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        ),
+      });
+    } else {
+      Object.defineProperty(video, "webkitDisplayingFullscreen", {
+        configurable: true,
+        value: true,
+      });
+      Object.defineProperty(video, "webkitExitFullscreen", { value: exit });
+      finish = () => {
+        Object.defineProperty(video, "webkitDisplayingFullscreen", {
+          value: false,
+        });
+        video.dispatchEvent(new Event("webkitendfullscreen"));
+      };
+    }
+    video.currentTime = 2;
+    video.dispatchEvent(new Event("timeupdate"));
+    video.dispatchEvent(new Event("ended"));
+    expect(exit).toHaveBeenCalledTimes(1);
+    expect(mount).not.toHaveBeenCalled();
+    finish();
+    await waitFor(() => expect(mount).toHaveBeenCalledTimes(1));
+    expect(doc.querySelector('[data-slot="interaction"]')).not.toHaveAttribute(
+      "data-host-hidden",
+    );
+  },
+);
+
+it("reports fullscreen failure without starting an invisible countdown", async () => {
+  const mount = vi.fn();
+  vi.stubGlobal("IVBInteraction", { mount });
+  const onError = vi.fn();
+  const { doc, video, click } = setupPlayer(
+    {
+      interactions: [
+        { source_timeline_id: "entry", at_seconds: 1, options: [] },
+      ],
+    },
+    { onError },
+  );
+  await click("start");
+  Object.defineProperty(doc, "fullscreenElement", { value: video });
+  Object.defineProperty(doc, "exitFullscreen", {
+    value: vi.fn().mockRejectedValue(new Error("fullscreen failed")),
+  });
+  video.dispatchEvent(new Event("ended"));
+  await waitFor(() => expect(onError).toHaveBeenCalled());
+  expect(mount).not.toHaveBeenCalled();
+  expect(document.querySelector('[role="alert"]')).toHaveTextContent(
+    "fullscreen failed",
+  );
+});

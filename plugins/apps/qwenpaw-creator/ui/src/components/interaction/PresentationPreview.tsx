@@ -38,6 +38,7 @@ export function presentationPreviewKey(
     id: project.project_id,
     review,
     name: project.name,
+    name_source: project.name_source,
     description: project.description,
     brief: project.strategy.creative_brief,
     motion: project.interactive_presentation?.motion,
@@ -159,6 +160,18 @@ export function PresentationPreview({
           authored_html: html,
           meta: {
             title: project.name,
+            title_source:
+              project.name_source ??
+              (project.name ===
+              Array.from(
+                (project.description || project.strategy.creative_brief)
+                  .trim()
+                  .replace(/\s+/g, " "),
+              )
+                .slice(0, 20)
+                .join("")
+                ? "auto"
+                : "user"),
             synopsis:
               project.description.trim() ||
               project.strategy.creative_brief.trim(),

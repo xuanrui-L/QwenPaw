@@ -758,6 +758,11 @@ def apply_frontend_edit_impacts(
 
     document = copy.deepcopy(dict(candidate))
     impact = EditImpact()
+    if (
+        "/name" in submitted_pointers
+        and "/name_source" not in submitted_pointers
+    ):
+        document["name_source"] = "user"
     if base is not None:
         for slot_id, raw_slot in _items(
             document,
