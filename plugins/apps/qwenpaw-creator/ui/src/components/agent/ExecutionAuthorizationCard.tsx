@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { message } from "antd";
-import { ClipboardCheck, Eye, PlayCircle } from "lucide-react";
+import { ClipboardCheck, Eye, Pencil, PlayCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   ExecutionAuthorizationApproval,
@@ -15,7 +15,11 @@ import {
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
 import { navigateToLocator } from "@/routing/locators";
 import { resolveCreatorLocator } from "@/routing/locatorTargets";
-import { projectJsonPointer } from "@/lib/projectJsonPointer";
+import {
+  projectJsonPointer,
+  readProjectPointer,
+} from "@/lib/projectJsonPointer";
+import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import i18n from "@/i18n";
 
 const BUTTON_BASE =
@@ -294,12 +298,61 @@ export default function ExecutionAuthorizationCard({
   const approve = useExecutionAuthorizationStore((state) => state.approve);
   const decline = useExecutionAuthorizationStore((state) => state.decline);
   const projectId = useExecutionAuthorizationStore((state) => state.projectId);
+  const patchProject = useProjectSnapshotStore((state) => state.patch);
+  const patching = useProjectSnapshotStore((state) => state.patching);
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
   if (authorization.status !== "PENDING") return null;
 
   const parameterSummary = authorizationParameterSummary(authorization);
   const checkpoint = authorizationCheckpointPhase(authorization);
   const jumpTarget = authorizationJumpTarget(authorization, project);
+
+  // Inline prompt editing applies only to production confirmations that target
+  // a concrete prompt field (element storyboard/video prompt or variant
+  // prompt). Checkpoints have no prompt field and keep their own upstream
+  // editing surfaces (e.g. the blueprint script panel).
+  const promptField = checkpoint ? undefined : jumpTarget?.field;
+  const promptEditable = Boolean(promptField && project);
+  const promptRead =
+    promptField && project ? readProjectPointer(project, promptField) : null;
+  const promptPresent = promptRead?.present ?? false;
+  const promptText =
+    promptRead && typeof promptRead.value === "string" ? promptRead.value : "";
+  const promptDirty = editing && draft !== promptText;
+
+  const startEditPrompt = () => {
+    setDraft(promptText);
+    setEditing(true);
+  };
+  const cancelEditPrompt = () => {
+    setEditing(false);
+    setDraft("");
+  };
+  const savePrompt = async () => {
+    if (!projectId || !promptField) return;
+    setSaving(true);
+    try {
+      await patchProject(projectId, [
+        {
+          op: promptPresent ? "replace" : "add",
+          path: promptField,
+          before: promptPresent ? promptText : undefined,
+          missingBefore: !promptPresent,
+          value: draft,
+        },
+      ]);
+      message.success(t("executionAuth.promptSaved"));
+      setEditing(false);
+      setDraft("");
+    } catch {
+      message.error(t("executionAuth.promptSaveFailed"));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const openTarget = () => {
     if (!jumpTarget || !projectId) return;
@@ -395,6 +448,18 @@ export default function ExecutionAuthorizationCard({
                 {t("executionAuth.view")}
               </button>
             )}
+            {promptEditable && !editing && (
+              <button
+                type="button"
+                onClick={startEditPrompt}
+                aria-label={t("executionAuth.editPrompt")}
+                title={t("executionAuth.editPrompt")}
+                className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent-soft)] hover:text-[var(--color-accent)]"
+              >
+                <Pencil className="h-3 w-3" />
+                {t("executionAuth.editPrompt")}
+              </button>
+            )}
           </div>
           <dl className="mt-1.5 space-y-0.5 text-[11px] leading-4">
             <div className="flex gap-1">
@@ -428,10 +493,48 @@ export default function ExecutionAuthorizationCard({
           </dl>
         </div>
       </div>
+      {editing && promptEditable && (
+        <div
+          className="mt-2 space-y-1.5"
+          data-execution-auth-prompt-editor={authorization.id}
+        >
+          <label className="block text-[10px] font-medium text-[var(--color-text-tertiary)]">
+            {t("executionAuth.promptLabel")}
+          </label>
+          <textarea
+            value={draft}
+            rows={4}
+            disabled={saving || patching}
+            onChange={(event) => setDraft(event.target.value)}
+            className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg-primary)] p-1.5 text-[11px] leading-4 text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+          />
+          <p className="text-[10px] leading-3 text-[var(--color-text-tertiary)]">
+            {t("executionAuth.promptEditHint")}
+          </p>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              disabled={!promptDirty || saving || patching}
+              onClick={() => void savePrompt()}
+              className={BUTTON_PRIMARY}
+            >
+              {t("executionAuth.savePrompt")}
+            </button>
+            <button
+              type="button"
+              disabled={saving || patching}
+              onClick={cancelEditPrompt}
+              className={BUTTON_GHOST}
+            >
+              {t("executionAuth.discardEdit")}
+            </button>
+          </div>
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || saving || patching}
           onClick={() => void continueRun()}
           className={`flex-1 ${BUTTON_PRIMARY}`}
         >
@@ -439,7 +542,7 @@ export default function ExecutionAuthorizationCard({
         </button>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || saving || patching}
           onClick={() => void cancelRun()}
           className={`flex-1 ${BUTTON_GHOST}`}
         >
