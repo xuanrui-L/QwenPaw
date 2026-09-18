@@ -42,6 +42,7 @@ from services.media_files.image_execution import (
     recover_unclaimed_image_tasks,
 )
 from services.media_files.transient_errors import is_transient_error_message
+from services.file_agent_runtime import manual_regeneration_hold
 from services.file_agent_runtime.notifications import RuntimeEventKind
 from services.file_agent_runtime.work_graph import (
     dispatch_key_predates_digest_ledger,
@@ -742,6 +743,16 @@ class WorkGraphScheduler:
         for node in self._dispatch_candidates(project_id, graph, tasks):
             if capacity <= 0:
                 break
+            if manual_regeneration_hold.is_held(project_id, node.node_id):
+                # A person re-rolled an upstream node by hand; its
+                # downstream stays put (STALE, 待重新生成) until they
+                # regenerate it too. Only the automatic cascade is
+                # suppressed — a manual dispatch bypasses this tick.
+                logger.info(
+                    "work-graph node %s held pending manual regeneration",
+                    node.node_id,
+                )
+                continue
             target_ref = node.target_ref or ""
             if target_ref.startswith("element:"):
                 held_for = frontend_edit_hold.hold_remaining(

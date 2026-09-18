@@ -20,6 +20,7 @@ from models.config import (
     get_image_model_name,
     get_video_model_name,
 )
+from services.file_agent_runtime import manual_regeneration_hold
 from services.file_agent_runtime.work_graph import derive_work_graph
 from services.file_agent_runtime.work_scheduler import WorkGraphScheduler
 from services.media_files.call_budget import media_call_count
@@ -147,6 +148,15 @@ async def dispatch_work_graph_node(
             f"节点 {node_id} 的依赖未就绪：" + "、".join(node.missing[:5]),
         )
     scheduler = WorkGraphScheduler(services)
+    # A human click is node-scoped: hold this node's downstream dependents
+    # so the unattended scheduler does not auto-cascade a paid regeneration
+    # (storyboard -> video -> compose) the operator did not ask for. Set
+    # before dispatch so a synchronous commit/wake already sees the hold.
+    manual_regeneration_hold.note_manual_regeneration(
+        project_id,
+        node_id,
+        graph.nodes,
+    )
     await scheduler.dispatch_node(
         project_id,
         node,

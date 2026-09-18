@@ -686,6 +686,137 @@ def test_happyhorse_explicit_reference_roles_follow_runtime_order(
     assert "实际是 prop" in report["findings"][1]["message"]
 
 
+def _explicit_order_project(video_prompt: str) -> dict:
+    """Element whose authored video references run character → prop → scene.
+
+    The canonical type order would put scene at [Image 3], but the runtime
+    submits the authored order exactly, so the prop owns that slot. Assets
+    carry the owner_ref that resolves each version to its semantic role.
+    """
+
+    storyboard_version = "artifact-version-storyboard"
+    character_version = "artifact-version-character"
+    prop_version = "artifact-version-prop"
+    scene_version = "artifact-version-scene"
+    return {
+        "settings": {"aspect_ratio": "16:9", "language": "zh-CN"},
+        "assets": {
+            "artifact_slots_by_id": {
+                "element:e:storyboard": {
+                    "slot_id": "element:e:storyboard",
+                    "kind": "r2v_storyboard_image",
+                    "owner_ref": "element:e",
+                    "version_ids": [storyboard_version],
+                    "selected_version_id": storyboard_version,
+                },
+            },
+            "artifact_versions_by_id": {
+                storyboard_version: {
+                    "owner_ref": "element:e",
+                    "name": "分镜图",
+                },
+                character_version: {
+                    "owner_ref": "asset:char:hero",
+                    "name": "角色图",
+                },
+                prop_version: {
+                    "owner_ref": "asset:prop:lamp",
+                    "name": "道具图",
+                },
+                scene_version: {
+                    "owner_ref": "asset:scene:room",
+                    "name": "场景图",
+                },
+            },
+            "source_versions_by_id": {},
+        },
+        "timelines": {
+            "items": {
+                "t": {
+                    "elements_by_id": {
+                        "e": {
+                            "outputs": {
+                                "storyboard": {
+                                    "slot_id": "element:e:storyboard",
+                                },
+                            },
+                            "creation": {
+                                "type": "r2v",
+                                "character_refs": ["char:hero"],
+                                "scene_ref": "scene:room",
+                                "prop_refs": ["prop:lamp"],
+                                "video_reference_version_ids": [
+                                    character_version,
+                                    prop_version,
+                                    scene_version,
+                                ],
+                                "narrative": "",
+                                "storyboard_prompt": (
+                                    "16:9 故事板，1 个分镜格；" "每一个分镜格内部均为 16:9。"
+                                ),
+                                "video_prompt": video_prompt,
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
+def test_explicit_reference_order_overrides_canonical_type_roles(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    project = _explicit_order_project(
+        "[Image 1] is the storyboard. "
+        "[Image 2] is the character reference. "
+        "[Image 3] is the lamp prop study. "
+        "[Image 4] is the room environment.",
+    )
+
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    # [Image 3] really is the prop in the authored runtime order, so the
+    # prompt is correct and nothing may be gated.
+    assert report["passed"] is True
+
+
+def test_explicit_reference_order_still_catches_a_real_swap(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        model_config,
+        "get_video_model_name",
+        lambda: "happyhorse-1.1",
+    )
+    monkeypatch.setattr(model_config, "get_video_backend", lambda: "wan")
+    project = _explicit_order_project(
+        "[Image 1] is the storyboard. "
+        "[Image 2] is the character reference. "
+        "[Image 3] is the room environment. "
+        "[Image 4] continues the action.",
+    )
+
+    report = check_changed_r2v_prompt_contracts(
+        project,
+        ["/timelines/items/t/elements_by_id/e"],
+    )
+
+    assert [item["code"] for item in report["findings"]] == [
+        "VIDEO_REFERENCE_ROLE_MISMATCH",
+    ]
+    assert "实际是 prop" in report["findings"][0]["message"]
+
+
 def test_borderless_outer_whitespace_is_not_a_panel_border_conflict(
     monkeypatch,
 ) -> None:
