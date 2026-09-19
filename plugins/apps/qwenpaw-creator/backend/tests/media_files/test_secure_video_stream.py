@@ -110,10 +110,11 @@ def _response(
     ("content", "declared", "container"),
     [
         (_MP4, "video/mp4", "mp4"),
+        (_MP4 + b"\r\n\x1a" + bytes(range(256)), "video/mp4", "mp4"),
         (_WEBM, "video/webm", "webm"),
         (_MP4 + b"\x1a\r\n\x00\n", "video/mp4", "mp4"),
     ],
-    ids=["mp4", "webm", "binary-control-bytes"],
+    ids=["mp4", "all-byte-values", "webm", "binary-control-bytes"],
 )
 @_run_async
 async def test_local_streaming_detects_video_magic_and_returns_integrity(
@@ -264,16 +265,22 @@ async def test_size_mime_checksum_and_magic_failures_remove_partial_file(
     assert not list(scratch.glob("r2v-materialized-*"))
 
 
+@pytest.mark.parametrize(
+    "content",
+    [_MP4, _MP4 + b"\r\n\x1a" + bytes(range(256))],
+    ids=["plain", "binary"],
+)
 @_run_async
 async def test_remote_stream_pins_peer_to_preresolved_public_dns(
     tmp_path: Path,
+    content: bytes,
 ) -> None:
     project_root, _scratch = _scope(tmp_path)
     transport = httpx.MockTransport(
         lambda _request: _response(
             200,
             peer="93.184.216.34",
-            content=_MP4,
+            content=content,
             headers={"content-type": "video/mp4"},
         ),
     )
@@ -286,7 +293,9 @@ async def test_remote_stream_pins_peer_to_preresolved_public_dns(
     )
 
     assert result.source_kind == "remote"
-    assert result.path.read_bytes() == _MP4
+    assert result.path.read_bytes() == content
+    assert result.size_bytes == len(content)
+    assert result.sha256 == hashlib.sha256(content).hexdigest()
 
 
 @_run_async
