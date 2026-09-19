@@ -420,6 +420,15 @@ async def execute_file_script_command(
     prompt = _build_script_prompt(project, timeline, intelligence_digest)
     if guidance:
         prompt += f"\n\n额外修改意见（必须遵循）：{guidance}"
+    from services.file_agent_runtime.manual_regeneration_hold import (
+        mark_untracked_admission,
+    )
+
+    await asyncio.to_thread(
+        mark_untracked_admission,
+        services.root,
+        project_id,
+    )
     raw = await text_model.chat_completion(
         prompt,
         system_prompt=_SCRIPT_SYSTEM_PROMPT,

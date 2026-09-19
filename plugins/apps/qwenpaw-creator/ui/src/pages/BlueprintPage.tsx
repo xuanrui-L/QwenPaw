@@ -20,6 +20,7 @@ import BlueprintStructureArea from "@/components/blueprint/BlueprintStructureAre
 import BlueprintScriptPanel from "@/components/blueprint/BlueprintScriptPanel";
 import BlueprintRoughCutStrip from "@/components/blueprint/BlueprintRoughCutStrip";
 import ProjectExportActions from "@/components/creator/ProjectExportActions";
+import ProductionStageControl from "@/components/creator/ProductionStageControl";
 import BlueprintPrepDrawer, {
   type PrepFocus,
   type PreproductionTab,
@@ -209,6 +210,7 @@ export default function BlueprintPage() {
           <ProjectExportActions project={project} />
         </span>
       </header>
+      <ProductionStageControl projectId={id} />
 
       {/* First screen: single projects read as the script document itself
           (design 84:37778); multi-episode / branching keep the structure. */}

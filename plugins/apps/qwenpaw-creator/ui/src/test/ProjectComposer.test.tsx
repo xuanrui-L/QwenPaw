@@ -68,6 +68,38 @@ const attachFile = () => {
 };
 
 describe("ProjectComposer ingest boundary", () => {
+  it("starts script-only short drama with just a text model and gates full production", async () => {
+    const config = structuredClone(configuredModelConfig);
+    config.image.enabled = false;
+    config.video.enabled = false;
+    config.vlm.enabled = false;
+    const { calls } = installMockFetch([
+      { match: "/models/config", response: { json: config } },
+      {
+        match: "/projects",
+        response: { json: created("p-script", "s-script", "c-script") },
+      },
+    ]);
+    renderComposer();
+    fill(/^例：霸道总裁短剧/, "先写小猫看雪的剧本");
+    const choice = screen.getByRole("checkbox", { name: /先写剧本/ });
+    expect(choice).toBeChecked();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /启动 Agent/ })).toBeEnabled(),
+    );
+    fireEvent.click(choice);
+    expect(screen.getByRole("button", { name: /启动 Agent/ })).toBeDisabled();
+    fireEvent.click(choice);
+    fireEvent.click(screen.getByRole("button", { name: /启动 Agent/ }));
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.url.endsWith("/projects"))?.body,
+      ).toMatchObject({
+        scenario: "short_drama",
+        productionStage: "script",
+      }),
+    );
+  });
   // The model-config snapshot is a module-level singleton; a previous test's
   // fetch must not leak into the next render's synchronous assertions.
   beforeEach(() => {

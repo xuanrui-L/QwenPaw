@@ -676,6 +676,21 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
     statuses: dict[str, WorkNodeStatus] = {}
 
     def add(node: WorkNode) -> None:
+        if (
+            project.settings.production_stage == "script"
+            and node.kind
+            in {"visual", "lineup", "storyboard", "video", "compose"}
+            and node.status is not WorkNodeStatus.RUNNING
+        ):
+            from services.project_files.production_stage import (
+                SCRIPT_ONLY_MESSAGE,
+            )
+
+            node = replace(
+                node,
+                status=WorkNodeStatus.GATED,
+                missing=(*node.missing, SCRIPT_ONLY_MESSAGE),
+            )
         nodes.append(node)
         statuses[node.node_id] = node.status
 

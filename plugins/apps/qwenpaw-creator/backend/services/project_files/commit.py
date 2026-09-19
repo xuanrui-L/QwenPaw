@@ -348,7 +348,10 @@ class ProjectCommitBoundary:
         advance_accepted_baseline: bool = True,
         block_token: str | None = None,
         reconcile_exclude_round_id: str | None = None,
-        prompt_sync_confirmation: tuple[str, str, str] | None = None,
+        prompt_sync_confirmation: (
+            tuple[str, str, str] | tuple[str, str, str, str] | None
+        ) = None,
+        production_stage_confirmation: str | None = None,
         prompt_sync_expected_etag: str | None = None,
         prompt_sync_context_validator: Callable[[dict[str, Any]], None]
         | None = None,
@@ -379,6 +382,25 @@ class ProjectCommitBoundary:
         )
         if protected:
             raise ProtectedFieldError(protected)
+        from .production_stage import (
+            PRODUCTION_STAGE_POINTER,
+            SCRIPT_APPROVAL_POINTER,
+        )
+
+        user_only = [
+            item.pointer
+            for item in requested
+            if item.pointer == SCRIPT_APPROVAL_POINTER
+            or (
+                item.pointer == PRODUCTION_STAGE_POINTER
+                and (
+                    origin_value is not ChangeOrigin.FRONTEND_EDIT
+                    or production_stage_confirmation is None
+                )
+            )
+        ]
+        if user_only:
+            raise ProtectedFieldError(user_only)
         if origin_value is not ChangeOrigin.RUNTIME_TASK:
             runtime_only = sorted(
                 {
@@ -565,6 +587,13 @@ class ProjectCommitBoundary:
             ):
                 latest = self.store.read(project_id)
                 if (
+                    production_stage_confirmation is not None
+                    and latest.etag != production_stage_confirmation
+                ):
+                    from domain.errors import ConflictError
+
+                    raise ConflictError("剧本已更新，请查看最新内容后重新确认。")
+                if (
                     prompt_sync_expected_etag is not None
                     and latest.etag != prompt_sync_expected_etag
                 ):
@@ -579,6 +608,9 @@ class ProjectCommitBoundary:
                     candidate=candidate_data,
                     latest=latest_data,
                 )
+                from .production_stage import derive_production_stage
+
+                derive_production_stage(latest_data, merged)
                 from .prompt_sync import derive_prompt_sync_changes
 
                 derive_prompt_sync_changes(

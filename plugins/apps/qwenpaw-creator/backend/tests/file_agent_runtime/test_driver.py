@@ -540,6 +540,7 @@ def test_browser_operation_scratch_is_removed_after_execution_failure(
 
 def test_live_operation_scratch_cleanup_rejects_escape_and_symlink(
     tmp_path,
+    directory_link,
 ) -> None:
     run_root = tmp_path / "runtime"
     scratch_root = run_root / "live_operation"
@@ -553,9 +554,9 @@ def test_live_operation_scratch_cleanup_rejects_escape_and_symlink(
     assert marker.read_text(encoding="utf-8") == "keep"
 
     redirect = scratch_root / "agent-run-link"
-    redirect.symlink_to(outside, target_is_directory=True)
+    directory_link(outside, redirect)
     _remove_live_operation_scratch(run_root, redirect.name)
-    assert redirect.is_symlink()
+    assert redirect.resolve() == outside.resolve()
     assert marker.read_text(encoding="utf-8") == "keep"
 
     ordinary = scratch_root / "agent-run-safe"
@@ -2732,6 +2733,71 @@ def test_manual_prompt_repair_respects_review_and_never_dispatches_media(
         assert feedback.metadata["modelRequiredNodes"] == ["video:ep1"]
         if after_failure:
             assert "瞬态故障" in feedback.content_parts[0].text
+
+
+@pytest.mark.parametrize("after_failure", [False, True])
+@pytest.mark.parametrize("review_mode", ["required", "auto_approve"])
+def test_completion_resume_preserves_manual_regeneration_pause(
+    tmp_path,
+    monkeypatch,
+    after_failure,
+    review_mode,
+) -> None:
+    from services.file_agent_runtime.manual_regeneration_hold import (
+        ManualRegenerationHoldStore,
+    )
+
+    services, _ = _create_project(tmp_path, initial_goal="完成短剧")
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    upstream = WorkNode(
+        node_id="storyboard:ep1",
+        kind="storyboard",
+        label="分镜",
+        status=WorkNodeStatus.DONE,
+    )
+    downstream = WorkNode(
+        node_id="video:ep1",
+        kind="video",
+        label="视频",
+        status=WorkNodeStatus.GATED,
+        deps=(upstream.node_id,),
+        missing=("video_prompt 缺失",),
+        authored_text_gap=True,
+    )
+    holds = ManualRegenerationHoldStore(services.root)
+    operation = holds.begin(PROJECT_ID, upstream, (upstream, downstream))
+    holds.admitted(operation)
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: review_mode,
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: WorkGraph(nodes=(downstream,), generation=1),
+    )
+    before = len(services.sessions.list_messages(PROJECT_ID, SESSION_ID))
+
+    async def resume():
+        await driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id="agent-run-held",
+            after_failure=after_failure,
+        )
+
+    asyncio.run(resume())
+    assert (
+        len(services.sessions.list_messages(PROJECT_ID, SESSION_ID)) == before
+    )
+    holds.resume(PROJECT_ID, holds.read(PROJECT_ID).revision)
+    asyncio.run(resume())
+    assert (
+        len(services.sessions.list_messages(PROJECT_ID, SESSION_ID))
+        == before + 1
+    )
 
 
 def test_model_blocked_with_its_pending_review_is_a_neutral_pause(

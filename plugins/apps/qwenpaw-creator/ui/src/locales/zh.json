@@ -1,4 +1,15 @@
 {
+  "productionStage": {
+    "scriptOnlyLaunch": "先写剧本，确认后再生成图片／视频",
+    "scriptOnly": "当前仅创作剧本，图片和视频生成已暂停。",
+    "mediaEnabled": "已允许媒体制作，执行仍遵循所选运行模式。",
+    "confirmScript": "确认剧本并允许制作",
+    "pauseMedia": "返回剧本阶段",
+    "confirmTitle": "确认当前已保存的剧本？",
+    "confirmDescription": "确认后可以生成图片和视频。自动模式会继续制作；需要逐项确认的模式仍会请求生成授权。之后修改剧本会再次暂停媒体制作。",
+    "allowMedia": "确认并允许制作",
+    "failed": "阶段更新失败，请刷新后重试。"
+  },
   "common": {
     "close": "关闭",
     "cancel": "取消",
@@ -780,7 +791,7 @@
     "regenUpToDate": "当前结果已是最新；修改 提示词 后可重新生成",
     "regenerateImage": "重新生成图片",
     "regenerateVideo": "重新生成视频",
-    "keepCurrentAndGenerate": "保留现有内容并生成",
+    "videoStaleHint": "分镜图已更新，视频待重新生成",
     "videoGenResult": "视频生成结果",
     "sbGenResult": "分镜图生成结果",
     "addReference": "添加引用",
@@ -1034,6 +1045,12 @@
     "view": "查看"
   },
   "workGraph": {
+    "manuallyHeld": "手动暂停",
+    "manualHoldNotice": "手动重生成已暂停后续自动制作。",
+    "resume": "恢复自动制作",
+    "resumeConfirm": "恢复后将继续下游自动生成，可能产生媒体生成费用。确认恢复自动制作？",
+    "resumeStale": "暂停状态已更新，请查看最新状态后重新确认恢复。",
+    "resumeFailed": "恢复自动制作失败，请重试。",
     "laneVisual": "视觉资产",
     "laneLineup": "阵容图",
     "laneCompose": "最终合成",
@@ -1115,6 +1132,14 @@
     "waitingConfirm": "等待确认",
     "jumpToPrompt": "跳转到将要生成的 提示词 / 编辑位置，确认前先检查输入",
     "view": "查看",
+    "promptLabel": "提示词",
+    "editPrompt": "编辑提示词",
+    "savePrompt": "保存",
+    "discardEdit": "放弃",
+    "promptSaved": "提示词已保存，点「继续」按新内容生成",
+    "promptSaveFailed": "提示词保存失败，请重试",
+    "promptChanged": "此提示词已在其他位置更新。请先放弃旧编辑并查看最新内容，再继续。",
+    "promptEditHint": "确认前可直接修改提示词；保存后点「继续」即按新内容生成。",
     "object": "对象",
     "model": "模型",
     "parameter": "参数",

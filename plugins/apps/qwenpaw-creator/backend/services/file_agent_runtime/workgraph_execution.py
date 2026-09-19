@@ -90,6 +90,7 @@ _PRE_DISPATCH_BLOCKERS = frozenset(
         "TARGET_NOT_FOUND",
         "WAITING_REVIEW",
         "EDIT_IN_PROGRESS",
+        "MANUAL_REGENERATION_HOLD",
         "GATED",
         "READY",
         "STALE",
@@ -593,8 +594,14 @@ async def ready_request_context(
     project_id: str,
     *,
     check_media_budget: bool = True,
+    confirmed_project_etag: str | None = None,
+    confirmed_node_id: str | None = None,
 ):
-    """Read the gates for every new request and approved dispatch."""
+    """Read all gates, allowing an exact explicit confirmation of one edit.
+
+    Only the confirmed node's frontend edit grace is waived, and only while
+    the read snapshot still matches. Unattended callers must not confirm edits.
+    """
     from services.run_review import admission
     from services.run_review.media_review import active_media_review_slots
 
@@ -628,10 +635,18 @@ async def ready_request_context(
         admission.active_sync_fences,
         services.projects.project_root(project_id) / "runtime" / "run-review",
     )
+    from .manual_regeneration_hold import ManualRegenerationHoldStore
+
+    manual_hold = await asyncio.to_thread(
+        ManualRegenerationHoldStore(services.root).read,
+        project_id,
+    )
     blocked: dict[str, str] = {}
     regenerable = {node.node_id for node in graph.regeneration_nodes()}
     for node in graph.nodes:
-        if node.command == CreatorCommandType.GENERATE_S2V_VIDEO.value:
+        if node.node_id in manual_hold.node_ids:
+            blocked[node.node_id] = "MANUAL_REGENERATION_HOLD"
+        elif node.command == CreatorCommandType.GENERATE_S2V_VIDEO.value:
             # S2V uses audio duration and its own resolution defaults. Do not
             # authorize it using the unrelated timeline/video project terms.
             blocked[node.node_id] = "UNSUPPORTED_EXECUTION_MODE"
@@ -651,15 +666,21 @@ async def ready_request_context(
             project=snapshot.project,
         ):
             blocked[node.node_id] = "WAITING_REVIEW"
-        elif node.target_ref and node.target_ref.startswith("element:"):
-            if (
-                frontend_edit_hold.hold_remaining(
-                    project_id,
-                    node.target_ref[8:],
-                )
-                > 0
-            ):
-                blocked[node.node_id] = "EDIT_IN_PROGRESS"
+        elif (
+            node.target_ref
+            and node.target_ref.startswith("element:")
+            and frontend_edit_hold.hold_remaining(
+                project_id,
+                node.target_ref[8:],
+            )
+            > 0
+            and not (
+                confirmed_project_etag is not None
+                and (snapshot.etag, node.node_id)
+                == (confirmed_project_etag, confirmed_node_id)
+            )
+        ):
+            blocked[node.node_id] = "EDIT_IN_PROGRESS"
         if (
             node.status is not WorkNodeStatus.READY
             and node.node_id not in regenerable

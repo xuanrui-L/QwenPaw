@@ -4072,6 +4072,9 @@ class FileCreatorAgentRuntime:
                 if is_compose
                 else _execution_provider_model(plan.spec, plan.parameters)
             )
+            approved_fingerprint = plan.fingerprint
+            confirmed_project_etag = None
+            confirmed_node_id = None
             dispatch_fingerprint = self.work_scheduler._ledger_fingerprint(
                 node,
             )
@@ -4088,6 +4091,7 @@ class FileCreatorAgentRuntime:
                     "targetRef": node.target_ref,
                     "arguments": plan.parameters,
                     "workGraph": {
+                        "nodeId": node.node_id,
                         "fingerprint": plan.fingerprint,
                         "provider": provider,
                         "model": model,
@@ -4117,6 +4121,36 @@ class FileCreatorAgentRuntime:
                         )
                     )
                     identity["executionAuthorizationId"] = authorization_id
+                    authorization = await asyncio.to_thread(
+                        self.executions.get_execution_authorization,
+                        project_id,
+                        authorization_id,
+                    )
+                    rebound = (authorization.decision or {}).get("workGraph")
+                    if rebound is not None:
+                        if (
+                            not isinstance(rebound, dict)
+                            or rebound.get("nodeId") != node.node_id
+                            or any(
+                                not isinstance(rebound.get(field), str)
+                                or not rebound[field]
+                                for field in (
+                                    "fingerprint",
+                                    "ledgerFingerprint",
+                                    "etag",
+                                )
+                            )
+                        ):
+                            raise FileAgentRuntimeError("无效的 WorkGraph 授权快照")
+                        approved_fingerprint = rebound["fingerprint"]
+                        dispatch_fingerprint = rebound["ledgerFingerprint"]
+                        confirmed_project_etag = rebound["etag"]
+                        confirmed_node_id = rebound["nodeId"]
+                        # Replays must use the saved snapshot's slot too.
+                        key = (
+                            f"dag-{node.node_id}-"
+                            f"{self.work_scheduler._dispatch_slot(dispatch_fingerprint)}"
+                        )
                 fence.assert_alive()
                 (
                     fresh,
@@ -4128,6 +4162,8 @@ class FileCreatorAgentRuntime:
                     self.executions,
                     project_id,
                     check_media_budget=not is_compose,
+                    confirmed_project_etag=confirmed_project_etag,
+                    confirmed_node_id=confirmed_node_id,
                 )
                 # An already admitted slot must never enter the image
                 # executor's paid transient-retry slot search a second time.
@@ -4179,7 +4215,7 @@ class FileCreatorAgentRuntime:
                     return blocked_item
                 current_plan = requested_work_node(fresh, current_node)
                 if (
-                    current_plan.fingerprint != plan.fingerprint
+                    current_plan.fingerprint != approved_fingerprint
                     or (
                         not is_compose
                         and _execution_provider_model(
@@ -4224,11 +4260,20 @@ class FileCreatorAgentRuntime:
                             f"project:{fresh.etag}:work-graph",
                         ),
                     )
-                result = await self.work_scheduler.await_admitted_execution(
+                from .manual_regeneration_hold import automatic_node
+
+                with automatic_node(
+                    self.services.root,
                     project_id,
                     current_node.node_id,
-                    execution,
-                )
+                ):
+                    result = (
+                        await self.work_scheduler.await_admitted_execution(
+                            project_id,
+                            current_node.node_id,
+                            execution,
+                        )
+                    )
                 task_id = getattr(result, "task_id", None)
                 if task_id is None and isinstance(result, Mapping):
                     task_id = result.get("taskId")
@@ -6805,6 +6850,19 @@ class FileCreatorAgentRuntime:
                 project_id,
                 authorization_id,
             )
+            from services.project_files.approved_prompt import (
+                approved_specialist_arguments,
+            )
+
+            approved_snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            arguments = approved_specialist_arguments(
+                approved_snapshot,
+                authorization,
+                arguments,
+            )
             active_provider, active_model = _execution_provider_model(
                 spec,
                 (
@@ -7033,6 +7091,19 @@ class FileCreatorAgentRuntime:
             role,
             timeline_count=timeline_count,
         ):
+            from services.project_files.production_stage import (
+                script_fingerprint,
+            )
+
+            if phase == "script":
+                confirmed = await asyncio.to_thread(
+                    self.services.projects.read,
+                    project_id,
+                )
+                if confirmed.project.settings.script_approval_fingerprint == (
+                    script_fingerprint(confirmed.project)
+                ):
+                    continue
             authorization = await self._creation_checkpoint_record(
                 project_id=project_id,
                 round_id=round_id,
@@ -7107,6 +7178,20 @@ class FileCreatorAgentRuntime:
                 is not ExecutionAuthorizationStatus.APPROVED
             ):
                 raise CreationCheckpointBlocked(phase, authorization.status)
+            if phase == "script":
+                latest = await asyncio.to_thread(
+                    self.services.projects.read,
+                    project_id,
+                )
+                if authorization.scope.get(
+                    "scriptFingerprint",
+                ) != script_fingerprint(
+                    latest.project,
+                ):
+                    raise CreationCheckpointBlocked(
+                        phase,
+                        ExecutionAuthorizationStatus.EXPIRED,
+                    )
 
     async def _creation_checkpoint_record(
         self,
@@ -7127,6 +7212,17 @@ class FileCreatorAgentRuntime:
         revised plan or designs instead of being locked out forever.
         """
 
+        revision = None
+        if phase == "script":
+            from services.project_files.production_stage import (
+                script_fingerprint,
+            )
+
+            snapshot = await asyncio.to_thread(
+                self.services.projects.read,
+                project_id,
+            )
+            revision = script_fingerprint(snapshot.project)
         attempt = 0
         while True:
             authorization_id = checkpoint_authorization_id(
@@ -7142,6 +7238,23 @@ class FileCreatorAgentRuntime:
                 )
             except RecordNotFoundError:
                 break
+            if (
+                revision is not None
+                and (record.scope or {}).get("scriptFingerprint") != revision
+            ):
+                if record.status is ExecutionAuthorizationStatus.PENDING:
+                    try:
+                        await asyncio.to_thread(
+                            self.executions.decide_execution_authorization,
+                            project_id,
+                            record.authorization_id,
+                            authorization_token=record.authorization_token,
+                            status=ExecutionAuthorizationStatus.EXPIRED,
+                        )
+                    except ExecutionStoreError:
+                        pass
+                attempt += 1
+                continue
             if record.status not in (
                 ExecutionAuthorizationStatus.REJECTED,
                 ExecutionAuthorizationStatus.EXPIRED,
@@ -7166,6 +7279,7 @@ class FileCreatorAgentRuntime:
                 "operation": checkpoint_operation(phase),
                 "checkpointPhase": phase,
                 "message": checkpoint_summary(phase),
+                **({"scriptFingerprint": revision} if revision else {}),
             },
             # The decision-tray card echoes provider/model back on approve,
             # and the API requires them to match the request exactly.
@@ -7410,6 +7524,18 @@ class FileCreatorAgentRuntime:
                 attempt += 1
                 continue
             existing = record
+            saved = (record.decision or {}).get("savedPrompt")
+            if (
+                record.status is ExecutionAuthorizationStatus.APPROVED
+                and saved
+            ):
+                latest = await asyncio.to_thread(
+                    self.services.projects.read,
+                    project_id,
+                )
+                if latest.etag != saved.get("etag"):
+                    attempt += 1
+                    continue
             break
         if (
             existing is not None
@@ -7469,6 +7595,11 @@ class FileCreatorAgentRuntime:
                     "operation": spec.name,
                     "targetRefs": [target_ref],
                     "parameters": billing_arguments,
+                    **(
+                        {"workGraph": dict(arguments["workGraph"])}
+                        if isinstance(arguments.get("workGraph"), Mapping)
+                        else {}
+                    ),
                     # Keep the literal tool request when it differs, so the
                     # approval record shows both what was asked and what is
                     # billed.
@@ -7878,6 +8009,14 @@ class FileCreatorAgentRuntime:
         waiting for a human.
         """
 
+        from .manual_regeneration_hold import ManualRegenerationHoldStore
+
+        manual_hold = await asyncio.to_thread(
+            ManualRegenerationHoldStore(self.services.root).read,
+            project_id,
+        )
+        if manual_hold.node_ids:
+            return
         auto_approve = get_media_review_mode() == MEDIA_REVIEW_AUTO_APPROVE
         if not auto_approve and await asyncio.to_thread(
             self.services.reviews.all_pending,

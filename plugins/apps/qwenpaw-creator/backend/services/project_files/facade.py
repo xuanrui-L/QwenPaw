@@ -480,14 +480,29 @@ class CreatorFileServices:
                 from services.media_files.r2v_execution import (
                     execute_file_r2v_command,
                 )
-
-                await execute_file_r2v_command(
-                    self,
-                    project_id=project_id,
-                    target_ref=target_ref,
-                    arguments={},
-                    idempotency_key=f"review-auto-continue-{digest}",
+                from services.file_agent_runtime import (
+                    manual_regeneration_hold as hold,
                 )
+
+                with hold.automatic_node(
+                    self.root,
+                    project_id,
+                    f"video:{element_id}",
+                ):
+                    await asyncio.to_thread(
+                        hold.check_automatic,
+                        self.root,
+                        project_id,
+                    )
+                    await execute_file_r2v_command(
+                        self,
+                        project_id=project_id,
+                        target_ref=target_ref,
+                        arguments={},
+                        idempotency_key=f"review-auto-continue-{digest}",
+                    )
+            except hold.ManualHoldConflict:
+                continue
             except Exception:
                 logger.exception(
                     "auto-continue video failed for %s in Project %s",

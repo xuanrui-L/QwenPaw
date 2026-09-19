@@ -41,6 +41,151 @@ from .conftest import make_r2v_element, r2v_project_services
 
 pytestmark = pytest.mark.unit
 
+
+def test_late_manual_hold_closes_running_image_and_allows_explicit_retry(
+    tmp_path,
+    monkeypatch,
+):
+    # Force the interleaving at the real provider admission boundary.
+    # pylint: disable=protected-access
+    from api import work_graph_routes as routes
+    from services.file_agent_runtime import work_scheduler
+    from services.file_agent_runtime.manual_regeneration_hold import (
+        ManualHoldConflict,
+        ManualRegenerationHoldStore,
+        automatic_node,
+    )
+    from services.file_agent_runtime.work_graph import derive_work_graph
+    from services.prompt_sync_service import PromptSyncService
+    from .conftest import accept_pending_reviews
+
+    async def scenario():
+        services = _services(tmp_path, monkeypatch)
+        provider = _CountingProvider()
+        worker = FileImageExecutionService(services, provider=provider)
+        base = services.projects.read(PROJECT_ID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["visual"] = _snapshot(
+            variants={
+                "items": {
+                    "hero": {"variant_id": "hero", "prompt": "Hero design"},
+                },
+                "order": ["hero"],
+            },
+        ).project.visual.model_dump(mode="json")
+        creation = candidate["timelines"]["items"]["timeline:main"][
+            "elements_by_id"
+        ][ELEMENT_ID]["creation"]
+        creation.update(
+            {
+                "character_refs": ["char:haaland"],
+                "visual_variant_refs": {"char:haaland": "hero"},
+                "storyboard_prompt": (
+                    "16:9 storyboard, 1 panel, each panel 16:9, bordered. "
+                    "A player enters the field."
+                ),
+                "video_prompt": (
+                    "[Image 1] is the storyboard. "
+                    "[Image 2] is the character reference."
+                ),
+            },
+        )
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin=ChangeOrigin.RUNTIME_TASK,
+        )
+        await worker.execute(
+            project_id=PROJECT_ID,
+            command="GENERATE_ASSET",
+            target_ref="asset:char:haaland",
+            arguments={"variantId": "hero"},
+            idempotency_key="anchor",
+        )
+        accept_pending_reviews(services, PROJECT_ID)
+        await PromptSyncService(services).confirm_current(
+            PROJECT_ID,
+            "timeline:main",
+            ELEMENT_ID,
+        )
+        initial_calls = provider.calls
+        holds = ManualRegenerationHoldStore(services.root)
+        node_id = f"storyboard:{ELEMENT_ID}"
+        original_claim = worker._claim_provider
+
+        async def claim_after_hold(task):
+            graph = derive_work_graph(
+                services.projects.read(PROJECT_ID).project,
+                tasks=worker.executions.list_tasks(PROJECT_ID),
+            )
+            upstream = graph.by_id["visual:char:haaland:hero"]
+            assert upstream.node_id in graph.by_id[node_id].deps
+            holds.admitted(holds.begin(PROJECT_ID, upstream, graph.nodes))
+            return await original_claim(task)
+
+        monkeypatch.setattr(worker, "_claim_provider", claim_after_hold)
+        with automatic_node(services.root, PROJECT_ID, node_id):
+            with pytest.raises(ManualHoldConflict):
+                await worker.execute(
+                    project_id=PROJECT_ID,
+                    command="GENERATE_STORYBOARD_IMAGE",
+                    target_ref=f"element:{ELEMENT_ID}",
+                    arguments={},
+                    idempotency_key="late-hold",
+                )
+        task = next(
+            t
+            for t in worker.executions.list_tasks(PROJECT_ID)
+            if t.idempotency_key == "late-hold"
+        )
+        assert task.status.value == "FAILED"
+        assert task.error["code"] == "MANUAL_REGENERATION_HOLD"
+        assert task.error["retryable"]
+        assert provider.calls == initial_calls
+        monkeypatch.setattr(worker, "_claim_provider", original_claim)
+        monkeypatch.setattr(
+            work_scheduler,
+            "get_execution_authorization_mode",
+            lambda: "required",
+        )
+
+        async def dispatch(
+            _services,
+            *,
+            project_id,
+            command,
+            target_ref,
+            arguments,
+            idempotency_key,
+            **kwargs,
+        ):
+            return await worker.execute(
+                project_id=project_id,
+                command=command,
+                target_ref=target_ref,
+                arguments=arguments,
+                idempotency_key=idempotency_key,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(
+            image_execution,
+            "execute_file_image_command",
+            dispatch,
+        )
+        response = await routes.dispatch_work_graph_node(
+            PROJECT_ID,
+            node_id,
+            services,
+        )
+        assert response["dispatched"]
+        assert provider.calls == initial_calls + 1
+        assert not holds.is_held(PROJECT_ID, node_id)
+        assert holds.is_held(PROJECT_ID, f"video:{ELEMENT_ID}")
+
+    asyncio.run(scenario())
+
+
 _PNG = b"\x89PNG\r\n\x1a\n" + b"retry-image" * 16
 
 PROJECT_ID = "image-resilience-project"

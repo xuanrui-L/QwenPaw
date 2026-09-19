@@ -24,7 +24,7 @@ from services.media_files import r2v_execution
 from services.runtime_files import ProjectRuntimeSessionStore
 from services.project_files.store import ProjectStore
 from services.project_files import archive as project_archive
-from services.project_files.models import IndexedFile
+from services.project_files.models import IndexedFile, Project
 
 pytestmark = pytest.mark.unit
 
@@ -207,7 +207,7 @@ def test_export_omits_only_published_compose_scratch(
         indexed = IndexedFile(
             file_id="film-file",
             kind="artifact_payload",
-            relative_uri="assets/source:film/film.mp4",
+            relative_uri="assets/source-film/film.mp4",
             sha256=hashlib.sha256(b"film").hexdigest(),
             size_bytes=4,
             media_type="video/mp4",
@@ -430,13 +430,14 @@ def test_archive_paths_do_not_silently_rename_or_collide(
         archive.writestr("project-1/source:a/file.json", "colon")
         archive.writestr("project-1/source_a/file.json", "underscore")
     destination = tmp_path / "restored"
-    extract(path, destination)
-    assert (
-        destination / "project-1/source:a/file.json"
-    ).read_text() == "colon"
-    assert (
-        destination / "project-1/source_a/file.json"
-    ).read_text() == "underscore"
+    if project_archive.sys.platform != "win32":
+        extract(path, destination)
+        assert (
+            destination / "project-1/source:a/file.json"
+        ).read_text() == "colon"
+        assert (
+            destination / "project-1/source_a/file.json"
+        ).read_text() == "underscore"
     # Windows must reject an unrepresentable archive instead of returning
     # success with dangling references or overwriting one colliding file.
     monkeypatch.setattr(
@@ -446,6 +447,20 @@ def test_archive_paths_do_not_silently_rename_or_collide(
     )
     with pytest.raises(BadRequestError, match="not supported on Windows"):
         extract(path, tmp_path / "windows")
+
+
+def test_export_rejects_directory_redirects(tmp_path, directory_link):
+    project = Project.new(project_id="project-1", name="Archive")
+    root = tmp_path / project.project_id
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_bytes(b"must not be exported")
+    directory_link(outside, root / "linked")
+    destination = tmp_path / "export.zip"
+    with pytest.raises(BadRequestError, match="non-regular path"):
+        project_archive.write_project_archive(root, project, destination)
+    assert not destination.exists()
 
 
 def test_validator_accepts_windows_reserved_chars(app, api_runtime_root):

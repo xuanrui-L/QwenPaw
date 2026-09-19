@@ -3596,7 +3596,11 @@ class FileLocalMediaExecutionService:
             raise ValueError("max_output_bytes must be positive")
         self.services = services
         self.runner = runner or FfmpegLocalMediaRunner()
-        self.executions = ProjectExecutionStore(services.root)
+        from services.file_agent_runtime.manual_regeneration_hold import (
+            HoldAwareExecutionStore,
+        )
+
+        self.executions = HoldAwareExecutionStore(services.root)
         self.max_output_bytes = max_output_bytes
         self._closed = False
 

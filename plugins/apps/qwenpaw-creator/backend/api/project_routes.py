@@ -42,6 +42,7 @@ from schemas.projects import (
     ExecutionPreauthorizationPolicy,
     ProjectCreateRequest,
     ProjectCreateResponse,
+    ProductionStageRequest,
 )
 from services.file_agent_runtime import (
     interrupt_creator_agent_runtime,
@@ -155,6 +156,8 @@ def _settings(request: ProjectCreateRequest) -> ProjectSettings:
         else None
     )
     return ProjectSettings(
+        production_stage=request.production_stage
+        or ("script" if request.scenario == "short_drama" else "media"),
         aspect_ratio=request.aspect_ratio,
         resolution=request.resolution,
         content_type=request.content_type,
@@ -518,6 +521,31 @@ async def create_project(
     notify_creator_agent_runtime(project_id)
     response.status_code = status.HTTP_201_CREATED
     return result
+
+
+@router.post("/{project_id}/production-stage")
+async def set_production_stage(
+    project_id: str,
+    request: ProductionStageRequest,
+    services: CreatorFileServices = Depends(project_file_services),
+):
+    expected = (
+        request.project_etag.strip().removeprefix("W/").strip().strip('"')
+    )
+    snapshot = await asyncio.to_thread(services.projects.read, project_id)
+    if snapshot.etag != expected:
+        raise ConflictError("剧本已更新，请查看最新内容后重新确认。")
+    candidate = snapshot.project.model_dump(mode="json")
+    candidate["settings"]["production_stage"] = request.stage
+    result = await services.commit_candidate(
+        base=snapshot,
+        candidate=candidate,
+        origin="frontend_edit",
+        review_policy="auto_fix",
+        production_stage_confirmation=expected,
+    )
+    notify_creator_agent_runtime(project_id)
+    return {"ok": True, "generation": result.snapshot.generation}
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
