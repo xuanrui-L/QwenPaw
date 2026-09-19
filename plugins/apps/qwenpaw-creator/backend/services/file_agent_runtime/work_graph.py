@@ -36,13 +36,10 @@ from services.project_files.blueprint_readiness import (
     STORY_BEFORE_VISUAL_MESSAGE,
     visual_story_missing,
 )
-
-
 from services.media_files.interaction_fingerprint import (
     motion_matches_request,
     interaction_request_fingerprint,
 )
-from services.prompt_text import dialogue_match_key, dialogue_spoken_lines
 from services.project_files.models import (
     ArtifactVersionRenderSource,
     narrative_timeline_ids,

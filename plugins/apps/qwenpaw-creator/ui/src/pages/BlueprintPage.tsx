@@ -16,8 +16,6 @@ import {
 import {
   isVoiceOnlyVisualEntity,
   hasBlueprintContent,
-
-
   selectNarrativeEdges,
   selectResearchSlots,
   selectTimelineSummaries,

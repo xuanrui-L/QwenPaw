@@ -1412,32 +1412,6 @@ class Timeline(StrictModel):
         )
 
 
-SNAPSHOT_TIMELINE_PREFIX = "snapshot:"
-
-
-def is_snapshot_timeline_id(timeline_id: str) -> bool:
-    """History snapshots are frozen copies, never live narrative nodes."""
-
-    return timeline_id.startswith(SNAPSHOT_TIMELINE_PREFIX)
-
-
-def narrative_timeline_ids(project: "Project") -> tuple[str, ...]:
-    """The live narrative timelines, in order.
-
-    Every "how many episodes / which timelines produce content" decision
-    must go through this filter: ``snapshot:*`` entries in
-    ``timelines.order`` are frozen version history, not episodes — they
-    must never receive script/storyboard/video/compose nodes, never count
-    toward multi-timeline checkpoints, and never enter narrative prompts.
-    """
-
-    return tuple(
-        timeline_id
-        for timeline_id in project.timelines.order
-        if not is_snapshot_timeline_id(timeline_id)
-    )
-
-
 class NarrativeEdge(StrictModel):
     """Branch link between two narrative nodes (Timelines). Linear projects
     keep this empty; the blueprint derives its structure shape from
@@ -1484,6 +1458,32 @@ class InteractiveManifest(StrictModel):
     # timeline_id -> final_video ArtifactVersion ref for that segment.
     segments: dict[EntityId, str] = Field(default_factory=dict)
     interactions: list[InteractionPoint] = Field(default_factory=list)
+
+
+SNAPSHOT_TIMELINE_PREFIX = "snapshot:"
+
+
+def is_snapshot_timeline_id(timeline_id: str) -> bool:
+    """History snapshots are frozen copies, never live narrative nodes."""
+
+    return timeline_id.startswith(SNAPSHOT_TIMELINE_PREFIX)
+
+
+def narrative_timeline_ids(project: "Project") -> tuple[str, ...]:
+    """The live narrative timelines, in order.
+
+    Every "how many episodes / which timelines produce content" decision
+    must go through this filter: ``snapshot:*`` entries in
+    ``timelines.order`` are frozen version history, not episodes — they
+    must never receive script/storyboard/video/compose nodes, never count
+    toward multi-timeline checkpoints, and never enter narrative prompts.
+    """
+
+    return tuple(
+        timeline_id
+        for timeline_id in project.timelines.order
+        if not is_snapshot_timeline_id(timeline_id)
+    )
 
 
 PresentationScreen = Literal["title", "play", "map", "ending"]

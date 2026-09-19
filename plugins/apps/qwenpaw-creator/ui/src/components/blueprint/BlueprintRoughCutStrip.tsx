@@ -186,7 +186,7 @@ function PreviewCinema({
   const wholeFilm = startId === FULL_FILM_ID && !branching;
   const initialId =
     startId === FULL_FILM_ID && branching
-      ? (selectLiveTimelineIds(project)[0] ?? startId)
+      ? selectLiveTimelineIds(project)[0] ?? startId
       : startId;
   const [currentId, setCurrentId] = useState(initialId);
   const [segmentIndex, setSegmentIndex] = useState(1);
@@ -197,14 +197,11 @@ function PreviewCinema({
   /** Intrinsic aspect ratio of the playing video; lets the frame hug it. */
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
 
-<<<<<<< HEAD
-=======
   // Both story shapes use the same checked storyboard / shot preview. This
   // component already follows narrative edges when the draft segment ends.
   // A server rough cut may still substitute character reference sheets.
   const srcFor = srcOf;
 
->>>>>>> d1a651d2 (fix(creator): restore story map choices and reconcile production previews)
   useEffect(() => {
     setCurrentId(initialId);
     setSegmentIndex(1);
@@ -223,7 +220,6 @@ function PreviewCinema({
   }, [onClose]);
 
   const liveOrder = useMemo(() => selectLiveTimelineIds(project), [project]);
-
 
   const edges = useMemo(
     () => project.narrative_edges ?? [],
@@ -299,9 +295,8 @@ function PreviewCinema({
       return;
     }
     if (edges.length === 0) {
-      // Linear story: fall through the ordered timelines.
-      const order = liveOrder;
-      const next = order[order.indexOf(currentId) + 1];
+      // Linear story: fall through the live timelines in narrative order.
+      const next = liveOrder[liveOrder.indexOf(currentId) + 1];
       if (next) {
         advanceTo(next);
         return;
@@ -343,7 +338,7 @@ function PreviewCinema({
             {t("blueprint.roughCutFailed")}
           </div>
         ) : !wholeFilm &&
-          !srcOf(currentId) &&
+          !srcFor(currentId) &&
           project.timelines.items[currentId] ? (
           <DraftTimelinePlayer
             key={`${currentId}:${replayNonce}`}
@@ -357,7 +352,7 @@ function PreviewCinema({
           // in either orientation.
           <video
             key={`${currentId}:${replayNonce}`}
-            src={(wholeFilm ? filmUrl : srcOf(currentId)) ?? undefined}
+            src={(wholeFilm ? filmUrl : srcFor(currentId)) ?? undefined}
             controls
             autoPlay
             playsInline
@@ -559,7 +554,7 @@ export default function BlueprintRoughCutStrip({
         </span>
         <span className="ml-auto flex min-w-0 shrink items-center gap-1.5 overflow-x-auto py-0.5 [scrollbar-width:none]">
           {(isBranching
-            ? project.timelines.order.length > 0
+            ? selectLiveTimelineIds(project).length > 0
             : Boolean(filmUrl)) && (
             <button
               type="button"

@@ -2079,5 +2079,3 @@ def test_anchor_chain_waits_for_stale_intermediate_before_initial_render(
     assert [node.node_id for node in graph.regeneration_nodes()] == [
         middle_ref,
     ]
-
-

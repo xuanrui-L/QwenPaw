@@ -46,9 +46,6 @@ router = APIRouter(
     dependencies=[Depends(bind_creator_trace_request)],
     route_class=CreatorErrorRoute,
 )
-# Archives transfer existing project data and media. They require no model
-# connection; an incompatible local model config must not prevent restoring
-# or backing up a Project created with different settings.
 router.include_router(archive_router)
 configured_router = APIRouter(
     dependencies=[Depends(bind_creator_tool_config)],
@@ -63,12 +60,12 @@ configured_router.include_router(file_sessions_router)
 configured_router.include_router(file_execution_router)
 configured_router.include_router(file_media_router)
 configured_router.include_router(work_graph_router)
+configured_router.include_router(interactive_bundle_router)
 configured_router.include_router(prompt_sync_router)
 configured_router.include_router(model_router)
 configured_router.include_router(observability_router)
 configured_router.include_router(video_templates_router)
 configured_router.include_router(voice_router)
-configured_router.include_router(interactive_bundle_router)
 router.include_router(configured_router)
 
 

@@ -169,7 +169,10 @@
     "saveAsTemplateFailed": "Failed to save template",
     "deleteTemplateConfirm": "Delete template \"{{name}}\"?",
     "deleteTemplateSuccess": "Template deleted",
-    "deleteTemplateFailed": "Failed to delete template"
+    "deleteTemplateFailed": "Failed to delete template",
+    "videoTemplateNone": "No Template",
+    "videoTemplateHint": "Choose a preset to get started quickly",
+    "videoTemplateUserSection": "My Templates"
   },
   "nav": {
     "videoPlan": "Video Plan",
@@ -638,7 +641,8 @@
     "railOverviewTab": "Video Overview",
     "noStoryboard": "No storyboard yet",
     "scriptPlan": "Back to video script",
-    "expandSidebar": "Expand sidebar"
+    "expandSidebar": "Expand sidebar",
+    "railStoryboardTab": "Storyboard Preview"
   },
   "r2v": {
     "title": "Video Plan / {{element}} / Production Workbench",
@@ -812,7 +816,9 @@
     "editorReferencesChanged": "The reference images or editing target have changed. Reload before continuing so image references stay accurate. Your current draft is preserved.",
     "editorReload": "Reload latest",
     "editorKeep": "Keep my edits",
-    "narrativeTitle": "Clip narrative"
+    "narrativeTitle": "Clip narrative",
+    "subtitle": "AI-generated frame sub-interface, inheriting storyboards, reference assets and artifact versions.",
+    "tokenClickRemove": "Click to remove this reference"
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",
@@ -2119,21 +2125,17 @@
     "collapseRoughCut": "Collapse strip",
     "playRoughCut": "Play rough cut",
     "playFullFilm": "Play full film",
-    "playFullInteractive": "Play full interactive story",
     "closeRoughCutPlayer": "Close player",
     "previewUnavailable": "Storyboard images have not been generated yet. Preview is unavailable.",
     "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
     "finalCutBadge": "Final cut",
     "downloadFinalCut": "Download final cut",
-    "exportBundle": "Export interactive bundle",
-    "exportBundleFailed": "Bundle not ready: every reachable branch needs its final cut first",
     "exporting": "Exporting…",
     "downloadFinal": "Download Final Cut",
     "exportProject": "Export Project",
     "downloadOrExport": "Download / Export",
     "episodeFinalCut": "{{title}} · final cut",
     "downloadFinalTitle": "Download final cut video or export project",
-    "downloadBundleTitle": "Export interactive bundle or project",
     "waitingForFinalCut": "Waiting for final cut compose",
     "exportProjectFailed": "Export failed: {{detail}}",
     "frameSource": {
@@ -2244,7 +2246,6 @@
     "designAcceptFailed": "Accept failed: {{detail}}",
     "noDesignYet": "Design image pending",
     "previewAll": "Preview story",
-    "previewChoice": "Choose a path",
     "previewReplay": "Replay",
     "pageTitle": "Video script",
     "researchAndSources": "Research & Sources",

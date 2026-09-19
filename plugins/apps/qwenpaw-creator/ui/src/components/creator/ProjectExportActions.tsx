@@ -3,9 +3,15 @@ import { Dropdown, message } from "antd";
 import { ChevronDown, Download, FileOutput, Package } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectDocument } from "@/contracts/creator";
-import { getArtifactVersionMediaUrl, getInteractiveBundleUrl } from "@/api/creator";
+import {
+  getArtifactVersionMediaUrl,
+  getInteractiveBundleUrl,
+} from "@/api/creator";
 import { selectTimelineFilmVersionId } from "@/selectors/blueprintSelectors";
-import { selectLiveTimelineIds, selectNarrativeShape } from "@/selectors/timelineElementSelectors";
+import {
+  selectLiveTimelineIds,
+  selectNarrativeShape,
+} from "@/selectors/timelineElementSelectors";
 import {
   ExportProgressCard,
   saveExportFile,
@@ -145,7 +151,9 @@ export default function ProjectExportActions({
         trigger={["click"]}
         menu={{
           items: [
-            ...(films.length > 1
+            ...(shape === "branching"
+              ? []
+              : films.length > 1
               ? [
                   {
                     type: "group" as const,
@@ -188,8 +196,8 @@ export default function ProjectExportActions({
             shape === "branching"
               ? t("blueprint.exportProject")
               : hasFilm
-                ? t("blueprint.downloadFinalTitle")
-                : t("blueprint.waitingForFinalCut")
+              ? t("blueprint.downloadFinalTitle")
+              : t("blueprint.waitingForFinalCut")
           }
           className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)]"
         >

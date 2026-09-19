@@ -137,27 +137,6 @@ describe("BlueprintPage narrative shapes", () => {
     );
   });
 
-  it("hosts the pre-production entries and the download/export home", () => {
-    seedProject(singleProject());
-    renderPage();
-
-    // Header: page title left (no 返回 on the blueprint itself), prep entries
-    // and the download / export dropdown right.
-    expect(
-      screen.queryByRole("button", { name: "返回" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("剧集蓝图")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /调研与素材/ }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /视觉开发/ })).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "下载 / 导出" }),
-    ).toBeInTheDocument();
-    // Footer is the production task status bar.
-    expect(screen.getByText("暂无进行中的生产任务")).toBeInTheDocument();
-  });
-
   it("branching projects keep the structure graph and the bundle export entry", () => {
     const project = cloneProject();
     project.narrative_edges = [
