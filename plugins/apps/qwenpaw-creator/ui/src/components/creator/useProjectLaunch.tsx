@@ -22,6 +22,10 @@ import { useLaunchUploadStore } from "@/store/launchUploadStore";
 import { taskErrorMessage } from "@/lib/taskPresentation";
 import { creatorStatusLabel } from "@/lib/creatorPresentation";
 import { useRouter } from "@/routing/navigation";
+import {
+  interactiveContentTypeFromBrief,
+  isInteractiveContentType,
+} from "@/lib/interactiveProject";
 
 export type AttachmentDraft =
   | {
@@ -398,8 +402,8 @@ export function useProjectLaunch(options?: {
       scenario === "short_drama"
         ? ["vlm", "image", "video"]
         : scenario === "video_edit" || hasAttachments
-        ? ["vlm"]
-        : [];
+          ? ["vlm"]
+          : [];
     const missing: string[] = [];
     for (const type of required) {
       const item = config[type];
@@ -530,11 +534,15 @@ export function useProjectLaunch(options?: {
         projectName.trim() || projectNameFromDescription(projectDescription);
       const projectPayload = {
         name: resolvedProjectName,
+        nameSource: projectName.trim() ? ("user" as const) : ("auto" as const),
         description: projectDescription.trim(),
         scenario,
         resolution,
         aspectRatio,
-        contentType: isVideoEdit ? contentType : null,
+        contentType:
+          isVideoEdit || isInteractiveContentType(contentType)
+            ? contentType
+            : interactiveContentTypeFromBrief(projectDescription),
         templateId: selectedTemplateId ?? undefined,
         // With no assets, let Project creation persist the first Goal and
         // message atomically.  This avoids an observable IDLE Project between

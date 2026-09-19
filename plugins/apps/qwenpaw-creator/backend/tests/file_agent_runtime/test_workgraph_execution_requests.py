@@ -46,7 +46,7 @@ async def wait_for(predicate, seconds=12):
         await asyncio.sleep(0.01)
 
 
-def create(temporary):
+def create(temporary, *, historical_media_tasks=0):
     services = CreatorFileServices.create(temporary.resolve())
     project = Project.new(project_id="probe-project", name="Independent probe")
     project.visual.entities.items["hero"] = VisualEntity(
@@ -77,6 +77,20 @@ def create(temporary):
             initial_message_id="probe-message",
             initial_client_message_id="probe-client",
         )
+        for index in range(historical_media_tasks):
+            task = TaskRecord(
+                task_id=f"historical-media-{index}",
+                project_id="probe-project",
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.SUCCEEDED,
+                request_fingerprint=f"historical-{index}",
+            )
+            task_root = staged / "runtime" / "tasks" / task.task_id
+            task_root.mkdir(parents=True)
+            (task_root / "task.json").write_text(
+                task.model_dump_json(),
+                encoding="utf-8",
+            )
 
     snapshot = services.projects.create(
         project,
@@ -106,16 +120,135 @@ def pin(monkeypatch):
     )
 
 
+def test_failed_receipt_reaches_agent_and_cannot_be_narrated_as_submitted(
+    tmp_path,
+    monkeypatch,
+):
+    pin(monkeypatch)
+    failure = "已本地拦截，未调用图片模型：请修改项目中的 prompt，再请求生成。"
+    graph = WorkGraph(
+        generation=1,
+        nodes=(
+            WorkNode(
+                node_id="visual:hero:v:base",
+                kind="visual",
+                label="角色基础图",
+                status=WorkNodeStatus.DONE,
+                target_ref="asset:hero",
+            ),
+            WorkNode(
+                node_id="visual:hero:v:battle",
+                kind="visual",
+                label="角色状态图",
+                status=WorkNodeStatus.FAILED,
+                target_ref="asset:hero",
+                error=failure,
+            ),
+            WorkNode(
+                node_id="script:main",
+                kind="script",
+                label="序章剧本",
+                status=WorkNodeStatus.STALE,
+            ),
+            WorkNode(
+                node_id="bundle:project",
+                kind="bundle",
+                label="互动包",
+                status=WorkNodeStatus.GATED,
+                missing=("script:main",),
+            ),
+        ),
+    )
+    monkeypatch.setattr(dm, "derive_work_graph", lambda *_a, **_kw: graph)
+
+    async def context(*_args, **_kwargs):
+        return (
+            services.projects.read("probe-project"),
+            [],
+            graph,
+            {
+                "visual:hero:v:battle": "FAILED",
+            },
+        )
+
+    monkeypatch.setattr(dm, "ready_request_context", context)
+    turns = 0
+
+    async def model(messages, _tools):
+        nonlocal turns
+        turns += 1
+        if turns == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="blocked-request",
+                        name="request_workgraph_execution",
+                        arguments={
+                            "projectId": "probe-project",
+                            "targetRefs": ["asset:hero"],
+                            "kinds": ["visual"],
+                        },
+                    ),
+                ),
+            )
+        result = json.loads(messages[-1]["content"])
+        assert result["status"] == "PARTIAL"
+        assert result["items"][1]["error"] == failure
+        assert result["productionStatus"]["bundle"]["status"] == "gated"
+        # Reproduce the observed model mistake, including streaming deltas.
+        return AgentModelTurn(content="状态图正在提交制作，序章已合成，互动包可以下载。")
+
+    services = create(tmp_path)
+    runtime = FileCreatorAgentRuntime(
+        services,
+        model_client=CallbackAgentChatClient(model),
+        poll_interval_seconds=0.01,
+    )
+
+    async def scenario():
+        try:
+            await runtime.start()
+            runtime.notify("probe-project")
+            await wait_for(lambda: turns == 2)
+            await runtime.wait_until_idle("probe-project")
+        finally:
+            await runtime.stop()
+
+    asyncio.run(scenario())
+    records = services.sessions.list_messages("probe-project", "probe-session")
+    final = [item for item in records if item.role == "assistant"][-1]
+    text = final.content_parts[0].text
+    assert "互动包尚未就绪" in text
+    assert "角色状态图：生成失败" in text
+    assert "正在提交制作" not in text
+    assert "互动包可以下载" not in text
+    deltas = [
+        event.payload.get("delta", "")
+        for event in services.sessions.list_events(
+            "probe-project",
+            "probe-session",
+        )
+        if event.event_type == "agent.message_delta"
+        and event.payload.get("streamKind") == "text"
+    ]
+    assert "正在提交制作" not in "".join(deltas)
+    assert not runtime.executions.list_tasks("probe-project")
+
+
 @pytest.mark.parametrize("cancel_first", [False, True])
-def test_required_approval_and_repeated_tool_only_one_real_admission(
+def test_high_media_history_keeps_approval_and_idempotent_admission(
     tmp_path,
     monkeypatch,
     cancel_first,
 ):
     pin(monkeypatch)
+    historical_media_tasks = 250
 
     async def scenario():
-        services = create(tmp_path)
+        services = create(
+            tmp_path,
+            historical_media_tasks=historical_media_tasks,
+        )
         turns = 0
 
         async def model(_messages, _tools):
@@ -180,8 +313,8 @@ def test_required_approval_and_repeated_tool_only_one_real_admission(
                 )
                 == 1
             )
-            assert len(runtime.executions.list_tasks("probe-project")) == len(
-                calls,
+            assert len(runtime.executions.list_tasks("probe-project")) == (
+                historical_media_tasks + len(calls)
             )
             if cancel_first:
                 results = [
@@ -434,10 +567,9 @@ def test_prompt_sync_gated_request_surfaces_diagnostic_fields(
         )
         graph = WorkGraph(nodes=(node,), generation=1)
 
-        async def fake_context(svcs, _execs, pid, **_kwargs):
+        async def fake_context(svcs, _execs, pid):
             # Only the request path reads this; hand back the GATED node and
-            # its pre-dispatch block reason (extra kwargs like
-            # ``check_media_budget`` are irrelevant to this canned graph).
+            # its pre-dispatch block reason.
             return (
                 svcs.projects.read(pid),
                 [],
@@ -536,12 +668,11 @@ def test_post_approval_prompt_sync_gate_surfaces_diagnostic_fields(
         real_context = dm.ready_request_context
         reads = {"n": 0}
 
-        async def fake_context(svcs, execs, pid, *, check_media_budget=True):
+        async def fake_context(svcs, execs, pid):
             snapshot, tasks, graph, blocked = await real_context(
                 svcs,
                 execs,
                 pid,
-                check_media_budget=check_media_budget,
             )
             reads["n"] += 1
             if reads["n"] == 1:
@@ -673,7 +804,15 @@ def approve(runtime, record):
     )
 
 
-def fake_dispatch(runtime, calls, *, release=None, started=None):
+def fake_dispatch(
+    runtime,
+    calls,
+    *,
+    release=None,
+    started=None,
+    failure=False,
+    raise_after_admission=False,
+):
     async def dispatch(project_id, node, fingerprint, **kwargs):
         snapshot = runtime.services.projects.read(project_id)
         assert kwargs["expected_object_versions"] == (
@@ -708,8 +847,97 @@ def fake_dispatch(runtime, calls, *, release=None, started=None):
             project_id,
             task.task_id,
             expected_status=TaskStatus.RUNNING,
-            status=TaskStatus.SUCCEEDED,
+            status=TaskStatus.FAILED if failure else TaskStatus.SUCCEEDED,
+            updates=(
+                {
+                    "error": {
+                        "message": "Output rejected: forbidden HTML tag",
+                        "retryable": False,
+                    },
+                }
+                if failure
+                else None
+            ),
         )
+        if raise_after_admission:
+            error = RuntimeError("Output rejected: forbidden HTML tag")
+            error.creator_task_id = task.task_id
+            raise error
         return SimpleNamespace(task_id=task.task_id)
 
     runtime.work_scheduler.dispatch_node = dispatch
+
+
+@pytest.mark.parametrize("raise_after_admission", [False, True])
+def test_admitted_failure_is_reported_to_agent_with_task_identity(
+    tmp_path,
+    monkeypatch,
+    raise_after_admission,
+):
+    pin(monkeypatch)
+
+    async def scenario():
+        services = create(tmp_path)
+        observed = []
+
+        async def model(messages, _tools):
+            tool_messages = [m for m in messages if m.get("role") == "tool"]
+            if tool_messages:
+                observed.append(json.loads(tool_messages[-1]["content"]))
+                return AgentModelTurn(
+                    content="The generation failed and needs correction.",
+                )
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="failure-call",
+                        name="request_workgraph_execution",
+                        arguments={
+                            "projectId": "probe-project",
+                            "targetRefs": ["asset:hero"],
+                            "kinds": ["visual"],
+                        },
+                    ),
+                ),
+            )
+
+        runtime = FileCreatorAgentRuntime(
+            services,
+            model_client=CallbackAgentChatClient(model),
+            poll_interval_seconds=0.01,
+        )
+        calls = []
+        fake_dispatch(
+            runtime,
+            calls,
+            failure=True,
+            raise_after_admission=raise_after_admission,
+        )
+        try:
+            await runtime.start()
+            runtime.notify("probe-project")
+            await wait_for(
+                lambda: runtime.executions.list_execution_authorizations(
+                    "probe-project",
+                ),
+            )
+            approve(
+                runtime,
+                runtime.executions.list_execution_authorizations(
+                    "probe-project",
+                )[0],
+            )
+            await wait_for(lambda: observed)
+            await runtime.wait_until_idle("probe-project")
+            item = observed[0]["items"][0]
+            assert item["status"] == "FAILED"
+            assert item["taskId"] == "paid-task-1"
+            assert (
+                item["error"]["message"]
+                == "Output rejected: forbidden HTML tag"
+            )
+            assert len(calls) == 1
+        finally:
+            await runtime.stop()
+
+    asyncio.run(scenario())

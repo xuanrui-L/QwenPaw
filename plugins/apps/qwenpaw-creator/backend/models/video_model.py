@@ -59,7 +59,7 @@ from models.video_backends import minimax as minimax_backend
 from models.video_backends import minimax_sglang as minimax_sglang_backend
 from models.video_backends import veo as veo_backend
 from models.video_backends import vidu as vidu_backend
-from utils.paths import media_path_from_url
+from utils.paths import local_path_from_file_url, media_path_from_url
 from utils.logger import setup_logger
 from utils.exceptions import ModelError
 
@@ -127,8 +127,7 @@ async def _resolve_reference_media_url(
             or f"reference-{uuid.uuid4().hex}.bin"
         )
     elif url.startswith("file://"):
-        parsed = urlparse(url)
-        media_path = Path(parsed.path)
+        media_path = local_path_from_file_url(url)
         filename = media_path.name or f"reference-{uuid.uuid4().hex}.bin"
     elif url.startswith(("http://", "https://")):
         filename = (
@@ -163,7 +162,7 @@ async def _resolve_reference_media_url(
             media_path = (
                 media_path_from_url(url)
                 if url.startswith("/generated/")
-                else Path(urlparse(url).path)
+                else local_path_from_file_url(url)
             )
             resolved_url = await upload_local_file_to_dashscope_temp(
                 media_path,

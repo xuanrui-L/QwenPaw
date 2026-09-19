@@ -637,8 +637,9 @@ def mutate_model_config(
     config_path = _config_paths()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with CrossProcessFileLock(config_path.parent / ".model-config.lock"):
+        raw_config = _load_json(config_path)
         persisted = _assemble_model_config(
-            _load_json(config_path),
+            raw_config,
             include_environment=False,
         )
         updated = mutator(persisted)
@@ -649,6 +650,11 @@ def mutate_model_config(
         updated_dict = updated.model_dump(
             exclude={"self_review": {"env_overrides", "operator_status"}},
         )
+        # Operator runtime limits are not part of the model-settings form.
+        # Preserve them under the same lock so a model or review-mode save
+        # cannot reset the media budget and concurrency to their defaults.
+        if isinstance(raw_config.get("agent_runtime"), dict):
+            updated_dict["agent_runtime"] = raw_config["agent_runtime"]
         _encrypt_secret_fields(updated_dict)
 
         atomic_replace_bytes(
@@ -1020,7 +1026,7 @@ async def _validate_section_connectivity(
 
     async with httpx.AsyncClient(timeout=30) as client:
         try:
-            url, headers, payload = _probe_payload(probe)
+            url, headers, payload = await _prepare_probe_payload(probe)
             if payload.pop("_get_probe", False):
                 headers.pop("Content-Type", None)
                 resp = await client.get(url, headers=headers, params=payload)
@@ -1631,7 +1637,6 @@ def _anthropic_llm_probe(
         headers,
         {
             "model": body.model_name,
-            "max_tokens": 8,
             "messages": [{"role": "user", "content": content}],
         },
     )
@@ -1668,8 +1673,22 @@ def _gemini_llm_probe(
         parts = [{"text": "Reply with pong only."}]
     payload: dict[str, Any] = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"maxOutputTokens": 8},
     }
+    return url, headers, payload
+
+
+async def _prepare_probe_payload(
+    body: ModelConnectionTestRequest,
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    url, headers, payload = _probe_payload(body)
+    if body.type in {"llm", "vlm"} and model_config.is_anthropic_protocol(
+        body.protocol
+    ):
+        from models.output_budget import anthropic_output_limit
+
+        payload["max_tokens"] = await anthropic_output_limit(
+            body.model_name, base_url=body.base_url, api_key=body.api_key
+        )
     return url, headers, payload
 
 
@@ -1768,7 +1787,6 @@ def _probe_payload(
             {
                 "model": body.model_name,
                 "messages": [{"role": "user", "content": content}],
-                "max_tokens": 8,
             },
         )
     if body.type == "image":
@@ -1901,7 +1919,7 @@ async def test_model_connection(
         )
     start = time.monotonic()
     try:
-        url, headers, payload = _probe_payload(selected)
+        url, headers, payload = await _prepare_probe_payload(selected)
         async with httpx.AsyncClient(timeout=30) as client:
             if payload.pop("_get_probe", False):
                 headers.pop("Content-Type", None)

@@ -1,0 +1,130 @@
+# 项目蓝图改造 · 实施与真实验证报告
+
+分支：`worktree-blueprint-impl`（基于 origin/dev/creator@2d0c3a7a 快进后实施）。
+规范输入：`creator-blueprint-redesign-plan.md`、`creator-blueprint-implementation-prompt.md`、
+交互基准 `ui/src/pages/BlueprintDemo*` + `ui/src/components/blueprint/*`（保留可运行）。
+
+## 一、交付提交（时间序）
+
+| 提交 | 内容 |
+|---|---|
+| 1be2dca9 | schema v9 域模型（Timeline 叙事字段 / narrative_edges / 3 个 artifact kind / InteractionCreation / InteractiveManifest）+ v8→v9 迁移（旧项目单节点映射、零回填） |
+| cf401bc5 | 互动包组装（manifest 推导 + 自托管 HTML 播放器 + zip） |
+| bcf3d1d8 | `GET /projects/{id}/interactive-bundle` 导出端点（fail-closed 409） |
+| f5077b04 / 02e3a082 / 45070bbe | 真实 key E2E（manual_real）：建项目 → 真实 qwen 结构起草 → patch 结构 → dispatch 剧本节点真实起草落盘 → 真实 qwen-image 分镜经管线落盘 → 粗剪 200 |
+| a41fe9fb | P2 后端：script markdown 双向解析、timeline_script 版本写回、structure/script 检查点（审阅模式配置驱动）、work_graph 剧本节点与 stale 收窄、SCRIPT_DRAFT 任务、选区 `artifact:<slot>@<version>` 注入 |
+| 4960d342 | 粗剪 draft 渲染（element_video ▸ 分镜图 480p 拼接，零模型调用）+ 端点 |
+| 91faa856 | P1 前端：BlueprintPage（三形态自适应）、参数化 `t/:timelineId/plan`、TopNav 蓝图/资产库、PlanPage 剧集栏+移除创作总纲、资产按归属分组、i18n、契约镜像 |
+| fc193613 | P3 后端：interaction 动效起草（真实 LLM 产 html_css，data-edge-ref 校验）、work_graph interaction/bundle 门禁节点 |
+| 2dbbc80a / b58b18c2 | 集成修复：Tour 首步指向蓝图；元素 outputs 为管线写回记录（回退错误预声明） |
+| 5b0b9f2c | 集成修复：stale 重派以请求指纹定界持久 id，避免撞旧发布事务 |
+
+## 二、测试基线
+
+- 后端 `pytest tests -q`：**1173 passed**（基线 1122，新增 51）
+- 前端 `tsc --noEmit` + `vitest run`：**253 passed / 48 files**
+- 真实 key E2E（`tests/manual/test_real_blueprint_e2e.py`，`-m manual_real`）：**passed**，
+  覆盖真实 qwen 结构与剧本起草、真实 qwen-image 分镜、依赖门禁（分镜依赖剧本）、
+  bundle/粗剪 fail-closed、粗剪 200 真 mp4。
+
+## 三、真实模型 / 真实 key 验证（DashScope）
+
+后端以真实 key 启动（`uvicorn dev_main:app`，TEXT=qwen-plus、IMAGE=qwen-image-2.0-pro、
+VIDEO 复用 LLM 凭证走 wan），前端 vite 5179，真实项目 `蓝图终验-互动短剧`：
+
+1. **文本**：qwen-plus 起草两集梗概（JSON）与整集场次体剧本（含台词/括注，模型自发使用
+   `source-version://` 时间码约定）→ `timeline_script` artifact 落盘。
+2. **图像**：qwen-image-2.0-pro 经 storyboard 管线真实产出分镜（画面与 prompt 吻合），
+   进入 DecisionTray StoryboardReview，人工 Keep 通过。
+3. **视频**：wan 真实生成两条镜头视频（`video:el:sc01`、`video:el:sc02` 均 done）。
+4. **检查点/授权真实闭环**：structure 检查点、付费生成确认均在 AgentDock DecisionTray
+   真实弹出并经人工 Continue 放行（审阅模式 confirm 路径）。
+5. **浏览器目验**（截图见本目录）：
+   - `blueprint-real-1.png` 单视频生产看板（旧项目只读映射文案）
+   - `blueprint-real-linear.png` 线性两集列表 + 粗剪帧带 + 活动条
+   - `blueprint-real-script.png` 剧本审阅面板 + DecisionTray 真实分镜审阅
+   - `verify-plan.png` 参数化时间线 + 左侧剧集栏（含真实分镜缩略）
+   - `verify-branching.png` 分支画布形态
+   - `verify-selection.png` 划选文本 → SelectionToolbar → dock 选区附件 chip
+6. **粗剪**：`GET /timelines/{tid}/rough-cut` 返回真实 draft mp4（ffmpeg 拼接分镜/镜头）；
+   蓝图粗剪条提供逐时间线播放按钮，内联 `<video>` 直接流播 draft（`roughcut-playing.png`，
+   浏览器实测 readyState=4、时间推进、双集可切换）。
+7. **成片合成**：`POST /timelines/{tid}/render` 两条时间线真实合成
+   （`timeline:timeline:main:render`、`timeline:tl:ep2:render` 均落盘 final_video）。
+8. **互动包端到端（真实产物 + 浏览器实点）**：`GET /interactive-bundle` 导出 zip
+   （2,745,318 字节：`index.html` + `manifest.json` + `segments/timeline_main.mp4`
+   1,644,142 B + `segments/tl_ep2.mp4` 1,104,453 B）。本地起 http 服务用 Playwright
+   实际播放：入口段播完弹出选择层（问题「是否进入旧宅？」，选项「选择 · 进入旧宅」，
+   来自 `edge_index`），点击后 `video.src` 切换到 `segments/tl_ep2.mp4` 且分支段可解码
+   播放，覆盖层关闭 —— 判定 **PASS**（截图 `bundle-choice.png`、`bundle-branch.png`）。
+9. **完整互动短剧（双选项/转折）二次终验**：真实扩展为 3 节点 2 结局 —— 新增
+   `tl:ep3`「第3集 · 雨夜转身」与 `edge:2`「选择 · 报警离开」，抉择点变为双选项。
+   全链真实重跑：主线剧本重稿（结构变更被指纹捕获）→ SC-03 分镜（qwen-image，
+   人工 Keep）→ wan 镜头视频 → 双选项动效重画（html 含双 `data-edge-ref`）→
+   ep3 成片合成 → v2 互动包导出 **4,121,941 字节**（3 段成片：main 1,644,142 B /
+   ep2 1,104,453 B / ep3 1,379,174 B）。Playwright 回放：两个选项分别点击 →
+   分别切到 `tl_ep2.mp4` / `tl_ep3.mp4`，**双分支 PASS**（`bundle-v2-choice.png`、
+   `bundle-v2-branch-*.png`、蓝图三节点画布 `blueprint-3branch.png`）。
+
+## 四、实施中发现并修复的真实集成缺陷
+
+1. Tour 首步锚定已移除的创作总纲块 → 文案改为指向蓝图（2dbbc80a）。
+2. E2E 曾预声明 element outputs → 校验揭示 slot 是管线写回记录，回退（b58b18c2）。
+3. stale 重派撞旧发布事务（script/interaction 执行服务）→ 持久 id 以请求指纹定界（5b0b9f2c）。
+4. 剧集栏把 element_video 塞进 `<img>` 渲染失败 → 视频 artifact 改走海报帧端点（315fe429）。
+5. 被取消的专家运行在活动流里显示为红色「失败」→ 区分 `cancelled` 渲染为中性「已取消」（315fe429）。
+6. 加选项后 interaction 节点恒为 DONE、动效永不重画 → work_graph 复用起草指纹判 stale（df2fd5d4）。
+7. 剧本 prompt 含叙事结构但指纹未覆盖 → 新增分支边不重稿且持久 id 撞旧事务 500 → 指纹并入 narrative context（90669ac8）。
+8. 互动包 file:// 双击打开空白（fetch 被 CORS 拦）→ manifest 内联进 index.html（c5bf46e8）。
+9. 粗剪条把 overlay/audio/transition/interaction 计为「待分镜」→ 仅统计画面元素（c5bf46e8）。
+10. stale 触发面宽于剧本指纹（改元素也标 stale）→ 同指纹重稿仍撞旧事务 → 持久 id 追加 slot 版本数定界（fb90b745）。
+11. agent 规划 3.95s 精确镜头被 R2V 整数秒校验整体拒绝 → 管线取整而非拒绝（7c99f35a）。
+
+## 五、复杂互动短剧全前端真实重验（雾山谜案·互动季）
+
+零 mock、纯前端用户路径：后端**不带任何模型 env** 启动 →
+Playwright 在设置界面真实配置模型（LLM qwen-plus / VLM qwen-vl-max /
+Image qwen-image-3.0-pro / Video wan2.7，DashScope 真 key，持久化到
+`config/model_config.json`）→ 首页 composer 输入完整创作 brief 真实建项 →
+Creator Agent 真实规划并逐步建成：
+
+- **结构**：5 条时间线（雾夜来信 / 旧宅疑云 / 雨夜报警 / 真相大白 / 沉默代价）、
+  4 条分支边、**2 个观众抉择点**（是否进入旧宅？/ 如何处置账册？）、3 个结局
+- **生产**：5 集剧本（qwen 真实起草+元素变更后重稿）、agent 自建视觉实体
+  （角色/场景设计图真实生成）、10 张分镜（qwen-image-3.0-pro）、
+  **10 条镜头视频（wan 真实生成）**、2 个双选项抉择动效、5 段成片合成
+- **导出**：蓝图页互动包导出 **10,729,886 字节**（5 段成片 1.4–3.2MB）
+- **全分支 file:// 回放（Playwright 实点）**：
+  旧宅→揭发→真相大白 ✅ / 旧宅→销毁→沉默代价 ✅ / 报警离开→雨夜报警 ✅
+  —— **三条结局路径全部 PASS**（`complex-blueprint-final.png`、
+  `complex-timeline_ep*.png`）
+- 期间 agent 两次因工具误用触发熔断护栏（variants 父级、elements_by_id
+  包装结构），均通过真实对话纠正后自行恢复；缺陷 10/11 即在本轮真实运行中
+  暴露并修复。视频模型现已切换 `wan2.6-r2v-flash` 快速版。
+
+## 六、第二轮复杂重验《回环 23:59》（指定模型组合 + 全程日志监控）
+
+模型组合按要求切换并全程真实调用：**LLM qwen3.8-max · 图像 qwen-image-3.0-pro ·
+视频 wan3.0-video（wan3 快速档）· TTS cosyvoice-v3.5-plus**（能力表中唯一 plus 档，
+需先设计音色）。时间循环悬疑剧：5 节点 / 2 抉择点（下车吗？接过车票吗？）/ 3 结局
+（无尽隧道 · 破环 · 重启）。
+
+- **结构与剧本**：qwen3.8-max 一次建成 5 时间线 + 4 边 + 双 interaction；期间一次
+  patch 失败后自我纠正（无需人工介入）。
+- **视觉**：7 张 Variant 设定 + 镜像双人阵容图 + 5 张分镜（qwen-image-3.0-pro）。
+- **视频**：10 镜头 → 5 段 8s 竖屏 wan3 视频。
+- **旁白（本轮新覆盖）**：agent 用 cosyvoice-v3.5-plus 先设计「低沉冷静年轻女声」
+  音色，为 5 条 audio 元素真实合成旁白（3.0–4.6s，speech_rate 0.9，gain -2dB）；
+  成片 ffprobe 确认全部含 AAC 音轨，node1 实测 mean -20.2dB（真实语音非静音）。
+- **交付**：5 段成片 + 14,484,357 字节互动包；file:// 三条结局路径 Playwright
+  实点全部 PASS（`loop2359-*.png`、蓝图收官 `loop2359-blueprint.png`）。
+
+### 全程监控发现并当场修复的缺陷
+12. 读轮询偶发 500（`RuntimeFileValidationError`）→ 同线程嵌套锁守卫先改抛可重试
+    LockTimeout（aa3a1aae）；随后监控发现真根因是**持锁跨 await 后执行器线程复用**
+    的假阳性——写高峰下 503 风暴甚至误杀 r2v supervisor → 守卫改为「告警 + 正常
+    限时等待」（c330486d），部署后风暴消失。
+13. qwen-image-3.0-pro 旗舰生图 >240s 超时 → `IMAGE_TIMEOUT=480` 部署。
+14. `IMAGE_REFERENCE_BUDGET_EXCEEDED`（qwen-image 3 图上限，lineup 展开
+    lineup+成员锚共 5 图）→ 按 fail-closed 设计修数据收敛引用；已有分镜在手时
+    stale 不阻塞后续视频（管线行为正确）。

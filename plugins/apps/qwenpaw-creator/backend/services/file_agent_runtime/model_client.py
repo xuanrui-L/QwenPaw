@@ -36,6 +36,7 @@ from agentscope.model import ChatModelBase, DashScopeChatModel
 
 from models import config as model_config
 from models.concurrency import model_slot
+from models.output_budget import anthropic_output_limit
 from models.dashscope_multimodal import DashScopeNativeFormatter
 from models.native_content import native_content_blocks
 from services.media_files.transient_errors import is_transient_error_message
@@ -746,6 +747,23 @@ def default_model_turn_timeout_seconds() -> float:
 DEFAULT_MODEL_TURN_TIMEOUT_SECONDS = default_model_turn_timeout_seconds()
 
 
+def _qwen_thinking_budget(model_name: str) -> int | None:
+    """Bound planning latency without truncating authored JSON/tool output.
+
+    Qwen3 defaults to the model's full reasoning allowance, which can keep a
+    small interactive project thinking for ten minutes before its first draft.
+    Other compatible providers must not receive this Qwen-specific parameter.
+    """
+    if not model_name.lower().startswith("qwen3"):
+        return None
+    raw = os.environ.get("CREATOR_AGENT_THINKING_BUDGET", "4096")
+    try:
+        budget = int(raw)
+    except ValueError:
+        budget = 4096
+    return budget if 0 < budget <= 32768 else 4096
+
+
 class AgentScopeAgentChatClient:
     """Direct AgentScope 2.0.4 model adapter for file Runtime turns.
 
@@ -762,13 +780,9 @@ class AgentScopeAgentChatClient:
         # Shares default_model_turn_timeout_seconds with the driver turn
         # budget so the transport timeout never undercuts it.
         timeout_seconds: float = DEFAULT_MODEL_TURN_TIMEOUT_SECONDS,
-        # ``None`` omits the parameter entirely so the provider/model keeps
-        # control over its own output budget.
-        max_tokens: int | None = None,
         temperature: float = 0.2,
     ) -> None:
         self.timeout_seconds = timeout_seconds
-        self.max_tokens = max_tokens
         self.temperature = temperature
         self._injected = model is not None
         self._configuration: tuple[str, str, str, str] | None = None
@@ -813,7 +827,6 @@ class AgentScopeAgentChatClient:
                 from agentscope.model import AnthropicChatModel
 
                 parameters = AnthropicChatModel.Parameters(
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                 )
                 self.model = _build_chat_model(
@@ -828,7 +841,6 @@ class AgentScopeAgentChatClient:
                 from agentscope.model import GeminiChatModel
 
                 parameters = GeminiChatModel.Parameters(
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                 )
                 self.model = _build_chat_model(
@@ -841,9 +853,9 @@ class AgentScopeAgentChatClient:
                 )
             else:
                 parameters = DashScopeChatModel.Parameters(
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     thinking_enable=True,
+                    thinking_budget=_qwen_thinking_budget(model_name),
                     parallel_tool_calls=False,
                 )
                 self.model = _build_chat_model(
@@ -906,7 +918,24 @@ class AgentScopeAgentChatClient:
             async with model_slot("text"), _buffered_thinking(
                 guarded_thinking_delta,
             ) as thinking_buffer:
-                response = await self._configured_model()(
+                configured = self._configured_model()
+                if not self._injected and self._configuration is not None:
+                    (
+                        api_key,
+                        base_url,
+                        model_name,
+                        protocol,
+                    ) = self._configuration
+                    if (
+                        model_config.is_anthropic_protocol(protocol)
+                        and configured.parameters.max_tokens is None
+                    ):
+                        configured.parameters.max_tokens = (
+                            await anthropic_output_limit(
+                                model_name, base_url=base_url, api_key=api_key
+                            )
+                        )
+                response = await configured(
                     native_messages,
                     tools=[dict(item) for item in tools] or None,
                 )
@@ -1451,7 +1480,6 @@ class AgentScopeVlmChatClient(AgentScopeAgentChatClient):
                 from agentscope.model import AnthropicChatModel
 
                 parameters = AnthropicChatModel.Parameters(
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                 )
                 self.model = _build_chat_model(
@@ -1466,7 +1494,6 @@ class AgentScopeVlmChatClient(AgentScopeAgentChatClient):
                 from agentscope.model import GeminiChatModel
 
                 parameters = GeminiChatModel.Parameters(
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                 )
                 self.model = _build_chat_model(
@@ -1479,9 +1506,9 @@ class AgentScopeVlmChatClient(AgentScopeAgentChatClient):
                 )
             else:
                 parameters = DashScopeChatModel.Parameters(
-                    max_tokens=self.max_tokens,
                     temperature=self.temperature,
                     thinking_enable=True,
+                    thinking_budget=_qwen_thinking_budget(model_name),
                     parallel_tool_calls=False,
                 )
                 self.model = _build_chat_model(

@@ -147,7 +147,6 @@ _TEXT_CARD_MAX_EDGE_CONTACT = 1.0
 _DECORATION_MIN_COVERAGE = 0.08
 _DECORATION_MAX_EDGE_CONTACT = 0.02
 _KEYFRAME_WIDTH = 960
-_VLM_MAX_TOKENS = 6000
 _MOTION_ELEMENT_SUFFIX = "-motion"
 _DEFAULT_DECORATION_BUDGET = 3
 _MAX_DECORATION_BUDGET = 8
@@ -1149,7 +1148,6 @@ async def _design_document(
                 content,
                 system_prompt=system_prompt,
                 temperature=0.6 if attempt == 0 else 0.4,
-                max_tokens=_VLM_MAX_TOKENS,
             )
             parsed = _parse_design_json(answer)
             if forced_theme is not None:
@@ -1308,7 +1306,6 @@ async def _select_decoration_ids(
             [{"type": "text", "text": "\n".join(lines)}],
             system_prompt=_SELECT_SYSTEM_PROMPT,
             temperature=0.3,
-            max_tokens=1000,
         )
         raw = _parse_design_json(answer).get("selected")
         if isinstance(raw, list):
@@ -1559,7 +1556,6 @@ async def _plan_story_beats(
                 "exit 从 soft_fade、shrink、none 选择。"
             ),
             temperature=0.35,
-            max_tokens=900,
         )
         parsed = _parse_design_json(answer)
         summary = str(parsed.get("storySummary") or "").strip()
@@ -1835,7 +1831,6 @@ async def design_motion_overlays(
                             "你是数学教学视频的内容编辑，只输出一个 JSON 对象，" "不输出任何其他文字。"
                         ),
                         temperature=0.3,
-                        max_tokens=800,
                     )
                     content = _parse_design_json(answer)
                     html, _hf = render_scene_blueprint(

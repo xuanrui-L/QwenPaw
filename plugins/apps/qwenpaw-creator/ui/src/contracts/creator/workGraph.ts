@@ -9,7 +9,15 @@ export type WorkNodeStatus =
 
 export interface WorkGraphNode {
   id: string;
-  kind: "script" | "visual" | "lineup" | "storyboard" | "video" | "compose";
+  kind:
+    | "script"
+    | "visual"
+    | "lineup"
+    | "storyboard"
+    | "video"
+    | "compose"
+    | "interaction"
+    | "bundle";
   label: string;
   status: WorkNodeStatus;
   deps: string[];
@@ -30,6 +38,5 @@ export interface WorkGraphView {
   generation: number;
   counts: Record<string, number>;
   mediaCalls: number;
-  mediaCallBudget: number;
   nodes: WorkGraphNode[];
 }

@@ -11,6 +11,7 @@ identities, dependency edges and all seven states.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from types import SimpleNamespace
 
@@ -27,6 +28,8 @@ from services.project_files.models import (
     ArtifactSlot,
     ArtifactVersion,
     ElementLocation,
+    ElementOutput,
+    ElementOutputRenderSource,
     IndexedFile,
     Project,
     R2VCreation,
@@ -38,6 +41,193 @@ from services.project_files.models import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def _historical_video_project() -> Project:
+    project = _project()
+    element = _element("clip-history")
+    element.outputs = {
+        "main": ElementOutput(slot_id="element:clip-history:main"),
+    }
+    element.render_source = ElementOutputRenderSource(
+        element_id=element.element_id,
+        output_name="main",
+    )
+    _add_element(project, element)
+    for suffix, kind, versions in (
+        ("storyboard", "r2v_storyboard_image", ["board-old", "board-new"]),
+        ("main", "element_video", ["clip-old", "clip-new"]),
+    ):
+        slot_id = f"element:clip-history:{suffix}"
+        for version_id in versions:
+            _select_slot(
+                project,
+                slot_id=slot_id,
+                kind=kind,
+                owner_ref="element:clip-history",
+                version_id=version_id,
+                provenance=(
+                    ["artifact-version:board-old"]
+                    if version_id == "clip-old"
+                    else None
+                ),
+            )
+        project.assets.artifact_slots_by_id[slot_id].version_ids = versions
+    old = project.assets.artifact_versions_by_id["clip-old"]
+    old.stale = True
+    old.stale_reason = "Element 生成输入已修改，需要重新生成"
+    for version_id in ("clip-old", "clip-new"):
+        project.assets.files_by_id[
+            f"file-{version_id}"
+        ].media_type = "video/mp4"
+    return project
+
+
+def _adopt_historical_video(project: Project):
+    from services.project_files.edit_impact import apply_frontend_edit_impacts
+
+    base = project.model_dump(mode="json")
+    candidate = copy.deepcopy(base)
+    candidate["assets"]["artifact_slots_by_id"]["element:clip-history:main"][
+        "selected_version_id"
+    ] = "clip-old"
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        [
+            "/assets/artifact_slots_by_id/element:clip-history:main/"
+            "selected_version_id",
+        ],
+        base=base,
+    )
+    return Project.model_validate(updated), impact
+
+
+@pytest.mark.parametrize("explicit_stale", [True, False])
+def test_adopting_historical_video_allows_compose_with_its_exact_version(
+    explicit_stale,
+):
+    from services.media_files.local_execution import _resolved_element_input
+
+    project = _historical_video_project()
+    original = project.assets.artifact_versions_by_id["clip-old"]
+    original.stale = explicit_stale
+    adopted, impact = _adopt_historical_video(project)
+    graph = derive_work_graph(adopted)
+    assert graph.by_id["video:clip-history"].status is WorkNodeStatus.DONE
+    assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.READY
+    assert impact.regeneration_required is False
+    assert impact.render_timeline_ids == {"timeline:main"}
+    chosen = adopted.assets.artifact_versions_by_id["clip-old"]
+    assert chosen.stale is False
+    assert chosen.provenance_refs == original.provenance_refs
+    assert chosen.input_fingerprint == original.input_fingerprint
+    element = adopted.timelines.items["timeline:main"].elements_by_id[
+        "clip-history"
+    ]
+    _, consumed, _ = _resolved_element_input(adopted, element)
+    assert consumed.version_id == "clip-old"
+    assert consumed.file_id == original.file_id
+
+
+@pytest.mark.parametrize(
+    "change", ["prompt", "duration", "storyboard", "stale"]
+)
+def test_adopted_video_becomes_stale_again_after_new_input_change(change):
+    adopted, _ = _adopt_historical_video(_historical_video_project())
+    element = adopted.timelines.items["timeline:main"].elements_by_id[
+        "clip-history"
+    ]
+    if change == "prompt":
+        element.creation.video_prompt = "new visual requirements"
+    elif change == "duration":
+        element.span.duration_tick += 1000
+    elif change == "storyboard":
+        adopted.assets.artifact_slots_by_id[
+            "element:clip-history:storyboard"
+        ].selected_version_id = "board-old"
+    else:
+        adopted.assets.artifact_versions_by_id["clip-old"].stale = True
+    graph = derive_work_graph(adopted)
+    assert graph.by_id["video:clip-history"].status is WorkNodeStatus.STALE
+    assert graph.by_id["compose:timeline:main"].status is WorkNodeStatus.GATED
+
+
+def test_explicitly_reselecting_stale_current_video_accepts_it():
+    project = _historical_video_project()
+    project.assets.artifact_slots_by_id[
+        "element:clip-history:main"
+    ].selected_version_id = "clip-old"
+    assert (
+        derive_work_graph(project).by_id["video:clip-history"].status
+        is WorkNodeStatus.STALE
+    )
+    adopted, impact = _adopt_historical_video(project)
+    assert (
+        derive_work_graph(adopted).by_id["video:clip-history"].status
+        is WorkNodeStatus.DONE
+    )
+    assert impact.render_timeline_ids == {"timeline:main"}
+    unchanged, no_op = _adopt_historical_video(adopted)
+    assert unchanged == adopted
+    assert no_op.render_timeline_ids == set()
+
+
+def test_selection_acceptance_does_not_transfer_to_another_video_version():
+    adopted, _ = _adopt_historical_video(_historical_video_project())
+    adopted.assets.artifact_slots_by_id[
+        "element:clip-history:main"
+    ].selected_version_id = "clip-new"
+    adopted.assets.artifact_versions_by_id["clip-new"].provenance_refs = [
+        "artifact-version:board-old",
+    ]
+    assert (
+        derive_work_graph(adopted).by_id["video:clip-history"].status
+        is WorkNodeStatus.STALE
+    )
+
+
+@pytest.mark.parametrize("change", ["prompt", "storyboard"])
+def test_selection_in_same_edit_cannot_clear_new_input_invalidation(change):
+    from services.project_files.edit_impact import apply_frontend_edit_impacts
+
+    base = _historical_video_project().model_dump(mode="json")
+    candidate = copy.deepcopy(base)
+    slots = candidate["assets"]["artifact_slots_by_id"]
+    slots["element:clip-history:main"]["selected_version_id"] = "clip-old"
+    selection_path = (
+        "/assets/artifact_slots_by_id/element:clip-history:main/"
+        "selected_version_id"
+    )
+    if change == "prompt":
+        element = candidate["timelines"]["items"]["timeline:main"][
+            "elements_by_id"
+        ]["clip-history"]
+        element["creation"]["video_prompt"] = "new prompt in same edit"
+        input_path = (
+            "/timelines/items/timeline:main/elements_by_id/clip-history/"
+            "creation/video_prompt"
+        )
+    else:
+        slots["element:clip-history:storyboard"][
+            "selected_version_id"
+        ] = "board-old"
+        input_path = (
+            "/assets/artifact_slots_by_id/element:clip-history:storyboard/"
+            "selected_version_id"
+        )
+    updated, impact = apply_frontend_edit_impacts(
+        candidate,
+        [selection_path, input_path],
+        base=base,
+    )
+    assert updated["assets"]["artifact_versions_by_id"]["clip-old"]["stale"]
+    assert impact.regeneration_required
+    assert (
+        "selectionAcceptance"
+        not in updated["assets"]["artifact_slots_by_id"][
+            "element:clip-history:main"
+        ]["metadata"]
+    )
 
 
 def _entity(entity_id: str, variants: dict[str, str | None]) -> VisualEntity:
@@ -878,7 +1068,7 @@ def test_non_r2v_modes_schedule_video_only_when_inputs_ready(
         assert node.status is WorkNodeStatus.READY
         assert node.command == command
         assert node.dispatch_arguments == (
-            {} if mode == "s2v" else {"mode": mode}
+            {} if mode == "s2v" else {"mode": mode, "generateAudio": True}
         )
     else:
         assert node.status is WorkNodeStatus.GATED
@@ -1164,8 +1354,18 @@ def test_stale_script_version_marks_script_node_stale() -> None:
     graph = derive_work_graph(project)
     node = graph.by_id["script:timeline:ep2"]
     assert node.status is WorkNodeStatus.STALE
-    # STALE is terminal for the scheduler: not READY, not dispatched.
+    # Regeneration is separate from READY and still requires authorization.
     assert node not in graph.ready_media_nodes()
+    assert node in graph.regeneration_nodes()
+    assert node.regeneration_of == "art:script-ep2"
+    assert node.dispatch_arguments == {"source": "timeline"}
+    assert node in graph.model_required_nodes()
+    assert node not in graph.model_required_nodes(automatic_regeneration=True)
+    assert node in graph.model_required_nodes(automatic_regeneration=False)
+
+    project.timelines.items["timeline:ep2"].description = ""
+    generated = derive_work_graph(project).by_id["script:timeline:ep2"]
+    assert generated.dispatch_arguments == {}
 
 
 @pytest.mark.parametrize("body", ["已发布正文：孙老四端茶，说完台词。", "", "  \n"])
@@ -1231,6 +1431,304 @@ def test_running_script_task_projects_running_status() -> None:
     node = graph.by_id["script:timeline:ep2"]
     assert node.status is WorkNodeStatus.RUNNING
     assert node.progress == 0.5
+
+
+# ---- Phase 3: interaction motions & interactive bundle gate -----------
+
+
+def _make_branching(project: Project) -> None:
+    """timeline:main --edge:a/b--> ep4a / ep4b，主线末尾挂抉择 element。"""
+
+    from services.project_files.models import (
+        InteractionCreation,
+        InteractionOption,
+        NarrativeEdge,
+        Timeline,
+    )
+
+    project.timelines.items["timeline:main"].title = "第3集 · 双重身份"
+    for timeline_id, title in (
+        ("timeline:ep4a", "第4集A · 真相大白"),
+        ("timeline:ep4b", "第4集B · 沉默代价"),
+    ):
+        project.timelines.items[timeline_id] = Timeline(
+            timeline_id=timeline_id,
+            title=title,
+        )
+        project.timelines.order.append(timeline_id)
+    project.narrative_edges = [
+        NarrativeEdge(
+            edge_id="edge:a",
+            source_timeline_id="timeline:main",
+            target_timeline_id="timeline:ep4a",
+            label="选择A · 揭发真相",
+        ),
+        NarrativeEdge(
+            edge_id="edge:b",
+            source_timeline_id="timeline:main",
+            target_timeline_id="timeline:ep4b",
+            label="选择B · 保持沉默",
+        ),
+    ]
+    project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ] = TimelineElement(
+        element_id="el:choice",
+        label="观众抉择",
+        span=TimelineSpan(start_tick=88_000, duration_tick=4_000),
+        creation=InteractionCreation(
+            type="interaction",
+            question="是否当众揭发沈修？",
+            options=[
+                InteractionOption(edge_ref="edge:a"),
+                InteractionOption(edge_ref="edge:b"),
+            ],
+            countdown_seconds=10,
+            default_edge_ref="edge:a",
+        ),
+    )
+
+
+def _draft_choice_motion(project: Project) -> None:
+    from services.project_files.models import MotionGraphic
+
+    element = project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ]
+    element.creation.motion = MotionGraphic(
+        format="html_css",
+        html=(
+            "<!DOCTYPE html><html><body>"
+            '<button data-edge-ref="edge:a">A</button>'
+            '<button data-edge-ref="edge:b">B</button>'
+            "</body></html>"
+        ),
+    )
+
+
+def _draft_presentation(project: Project) -> None:
+    """Use the shared HTML fixture without importing another test module."""
+    from pathlib import Path
+
+    from services.media_files.presentation_authoring import (
+        presentation_fingerprint,
+    )
+    from services.project_files.models import (
+        MotionGraphic,
+        narrative_timeline_ids,
+    )
+
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "player/tests/fixtures/authored-presentation.html"
+    )
+    html = fixture.read_text().replace(
+        "__NODES__",
+        "".join(
+            f'<button data-action="jump" data-node-ref="{tid}">{tid}</button>'
+            for tid in narrative_timeline_ids(project)
+        ),
+    )
+    project.interactive_presentation.motion = MotionGraphic(
+        html=html,
+        design_notes=f"input_fingerprint={presentation_fingerprint(project)}",
+    )
+
+
+def _select_final_video(project: Project, timeline_id: str) -> None:
+    _select_slot(
+        project,
+        slot_id=f"timeline:{timeline_id}:render",
+        kind="final_video",
+        owner_ref=f"timeline:{timeline_id}",
+        version_id=f"art:final-{timeline_id}",
+    )
+
+
+def test_interaction_node_gates_on_script_then_becomes_dispatchable() -> None:
+    project = _project()
+    _make_branching(project)
+
+    graph = derive_work_graph(project)
+    node = graph.by_id["interaction:el:choice"]
+    assert node.kind == "interaction"
+    assert node.timeline_id == "timeline:main"
+    assert node.lane == "第3集 · 双重身份"
+    assert node.deps == ("script:timeline:main",)
+    # 剧本未定稿：抉择动效等剧本节点。
+    assert node.status is WorkNodeStatus.GATED
+    assert "script:timeline:main" in node.missing
+    assert node.command == "GENERATE_INTERACTION_MOTION"
+    assert node.target_ref == "element:el:choice"
+    assert node.locator == {
+        "page": "blueprint",
+        "timelineId": "timeline:main",
+        "elementId": "el:choice",
+    }
+
+    _select_slot(
+        project,
+        slot_id="script:timeline:main",
+        kind="timeline_script",
+        owner_ref="timeline:timeline:main",
+        version_id="art:script-main",
+    )
+    graph = derive_work_graph(project)
+    node = graph.by_id["interaction:el:choice"]
+    assert node.status is WorkNodeStatus.READY
+    # interaction 在 DISPATCHABLE_KINDS 中：调度器可直接派发。
+    assert node in graph.ready_media_nodes()
+
+
+def test_interaction_node_done_when_motion_is_drafted() -> None:
+    project = _project()
+    _make_branching(project)
+    _draft_choice_motion(project)
+    _draft_presentation(project)
+
+    graph = derive_work_graph(project)
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
+
+
+def test_interaction_node_reopens_when_options_change_after_draft() -> None:
+    """加选项/改边文案后旧动效必须失效（stale 收窄，方案 2.7a）。"""
+
+    from services.media_files.interaction_fingerprint import (
+        FINGERPRINT_MARKER,
+        interaction_request_fingerprint,
+    )
+    from services.project_files.models import InteractionOption, NarrativeEdge
+
+    project = _project()
+    _make_branching(project)
+    _draft_choice_motion(project)
+    _draft_presentation(project)
+    _select_slot(
+        project,
+        slot_id="script:timeline:main",
+        kind="timeline_script",
+        owner_ref="timeline:timeline:main",
+        version_id="art:script-main",
+    )
+    element = project.timelines.items["timeline:main"].elements_by_id[
+        "el:choice"
+    ]
+    edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
+    fingerprint = interaction_request_fingerprint(
+        element.creation,
+        edges_by_id,
+        project,
+    )
+    element.creation.motion.design_notes = (
+        f"抉择动效\n{FINGERPRINT_MARKER}{fingerprint}"
+    )
+    graph = derive_work_graph(project)
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.DONE
+
+    project.narrative_edges.append(
+        NarrativeEdge(
+            edge_id="edge:c",
+            source_timeline_id="timeline:main",
+            target_timeline_id="timeline:ep4a",
+            label="选择C · 报警",
+        ),
+    )
+    element.creation.options.append(InteractionOption(edge_ref="edge:c"))
+    graph = derive_work_graph(project)
+    assert graph.by_id["interaction:el:choice"].status is WorkNodeStatus.READY
+
+
+@pytest.mark.parametrize("scope", ["element", "project"])
+def test_running_interaction_task_projects_running_status(scope) -> None:
+    project = _project()
+    _make_branching(project)
+    target = (
+        "element:el:choice"
+        if scope == "element"
+        else f"project:{project.project_id}"
+    )
+    graph = derive_work_graph(
+        project,
+        tasks=[
+            _task(
+                "interaction_draft",
+                target,
+                TaskStatus.RUNNING,
+                progress=0.3,
+            ),
+        ],
+    )
+    node = graph.by_id[
+        "interaction:el:choice"
+        if scope == "element"
+        else "interaction:project"
+    ]
+    assert node.status is WorkNodeStatus.RUNNING
+    assert node.progress == 0.3
+
+
+def test_bundle_node_gates_until_segments_and_interactions_done() -> None:
+    project = _project()
+    _make_branching(project)
+
+    graph = derive_work_graph(project)
+    bundle = graph.by_id["bundle:project"]
+    assert bundle.kind == "bundle"
+    assert bundle.lane == "compose"
+    assert bundle.status is WorkNodeStatus.GATED
+    # 门禁点名：抉择动效未就绪 + 全部可达分段缺成片。
+    assert "interaction:el:choice" in bundle.deps
+    assert "interaction:el:choice" in bundle.missing
+    assert "timeline:timeline:main 缺成片" in bundle.missing
+    assert "timeline:timeline:ep4a 缺成片" in bundle.missing
+    assert "timeline:timeline:ep4b 缺成片" in bundle.missing
+    # bundle 不派发媒体任务：经 GET /interactive-bundle 导出。
+    assert bundle.command is None
+    assert bundle not in graph.ready_media_nodes()
+    assert "interactive-bundle" in bundle.label
+    assert bundle.locator == {
+        "page": "blueprint",
+        "export": "interactive-bundle",
+    }
+
+    _draft_choice_motion(project)
+    _draft_presentation(project)
+    for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
+        _select_final_video(project, timeline_id)
+    graph = derive_work_graph(project)
+    assert graph.by_id["bundle:project"].status is WorkNodeStatus.DONE
+
+
+def test_bundle_node_goes_stale_when_a_segment_final_is_stale() -> None:
+    project = _project()
+    _make_branching(project)
+    _draft_choice_motion(project)
+    _draft_presentation(project)
+    for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
+        _select_final_video(project, timeline_id)
+    project.assets.artifact_versions_by_id[
+        "art:final-timeline:ep4a"
+    ].stale = True
+
+    graph = derive_work_graph(project)
+    assert graph.by_id["bundle:project"].status is WorkNodeStatus.STALE
+
+
+def test_projects_without_edges_have_no_interaction_or_bundle_nodes() -> None:
+    # 旧单 timeline 项目与线性多集项目零回退。
+    legacy = _project()
+    _add_element(legacy, _element("elem:one"))
+    graph = derive_work_graph(legacy)
+    assert not [
+        node for node in graph.nodes if node.kind in ("interaction", "bundle")
+    ]
+
+    linear = _project()
+    _add_second_timeline(linear)
+    graph = derive_work_graph(linear)
+    assert not [
+        node for node in graph.nodes if node.kind in ("interaction", "bundle")
+    ]
 
 
 # ---- History snapshots are frozen: never part of the production graph ----
@@ -1454,6 +1952,48 @@ def test_failed_reroll_is_not_masked_by_the_old_success() -> None:
         WorkNodeStatus.FAILED
     )
     assert status_with_failure("2026-08-04T00:00:00Z") is WorkNodeStatus.DONE
+
+
+def test_completed_branching_graph_has_no_permanent_ready_bundle():
+    project = _project()
+    _make_branching(project)
+    for timeline_id in project.timelines.order:
+        project.timelines.items[
+            timeline_id
+        ].description = "Published complete scene."
+        _select_final_video(project, timeline_id)
+    _draft_choice_motion(project)
+    _draft_presentation(project)
+    graph = derive_work_graph(project)
+    assert not graph.unfinished(), [
+        (n.node_id, n.status) for n in graph.unfinished()
+    ]
+    assert not graph.model_required_nodes()
+
+
+def test_stale_bundle_waits_for_machine_dependencies():
+    from services.file_agent_runtime.work_graph import WorkGraph, WorkNode
+
+    graph = WorkGraph(
+        nodes=(
+            WorkNode(
+                node_id="compose:main",
+                kind="compose",
+                label="compose",
+                status=WorkNodeStatus.RUNNING,
+            ),
+            WorkNode(
+                node_id="bundle:project",
+                kind="bundle",
+                label="bundle",
+                status=WorkNodeStatus.STALE,
+                deps=("compose:main",),
+                missing=("compose:main",),
+            ),
+        ),
+        generation=1,
+    )
+    assert not graph.model_required_nodes(automatic_regeneration=True)
 
 
 @pytest.mark.parametrize("reverse_tasks", [False, True])

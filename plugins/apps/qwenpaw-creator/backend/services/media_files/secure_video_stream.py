@@ -164,6 +164,7 @@ def _file_read_flags() -> int:
         raise RuntimeError("安全视频物化要求平台支持 O_NOFOLLOW")
     return (
         os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NONBLOCK", 0)
         | os.O_NOFOLLOW
@@ -175,6 +176,7 @@ def _file_create_flags() -> int:
         raise RuntimeError("安全视频物化要求平台支持 O_NOFOLLOW")
     return (
         os.O_WRONLY
+        | getattr(os, "O_BINARY", 0)
         | os.O_CREAT
         | os.O_EXCL
         | getattr(os, "O_CLOEXEC", 0)
@@ -401,7 +403,9 @@ class _TaskScratch:
         try:
             descriptor = os.open(
                 target,
-                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
             )
         except OSError as error:
             raise ValidationError(
@@ -421,6 +425,7 @@ class _TaskScratch:
         if not self._descriptor_rooted:
             flags = (
                 os.O_WRONLY
+                | getattr(os, "O_BINARY", 0)
                 | os.O_CREAT
                 | os.O_EXCL
                 | getattr(

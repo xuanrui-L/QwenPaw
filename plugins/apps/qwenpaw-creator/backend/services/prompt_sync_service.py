@@ -508,7 +508,6 @@ class PromptSyncService:
             )
         else:
             client = self.client or AgentScopeAgentChatClient(
-                max_tokens=7000,
                 temperature=0.2,
             )
             turn = await client.complete(

@@ -5,6 +5,7 @@ import type {
   TaskView,
 } from "@/contracts/creator";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { makeRun } from "@/test/agentFixtures";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -26,6 +27,45 @@ describe("creator task view refresh ordering", () => {
   beforeEach(() => {
     useCreatorTaskViewStore.getState().reset();
   });
+
+  it.each([
+    { taskStatus: "CANCELLED", delegated: false, expected: "CANCELLED" },
+    { taskStatus: "RUNNING", delegated: false, expected: "WAITING_RUNTIME" },
+    { taskStatus: "CANCELLED", delegated: true, expected: "WAITING_RUNTIME" },
+  ] as const)(
+    "reconciles cancelled media without hiding live Tasks or chat delegations: %j",
+    async ({ taskStatus, delegated, expected }) => {
+      const run = makeRun({
+        status: "WAITING_RUNTIME",
+        taskRefs: ["task-1"],
+        metadata: {
+          commandType: "GENERATE_STORYBOARD_IMAGE",
+          ...(delegated ? { parentActionId: "delegate-action" } : {}),
+        },
+      });
+      const task: TaskView = {
+        id: "task-1",
+        projectId: "p1",
+        transactionId: null,
+        specialistRunId: run.id,
+        kind: "image_generation",
+        targetRef: "element:one",
+        status: taskStatus,
+        progress: null,
+        resultRefs: [],
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) =>
+          response({
+            items: url.endsWith("/tasks") ? [task] : [run],
+          }),
+        ),
+      );
+      await useCreatorTaskViewStore.getState().refresh("p1");
+      expect(useCreatorTaskViewStore.getState().runs[0].status).toBe(expected);
+    },
+  );
 
   it("does not let an older pending snapshot overwrite a newer terminal refresh", async () => {
     const oldRuns = deferred<Response>();

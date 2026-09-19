@@ -4,6 +4,7 @@
 Submitting real tasks (ASR/video) as a "ping" is billable and rejected
 by the DashScope gateway with 403; probes use free read-only APIs.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -211,7 +212,7 @@ def test_anthropic_llm_probe_uses_messages_endpoint() -> None:
     assert headers["anthropic-version"] == "2023-06-01"
     assert "Authorization" not in headers
     assert payload["model"] == "claude-sonnet-4-20250514"
-    assert payload["max_tokens"] == 8
+    assert "max_tokens" not in payload
     assert payload["messages"] == [
         {"role": "user", "content": "Reply with pong only."},
     ]
@@ -254,7 +255,7 @@ def test_gemini_llm_probe_uses_generate_content() -> None:
     assert payload["contents"] == [
         {"parts": [{"text": "Reply with pong only."}]},
     ]
-    assert payload["generationConfig"]["maxOutputTokens"] == 8
+    assert "maxOutputTokens" not in payload.get("generationConfig", {})
 
 
 def test_gemini_llm_probe_omits_key_when_keyless() -> None:

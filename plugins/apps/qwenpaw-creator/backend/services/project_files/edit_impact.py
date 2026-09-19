@@ -17,6 +17,8 @@ import re
 from typing import Any, Mapping, Sequence
 
 from .json_pointer import split_pointer
+from .media_selection import video_selection_fingerprint
+from .models import TimelineElement
 from .prompt_sync import is_prompt_sync_pointer
 
 
@@ -159,7 +161,10 @@ def _mark_timeline_render_stale(
         "artifact_slots_by_id",
     ).items():
         slot = _record(raw_slot)
-        if slot.get("owner_ref") != owner_ref:
+        if (
+            slot.get("owner_ref") != owner_ref
+            or slot.get("kind") != "final_video"
+        ):
             continue
         _mark_selected_stale(
             document,
@@ -223,6 +228,7 @@ def _invalidate_r2v_outputs(
 
 _R2V_VIDEO_ONLY_FIELDS = {
     "video_prompt",
+    "generate_audio",
     "video_reference_version_ids",
 }
 _EDIT_METADATA_FIELDS = {"intent", "reason"}
@@ -360,6 +366,10 @@ def _apply_element_path(  # pylint: disable=too-many-branches
     if element is None:
         return
     impact.affected_element_ids.add(element_id)
+    # Audience interactions are played separately from the final cut.
+    # Editing/generating their HTML must not invalidate paid video work.
+    if _record(element.get("creation")).get("type") == "interaction":
+        return
     suffix = tokens[5:]
     if not suffix:
         _mark_timeline_render_stale(document, timeline_id, impact)
@@ -376,12 +386,12 @@ def _apply_element_path(  # pylint: disable=too-many-branches
     ):
         return
 
-    if creation_type == "r2v":
-        include_storyboard = True
+    if creation_type in {"r2v", "t2v", "i2v"}:
+        include_storyboard = creation_type == "r2v"
         generated_input_changed = False
         if suffix[0] == "creation":
             generated_input_changed = True
-            include_storyboard = not (
+            include_storyboard = creation_type == "r2v" and not (
                 len(suffix) >= 2 and suffix[1] in _R2V_VIDEO_ONLY_FIELDS
             )
         elif suffix[:2] == ("span", "duration_tick"):
@@ -536,6 +546,59 @@ def _apply_slot_selection_path(
     _mark_timeline_render_stale(document, timeline_id, impact)
 
 
+def _accept_video_selection(
+    document: dict[str, Any],
+    tokens: tuple[str, ...],
+    impact: EditImpact,
+    *,
+    unchanged: bool,
+) -> None:
+    if (
+        len(tokens) != 4
+        or tokens[:2] != ("assets", "artifact_slots_by_id")
+        or tokens[3] != "selected_version_id"
+    ):
+        return
+    slots = _items(document, "assets", "artifact_slots_by_id")
+    slot = _record(slots.get(tokens[2]))
+    if slot.get("kind") != "element_video":
+        return
+    version_id = slot.get("selected_version_id")
+    version = _items(document, "assets", "artifact_versions_by_id").get(
+        version_id,
+    )
+    if (
+        not isinstance(version, dict)
+        or version_id not in slot.get("version_ids", [])
+        or version_id in impact.invalidated_artifact_version_ids
+        or (unchanged and not version.get("stale"))
+    ):
+        return
+    owner_ref = slot.get("owner_ref", "")
+    found = _find_element(document, owner_ref.removeprefix("element:"))
+    if found is None:
+        return
+    _, raw_element = found
+    element = TimelineElement.model_validate(raw_element)
+    storyboard = _record(
+        slots.get(f"element:{element.element_id}:storyboard"),
+    )
+    metadata = dict(_record(slot.get("metadata")))
+    metadata["selectionAcceptance"] = {
+        "versionId": version_id,
+        "inputFingerprint": video_selection_fingerprint(
+            element,
+            storyboard.get("selected_version_id"),
+        ),
+    }
+    slot["metadata"] = metadata
+    # Accept the chosen bytes without fabricating generation provenance.
+    version["stale"] = False
+    version["stale_reason"] = None
+    # Re-selecting a previously stale selection is also an explicit adoption.
+    _apply_slot_selection_path(document, tokens, impact)
+
+
 def _pointer_value(
     document: Mapping[str, Any] | None,
     tokens: tuple[str, ...],
@@ -594,6 +657,86 @@ def _pointer_unchanged(
     return base_found == candidate_found and base_value == candidate_value
 
 
+def _script_inputs(
+    document: Mapping[str, Any],
+    timeline_id: str,
+    *,
+    source: str | None = None,
+) -> Any:
+    """Only authoring inputs, never downstream elements or frozen history.
+
+    Match script_execution's prompt scope: the live title/synopsis outline
+    is shared, but the saved body, duration and incident branch edges belong
+    to this node. Rewiring a distant ending must not expire the prologue.
+    Edge presentation fields (currently tone) are not script inputs.
+    Timeline-sourced scripts mirror only the authoritative body verbatim.
+    """
+    timelines = _items(document, "timelines", "items")
+    timeline = _record(timelines.get(timeline_id))
+    if source == "timeline":
+        return timeline.get("description", "")
+    order = _record(document.get("timelines")).get("order", [])
+    strategy = _record(document.get("strategy"))
+    sources = _items(document, "sources", "sources")
+    source_items = _record(sources.get("items"))
+    intelligence_ids = []
+    for source_id in sources.get("order", []):
+        version_id = _record(source_items.get(source_id)).get(
+            "current_intelligence_version_id",
+        )
+        if version_id is not None:
+            intelligence_ids.append(version_id)
+        if len(intelligence_ids) == 3:
+            break
+    return (
+        tuple(
+            document.get(key) for key in ("name", "description", "scenario")
+        ),
+        tuple(
+            strategy.get(key)
+            for key in (
+                "creative_brief",
+                "audience",
+                "creative_direction",
+                "constraints",
+            )
+        ),
+        timeline.get("description", ""),
+        timeline.get("planned_duration_seconds")
+        or _record(document.get("settings")).get("target_duration_seconds"),
+        [
+            (
+                tid,
+                *(
+                    _record(timelines.get(tid)).get(key)
+                    for key in ("title", "synopsis")
+                ),
+            )
+            for tid in order
+            if not tid.startswith("snapshot:")
+        ],
+        [
+            tuple(
+                _record(edge).get(key, "")
+                for key in (
+                    "edge_id",
+                    "source_timeline_id",
+                    "target_timeline_id",
+                    "label",
+                    "prompt",
+                )
+            )
+            for edge in document.get("narrative_edges", [])
+            if timeline_id
+            in (
+                _record(edge).get("source_timeline_id"),
+                _record(edge).get("target_timeline_id"),
+            )
+        ],
+        intelligence_ids,
+    )
+
+
 def apply_frontend_edit_impacts(
     candidate: Mapping[str, Any],
     submitted_pointers: Sequence[str],
@@ -604,6 +747,55 @@ def apply_frontend_edit_impacts(
 
     document = copy.deepcopy(dict(candidate))
     impact = EditImpact()
+    if (
+        "/name" in submitted_pointers
+        and "/name_source" not in submitted_pointers
+    ):
+        document["name_source"] = "user"
+    if base is not None:
+        for slot_id, raw_slot in _items(
+            document,
+            "assets",
+            "artifact_slots_by_id",
+        ).items():
+            slot = _record(raw_slot)
+            owner_ref = slot.get("owner_ref")
+            if (
+                slot.get("kind") != "timeline_script"
+                or not isinstance(owner_ref, str)
+                or not owner_ref.startswith("timeline:")
+            ):
+                continue
+            timeline_id = owner_ref.removeprefix("timeline:")
+            if timeline_id.startswith(
+                "snapshot:",
+            ) or timeline_id not in _items(document, "timelines", "items"):
+                continue
+            version = _record(
+                _items(document, "assets", "artifact_versions_by_id").get(
+                    slot.get("selected_version_id"),
+                ),
+            )
+            source = _record(version.get("metadata")).get("scriptSource")
+            if _script_inputs(
+                base,
+                timeline_id,
+                source=source,
+            ) != _script_inputs(
+                document,
+                timeline_id,
+                source=source,
+            ):
+                _mark_selected_stale(
+                    document,
+                    slot_id,
+                    reason=(
+                        "剧本正文已修改，需要同步"
+                        if source == "timeline"
+                        else "剧本创作依据已修改，需要重新起草"
+                    ),
+                    impact=impact,
+                )
     for pointer in dict.fromkeys(submitted_pointers):
         if is_prompt_sync_pointer(pointer):
             # This stamp is derived under the commit lock. It does not alter
@@ -623,6 +815,15 @@ def apply_frontend_edit_impacts(
         )
         _apply_timeline_setting_path(document, tokens, impact)
         _apply_slot_selection_path(document, tokens, impact)
+    for pointer in dict.fromkeys(submitted_pointers):
+        tokens = split_pointer(pointer)
+        _accept_video_selection(
+            document,
+            tokens,
+            impact,
+            unchanged=base is not None
+            and _pointer_unchanged(base, document, tokens),
+        )
     return document, impact
 
 
@@ -636,7 +837,25 @@ def summarize_committed_edit_impact(
     # Re-running the classifier on a copy is deterministic and also covers
     # the no-selected-artifact case where the commit contains no induced
     # stale path.
-    _, classified = apply_frontend_edit_impacts(project, changed_pointers)
+    document, classified = apply_frontend_edit_impacts(
+        project,
+        changed_pointers,
+    )
+    for pointer in changed_pointers:
+        tokens = split_pointer(pointer)
+        if (
+            len(tokens) >= 5
+            and tokens[:2] == ("assets", "artifact_slots_by_id")
+            and tokens[3:5] == ("metadata", "selectionAcceptance")
+        ):
+            # Re-adopting the current stale video may change only this
+            # stamp: its selection and final's stale flag already match.
+            # The UI still needs to report the downstream compose action.
+            _apply_slot_selection_path(
+                document,
+                (*tokens[:3], "selected_version_id"),
+                classified,
+            )
     impact.affected_element_ids.update(classified.affected_element_ids)
     impact.affected_timeline_ids.update(classified.affected_timeline_ids)
     impact.invalidated_artifact_version_ids.update(
