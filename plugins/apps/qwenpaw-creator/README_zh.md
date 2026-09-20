@@ -171,6 +171,8 @@ Agent 生成的媒体和修改的文本会进入决策托盘；你手动编辑�
 
 官方内置模板：[非正式发布会](templates/cat-launch/README.md)，支持多张参考图、约30秒完整 R2V 和全屏双语动效；上传音频优先作配乐，没有音频时由视频模型原生生成配乐。
 
+普通字幕默认采用透明背景、清晰的无衬线字体和轻微文字阴影，在字幕区域稳定呈现，不自动添加气泡、底板、边框或表情。缺少动效文档或动效渲染失败时，也使用同样的简洁字幕。专用模板保留各自的版式；已有明确设计的文档可继续使用，选择字幕重新设计时应用当前样式。
+
 请打开 QwenPaw 控制台的 **Apps（应用中心）**，找到 **QwenPaw Creator** 并点击安装；安装完成后，直接从 Apps 打开 Creator。
 
 Creator 会使用若干本地工具，但不会改动系统安装：`ffmpeg` 负责媒体处理与合成（可用 `CREATOR_FFMPEG_PATH` 指定，否则回退系统 `ffmpeg` 或 `imageio-ffmpeg`）；`jq` 支撑 Agent 对项目文件的结构化编辑（`CREATOR_JQ_PATH` 或 `PATH`）。依赖缺失时 Creator 以降级模式启动，可通过 `GET /api/qwenpaw-creator/health` 查看缺失项。

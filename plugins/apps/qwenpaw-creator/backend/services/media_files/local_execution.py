@@ -68,7 +68,10 @@ from services.media_files.beat_grid import (
     BeatGridUnavailable,
     extract_beat_grid,
 )
-from services.media_files.motion_templates import render_caption_template
+from services.media_files.motion_templates import (
+    DEFAULT_CAPTION_LOCATION,
+    render_caption_template,
+)
 from services.media_files.transitions import (
     SUPPORTED_XFADE_KINDS,
     TransitionClip,
@@ -1527,31 +1530,16 @@ class FfmpegLocalMediaRunner:
                     elif probe.text_occlusion > 0.10:
                         safety_error = "字幕文字被卡片内的图标或装饰遮挡"
                 if safety_error is not None:
-                    fallback_w = (
-                        float(render_location.get("width", 0.8))
-                        if isinstance(render_location, Mapping)
-                        else 0.8
-                    )
-                    fallback_h = (
-                        float(render_location.get("height", 0.25))
-                        if isinstance(render_location, Mapping)
-                        else 0.25
-                    )
                     render_location = {
-                        "x": 0.5,
-                        "y": 0.88,
-                        "width": 0.8,
-                        "height": 0.25,
-                        "anchor_x": 0.5,
-                        "anchor_y": 0.5,
+                        **DEFAULT_CAPTION_LOCATION,
                         "opacity": 1.0,
                     }
                     motion = {
                         "html": render_caption_template(
                             str(overlay.get("text") or ""),
                             emotion=str(overlay.get("vibe") or "chill"),
-                            box_width=fallback_w,
-                            box_height=fallback_h,
+                            box_width=render_location["width"],
+                            box_height=render_location["height"],
                         ),
                         "fps": 24,
                         "loop": False,
@@ -1588,23 +1576,8 @@ class FfmpegLocalMediaRunner:
                     continue
                 if not using_safe_motion:
                     generated_error = prep.error or "未知错误"
-                    fallback_w = (
-                        float(render_location.get("width", 0.8))
-                        if isinstance(render_location, Mapping)
-                        else 0.8
-                    )
-                    fallback_h = (
-                        float(render_location.get("height", 0.25))
-                        if isinstance(render_location, Mapping)
-                        else 0.25
-                    )
                     render_location = {
-                        "x": 0.5,
-                        "y": 0.88,
-                        "width": 0.8,
-                        "height": 0.25,
-                        "anchor_x": 0.5,
-                        "anchor_y": 0.5,
+                        **DEFAULT_CAPTION_LOCATION,
                         "opacity": 1.0,
                     }
                     safe_prep = prepare_motion_layer(
@@ -1612,8 +1585,8 @@ class FfmpegLocalMediaRunner:
                         html=render_caption_template(
                             str(overlay.get("text") or ""),
                             emotion=str(overlay.get("vibe") or "chill"),
-                            box_width=fallback_w,
-                            box_height=fallback_h,
+                            box_width=render_location["width"],
+                            box_height=render_location["height"],
                         ),
                         fps=24,
                         loop=False,
@@ -1694,7 +1667,7 @@ class FfmpegLocalMediaRunner:
                 video_size=video_size,
                 appear_at=overlay["appear_at"],
                 duration=overlay["duration"],
-                location=overlay.get("location"),
+                location=render_location,
             )
         if not result.success:
             rendered.unlink(missing_ok=True)
@@ -3386,7 +3359,9 @@ def _resolved_fingerprint(resolved: _ResolvedExecution) -> str:
             # segment and transition durations now stay on Timeline time.
             # v10: loudnorm accepts FFmpeg progress logs after its JSON;
             # old unnormalized deliveries must not be reused after the fix.
-            "rendererVersion": 10,
+            # v11: ordinary and safety-fallback captions use borderless
+            # typography, including the last-resort PNG renderer.
+            "rendererVersion": 11,
             "targetRef": resolved.target_ref,
             "inputs": [
                 {

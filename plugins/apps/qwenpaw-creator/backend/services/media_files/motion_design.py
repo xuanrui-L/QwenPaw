@@ -4,12 +4,11 @@
 # pylint: disable=too-many-return-statements,line-too-long
 """VLM-driven motion-graphic design for Timeline edit segments.
 
-``design_motion_overlays`` runs two passes over one Timeline.  Pass A looks
-at real frames behind every text Overlay (``pet_os`` / ``interview_summary``)
-and designs a fancy generated caption card, stored as ``creation.motion`` on
-that same Element; the fixed bubble template stays as the render fallback.
-Pass B picks a sparse set of segments worth a decorative sticker through one
-coordinated selection call, designs each pick against real keyframes, and
+``design_motion_overlays`` runs two passes over one Timeline. Pass A fills
+text Overlays with plain, borderless subtitles or their selected template,
+stored as ``creation.motion`` on the same Element. Render fallbacks use the
+same neutral typography. When explicitly enabled, Pass B picks a sparse set
+of segments for decoration, designs each pick against real keyframes, and
 persists accepted designs as text-free decoration Overlay Elements.  Every
 document is validated by actually loading it before one Project commit.
 
@@ -53,7 +52,6 @@ from services.media_files.live_operation import (
 from services.media_files.motion_blueprints import (
     CONTENT_TYPES,
     blueprint_catalog_text,
-    content_type_caption_order,
     content_type_frame,
     content_type_palette,
     render_caption_blueprint,
@@ -70,6 +68,8 @@ from services.media_files.motion_overlay import (
     probe_motion_document,
 )
 from services.media_files.motion_templates import (
+    CAPTION_TEMPLATE_VERSION,
+    DEFAULT_CAPTION_LOCATION,
     MOTION_TEMPLATE_VERSION,
     SUPPORTED_EMOTIONS,
     SUPPORTED_ENTRANCES,
@@ -121,10 +121,6 @@ def _log_safe(value: object) -> str:
 
 _MAX_SEGMENTS = 24
 _MAX_CONCURRENT_DESIGNS = 3
-# Uniform narration captions: one fixed blueprint and intensity shared by
-# every card in the film, so subtitles stay visually identical throughout.
-_UNIFORM_CAPTION_BLUEPRINT = "static_capsule"
-_UNIFORM_CAPTION_INTENSITY = 0.5
 _MAX_DESIGN_ATTEMPTS = 2
 _TEXT_CARD_DESIGN_ATTEMPTS = 4
 _TEXT_CARD_MIN_COVERAGE = 0.3
@@ -132,16 +128,6 @@ _TEXT_CARD_MIN_COVERAGE = 0.3
 # through layout; letters and CJK characters stay authoritative.
 _PUNCTUATION_RUN = re.compile(
     r"[，。！？、；：“”‘’…—～·（）《》〈〉,.!?;:'\"()\[\]~\-]+",
-)
-# Placement/scale tendencies rotated across a film's caption cards so
-# concurrent designs still differ in composition; the model may overrule
-# any of them when the footage demands, they are never style templates.
-_CARD_COMPOSITION_SEEDS = (
-    "大字抢镜：卡占画面上半部偏一侧（width≈0.5），整体微倾斜，靠近主体方向",
-    "小而点睛：紧贴主体动作旁的小卡（width≈0.28），像一句随手贴上的吐槽",
-    "斜角构图：画面斜上角或斜下角，明显旋转角度，逐字大小错落",
-    "横贯强调：中下部横向大字（width≈0.6），关键词放大变色，背景色块不规则",
-    "边角呼应：靠画面一侧竖向留白处，窄而高的排版感，搭配细长装饰线",
 )
 # Expressive caption cards may bleed background blocks off their box
 # edge on purpose; only a fully edge-locked frame (text at risk of
@@ -153,7 +139,7 @@ _DECORATION_MAX_EDGE_CONTACT = 0.02
 _KEYFRAME_WIDTH = 960
 _VLM_MAX_TOKENS = 6000
 _MOTION_ELEMENT_SUFFIX = "-motion"
-_DEFAULT_DECORATION_BUDGET = 3
+_DEFAULT_DECORATION_BUDGET = 0
 _MAX_DECORATION_BUDGET = 8
 
 # Emoji and pictographic glyphs depend on platform color-font rasterization,
@@ -1061,62 +1047,6 @@ def _design_task_text(
     return "\n".join(lines)
 
 
-def _text_style_task_text(
-    *,
-    overlay: TimelineElement,
-    edit_element: TimelineElement | None,
-    duration_seconds: float,
-    canvas_size: tuple[int, int],
-    brief: str,
-    theme: str = "comic_patrol",
-    card_index: int = 0,
-    content_type: str = "",
-) -> str:
-    creation = overlay.creation
-    assert isinstance(creation, OverlayCreation)
-    del theme  # 家族感由画面与全片概念推导，不再绑定固定主题色板
-    # Composition seeds rotate per card so concurrently designed cards
-    # still land in different places at different scales — they are
-    # placement tendencies the model may overrule for the footage, never
-    # style templates.
-    seed = _CARD_COMPOSITION_SEEDS[card_index % len(_CARD_COMPOSITION_SEEDS)]
-    lines = [
-        "请为下面这段台词自由设计一张贴合本片风格的动态花字/字幕卡。",
-        f"台词文字: {creation.text}",
-        f"情绪基调: {creation.vibe}",
-        f"展示时长: {duration_seconds:.1f} 秒",
-        f"本卡序号: 第 {card_index + 1} 张。本卡构图建议（可根据画面推翻，但同片各卡构图必须互不重复）：{seed}。",
-    ]
-    if edit_element is not None and isinstance(
-        edit_element.creation,
-        EditCreation,
-    ):
-        lines.append(
-            f"片段剪辑意图: {edit_element.creation.intent or '（未提供）'}",
-        )
-    lines.append(
-        f"画布尺寸: {canvas_size[0]}x{canvas_size[1]} 像素。"
-        "字幕卡盒子的像素尺寸 = location.width/height 乘以画布尺寸，请据此设计字号与布局。",
-    )
-    if brief:
-        lines.append(f"整体包装要求: {brief}")
-    _CAPTION_CONTENT_HINTS = {
-        "short_drama": "本片类型：短剧。花字风格偏情绪化、电影感、文艺、有质感。",
-        "interview": "本片类型：采访。花字风格偏清晰、专业、结构化、关键词突出。",
-        "pets": "本片类型：宠物。花字风格偏温暖、手写感、可爱、活泼。",
-        "gaming": "本片类型：游戏。花字风格偏霓虹、发光、炫酷、科技感。",
-        "sports": "本片类型：体育。花字风格偏粗犷、有力、冲击力强。",
-        "travel": "本片类型：旅行。花字风格偏温暖明亮、手写感、轻松。",
-        "general": "本片类型：通用剪辑。花字风格均衡百搭。",
-    }
-    if content_type in _CAPTION_CONTENT_HINTS:
-        lines.append(_CAPTION_CONTENT_HINTS[content_type])
-    lines.append(
-        "附图是该时段内按时间顺序抽取的真实画面帧，请从中判断主体位置、留白区域和配色。严格按系统要求只输出一个 JSON 对象。",
-    )
-    return "\n".join(lines)
-
-
 async def _design_document(
     *,
     system_prompt: str,
@@ -1583,7 +1513,7 @@ def _is_trusted_caption_motion(motion: MotionGraphic | None) -> bool:
     versioned fixed templates. A hand-written ``html_css`` snippet from
     the editing model (field run 2026-08-09: revision turns wrote 700
     byte cards) fails the compose-time safety check and silently ships
-    the fallback bubble — treat it as unstyled so the design pass
+    the plain subtitle fallback — treat it as unstyled so the design pass
     replaces it with a real footage-aware design.
     """
 
@@ -1706,7 +1636,7 @@ async def design_motion_overlays(
         except (TypeError, ValueError) as exc:
             raise ValidationError("maxDecorations 必须是整数") from exc
         budget = min(max(budget, 0), _MAX_DECORATION_BUDGET)
-    caption_style = str(arguments.get("captionStyle") or "varied").strip()
+    caption_style = str(arguments.get("captionStyle") or "uniform").strip()
     if caption_style not in {"varied", "uniform"}:
         raise ValidationError("captionStyle 必须是 varied 或 uniform")
     scene_style = str(arguments.get("sceneStyle") or "generative").strip()
@@ -1936,208 +1866,41 @@ async def design_motion_overlays(
         clip_styled[element.element_id] = motion
         return {**entry, "status": "designed", "concept": concept}
 
-    def fallback_text_style(
-        overlay: TimelineElement,
-        *,
-        reason: str,
-        card_index: int = 0,
-    ) -> dict[str, Any]:
-        # The reason string flows into design notes and the fallback
-        # status payload that downstream observers log; neutralise CR/LF
-        # so exception text cannot forge log lines.
-        reason = reason.replace("\r", "\\r").replace("\n", "\\n")
-        creation = overlay.creation
-        assert isinstance(creation, OverlayCreation)
-        emotion = (
-            creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
-        )
-        location = ElementLocation(
-            x=0.50,
-            y=0.88,
-            width=0.80,
-            height=0.25,
-            anchor_x=0.5,
-            anchor_y=0.5,
-        )
-        if overlay.location:
-            location = overlay.location
-        try:
-            _validate_caption_location(
-                location,
-                creation.text,
-                canvas_size,
-            )
-        except ValidationError:
-            location = ElementLocation(
-                x=0.50,
-                y=0.88,
-                width=0.80,
-                height=0.25,
-                anchor_x=0.5,
-                anchor_y=0.5,
-            )
-        # Deterministic blueprint rotation keeps fallback cards varied
-        # even when every generative attempt failed; the render-time
-        # probe gates still guard the final composite, and a blueprint
-        # that failed those gates degrades to the fixed CSS template
-        # inside the compose path without dropping the copy.
-        ct_order = content_type_caption_order(content_type)
-        blueprint = ct_order[card_index % len(ct_order)]
-        concept = f"蓝图字幕卡 {blueprint}（生成式设计回退：{reason}）"
-        ct_palette = content_type_palette(content_type)
-        palette_arg = ct_palette or _THEME_BLUEPRINT_PALETTES.get(theme)
-        try:
-            blueprint_html, _hf = render_caption_blueprint(
-                blueprint,
-                creation.text,
-                palette=palette_arg,
-                intensity=0.55,
-                box_width=location.width,
-                box_height=location.height,
-            )
-            motion = MotionGraphic(
-                format="html_js",
-                html=blueprint_html,
-                fps=24,
-                loop=False,
-                design_notes=concept,
-                motif="caption_card",
-                theme=theme,
-                variant="sticker",
-                emotion=emotion,
-                entrance="pop",
-                exit="soft_fade",
-                intensity=0.55,
-            )
-        except ValueError:
-            concept = f"可靠动态 OS 字幕卡（生成样式回退：{reason}）"
-            motion = MotionGraphic(
-                html=render_caption_template(
-                    creation.text,
-                    theme=theme,
-                    emotion=emotion,
-                    box_width=location.width,
-                    box_height=location.height,
-                ),
-                fps=24,
-                loop=False,
-                design_notes=concept,
-                motif="caption_card",
-                template_version=MOTION_TEMPLATE_VERSION,
-                theme=theme,
-                variant="sticker",
-                emotion=emotion,
-                entrance="pop",
-                exit="soft_fade",
-                intensity=0.6,
-            )
-        styled[overlay.element_id] = (motion, location)
-        return {
-            "elementId": overlay.element_id,
-            "overlayKind": "caption",
-            "status": "styled_fallback",
-            "concept": concept,
-            "fallbackReason": reason,
-        }
-
     def uniform_text_style(overlay: TimelineElement) -> dict[str, Any]:
-        """Style one caption with the film-wide uniform template.
-
-        Narration captions (tutorials, explainers, documentary voice-over)
-        must look identical from the first card to the last — only the
-        words change — so the uniform mode renders every card from one
-        fixed blueprint deterministically and never asks the design model
-        for a per-card look.
-        """
-
+        """Use the same borderless typography for all ordinary subtitles."""
         creation = overlay.creation
         assert isinstance(creation, OverlayCreation)
         entry: dict[str, Any] = {
             "elementId": overlay.element_id,
             "overlayKind": "caption",
         }
-        # Uniform mode expresses a film-wide caption policy, so every
-        # caption is covered even when the caller scoped elementIds to
-        # its motion clips; re-styling is prevented by the already_styled
-        # guard, never by the request filter.
-        if _is_trusted_caption_motion(creation.motion):
+        # Keep authored/template documents unless these captions were
+        # explicitly selected for redesign.
+        forced = requested is not None and overlay.element_id in requested
+        if not forced and _is_trusted_caption_motion(creation.motion):
             return {**entry, "status": "already_styled"}
-        emotion = (
-            creation.vibe if creation.vibe in SUPPORTED_EMOTIONS else "chill"
-        )
         location = overlay.location or ElementLocation(
-            x=0.50,
-            y=0.88,
-            width=0.80,
-            height=0.25,
-            anchor_x=0.5,
-            anchor_y=0.5,
+            **DEFAULT_CAPTION_LOCATION,
         )
         try:
             _validate_caption_location(location, creation.text, canvas_size)
         except ValidationError:
-            location = ElementLocation(
-                x=0.50,
-                y=0.88,
-                width=0.80,
-                height=0.25,
-                anchor_x=0.5,
-                anchor_y=0.5,
-            )
-        uniform_blueprint = (
-            "precision_subtitle"
-            if content_type == "tutorial"
-            else _UNIFORM_CAPTION_BLUEPRINT
-        )
-        concept = f"全片统一解说字幕卡 {uniform_blueprint}"
-        try:
-            blueprint_html, _hf = render_caption_blueprint(
-                uniform_blueprint,
+            location = ElementLocation(**DEFAULT_CAPTION_LOCATION)
+        concept = "简洁无边框字幕：透明背景、清晰字体、稳定排版"
+        motion = MotionGraphic(
+            format="html_css",
+            html=render_caption_template(
                 creation.text,
-                palette=(
-                    content_type_palette(content_type)
-                    or _THEME_BLUEPRINT_PALETTES.get(theme)
-                ),
-                intensity=_UNIFORM_CAPTION_INTENSITY,
                 box_width=location.width,
                 box_height=location.height,
-            )
-            motion = MotionGraphic(
-                format="html_js",
-                html=blueprint_html,
-                fps=24,
-                loop=False,
-                design_notes=concept,
-                motif="caption_card",
-                theme=theme,
-                variant="sticker",
-                emotion=emotion,
-                entrance="pop",
-                exit="soft_fade",
-                intensity=_UNIFORM_CAPTION_INTENSITY,
-            )
-        except ValueError:
-            concept = "全片统一解说字幕卡（固定模板）"
-            motion = MotionGraphic(
-                html=render_caption_template(
-                    creation.text,
-                    theme=theme,
-                    emotion=emotion,
-                    box_width=location.width,
-                    box_height=location.height,
-                ),
-                fps=24,
-                loop=False,
-                design_notes=concept,
-                motif="caption_card",
-                template_version=MOTION_TEMPLATE_VERSION,
-                theme=theme,
-                variant="sticker",
-                emotion=emotion,
-                entrance="pop",
-                exit="soft_fade",
-                intensity=_UNIFORM_CAPTION_INTENSITY,
-            )
+            ),
+            fps=24,
+            loop=False,
+            design_notes=concept,
+            motif="caption_card",
+            template_version=CAPTION_TEMPLATE_VERSION,
+            intensity=0,
+        )
         styled[overlay.element_id] = (motion, location)
         return {**entry, "status": "designed", "concept": concept}
 
@@ -2415,91 +2178,9 @@ async def design_motion_overlays(
                 "status": "styled",
                 "concept": motion.design_notes,
             }
-        # An explicit elementIds request forces a redesign even over a
-        # trusted document — that is how review feedback replaces a card.
-        if requested is None and _is_trusted_caption_motion(creation.motion):
-            return {**entry, "status": "already_styled"}
-        edit = best_covering_edit(overlay)
-        if edit is None:
-            return fallback_text_style(
-                overlay,
-                reason="没有相交的剪辑画面",
-                card_index=card_index,
-            )
-        try:
-            source_start, source_end = _segment_seconds(timeline, edit)
-        except ValidationError as exc:
-            return fallback_text_style(
-                overlay,
-                reason=str(exc),
-                card_index=card_index,
-            )
-        edit_start = edit.span.start_tick
-        edit_duration = max(1, edit.span.duration_tick)
-        overlay_start = overlay.span.start_tick
-        overlay_end = overlay_start + overlay.span.duration_tick
-        rel_start = (
-            max(overlay_start, edit_start) - edit_start
-        ) / edit_duration
-        rel_end = (
-            min(overlay_end, edit_start + edit.span.duration_tick) - edit_start
-        ) / edit_duration
-        source_span = source_end - source_start
-        frames = await window_frames(
-            edit.render_source,  # type: ignore[arg-type]
-            source_start + source_span * rel_start,
-            source_start + source_span * rel_end,
-        )
-        if isinstance(frames, dict):
-            return fallback_text_style(
-                overlay,
-                reason=str(
-                    frames.get("error") or frames.get("skipReason") or "抽帧失败",
-                ),
-                card_index=card_index,
-            )
-        duration_seconds = (
-            overlay.span.duration_tick / timeline.ticks_per_second
-        )
-        async with semaphore:
-            try:
-                design = await _design_document(
-                    system_prompt=_TEXT_STYLE_SYSTEM_PROMPT,
-                    task_text=_text_style_task_text(
-                        overlay=overlay,
-                        edit_element=edit,
-                        duration_seconds=duration_seconds,
-                        canvas_size=canvas_size,
-                        brief=brief,
-                        theme=theme,
-                        card_index=card_index,
-                        content_type=content_type,
-                    ),
-                    frame_paths=frames,
-                    canvas_size=canvas_size,
-                    required_text=creation.text,
-                    default_loop=False,
-                    min_coverage=_TEXT_CARD_MIN_COVERAGE,
-                    max_edge_contact=_TEXT_CARD_MAX_EDGE_CONTACT,
-                    max_attempts=_TEXT_CARD_DESIGN_ATTEMPTS,
-                    ffmpeg_path=ffmpeg_path,
-                    forced_theme=theme,
-                )
-            except Exception as exc:
-                return fallback_text_style(
-                    overlay,
-                    reason=str(exc),
-                    card_index=card_index,
-                )
-        if isinstance(design, str):
-            return fallback_text_style(
-                overlay,
-                reason=design,
-                card_index=card_index,
-            )
-        motion, location, concept = design
-        styled[overlay.element_id] = (motion, location)
-        return {**entry, "status": "styled", "concept": concept}
+        # Legacy varied requests also use the neutral subtitle default.
+        # Distinctive captions live in an explicitly authored template.
+        return uniform_text_style(overlay)
 
     async def decorate_segment(
         element: TimelineElement,
