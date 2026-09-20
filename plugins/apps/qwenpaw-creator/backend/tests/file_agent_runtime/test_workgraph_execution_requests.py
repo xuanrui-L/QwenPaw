@@ -855,7 +855,6 @@ def test_agent_workgraph_request_cannot_bypass_manual_hold(
             services,
             runtime.executions,
             "probe-project",
-            check_media_budget=False,
         )
         node = next(item for item in graph.nodes if item.kind == "visual")
         upstream = WorkNode(
@@ -1100,7 +1099,6 @@ def test_saved_prompt_authorization_rebinding(
                 services,
                 runtime.executions,
                 "probe-project",
-                check_media_budget=False,
             )
             node = next(
                 n
@@ -1138,7 +1136,6 @@ def test_saved_prompt_authorization_rebinding(
                 services,
                 runtime.executions,
                 "probe-project",
-                check_media_budget=False,
             )
             saved_node = saved_graph.by_id[node.node_id]
             held = scope != "visual" and not case.startswith("unchanged")
@@ -1192,14 +1189,12 @@ def test_saved_prompt_authorization_rebinding(
                     services,
                     runtime.executions,
                     "probe-project",
-                    check_media_budget=False,
                 )
                 assert still_blocked[node.node_id] == "EDIT_IN_PROGRESS"
                 _, _, _, confirmed_blocked = await dm.ready_request_context(
                     services,
                     runtime.executions,
                     "probe-project",
-                    check_media_budget=False,
                     confirmed_project_etag=saved.etag,
                     confirmed_node_id=node.node_id,
                 )
@@ -1236,7 +1231,6 @@ def test_saved_prompt_authorization_rebinding(
                     services,
                     runtime.executions,
                     "probe-project",
-                    check_media_budget=False,
                 )
                 latest_node = latest_graph.by_id[node.node_id]
                 assert (

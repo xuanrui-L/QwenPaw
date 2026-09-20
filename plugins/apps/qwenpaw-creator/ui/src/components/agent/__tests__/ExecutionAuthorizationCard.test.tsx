@@ -20,7 +20,6 @@ import {
 import { projectDocument } from "@/test/creatorFixtures";
 import { makePendingAuthorization } from "@/test/agentFixtures";
 
-vi.mock("@/routing/locators", () => ({ navigateToLocator: vi.fn() }));
 vi.mock("@/routing/navigation", () => ({ navigate: vi.fn() }));
 
 type PatchFn = ProjectSnapshotState["patch"];

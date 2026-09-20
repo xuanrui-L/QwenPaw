@@ -263,7 +263,8 @@ def test_interrupt_response_does_not_wait_for_terminal_task_cleanup(
 
 
 @pytest.mark.parametrize(
-    "task_status", [TaskStatus.RUNNING, TaskStatus.CANCELLED]
+    "task_status",
+    [TaskStatus.RUNNING, TaskStatus.CANCELLED],
 )
 def test_stop_cleanup_settles_media_run_after_worker_is_gone(
     tmp_path,
@@ -782,7 +783,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
             services,
             executions,
             "project-1",
-            check_media_budget=False,
         )
         node = next(
             n
@@ -930,7 +930,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
             services,
             executions,
             "project-1",
-            check_media_budget=False,
         )
         if change not in {"unchanged", "review"}:
             assert blocked[node.node_id] == "EDIT_IN_PROGRESS"
@@ -958,7 +957,6 @@ def test_workgraph_saved_snapshot_approval_fails_closed(
                     services,
                     executions,
                     "project-1",
-                    check_media_budget=False,
                     **confirmation,
                 )
                 matches = confirmation == {

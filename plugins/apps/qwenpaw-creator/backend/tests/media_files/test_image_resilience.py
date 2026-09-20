@@ -176,7 +176,7 @@ def test_late_manual_hold_closes_running_image_and_allows_explicit_retry(
         response = await routes.dispatch_work_graph_node(
             PROJECT_ID,
             node_id,
-            services,
+            services=services,
         )
         assert response["dispatched"]
         assert provider.calls == initial_calls + 1
@@ -1066,7 +1066,8 @@ def test_safety_rejection_blocks_unchanged_inputs_and_accepts_repairs(
 
 
 def test_unchanged_text_only_refusal_is_also_locally_blocked(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
 ):
     services = _safety_services(tmp_path, monkeypatch)
     provider = _CountingProvider(fail_with=_SAFETY_MESSAGE)
