@@ -1515,9 +1515,11 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
                 lane="interaction",
                 task_id=getattr(task, "task_id", None),
                 progress=getattr(task, "progress", None),
-                error=_task_error_summary(failure)
-                if status is WorkNodeStatus.FAILED
-                else None,
+                error=(
+                    _task_error_summary(failure)
+                    if status is WorkNodeStatus.FAILED
+                    else None
+                ),
                 missing=missing,
                 locator={
                     "page": "blueprint",
