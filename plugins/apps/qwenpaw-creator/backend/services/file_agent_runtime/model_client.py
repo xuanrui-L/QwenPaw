@@ -13,7 +13,9 @@ import inspect
 import json
 import os
 import re
+from pathlib import Path
 from time import monotonic
+from uuid import uuid4
 
 from typing import Any, Protocol
 
@@ -725,6 +727,172 @@ def _build_chat_model(
     )
 
 
+STREAM_DUMP_ENV = "CREATOR_AGENT_STREAM_DUMP"
+_STREAM_DUMP_FRAGMENT = 48
+_stream_dump_broken = False
+
+
+def _stream_dump_target() -> Path | None:
+    """Where to append raw stream records, when capturing is switched on.
+
+    The trace records only the *assembled* tool call, so a call that arrived
+    as a single 8-byte fragment cannot be told apart from one whose later
+    fragments were lost on the way in. Pointing
+    ``CREATOR_AGENT_STREAM_DUMP`` at a file appends one JSON line per item
+    the provider client yields. Unset, nothing is read and nothing written.
+    """
+    raw = os.environ.get(STREAM_DUMP_ENV, "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def _dump_fragment(value: str) -> dict:
+    """Length plus both ends - enough to see a cut, not the payload."""
+    return {
+        "len": len(value),
+        "head": value[:_STREAM_DUMP_FRAGMENT],
+        "tail": value[-_STREAM_DUMP_FRAGMENT:],
+    }
+
+
+def stream_dump_record(item: Any, seq: int) -> dict:
+    """Describe one yielded provider item without its content."""
+    blocks: list[dict] = []
+    for block in getattr(item, "content", None) or []:
+        entry: dict[str, Any] = {"kind": type(block).__name__}
+        for attr in ("id", "name"):
+            value = getattr(block, attr, None)
+            if value:
+                entry[attr] = str(value)
+        for attr in ("text", "thinking", "input"):
+            value = getattr(block, attr, None)
+            if isinstance(value, str) and value:
+                entry[attr] = _dump_fragment(value)
+        blocks.append(entry)
+    record: dict[str, Any] = {
+        "event": "item",
+        "seq": seq,
+        "is_last": bool(getattr(item, "is_last", False)),
+        "blocks": blocks,
+    }
+    reason = getattr(item, "finished_reason", None)
+    if reason is not None:
+        record["finished_reason"] = str(getattr(reason, "value", reason))
+    return record
+
+
+def _stream_dump(path: Path | None, turn: str, payload: dict) -> None:
+    """Append one record; a broken debug sink must never break the turn."""
+    global _stream_dump_broken
+    if path is None or _stream_dump_broken:
+        return
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            record = {"turn": turn, **payload}
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        _stream_dump_broken = True
+        logger.warning(
+            "Stream dump disabled after a write failure (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+
+
+class _RawStreamReasons:
+    """Proxy a provider stream to keep what the provider itself reported.
+
+    AgentScope's parser never reads ``choices[*].finish_reason``, so the
+    normalized ``finished_reason`` stays at its dataclass default and cannot
+    tell a stopped-at-length output budget from a severed connection - which
+    is exactly the distinction needed when a tool call arrives cut off in the
+    middle of a value. Only installed while the stream dump is enabled.
+    """
+
+    def __init__(self, stream: Any, report: Callable[[dict], None]) -> None:
+        self._stream = stream
+        self._report = report
+        self._reasons: list[str] = []
+        self._usage = ""
+        self._reported = False
+
+    def __aiter__(self) -> "_RawStreamReasons":
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            chunk = await self._stream.__anext__()
+        except StopAsyncIteration:
+            self._finish()
+            raise
+        except BaseException as exc:  # noqa: BLE001 - report, then re-raise
+            self._finish({"aborted": type(exc).__name__})
+            raise
+        for choice in getattr(chunk, "choices", None) or []:
+            reason = getattr(choice, "finish_reason", None)
+            if reason:
+                self._reasons.append(
+                    f"choice[{getattr(choice, 'index', 0)}]={reason}",
+                )
+        usage = getattr(chunk, "usage", None)
+        if usage:
+            self._usage = str(usage)
+        return chunk
+
+    async def __aenter__(self) -> "_RawStreamReasons":
+        enter = getattr(self._stream, "__aenter__", None)
+        if enter is not None:
+            await enter()
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        exit_ = getattr(self._stream, "__aexit__", None)
+        if exit_ is not None:
+            await exit_(*exc_info)
+        self._finish()
+
+    def _finish(self, extra: dict | None = None) -> None:
+        if self._reported:
+            return
+        self._reported = True
+        payload: dict[str, Any] = {
+            "event": "raw_stream",
+            "finish_reasons": self._reasons,
+            "usage": self._usage[:300],
+        }
+        payload.update(extra or {})
+        self._report(payload)
+
+
+# The provider request is issued when the stream is first iterated, which is
+# after any per-turn context manager would have unwound, so the spy is
+# installed once and reads the turn that is currently asking for a capture.
+_CAPTURE_CONTEXT: dict[str, Any] = {"path": None, "turn": ""}
+
+
+def _install_raw_reason_capture(model: Any) -> None:
+    """Wrap the provider's ``chat.completions.create`` exactly once."""
+    completions = getattr(getattr(model, "client", None), "chat", None)
+    completions = getattr(completions, "completions", None)
+    original = getattr(completions, "create", None)
+    if original is None or getattr(original, "_creator_reason_spy", False):
+        return
+
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        result = await original(*args, **kwargs)
+        if not hasattr(result, "__aiter__"):
+            return result
+        path = _CAPTURE_CONTEXT["path"]
+        turn = _CAPTURE_CONTEXT["turn"]
+        return _RawStreamReasons(
+            result,
+            lambda payload: _stream_dump(path, turn, payload),
+        )
+
+    # pylint: disable-next=protected-access
+    wrapped._creator_reason_spy = True  # type: ignore[attr-defined]
+    completions.create = wrapped
+
+
 def default_model_turn_timeout_seconds() -> float:
     """Per-turn budget shared by the driver and the transport timeout.
 
@@ -913,6 +1081,21 @@ class AgentScopeAgentChatClient:
         streamed_tool_names: dict[str, str] = {}
         pending_tool_inputs: dict[str, list[str]] = {}
         provider_tool_chunk_counts: dict[str, int] = {}
+        dump_path = _stream_dump_target()
+        dump_turn = uuid4().hex[:8]
+        _CAPTURE_CONTEXT["path"] = dump_path
+        _CAPTURE_CONTEXT["turn"] = dump_turn
+        if dump_path is not None:
+            _install_raw_reason_capture(self._configured_model())
+        _stream_dump(
+            dump_path,
+            dump_turn,
+            {
+                "event": "turn_start",
+                "model": str(getattr(self.model, "model", "")),
+                "tools": len(tools),
+            },
+        )
 
         try:
             async with model_slot("text"), _buffered_thinking(
@@ -943,7 +1126,14 @@ class AgentScopeAgentChatClient:
                 )
                 if inspect.isasyncgen(response):
                     final = None
+                    dump_seq = 0
                     async for item in response:
+                        _stream_dump(
+                            dump_path,
+                            dump_turn,
+                            stream_dump_record(item, dump_seq),
+                        )
+                        dump_seq += 1
                         if item.is_last:
                             final = item
                             continue
@@ -1022,6 +1212,24 @@ class AgentScopeAgentChatClient:
                             "AgentScope Creator stream is missing its final response",
                         )
                     response = final
+                    _stream_dump(
+                        dump_path,
+                        dump_turn,
+                        {
+                            "event": "stream_end",
+                            "items": dump_seq,
+                            "chunk_counts": dict(
+                                provider_tool_chunk_counts,
+                            ),
+                            "streamed_names": dict(streamed_tool_names),
+                            # Anything left here never reached a resolved
+                            # tool name: those fragments are lost arguments.
+                            "unflushed": {
+                                key: [len(part) for part in parts]
+                                for key, parts in (pending_tool_inputs.items())
+                            },
+                        },
+                    )
         except NonNativeToolMarkupError as exc:
             # Same class of stochastic stream degradation as an empty
             # response: the model narrates its tool call as XML-ish text.
@@ -1323,6 +1531,22 @@ class AgentScopeAgentChatClient:
                             or (1 if raw_arguments else 0)
                         ),
                     ),
+                )
+                _stream_dump(
+                    dump_path,
+                    dump_turn,
+                    {
+                        "event": "final_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "raw": _dump_fragment(raw_arguments),
+                        "repaired": repaired,
+                        "chunks": provider_tool_chunk_counts.get(
+                            call_id,
+                            0,
+                        ),
+                        "parse_error": (parse_error or "")[:200],
+                    },
                 )
 
         text = "".join(text_parts)

@@ -936,6 +936,80 @@ describe("AgentDock public output and interactions", () => {
     expect(screen.getByText("重新生成视频")).toBeInTheDocument();
   });
 
+  const seedFailedRun = (error: Record<string, unknown>) =>
+    useCreatorSessionStore.setState(
+      (state) =>
+        ({
+          session: { ...state.session!, status: "ERROR", error },
+        }) as never,
+    );
+
+  it("tells the user to redeem Credits when the model run is refused for balance", async () => {
+    // MODEL_QUOTA_EXCEEDED means the provider declined before reaching any
+    // model, so no further Agent turn can succeed. The generic tray copy
+    // claimed the failure "went back to the Agent", which is what let one
+    // empty balance produce repeated failures within two seconds.
+    const { calls } = installMockFetch([
+      {
+        match: "/projects/p1/messages",
+        method: "POST",
+        response: { json: ACCEPTED },
+      },
+    ]);
+    useAgentDockUiStore.getState().setOpen(true);
+    seedFailedRun({
+      code: "MODEL_QUOTA_EXCEEDED",
+      message:
+        "Creator AgentScope model request failed: Error code: 403 - " +
+        "{'error': {'code': 'ASP.BIZ.CREDITS_INSUFFICIENT'}}",
+      retryable: false,
+    });
+
+    renderDock();
+
+    expect(
+      screen.getByText(/模型 Credits 不足，已停止自动重试/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/本次执行未完成/)).not.toBeInTheDocument();
+    // The raw provider repr stays out of the tray.
+    expect(document.body).not.toHaveTextContent("ASP.BIZ.CREDITS_INSUFFICIENT");
+
+    fireEvent.click(screen.getByRole("button", { name: "已兑换，继续" }));
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.url.includes("/projects/p1/messages"))?.body,
+      ).toMatchObject({ message: "我已兑换 Credits，请继续之前中断的任务" }),
+    );
+  });
+
+  it("keeps the throttle tray on its own copy and continue message", () => {
+    // Both causes share one resume handler; this pins the throttle side so the
+    // Credits branch cannot quietly take over its wording.
+    installMockFetch([
+      {
+        match: "/projects/p1/messages",
+        method: "POST",
+        response: { json: ACCEPTED },
+      },
+    ]);
+    useAgentDockUiStore.getState().setOpen(true);
+    seedFailedRun({
+      code: "MODEL_RATE_LIMITED",
+      message: "model rate limited",
+      retryable: true,
+      details: { retryCount: 5 },
+    });
+
+    renderDock();
+
+    expect(screen.getByText(/已重试 5 次仍无法访问/)).toBeInTheDocument();
+    // antd pads a two-character button label, so match the word loosely.
+    expect(
+      screen.getByRole("button", { name: /^\s*继\s*续\s*$/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/模型 Credits 不足/)).not.toBeInTheDocument();
+  });
+
   it("morphs the composer button between send and stop across idle/running states", async () => {
     const { calls } = installMockFetch([
       {

@@ -76,6 +76,11 @@ DISPATCHABLE_KINDS = frozenset(
         "video",
         "compose",
         "interaction",
+        # The whole-piece cover is a project-level READY node with a
+        # GENERATE_COVER command; without this kind the scheduler's
+        # ready_media_nodes() filter skips it and it strands at 待开始
+        # forever even after every other lane finishes.
+        "cover",
     },
 )
 
@@ -1532,6 +1537,70 @@ def derive_work_graph(  # pylint: disable=too-many-branches,too-many-statements
             ),
         )
         interaction_node_ids.append(node_id)
+
+        # ---- Lane: whole-piece cover (方案 平台展示海报) --------------
+        # 一个项目级 kind="cover" 节点：interactive_presentation 上尚无当前
+        # 封面 → READY（GENERATE_COVER 单次文生图调用，调度器可直接派发、
+        # AUTO_FIX 免评审）；已有当前封面 → DONE。不并入 bundle 硬依赖：导出
+        # 对缺封面的情形有抽帧兜底，绝不能因封面失败而卡住导出。
+        from services.media_files.cover_generation import (
+            cover_input_fingerprint,
+            cover_is_current,
+        )
+
+        cover_node_id = "cover:project"
+        cover_semantic = cover_input_fingerprint(project)
+        cover_fp = _fingerprint(cover_node_id, cover_semantic)
+        cover_key = (
+            TaskKind.COVER_GENERATION.value,
+            f"project:{project.project_id}",
+            None,
+        )
+        cover_task, cover_failure = active.get(cover_key), failed.get(
+            cover_key,
+        )
+        cover_missing = _upstream_missing(deps, statuses)
+        if cover_task is not None:
+            cover_status = WorkNodeStatus.RUNNING
+        elif cover_is_current(project):
+            cover_status = WorkNodeStatus.DONE
+        elif cover_missing:
+            cover_status = WorkNodeStatus.GATED
+        elif (
+            cover_failure is not None
+            and (getattr(cover_failure, "metadata", None) or {}).get(
+                "inputFingerprint",
+            )
+            == cover_semantic
+        ):
+            cover_status = WorkNodeStatus.FAILED
+        else:
+            cover_status = WorkNodeStatus.READY
+        add(
+            WorkNode(
+                node_id=cover_node_id,
+                kind="cover",
+                label="整片封面 · 平台展示海报",
+                status=cover_status,
+                deps=deps,
+                lane="compose",
+                task_id=getattr(cover_task, "task_id", None),
+                progress=getattr(cover_task, "progress", None),
+                error=(
+                    _task_error_summary(cover_failure)
+                    if cover_status is WorkNodeStatus.FAILED
+                    else None
+                ),
+                missing=cover_missing,
+                locator={
+                    "page": "blueprint",
+                    "field": "/interactive_presentation/cover_file_id",
+                },
+                command="GENERATE_COVER",
+                target_ref=f"project:{project.project_id}",
+                dispatch_fingerprint=cover_fp,
+            ),
+        )
     edges_by_id = {edge.edge_id: edge for edge in project.narrative_edges}
     for timeline_id in live_timeline_ids:
         timeline = project.timelines.items[timeline_id]

@@ -2,10 +2,14 @@
 """Text model protocol dispatch and keyless free-tier support."""
 
 # pylint: disable=protected-access
+# The response doubles have to expose httpx's ``json()`` method, which
+# shadows the stdlib module this file also imports.
+# pylint: disable=redefined-outer-name
 
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -38,15 +42,25 @@ def _patch_config(monkeypatch, *, protocol: str, api_key: str) -> None:
     )
 
 
-def _fake_httpx(monkeypatch, captured: dict) -> None:
+def _fake_httpx(
+    monkeypatch,
+    captured: dict,
+    *,
+    body_text: str = "",
+    content_type: str = "application/json",
+) -> None:
     class FakeResponse:
+        # The chat decoder reads what httpx exposes (media type + body).
+        headers = {"content-type": content_type}
         status_code = 200
 
         @property
         def text(self) -> str:
-            return ""
+            return body_text or json.dumps(self.json())
 
         def json(self) -> dict:
+            if body_text:
+                return json.loads(body_text)
             return {
                 "choices": [
                     {"message": {"content": "pong"}},
@@ -105,6 +119,74 @@ def test_openai_protocol_sends_bearer_when_key_present(monkeypatch) -> None:
     asyncio.run(text_model.chat_completion("ping"))
 
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
+
+
+def test_openai_protocol_asks_the_provider_to_stream(monkeypatch) -> None:
+    """A non-streaming request dies at the gateway, not at our own budget.
+
+    Measured: platform-pre's nginx answered 504 at 180.36s for a four-screen
+    presentation while our timeout for that call was 600s. Nothing had been
+    written back yet, so the proxy read a slow generation as a dead connection.
+    Streaming keeps bytes moving, which resets that clock, and the decoder
+    folds the stream back into the single completion callers here expect.
+    """
+    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
+    captured: dict = {}
+    _fake_httpx(monkeypatch, captured)
+
+    asyncio.run(text_model.chat_completion("ping"))
+
+    assert captured["body"]["stream"] is True
+
+
+def test_stream_that_ends_without_saying_so_is_reported_truncated(
+    monkeypatch,
+) -> None:
+    """A prefix must not be handed on as an answer.
+
+    Turning streaming on makes this load-bearing: a gateway that severs the
+    stream mid-document would otherwise return half a work page, which is worse
+    than the 504 it replaced because nothing looks wrong downstream.
+    """
+    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
+    captured: dict = {}
+    _fake_httpx(
+        monkeypatch,
+        captured,
+        content_type="text/event-stream",
+        body_text='data: {"choices": [{"delta": {"content": "<html>"}}]}\n\n',
+    )
+
+    with pytest.raises(ModelError) as raised:
+        asyncio.run(text_model.chat_completion("ping"))
+
+    assert "响应流被截断" in str(raised.value)
+    assert raised.value.retryable is True
+
+
+def test_politely_ended_stream_without_a_finish_reason_is_accepted(
+    monkeypatch,
+) -> None:
+    """The other half of the rule: ``[DONE]`` alone is a normal ending.
+
+    Some compatible servers never report a finish reason yet still close the
+    stream properly. Treating that as truncation would reject good answers, so
+    only a stream that ends with neither signal counts as cut short.
+    """
+    _patch_config(monkeypatch, protocol="OpenAI 协议", api_key="sk-test")
+    captured: dict = {}
+    _fake_httpx(
+        monkeypatch,
+        captured,
+        content_type="text/event-stream",
+        body_text=(
+            'data: {"choices": [{"delta": {"content": "pon"}}]}\n\n'
+            'data: {"choices": [{"delta": {"content": "g"}}]}\n\n'
+            "data: [DONE]\n\n"
+        ),
+    )
+
+    assert asyncio.run(text_model.chat_completion("ping")) == "pong"
 
 
 @pytest.mark.parametrize(
@@ -170,11 +252,13 @@ def test_anthropic_protocol_dispatches_to_messages_endpoint(
     captured: dict = {}
 
     class FakeResponse:
+        # The chat decoder reads what httpx exposes (media type + body).
+        headers = {"content-type": "application/json"}
         status_code = 200
 
         @property
         def text(self) -> str:
-            return ""
+            return json.dumps(self.json())
 
         def json(self) -> dict:
             return {"content": [{"type": "text", "text": "pong"}]}

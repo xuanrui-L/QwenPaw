@@ -452,6 +452,11 @@ def assemble_interactive_bundle(
 
     ``read_artifact_file`` maps an ArtifactVersion ``file_id`` to raw bytes so
     this module stays storage-agnostic (the caller owns the assets root).
+
+    The whole-piece ``cover.jpg`` comes from the cover stored on the project
+    (generated in-flow by the cover task); when none is present yet we fall
+    back to a frame from the entry segment so the bundle still ships a cover
+    for the platform, which cannot grab one at runtime.
     """
 
     from .presentation_authoring import presentation_is_current
@@ -608,4 +613,60 @@ def assemble_interactive_bundle(
                 payload["segments"][timeline_id],
                 read_artifact_file(version.file_id),
             )
+        _write_cover(
+            bundle,
+            project,
+            manifest,
+            read_artifact_file,
+        )
     return buffer.getvalue()
+
+
+def _write_cover(
+    bundle: zipfile.ZipFile,
+    project: Project,
+    manifest: InteractiveManifest,
+    read_artifact_file: Callable[[str], bytes],
+) -> None:
+    """Ship ``cover.jpg``: the stored poster, else an entry-segment frame."""
+
+    from .cover_generation import COVER_FILENAME, poster_frame_from_video
+
+    cover: bytes | None = None
+    cover_file_id = project.interactive_presentation.cover_file_id
+    if cover_file_id:
+        try:
+            cover = read_artifact_file(cover_file_id)
+        except InteractiveBundleError:
+            cover = None
+    if not cover:
+        cover = _entry_cover_fallback(
+            project,
+            manifest,
+            read_artifact_file,
+            poster_frame_from_video,
+        )
+    if cover:
+        bundle.writestr(COVER_FILENAME, cover)
+
+
+def _entry_cover_fallback(
+    project: Project,
+    manifest: InteractiveManifest,
+    read_artifact_file: Callable[[str], bytes],
+    poster_frame_from_video: Callable[[bytes], bytes | None],
+) -> bytes | None:
+    """Pull one frame from the entry segment's final cut as a cover."""
+
+    entry_ref = manifest.segments.get(manifest.entry_timeline_id)
+    if not entry_ref:
+        return None
+    version = project.assets.artifact_versions_by_id.get(
+        entry_ref.removeprefix("artifact-version:"),
+    )
+    if version is None:
+        return None
+    try:
+        return poster_frame_from_video(read_artifact_file(version.file_id))
+    except InteractiveBundleError:
+        return None

@@ -387,7 +387,14 @@ def test_same_inputs_are_never_redispatched(tmp_path, monkeypatch):
     async def scenario():
         await scheduler.tick(PROJECT_ID)
         await _drain()
-        record = _failed_record(dispatch, error="provider down")
+        record = _failed_record(
+            dispatch,
+            # A settled failure, not an unknown one: an unrecognised wording is
+            # retried on purpose (see _is_transient_dispatch_error), which is
+            # what keeps a gateway timeout from walling a project forever.
+            error="Image generation failed: check creator_image_model "
+            "configuration.",
+        )
         monkeypatch.setattr(
             scheduler.executions,
             "list_tasks",
@@ -1138,6 +1145,235 @@ def test_transient_hard_cap_emits_steer_once(tmp_path, monkeypatch):
         if event.kind is RuntimeEventKind.NODE_TRANSIENT_CAP_EXHAUSTED
     ]
     assert len(exhausted) == 1
+
+
+# The gateway's Credits refusal, verbatim: a 403 whose body reads like a
+# permission failure and whose retryable flag is (correctly, here) false.
+CREDITS_ERROR = (
+    'Image generation failed with status 403: {"code": '
+    '"ASP.BIZ.CREDITS_INSUFFICIENT", "message": "模型 Credits 不足，请先使用'
+    '贡献值兑换", "retryable": false, "request_id": '
+    '"bcc611fa-c5da-4190-8e3b-73aff40f4444"}. '
+    "Check creator_image_model configuration."
+)
+
+# A deterministic client fault the same gateway reports as a retryable 502.
+UPSTREAM_ERROR = (
+    'Video task submission failed with status 502: {"code": '
+    '"ASP.UPSTREAM.ERROR", "message": "InvalidParameter", '
+    '"retryable": true, "request_id": '
+    '"d5507d1b-1059-9635-989e-e1f0c1b6b62e"}'
+)
+
+
+def test_credits_refusal_holds_the_project_and_reports_once(
+    tmp_path,
+    monkeypatch,
+):
+    """One exhausted balance must not become one failure per node.
+
+    Every node in a fan-out would fail identically, so the breaker holds
+    paid dispatch project-wide and a single event carries the provider's
+    request id for handover.
+    """
+    from services.file_agent_runtime.notifications import RuntimeEventKind
+
+    services = _services(tmp_path, monkeypatch, ready_variants=3)
+    _enable_yolo(monkeypatch)
+    monkeypatch.setattr(
+        "services.file_agent_runtime.work_scheduler.get_media_parallelism",
+        lambda: 1,
+    )
+    bus = _RecordingBus()
+    records: list = []
+    dispatch = _RecordingDispatch(
+        fail=True,
+        error=CREDITS_ERROR,
+        records=records,
+    )
+    scheduler = WorkGraphScheduler(
+        services,
+        image_dispatch=dispatch,
+        notifications=bus,
+    )
+    # Real executors admit a durable task before any provider spend, so the
+    # refusal leaves a FAILED record; without one the record-less reopen path
+    # would (correctly) treat the dispatch as never having happened.
+    monkeypatch.setattr(
+        scheduler.executions,
+        "list_tasks",
+        lambda _project_id: list(records),
+    )
+
+    async def scenario():
+        for _ in range(4):
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+        await scheduler.shutdown()
+
+    asyncio.run(scenario())
+
+    credits_events = [
+        event
+        for event in bus.events
+        if event.kind is RuntimeEventKind.PROVIDER_CREDITS_EXHAUSTED
+    ]
+    # Serialised on purpose: the first refusal trips the breaker, so the
+    # three remaining ticks dispatch nothing at all.
+    assert len(dispatch.calls) == 1
+    assert len(credits_events) == 1
+    assert "provider_request_id=bcc611fa" in credits_events[0].text
+    assert credits_events[0].payload["errorCode"] == (
+        "ASP.BIZ.CREDITS_INSUFFICIENT"
+    )
+    # Not walled: the fix is a top-up and the prompt has nothing to do with
+    # it, so the node stays dispatchable instead of going permanently quiet.
+    assert scheduler._deterministic_failure_nodes == {}
+
+
+def test_credits_breaker_is_tripped_once_and_cleared_by_cancel(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    scheduler = WorkGraphScheduler(services)
+
+    assert scheduler._trip_quota_breaker(
+        PROJECT_ID,
+        Exception(CREDITS_ERROR),
+    )
+    assert scheduler._quota_breaker_open(PROJECT_ID)
+    # A second refusal inside the window must not emit a second event.
+    assert not scheduler._trip_quota_breaker(
+        PROJECT_ID,
+        Exception(CREDITS_ERROR),
+    )
+    # Any other provider error leaves the breaker alone.
+    assert not scheduler._trip_quota_breaker(
+        PROJECT_ID,
+        Exception(UPSTREAM_ERROR),
+    )
+
+    # The window is a TTL rather than a latch: a top-up resumes the run
+    # without a restart.
+    scheduler._quota_tripped[PROJECT_ID] -= (
+        work_scheduler._QUOTA_BREAKER_SECONDS + 1
+    )
+    assert not scheduler._quota_breaker_open(PROJECT_ID)
+    # And a refusal in the fresh window is reported again - the user paid
+    # for more Credits and it still failed, which is new information.
+    assert scheduler._trip_quota_breaker(
+        PROJECT_ID,
+        Exception(CREDITS_ERROR),
+    )
+
+    # Cancelling is the user's "start over", and the usual reason to cancel
+    # a Credits-exhausted run is that they just paid for more.
+    scheduler.cancel_project(PROJECT_ID)
+    assert not scheduler._quota_breaker_open(PROJECT_ID)
+
+
+# The image lane's own summary once its in-request budget is spent. Measured on
+# platform-pre: sixteen nodes each exhausted three attempts inside 31 seconds,
+# because every node retried on the same second and spent its own budget.
+RATE_LIMIT_ERROR = "Image generation failed: rate limited after all retries"
+
+
+def test_rate_limit_breaker_holds_the_fan_out_and_expires(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    scheduler = WorkGraphScheduler(services)
+
+    assert scheduler._trip_rate_limit_breaker(
+        PROJECT_ID,
+        Exception(RATE_LIMIT_ERROR),
+    )
+    assert scheduler._rate_limit_breaker_open(PROJECT_ID)
+    # One window produces one line: the rest of the fan-out would hear the same
+    # refusal, so repeating it tells the agent nothing new.
+    assert not scheduler._trip_rate_limit_breaker(
+        PROJECT_ID,
+        Exception(RATE_LIMIT_ERROR),
+    )
+
+    # A bare status says the same thing in the provider's own words.
+    scheduler.cancel_project(PROJECT_ID)
+    assert not scheduler._rate_limit_breaker_open(PROJECT_ID)
+    assert scheduler._trip_rate_limit_breaker(
+        PROJECT_ID,
+        Exception(
+            "Image generation failed with status 429: too many requests",
+        ),
+    )
+
+    # Credits is the better diagnosis when a refusal looks like both: its
+    # remedy is the user's and its window is far longer, so the short hold
+    # would only delay the message that can actually be acted on.
+    scheduler.cancel_project(PROJECT_ID)
+    assert not scheduler._trip_rate_limit_breaker(
+        PROJECT_ID,
+        Exception(CREDITS_ERROR),
+    )
+    assert not scheduler._rate_limit_breaker_open(PROJECT_ID)
+
+    # An unrelated transient fault must not wall the whole project - it says
+    # nothing about the other nodes' inputs.
+    assert not scheduler._trip_rate_limit_breaker(
+        PROJECT_ID,
+        Exception(UPSTREAM_ERROR),
+    )
+    assert not scheduler._rate_limit_breaker_open(PROJECT_ID)
+
+    # The window is a TTL, so a throttle that clears resumes dispatch without
+    # a restart; the first node through learns whether it really did.
+    assert scheduler._trip_rate_limit_breaker(
+        PROJECT_ID,
+        Exception(RATE_LIMIT_ERROR),
+    )
+    scheduler._rate_limited_tripped[PROJECT_ID] -= (
+        work_scheduler._RATE_LIMIT_BREAKER_SECONDS + 1
+    )
+    assert not scheduler._rate_limit_breaker_open(PROJECT_ID)
+
+
+def test_credits_breaker_also_holds_prompt_preparation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Preparation is a paid text call, so the same refusal holds it."""
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    constructed: list[str] = []
+
+    class Sentinel:
+        def __init__(self, *_args, **_kwargs) -> None:
+            constructed.append("PromptSyncService")
+
+    monkeypatch.setattr(
+        "services.prompt_sync_service.PromptSyncService",
+        Sentinel,
+    )
+    scheduler = WorkGraphScheduler(services)
+    scheduler._trip_quota_breaker(PROJECT_ID, Exception(CREDITS_ERROR))
+    graph = WorkGraph(
+        nodes=(
+            WorkNode(
+                node_id="video:e1",
+                kind="video",
+                label="视频 e1",
+                status=WorkNodeStatus.GATED,
+                timeline_id="timeline:main",
+                target_ref="element:e1",
+                prompt_sync_required=True,
+            ),
+        ),
+        generation=1,
+    )
+
+    asyncio.run(scheduler._prepare_changed_prompts(PROJECT_ID, graph))
+
+    assert not constructed
 
 
 def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:

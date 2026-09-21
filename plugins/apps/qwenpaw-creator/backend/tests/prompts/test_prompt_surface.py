@@ -364,7 +364,9 @@ def test_native_dialogue_voice_guidance_matches_video_capability(
     backend,
     supports_reference_voice,
 ) -> None:
-    _tts(monkeypatch, model="qwen-audio-3.0-tts-flash")
+    # A model that genuinely ships no system voices, so the design prerequisite
+    # branch is exercised rather than a model name that happens to be sparse.
+    _tts(monkeypatch, model="cosyvoice-v3.5-plus")
     monkeypatch.setattr(
         model_config,
         "get_video_model_name",

@@ -29,6 +29,8 @@ import httpx
 
 from models import config as model_config
 from models.concurrency import model_slot
+from models.provider_errors import retryable_for_status
+from models.retry_timing import backoff_seconds
 from models.reference_markers import ReferenceMarkerSpec
 from services.runtime_files.atomic_store import atomic_replace_bytes
 from utils.logger import setup_logger
@@ -41,6 +43,24 @@ logger = setup_logger("model.image")
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 10  # seconds
 MIN_IMAGE_BYTES = int(os.environ.get("IMAGE_MIN_BYTES", "10000"))
+
+
+def _is_retryable_response(resp: httpx.Response) -> bool:
+    """Whether an HTTP failure deserves another attempt.
+
+    The shared rule applies: a gateway error code decides when the body carries
+    one, and the status decides otherwise. An nginx error page has no envelope,
+    so a 503 is retried here instead of ending the task on its first attempt.
+
+    The raw body is what gets classified, not the formatted detail: the human
+    message keeps only ``message``, which would drop the very code that makes a
+    502 non-retryable and silently degrade this back to a status guess.
+    """
+
+    if resp.status_code < 400:
+        return False
+    return retryable_for_status(resp.status_code, resp.text)
+
 
 # Tool-level image operation modes. ``generate`` keeps the historical
 # behaviour (text-to-image, optionally guided by references); ``edit`` and
@@ -772,6 +792,7 @@ class BaseImageModel(ABC):
                     )
                     return {"url": local_url, "source_url": ""}
             data = None
+            rate_limited = False
             async with model_slot("image"):
                 for attempt in range(MAX_RETRIES):
                     async with httpx.AsyncClient(
@@ -784,30 +805,46 @@ class BaseImageModel(ABC):
                             clean_reference_urls,
                             active_mode,
                         )
-                        if resp.status_code == 429:
-                            wait = RETRY_BACKOFF_BASE * (attempt + 1)
-                            logger.warning(
-                                f"Image generation rate limited (429), retrying in {wait}s "
-                                f"(attempt {attempt+1}/{MAX_RETRIES})",
-                            )
-                            await asyncio.sleep(wait)
-                            continue
-                        resp.raise_for_status()
-                        data = resp.json()
-                        try:
-                            return await self._decode(data)
-                        except ModelError as exc:
-                            if attempt == MAX_RETRIES - 1:
-                                raise
-                            wait = RETRY_BACKOFF_BASE * (attempt + 1)
-                            logger.warning(
-                                f"Image response validation failed, retrying in {wait}s: {exc}",
-                            )
-                            await asyncio.sleep(wait)
-                            continue
+                    if _is_retryable_response(resp):
+                        if attempt == MAX_RETRIES - 1:
+                            if resp.status_code == 429:
+                                rate_limited = True
+                                break
+                            # Let the provider's own status surface below.
+                            resp.raise_for_status()
+                        wait = backoff_seconds(
+                            attempt,
+                            base=RETRY_BACKOFF_BASE,
+                            headers=resp.headers,
+                        )
+                        logger.warning(
+                            f"Image generation retryable HTTP {resp.status_code}, "
+                            f"retrying in {wait}s "
+                            f"(attempt {attempt+1}/{MAX_RETRIES})",
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    try:
+                        return await self._decode(data)
+                    except ModelError as exc:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        wait = backoff_seconds(
+                            attempt,
+                            base=RETRY_BACKOFF_BASE,
+                        )
+                        logger.warning(
+                            f"Image response validation failed, retrying in {wait}s: {exc}",
+                        )
+                        await asyncio.sleep(wait)
+                        continue
             if data is None:
                 raise ModelError(
-                    "Image generation failed: rate limited after all retries",
+                    "Image generation failed: rate limited after all retries"
+                    if rate_limited
+                    else "Image generation failed after all retries",
                     model_name=self.model_name,
                 )
             raise ModelError(
@@ -849,6 +886,13 @@ class BaseImageModel(ABC):
                     else "Check creator_image_model configuration."
                 ),
                 model_name=self.model_name,
+                # Same envelope-first rule as the retry loop above, so a task
+                # is not persisted as retryable when its body names a
+                # deterministic fault.
+                retryable=retryable_for_status(
+                    e.response.status_code,
+                    e.response.text,
+                ),
             )
         except Exception as e:
             raise _logged_model_error(

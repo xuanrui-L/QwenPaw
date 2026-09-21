@@ -15,7 +15,11 @@ import type {
 } from "react";
 import { Button, Tooltip, message } from "antd";
 import { useShallow } from "zustand/react/shallow";
-import { ArrowUpOutlined, MenuFoldOutlined } from "@ant-design/icons";
+import {
+  ArrowUpOutlined,
+  CommentOutlined,
+  MenuFoldOutlined,
+} from "@ant-design/icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -59,6 +63,7 @@ import {
   type SubagentStreamTool,
 } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { MODEL_QUOTA_ERROR_CODE } from "@/store/modelCreditsStore";
 import { useWorkGraphStore } from "@/store/workGraphStore";
 import WorkGraphPanel from "@/components/agent/WorkGraphPanel";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
@@ -96,6 +101,7 @@ import AgentProgressOverview from "./AgentProgressOverview";
 import AgentWaitHint from "./AgentWaitHint";
 import AgentActivityIndicator from "./AgentActivityIndicator";
 import DecisionTray from "./DecisionTray";
+import FeedbackModal from "@/components/creator/FeedbackModal";
 import MentionInput, { type MentionInputHandle } from "./MentionInput";
 import { reviewPendingUnits } from "./FileProjectReviewPanel";
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
@@ -1121,6 +1127,9 @@ export default function AgentDock({
     (state) => state.loadOlderMessages,
   );
   const sendMessage = useCreatorSessionStore((state) => state.sendMessage);
+  // Feedback lives here because this is where a run is watched: the person
+  // complains about what they can see failing, and only types the reason.
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const stopping = useCreatorSessionStore((state) => state.stopping);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const stopAllAgents = useCreatorSessionStore((state) => state.stopAllAgents);
@@ -1446,16 +1455,18 @@ export default function AgentDock({
     ],
   );
 
-  // A throttled run stops with the full conversation still intact; the
-  // continue control re-submits a resume request so the Agent picks the
-  // same task back up on the previous messages.
-  const resumeAfterRateLimit = async () => {
+  // A stopped run keeps the full conversation intact; the continue control
+  // re-submits a resume request so the Agent picks the same task back up on the
+  // previous messages. The message differs by cause: resuming after a throttle
+  // is "carry on", while resuming after an exhausted Credits balance is only
+  // honest once the user has actually redeemed more.
+  const resumeAfterBlockedModelRun = async (resumeMessageKey: string) => {
     if (rateLimitResuming) return;
     setRateLimitResuming(true);
     const resumeProject = projectId;
     const resumeVersion = projectLifecycleVersion.current;
     try {
-      await sendMessage({ message: t("agent.rateLimitResumeMessage") });
+      await sendMessage({ message: t(resumeMessageKey) });
     } catch (error) {
       if (
         currentProject.current === resumeProject &&
@@ -2399,9 +2410,32 @@ export default function AgentDock({
                           type="primary"
                           danger
                           loading={rateLimitResuming}
-                          onClick={() => void resumeAfterRateLimit()}
+                          onClick={() =>
+                            void resumeAfterBlockedModelRun(
+                              "agent.rateLimitResumeMessage",
+                            )
+                          }
                         >
                           {t("agent.rateLimitContinue")}
+                        </Button>
+                      </div>
+                    ) : session.error.code === MODEL_QUOTA_ERROR_CODE ? (
+                      // Nothing the Agent retries can fix this one: the
+                      // provider refuses before reaching any model, so the
+                      // only way forward is a human redeeming Credits.
+                      <div className="flex items-center justify-between gap-2">
+                        <span>{t("agent.quotaExhausted")}</span>
+                        <Button
+                          size="small"
+                          type="primary"
+                          loading={rateLimitResuming}
+                          onClick={() =>
+                            void resumeAfterBlockedModelRun(
+                              "agent.quotaResumeMessage",
+                            )
+                          }
+                        >
+                          {t("agent.quotaContinue")}
                         </Button>
                       </div>
                     ) : (
@@ -2476,6 +2510,17 @@ export default function AgentDock({
                       </span>
                     </span>
                   )}
+                <Button
+                  type="text"
+                  size="small"
+                  data-agent-feedback
+                  aria-label={t("feedback.action")}
+                  icon={<CommentOutlined />}
+                  className="shrink-0 !h-6 !px-1.5 !text-[11px]"
+                  onClick={() => setFeedbackOpen(true)}
+                >
+                  {t("feedback.action")}
+                </Button>
               </div>
               <AgentWaitHint
                 projectId={projectId}
@@ -2789,6 +2834,11 @@ export default function AgentDock({
           </>
         </div>
       )}
+      <FeedbackModal
+        open={feedbackOpen}
+        projectId={projectId}
+        onClose={() => setFeedbackOpen(false)}
+      />
     </>
   );
 }

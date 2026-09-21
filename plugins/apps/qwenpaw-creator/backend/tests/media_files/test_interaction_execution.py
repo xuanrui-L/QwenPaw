@@ -503,7 +503,16 @@ def test_failed_task_parks_scheduler_without_more_model_calls(
         assert (
             graph.by_id[f"interaction:{ELEMENT_ID}"].status.value == "failed"
         )
-        assert len(scheduler.executions.list_tasks(PROJECT_ID)) == 2
+        # 只数抉择动效自身的任务：失败的确定性错误必须壁垄、不再重试。
+        # 整片封面节点现在也进 DISPATCHABLE_KINDS，会额外派发一条
+        # COVER_GENERATION 任务（走图像模型，不占上面的 chat calls），
+        # 所以这里按 kind 过滤，保持本用例只针对 interaction 的语义。
+        interaction_tasks = [
+            task
+            for task in scheduler.executions.list_tasks(PROJECT_ID)
+            if getattr(task.kind, "value", task.kind) == "interaction_draft"
+        ]
+        assert len(interaction_tasks) == 2
 
     asyncio.run(scenario())
 

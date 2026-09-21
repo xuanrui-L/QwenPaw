@@ -36,7 +36,7 @@ import os
 from models import config as model_config
 from models.media_transport import (
     read_reference_media,
-    upload_reference_bytes_to_dashscope_temp,
+    upload_reference_bytes_for_provider,
     validate_reference_image_bytes,
 )
 from models.provider_tasks import note_provider_task
@@ -212,6 +212,23 @@ class DashScopeImageModel(BaseImageModel):
         return base if base.endswith(suffix) else f"{base}{suffix}"
 
     @property
+    def _media_via_platform_proxy(self) -> bool:
+        """True when this endpoint is the AgentScope model proxy.
+
+        Measured on platform-pre: the proxy ignores ``X-DashScope-Async`` and
+        answers the generation call synchronously in 48-59 seconds, so the
+        async submit attempt would spend the short submit deadline on a
+        connection that was never going to carry a task id - and a client-side
+        timeout there abandons a render the provider has already billed. Its
+        ``sk-as-`` key also has no identity on the Bailian upload API, so
+        references leave through the proxy's own upload endpoint instead.
+        """
+        return model_config.is_agentscope_gateway(
+            protocol=model_config.get_image_protocol(),
+            base_url=self.base_url,
+        )
+
+    @property
     def api_root(self) -> str:
         """The /api/v1 root shared by task submission and polling URLs."""
 
@@ -249,11 +266,13 @@ class DashScopeImageModel(BaseImageModel):
             validate_reference_image_bytes(media_bytes)
         except ValueError:
             return None
-        return await upload_reference_bytes_to_dashscope_temp(
+        return await upload_reference_bytes_for_provider(
             media_bytes,
             filename,
             api_key=self.api_key,
             model_name=model_name or self.model_name,
+            base_url=self.base_url,
+            protocol=model_config.get_image_protocol(),
         )
 
     async def _request(
@@ -289,10 +308,16 @@ class DashScopeImageModel(BaseImageModel):
         base_headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
-            # Resolve oss:// temp-upload references server-side.
-            "X-DashScope-OssResourceResolve": "enable",
         }
-        if not type(self)._async_unsupported:
+        if not self._media_via_platform_proxy:
+            # Resolve oss:// temp-upload references server-side. The proxy
+            # never sees an oss:// reference under this configuration, and
+            # sending the header would only suggest that it does.
+            base_headers["X-DashScope-OssResourceResolve"] = "enable"
+        if (
+            not type(self)._async_unsupported
+            and not self._media_via_platform_proxy
+        ):
             submit = await client.post(
                 self.generation_url,
                 headers={
@@ -691,6 +716,16 @@ class DashScopeImageModel(BaseImageModel):
         """
 
         translate_model = model_config.get_image_translate_model_name()
+        if self._media_via_platform_proxy:
+            # qwen-mt-image is not on the proxy's model allowlist (measured:
+            # GET /v1/models lists 15 ids and it is not among them), so the
+            # submission would die as a 400 after the upload already happened.
+            raise ModelError(
+                "图片内文字翻译使用 qwen-mt-image，该模型不在当前模型代理的可用"
+                "模型列表中；如需该能力请将图片端点切回百炼直连",
+                model_name=translate_model,
+                retryable=False,
+            )
         task_id = await self.submit_translate_task(
             image_url,
             source_lang=source_lang,

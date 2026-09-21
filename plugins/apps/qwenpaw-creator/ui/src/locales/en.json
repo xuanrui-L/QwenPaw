@@ -6,6 +6,14 @@
     "allowMedia": "Confirm and continue",
     "failed": "Could not confirm the script. Refresh and try again."
   },
+  "feedback": {
+    "action": "Feedback",
+    "title": "Feedback",
+    "placeholder": "Your input will guide what we improve next",
+    "submit": "Submit",
+    "sent": "Received — thank you for the feedback",
+    "failed": "Failed to submit feedback"
+  },
   "common": {
     "close": "Close",
     "cancel": "Cancel",
@@ -179,6 +187,14 @@
     "replayTour": "Replay tutorial",
     "breadcrumb": "Breadcrumb",
     "productionWorkbench": "Production Workbench",
+    "creditsExhausted": "Out of Credits",
+    "creditsExhaustedHint": "The model Credits balance is empty, so the provider refuses model calls in every project. Redeem Credits with contribution points on the platform's Model Calls page, then return to the project that failed and continue.",
+    "creditsDismiss": "Hide the Credits notice for now",
+    "creditsRemaining": "Available",
+    "creditsConsumed": "Consumed",
+    "creditsRingTitle": "Credits usage",
+    "creditsRingAria": "Remaining Credits",
+    "creditsRingUnavailable": "Unavailable: cannot reach the platform credits endpoint",
     "blueprint": "Video script"
   },
   "modelConfig": {
@@ -287,6 +303,7 @@
       "dashscope": "DashScope",
       "aliyunTokenPlan": "Aliyun Token Plan",
       "aliyunCodingPlan": "Aliyun Coding Plan",
+      "agentscopePlatform": "AgentScope Platform",
       "deepseek": "DeepSeek",
       "googleGemini": "Google Gemini",
       "openai": "OpenAI Protocol",
@@ -345,6 +362,16 @@
     "paneReviewDesc": "Model-driven quality review with revision loops. Linked to Execution Mode: the more automated you run, the more it is recommended.",
     "paneGuide": "Setup Guide",
     "paneGuideDesc": "Not sure what to configure? Match your creation scenario against the table below.",
+    "panePlatform": "One-Click Setup",
+    "panePlatformDesc": "Fetch this subdomain's model key and endpoint from AgentScope Platform, then write them into every service the platform proxies.",
+    "platform": {
+      "action": "Fetch and configure",
+      "credits": "Credits available: {{value}}",
+      "coverage": "Covers language and understanding, image, video, speech synthesis and transcription. Digital human, embedding and web grounding are not proxied by the platform and still need their own configuration.",
+      "endpoint": "Endpoint written: {{url}}",
+      "needsModel": "No model chosen",
+      "applyFailed": "One-click setup failed"
+    },
     "modeLevel": "Stop {{level}}",
     "gateCheckpoints": "Creation checkpoints",
     "gateExecution": "High-cost authorization",
@@ -947,6 +974,9 @@
     "rateLimitExhausted": "Model rate-limited, still unavailable after {{retries}} retries",
     "rateLimitContinue": "Continue",
     "rateLimitResumeMessage": "Continue the task that was interrupted by model rate limiting",
+    "quotaExhausted": "Not enough model Credits, so automatic retries stopped. Redeem Credits with contribution points on the platform's Model Calls page, then continue.",
+    "quotaContinue": "Redeemed — continue",
+    "quotaResumeMessage": "I have redeemed Credits; please continue the task that was interrupted",
     "mentionHint": "Type @ to reference storyboards, assets etc. as context; currently selected objects are also auto-included.",
     "clearAll": "Clear all references, selected text and @ mentions",
     "clear": "Clear",
@@ -1554,7 +1584,7 @@
     "modelGuideVideoGen": "Video Generation",
     "modelGuideVideoGenProtocols": "Capabilities are validated by protocol and exact model ID. DashScope includes wan3.0-video / wan3.0-video-prime All-in-One (t2v/i2v/r2v, 2–30s), Wan2.7 / HappyHorse families, hosted Kling, and r2v-only hosted Vidu models. Other protocols include official Seedance IDs, Veo 3.1, MiniMax, Kling, and model-specific Vidu capabilities. The protocol selects hosted vs official channels.",
     "modelGuideAsrTitle": "ASR Speech Recognition",
-    "modelGuideAsrProtocols": "DashScope Fun-ASR, DashScope Qwen3-ASR, OpenAI Whisper",
+    "modelGuideAsrProtocols": "DashScope Fun-ASR, DashScope Qwen3-ASR, AgentScope Platform, OpenAI Whisper",
     "modelGuideVoice": "Narration / talking-head",
     "modelGuideVoiceModels": "TTS + Digital Human",
     "modelGuideVoiceDesc": "Synthesizes narration and lines; audio drives talking-head segments",
@@ -2267,6 +2297,11 @@
     "exportBundle": "Export interactive bundle",
     "exportBundleFailed": "Interactive bundle export failed",
     "downloadBundleTitle": "Export interactive bundle or project",
+    "uploadBundle": "Publish",
+    "uploadBundleTitle": "Upload the interactive bundle to the platform; track progress on Platform",
+    "uploading": "Uploading…",
+    "uploadBundleSubmitted": "Submitted — opening publish progress",
+    "uploadBundleFailed": "Interactive bundle upload failed",
     "previewChoice": "Choose a path"
   },
   "sidebar": {

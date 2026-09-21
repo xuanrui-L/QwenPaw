@@ -6,6 +6,14 @@
     "allowMedia": "确认并继续",
     "failed": "确认失败，请刷新后重试。"
   },
+  "feedback": {
+    "action": "意见反馈",
+    "title": "意见反馈",
+    "placeholder": "你的意见将成为我们改进的依据",
+    "submit": "提交",
+    "sent": "已收到，谢谢你的反馈",
+    "failed": "反馈提交失败"
+  },
   "common": {
     "close": "关闭",
     "cancel": "取消",
@@ -179,6 +187,14 @@
     "replayTour": "重新查看新手引导",
     "breadcrumb": "面包屑",
     "productionWorkbench": "制作工作台",
+    "creditsExhausted": "Credits 不足",
+    "creditsExhaustedHint": "模型 Credits 已用尽，所有项目的模型调用都会被服务端拒绝。请在平台「模型调用」页用贡献值兑换，再回到出错的那个项目继续。",
+    "creditsDismiss": "暂时隐藏 Credits 提醒",
+    "creditsRemaining": "剩余可用",
+    "creditsConsumed": "已消耗",
+    "creditsRingTitle": "Credits 用量",
+    "creditsRingAria": "Credits 剩余额度",
+    "creditsRingUnavailable": "暂不可用：未连上平台额度接口",
     "blueprint": "视频脚本"
   },
   "modelConfig": {
@@ -287,6 +303,7 @@
       "dashscope": "DashScope（百炼）",
       "aliyunTokenPlan": "Aliyun Token Plan",
       "aliyunCodingPlan": "Aliyun Coding Plan",
+      "agentscopePlatform": "AgentScope Platform",
       "deepseek": "DeepSeek",
       "googleGemini": "Google Gemini",
       "openai": "OpenAI 协议",
@@ -345,6 +362,16 @@
     "paneReviewDesc": "由模型代替人工评估产物质量并驱动修改迭代。与「执行模式」联动：自动化程度越高，越建议开启。",
     "paneGuide": "配置指南",
     "paneGuideDesc": "不知道该配什么？按创作场景对照下表配置对应模型。",
+    "panePlatform": "一键配置",
+    "panePlatformDesc": "从 AgentScope Platform 拉取本子域的模型密钥与端点，一次写入平台可代理的全部服务。",
+    "platform": {
+      "action": "拉取并配置",
+      "credits": "可用 Credits {{value}}",
+      "coverage": "覆盖语言与理解、图片生成、视频生成、语音合成与语音识别。数字人、向量化与联网检索不由平台代理提供，仍需单独配置。",
+      "endpoint": "已写入端点 {{url}}",
+      "needsModel": "未选择模型",
+      "applyFailed": "一键配置失败"
+    },
     "modeLevel": "档位 {{level}}",
     "gateCheckpoints": "创作检查点",
     "gateExecution": "高花费授权",
@@ -947,6 +974,9 @@
     "rateLimitExhausted": "模型遭遇限流，已重试 {{retries}} 次仍无法访问",
     "rateLimitContinue": "继续",
     "rateLimitResumeMessage": "继续执行之前因模型限流中断的任务",
+    "quotaExhausted": "模型 Credits 不足，已停止自动重试；请在平台「模型调用」页用贡献值兑换后继续",
+    "quotaContinue": "已兑换，继续",
+    "quotaResumeMessage": "我已兑换 Credits，请继续之前中断的任务",
     "mentionHint": "输入 @ 可引用分镜、素材等对象作为上下文；当前选中的对象也会自动带入对话。",
     "clearAll": "清空全部引用、划选文本与输入框内的 @ 引用",
     "clear": "清空",
@@ -1554,7 +1584,7 @@
     "modelGuideVideoGen": "视频生成",
     "modelGuideVideoGenProtocols": "能力按协议与精确模型 ID 校验。DashScope 包含 wan3.0-video / wan3.0-video-prime All-in-One（t2v/i2v/r2v，2–30 秒）、Wan2.7 / HappyHorse 家族、托管可灵及仅 r2v 的托管 Vidu 模型；其他协议包含 Seedance 官方 ID、Veo 3.1、MiniMax、可灵官方及能力按型号区分的 Vidu 官方。选择的协议决定托管或官方直连渠道。",
     "modelGuideAsrTitle": "ASR 语音识别",
-    "modelGuideAsrProtocols": "DashScope Fun-ASR、DashScope Qwen3-ASR、OpenAI Whisper",
+    "modelGuideAsrProtocols": "DashScope Fun-ASR、DashScope Qwen3-ASR、AgentScope Platform、OpenAI Whisper",
     "modelGuideVoice": "旁白配音 / 数字人口播",
     "modelGuideVoiceModels": "TTS + 数字人",
     "modelGuideVoiceDesc": "合成旁白与台词；音频驱动数字人口播视频段",
@@ -2267,6 +2297,11 @@
     "exportBundle": "导出互动包",
     "exportBundleFailed": "互动包暂时无法导出",
     "downloadBundleTitle": "导出互动包或导出项目",
+    "uploadBundle": "上传发布",
+    "uploadBundleTitle": "上传互动包到平台发布，进度在 Platform 查看",
+    "uploading": "上传中…",
+    "uploadBundleSubmitted": "已提交，正在打开发布进度",
+    "uploadBundleFailed": "互动包上传失败",
     "previewChoice": "选择故事走向"
   },
   "sidebar": {

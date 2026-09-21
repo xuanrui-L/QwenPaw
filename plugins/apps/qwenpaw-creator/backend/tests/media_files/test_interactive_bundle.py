@@ -260,6 +260,96 @@ def test_bundle_zip_contains_player_manifest_and_segments() -> None:
         assert "__MANIFEST_JSON__" not in player
 
 
+def test_bundle_ships_stored_cover_and_skips_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.media_files import cover_generation
+
+    project, payloads = _branching_project()
+    _draft_presentation(project)
+    poster = b"\xff\xd8\xff\xe0 stored poster"
+    payloads["file:cover"] = poster
+    project.interactive_presentation = (
+        project.interactive_presentation.model_copy(
+            update={
+                "cover_file_id": "file:cover",
+                "cover_checksum": _sha(poster),
+            },
+        )
+    )
+
+    def _no_fallback(video_bytes: bytes):  # pragma: no cover
+        raise AssertionError("a stored cover must skip the frame fallback")
+
+    monkeypatch.setattr(
+        cover_generation,
+        "poster_frame_from_video",
+        _no_fallback,
+    )
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=payloads.__getitem__,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        assert archive.read("cover.jpg") == poster
+
+
+def test_bundle_falls_back_to_entry_frame_without_generated_cover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.media_files import cover_generation
+
+    project, payloads = _branching_project()
+    _draft_presentation(project)
+    frame = b"\xff\xd8\xff\xe1 fake frame"
+    seen: dict[str, object] = {}
+
+    def fake_poster(video_bytes: bytes) -> bytes:
+        seen["video"] = video_bytes
+        return frame
+
+    monkeypatch.setattr(
+        cover_generation,
+        "poster_frame_from_video",
+        fake_poster,
+    )
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=payloads.__getitem__,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        assert archive.read("cover.jpg") == frame
+    # The fallback draws from the entry segment (tl:ep3), not some other cut.
+    entry_file_id = "file:tl:ep3:final"
+    assert seen["video"] == payloads[entry_file_id]
+
+
+def test_bundle_omits_cover_when_no_poster_and_no_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.media_files import cover_generation
+
+    project, payloads = _branching_project()
+    _draft_presentation(project)
+    monkeypatch.setattr(
+        cover_generation,
+        "poster_frame_from_video",
+        lambda video_bytes: None,
+    )
+
+    bundle = assemble_interactive_bundle(
+        project,
+        read_artifact_file=payloads.__getitem__,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        assert "cover.jpg" not in archive.namelist()
+
+
 def test_no_generated_interface_means_no_export():
     project, payloads = _branching_project()
     project.interactive_presentation.motion = None

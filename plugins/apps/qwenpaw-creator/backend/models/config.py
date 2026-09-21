@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from services.runtime_files.errors import LockTimeoutError
 from services.runtime_files.locking import CrossProcessFileLock
@@ -754,6 +755,81 @@ def protocol_requires_api_key(protocol: str) -> bool:
     return is_anthropic_protocol(protocol) or is_gemini_protocol(protocol)
 
 
+AGENTSCOPE_PLATFORM_HOST = "agentscope.io"
+
+
+def _section_protocol(tool_name: str, section_key: str, env_name: str) -> str:
+    """Saved protocol label for one model section, request-scoped first."""
+
+    tool_config = get_request_tool_config(tool_name)
+    if tool_config:
+        return str(tool_config.get("protocol") or "").strip()
+    section = _get_user_config().get(section_key)
+    if isinstance(section, dict) and section.get("protocol"):
+        return str(section["protocol"]).strip()
+    return os.environ.get(env_name, "").strip()
+
+
+def get_image_protocol() -> str:
+    return _section_protocol(
+        CREATOR_IMAGE_CONFIG_TOOL,
+        "image",
+        "IMAGE_PROTOCOL",
+    )
+
+
+def get_video_protocol() -> str:
+    return _section_protocol(
+        CREATOR_VIDEO_CONFIG_TOOL,
+        "video",
+        "VIDEO_PROTOCOL",
+    )
+
+
+def get_tts_protocol() -> str:
+    return _section_protocol(
+        CREATOR_TTS_CONFIG_TOOL,
+        "tts",
+        "TTS_PROTOCOL",
+    )
+
+
+def is_agentscope_protocol(protocol: str) -> bool:
+    """True when *protocol* names the AgentScope model-proxy gateway."""
+    return "agentscope" in protocol.casefold()
+
+
+def is_agentscope_endpoint(base_url: str) -> bool:
+    """True when *base_url*'s host is the AgentScope platform or its proxy.
+
+    Hostname parsing rather than substring matching, mirroring
+    ``models.image._is_maas_endpoint``: a lookalike URL path must not select a
+    different media transport.
+    """
+    candidate = base_url if "://" in base_url else f"//{base_url}"
+    try:
+        hostname = (urlsplit(candidate).hostname or "").casefold()
+    except ValueError:
+        return False
+    return hostname == AGENTSCOPE_PLATFORM_HOST or hostname.endswith(
+        f".{AGENTSCOPE_PLATFORM_HOST}",
+    )
+
+
+def is_agentscope_gateway(protocol: str = "", base_url: str = "") -> bool:
+    """True when this section talks to the AgentScope model proxy.
+
+    The proxy carries the DashScope wire format but is not DashScope. Its
+    ``sk-as-`` key has no identity on the Bailian temporary-upload API
+    (measured on platform-pre: ``GET /api/v1/uploads?action=getPolicy``
+    answers ``401 InvalidApiKey``), so no ``oss://`` reference can ever be
+    minted for it; local reference media must leave through the proxy's own
+    ``POST /v1/media/uploads``, which returns an anonymously readable public
+    URL that the proxy fetches server-side.
+    """
+    return is_agentscope_protocol(protocol) or is_agentscope_endpoint(base_url)
+
+
 def get_vlm_chat_url() -> str:
     """Return the chat-completion endpoint URL for the configured VLM.
 
@@ -1100,6 +1176,14 @@ def get_asr_model_name() -> str:
         "model",
         "ASR_MODEL_NAME",
         ASR_MODEL_NAME,
+    )
+
+
+def get_asr_protocol() -> str:
+    return _section_protocol(
+        CREATOR_ASR_CONFIG_TOOL,
+        "asr",
+        "ASR_PROTOCOL",
     )
 
 
@@ -1713,6 +1797,11 @@ def video_backend_for_protocol(protocol: str) -> str | None:
     if not protocol:
         return None
     lowered = protocol.casefold()
+    # The AgentScope proxy hosts Wan/HappyHorse on the same DashScope async
+    # transport; it is distinguished from Bailian by media transport, not by
+    # the video protocol (see ``is_agentscope_gateway``).
+    if "agentscope" in lowered:
+        return "wan"
     if "token plan" in lowered or "tokenplan" in lowered:
         return "wan"
     if "dashscope" in lowered or "百炼" in protocol:

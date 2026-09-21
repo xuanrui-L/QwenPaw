@@ -145,6 +145,20 @@ def motion_document_file_id(checksum: str) -> str:
     return f"file-motion-{digest}"
 
 
+def cover_document_file_id(checksum: str) -> str:
+    """Content-addressed file id of one whole-piece cover poster.
+
+    Mirrors :func:`motion_document_file_id`: identical posters share one
+    file id, and the id derives from the stored bytes' checksum.
+    """
+
+    digest = uuid5(
+        NAMESPACE_URL,
+        f"qwenpaw-creator:cover-document:{checksum}",
+    ).hex
+    return f"file-cover-{digest}"
+
+
 class IndexedFile(StrictModel):
     file_id: EntityId
     kind: Literal[
@@ -1521,6 +1535,12 @@ class InteractivePresentation(StrictModel):
         default_factory=dict,
     )
     motion: MotionGraphic | None = None
+    # Whole-piece cover poster for the platform (a generated 16:9 image).
+    # Optional and interactive-only: linear projects keep these at their
+    # empty defaults, and the persisted-schema ETag keeps old projects stable.
+    cover_file_id: EntityId | None = None
+    cover_checksum: Sha256 | None = None
+    cover_fingerprint: str = ""
 
     @model_validator(mode="after")
     def _css_only(self):
@@ -1528,6 +1548,10 @@ class InteractivePresentation(StrictModel):
 
         if self.motion is not None and self.motion.format != "html_css":
             raise ValueError("interactive presentation must use html_css")
+        if (self.cover_file_id is None) != (self.cover_checksum is None):
+            raise ValueError(
+                "cover_file_id and cover_checksum must be set together",
+            )
         for screen, design in self.screens.items():
             if set(design.controls) - PRESENTATION_ACTIONS[screen]:
                 raise ValueError(f"unsupported control for {screen}")

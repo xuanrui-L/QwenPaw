@@ -1536,6 +1536,23 @@ def _draft_presentation(project: Project) -> None:
     )
 
 
+def _make_cover_current(project: Project) -> None:
+    """Mark the whole-piece cover as generated and current for the graph."""
+
+    from services.media_files.cover_generation import cover_input_fingerprint
+
+    fingerprint = cover_input_fingerprint(project)
+    project.interactive_presentation = (
+        project.interactive_presentation.model_copy(
+            update={
+                "cover_file_id": "file-cover-test",
+                "cover_checksum": "a" * 64,
+                "cover_fingerprint": f"input_fingerprint={fingerprint}",
+            },
+        )
+    )
+
+
 def _select_final_video(project: Project, timeline_id: str) -> None:
     _select_slot(
         project,
@@ -1578,6 +1595,34 @@ def test_interaction_node_gates_on_script_then_becomes_dispatchable() -> None:
     node = graph.by_id["interaction:el:choice"]
     assert node.status is WorkNodeStatus.READY
     # interaction 在 DISPATCHABLE_KINDS 中：调度器可直接派发。
+    assert node in graph.ready_media_nodes()
+
+
+def test_cover_node_becomes_dispatchable_when_script_is_final() -> None:
+    """Regression: cover must be dispatchable or it strands at 待开始.
+
+    The whole-piece cover shares interaction:project's deps, so once the
+    script is selected it turns READY; it only leaves 待开始 if its kind is
+    in DISPATCHABLE_KINDS and the scheduler actually picks it up.
+    """
+
+    project = _project()
+    _make_branching(project)
+    # cover 依赖全部 timeline 的 script 节点，三条都定稿后才转 READY。
+    for timeline_id in ("timeline:main", "timeline:ep4a", "timeline:ep4b"):
+        _select_slot(
+            project,
+            slot_id=f"script:{timeline_id}",
+            kind="timeline_script",
+            owner_ref=f"timeline:{timeline_id}",
+            version_id=f"art:script-{timeline_id.rsplit(':', 1)[-1]}",
+        )
+
+    graph = derive_work_graph(project)
+    node = graph.by_id["cover:project"]
+    assert node.kind == "cover"
+    assert node.command == "GENERATE_COVER"
+    assert node.status is WorkNodeStatus.READY
     assert node in graph.ready_media_nodes()
 
 
@@ -1965,6 +2010,7 @@ def test_completed_branching_graph_has_no_permanent_ready_bundle():
         _select_final_video(project, timeline_id)
     _draft_choice_motion(project)
     _draft_presentation(project)
+    _make_cover_current(project)
     graph = derive_work_graph(project)
     assert not graph.unfinished(), [
         (n.node_id, n.status) for n in graph.unfinished()

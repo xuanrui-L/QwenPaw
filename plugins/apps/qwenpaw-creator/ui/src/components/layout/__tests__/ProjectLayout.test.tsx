@@ -13,6 +13,7 @@ import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
 import { useFileProjectReviewStore } from "@/store/fileProjectReviewStore";
+import { useModelCreditsStore } from "@/store/modelCreditsStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import {
   configuredModelConfig,
@@ -162,6 +163,7 @@ describe("ProjectLayout visible shell", () => {
     useProjectSnapshotStore.getState().reset();
     useFileProjectReviewStore.getState().reset();
     useNavigationStore.getState().clear();
+    useModelCreditsStore.setState({ notice: null });
     seedProject();
   });
 
@@ -233,6 +235,30 @@ describe("ProjectLayout visible shell", () => {
     rendered.unmount();
     expect(useFileProjectReviewStore.getState().projectId).toBeNull();
     expect(useFileProjectReviewStore.getState().polling).toBe(false);
+  });
+
+  it("keeps the Credits refusal in the navigation bar beside every project page", async () => {
+    // The provider refuses an empty balance account-wide, so the fact cannot
+    // belong to the one project whose failure tray happened to record it: it
+    // has to survive going back to the list and entering another project.
+    installMockFetch(commonRoutes());
+    useModelCreditsStore.getState().markExhausted("p-other");
+    render(
+      <RouterProvider
+        router={createMemoryRouter(CREATOR_ROUTE_OBJECTS, {
+          initialEntries: ["/project/p1/plan"],
+        })}
+      />,
+    );
+
+    expect(await screen.findByText("测试项目")).toBeInTheDocument();
+    const notice = document.querySelector("[data-model-credits-notice]");
+    expect(notice).not.toBeNull();
+    // Inside the 58px header, not in the page body.
+    expect(notice?.closest("header")).not.toBeNull();
+    // Display only: clicking it must not throw the user into the failed
+    // project, which cannot fix an empty balance from there.
+    expect(notice?.querySelector("a")).toBeNull();
   });
 
   it("navigates a completed file Review to the exact changed Element on the Plan page", async () => {

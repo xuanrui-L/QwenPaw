@@ -7,6 +7,7 @@ import {
   resumeWorkGraph,
 } from "@/api/creator/workGraph";
 import type { WorkGraphView } from "@/contracts/creator/workGraph";
+import { useCreditsStore } from "@/store/creditsStore";
 
 interface WorkGraphState {
   projectId: string | null;
@@ -29,6 +30,25 @@ let refreshGeneration = 0;
 // project. Ordinary refreshes within a project must not invalidate it.
 let projectGeneration = 0;
 
+// A node reaching a settled state means a billable model attempt finished, so
+// the Credits ring should re-read. Only a *transition* counts: a project's
+// first graph (no previous) must not fire, and re-observing an already-settled
+// node on later polls must not re-fire either.
+const SETTLED_NODE_STATUSES = new Set(["done", "failed"]);
+
+function hasNewlySettledNode(
+  prev: WorkGraphView | null,
+  next: WorkGraphView,
+): boolean {
+  if (!prev) return false;
+  const prevStatus = new Map(prev.nodes.map((node) => [node.id, node.status]));
+  return next.nodes.some(
+    (node) =>
+      SETTLED_NODE_STATUSES.has(node.status) &&
+      !SETTLED_NODE_STATUSES.has(prevStatus.get(node.id) ?? ""),
+  );
+}
+
 export const useWorkGraphStore = create<WorkGraphState>((set, get) => ({
   projectId: null,
   graph: null,
@@ -38,6 +58,7 @@ export const useWorkGraphStore = create<WorkGraphState>((set, get) => ({
   resuming: false,
   refresh: async (projectId) => {
     const generation = ++refreshGeneration;
+    const prevGraph = get().projectId === projectId ? get().graph : null;
     if (get().projectId !== projectId) projectGeneration += 1;
     set((state) =>
       state.projectId === projectId
@@ -55,6 +76,9 @@ export const useWorkGraphStore = create<WorkGraphState>((set, get) => ({
       const graph = await getWorkGraph(projectId);
       if (generation !== refreshGeneration) return;
       set({ projectId, graph, loading: false, error: null });
+      if (hasNewlySettledNode(prevGraph, graph)) {
+        void useCreditsStore.getState().reload();
+      }
     } catch (error) {
       if (generation !== refreshGeneration) return;
       set({

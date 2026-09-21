@@ -410,6 +410,312 @@ async def upload_reference_bytes_to_dashscope_temp(
     )
 
 
+# ── AgentScope model-proxy media upload ─────────────────────────────────────
+# The proxy carries the DashScope wire format, but its ``sk-as-`` key has no
+# identity on the Bailian temporary-upload API (measured on platform-pre:
+# getPolicy answers 401 InvalidApiKey), so an ``oss://`` reference can never be
+# minted for it. Its own endpoint returns an anonymously readable public URL,
+# and the proxy fetches public URLs server-side (measured: an unreachable
+# reference answers FAILED "Failed to download <url>" before any render).
+PLATFORM_MEDIA_UPLOAD_PATH = "/v1/media/uploads"
+# The endpoint sits behind a 32MB nginx envelope rather than the 1GB temp-OSS
+# budget, so the smaller cap has to be enforced here instead of upstream.
+PLATFORM_MEDIA_UPLOAD_MAX_BYTES = 30 * 1024 * 1024
+# The response carries no expiry field. An hour is long enough to reuse one
+# character sheet across every segment of a run, and short enough that a bucket
+# sweep cannot strand a paid render on a dead reference URL.
+PLATFORM_MEDIA_UPLOAD_CACHE_SECONDS = 60 * 60
+
+_platform_media_upload_cache: dict[tuple[str, str], tuple[str, float]] = {}
+_platform_media_upload_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+
+def platform_media_upload_url(base_url: str) -> str:
+    """Return the proxy's upload endpoint for one configured section base.
+
+    Image and video bases are saved either as the API root (``/v1``) or as the
+    full generation endpoint, so the path is rebuilt from the origin instead of
+    appended to whatever the caller stored.
+    """
+    parsed = urlparse(base_url.strip())
+    if not parsed.netloc:
+        raise RuntimeError(
+            f"cannot derive the media-upload endpoint from base URL: {base_url!r}",
+        )
+    scheme = parsed.scheme or "https"
+    return f"{scheme}://{parsed.netloc}{PLATFORM_MEDIA_UPLOAD_PATH}"
+
+
+def _prune_platform_media_upload_cache(now: float) -> None:
+    expired = [
+        key
+        for key, (_, deadline) in _platform_media_upload_cache.items()
+        if deadline <= now
+    ]
+    for key in expired:
+        _platform_media_upload_cache.pop(key, None)
+        lock = _platform_media_upload_locks.get(key)
+        if lock is not None and not lock.locked():
+            _platform_media_upload_locks.pop(key, None)
+
+
+def _platform_media_upload_cache_key(
+    *,
+    identity: str,
+    api_key: str,
+) -> tuple[str, str]:
+    """Cache identity for one upload.
+
+    Unlike a Bailian temporary upload - which is bound to the model its policy
+    was issued for - a proxy upload URL is model-agnostic and anonymously
+    fetchable, so one entry can serve every consumer of the same bytes.
+    """
+    return identity, _credential_cache_token(api_key)
+
+
+def _post_platform_media_upload(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    api_key: str,
+    filename: str,
+    file_source: object,
+    media_type: str,
+) -> str:
+    """Upload one payload through the proxy. Returns its public URL."""
+    url = platform_media_upload_url(base_url)
+    response = client.post(
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        files={"file": (filename, file_source, media_type)},
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            "provider media upload failed "
+            f"(HTTP {response.status_code} {url}): {response.text[:300]}",
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"provider media upload returned a non-JSON body from {url}",
+        ) from exc
+    items = payload.get("items") if isinstance(payload, dict) else None
+    first = items[0] if isinstance(items, list) and items else None
+    public_url = str((first or {}).get("url") or "")
+    if not public_url:
+        raise RuntimeError(
+            f"provider media upload returned no URL: {str(payload)[:200]}",
+        )
+    logger.info(
+        "Provider media upload complete | filename=%s, url=%s",
+        filename,
+        public_url,
+    )
+    return public_url
+
+
+def _upload_file_to_platform_media_sync(
+    path: Path,
+    *,
+    api_key: str,
+    base_url: str,
+    media_type: str,
+) -> str:
+    """Stream one local file to the proxy's own media bucket."""
+    size = path.stat().st_size
+    if size > PLATFORM_MEDIA_UPLOAD_MAX_BYTES:
+        raise RuntimeError(
+            "provider media upload rejects files larger than "
+            f"{PLATFORM_MEDIA_UPLOAD_MAX_BYTES} bytes ({size} given); shrink "
+            "the reference or serve it from public storage",
+        )
+    timeout = httpx.Timeout(connect=30.0, read=120.0, write=300.0, pool=30.0)
+    filename = _dashscope_transport_filename(path, media_type)
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        with path.open("rb") as file_handle:
+            return _post_platform_media_upload(
+                client,
+                base_url=base_url,
+                api_key=api_key,
+                filename=filename,
+                file_source=file_handle,
+                media_type=media_type,
+            )
+
+
+def _upload_bytes_to_platform_media_sync(
+    content: bytes,
+    filename: str,
+    *,
+    api_key: str,
+    base_url: str,
+    media_type: str,
+) -> str:
+    if len(content) > PLATFORM_MEDIA_UPLOAD_MAX_BYTES:
+        raise RuntimeError(
+            "provider media upload rejects payloads larger than "
+            f"{PLATFORM_MEDIA_UPLOAD_MAX_BYTES} bytes ({len(content)} given)",
+        )
+    timeout = httpx.Timeout(connect=30.0, read=120.0, write=300.0, pool=30.0)
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        return _post_platform_media_upload(
+            client,
+            base_url=base_url,
+            api_key=api_key,
+            filename=_safe_filename(filename),
+            file_source=content,
+            media_type=media_type,
+        )
+
+
+async def upload_local_file_to_platform_media(
+    path: Path,
+    *,
+    api_key: str,
+    base_url: str,
+    media_type: str,
+) -> str:
+    """Upload a local file through the proxy and cache its public URL."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(
+            f"selected local media does not exist: {resolved}",
+        )
+    if not api_key.strip():
+        raise RuntimeError("provider media upload requires an API key")
+    stat = resolved.stat()
+    cache_key = _platform_media_upload_cache_key(
+        identity=f"{resolved}|{int(stat.st_size)}|{int(stat.st_mtime_ns)}",
+        api_key=api_key,
+    )
+    return await _cached_platform_media_upload(
+        cache_key,
+        lambda: _upload_file_to_platform_media_sync(
+            resolved,
+            api_key=api_key,
+            base_url=base_url,
+            media_type=media_type,
+        ),
+    )
+
+
+async def upload_reference_bytes_to_platform_media(
+    content: bytes,
+    filename: str,
+    *,
+    api_key: str,
+    base_url: str,
+    media_type: str,
+) -> str:
+    """Upload in-memory reference media through the proxy."""
+    if not api_key.strip():
+        raise RuntimeError("provider media upload requires an API key")
+    digest = hashlib.sha256(content).hexdigest()
+    cache_key = _platform_media_upload_cache_key(
+        identity=f"sha256:{digest}|{filename}",
+        api_key=api_key,
+    )
+    return await _cached_platform_media_upload(
+        cache_key,
+        lambda: _upload_bytes_to_platform_media_sync(
+            content,
+            filename,
+            api_key=api_key,
+            base_url=base_url,
+            media_type=media_type,
+        ),
+    )
+
+
+async def _cached_platform_media_upload(
+    cache_key: tuple[str, str],
+    upload,
+) -> str:
+    """Run *upload* at most once per cache key, concurrently safe."""
+    now = time.monotonic()
+    _prune_platform_media_upload_cache(now)
+    cached = _platform_media_upload_cache.get(cache_key)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    lock = _platform_media_upload_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        now = time.monotonic()
+        cached = _platform_media_upload_cache.get(cache_key)
+        if cached is not None and cached[1] > now:
+            return cached[0]
+        url = await asyncio.to_thread(upload)
+        _platform_media_upload_cache[cache_key] = (
+            url,
+            now + PLATFORM_MEDIA_UPLOAD_CACHE_SECONDS,
+        )
+        return url
+
+
+async def upload_reference_file_for_provider(
+    path: Path,
+    *,
+    api_key: str,
+    model_name: str,
+    media_type: str,
+    base_url: str,
+    protocol: str = "",
+) -> str:
+    """Return a URL the configured provider can fetch for one local file.
+
+    Single decision point for the two reference transports, so a call site
+    never has to know which storage the endpoint behind it accepts: the
+    AgentScope proxy has no Bailian upload identity and takes its own public
+    URL, everything else keeps the model-bound ``oss://`` temporary upload.
+    """
+    if model_config.is_agentscope_gateway(
+        protocol=protocol,
+        base_url=base_url,
+    ):
+        return await upload_local_file_to_platform_media(
+            path,
+            api_key=api_key,
+            base_url=base_url,
+            media_type=media_type,
+        )
+    return await upload_local_file_to_dashscope_temp(
+        path,
+        api_key=api_key,
+        model_name=model_name,
+        media_type=media_type,
+    )
+
+
+async def upload_reference_bytes_for_provider(
+    content: bytes,
+    filename: str,
+    *,
+    api_key: str,
+    model_name: str,
+    base_url: str,
+    protocol: str = "",
+    media_type: str = "",
+) -> str:
+    """Return a URL the configured provider can fetch for in-memory media."""
+    if model_config.is_agentscope_gateway(
+        protocol=protocol,
+        base_url=base_url,
+    ):
+        return await upload_reference_bytes_to_platform_media(
+            content,
+            filename,
+            api_key=api_key,
+            base_url=base_url,
+            media_type=media_type or _reference_media_type(filename, content),
+        )
+    return await upload_reference_bytes_to_dashscope_temp(
+        content,
+        filename,
+        api_key=api_key,
+        model_name=model_name,
+    )
+
+
 def reference_media_data_url(content: bytes, filename: str) -> str:
     """Inline reference media as a Base64 data URL for the Ark Seedance API.
 

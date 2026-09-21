@@ -73,6 +73,7 @@ from models.media_transport import (
     read_reference_media,
     validate_reference_image_bytes,
 )
+from models.provider_errors import is_gateway_quota_error
 from services.object_grounding import ground_image_objects
 from services.object_grounding import object_grounding_image_suffix
 from services.object_grounding import render_object_grounding_annotation
@@ -3044,15 +3045,27 @@ class FileCreatorAgentRuntime:
                 run_id,
                 exc,
             )
+            # An exhausted Credits balance answers 403 with ``retryable:
+            # false`` - no model turn can succeed until a human redeems more.
+            # Retrying that burns the YOLO resume fuse and repeats a failure
+            # the Agent cannot act on, so the provider's own envelope decides.
+            request_detail = str(exc)
+            quota_exhausted = is_gateway_quota_error(request_detail)
             await self._fail_run(
                 project_id,
                 session.session_id,
                 goal.goal_id,
                 run_id,
                 message,
-                code="MODEL_REQUEST_FAILED",
-                message_text=str(exc),
-                retryable=True,
+                code=(
+                    "MODEL_QUOTA_EXCEEDED"
+                    if quota_exhausted
+                    else "MODEL_REQUEST_FAILED"
+                ),
+                # Neutral technical text: AgentDock renders the localized
+                # notice from locales via the error code.
+                message_text=request_detail,
+                retryable=not quota_exhausted,
             )
             self._blocked_heads[project_id] = message.message_seq
         except AgentStreamCallbackError as exc:

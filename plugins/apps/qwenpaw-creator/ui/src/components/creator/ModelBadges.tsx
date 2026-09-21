@@ -1,8 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { GlobalOutlined, SoundOutlined, UserOutlined } from "@ant-design/icons";
+import {
+  CloudServerOutlined,
+  GlobalOutlined,
+  SoundOutlined,
+  UserOutlined,
+} from "@ant-design/icons";
+import { Modal, Tooltip } from "antd";
 import type { ModelConfigItem } from "@/contracts/creator";
 import { useModelConfigStore } from "@/store/modelConfigStore";
+import PlatformAutoConfigPane from "@/components/creator/PlatformAutoConfigPane";
 import modelLlmIcon from "@/assets/design/model-llm.svg";
 import modelVlmIcon from "@/assets/design/model-vlm.svg";
 import modelAsrIcon from "@/assets/design/model-asr.svg";
@@ -77,6 +84,7 @@ export default function ModelBadges() {
   const config = useModelConfigStore((state) => state.config);
   const refresh = useModelConfigStore((state) => state.refresh);
   const [modalOpen, setModalOpen] = useState(false);
+  const [platformOpen, setPlatformOpen] = useState(false);
 
   useEffect(() => {
     void refresh();
@@ -144,93 +152,146 @@ export default function ModelBadges() {
 
   return (
     <>
-      <button
-        type="button"
-        data-onboarding-id="model-badges"
-        onClick={() => setModalOpen(true)}
-        title={t("modelBadges.modelConfig")}
-        aria-label={t("modelBadges.modelConfig")}
-        className="mr-[92px] flex cursor-pointer items-center rounded-full bg-[rgba(43,27,0,0.04)] px-3 py-1 transition-colors hover:bg-[rgba(43,27,0,0.07)]"
-      >
-        <span className="hidden items-center gap-3 xl:flex">
-          {BADGE_META.map((meta) => {
-            const state = status(meta.type);
-            const ready = state === "on";
-            const tint = ready ? READY_COLOR : IDLE_COLOR;
-            return (
-              <span
-                key={meta.type}
-                className="flex h-5 items-center gap-2"
-                title={t("modelBadges.badgeTitle", {
-                  name: t(meta.labelKey),
-                  status: t(STATUS_TEXT_KEYS[state]),
-                })}
-                aria-label={t("modelBadges.badgeTitle", {
-                  name: t(meta.labelKey),
-                  status: t(STATUS_TEXT_KEYS[state]),
-                })}
-                data-model-badge={meta.type}
-                data-status={state}
-              >
+      {/* The reserved right-hand space belongs to the cluster, not to the strip:
+          keeping it on the wrapper lets the quick-config entry sit flush against
+          the badges instead of 92px away from them. */}
+      <div className="mr-[92px] flex items-center gap-1">
+        <button
+          type="button"
+          data-onboarding-id="model-badges"
+          onClick={() => setModalOpen(true)}
+          title={t("modelBadges.modelConfig")}
+          aria-label={t("modelBadges.modelConfig")}
+          className="flex cursor-pointer items-center rounded-full bg-[rgba(43,27,0,0.04)] px-3 py-1 transition-colors hover:bg-[rgba(43,27,0,0.07)]"
+        >
+          <span className="hidden items-center gap-3 xl:flex">
+            {BADGE_META.map((meta) => {
+              const state = status(meta.type);
+              const ready = state === "on";
+              const tint = ready ? READY_COLOR : IDLE_COLOR;
+              return (
                 <span
-                  className="flex h-2 w-2 shrink-0 items-center justify-center rounded-full"
-                  style={{ background: ready ? READY_HALO : IDLE_HALO }}
+                  key={meta.type}
+                  className="flex h-5 items-center gap-2"
+                  title={t("modelBadges.badgeTitle", {
+                    name: t(meta.labelKey),
+                    status: t(STATUS_TEXT_KEYS[state]),
+                  })}
+                  aria-label={t("modelBadges.badgeTitle", {
+                    name: t(meta.labelKey),
+                    status: t(STATUS_TEXT_KEYS[state]),
+                  })}
+                  data-model-badge={meta.type}
+                  data-status={state}
                 >
                   <span
-                    className="h-1 w-1 rounded-full"
-                    style={{ background: tint }}
-                  />
+                    className="flex h-2 w-2 shrink-0 items-center justify-center rounded-full"
+                    style={{ background: ready ? READY_HALO : IDLE_HALO }}
+                  >
+                    <span
+                      className="h-1 w-1 rounded-full"
+                      style={{ background: tint }}
+                    />
+                  </span>
+                  {meta.icon ? (
+                    <span
+                      className="h-5 w-5 shrink-0"
+                      style={{
+                        backgroundColor: tint,
+                        // Quoted so inlined `data:` glyphs keep working: an
+                        // unquoted url() would break on their `#` fill colours.
+                        maskImage: `url("${meta.icon}")`,
+                        WebkitMaskImage: `url("${meta.icon}")`,
+                        maskSize: "100% 100%",
+                        WebkitMaskSize: "100% 100%",
+                        maskRepeat: "no-repeat",
+                        WebkitMaskRepeat: "no-repeat",
+                      }}
+                    />
+                  ) : meta.fallbackIcon ? (
+                    <meta.fallbackIcon style={{ fontSize: 18, color: tint }} />
+                  ) : null}
                 </span>
-                {meta.icon ? (
-                  <span
-                    className="h-5 w-5 shrink-0"
-                    style={{
-                      backgroundColor: tint,
-                      // Quoted so inlined `data:` glyphs keep working: an
-                      // unquoted url() would break on their `#` fill colours.
-                      maskImage: `url("${meta.icon}")`,
-                      WebkitMaskImage: `url("${meta.icon}")`,
-                      maskSize: "100% 100%",
-                      WebkitMaskSize: "100% 100%",
-                      maskRepeat: "no-repeat",
-                      WebkitMaskRepeat: "no-repeat",
-                    }}
-                  />
-                ) : meta.fallbackIcon ? (
-                  <meta.fallbackIcon style={{ fontSize: 18, color: tint }} />
-                ) : null}
-              </span>
-            );
-          })}
-        </span>
-        {/* Narrow viewports collapse the eight glyphs into one readiness
+              );
+            })}
+          </span>
+          {/* Narrow viewports collapse the eight glyphs into one readiness
             summary pill; the per-model statuses stay reachable via title. */}
-        <span
-          data-model-badges-compact
-          className="flex h-5 items-center gap-2 whitespace-nowrap text-xs font-semibold text-[var(--color-text-secondary)] xl:hidden"
-          title={compactTitle}
-        >
           <span
-            className="flex h-2 w-2 shrink-0 items-center justify-center rounded-full"
-            style={{
-              background:
-                readyCount === BADGE_META.length ? READY_HALO : IDLE_HALO,
-            }}
+            data-model-badges-compact
+            className="flex h-5 items-center gap-2 whitespace-nowrap text-xs font-semibold text-[var(--color-text-secondary)] xl:hidden"
+            title={compactTitle}
           >
             <span
-              className="h-1 w-1 rounded-full"
+              className="flex h-2 w-2 shrink-0 items-center justify-center rounded-full"
               style={{
                 background:
-                  readyCount === BADGE_META.length ? READY_COLOR : IDLE_COLOR,
+                  readyCount === BADGE_META.length ? READY_HALO : IDLE_HALO,
               }}
-            />
+            >
+              <span
+                className="h-1 w-1 rounded-full"
+                style={{
+                  background:
+                    readyCount === BADGE_META.length ? READY_COLOR : IDLE_COLOR,
+                }}
+              />
+            </span>
+            {t("modelBadges.compactSummary", {
+              ready: readyCount,
+              total: BADGE_META.length,
+            })}
           </span>
-          {t("modelBadges.compactSummary", {
-            ready: readyCount,
-            total: BADGE_META.length,
-          })}
-        </span>
-      </button>
+        </button>
+        {/* Platform one-click configuration, outside the model dialog: the
+            first thing a platform deployment needs should not sit three clicks
+            deep behind nine sections it does not have to touch. */}
+        <Tooltip title={t("modelConfig.panePlatform")}>
+          <button
+            type="button"
+            data-platform-quick-config
+            className="icon-button shrink-0"
+            style={{
+              width: "auto",
+              padding: "0 10px",
+              gap: 6,
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+            aria-label={t("modelConfig.panePlatform")}
+            onClick={() => setPlatformOpen(true)}
+          >
+            <CloudServerOutlined style={{ fontSize: 13 }} />
+            <span className="whitespace-nowrap">
+              {t("modelConfig.panePlatform")}
+            </span>
+          </button>
+        </Tooltip>
+      </div>
+      <Modal
+        open={platformOpen}
+        title={t("modelConfig.panePlatform")}
+        footer={null}
+        width={520}
+        destroyOnClose
+        onCancel={() => setPlatformOpen(false)}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+            padding: "6px 0 2px",
+          }}
+        >
+          <PlatformAutoConfigPane
+            onJumpToModel={() => {
+              setPlatformOpen(false);
+              setModalOpen(true);
+            }}
+          />
+        </div>
+      </Modal>
       <ModelConfigModal open={modalOpen} onClose={modalClose} />
     </>
   );

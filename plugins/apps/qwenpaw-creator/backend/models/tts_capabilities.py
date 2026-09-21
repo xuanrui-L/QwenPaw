@@ -10,11 +10,17 @@ The provider exposes two families that share nothing but the credential:
 - ``cosyvoice``: synthesis over WebSocket; one ``voice-enrollment`` surface
   handles both cloning and design, and the newest models ship no system voices
   at all, so a character voice must be created before anything can be spoken.
+- ``qwen-audio``: shares the CosyVoice enrollment surface but does ship system
+  voices, and the set is per model - ``-plus`` carries two flagship voices and
+  ``-flash`` a dozen social/companion ones. Voices never cross between the two,
+  so each model needs its own list. These are also the only speech models the
+  model proxy routes, which is what ``providers`` records.
 
 Keeping the differences in one table lets the rest of the backend ask
 capability questions ("does this model have system voices?", "which model do I
-enroll against?") instead of pattern-matching model names, and lets the UI ask
-for a model list without duplicating the knowledge.
+enroll against?", "can this endpoint serve it?") instead of pattern-matching
+model names, and lets the UI ask for a model list without duplicating the
+knowledge.
 """
 
 from __future__ import annotations
@@ -24,6 +30,10 @@ from typing import Literal
 
 TtsFamily = Literal["qwen-tts", "cosyvoice"]
 TtsTransport = Literal["http", "websocket"]
+# ``bailian`` is the direct DashScope endpoint, ``gateway`` the AgentScope model
+# proxy. A model listed under neither would be unselectable everywhere, so the
+# default is the endpoint this table was written for.
+TtsProvider = Literal["bailian", "gateway"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +50,11 @@ class TtsModelCapability:
     clone_target: str = ""
     # Model that designed voices are bound to; empty means "not supported".
     design_target: str = ""
+    # Endpoints that actually serve this model. The proxy publishes its own
+    # model list and answers anything outside it with
+    # ``ASP.BIZ.MODEL_NOT_ALLOWED``, so offering a Bailian-only name there is
+    # a guaranteed failure the user has to discover by hand.
+    providers: tuple[TtsProvider, ...] = ("bailian",)
 
     @property
     def has_system_voices(self) -> bool:
@@ -69,6 +84,29 @@ _QWEN_TTS_VOICES = (
     "Nofish",
     "Marcus",
     "Roy",
+)
+
+# From the Qwen-Audio-TTS voice list: a voice outside its own model's list is
+# rejected upstream, and the model proxy reports that rejection as 502 with
+# ``retryable: true``, so a wrong name here reads as a broken endpoint.
+_QWEN_AUDIO_PLUS_VOICES = (
+    "longanlingxin",
+    "longanlufeng",
+)
+
+_QWEN_AUDIO_FLASH_VOICES = (
+    "longanfengyue",
+    "longanyuanfei",
+    "longanlingxi",
+    "longanxiaoxin",
+    "longanhuan_v3.6",
+    "longjielidou_v3.6",
+    "longpaopao_v3.6",
+    "longhuohuo_v3.6",
+    "longchuanshu_v3.6",
+    "loongmary",
+    "loongeva_v3.6",
+    "loongjohn",
 )
 
 _CAPABILITIES: tuple[TtsModelCapability, ...] = (
@@ -101,8 +139,20 @@ _CAPABILITIES: tuple[TtsModelCapability, ...] = (
         model="qwen-audio-3.0-tts-flash",
         family="cosyvoice",
         transport="websocket",
-        label="Qwen-Audio 3.0 TTS Flash（无系统音色，需先设计或复刻音色）",
-        system_voices=(),
+        label="Qwen-Audio 3.0 TTS Flash（12 个系统音色，快速）",
+        system_voices=_QWEN_AUDIO_FLASH_VOICES,
+        providers=("bailian", "gateway"),
+    ),
+    # Listed after its cheaper sibling on purpose: a protocol switch that has
+    # to pick a replacement model takes the first available one, and that
+    # should never be the flagship.
+    TtsModelCapability(
+        model="qwen-audio-3.0-tts-plus",
+        family="cosyvoice",
+        transport="websocket",
+        label="Qwen-Audio 3.0 TTS Plus（旗舰音色，2 个系统音色）",
+        system_voices=_QWEN_AUDIO_PLUS_VOICES,
+        providers=("bailian", "gateway"),
     ),
 )
 
@@ -113,6 +163,12 @@ DEFAULT_TTS_MODEL = "qwen3-tts-flash"
 
 def supported_models() -> tuple[TtsModelCapability, ...]:
     return _CAPABILITIES
+
+
+def models_for(provider: TtsProvider) -> tuple[TtsModelCapability, ...]:
+    """Models one endpoint actually serves, in table order."""
+
+    return tuple(item for item in _CAPABILITIES if provider in item.providers)
 
 
 def capability_for(model: str) -> TtsModelCapability | None:
@@ -139,8 +195,10 @@ __all__ = [
     "DEFAULT_TTS_MODEL",
     "TtsFamily",
     "TtsModelCapability",
+    "TtsProvider",
     "TtsTransport",
     "capability_for",
+    "models_for",
     "require_capability",
     "supported_models",
 ]

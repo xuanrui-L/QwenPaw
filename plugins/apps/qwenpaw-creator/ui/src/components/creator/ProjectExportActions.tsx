@@ -1,11 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Dropdown, message } from "antd";
-import { ChevronDown, Download, FileOutput, Package } from "lucide-react";
+import {
+  ChevronDown,
+  Download,
+  FileOutput,
+  Package,
+  Upload,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectDocument } from "@/contracts/creator";
 import {
   getArtifactVersionMediaUrl,
   getInteractiveBundleUrl,
+  newUploadIdempotencyKey,
+  uploadInteractiveBundle,
 } from "@/api/creator";
 import { selectTimelineFilmVersionId } from "@/selectors/blueprintSelectors";
 import {
@@ -32,6 +40,7 @@ export default function ProjectExportActions({
   const projectId = project.project_id;
   const shape = useMemo(() => selectNarrativeShape(project), [project]);
   const [bundleBusy, setBundleBusy] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [exportProgress, setExportProgress] =
     useState<ExportProgressState | null>(null);
   const exporting = exportProgress?.status === "running";
@@ -116,20 +125,26 @@ export default function ProjectExportActions({
     return () => window.clearTimeout(timer);
   }, [exportProgress]);
 
+  // The bundle endpoint 409s until every branch has a final cut; both the
+  // download and the publish path read the same bytes, so fetch once here.
+  const fetchBundleBlob = async (): Promise<Blob> => {
+    const response = await fetch(getInteractiveBundleUrl(projectId));
+    if (!response.ok) {
+      const error = await response.json().catch(() => null);
+      throw new Error(
+        error?.error?.message ||
+          error?.message ||
+          error?.detail ||
+          `HTTP ${response.status}`,
+      );
+    }
+    return response.blob();
+  };
+
   const exportBundle = async () => {
     setBundleBusy(true);
     try {
-      const response = await fetch(getInteractiveBundleUrl(projectId));
-      if (!response.ok) {
-        const error = await response.json().catch(() => null);
-        throw new Error(
-          error?.error?.message ||
-            error?.message ||
-            error?.detail ||
-            `HTTP ${response.status}`,
-        );
-      }
-      const blob = await response.blob();
+      const blob = await fetchBundleBlob();
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -142,6 +157,30 @@ export default function ProjectExportActions({
       );
     } finally {
       setBundleBusy(false);
+    }
+  };
+
+  // Publish to the platform, then hand the person off to progress_url; the
+  // Platform side owns polling to success/failed, so this only submits.
+  const uploadBundle = async () => {
+    setUploadBusy(true);
+    try {
+      const blob = await fetchBundleBlob();
+      const result = await uploadInteractiveBundle({
+        bundle: blob,
+        projectId,
+        idempotencyKey: newUploadIdempotencyKey(),
+      });
+      message.success(t("blueprint.uploadBundleSubmitted"));
+      if (result.progress_url) {
+        window.open(result.progress_url, "_blank", "noopener,noreferrer");
+      }
+    } catch (error) {
+      message.error(
+        `${t("blueprint.uploadBundleFailed")}：${(error as Error).message}`,
+      );
+    } finally {
+      setUploadBusy(false);
     }
   };
 
@@ -221,6 +260,21 @@ export default function ProjectExportActions({
         >
           <Package className="h-3.5 w-3.5" />
           {bundleBusy ? t("blueprint.exporting") : t("blueprint.exportBundle")}
+        </button>
+      )}
+      {shape === "branching" && (
+        <button
+          type="button"
+          data-upload-bundle
+          disabled={
+            uploadBusy || bundleBusy || !project.narrative_edges?.length
+          }
+          title={t("blueprint.uploadBundleTitle")}
+          onClick={() => void uploadBundle()}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-primary)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-border-strong)] hover:bg-[var(--color-bg-secondary)] disabled:cursor-not-allowed disabled:opacity-70"
+        >
+          <Upload className="h-3.5 w-3.5" />
+          {uploadBusy ? t("blueprint.uploading") : t("blueprint.uploadBundle")}
         </button>
       )}
       {exportProgress && (

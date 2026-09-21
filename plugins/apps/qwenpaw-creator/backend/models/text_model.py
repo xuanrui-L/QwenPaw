@@ -22,7 +22,68 @@ import httpx
 from models import config as model_config
 from models.concurrency import model_slot
 from models.output_budget import anthropic_output_limit
+from models.provider_errors import is_gateway_quota_error, retryable_for_status
+from models.sse import decode_chat_response
 from utils.exceptions import ModelError, redact_url, upstream_status_hint
+
+
+def _finish_reason_of(payload: dict) -> str:
+    """The provider's own ending reason, across the three reply shapes."""
+
+    for key, field in (
+        ("choices", "finish_reason"),
+        ("candidates", "finishReason"),
+    ):
+        rows = payload.get(key) or []
+        if rows and isinstance(rows[0], dict):
+            reason = str(rows[0].get(field) or "")
+            if reason:
+                return reason
+    return str(payload.get("stop_reason") or "")
+
+
+def _reasoning_only(payload: dict) -> bool:
+    """Whether the reply carried thinking but no answer, without reading it."""
+
+    choices = payload.get("choices") or []
+    if choices and isinstance(choices[0], dict):
+        reasoning = (choices[0].get("message") or {}).get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            return True
+    return bool(payload.get("_reasoning_content_dropped"))
+
+
+def _completion_tokens_of(payload: dict) -> str:
+    usage = payload.get("usage") or payload.get("usageMetadata") or {}
+    if isinstance(usage, dict):
+        for key in (
+            "completion_tokens",
+            "output_tokens",
+            "candidatesTokenCount",
+        ):
+            if usage.get(key) is not None:
+                return str(usage[key])
+    return "unknown"
+
+
+def _empty_content_detail(payload: dict) -> str:
+    """Why a 2xx reply held no text, always reported.
+
+    A contentless reply is otherwise undecidable: a reasoning model that spent
+    the whole budget on its thinking trace, a stream the gateway ended without
+    a closing frame, and a refusal all produce the same empty string. The
+    finish reason, token count and reasoning-only hint tell those apart, and
+    none of them is the model's private text.
+    """
+    reason = _finish_reason_of(payload) or "unknown"
+    if payload.get("_finish_reason_missing"):
+        reason += "(never_reported)"
+    detail = f"（结束原因：{reason}，输出 token：{_completion_tokens_of(payload)}）"
+    if _reasoning_only(payload):
+        detail += "；模型仅返回了推理内容，没有最终结果"
+    if _finish_reason_of(payload) == "length":
+        detail += "。上游达到输出长度限制，请检查模型或服务的默认输出预算后重试"
+    return detail
 
 
 def _openai_chat_url() -> str:
@@ -58,6 +119,11 @@ def _http_error(
     the upstream response excerpt plus a status-specific hint.
     """
     hint = upstream_status_hint(response.status_code)
+    if is_gateway_quota_error(response.text):
+        # A Credits-exhausted account is answered with a 403 whose body reads
+        # like a permission failure; name the real cause and keep a stable
+        # token so the task error is searchable.
+        hint = "CREDITS_INSUFFICIENT: 模型额度已用尽，重试无效；请充值后再继续"
     detail = f"上游响应: {response.text[:500]}" if response.text else "上游未返回响应体"
     message = (
         f"Text model 请求失败 [protocol={protocol} model={model_name} "
@@ -66,11 +132,16 @@ def _http_error(
     )
     if hint:
         message = f"{message}。{hint}"
-    # Upstream 4xx client errors are permanent: retrying will not help.
+    # Upstream 4xx client errors are permanent: retrying will not help. A
+    # gateway envelope overrides the status, because some gateways report a
+    # deterministic 5xx as retryable.
     return ModelError(
         message,
         model_name=model_name,
-        retryable=response.status_code >= 500,
+        retryable=retryable_for_status(
+            response.status_code,
+            response.text,
+        ),
     )
 
 
@@ -87,6 +158,12 @@ async def _call_openai(
         "model": model_name,
         "messages": messages,
         "temperature": temperature,
+        # Asked to stream although the caller wants one answer. A gateway in
+        # front of a slow model reads a silent connection as a dead one and
+        # kills it at 180s (measured: nginx 504 on a four-screen presentation,
+        # where our own budget was 600s). Bytes flowing resets that clock, and
+        # ``decode_chat_response`` folds the stream back into one completion.
+        "stream": True,
     }
     # Free-tier gateways (e.g. OpenCode Zen ``*-free``) accept requests
     # without an Authorization header; an empty Bearer value would be
@@ -98,7 +175,14 @@ async def _call_openai(
     host = urlsplit(url).hostname or ""
     if (
         thinking_budget is not None
-        and host.endswith(".aliyuncs.com")
+        and (
+            host.endswith(".aliyuncs.com")
+            # The AgentScope platform proxy fronts the same Qwen models and
+            # honours ``thinking_budget``. Without this the field is silently
+            # dropped there, so a thinking model rambles on until the platform
+            # ends the stream at ~300s and we get reasoning-only, empty output.
+            or model_config.is_agentscope_endpoint(url)
+        )
         and model_name.lower().startswith(("qwen3.", "qwen3-"))
     ):
         body["thinking_budget"] = thinking_budget
@@ -119,7 +203,15 @@ async def _call_openai(
             model_name=model_name,
             url=url,
         )
-    payload = response.json()
+    # Some gateways answer with text/event-stream even though this request
+    # never asked to stream; decode both shapes into one chat.completion.
+    payload = decode_chat_response(
+        status_code=response.status_code,
+        text=response.text,
+        content_type=str(response.headers.get("content-type") or ""),
+        model_name=model_name,
+        url=url,
+    )
     choices = payload.get("choices") or []
     content = (
         choices[0].get("message", {}).get("content")
@@ -127,20 +219,22 @@ async def _call_openai(
         else None
     )
     if not isinstance(content, str) or not content.strip():
-        choice = choices[0] if choices and isinstance(choices[0], dict) else {}
-        finish_reason = choice.get("finish_reason") or "unknown"
-        usage = payload.get("usage") or {}
-        completion_tokens = usage.get("completion_tokens", "unknown")
-        reasoning = (choice.get("message") or {}).get("reasoning_content")
-        detail = (
-            f"Text model 返回空内容（模型：{model_name}，"
-            f"结束原因：{finish_reason}，输出 token：{completion_tokens}）"
+        raise ModelError(
+            "Text model 返回空内容" + _empty_content_detail(payload),
+            model_name=model_name,
         )
-        if isinstance(reasoning, str) and reasoning.strip():
-            detail += "；模型仅返回了推理内容，没有最终结果"
-        if finish_reason == "length":
-            detail += "。上游达到输出长度限制，请检查模型或服务的默认输出预算后重试"
-        raise ModelError(detail, model_name=model_name)
+    if payload.get("_stream_truncated"):
+        # The gateway stopped talking without ever saying how the answer ended.
+        # What arrived is a prefix, and a half-written HTML page accepted as a
+        # finished work screen is worse than the 504 this replaces, because it
+        # fails silently. Nothing was completed, so asking again is safe.
+        raise ModelError(
+            "Text model 响应流被截断"
+            f"（结束原因未上报，输出 token：{_completion_tokens_of(payload)}，"
+            f"已收到 {len(content)} 字符但不完整）",
+            model_name=model_name,
+            retryable=True,
+        )
     return content.strip()
 
 
@@ -204,7 +298,10 @@ async def _call_anthropic(
     ]
     content = "\n".join(text_parts)
     if not content.strip():
-        raise ModelError("Text model 返回空内容", model_name=model_name)
+        raise ModelError(
+            "Text model 返回空内容" + _empty_content_detail(payload),
+            model_name=model_name,
+        )
     return content.strip()
 
 
@@ -258,7 +355,10 @@ async def _call_gemini(
     payload = response.json()
     candidates = payload.get("candidates") or []
     if not candidates:
-        raise ModelError("Text model 返回空内容", model_name=model_name)
+        raise ModelError(
+            "Text model 返回空内容" + _empty_content_detail(payload),
+            model_name=model_name,
+        )
     candidate = candidates[0] if isinstance(candidates[0], dict) else {}
     content_obj = candidate.get("content") or {}
     parts = content_obj.get("parts") or []
@@ -269,7 +369,10 @@ async def _call_gemini(
     ]
     content = "\n".join(text_parts)
     if not content.strip():
-        raise ModelError("Text model 返回空内容", model_name=model_name)
+        raise ModelError(
+            "Text model 返回空内容" + _empty_content_detail(payload),
+            model_name=model_name,
+        )
     return content.strip()
 
 

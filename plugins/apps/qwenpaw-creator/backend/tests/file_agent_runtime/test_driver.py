@@ -17,6 +17,7 @@ from api.file_asset_routes import _AssetInput, _ingest_many_sync
 from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime import (
     AgentModelConfigurationError,
+    AgentModelError,
     AgentModelTurn,
     AgentRunStatus,
     AgentToolCall,
@@ -1318,6 +1319,73 @@ def test_repeated_malformed_jq_project_arguments_stop_after_two_retries(
     assert "Do not resend it" in errors[-1]["recovery"]
 
 
+@pytest.mark.parametrize(
+    ("detail", "expected_code", "expected_retryable"),
+    [
+        (
+            "Creator AgentScope model request failed: Error code: 403 - "
+            "{'error': {'code': 'ASP.BIZ.CREDITS_INSUFFICIENT', "
+            "'message': '模型 Credits 不足，请先使用贡献值兑换', "
+            "'retryable': False, 'type': 'BUSINESS'}, 'request_id': "
+            "'70491bf2-9f12-4e43-82c1-bab4a321f647'}",
+            "MODEL_QUOTA_EXCEEDED",
+            False,
+        ),
+        (
+            "Creator AgentScope model request failed: Error code: 503 - "
+            "upstream connect error",
+            "MODEL_REQUEST_FAILED",
+            True,
+        ),
+    ],
+)
+def test_model_request_failure_defers_to_the_provider_retry_verdict(
+    tmp_path,
+    monkeypatch,
+    detail: str,
+    expected_code: str,
+    expected_retryable: bool,
+) -> None:
+    """A refused request is not automatically a retriable one.
+
+    Measured on a project that died on its last shot: every turn answered 403
+    ``ASP.BIZ.CREDITS_INSUFFICIENT`` with ``retryable: false``, but this branch
+    hardcoded ``retryable=True``, so nine identical failures landed inside two
+    seconds and the only on-screen words were that the feedback had gone back
+    to the Agent. Nothing the Agent can send fixes an empty balance, so the
+    run has to stop and say what is missing.
+    """
+
+    async def callback(_messages, _tools):
+        raise AgentModelError(detail)
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="请生成结果",
+        )
+        driver = _driver(services, callback)
+        resumes: list[bool] = []
+
+        async def spy(**kwargs) -> None:
+            resumes.append(bool(kwargs.get("after_failure")))
+
+        monkeypatch.setattr(driver, "_queue_yolo_completion_resume", spy)
+        await _run_to_idle(driver, services, error=True)
+        session = services.sessions.get_project_session(PROJECT_ID)
+        await driver.stop()
+        return session, resumes
+
+    session, resumes = asyncio.run(scenario())
+
+    assert session.error["code"] == expected_code
+    assert session.error["retryable"] is expected_retryable
+    assert session.error["message"] == detail
+    # The flag is not only carried to the UI: it is the sole gate on handing an
+    # unattended project back to the Agent, so a quota refusal must not queue.
+    assert resumes == ([True] if expected_retryable else [])
+
+
 def test_initial_creation_runs_auto_fix_tool_loop_without_review(
     tmp_path,
     monkeypatch,
@@ -2156,17 +2224,13 @@ def test_specialist_cancel_emits_terminal_event(
     monkeypatch,
     cancel_phase,
 ) -> None:
-    """A specialist run cancelled mid-flight must emit a terminal
-    ``subagent.failed`` event, both from RUNNING_MODEL and from
-    WAITING_RUNTIME (a long-running tool mid-invoke).
-
-    Regression note for the WAITING_RUNTIME case: the run reaches the
-    cancel-except only after the invoke-finally bridges WAITING_RUNTIME back
-    to RUNNING_MODEL, so the on-disk transition succeeds — but the terminal
-    event was still missing.  Locks in that the event fires on this path too.
-    """
+    """Cancellation must emit a terminal event from either specialist phase."""
     if cancel_phase == "waiting_runtime":
         _authorization_gate_modes(monkeypatch, authorization="allow_all")
+        monkeypatch.setattr(
+            "services.specialist_tools.is_tts_configured",
+            lambda: True,
+        )
 
     async def scenario():
         services, _snapshot = _create_project(
@@ -2175,6 +2239,7 @@ def test_specialist_cancel_emits_terminal_event(
         )
         blocked = asyncio.Event()
         cancel_entered = asyncio.Event()
+        delegated = False
 
         async def _block_until_cancelled() -> None:
             blocked.set()
@@ -2185,8 +2250,12 @@ def test_specialist_cancel_emits_terminal_event(
                 raise
 
         async def callback(messages, tools):
+            nonlocal delegated
             names = {item["function"]["name"] for item in tools}
             if "delegate_to_agent" in names:
+                if delegated:
+                    await asyncio.Event().wait()
+                delegated = True
                 return _delegate_call(
                     "delegate-editing",
                     role="ai_editing_director",
@@ -2194,14 +2263,12 @@ def test_specialist_cancel_emits_terminal_event(
                     task="角色声音设计",
                 )
             if cancel_phase == "waiting_runtime":
-                # Specialist turn: park the run in a long-running tool.
                 return _media_call(
                     "gen-1",
                     name="tts_generation",
                     target_ref="asset:hero",
                     arguments={"text": "测试取消中的长任务。"},
                 )
-            # Specialist turn: block forever until the parent is interrupted.
             await _block_until_cancelled()
 
         async def blocking_invoke(**_kwargs):
@@ -2210,15 +2277,37 @@ def test_specialist_cancel_emits_terminal_event(
         driver = _driver(services, callback)
         if cancel_phase == "waiting_runtime":
             driver.specialist_tools.invoke = blocking_invoke  # type: ignore[method-assign]
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        await asyncio.wait_for(blocked.wait(), timeout=2.0)
-        interrupted = await driver.interrupt(PROJECT_ID, reason="test-stop")
-        await driver.wait_until_idle(PROJECT_ID)
-        specialist_runs = driver.executions.list_specialist_runs(PROJECT_ID)
-        events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
-        await driver.stop()
-        return interrupted, specialist_runs, events, cancel_entered
+        try:
+            await driver.start()
+            driver.notify(PROJECT_ID)
+            # Readiness includes durable I/O, not just model/tool latency.
+            await asyncio.wait_for(blocked.wait(), timeout=30.0)
+            runs = driver.executions.list_specialist_runs(PROJECT_ID)
+            assert len(runs) == 1
+            assert runs[0].status.value == cancel_phase.upper()
+            specialist_task = driver._specialist_tasks[PROJECT_ID][
+                runs[0].run_id
+            ].task
+            assert specialist_task is not None
+            interrupted = await driver.interrupt(
+                PROJECT_ID,
+                reason="test-stop",
+            )
+            # Mainline idleness does not join detached specialists.
+            done, _pending = await asyncio.wait(
+                {specialist_task},
+                timeout=30.0,
+            )
+            assert specialist_task in done
+            assert specialist_task.cancelled()
+            await driver.wait_until_idle(PROJECT_ID, timeout_seconds=30.0)
+            specialist_runs = driver.executions.list_specialist_runs(
+                PROJECT_ID,
+            )
+            events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+            return interrupted, specialist_runs, events, cancel_entered
+        finally:
+            await driver.stop()
 
     interrupted, specialist_runs, events, cancel_entered = asyncio.run(
         scenario(),

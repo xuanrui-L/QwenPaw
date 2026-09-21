@@ -83,6 +83,16 @@ def test_backend_detection() -> None:
     assert _backend_for_protocol("volcano engine（火山引擎）") == "ARK"
     assert _backend_for_protocol("black forest labs（flux）") == "BFL"
     assert _backend_for_protocol("ideogram") == "IDEOGRAM"
+    # The AgentScope proxy speaks the same multimodal-generation endpoint; a
+    # deployment that only sets an env base URL has to land there too.
+    assert _backend_for_protocol("agentscope platform") == "DASHSCOPE"
+    assert (
+        _detect_backend_from_names(
+            "",
+            "https://platform-pre.agentscope.io/v1",
+        )
+        == "DASHSCOPE"
+    )
     assert _detect_backend_from_names("gemini-3-pro-image", "") == "GEMINI"
     assert _detect_backend_from_names("", "https://api.bfl.ai") == "BFL"
 
