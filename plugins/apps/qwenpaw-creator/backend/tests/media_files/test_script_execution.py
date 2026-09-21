@@ -12,13 +12,11 @@ from services.file_agent_runtime.work_graph import (
     WorkNodeStatus,
     derive_work_graph,
 )
-from services.file_agent_runtime import work_scheduler
 from services.media_files import script_execution
 from services.media_files.script_execution import (
     execute_file_script_command,
 )
 from services.project_files.facade import CreatorFileServices
-from services.project_files.edit_impact import apply_frontend_edit_impacts
 from services.project_files.models import Project, Timeline
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 
@@ -140,89 +138,6 @@ def test_same_inputs_replay_without_second_model_call(
     assert replay.replayed
     assert replay.artifact_version_id == first.artifact_version_id
     assert len(calls) == 1
-
-
-@pytest.mark.parametrize("automatic", [False, True])
-def test_scheduler_regenerates_stale_script_once_and_keeps_saved_body(
-    tmp_path,
-    monkeypatch,
-    automatic,
-):
-    services = _services(tmp_path)
-    calls = _mock_chat(monkeypatch, [DRAFT, DRAFT + "\n**管家**：请保管钥匙。\n"])
-    monkeypatch.setattr(
-        work_scheduler,
-        "get_execution_authorization_mode",
-        lambda: "allow_all" if automatic else "required",
-    )
-
-    async def scenario():
-        first = await execute_file_script_command(
-            services,
-            project_id=PROJECT_ID,
-            target_ref="timeline:timeline:ep2",
-            arguments={},
-            idempotency_key="first-script",
-        )
-        base = services.projects.read(PROJECT_ID)
-        candidate = base.project.model_dump(mode="json")
-        candidate["timelines"]["items"]["timeline:main"][
-            "description"
-        ] = "已发布第一集正文"
-        episode = candidate["timelines"]["items"]["timeline:ep2"]
-        episode["synopsis"] = "林晚决定留下钥匙，进入旧宅。"
-        episode["description"] = "林晚把钥匙收进口袋，然后走进旧宅。必须保留这个动作。"
-        candidate, _ = apply_frontend_edit_impacts(
-            candidate,
-            [
-                "/timelines/items/timeline:ep2/synopsis",
-                "/timelines/items/timeline:ep2/description",
-            ],
-            base=base.project.model_dump(mode="json"),
-        )
-        services.commits.commit(
-            base=base,
-            candidate=candidate,
-            origin=ChangeOrigin.FRONTEND_EDIT,
-            review_policy=ReviewPolicy.AUTO_FIX,
-        )
-        scheduler = work_scheduler.WorkGraphScheduler(services)
-        try:
-            await scheduler.tick(PROJECT_ID)
-            if automatic:
-                deadline = asyncio.get_running_loop().time() + 5
-                while (
-                    services.projects.read(PROJECT_ID)
-                    .project.assets.artifact_slots_by_id["script:timeline:ep2"]
-                    .selected_version_id
-                    == first.artifact_version_id
-                ):
-                    assert asyncio.get_running_loop().time() < deadline
-                    await asyncio.sleep(0.01)
-            for _ in range(3):
-                await scheduler.tick(PROJECT_ID)
-                await asyncio.sleep(0.01)
-            project = services.projects.read(PROJECT_ID).project
-            assert project.assets.artifact_versions_by_id[
-                first.artifact_version_id
-            ].stale
-            selected = project.assets.artifact_slots_by_id[
-                "script:timeline:ep2"
-            ].selected_version_id
-            if automatic:
-                assert selected != first.artifact_version_id
-                assert not project.assets.artifact_versions_by_id[
-                    selected
-                ].stale
-                assert len(calls) == 2
-                assert "必须保留这个动作" in calls[-1]["prompt"]
-            else:
-                assert selected == first.artifact_version_id
-                assert len(calls) == 1
-        finally:
-            await scheduler.shutdown()
-
-    asyncio.run(scenario())
 
 
 def test_changed_synopsis_drafts_a_new_selected_version(

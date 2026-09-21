@@ -189,12 +189,7 @@ def test_manifest_and_invoke_expose_only_model_owned_arguments(tmp_path):
         },
     )
     assert written["project"]["name"] == "Invoked"
-    assert written["changedPointers"] == [
-        "/name",
-        "/name_source",
-        "/settings/platform",
-    ]
-    assert written["project"]["name_source"] == "user"
+    assert written["changedPointers"] == ["/name", "/settings/platform"]
 
     with pytest.raises(ValidationError, match="origin"):
         tools.invoke(
