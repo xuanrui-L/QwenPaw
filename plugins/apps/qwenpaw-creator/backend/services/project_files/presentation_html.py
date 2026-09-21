@@ -151,7 +151,7 @@ class _PresentationParser(_InteractionParser):
             )
 
 
-def validate_presentation_html(
+def validate_presentation_html(  # pylint: disable=too-many-branches
     html: str,
     node_ids=None,
     screens=None,
@@ -188,7 +188,7 @@ def validate_presentation_html(
         for binding in ("project.title", "project.synopsis"):
             if not copy.get(("title", binding)):
                 parser.problems.append(
-                    f"homepage {binding} needs authored text"
+                    f"homepage {binding} needs authored text",
                 )
         if (
             expected_title
@@ -197,7 +197,7 @@ def validate_presentation_html(
             parser.problems.append("homepage must preserve the user title")
         if copy.get(("ending", "node.title")) != "结局":
             parser.problems.append(
-                "ending heading must be 结局 without numbering"
+                "ending heading must be 结局 without numbering",
             )
         if any(
             binding == "progress.endings" for _, binding in parser.bindings

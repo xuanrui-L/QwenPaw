@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 """Extract one complete authored document from a model's prose/code reply."""
 
+import re
 from html.parser import HTMLParser
+
+# ``<![foo]>`` is a bogus declaration; html.parser swallows one without
+# reporting it, so it has to be found textually before the document starts.
+_BOGUS_DECLARATION = re.compile(r"<!\[(?!CDATA\[)[^\]]*\]>")
 
 
 class _DocumentBounds(HTMLParser):
@@ -57,4 +62,6 @@ def extract_html_document(raw: str) -> str:
     preceding = [a for a, b in parser.doctypes if b <= start]
     if preceding:
         start = preceding[-1]
+    if _BOGUS_DECLARATION.search(raw[:start]):
+        raise ValueError("HTML 文档之前存在无法识别的声明，请返回完整的 HTML")
     return raw[start:end]

@@ -398,6 +398,7 @@ async def execute_file_interaction_command(
     task_id = _stable_id("task", project_id, idempotency_key)
     attempt_id = f"{task_id}-attempt-1"
 
+    # pylint: disable-next=inconsistent-return-statements
     def admit():
         with services.projects.lifecycle_lock(project_id):
             try:
@@ -435,7 +436,7 @@ async def execute_file_interaction_command(
             if existing is not None:
                 if existing.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
                     raise ConflictError(
-                        "Interaction generation already running"
+                        "Interaction generation already running",
                     )
                 reason = (existing.error or {}).get("message")
                 raise ModelError(

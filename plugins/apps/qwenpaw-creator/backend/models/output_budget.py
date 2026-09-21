@@ -30,7 +30,9 @@ def known_anthropic_output_limit(model_name: str) -> int | None:
     # MiniMax's Anthropic protocol documents a maximum of 204800 tokens:
     # https://platform.minimax.io/docs/api-reference/text-chat-anthropic
     if re.fullmatch(
-        r"MiniMax-M2(?:\.[157])?(?:-highspeed)?", model_name, re.I
+        r"MiniMax-M2(?:\.[157])?(?:-highspeed)?",
+        model_name,
+        re.I,
     ):
         return 204800
     name = re.sub(r"-(?:\d{8}|latest)$", "", model_name)
@@ -56,7 +58,8 @@ async def anthropic_output_limit(
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(
-                f"{base}/models/{quote(model_name, safe='')}", headers=headers
+                f"{base}/models/{quote(model_name, safe='')}",
+                headers=headers,
             )
             response.raise_for_status()
             limit = response.json().get("max_tokens")
