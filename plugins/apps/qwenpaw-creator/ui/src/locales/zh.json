@@ -165,7 +165,10 @@
     "saveAsTemplateFailed": "保存模板失败",
     "deleteTemplateConfirm": "删除模板「{{name}}」？",
     "deleteTemplateSuccess": "模板已删除",
-    "deleteTemplateFailed": "删除模板失败"
+    "deleteTemplateFailed": "删除模板失败",
+    "videoTemplateNone": "不使用模板",
+    "videoTemplateHint": "选择预设模板快速开始",
+    "videoTemplateUserSection": "我的模板"
   },
   "nav": {
     "videoPlan": "视频方案",
@@ -634,7 +637,8 @@
     "railOverviewTab": "视频概览",
     "noStoryboard": "暂无分镜图",
     "scriptPlan": "返回视频脚本",
-    "expandSidebar": "展开侧边栏"
+    "expandSidebar": "展开侧边栏",
+    "railStoryboardTab": "分镜图预览"
   },
   "r2v": {
     "title": "视频方案 / {{element}} / 制作工作台",
@@ -808,7 +812,9 @@
     "editorReferencesChanged": "引用图片或编辑对象已变化。为避免引用到错误图片，请重新载入后继续编辑。当前编辑暂时保留。",
     "editorReload": "重新载入最新内容",
     "editorKeep": "保留我的编辑",
-    "narrativeTitle": "片段内容"
+    "narrativeTitle": "片段内容",
+    "subtitle": "AI 生成画面子界面，继承分镜、引用资产和产物版本。",
+    "tokenClickRemove": "点击移除该引用"
   },
   "elementDetail": {
     "selectElement": "选择一项时间线内容",
@@ -1055,8 +1061,6 @@
     "generate": "生成",
     "productionProgress": "制作进度 {{done}}/{{total}}",
     "parallel": "并行 {{count}}",
-    "mediaCallBudgetTitle": "已发起的付费媒体生成调用次数 / 项目上限（可在配置 agent_runtime.media_call_budget 调整）",
-    "mediaCalls": "媒体调用 {{used}}/{{budget}}",
     "progress": "进度 {{done}}/{{total}}",
     "failed": "失败 {{count}}",
     "listSeparator": "、",
@@ -1114,6 +1118,9 @@
   },
   "executionAuth": {
     "title": "高成本媒体执行",
+    "generatePresentation": "生成作品页面",
+    "generateInteraction": "生成抉择动效",
+    "presentationTarget": "首页、播放页、剧情地图与结局页",
     "duration": "时长 {{duration}}秒",
     "resolutionLabel": "分辨率 {{resolution}}",
     "ratio": "比例 {{ratio}}",
@@ -1152,6 +1159,8 @@
     "checkpointCancelled": "已取消本次确认"
   },
   "fileReview": {
+    "applyingExecutionMode": "正在按已保存的执行模式处理交互设计…",
+    "autoModeFailed": "交互设计自动处理未完成，请重试或手动处理：{{detail}}",
     "pending": "待审",
     "kept": "已保留",
     "undone": "已撤销",
@@ -1169,6 +1178,7 @@
     "creativeBrief": "创作总纲",
     "creativeDirection": "创作方向",
     "prompt": "提示词",
+    "nativeAudio": "视频原声",
     "camera": "运镜",
     "framing": "景别",
     "duration": "时长",
@@ -1230,6 +1240,9 @@
       "videoVersion": "视频版本",
       "editPlan": "剪辑方案",
       "contentUpdated": "内容已更新",
+      "presentationEffect": "作品页面 · 界面效果",
+      "interactionEffect": "抉择动效",
+      "effectUpdated": "界面效果已更新，点击查看预览",
       "mediaSelection": "使用的素材",
       "selectionUpdated": "素材选择已更新",
       "text": "文案",
@@ -1419,6 +1432,7 @@
     "reviewRound": "第 {{round}} 轮"
   },
   "workspaceEmpty": {
+    "interactive": "剧情节点待起草",
     "preparingHint": "素材准备完成后会自动开始创作。你可以在创作助手中查看进展，无需重复提交。",
     "blueprint": "视频脚本",
     "script": "剧本内容",
@@ -2040,6 +2054,8 @@
     "dismiss": "关闭上传进度"
   },
   "blueprint": {
+    "scriptSyncExplanation": "创作依据已更新，当前剧本尚未同步。生成过程中补全剧情分支或创作要求也会触发此状态，并不表示你提出过修改。已有正文仍可查看。",
+    "scriptSyncReason": "更新原因：{{reason}}",
     "timelineEdit": "时间线编辑",
     "episodeN": "节点 {{n}}",
     "episodesCount": "叙事节点 · {{count}}",
@@ -2055,10 +2071,31 @@
       "done": "已成片",
       "run": "生成中",
       "wait": "剧本已写入",
-      "scriptStale": "剧本已过期",
+      "scriptStale": "剧本待同步",
       "idle": "待起草"
     },
     "episodeList": "剧集列表 · 线性 {{count}} 集",
+    "graph": {
+      "title": "剧情地图",
+      "expand": "展开剧情地图",
+      "collapse": "收起剧情地图",
+      "locateNode": "定位剧情节点",
+      "zoomOut": "缩小剧情地图",
+      "zoomIn": "放大剧情地图",
+      "actualSize": "恢复 100%",
+      "fit": "总览",
+      "arrange": "自动整理",
+      "localLayout": "重新排布节点，布局仅保存在当前浏览器",
+      "navigationHint": "拖动节点整理 · 拖动空白平移 · Shift + 滚轮横移 · 点击节点查看去向",
+      "connections": "节点分支去向",
+      "clearFocus": "取消节点聚焦",
+      "continue": "继续",
+      "noOutgoing": "此节点没有后续分支。",
+      "incoming": "查看 {{count}} 条来路"
+    },
+    "interactiveStoryMap": "互动式短剧 · 剧情地图",
+    "branchesPending": "分支连接尚未建立",
+    "branchesPendingHint": "剧情节点将在这里逐步展开，抉择和分支连接建立后会显示完整的剧情走向。可先查看已有节点的剧本，或进入交互设计查看页面要求。",
     "noSynopsis": "暂无梗概",
     "timelineQuick": "时间线",
     "endingNode": "结局",
@@ -2085,6 +2122,7 @@
     "playRoughCut": "播放粗剪",
     "playFullFilm": "播放整个成片",
     "closeRoughCutPlayer": "关闭播放",
+    "previewUnavailable": "分镜图尚未生成，暂时无法预览",
     "roughCutFailed": "粗剪拼接失败：该时间线还没有可用的镜头素材",
     "finalCutBadge": "成片",
     "downloadFinalCut": "下载成片",
@@ -2123,7 +2161,7 @@
       "researchReady": "调研完成",
       "researchRunning": "调研中",
       "scriptReady": "共 {{count}} 个版本",
-      "scriptStale": "剧本已过期，需要重审",
+      "scriptStale": "创作依据已更新，剧本待同步",
       "visualReady": "设计已生成",
       "visualPending": "待生成",
       "elementReady": "已生成",
@@ -2142,7 +2180,7 @@
     "finalCut": "最终成片",
     "scriptPanelTitle": "剧本 · {{title}}",
     "scriptVersion": "共 {{count}} 版",
-    "scriptStaleChip": "已过期",
+    "scriptStaleChip": "待同步",
     "requestChanges": "提出修改",
     "requestChangesDraft": "请修改《{{title}}》的剧本：",
     "requestChangesPrefilled": "已写入创作助手输入框，补充修改意见后发送",
@@ -2224,9 +2262,15 @@
     "sourceResultFailed": "理解结果读取失败",
     "sourceResultLoading": "正在读取理解结果",
     "pausePreview": "暂停预览",
-    "previewPosition": "预览进度"
+    "previewPosition": "预览进度",
+    "playFullInteractive": "播放整个互动包",
+    "exportBundle": "导出互动包",
+    "exportBundleFailed": "互动包暂时无法导出",
+    "downloadBundleTitle": "导出互动包或导出项目",
+    "previewChoice": "选择故事走向"
   },
   "sidebar": {
+    "nodes": "剧情节点",
     "assistant": "创作助手",
     "episodes": "剧集列表"
   },
@@ -2311,6 +2355,10 @@
     "activeWork": "当前进行中"
   },
   "agentProgress": {
+    "visualState": "状态 {{index}}",
+    "waitingForUpdate": "等待「{{target}}」更新",
+    "waitingForTarget": "等待「{{target}}」完成",
+    "waitingForPrompt": "等待补全生成提示词",
     "composeNeedsUpdate": "成片需更新",
     "lastAttemptFailed": "上次尝试失败",
     "lastAttemptCancelled": "上次尝试已停止",

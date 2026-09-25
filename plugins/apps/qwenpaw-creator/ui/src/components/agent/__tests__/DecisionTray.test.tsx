@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DecisionTray from "@/components/agent/DecisionTray";
 import type { FileProjectReviewRecord } from "@/contracts/creator";
@@ -67,6 +67,23 @@ afterEach(() => {
 });
 
 describe("DecisionTray", () => {
+  it("does not offer a manual batch decision while execution mode is handling the review, but restores it on failure", () => {
+    seed({
+      authorizations: [],
+      reviews: [
+        textReview("design-review", "/interactive_presentation/motion"),
+      ],
+    });
+    useFileProjectReviewStore.setState({ autoReviewIds: ["design-review"] });
+    const { container } = render(<DecisionTray projectId="p1" />);
+    expect(container).toBeEmptyDOMElement();
+    act(() => useFileProjectReviewStore.setState({ autoReviewIds: [] }));
+    expect(container.querySelector("[data-decision-tray]")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "保留 作品页面 · 界面效果" }),
+    ).toBeInTheDocument();
+  });
+
   it("focuses the blocking authorization first, then steps to the review", () => {
     seed({ reviews: [textReview("review-1", "/description")] });
     render(<DecisionTray projectId="p1" />);

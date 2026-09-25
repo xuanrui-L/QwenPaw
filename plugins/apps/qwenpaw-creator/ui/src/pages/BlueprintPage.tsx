@@ -1,5 +1,8 @@
+import InteractionWorkbench, {
+  hasInteractionDesign,
+} from "@/components/interaction/InteractionWorkbench";
 import { useEffect, useMemo, useState } from "react";
-import { FolderSearch, Palette } from "lucide-react";
+import { FolderSearch, Palette, MousePointer2 } from "lucide-react";
 import { MenuUnfoldOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { navigate, useParams, useSearchParams } from "@/routing/navigation";
@@ -13,6 +16,7 @@ import {
 import {
   isVoiceOnlyVisualEntity,
   hasBlueprintContent,
+  selectNarrativeEdges,
   selectResearchSlots,
   selectTimelineSummaries,
 } from "@/selectors/blueprintSelectors";
@@ -61,6 +65,7 @@ export default function BlueprintPage() {
     () => (project ? selectTimelineSummaries(project) : []),
     [project],
   );
+  const edges = useMemo(() => selectNarrativeEdges(project), [project]);
   const researchSlots = useMemo(
     () => (project ? selectResearchSlots(project) : []),
     [project],
@@ -72,6 +77,7 @@ export default function BlueprintPage() {
   const sidebarOpen = useAgentDockUiStore((state) => state.open);
   const setSidebarOpen = useAgentDockUiStore((state) => state.setOpen);
   const [scriptOpen, setScriptOpen] = useState(false);
+  const [interactionOpen, setInteractionOpen] = useState(false);
   const [prepOpen, setPrepOpen] = useState(false);
   const [prepTab, setPrepTab] = useState<PreproductionTab>("visual");
   const [prepFocus, setPrepFocus] = useState<PrepFocus | null>(null);
@@ -82,7 +88,7 @@ export default function BlueprintPage() {
     if (!project || !timelineFromQuery) return;
     if (!project.timelines.items[timelineFromQuery]) return;
     setSelectedTimelineId(timelineFromQuery);
-    setScriptOpen(true);
+    setScriptOpen(!String(query.get("field") || "").includes("/creation/"));
     useCreatorInteractionStore
       .getState()
       .select(`timeline:${timelineFromQuery}`);
@@ -169,6 +175,17 @@ export default function BlueprintPage() {
           <h2 className="truncate text-sm font-medium text-[var(--color-text-primary)]">
             {t("blueprint.pageTitle")}
           </h2>
+          {hasInteractionDesign(project) && (
+            <button
+              type="button"
+              className="btn-secondary"
+              data-interaction-design-entry
+              onClick={() => setInteractionOpen(true)}
+            >
+              <MousePointer2 className="h-3.5 w-3.5" />
+              交互设计
+            </button>
+          )}
         </div>
         <span className="flex flex-wrap items-center justify-end gap-3">
           <button
@@ -214,7 +231,7 @@ export default function BlueprintPage() {
 
       {/* First screen: single projects read as the script document itself
           (design 84:37778); multi-episode / branching keep the structure. */}
-      {!hasBlueprintContent(project) ? (
+      {!hasBlueprintContent(project) && shape !== "branching" ? (
         <div
           className="workspace-decor-grid flex min-h-0 flex-1 overflow-y-auto p-4"
           data-blueprint-initial
@@ -237,7 +254,8 @@ export default function BlueprintPage() {
           <BlueprintStructureArea
             project={project}
             shape={shape}
-            summaries={summaries}
+            summaries={hasBlueprintContent(project) ? summaries : []}
+            edges={edges}
             selectedTimelineId={scriptOpen ? selectedTimelineId : null}
             onSelectTimeline={openScript}
             onOpenTimeline={openTimeline}
@@ -249,6 +267,11 @@ export default function BlueprintPage() {
         </div>
       )}
 
+      <InteractionWorkbench
+        project={project}
+        open={interactionOpen}
+        onOpenChange={setInteractionOpen}
+      />
       <BlueprintRoughCutStrip project={project} onSelectTimeline={openScript} />
 
       {/* Inline panels: only the workspace column, AgentDock stays visible. */}

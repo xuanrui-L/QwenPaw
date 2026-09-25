@@ -10,6 +10,7 @@ a person clicking retry is an explicit instruction.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, Response
@@ -17,7 +18,6 @@ from pydantic import BaseModel, Field
 
 from domain.errors import NotFoundError, ValidationError
 from models.config import (
-    get_media_call_budget,
     get_image_model_name,
     get_video_model_name,
 )
@@ -38,6 +38,10 @@ router = APIRouter(
 )
 
 
+class DispatchWorkGraphRequest(BaseModel):
+    regenerate: bool = False
+
+
 def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
     try:
         snapshot = services.projects.read(project_id)
@@ -47,6 +51,7 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
     graph = derive_work_graph(
         snapshot.project,
         tasks=tasks,
+        pending_reviews=services.reviews.all_pending(project_id),
         media_models=(get_image_model_name(), get_video_model_name()),
     )
     hold = manual_regeneration_hold.ManualRegenerationHoldStore(
@@ -57,9 +62,7 @@ def _graph_payload(project_id: str, services: CreatorFileServices) -> dict:
         "manualHold": hold.payload(),
         "generation": graph.generation,
         "counts": graph.counts(),
-        # Honest spend metric: billable provider calls, never estimated money.
         "mediaCalls": media_call_count(services, project_id),
-        "mediaCallBudget": get_media_call_budget(),
         "nodes": [
             {
                 "id": node.node_id,
@@ -149,6 +152,7 @@ async def resume_work_graph(
 async def dispatch_work_graph_node(
     project_id: str,
     node_id: str,
+    request: DispatchWorkGraphRequest | None = None,
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
     snapshot = await asyncio.to_thread(_read_project, project_id, services)
@@ -174,9 +178,16 @@ async def dispatch_work_graph_node(
         raise NotFoundError(f"work-graph 节点不存在: {node_id}")
     if node.command is None:
         raise ValidationError(f"节点 {node_id} 不支持直接派发")
-    if node.status.value == "running":
-        # An in-flight execution is provider spend already committed; the
-        # click races the run instead of authorizing a second one.
+    regenerate = bool(request and request.regenerate)
+    if regenerate and node.kind != "interaction":
+        raise ValidationError("Explicit regeneration is only for interaction")
+    if node.status.value == "running" or (
+        node.kind == "interaction"
+        and node.status.value == "done"
+        and not regenerate
+    ):
+        # Existing media controls request a reroll without a request body.
+        # Interaction controls explicitly opt in to bypass semantic reuse.
         return {
             "ok": True,
             "nodeId": node_id,
@@ -188,6 +199,16 @@ async def dispatch_work_graph_node(
             f"节点 {node_id} 的依赖未就绪：" + "、".join(node.missing[:5]),
         )
     scheduler = WorkGraphScheduler(services)
+    if regenerate:
+        # Concurrent clicks at this Project revision share a durable slot.
+        # Automatic scheduler ticks never acquire this manual capability.
+        node = replace(
+            node,
+            dispatch_fingerprint=(
+                f"{node.dispatch_fingerprint}-manual-{snapshot.etag}"
+            ),
+            dispatch_arguments={**node.dispatch_arguments, "regenerate": True},
+        )
     operation = await asyncio.to_thread(
         holds.begin,
         project_id,

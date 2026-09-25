@@ -22,6 +22,10 @@ import { useLaunchUploadStore } from "@/store/launchUploadStore";
 import { taskErrorMessage } from "@/lib/taskPresentation";
 import { creatorStatusLabel } from "@/lib/creatorPresentation";
 import { useRouter } from "@/routing/navigation";
+import {
+  interactiveContentTypeFromBrief,
+  isInteractiveContentType,
+} from "@/lib/interactiveProject";
 
 export type AttachmentDraft =
   | {
@@ -535,11 +539,15 @@ export function useProjectLaunch(options?: {
         // Resolve the stage from the saved permission mode on the server,
         // so a stale client snapshot cannot override the user's choice.
         name: resolvedProjectName,
+        nameSource: projectName.trim() ? ("user" as const) : ("auto" as const),
         description: projectDescription.trim(),
         scenario,
         resolution,
         aspectRatio,
-        contentType: isVideoEdit ? contentType : null,
+        contentType:
+          isVideoEdit || isInteractiveContentType(contentType)
+            ? contentType
+            : interactiveContentTypeFromBrief(projectDescription),
         templateId: selectedTemplateId ?? undefined,
         // With no assets, let Project creation persist the first Goal and
         // message atomically.  This avoids an observable IDLE Project between

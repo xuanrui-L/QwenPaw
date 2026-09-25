@@ -15,6 +15,8 @@ The protocol is read from the persisted ``llm`` section of
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import httpx
 
 from models import config as model_config
@@ -79,6 +81,7 @@ async def _call_openai(
     model_name: str,
     temperature: float,
     timeout: float,
+    thinking_budget: int | None = None,
 ) -> str:
     body = {
         "model": model_name,
@@ -89,6 +92,16 @@ async def _call_openai(
     # without an Authorization header; an empty Bearer value would be
     # rejected as an invalid key.
     url = _openai_chat_url()
+    # Qwen's max_tokens excludes reasoning. Bound the separate budget for
+    # callers that need predictable latency, without adding provider-specific
+    # fields to other OpenAI-compatible gateways.
+    host = urlsplit(url).hostname or ""
+    if (
+        thinking_budget is not None
+        and host.endswith(".aliyuncs.com")
+        and model_name.lower().startswith(("qwen3.", "qwen3-"))
+    ):
+        body["thinking_budget"] = thinking_budget
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -266,6 +279,7 @@ async def chat_completion(
     system_prompt: str = "",
     temperature: float = 0.2,
     timeout: float = 180.0,
+    thinking_budget: int | None = None,
 ) -> str:
     """Call the configured text model without accepting any media content parts."""
 
@@ -313,6 +327,7 @@ async def chat_completion(
             model_name=model_name,
             temperature=temperature,
             timeout=timeout,
+            thinking_budget=thinking_budget,
         )
     except ModelError:
         raise

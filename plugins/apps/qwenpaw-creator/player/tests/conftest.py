@@ -1,0 +1,62 @@
+# -*- coding: utf-8 -*-
+# pylint: disable=wrong-import-position,redefined-outer-name
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from ivb.server.library import ProjectLibrary  # noqa: E402
+from ivb.testing import (  # noqa: E402
+    BundleSpec,
+    write_bundle_dir,
+    write_bundle_zip,
+)  # noqa: E402
+
+
+@pytest.fixture
+def spec() -> BundleSpec:
+    return BundleSpec()
+
+
+@pytest.fixture
+def bundle_dir(tmp_path, spec):
+    return write_bundle_dir(tmp_path / "clean.ivb", spec)
+
+
+@pytest.fixture
+def bundle_zip(tmp_path, spec):
+    return write_bundle_zip(tmp_path / "clean.ivb.zip", spec)
+
+
+@pytest.fixture
+def make_zip(tmp_path):
+    def _make(name: str, **kwargs) -> Path:
+        return write_bundle_zip(tmp_path / f"{name}.zip", BundleSpec(**kwargs))
+
+    return _make
+
+
+@pytest.fixture
+def make_dir(tmp_path):
+    def _make(name: str, **kwargs) -> Path:
+        return write_bundle_dir(tmp_path / name, BundleSpec(**kwargs))
+
+    return _make
+
+
+@pytest.fixture
+def data_dir(tmp_path):
+    return tmp_path / "data"
+
+
+@pytest.fixture
+def library(data_dir):
+    """一个空的多包库(data_dir 已建,尚未装包)。"""
+
+    return ProjectLibrary(data_dir)

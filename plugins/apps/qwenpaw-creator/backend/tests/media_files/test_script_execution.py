@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import pytest
 
@@ -12,12 +13,19 @@ from services.file_agent_runtime.work_graph import (
     WorkNodeStatus,
     derive_work_graph,
 )
+from services.file_agent_runtime import work_scheduler
 from services.media_files import script_execution
 from services.media_files.script_execution import (
+    _build_script_prompt,
     execute_file_script_command,
 )
 from services.project_files.facade import CreatorFileServices
-from services.project_files.models import Project, Timeline
+from services.project_files.agent_tools import (
+    AgentProjectToolContext,
+    AgentProjectTools,
+)
+from services.project_files.edit_impact import apply_frontend_edit_impacts
+from services.project_files.models import NarrativeEdge, Project, Timeline
 from services.runtime_files.models import ChangeOrigin, ReviewPolicy
 
 pytestmark = pytest.mark.unit
@@ -138,6 +146,266 @@ def test_same_inputs_replay_without_second_model_call(
     assert replay.replayed
     assert replay.artifact_version_id == first.artifact_version_id
     assert len(calls) == 1
+
+
+def _branching_services(tmp_path):
+    services = _services(tmp_path)
+    base = services.projects.read(PROJECT_ID)
+    project = base.project.model_copy(deep=True)
+    project.timelines.items["timeline:main"].description = "Saved ending A"
+    project.timelines.items["ending-b"] = Timeline(
+        timeline_id="ending-b",
+        title="Ending B",
+        description="Saved ending B",
+    )
+    project.timelines.order.append("ending-b")
+    project.narrative_edges = [
+        NarrativeEdge(
+            edge_id="ending-choice",
+            source_timeline_id="timeline:main",
+            target_timeline_id="ending-b",
+            label="Look for more evidence",
+        ),
+    ]
+    services.commits.commit(
+        base=base,
+        candidate=project.model_dump(mode="json"),
+        origin=ChangeOrigin.INITIAL_CREATION,
+        review_policy=ReviewPolicy.AUTO_FIX,
+    )
+    return services
+
+
+@pytest.mark.parametrize("tool_name", ["jq_project", "patch_project"])
+def test_initial_agent_ending_edit_keeps_script_and_replays_without_model(
+    tmp_path,
+    monkeypatch,
+    tool_name,
+):
+    services = _branching_services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    first = _draft(services, key="first")
+    tools = AgentProjectTools(
+        services.projects,
+        context=AgentProjectToolContext(
+            origin=ChangeOrigin.INITIAL_CREATION,
+            review_policy=ReviewPolicy.AUTO_FIX,
+            caused_by_message_seq=1,
+        ),
+    )
+    tools.read_project(PROJECT_ID)
+    base = services.projects.read(PROJECT_ID)
+    # A concurrent production commit must survive the Agent's cached base.
+    candidate = base.project.model_dump(mode="json")
+    candidate["settings"]["aspect_ratio"] = "9:16"
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.RUNTIME_TASK,
+        review_policy=ReviewPolicy.AUTO_FIX,
+    )
+    edge = NarrativeEdge(
+        edge_id="revised-ending-choice",
+        source_timeline_id="ending-b",
+        target_timeline_id="timeline:main",
+        label="Keep the evidence",
+    ).model_dump(mode="json")
+    if tool_name == "jq_project":
+        result = tools.jq_project(
+            project_id=PROJECT_ID,
+            program=".narrative_edges = $edges",
+            json_args={"edges": [edge]},
+        )
+    else:
+        result = tools.patch_project(
+            project_id=PROJECT_ID,
+            ops=[
+                {"op": "replace", "path": "/narrative_edges", "value": [edge]},
+            ],
+        )
+    project = result.project
+    assert project.settings.aspect_ratio == "9:16"
+    assert _build_script_prompt(
+        base.project,
+        base.project.timelines.items["timeline:ep2"],
+        "",
+    ) == _build_script_prompt(
+        project,
+        project.timelines.items["timeline:ep2"],
+        "",
+    )
+    slot = project.assets.artifact_slots_by_id[first.slot_id]
+    version = project.assets.artifact_versions_by_id[first.artifact_version_id]
+    assert not version.stale
+    assert slot.version_ids == [first.artifact_version_id]
+    indexed = project.assets.files_by_id[first.file_id]
+    payload = (
+        services.projects.project_root(PROJECT_ID) / indexed.relative_uri
+    ).read_bytes()
+    assert hashlib.sha256(payload).hexdigest() == version.checksum
+    graph = derive_work_graph(project)
+    assert graph.by_id["script:timeline:ep2"].status is WorkNodeStatus.DONE
+    assert graph.by_id["script:timeline:ep2"].regeneration_of is None
+    replay = _draft(services, key="retry-after-remote-edit")
+    assert replay.replayed
+    assert replay.artifact_version_id == first.artifact_version_id
+    assert len(calls) == 1
+
+
+def test_remote_branch_edit_during_model_call_keeps_valid_result(
+    tmp_path,
+    monkeypatch,
+):
+    services = _branching_services(tmp_path)
+    calls = []
+
+    async def finish_ending_then_return(prompt, **_kwargs):
+        calls.append(prompt)
+        tools = AgentProjectTools(
+            services.projects,
+            context=AgentProjectToolContext(
+                origin=ChangeOrigin.INITIAL_CREATION,
+            ),
+        )
+        tools.read_project(PROJECT_ID)
+        tools.patch_project(
+            project_id=PROJECT_ID,
+            ops=[
+                {"op": "remove", "path": "/narrative_edges/0"},
+            ],
+        )
+        return DRAFT
+
+    monkeypatch.setattr(
+        script_execution.text_model,
+        "chat_completion",
+        finish_ending_then_return,
+    )
+    first = _draft(services, key="in-flight")
+    assert not first.replayed
+    replay = _draft(services, key="retry")
+    assert replay.replayed
+    assert replay.artifact_version_id == first.artifact_version_id
+    assert len(calls) == 1
+
+
+def test_unused_default_duration_does_not_redraft_script(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    first = _draft(services, key="first")
+    tools = AgentProjectTools(
+        services.projects,
+        context=AgentProjectToolContext(origin=ChangeOrigin.INITIAL_CREATION),
+    )
+    tools.read_project(PROJECT_ID)
+    result = tools.patch_project(
+        project_id=PROJECT_ID,
+        ops=[
+            {
+                "op": "replace",
+                "path": "/settings/target_duration_seconds",
+                "value": 90,
+            },
+        ],
+    )
+    assert not result.project.assets.artifact_versions_by_id[
+        first.artifact_version_id
+    ].stale
+    replay = _draft(services, key="retry")
+    assert replay.replayed
+    assert replay.artifact_version_id == first.artifact_version_id
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_scheduler_regenerates_stale_script_once_and_keeps_saved_body(
+    tmp_path,
+    monkeypatch,
+    automatic,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT, DRAFT + "\n**管家**：请保管钥匙。\n"])
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_execution_authorization_mode",
+        lambda: "allow_all" if automatic else "required",
+    )
+
+    async def scenario():
+        first = await execute_file_script_command(
+            services,
+            project_id=PROJECT_ID,
+            target_ref="timeline:timeline:ep2",
+            arguments={},
+            idempotency_key="first-script",
+        )
+        base = services.projects.read(PROJECT_ID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["timelines"]["items"]["timeline:main"][
+            "description"
+        ] = "已发布第一集正文"
+        episode = candidate["timelines"]["items"]["timeline:ep2"]
+        episode["synopsis"] = "林晚决定留下钥匙，进入旧宅。"
+        episode["description"] = "林晚把钥匙收进口袋，然后走进旧宅。必须保留这个动作。"
+        candidate, _ = apply_frontend_edit_impacts(
+            candidate,
+            [
+                "/timelines/items/timeline:ep2/synopsis",
+                "/timelines/items/timeline:ep2/description",
+            ],
+            base=base.project.model_dump(mode="json"),
+        )
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin=ChangeOrigin.FRONTEND_EDIT,
+            review_policy=ReviewPolicy.AUTO_FIX,
+        )
+        scheduler = work_scheduler.WorkGraphScheduler(services)
+        try:
+            await scheduler.tick(PROJECT_ID)
+            if automatic:
+                deadline = asyncio.get_running_loop().time() + 5
+                while (
+                    services.projects.read(PROJECT_ID)
+                    .project.assets.artifact_slots_by_id["script:timeline:ep2"]
+                    .selected_version_id
+                    == first.artifact_version_id
+                ):
+                    assert asyncio.get_running_loop().time() < deadline
+                    await asyncio.sleep(0.01)
+            for _ in range(3):
+                await scheduler.tick(PROJECT_ID)
+                await asyncio.sleep(0.01)
+            project = services.projects.read(PROJECT_ID).project
+            assert project.assets.artifact_versions_by_id[
+                first.artifact_version_id
+            ].stale
+            selected = project.assets.artifact_slots_by_id[
+                "script:timeline:ep2"
+            ].selected_version_id
+            if automatic:
+                assert selected != first.artifact_version_id
+                assert not project.assets.artifact_versions_by_id[
+                    selected
+                ].stale
+                assert len(calls) == 1
+                version = project.assets.artifact_versions_by_id[selected]
+                file = project.assets.files_by_id[version.file_id]
+                assert (
+                    services.projects.project_root(PROJECT_ID)
+                    / file.relative_uri
+                ).read_text(encoding="utf-8") == episode["description"]
+            else:
+                assert selected == first.artifact_version_id
+                assert len(calls) == 1
+        finally:
+            await scheduler.shutdown()
+
+    asyncio.run(scenario())
 
 
 def test_changed_synopsis_drafts_a_new_selected_version(
@@ -263,3 +531,158 @@ def test_same_guidance_retry_still_replays(tmp_path, monkeypatch) -> None:
     assert retry.replayed
     assert retry.artifact_version_id == first.artifact_version_id
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("change", ["stale", "guidance"])
+def test_identical_redraft_is_fresh_and_next_retry_does_not_regenerate(
+    tmp_path,
+    monkeypatch,
+    change,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    first = _draft(services, key="original")
+    if change == "stale":
+        base = services.projects.read(PROJECT_ID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["assets"]["artifact_versions_by_id"][
+            first.artifact_version_id
+        ]["stale"] = True
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin=ChangeOrigin.FRONTEND_EDIT,
+            review_policy=ReviewPolicy.AUTO_FIX,
+            caused_by_request_id="invalidate",
+            round_id="invalidate",
+            transaction_id="invalidate",
+        )
+    guidance = "保留同样的正文" if change == "guidance" else None
+    second = _draft(services, key="regenerate", guidance=guidance)
+    assert second.artifact_version_id != first.artifact_version_id
+    snapshot = services.projects.read(PROJECT_ID)
+    assert not snapshot.project.assets.artifact_versions_by_id[
+        second.artifact_version_id
+    ].stale
+    assert (
+        derive_work_graph(snapshot.project).by_id["script:timeline:ep2"].status
+        is WorkNodeStatus.DONE
+    )
+    third = _draft(services, key="retry", guidance=guidance)
+    assert (
+        third.replayed
+        and third.artifact_version_id == second.artifact_version_id
+    )
+    assert len(calls) == 2
+    assert services.projects.read(PROJECT_ID).etag == snapshot.etag
+
+
+@pytest.mark.parametrize("field", ["synopsis", "description"])
+def test_changed_inputs_during_model_call_do_not_publish_old_script(
+    tmp_path,
+    monkeypatch,
+    field,
+):
+    services = _services(tmp_path)
+
+    async def change_then_return(*_args, **_kwargs):
+        base = services.projects.read(PROJECT_ID)
+        candidate = base.project.model_dump(mode="json")
+        candidate["timelines"]["items"]["timeline:ep2"][
+            field
+        ] = "New story during generation"
+        services.commits.commit(
+            base=base,
+            candidate=candidate,
+            origin=ChangeOrigin.FRONTEND_EDIT,
+            review_policy=ReviewPolicy.AUTO_FIX,
+            caused_by_request_id="during",
+            round_id="during",
+            transaction_id="during",
+        )
+        return DRAFT
+
+    monkeypatch.setattr(
+        script_execution.text_model,
+        "chat_completion",
+        change_then_return,
+    )
+    with pytest.raises(ValidationError, match="旧结果未发布"):
+        _draft(services, key="old-inputs")
+    assert (
+        "script:timeline:ep2"
+        not in services.projects.read(
+            PROJECT_ID,
+        ).project.assets.artifact_slots_by_id
+    )
+
+
+def test_stale_script_sync_preserves_authored_body_without_model_call(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    first = _draft(services, key="initial")
+    authored = "\n  原稿的空格与台词都要保留。\n\n陈默：还有七天以后，他们全部倒下。\n"
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["timelines"]["items"]["timeline:ep2"]["description"] = authored
+    candidate["assets"]["artifact_versions_by_id"][first.artifact_version_id][
+        "stale"
+    ] = True
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.FRONTEND_EDIT,
+    )
+
+    def sync(key):
+        return asyncio.run(
+            execute_file_script_command(
+                services,
+                project_id=PROJECT_ID,
+                target_ref="timeline:timeline:ep2",
+                arguments={"source": "timeline"},
+                idempotency_key=key,
+            ),
+        )
+
+    result = sync("sync-body")
+    current = services.projects.read(PROJECT_ID)
+    version = current.project.assets.artifact_versions_by_id[
+        result.artifact_version_id
+    ]
+    file = current.project.assets.files_by_id[version.file_id]
+    assert (
+        services.projects.project_root(PROJECT_ID) / file.relative_uri
+    ).read_bytes() == authored.encode("utf-8")
+    assert (
+        current.project.timelines.items["timeline:ep2"].description == authored
+    )
+    assert version.metadata["scriptSource"] == "timeline"
+    assert not version.stale
+    assert current.project.assets.artifact_versions_by_id[
+        first.artifact_version_id
+    ].stale
+    assert sync("sync-again").replayed
+    assert len(calls) == 1
+
+
+def test_explicit_script_revision_includes_existing_authored_body(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path)
+    calls = _mock_chat(monkeypatch, [DRAFT])
+    base = services.projects.read(PROJECT_ID)
+    candidate = base.project.model_dump(mode="json")
+    candidate["timelines"]["items"]["timeline:ep2"]["description"] = DRAFT
+    services.commits.commit(
+        base=base,
+        candidate=candidate,
+        origin=ChangeOrigin.FRONTEND_EDIT,
+    )
+    _draft(services, key="revise", guidance="只调整开场动作")
+    assert DRAFT in calls[0]["prompt"]
+    assert "只调整开场动作" in calls[0]["prompt"]

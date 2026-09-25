@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from domain.enums import TaskStatus
+from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
     WorkNode,
@@ -23,6 +23,7 @@ from services.file_agent_runtime.work_scheduler import (
     _blocked_by_active_media_review,
     _blocked_by_active_sync_review,
 )
+from services.runtime_files.execution_models import TaskRecord
 from services.runtime_files.path_safety import require_safe_runtime_segment
 from services.project_files.facade import CreatorFileServices
 from services.project_files.models import (
@@ -304,6 +305,64 @@ def test_tick_dispatches_up_to_media_parallelism(tmp_path, monkeypatch):
     assert len(variant_ids) == 3  # three distinct nodes, no duplicates
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_stale_script_dispatch_requires_automatic_execution(
+    tmp_path,
+    monkeypatch,
+    enabled,
+):
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    node = WorkNode(
+        node_id="script:timeline:main",
+        kind="script",
+        label="Script",
+        status=WorkNodeStatus.STALE,
+        timeline_id="timeline:main",
+        command="GENERATE_TIMELINE_SCRIPT",
+        target_ref="timeline:timeline:main",
+        dispatch_fingerprint="script-inputs",
+        regeneration_of="script-old",
+    )
+    graph = WorkGraph(nodes=(node,), generation=1)
+    monkeypatch.setattr(
+        work_scheduler,
+        "derive_work_graph",
+        lambda *a, **k: graph,
+    )
+    scheduler = WorkGraphScheduler(services)
+    monkeypatch.setattr(scheduler, "enabled", lambda: enabled)
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
+    dispatch = _RecordingDispatch()
+
+    async def scenario():
+        dispatched = asyncio.Event()
+
+        async def script_dispatch(*args, **kwargs):
+            result = await dispatch(*args, **kwargs)
+            dispatched.set()
+            return result
+
+        monkeypatch.setattr(
+            work_scheduler,
+            "_default_script_dispatch",
+            script_dispatch,
+        )
+        try:
+            await scheduler.tick(PROJECT_ID)
+            if enabled:
+                await asyncio.wait_for(dispatched.wait(), timeout=2)
+        finally:
+            await scheduler.shutdown()
+
+    asyncio.run(scenario())
+    assert len(dispatch.calls) == int(enabled)
+    if enabled:
+        call = dispatch.calls[0]
+        assert call["target_ref"] == "timeline:timeline:main"
+        assert call["command"] == "GENERATE_TIMELINE_SCRIPT"
+        assert "-regen-" in call["idempotency_key"]
+
+
 def _failed_record(dispatch: _RecordingDispatch, *, error: str):
     """The durable FAILED record a real executor leaves after admission."""
     call = dispatch.calls[0]
@@ -418,6 +477,31 @@ def test_dispatched_idempotency_key_is_a_safe_runtime_segment(
     key = dispatch.calls[0]["idempotency_key"]
     assert key.startswith("dag-visual:char:a:var:0-")
     assert "/" not in key
+    assert "|" not in key
+    assert (
+        require_safe_runtime_segment(key, label="caused_by_request_id") == key
+    )
+
+
+def test_idempotency_key_is_a_safe_runtime_segment(tmp_path, monkeypatch):
+    """Regression: the ledger fingerprint carries "|img:<model>|vid:<model>"
+    and "|" is rejected by require_safe_runtime_segment. Media executors
+    persist the dispatch key verbatim as Task idempotency_key /
+    caused_by_request_id, so a raw fingerprint in the key failed every
+    work-graph dispatch ("caused_by_request_id is not a safe path
+    segment") and media generation never started."""
+    services = _services(tmp_path, monkeypatch, ready_variants=1)
+    _enable_yolo(monkeypatch)
+    dispatch = _RecordingDispatch()
+    scheduler = WorkGraphScheduler(services, image_dispatch=dispatch)
+
+    async def scenario():
+        await scheduler.tick(PROJECT_ID)
+        await _drain()
+
+    asyncio.run(scenario())
+
+    key = dispatch.calls[0]["idempotency_key"]
     assert "|" not in key
     assert (
         require_safe_runtime_segment(key, label="caused_by_request_id") == key
@@ -1059,7 +1143,13 @@ def test_transient_hard_cap_emits_steer_once(tmp_path, monkeypatch):
 def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     state = {"index": 0}
 
-    def fake_derive(_project, tasks=(), *, media_models=None):
+    def fake_derive(
+        _project,
+        tasks=(),
+        *,
+        media_models=None,
+        pending_reviews=(),
+    ):
         del tasks
         index = min(state["index"], len(graphs) - 1)
         state["index"] += 1
@@ -1073,6 +1163,7 @@ def _graph_sequence(monkeypatch, graphs: list[WorkGraph]) -> None:
     [
         ("video", "video:e1", "视频 e1", "node_succeeded"),
         ("compose", "compose:final", "成片", "compose_completed"),
+        ("bundle", "bundle:project", "互动包准备", "node_succeeded"),
     ],
 )
 def test_done_edge_emits_milestone_once_across_ticks(
@@ -1482,3 +1573,97 @@ def test_manual_fingerprint_re_rolls_a_succeeded_slot() -> None:
     assert WorkGraphScheduler.manual_retry_fingerprint(node, [succeeded]) == (
         fresh
     )
+
+
+def test_media_history_does_not_block_dispatch_but_gates_still_apply(
+    tmp_path,
+    monkeypatch,
+):
+    services = _services(tmp_path, monkeypatch, ready_variants=0)
+    history = [
+        TaskRecord(
+            task_id=f"historical-media-{index}",
+            project_id=PROJECT_ID,
+            kind=TaskKind.R2V_GENERATION,
+            status=TaskStatus.SUCCEEDED,
+            request_fingerprint=f"historical-{index}",
+        )
+        for index in range(250)
+    ]
+    monkeypatch.setattr(
+        work_scheduler.ProjectExecutionStore,
+        "list_tasks",
+        lambda _store, _project_id: history,
+    )
+    monkeypatch.setattr(work_scheduler, "get_media_parallelism", lambda: 1)
+    monkeypatch.setattr(
+        work_scheduler,
+        "get_execution_authorization_mode",
+        lambda: "required",
+    )
+    graph = WorkGraph(
+        nodes=tuple(
+            WorkNode(
+                node_id=kind + ":test",
+                kind=kind,
+                label=kind,
+                status=WorkNodeStatus.READY,
+                command=command,
+                target_ref="timeline:main"
+                if kind == "compose"
+                else "element:test",
+            )
+            for kind, command in [
+                ("video", "GENERATE_R2V_VIDEO"),
+                ("interaction", "GENERATE_INTERACTION_MOTION"),
+                ("compose", "COMPOSE_FINAL_VIDEO"),
+            ]
+        ),
+        generation=1,
+    )
+    completed = set()
+    monkeypatch.setattr(
+        work_scheduler,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: WorkGraph(
+            nodes=tuple(
+                node for node in graph.nodes if node.kind not in completed
+            ),
+            generation=graph.generation,
+        ),
+    )
+    scheduler = WorkGraphScheduler(services)
+    monkeypatch.setattr(scheduler, "wake", lambda _project_id: None)
+    calls = []
+    release = asyncio.Event()
+
+    async def dispatch(_project, node, *_args, **_kwargs):
+        calls.append(node.kind)
+        await release.wait()
+        completed.add(node.kind)
+
+    scheduler.dispatch_node = dispatch
+
+    async def scenario():
+        try:
+            await scheduler.tick(PROJECT_ID)
+            await _drain()
+            assert not calls, "automatic dispatch still requires authorization"
+            _enable_yolo(monkeypatch)
+            for count in range(1, 4):
+                release.clear()
+                await scheduler.tick(PROJECT_ID)
+                await _drain()
+                assert len(calls) == count
+                await scheduler.tick(PROJECT_ID)
+                await _drain()
+                assert (
+                    len(calls) == count
+                ), "inflight work still occupies capacity"
+                release.set()
+                await asyncio.gather(*scheduler._dispatch_tasks[PROJECT_ID])
+        finally:
+            await scheduler.shutdown()
+
+    asyncio.run(scenario())
+    assert sorted(calls) == ["compose", "interaction", "video"]

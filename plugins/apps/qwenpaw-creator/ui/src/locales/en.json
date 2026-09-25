@@ -165,7 +165,10 @@
     "saveAsTemplateFailed": "Failed to save template",
     "deleteTemplateConfirm": "Delete template \"{{name}}\"?",
     "deleteTemplateSuccess": "Template deleted",
-    "deleteTemplateFailed": "Failed to delete template"
+    "deleteTemplateFailed": "Failed to delete template",
+    "videoTemplateNone": "No Template",
+    "videoTemplateHint": "Choose a preset to get started quickly",
+    "videoTemplateUserSection": "My Templates"
   },
   "nav": {
     "videoPlan": "Video Plan",
@@ -634,7 +637,8 @@
     "railOverviewTab": "Video Overview",
     "noStoryboard": "No storyboard yet",
     "scriptPlan": "Back to video script",
-    "expandSidebar": "Expand sidebar"
+    "expandSidebar": "Expand sidebar",
+    "railStoryboardTab": "Storyboard Preview"
   },
   "r2v": {
     "title": "Video Plan / {{element}} / Production Workbench",
@@ -808,7 +812,9 @@
     "editorReferencesChanged": "The reference images or editing target have changed. Reload before continuing so image references stay accurate. Your current draft is preserved.",
     "editorReload": "Reload latest",
     "editorKeep": "Keep my edits",
-    "narrativeTitle": "Clip narrative"
+    "narrativeTitle": "Clip narrative",
+    "subtitle": "AI-generated frame sub-interface, inheriting storyboards, reference assets and artifact versions.",
+    "tokenClickRemove": "Click to remove this reference"
   },
   "elementDetail": {
     "selectElement": "Select a timeline element",
@@ -1055,8 +1061,6 @@
     "generate": "Generate",
     "productionProgress": "Production progress {{done}}/{{total}}",
     "parallel": "Parallel {{count}}",
-    "mediaCallBudgetTitle": "Paid media generation calls issued / project budget (adjust via agent_runtime.media_call_budget)",
-    "mediaCalls": "Media calls {{used}}/{{budget}}",
     "progress": "Progress {{done}}/{{total}}",
     "failed": "Failed {{count}}",
     "listSeparator": ", ",
@@ -1114,6 +1118,9 @@
   },
   "executionAuth": {
     "title": "High-cost Media Execution",
+    "generatePresentation": "Generate work pages",
+    "generateInteraction": "Generate choice animation",
+    "presentationTarget": "Home, playback, story map and ending pages",
     "duration": "Duration {{duration}}s",
     "resolutionLabel": "Resolution {{resolution}}",
     "ratio": "Ratio {{ratio}}",
@@ -1152,6 +1159,8 @@
     "checkpointCancelled": "Confirmation cancelled."
   },
   "fileReview": {
+    "applyingExecutionMode": "Applying the saved execution mode to the interaction design…",
+    "autoModeFailed": "The interaction design could not be accepted automatically. Retry or review it manually: {{detail}}",
     "pending": "Pending",
     "kept": "Kept",
     "undone": "Undone",
@@ -1169,6 +1178,7 @@
     "creativeBrief": "Creative Brief",
     "creativeDirection": "Creative Direction",
     "prompt": "Prompt",
+    "nativeAudio": "Native video audio",
     "camera": "Camera",
     "framing": "Framing",
     "duration": "Duration",
@@ -1230,6 +1240,9 @@
       "videoVersion": "Video version",
       "editPlan": "Edit plan",
       "contentUpdated": "Content updated",
+      "presentationEffect": "Experience pages · Interface",
+      "interactionEffect": "Choice animation",
+      "effectUpdated": "Interface updated. View the preview to review it.",
       "mediaSelection": "Selected media",
       "selectionUpdated": "Media selection updated",
       "text": "Copy",
@@ -1419,6 +1432,7 @@
     "reviewRound": "Round {{round}}"
   },
   "workspaceEmpty": {
+    "interactive": "Story nodes awaiting a draft",
     "preparingHint": "Creation starts automatically once your materials are ready. Follow progress in the assistant; there is no need to submit again.",
     "blueprint": "Video script",
     "script": "Script",
@@ -2040,6 +2054,8 @@
     "dismiss": "Dismiss upload progress"
   },
   "blueprint": {
+    "scriptSyncExplanation": "The creative inputs have changed and this script has not yet been synchronized. Story branches or creative requirements added during generation can also trigger this state; it does not imply you requested an edit. The existing script remains readable.",
+    "scriptSyncReason": "Update reason: {{reason}}",
     "timelineEdit": "Timeline Editing",
     "episodeN": "Node {{n}}",
     "episodesCount": "Nodes · {{count}}",
@@ -2055,10 +2071,31 @@
       "done": "Final cut ready",
       "run": "Generating",
       "wait": "Script written",
-      "scriptStale": "Script stale",
+      "scriptStale": "Script needs syncing",
       "idle": "To draft"
     },
     "episodeList": "Episode list · Linear {{count}} episodes",
+    "graph": {
+      "title": "Story map",
+      "expand": "Expand story map",
+      "collapse": "Collapse story map",
+      "locateNode": "Locate story node",
+      "zoomOut": "Zoom out story map",
+      "zoomIn": "Zoom in story map",
+      "actualSize": "Reset to 100%",
+      "fit": "Overview",
+      "arrange": "Auto arrange",
+      "localLayout": "Reset node positions. Layout is saved in this browser only.",
+      "navigationHint": "Drag nodes to arrange · Drag background to pan · Shift + wheel to scroll sideways · Select a node to trace choices",
+      "connections": "Node connections",
+      "clearFocus": "Clear node focus",
+      "continue": "Continue",
+      "noOutgoing": "This node has no outgoing branches.",
+      "incoming": "Show {{count}} incoming paths"
+    },
+    "interactiveStoryMap": "Interactive drama · Story map",
+    "branchesPending": "Branch connections not yet created",
+    "branchesPendingHint": "Story nodes appear here as they are drafted. Choices and connections will show the story paths once created. You can read existing scripts or open Interaction Design to review the page requirements.",
     "noSynopsis": "No synopsis yet",
     "timelineQuick": "Timeline",
     "endingNode": "Ending",
@@ -2085,6 +2122,7 @@
     "playRoughCut": "Play rough cut",
     "playFullFilm": "Play full film",
     "closeRoughCutPlayer": "Close player",
+    "previewUnavailable": "Storyboard images have not been generated yet. Preview is unavailable.",
     "roughCutFailed": "Rough-cut assembly failed: this timeline has no usable clips yet",
     "finalCutBadge": "Final cut",
     "downloadFinalCut": "Download final cut",
@@ -2123,7 +2161,7 @@
       "researchReady": "Research done",
       "researchRunning": "Researching",
       "scriptReady": "{{count}} versions",
-      "scriptStale": "Script stale, re-review needed",
+      "scriptStale": "Creative inputs updated; script needs syncing",
       "visualReady": "Design generated",
       "visualPending": "To generate",
       "elementReady": "Generated",
@@ -2142,7 +2180,7 @@
     "finalCut": "Final cut",
     "scriptPanelTitle": "Script · {{title}}",
     "scriptVersion": "{{count}} versions",
-    "scriptStaleChip": "Stale",
+    "scriptStaleChip": "Needs syncing",
     "requestChanges": "Request changes",
     "requestChangesDraft": "Please revise the script of “{{title}}”: ",
     "requestChangesPrefilled": "Drafted in the assistant composer — add your feedback and send",
@@ -2224,9 +2262,15 @@
     "sourceResultFailed": "Could not load understanding",
     "sourceResultLoading": "Loading understanding",
     "pausePreview": "Pause preview",
-    "previewPosition": "Preview position"
+    "previewPosition": "Preview position",
+    "playFullInteractive": "Play full interactive story",
+    "exportBundle": "Export interactive bundle",
+    "exportBundleFailed": "Interactive bundle export failed",
+    "downloadBundleTitle": "Export interactive bundle or project",
+    "previewChoice": "Choose a path"
   },
   "sidebar": {
+    "nodes": "Story nodes",
     "assistant": "Assistant",
     "episodes": "Episodes"
   },
@@ -2311,6 +2355,10 @@
     "activeWork": "In progress"
   },
   "agentProgress": {
+    "visualState": "State {{index}}",
+    "waitingForUpdate": "Waiting for {{target}} to be updated",
+    "waitingForTarget": "Waiting for {{target}} to finish",
+    "waitingForPrompt": "Waiting for the generation prompt",
     "composeNeedsUpdate": "Final cut needs updating",
     "lastAttemptFailed": "Last attempt failed",
     "lastAttemptCancelled": "Last attempt stopped",

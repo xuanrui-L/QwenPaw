@@ -6,6 +6,8 @@ import asyncio
 import os
 from pathlib import Path
 
+import pytest
+
 from services.project_files.json_pointer import hash_json_value
 from services.project_files.models import Project
 from services.runtime_files import ProjectRuntimeSessionStore
@@ -421,3 +423,29 @@ def test_snapshot_polling_during_edits_never_returns_busy(app, run_scenario):
     assert edit_statuses == [200] * 10
     assert {status for loop in poll_statuses for status in loop} == {200}
     assert final.json()["project"]["name"] == "Edited 9"
+
+
+@pytest.mark.parametrize("source", ["user", "auto"])
+def test_project_create_persists_title_provenance(
+    app,
+    api_runtime_root,
+    run_scenario,
+    source,
+):
+    payload = _create_payload(
+        "title-source-" + source,
+        "项目标题",
+        nameSource=source,
+    )
+
+    async def scenario(client):
+        return await client.post("/projects", json=payload)
+
+    response = run_scenario(app, scenario)
+    assert response.status_code == 201
+    project = Project.model_validate_json(
+        (
+            api_runtime_root / response.json()["projectId"] / "project.json"
+        ).read_text(),
+    )
+    assert project.name_source == source
