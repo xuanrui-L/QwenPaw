@@ -93,6 +93,56 @@ def test_async_rejection_falls_back_to_sync_and_caches(monkeypatch) -> None:
     assert DashScopeImageModel._async_rejected(denied) is False
 
 
+def test_platform_proxy_skips_the_async_probe_and_keeps_the_deadline(
+    monkeypatch,
+) -> None:
+    """The AgentScope proxy is driven synchronously, on the render deadline.
+
+    Measured on platform-pre: it ignores ``X-DashScope-Async`` and answers the
+    generation call in 48-59 seconds. Probing async first would spend
+    ``SUBMIT_REQUEST_TIMEOUT`` (60s) on a connection that can never carry a
+    task id, and a client-side timeout there abandons a render the provider
+    has already billed.
+    """
+    monkeypatch.setattr(DashScopeImageModel, "_async_unsupported", False)
+    model = _model(
+        base_url=(
+            "https://platform-pre.agentscope.io/v1/services/aigc/"
+            "multimodal-generation/generation"
+        ),
+        timeout=900,
+    )
+    observed: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(
+            {
+                "headers": dict(request.headers),
+                "timeout": dict(request.extensions.get("timeout") or {}),
+            },
+        )
+        return httpx.Response(
+            200,
+            json={"output": {"choices": [{"message": {}}]}},
+        )
+
+    async def scenario() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            return await model._request(client, "p", "16:9", [])
+
+    response = asyncio.run(scenario())
+
+    assert response.status_code == 200
+    assert len(observed) == 1  # no async probe, no resubmit
+    assert "x-dashscope-async" not in observed[0]["headers"]
+    # No oss:// reference can exist on this transport, so there is nothing to
+    # resolve - claiming otherwise would hide the real failure elsewhere.
+    assert "x-dashscope-ossresourceresolve" not in observed[0]["headers"]
+    assert observed[0]["timeout"].get("read") == 900
+
+
 # ── poll loop ──────────────────────────────────────────────────────────────
 
 

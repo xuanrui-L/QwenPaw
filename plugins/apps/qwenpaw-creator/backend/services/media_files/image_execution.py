@@ -71,7 +71,6 @@ from services.project_files.models import (
     VisualVariant,
     visual_style_anchor,
 )
-from services.media_files.call_budget import ensure_media_call_budget
 from services.media_files.publication_retry import (
     commit_with_lock_retry,
     record_materialized_result,
@@ -3717,9 +3716,6 @@ async def execute_file_image_command(
 ) -> FileImageExecutionResult:
     """Small route/tool entry point with an injectable provider for tests."""
 
-    # Wallet fuse: every dispatch path (specialist delegation, work-graph
-    # scheduler, manual retry) funnels through here.
-    ensure_media_call_budget(services, project_id)
     worker = file_image_execution_service(services, provider=provider)
     return await worker.execute(
         project_id=project_id,

@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 import httpx
 
 from models import config
-from models.media_transport import upload_local_file_to_dashscope_temp
+from models.media_transport import upload_reference_file_for_provider
 from models.tts_capabilities import TtsModelCapability, require_capability
 from utils.exceptions import ModelError
 from utils.logger import setup_logger
@@ -84,6 +84,75 @@ def _active_capability() -> TtsModelCapability:
 
 def _endpoint(base_url: str, suffix: str) -> str:
     return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
+
+
+_TTS_BAILIAN_SUFFIX = "services/aigc/multimodal-generation/generation"
+_TTS_GATEWAY_SUFFIX = "services/audio/tts/SpeechSynthesizer"
+
+
+def _tts_endpoint(base_url: str, *, via_gateway: bool) -> str:
+    """Speech endpoint for the configured base.
+
+    A base is saved either as an API root or as a full generation endpoint,
+    and the two providers do not even agree on the root prefix (``/api/v1``
+    against ``/v1``), so the gateway URL is rebuilt from the origin instead
+    of being joined onto whatever path the user pasted.
+    """
+    if not via_gateway:
+        return _endpoint(base_url, _TTS_BAILIAN_SUFFIX)
+    parsed = urlparse(base_url.strip())
+    if not parsed.netloc:
+        raise ValueError(f"TTS base URL has no host: {base_url!r}")
+    return (
+        f"{parsed.scheme or 'https'}://{parsed.netloc}"
+        f"/v1/{_TTS_GATEWAY_SUFFIX}"
+    )
+
+
+def _resolve_system_voice(
+    capability: TtsModelCapability,
+    model: str,
+    requested: str,
+    *,
+    via_gateway: bool,
+) -> str:
+    """The voice to synthesize with, checked against the local catalogue.
+
+    A model proxy publishes no voice catalogue at all (its customization
+    listing answers an empty ``voice_list``), so on that provider the
+    configured name is the only source of truth and is passed through with a
+    warning - refusing it would make speech synthesis unreachable there.
+    Every other provider keeps the fail-fast check: a made-up name would
+    otherwise be rejected by the provider only after the call had burned an
+    execution authorization round-trip.
+    """
+    if not capability.has_system_voices:
+        if via_gateway and requested:
+            logger.warning(
+                "TTS voice %r is not in the local catalogue for %s; "
+                "the gateway catalogue is unpublished, passing it through",
+                requested,
+                model,
+            )
+            return requested
+        raise ValueError(
+            f"{model} has no system voices; create a character voice "
+            "first and synthesize with its voice id",
+        )
+    if requested in capability.system_voices:
+        return requested
+    if via_gateway:
+        logger.warning(
+            "TTS voice %r is unknown locally for %s; the gateway "
+            "catalogue is unpublished, passing it through",
+            requested,
+            model,
+        )
+        return requested
+    raise ValueError(
+        f"unknown voice {requested!r} for {model}; available "
+        f"system voices: {', '.join(capability.system_voices)}",
+    )
 
 
 def _require_text(text: str) -> str:
@@ -334,6 +403,14 @@ async def synthesize(
     value = _require_text(text)
     key = _require_key()
     capability = _active_capability()
+    # The proxy publishes its own speech route and only that one: measured on
+    # platform-pre, qwen-audio-3.0-tts-flash synthesizes over HTTP POST to
+    # SpeechSynthesizer (output.audio.url), while the multimodal-generation
+    # path creator uses for Bailian answers 400 MODEL_NOT_ALLOWED.
+    via_gateway = config.is_agentscope_gateway(
+        protocol=config.get_tts_protocol(),
+        base_url=config.get_tts_base_url(),
+    )
     if voice_id:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{3,199}", voice_id):
             raise ValueError(
@@ -344,21 +421,25 @@ async def synthesize(
         active_voice = voice_id
     else:
         model = capability.model
-        active_voice = (voice or "").strip() or config.get_tts_voice()
-        if not capability.has_system_voices:
-            raise ValueError(
-                f"{model} has no system voices; create a character voice "
-                "first and synthesize with its voice id",
-            )
-        if active_voice not in capability.system_voices:
-            # Fail fast on a made-up voice name: the provider would reject
-            # it anyway, but only after the call burned an execution
-            # authorization round-trip.
-            raise ValueError(
-                f"unknown voice {active_voice!r} for {model}; available "
-                f"system voices: {', '.join(capability.system_voices)}",
-            )
+        active_voice = _resolve_system_voice(
+            capability,
+            capability.model,
+            (voice or "").strip() or config.get_tts_voice(),
+            via_gateway=via_gateway,
+        )
     transport = require_capability(model).transport
+    if via_gateway and transport == "websocket":
+        # The DashScope SDK's websocket dials Bailian directly and could not
+        # carry the proxy key, so the qwen-audio speech models go over HTTP.
+        # A genuine CosyVoice model has no measured HTTP route here.
+        if not model.casefold().startswith("qwen-audio"):
+            raise ModelError(
+                f"{model} 通过 WebSocket 合成，当前模型代理不支持；"
+                "请改用 qwen-audio-3.0-tts 系列，或将 TTS 端点切回百炼直连",
+                model_name=model,
+                retryable=False,
+            )
+        transport = "http"
     rate = 1.0 if speech_rate is None else float(speech_rate)
     if not 0.5 <= rate <= 2.0:
         raise ValueError("speechRate must be between 0.5 and 2.0")
@@ -399,10 +480,7 @@ async def synthesize(
         "input": {"text": value, "voice": active_voice},
     }
     data = await _post_json(
-        _endpoint(
-            config.get_tts_base_url(),
-            "services/aigc/multimodal-generation/generation",
-        ),
+        _tts_endpoint(config.get_tts_base_url(), via_gateway=via_gateway),
         api_key=key,
         payload=payload,
         timeout_seconds=config.get_tts_timeout_seconds(),
@@ -445,11 +523,13 @@ async def _sample_url(sample_media_url: str, api_key: str, model: str) -> str:
     if parsed.scheme == "file":
         local_path = local_path_from_file_url(sample_media_url)
         media_type = mimetypes.guess_type(local_path.name)[0] or "audio/wav"
-        return await upload_local_file_to_dashscope_temp(
+        return await upload_reference_file_for_provider(
             local_path,
             api_key=api_key,
             model_name=model,
             media_type=media_type,
+            base_url=config.get_tts_base_url(),
+            protocol=config.get_tts_protocol(),
         )
     if parsed.scheme in {"http", "https", "oss"}:
         return sample_media_url

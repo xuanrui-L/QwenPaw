@@ -47,6 +47,8 @@ import {
 import type {
   HostProviderInfo,
   TtsCapabilities,
+  TtsModelCapability,
+  TtsProvider,
   VideoModelCapabilities,
 } from "@/api/creator";
 import type {
@@ -61,6 +63,7 @@ export const LLM_PROTOCOLS = [
   "DashScope（百炼）",
   "Aliyun Token Plan",
   "Aliyun Coding Plan",
+  "AgentScope Platform",
   "DeepSeek",
   "Google Gemini",
   "OpenAI 协议",
@@ -81,6 +84,7 @@ export const VLM_PROTOCOLS = [
   "DashScope（百炼）",
   "Aliyun Token Plan",
   "Aliyun Coding Plan",
+  "AgentScope Platform",
   "DeepSeek",
   "Google Gemini",
   "OpenAI 协议",
@@ -99,9 +103,10 @@ export const VLM_PROTOCOLS = [
 export const ASR_PROTOCOLS = [
   "DashScope Fun-ASR",
   "DashScope Qwen3-ASR",
+  "AgentScope Platform",
   "OpenAI Whisper",
 ];
-export const TTS_PROTOCOLS = ["DashScope（百炼）"];
+export const TTS_PROTOCOLS = ["DashScope（百炼）", "AgentScope Platform"];
 export const S2V_PROTOCOLS = ["DashScope（百炼）"];
 export const EMBEDDING_PROTOCOLS = ["DashScope（百炼）"];
 export const IMAGE_PROTOCOLS = [
@@ -112,6 +117,7 @@ export const IMAGE_PROTOCOLS = [
   "Black Forest Labs（FLUX）",
   "Ideogram",
   "Aliyun Token Plan",
+  "AgentScope Platform",
 ];
 // Kling and Vidu appear twice on purpose: they are served both as
 // Bailian-hosted models on the DashScope protocol and through their own
@@ -125,6 +131,7 @@ export const VIDEO_PROTOCOLS = [
   "Kling（可灵官方）",
   "Vidu（官方）",
   "Aliyun Token Plan",
+  "AgentScope Platform",
 ];
 
 // Self-hosted SGLang serves without authentication unless started with
@@ -166,6 +173,9 @@ export const PROTOCOL_LABEL_KEYS: Record<string, string> = {
   "DashScope Fun-ASR": "modelConfig.protocols.dashscopeFunAsr",
   "DashScope Qwen3-ASR": "modelConfig.protocols.dashscopeQwen3Asr",
   "OpenAI Whisper": "modelConfig.protocols.openaiWhisper",
+  // The stored label carries the substring the backend matches on
+  // (models.config.is_agentscope_protocol), so it stays untranslated.
+  "AgentScope Platform": "modelConfig.protocols.agentscopePlatform",
 };
 
 // Default endpoints for LLM/VLM protocols when the host provider registry
@@ -176,6 +186,9 @@ const LLM_PROTOCOL_FALLBACK_BASE_URLS: Record<string, string> = {
   "Aliyun Token Plan":
     "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
   "Aliyun Coding Plan": "https://coding.dashscope.aliyuncs.com/v1",
+  // The proxy's API root: /compatible-mode/v1 is not deployed on platform-pre
+  // (it answers the frontend shell), while /v1 serves chat and the model list.
+  "AgentScope Platform": "https://platform.agentscope.io/v1",
   DeepSeek: "https://api.deepseek.com",
   "OpenAI 协议": "https://api.openai.com/v1",
   "Anthropic Claude": "https://api.anthropic.com",
@@ -190,12 +203,70 @@ const LLM_PROTOCOL_FALLBACK_BASE_URLS: Record<string, string> = {
   OpenCode: "https://opencode.ai/zen/v1",
 };
 
+// Model list the LLM/VLM section offers for a fallback protocol when the host
+// registry has no record for it. AgentScope Platform's proxy serves the Qwen3.8
+// family; flash leads so it becomes the seeded default.
+const LLM_PROTOCOL_FALLBACK_MODELS: Record<string, string[]> = {
+  "AgentScope Platform": ["qwen3.8-flash", "qwen3.8-max"],
+};
+
 // Presets seed a default endpoint when the user picks a protocol/model;
 // the URL always stays editable for self-hosted or proxied deployments.
 interface ProtocolPreset {
   base_url: string;
   models: string[];
   base_url_options?: { label: string; value: string }[];
+}
+
+/**
+ * Endpoint and model list the LLM/VLM section should use for *protocol*.
+ *
+ * Every protocol has to resolve to an endpoint here, including the ones the
+ * QwenPaw host does not publish as a provider. Returning null for a missing
+ * provider id instead would leave the previously selected provider's URL in
+ * the field, so switching to the model proxy kept sending an sk-as key to
+ * Bailian - a different provider than the one that issued the credential.
+ */
+export function llmPresetFor(
+  protocol: string,
+  providerId: string | undefined,
+  providers: HostProviderInfo[],
+): ProtocolPreset | null {
+  // OpenCode publishes no host provider record, so its own tables stand in for
+  // one; the model list is merged rather than replaced because a host may also
+  // report OpenCode models of its own.
+  const opencodeIds =
+    providerId === "opencode" ? OPENCODE_MODELS.map((model) => model.id) : [];
+  const provider = providerId
+    ? providers.find((item) => item.id === providerId)
+    : undefined;
+  if (!provider) {
+    if (providerId === "opencode") {
+      return {
+        base_url: OPENCODE_BASE_URL_OPTIONS[0].value,
+        models: opencodeIds,
+        base_url_options: OPENCODE_BASE_URL_OPTIONS,
+      };
+    }
+    const fallback = LLM_PROTOCOL_FALLBACK_BASE_URLS[protocol];
+    return fallback
+      ? {
+          base_url: fallback,
+          models: LLM_PROTOCOL_FALLBACK_MODELS[protocol] ?? [],
+        }
+      : null;
+  }
+  const hostIds = [
+    ...provider.models.map((model) => model.id),
+    ...provider.extra_models.map((model) => model.id),
+  ];
+  return {
+    base_url: provider.base_url,
+    models: [...hostIds, ...opencodeIds.filter((id) => !hostIds.includes(id))],
+    base_url_options:
+      provider.meta?.base_url_options ??
+      (providerId === "opencode" ? OPENCODE_BASE_URL_OPTIONS : undefined),
+  };
 }
 
 const PROTOCOL_TO_PROVIDER_ID: Record<string, string> = {
@@ -271,13 +342,50 @@ const ASR_PRESETS: Record<string, ProtocolPreset> = {
     base_url: "https://api.openai.com/v1",
     models: ["whisper-1"],
   },
+  // The proxy does not deploy the fun-asr transcription route at all
+  // (measured: 404), so only the qwen-audio alias is offered.
+  "AgentScope Platform": {
+    base_url: "https://platform.agentscope.io/v1",
+    models: ["qwen-audio-3.0-asr-flash"],
+  },
 };
+
+/**
+ * Which endpoint a TTS protocol talks to, matching `providers` in the
+ * capability table. Only the proxy narrows the choice: it publishes its own
+ * model list and rejects anything outside it with MODEL_NOT_ALLOWED, while a
+ * Bailian or custom base is assumed to serve every listed speech model.
+ */
+const ttsProviderFor = (protocol: string): TtsProvider =>
+  protocol === "AgentScope Platform" ? "gateway" : "bailian";
+
+/**
+ * Speech models the given protocol can actually drive, in table order.
+ *
+ * Exported so the narrowing itself is testable: offering a Bailian-only name
+ * under the proxy is not a cosmetic slip but a guaranteed
+ * ``MODEL_NOT_ALLOWED`` on every synthesis attempt.
+ */
+export function ttsModelChoices(
+  protocol: string,
+  models: TtsModelCapability[],
+): TtsModelCapability[] {
+  const provider = ttsProviderFor(protocol);
+  return models.filter((item) => item.providers.includes(provider));
+}
 
 const TTS_PRESETS: Record<string, ProtocolPreset> = {
   "DashScope（百炼）": {
     base_url: "https://dashscope.aliyuncs.com/api/v1",
     // Filled from the backend capability table so the UI never offers a model
     // this build cannot drive.
+    models: [],
+  },
+  // The model list stays capability-driven; only the qwen-audio speech models
+  // have a route here (cosyvoice is websocket-only and is refused at
+  // synthesis time with an actionable message rather than a silent failure).
+  "AgentScope Platform": {
+    base_url: "https://platform.agentscope.io/v1",
     models: [],
   },
 };
@@ -364,6 +472,13 @@ const IMAGE_PRESETS: Record<string, ProtocolPreset> = {
   "Aliyun Token Plan": {
     base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
     models: ["wan2.7-image-pro", "wan2.7-image"],
+  },
+  // AgentScope platform model proxy: the allowlist is measured, not guessed
+  // (GET /v1/models). The base carries the proxy's API root, which is also
+  // where its own /media/uploads reference transport lives.
+  "AgentScope Platform": {
+    base_url: "https://platform.agentscope.io/v1",
+    models: ["qwen-image-3.0"],
   },
 };
 
@@ -458,6 +573,13 @@ const VIDEO_PRESETS: Record<string, ProtocolPreset> = {
   "Aliyun Token Plan": {
     base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1",
     models: ["happyhorse-1.1"],
+  },
+  // HappyHorse 1.1 is exposed per mode on the proxy, so the family base name
+  // is listed (it derives -t2v/-i2v/-r2v at submission); 1.0 is allowlisted
+  // only as the exact video-edit id, so an exact name is offered instead.
+  "AgentScope Platform": {
+    base_url: "https://platform.agentscope.io/v1",
+    models: ["wan3.0-video", "happyhorse-1.1", "happyhorse-1.0-video-edit"],
   },
 };
 
@@ -656,7 +778,8 @@ type SettingsPane =
   | "media"
   | "mode"
   | "review"
-  | "guide";
+  | "guide"
+  | "platform";
 
 const PANE_MODELS: Record<"lang" | "perception" | "media", TabType[]> = {
   lang: ["llm", "vlm", "embedding"],
@@ -1958,46 +2081,18 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     protocol: string,
   ): ProtocolPreset | null => {
     if (type === "llm" || type === "vlm") {
-      const providerId = mergedProviderMap[protocol];
-      if (!providerId) return null;
-      const provider = hostProviders.find((p) => p.id === providerId);
-      const opencodeIds =
-        providerId === "opencode" ? OPENCODE_MODELS.map((m) => m.id) : [];
-      if (!provider) {
-        if (providerId === "opencode") {
-          return {
-            base_url: OPENCODE_BASE_URL_OPTIONS[0].value,
-            models: opencodeIds,
-            base_url_options: OPENCODE_BASE_URL_OPTIONS,
-          };
-        }
-        const fallback = LLM_PROTOCOL_FALLBACK_BASE_URLS[protocol];
-        return fallback ? { base_url: fallback, models: [] } : null;
-      }
-      const hostIds = [
-        ...provider.models.map((m) => m.id),
-        ...provider.extra_models.map((m) => m.id),
-      ];
-      return {
-        base_url: provider.base_url,
-        models: [
-          ...hostIds,
-          ...opencodeIds.filter((id) => !hostIds.includes(id)),
-        ],
-        base_url_options:
-          provider.meta?.base_url_options ??
-          (providerId === "opencode" ? OPENCODE_BASE_URL_OPTIONS : undefined),
-      };
+      return llmPresetFor(protocol, mergedProviderMap[protocol], hostProviders);
     }
     if (type === "asr") return ASR_PRESETS[protocol] || null;
     if (type === "s2v") return S2V_PRESETS[protocol] || null;
     if (type === "tts") {
       const preset = TTS_PRESETS[protocol];
       if (!preset) return null;
-      // Supported speech models come from the backend capability table.
+      // Supported speech models come from the backend capability table, kept
+      // to the ones this endpoint actually serves.
       return {
         ...preset,
-        models: ttsModels.map((item) => item.model),
+        models: ttsModelChoices(protocol, ttsModels).map((item) => item.model),
       };
     }
     if (type === "embedding") return EMBEDDING_PRESETS[protocol] || null;
@@ -2012,7 +2107,17 @@ export default function ModelConfigModal({ open, onClose }: Props) {
   ): { value: string; label: string }[] => {
     if (type === "llm" || type === "vlm") {
       const providerId = mergedProviderMap[protocol];
-      if (!providerId) return [];
+      if (!providerId) {
+        // A protocol the host registry does not publish (e.g. AgentScope
+        // Platform) still offers its static preset model list, so the field
+        // becomes a dropdown like every provider-backed section instead of a
+        // bare text box.
+        const preset = llmPresetFor(protocol, undefined, hostProviders);
+        return (preset?.models ?? []).map((model) => ({
+          value: model,
+          label: model,
+        }));
+      }
       const provider = hostProviders.find((p) => p.id === providerId);
       const options = provider
         ? [
@@ -2045,7 +2150,7 @@ export default function ModelConfigModal({ open, onClose }: Props) {
     if (type === "tts") {
       // Label each speech model with what it can do, so the choice between
       // "has system voices" and "must design a voice first" is visible.
-      return ttsModels.map((item) => ({
+      return ttsModelChoices(protocol, ttsModels).map((item) => ({
         value: item.model,
         label: item.label,
       }));

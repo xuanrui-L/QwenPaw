@@ -14,6 +14,7 @@ import re
 import subprocess
 import tempfile
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -22,7 +23,7 @@ from urllib.parse import urlparse, urlsplit
 import httpx
 
 from models import config
-from models.media_transport import upload_local_file_to_dashscope_temp
+from models.media_transport import upload_reference_file_for_provider
 from services.runtime_files.media_probe import probe_media
 from services.runtime_files.runtime_dependencies import resolve_ffmpeg
 from utils.logger import setup_logger
@@ -181,6 +182,30 @@ def _extract_audio_from_video(
     return output_path
 
 
+async def _upload_asr_reference(
+    path: Path,
+    *,
+    api_key: str,
+    model: str,
+    media_type: str,
+) -> str:
+    """A URL the configured ASR endpoint can actually fetch.
+
+    Which storage that is depends on the provider, so the decision stays in
+    ``media_transport``: Bailian resolves an ``oss://`` temporary upload, a
+    model proxy answers 401 to the policy API that mints one and needs its
+    own upload route instead.
+    """
+    return await upload_reference_file_for_provider(
+        path,
+        api_key=api_key,
+        model_name=model,
+        media_type=media_type,
+        base_url=config.get_asr_base_url(),
+        protocol=config.get_asr_protocol(),
+    )
+
+
 async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
     """Return a URL Fun-ASR can fetch, uploading local media when needed.
 
@@ -225,10 +250,10 @@ async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
                     audio_path.name,
                     audio_path.stat().st_size / (1024 * 1024),
                 )
-                url = await upload_local_file_to_dashscope_temp(
+                url = await _upload_asr_reference(
                     audio_path,
                     api_key=api_key,
-                    model_name=model,
+                    model=model,
                     media_type="audio/mpeg",
                 )
                 logger.info("Fun-ASR: upload complete -> %s", url[:120])
@@ -242,10 +267,10 @@ async def _fun_asr_file_url(media_url: str, api_key: str, model: str) -> str:
             local_path.name,
             local_path.stat().st_size / (1024 * 1024),
         )
-        url = await upload_local_file_to_dashscope_temp(
+        url = await _upload_asr_reference(
             local_path,
             api_key=api_key,
-            model_name=model,
+            model=model,
             media_type=media_type,
         )
         logger.info("Fun-ASR: upload complete -> %s", url[:120])
@@ -509,6 +534,17 @@ def _qwen3_endpoint(base_url: str) -> str:
     host = parts.netloc
     if not host:
         raise ValueError(f"ASR base URL has no host: {base_url!r}")
+    if config.is_agentscope_gateway(
+        protocol=config.get_asr_protocol(),
+        base_url=base_url,
+    ):
+        # The model proxy serves its API root at /v1 and does not deploy the
+        # token-portal /api/v1 prefix for this route (measured: the
+        # multimodal path answers under /v1 only).
+        return (
+            f"{scheme}://{host}/v1/services/aigc/"
+            "multimodal-generation/generation"
+        )
     return (
         f"{scheme}://{host}/api/v1/services/aigc/"
         "multimodal-generation/generation"
@@ -794,22 +830,54 @@ def _prepare_qwen3_chunks(
     return prepared
 
 
+def _is_qwen_multimodal_asr(model: str) -> bool:
+    """True when *model* is served by the aigc multimodal-generation route.
+
+    Two naming generations share that route: ``qwen3-asr-*`` on Bailian and
+    ``qwen-audio-*-asr-*`` on the AgentScope proxy, where the ``fun-asr``
+    transcription route is not deployed at all (measured: 404).
+    """
+    folded = model.casefold()
+    return folded.startswith("qwen3-asr") or (
+        folded.startswith("qwen-audio") and "asr" in folded
+    )
+
+
 def _qwen3_sentences(body: Mapping[str, Any]) -> list[str]:
     choices = body.get("output", {}).get("choices") or ()
-    if not choices:
-        return []
-    content = choices[0].get("message", {}).get("content") or ()
     sentences: list[str] = []
-    for item in content:
-        if isinstance(item, Mapping):
-            text = str(item.get("text") or "").strip()
-        elif isinstance(item, str):
-            text = item.strip()
-        else:
-            text = ""
+    if choices:
+        content = choices[0].get("message", {}).get("content") or ()
+        for item in content:
+            if isinstance(item, Mapping):
+                text = str(item.get("text") or "").strip()
+            elif isinstance(item, str):
+                text = item.strip()
+            else:
+                text = ""
+            if text:
+                sentences.append(text)
+    if sentences:
+        return sentences
+    # ``qwen-audio-*-asr-*`` answers without ``choices``: the transcript sits
+    # in ``output.sentence`` (one object, or one per segment) and is repeated
+    # at the top level. Reading only ``choices`` yields an empty transcript
+    # for a call that actually succeeded.
+    output = body.get("output")
+    sentence = output.get("sentence") if isinstance(output, Mapping) else None
+    candidates: list[Mapping[str, Any]] = []
+    if isinstance(sentence, Mapping):
+        candidates = [sentence]
+    elif isinstance(sentence, Sequence):
+        candidates = [item for item in sentence if isinstance(item, Mapping)]
+    for item in candidates:
+        text = str(item.get("text") or "").strip()
         if text:
             sentences.append(text)
-    return sentences
+    if sentences:
+        return sentences
+    top_level = str(body.get("text") or "").strip()
+    return [top_level] if top_level else []
 
 
 def _spread_segments(
@@ -858,8 +926,16 @@ async def _qwen3_transcribe_url(
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
-        "X-DashScope-OssResourceResolve": "enable",
     }
+    if not config.is_agentscope_gateway(
+        protocol=config.get_asr_protocol(),
+        base_url=config.get_asr_base_url(),
+    ):
+        # oss:// resolution is a Bailian mechanism; a model proxy key cannot
+        # mint an oss:// URL in the first place (its temporary-upload policy
+        # API answers 401 InvalidApiKey), so the header would only advertise
+        # a reference form this endpoint cannot fetch.
+        headers["X-DashScope-OssResourceResolve"] = "enable"
     body = await _post_with_retry(client, endpoint, payload, headers=headers)
     return _qwen3_sentences(body)
 
@@ -925,10 +1001,10 @@ async def _qwen3_asr(media_url: str) -> ASRResult:
                 offset_ms = 0
                 prev_sentences: list[str] = []
                 for chunk, plan in chunks:
-                    chunk_url = await upload_local_file_to_dashscope_temp(
+                    chunk_url = await _upload_asr_reference(
                         chunk,
                         api_key=key,
-                        model_name=model,
+                        model=model,
                         media_type="audio/mpeg",
                     )
                     sentences = await _qwen3_transcribe_url(
@@ -1093,7 +1169,7 @@ async def transcribe(media_url: str) -> ASRResult:
     if provider == "whisper":
         return await _whisper(media_url)
     model = config.get_asr_model_name() or ""
-    if model.casefold().startswith("qwen3-asr"):
+    if _is_qwen_multimodal_asr(model):
         return await _qwen3_asr(media_url)
     return await _fun_asr(media_url)
 

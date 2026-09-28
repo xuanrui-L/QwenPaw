@@ -197,6 +197,60 @@ describe("bounded frontend caches", () => {
     unsubscribe();
   });
 
+  it("keeps replay within the loaded tail while preserving live messages and backward paging", async () => {
+    const tail = Array.from({ length: 50 }, (_, index) =>
+      msg({ messageId: `m${951 + index}`, messageSeq: 951 + index }),
+    );
+    const routes = bootstrapRoutes({
+      messages: tail,
+      session: { lastMessageSeq: 1000, lastEventSeq: 10_000, status: "IDLE" },
+    });
+    routes[0].response.json = { items: tail, nextBefore: 951 } as never;
+    const live = msg({ messageId: "m1001", messageSeq: 1001 });
+    const older = msg({ messageId: "m950", messageSeq: 950 });
+    const { calls } = installMockFetch([
+      { match: "messages?after=1000", response: { json: { items: [live] } } },
+      { match: "messages?before=951", response: { json: { items: [older] } } },
+      ...routes,
+    ]);
+    await store().bootstrap("p1");
+    ingest(
+      ev(1, "agent.message_delta", {
+        messageId: "old",
+        deltaIndex: 0,
+        delta: "历史内容",
+      }),
+      ev(2, "message.completed", { messageId: "old", messageSeq: 2 }),
+      ev(3, "message.appended", {
+        message: msg({ messageId: "old2", messageSeq: 3 }),
+      }),
+      ev(10_000, "subagent.started", {
+        parentActionId: "detached",
+        runId: "still-running",
+        role: "visual_development_agent",
+      }),
+    );
+    expect(store().messages).toEqual(tail);
+    expect(store().streamingAssistantMessages).toEqual({});
+    expect(store().hasMoreMessages).toBe(true);
+    expect(store().isReplaying).toBe(false);
+    expect(store().subagentActivities.detached.completed).toBe(false);
+    expect(calls.filter((call) => call.url.includes("/messages"))).toHaveLength(
+      1,
+    );
+
+    ingest(
+      ev(10_001, "message.completed", { messageId: "m1001", messageSeq: 1001 }),
+    );
+    await waitFor(() => expect(store().messages.at(-1)).toEqual(live));
+    await store().loadOlderMessages();
+    expect(store().messages[0]).toEqual(older);
+    expect(store().messages).toHaveLength(52);
+    expect(calls.some((call) => /[?&]after=(?:0|1)&/u.test(call.url))).toBe(
+      false,
+    );
+  });
+
   it("does not confuse a concrete Task progress number with AgentStatusBar progress", () => {
     const progress = {
       phase: "timeline_edit" as const,

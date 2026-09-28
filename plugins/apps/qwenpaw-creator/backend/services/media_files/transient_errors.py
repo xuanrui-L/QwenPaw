@@ -11,6 +11,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from models.provider_errors import (
+    is_retryable_status,
+    status_code_in_text,
+)
+
 TRANSIENT_ERROR_MARKERS = (
     "connection",
     "timeout",
@@ -36,6 +41,12 @@ TRANSIENT_ERROR_MARKERS = (
     "status 502",
     "status 503",
     "status 504",
+    # The gateway severing a response mid-flight leaves an httpx transport
+    # error with no body, so there is no envelope and no status to read: the
+    # wording is the only signal. Nothing was billed - the request never
+    # completed - which is what makes a bounded retry safe here.
+    "peer closed connection",
+    "incomplete chunked read",
     # Legacy empty-detail records: before the provider labelled
     # httpx transport errors, WriteError/ReadError/ConnectError
     # stringified to nothing and persisted this exact degenerate
@@ -46,20 +57,83 @@ TRANSIENT_ERROR_MARKERS = (
     "image generation failed: . check",
 )
 
+# Causes a retry cannot fix, for the failures that carry neither a gateway
+# envelope nor an HTTP status - configuration and capability problems, which
+# have no status to read precisely because no request ever left the machine.
+# :func:`is_unclassified_failure` treats them as settled, so the scheduler's
+# retry-by-default floor never re-opens a misconfigured node.
+PERMANENT_ERROR_MARKERS = (
+    "api key",
+    "configuration",
+    "未配置",
+    "does not support",
+    "refusing resubmission",
+    "never resubmit",
+)
+
 MAX_TRANSIENT_RETRY_SLOTS = 3
 
 
 def is_transient_error_message(message: str) -> bool:
+    """Whether a failure is worth another attempt.
+
+    Two signals, most trusted first: an HTTP status the message names, then a
+    short list of causes no retry can fix. Anything left over counts as
+    transient.
+    """
+
+    # A gateway error code used to outrank everything below - the AgentScope
+    # proxy stamped ``retryable: true`` on deterministic failures, so trusting
+    # the status alone would burn paid retries on a request that could never
+    # succeed. The proxy is fixing that stamping on its side, so the status is
+    # now the authority and the envelope no longer vetoes a retry here.
+    status = status_code_in_text(message)
+    if status:
+        # A message that names its own status needs no substring guess. The
+        # old allowlist missed nginx's hyphenated "504 Gateway Time-out" - its
+        # entries read "gateway timeout" and "status 504", and the lane writes
+        # "HTTP 504" - so a gateway that merely took too long walled every
+        # presentation node as deterministic.
+        return is_retryable_status(status)
     folded = message.casefold()
+    if any(marker in folded for marker in PERMANENT_ERROR_MARKERS):
+        return False
     return any(marker in folded for marker in TRANSIENT_ERROR_MARKERS)
+
+
+def is_unclassified_failure(message: str) -> bool:
+    """Whether a failure carries no signal at all about its cause.
+
+    True only when there is no HTTP status in the wording and
+    no match in either marker table - which means the caller has learned
+    nothing, as opposed to having learned that the fault is permanent. The
+    scheduler retries exactly these, so that an unrecognised wording costs a
+    bounded budget instead of walling a node forever: nginx writes "504 Gateway
+    Time-out" with a hyphen, and that one character stalled a whole project.
+    """
+
+    text = str(message or "")
+    if status_code_in_text(text):
+        return False
+    folded = text.casefold()
+    return not any(
+        marker in folded
+        for marker in (*TRANSIENT_ERROR_MARKERS, *PERMANENT_ERROR_MARKERS)
+    )
 
 
 def is_transient_task_error(error: Mapping[str, Any] | None) -> bool:
     if not isinstance(error, Mapping):
         return False
+    message = str(error.get("message") or "")
+    # The persisted flag is whatever the raising layer believed. A gateway
+    # envelope used to outrank it - the proxy stamped ``retryable: true`` on
+    # deterministic failures, so honouring the flag first would re-open a retry
+    # slot for a request that can never succeed - but the proxy is fixing that
+    # stamping on its side, so the flag is taken at face value again.
     if error.get("retryable") is True:
         return True
-    return is_transient_error_message(str(error.get("message") or ""))
+    return is_transient_error_message(message)
 
 
 def transient_retry_slot_key(idempotency_key: str, attempt: int) -> str:
@@ -72,8 +146,10 @@ def transient_retry_slot_key(idempotency_key: str, attempt: int) -> str:
 
 __all__ = [
     "MAX_TRANSIENT_RETRY_SLOTS",
+    "PERMANENT_ERROR_MARKERS",
     "TRANSIENT_ERROR_MARKERS",
     "is_transient_error_message",
     "is_transient_task_error",
+    "is_unclassified_failure",
     "transient_retry_slot_key",
 ]

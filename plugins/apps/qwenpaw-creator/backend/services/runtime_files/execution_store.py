@@ -662,6 +662,8 @@ class ProjectExecutionStore:
     def create_task(
         self,
         record: TaskRecord | Mapping[str, Any],
+        *,
+        _lifecycle_lock_held: bool = False,
     ) -> TaskRecord:
         candidate = TaskRecord.model_validate(record)
         project_id = self._safe(candidate.project_id, "project_id")
@@ -679,7 +681,10 @@ class ProjectExecutionStore:
                 "new Task Attempt head must start at zero",
             )
         self._require_project(project_id)
-        with self._project_lock(project_id):
+        with self._project_lock(
+            project_id,
+            _lifecycle_lock_held=_lifecycle_lock_held,
+        ):
             if candidate.run_id is not None:
                 run = self._run_store(project_id, candidate.run_id).read()
                 self._assert_run_identity(run, project_id, candidate.run_id)

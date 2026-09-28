@@ -45,13 +45,15 @@ else
   echo "✓ Config found in ${QWENPAW_WORKING_DIR}, skipping initialization."
 fi
 
-# Auto-install bundled Creator plugin if not already present.
-# Set CREATOR_FORCE_PLUGIN_UPDATE=true to force overwrite existing plugins.
+# Install the bundled Creator plugin on every start by default, so a rebuilt
+# image's plugin wins over a stale copy left behind in a persisted working
+# dir. Set CREATOR_FORCE_PLUGIN_UPDATE=false to keep an existing plugin
+# (e.g. when bind-mounting the plugin directory for live editing).
 if [ -d "/app/bundled-plugins/qwenpaw-creator" ]; then
   case "${QWENPAW_WORKING_DIR}" in
     ""|"/") echo "ERROR: QWENPAW_WORKING_DIR is unset or /" >&2; exit 1 ;;
   esac
-  if [ "${CREATOR_FORCE_PLUGIN_UPDATE:-}" = "true" ] || [ ! -d "${QWENPAW_WORKING_DIR}/plugins/qwenpaw-creator" ]; then
+  if [ "${CREATOR_FORCE_PLUGIN_UPDATE:-true}" = "true" ] || [ ! -d "${QWENPAW_WORKING_DIR}/plugins/qwenpaw-creator" ]; then
     echo "📦 Installing bundled Creator plugin..."
     mkdir -p "${QWENPAW_WORKING_DIR}/plugins"
     rm -rf "${QWENPAW_WORKING_DIR}/plugins/qwenpaw-creator"
@@ -59,7 +61,7 @@ if [ -d "/app/bundled-plugins/qwenpaw-creator" ]; then
     CREATOR_VERSION=$(python3 -c "import json;print(json.load(open('/app/bundled-plugins/qwenpaw-creator/plugin.json'))['version'])" 2>/dev/null || echo "unknown")
     echo "✅ Creator plugin v${CREATOR_VERSION} installed."
   else
-    echo "✓ Creator plugin already installed (set CREATOR_FORCE_PLUGIN_UPDATE=true to overwrite)."
+    echo "✓ CREATOR_FORCE_PLUGIN_UPDATE=false, keeping the existing plugin."
   fi
 else
   echo "✓ Creator plugin not bundled."

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -13,8 +14,10 @@ import pytest
 from PIL import Image
 
 from api.file_asset_routes import _AssetInput, _ingest_many_sync
+from domain.enums import TaskKind, TaskStatus
 from services.file_agent_runtime import (
     AgentModelConfigurationError,
+    AgentModelError,
     AgentModelTurn,
     AgentRunStatus,
     AgentToolCall,
@@ -60,6 +63,7 @@ from services.runtime_files.models import (
 )
 from services.runtime_files.execution_models import (
     ExecutionAuthorizationStatus,
+    TaskRecord,
 )
 from services.specialist_tools import SpecialistToolResult
 
@@ -248,7 +252,12 @@ def test_ai_edit_idempotency_can_be_scoped_to_one_model_tool_call() -> None:
     assert "file_id=null" in _specialist_tool_recovery("ai_edit")
 
 
-def _create_project(tmp_path, *, initial_goal: str | None):
+def _create_project(
+    tmp_path,
+    *,
+    initial_goal: str | None,
+    historical_media_tasks: int = 0,
+):
     services = CreatorFileServices.create(tmp_path.resolve())
 
     def initialize(staged_root) -> None:
@@ -266,6 +275,20 @@ def _create_project(tmp_path, *, initial_goal: str | None):
                 "client-initial" if initial_goal is not None else None
             ),
         )
+        for index in range(historical_media_tasks):
+            task = TaskRecord(
+                task_id=f"historical-media-{index}",
+                project_id=PROJECT_ID,
+                kind=TaskKind.IMAGE_GENERATION,
+                status=TaskStatus.SUCCEEDED,
+                request_fingerprint=f"historical-{index}",
+            )
+            task_root = staged_root / "runtime" / "tasks" / task.task_id
+            task_root.mkdir(parents=True)
+            (task_root / "task.json").write_text(
+                task.model_dump_json(),
+                encoding="utf-8",
+            )
 
     project = Project.new(project_id=PROJECT_ID, name="Initial")
     project.visual.entities.items["hero"] = VisualEntity(
@@ -1296,6 +1319,73 @@ def test_repeated_malformed_jq_project_arguments_stop_after_two_retries(
     assert "Do not resend it" in errors[-1]["recovery"]
 
 
+@pytest.mark.parametrize(
+    ("detail", "expected_code", "expected_retryable"),
+    [
+        (
+            "Creator AgentScope model request failed: Error code: 403 - "
+            "{'error': {'code': 'ASP.BIZ.CREDITS_INSUFFICIENT', "
+            "'message': '模型 Credits 不足，请先使用贡献值兑换', "
+            "'retryable': False, 'type': 'BUSINESS'}, 'request_id': "
+            "'70491bf2-9f12-4e43-82c1-bab4a321f647'}",
+            "MODEL_QUOTA_EXCEEDED",
+            False,
+        ),
+        (
+            "Creator AgentScope model request failed: Error code: 503 - "
+            "upstream connect error",
+            "MODEL_REQUEST_FAILED",
+            True,
+        ),
+    ],
+)
+def test_model_request_failure_defers_to_the_provider_retry_verdict(
+    tmp_path,
+    monkeypatch,
+    detail: str,
+    expected_code: str,
+    expected_retryable: bool,
+) -> None:
+    """A refused request is not automatically a retriable one.
+
+    Measured on a project that died on its last shot: every turn answered 403
+    ``ASP.BIZ.CREDITS_INSUFFICIENT`` with ``retryable: false``, but this branch
+    hardcoded ``retryable=True``, so nine identical failures landed inside two
+    seconds and the only on-screen words were that the feedback had gone back
+    to the Agent. Nothing the Agent can send fixes an empty balance, so the
+    run has to stop and say what is missing.
+    """
+
+    async def callback(_messages, _tools):
+        raise AgentModelError(detail)
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="请生成结果",
+        )
+        driver = _driver(services, callback)
+        resumes: list[bool] = []
+
+        async def spy(**kwargs) -> None:
+            resumes.append(bool(kwargs.get("after_failure")))
+
+        monkeypatch.setattr(driver, "_queue_yolo_completion_resume", spy)
+        await _run_to_idle(driver, services, error=True)
+        session = services.sessions.get_project_session(PROJECT_ID)
+        await driver.stop()
+        return session, resumes
+
+    session, resumes = asyncio.run(scenario())
+
+    assert session.error["code"] == expected_code
+    assert session.error["retryable"] is expected_retryable
+    assert session.error["message"] == detail
+    # The flag is not only carried to the UI: it is the sole gate on handing an
+    # unattended project back to the Agent, so a quota refusal must not queue.
+    assert resumes == ([True] if expected_retryable else [])
+
+
 def test_initial_creation_runs_auto_fix_tool_loop_without_review(
     tmp_path,
     monkeypatch,
@@ -2134,17 +2224,13 @@ def test_specialist_cancel_emits_terminal_event(
     monkeypatch,
     cancel_phase,
 ) -> None:
-    """A specialist run cancelled mid-flight must emit a terminal
-    ``subagent.failed`` event, both from RUNNING_MODEL and from
-    WAITING_RUNTIME (a long-running tool mid-invoke).
-
-    Regression note for the WAITING_RUNTIME case: the run reaches the
-    cancel-except only after the invoke-finally bridges WAITING_RUNTIME back
-    to RUNNING_MODEL, so the on-disk transition succeeds — but the terminal
-    event was still missing.  Locks in that the event fires on this path too.
-    """
+    """Cancellation must emit a terminal event from either specialist phase."""
     if cancel_phase == "waiting_runtime":
         _authorization_gate_modes(monkeypatch, authorization="allow_all")
+        monkeypatch.setattr(
+            "services.specialist_tools.is_tts_configured",
+            lambda: True,
+        )
 
     async def scenario():
         services, _snapshot = _create_project(
@@ -2153,6 +2239,7 @@ def test_specialist_cancel_emits_terminal_event(
         )
         blocked = asyncio.Event()
         cancel_entered = asyncio.Event()
+        delegated = False
 
         async def _block_until_cancelled() -> None:
             blocked.set()
@@ -2163,8 +2250,12 @@ def test_specialist_cancel_emits_terminal_event(
                 raise
 
         async def callback(messages, tools):
+            nonlocal delegated
             names = {item["function"]["name"] for item in tools}
             if "delegate_to_agent" in names:
+                if delegated:
+                    await asyncio.Event().wait()
+                delegated = True
                 return _delegate_call(
                     "delegate-editing",
                     role="ai_editing_director",
@@ -2172,14 +2263,12 @@ def test_specialist_cancel_emits_terminal_event(
                     task="角色声音设计",
                 )
             if cancel_phase == "waiting_runtime":
-                # Specialist turn: park the run in a long-running tool.
                 return _media_call(
                     "gen-1",
                     name="tts_generation",
                     target_ref="asset:hero",
                     arguments={"text": "测试取消中的长任务。"},
                 )
-            # Specialist turn: block forever until the parent is interrupted.
             await _block_until_cancelled()
 
         async def blocking_invoke(**_kwargs):
@@ -2188,15 +2277,37 @@ def test_specialist_cancel_emits_terminal_event(
         driver = _driver(services, callback)
         if cancel_phase == "waiting_runtime":
             driver.specialist_tools.invoke = blocking_invoke  # type: ignore[method-assign]
-        await driver.start()
-        driver.notify(PROJECT_ID)
-        await asyncio.wait_for(blocked.wait(), timeout=2.0)
-        interrupted = await driver.interrupt(PROJECT_ID, reason="test-stop")
-        await driver.wait_until_idle(PROJECT_ID)
-        specialist_runs = driver.executions.list_specialist_runs(PROJECT_ID)
-        events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
-        await driver.stop()
-        return interrupted, specialist_runs, events, cancel_entered
+        try:
+            await driver.start()
+            driver.notify(PROJECT_ID)
+            # Readiness includes durable I/O, not just model/tool latency.
+            await asyncio.wait_for(blocked.wait(), timeout=30.0)
+            runs = driver.executions.list_specialist_runs(PROJECT_ID)
+            assert len(runs) == 1
+            assert runs[0].status.value == cancel_phase.upper()
+            specialist_task = driver._specialist_tasks[PROJECT_ID][
+                runs[0].run_id
+            ].task
+            assert specialist_task is not None
+            interrupted = await driver.interrupt(
+                PROJECT_ID,
+                reason="test-stop",
+            )
+            # Mainline idleness does not join detached specialists.
+            done, _pending = await asyncio.wait(
+                {specialist_task},
+                timeout=30.0,
+            )
+            assert specialist_task in done
+            assert specialist_task.cancelled()
+            await driver.wait_until_idle(PROJECT_ID, timeout_seconds=30.0)
+            specialist_runs = driver.executions.list_specialist_runs(
+                PROJECT_ID,
+            )
+            events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+            return interrupted, specialist_runs, events, cancel_entered
+        finally:
+            await driver.stop()
 
     interrupted, specialist_runs, events, cancel_entered = asyncio.run(
         scenario(),
@@ -2800,6 +2911,533 @@ def test_completion_resume_preserves_manual_regeneration_pause(
     )
 
 
+@pytest.fixture(name="completion_resume_runtime")
+def _completion_resume_runtime(tmp_path, monkeypatch, request):
+    services, snapshot = _create_project(
+        tmp_path,
+        initial_goal="完成短剧",
+        historical_media_tasks=getattr(request, "param", 0),
+    )
+    driver = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    state = {
+        "generation": snapshot.generation,
+        "nodes": [
+            WorkNode(
+                node_id="video:ep1",
+                kind="video",
+                label="第一场 · 视频",
+                status=WorkNodeStatus.GATED,
+                missing=("video_prompt 缺失", "dialogue 缺失"),
+                authored_text_gap=True,
+                dispatch_fingerprint="input-0",
+            ),
+        ],
+        "failures": {},
+        "wakes": [],
+    }
+    monkeypatch.setattr(
+        driver_module,
+        "get_media_review_mode",
+        lambda: "auto_approve",
+    )
+    monkeypatch.setattr(
+        services.projects,
+        "read",
+        lambda _project_id: replace(snapshot, generation=state["generation"]),
+    )
+    monkeypatch.setattr(
+        driver_module,
+        "derive_work_graph",
+        lambda *_args, **_kwargs: WorkGraph(
+            nodes=tuple(state["nodes"]),
+            generation=state["generation"],
+        ),
+    )
+    monkeypatch.setattr(driver.work_scheduler, "enabled", lambda: True)
+    monkeypatch.setattr(driver.work_scheduler, "wake", state["wakes"].append)
+    monkeypatch.setattr(
+        driver.work_scheduler,
+        "deterministic_failure_nodes_for_project",
+        lambda _project_id: state["failures"],
+    )
+    return services, driver, state
+
+
+def _queue_completion_resume(
+    driver,
+    *,
+    run_id="run-completion",
+    after_failure=False,
+):
+    asyncio.run(
+        driver._queue_yolo_completion_resume(
+            project_id=PROJECT_ID,
+            session_id=SESSION_ID,
+            conversation_id=CONVERSATION_ID,
+            run_id=run_id,
+            after_failure=after_failure,
+        ),
+    )
+    return driver.sessions.list_messages(PROJECT_ID, SESSION_ID, limit=None)
+
+
+@pytest.mark.parametrize("resume_count", [2, 6, 10])
+def test_yolo_new_done_allows_same_generation_and_sixth_resume(
+    completion_resume_runtime,
+    resume_count,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    for index in range(resume_count):
+        state["nodes"].append(
+            WorkNode(
+                f"visual:{index}",
+                "visual",
+                f"角色 {index}",
+                WorkNodeStatus.DONE,
+            ),
+        )
+        messages = _queue_completion_resume(driver, run_id=f"run-{index}")
+        checkpoint = messages[-1].metadata["completionCheckpoint"]
+        assert checkpoint["version"] == 1
+        assert checkpoint["completedNodeIds"] == [
+            f"visual:{i}" for i in range(index + 1)
+        ]
+        assert checkpoint["unproductiveResumes"] == 0
+        assert (
+            messages[-1].metadata["projectGeneration"] == state["generation"]
+        )
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages)
+        == resume_count
+    )
+    assert not any(
+        item.source == "creator_execution_notice" for item in messages
+    )
+
+
+@pytest.mark.parametrize("generation_churn", [False, True])
+def test_yolo_repeated_state_pauses_visibly_once_across_restart(
+    completion_resume_runtime,
+    monkeypatch,
+    generation_churn,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    before = _queue_completion_resume(driver)
+    state["generation"] += int(generation_churn)
+    node = state["nodes"][0]
+    state["nodes"][0] = replace(
+        node,
+        label="模型声称已经完成",
+        missing=tuple(reversed(node.missing)),
+        task_id="new-task-id",
+        progress=0.9,
+        locator={"updatedAt": "later", "modelClaim": "completed"},
+    )
+    driver._wake.clear()
+    messages = _queue_completion_resume(driver, run_id="different-run")
+    pause = messages[-1]
+    assert pause.role == "assistant"
+    assert pause.source == "creator_execution_notice"
+    assert (
+        pause.metadata["executionPause"]["reason"] == "no_committed_progress"
+    )
+    assert "未检测到新的节点完成进展" in pause.content_parts[0].text
+    assert "video_prompt 缺失" in pause.content_parts[0].text
+    assert (
+        "检查" in pause.content_parts[0].text
+        and "继续" in pause.content_parts[0].text
+    )
+    assert [item for item in messages if item.role == "user"] == [
+        item for item in before if item.role == "user"
+    ]
+    assert not driver._wake.is_set()
+    restarted = _driver(services, lambda _messages, _tools: AgentModelTurn())
+    monkeypatch.setattr(restarted.work_scheduler, "enabled", lambda: True)
+    monkeypatch.setattr(
+        restarted.work_scheduler,
+        "wake",
+        state["wakes"].append,
+    )
+    state["generation"] += 1
+    assert (
+        _queue_completion_resume(restarted, run_id="restart-run") == messages
+    )
+    events = services.sessions.list_events(PROJECT_ID, SESSION_ID)
+    completed = [
+        event for event in events if event.event_type == "message.completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0].payload["messageId"] == pause.message_id
+    assert (
+        services.sessions.get_project_session(
+            PROJECT_ID,
+        ).last_consumed_message_seq
+        == 0
+    )
+    assert driver.runs.list(PROJECT_ID) == []
+    assert driver.executions.list_tasks(PROJECT_ID) == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"missing": ("新的结构缺口",)},
+        {"status": WorkNodeStatus.STALE},
+        {"error": "prompt preparation failed"},
+        {"dispatch_fingerprint": "changed-input"},
+        {"regeneration_of": "artifact-version-old"},
+    ],
+)
+def test_yolo_actionable_changes_consume_budget_without_progress_credit(
+    completion_resume_runtime,
+    change,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    before = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    state["generation"] += 1
+    state["nodes"][0] = replace(state["nodes"][0], **change)
+    after = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert after["actionableFingerprint"] != before["actionableFingerprint"]
+    assert after["unproductiveResumes"] == 1
+
+
+@pytest.mark.parametrize("generation_churn", [False, True])
+def test_yolo_five_changed_unproductive_attempts_exhaust_budget(
+    completion_resume_runtime,
+    generation_churn,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    for index in range(6):
+        state["generation"] += int(generation_churn)
+        state["nodes"][0] = replace(
+            state["nodes"][0],
+            dispatch_fingerprint=f"input-{index}",
+        )
+        messages = _queue_completion_resume(driver, run_id=f"run-{index}")
+        if index < 5:
+            assert (
+                messages[-1].metadata["completionCheckpoint"][
+                    "unproductiveResumes"
+                ]
+                == index
+            )
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages) == 5
+    )
+    assert (
+        messages[-1].metadata["executionPause"]["reason"]
+        == "consecutive_resume_limit"
+    )
+    assert "预算已耗尽" in messages[-1].content_parts[0].text
+    state["generation"] += 1
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        dispatch_fingerprint="another-input",
+    )
+    assert (
+        _queue_completion_resume(driver, run_id="repeat-budget-check")
+        == messages
+    )
+    state["nodes"].append(
+        WorkNode("visual:new", "visual", "新角色", WorkNodeStatus.DONE),
+    )
+    messages = _queue_completion_resume(driver, run_id="productive-sixth")
+    assert (
+        messages[-1].metadata["completionCheckpoint"]["unproductiveResumes"]
+        == 0
+    )
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages) == 6
+    )
+
+
+def test_yolo_done_union_prevents_toggling_from_earning_progress(
+    completion_resume_runtime,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    done = WorkNode("visual:hero", "visual", "角色", WorkNodeStatus.DONE)
+    state["nodes"].append(done)
+    _queue_completion_resume(driver)
+    state["nodes"][1] = replace(done, status=WorkNodeStatus.READY)
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        dispatch_fingerprint="input-1",
+    )
+    checkpoint = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert checkpoint["completedNodeIds"] == [done.node_id]
+    assert checkpoint["unproductiveResumes"] == 1
+    state["nodes"][1] = done
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        dispatch_fingerprint="input-2",
+    )
+    checkpoint = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert checkpoint["unproductiveResumes"] == 2
+    state["nodes"].append(
+        WorkNode("visual:new", "visual", "新角色", WorkNodeStatus.DONE),
+    )
+    checkpoint = _queue_completion_resume(driver)[-1].metadata[
+        "completionCheckpoint"
+    ]
+    assert checkpoint["completedNodeIds"] == ["visual:hero", "visual:new"]
+    assert checkpoint["unproductiveResumes"] == 0
+
+
+def test_yolo_absolute_ceiling_survives_notifications_until_human_input(
+    completion_resume_runtime,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    for index in range(11):
+        state["nodes"].append(
+            WorkNode(f"visual:{index}", "visual", "角色", WorkNodeStatus.DONE),
+        )
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": "进度"}],
+            source=driver_module.NOTIFICATION_SOURCE,
+        )
+        messages = _queue_completion_resume(driver, run_id=f"run-{index}")
+    assert (
+        sum(item.source == driver.YOLO_RESUME_SOURCE for item in messages)
+        == 10
+    )
+    assert (
+        messages[-1].metadata["executionPause"]["reason"]
+        == "unattended_budget"
+    )
+    assert "10 次自动续跑上限" in messages[-1].content_parts[0].text
+    services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        content_parts=[{"type": "text", "text": "检查后继续"}],
+        source="user",
+    )
+    assert (
+        _queue_completion_resume(driver)[-1].source
+        == driver.YOLO_RESUME_SOURCE
+    )
+
+
+@pytest.mark.parametrize("mode", ["manual", "auto_approve"])
+@pytest.mark.parametrize("count", [5, 10])
+def test_completion_resume_mode_separation_keeps_absolute_ceiling(
+    completion_resume_runtime,
+    monkeypatch,
+    mode,
+    count,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    monkeypatch.setattr(driver_module, "get_media_review_mode", lambda: mode)
+    other_source = (
+        driver.YOLO_RESUME_SOURCE
+        if mode == "manual"
+        else driver.PROMPT_CONTRACT_RESUME_SOURCE
+    )
+    for index in range(count):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"续跑 {index}"}],
+            source=other_source,
+            metadata={"projectGeneration": state["generation"]},
+        )
+    feedback = _queue_completion_resume(driver)[-1]
+    if count == 10:
+        assert (
+            feedback.metadata["executionPause"]["reason"]
+            == "unattended_budget"
+        )
+    else:
+        expected_source = (
+            driver.PROMPT_CONTRACT_RESUME_SOURCE
+            if mode == "manual"
+            else driver.YOLO_RESUME_SOURCE
+        )
+        assert feedback.source == expected_source
+    if mode == "manual":
+        assert state["wakes"] == []
+
+
+@pytest.mark.parametrize(
+    "streak,same_generation",
+    [(1, True), (5, False), (4, False)],
+)
+def test_yolo_legacy_metadata_preserves_generation_and_streak_guards(
+    completion_resume_runtime,
+    streak,
+    same_generation,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    for index in range(streak):
+        services.sessions.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            CONVERSATION_ID,
+            role="user",
+            content_parts=[{"type": "text", "text": f"旧续跑 {index}"}],
+            source=driver.YOLO_RESUME_SOURCE,
+            metadata={
+                "projectGeneration": state["generation"]
+                - int(not same_generation),
+            },
+        )
+    state["nodes"].append(
+        WorkNode("visual:done", "visual", "角色", WorkNodeStatus.DONE),
+    )
+    messages = _queue_completion_resume(driver)
+    if streak == 4:
+        assert (
+            messages[-1].metadata["completionCheckpoint"][
+                "unproductiveResumes"
+            ]
+            == 4
+        )
+        state["nodes"][0] = replace(
+            state["nodes"][0],
+            dispatch_fingerprint="new-input",
+        )
+        messages = _queue_completion_resume(driver)
+    assert messages[-1].source == "creator_execution_notice"
+    assert messages[-1].metadata["executionPause"]["reason"] == (
+        "no_committed_progress"
+        if same_generation
+        else "consecutive_resume_limit"
+    )
+
+
+@pytest.mark.parametrize("after_failure", [False, True])
+def test_yolo_deterministic_errors_precede_generic_feedback(
+    completion_resume_runtime,
+    after_failure,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    state["nodes"] = [
+        WorkNode(f"script:{i}", "script", f"剧本 {i}", WorkNodeStatus.STALE)
+        for i in range(9)
+    ] + [
+        WorkNode(
+            "video:prep",
+            "video",
+            "生成准备",
+            WorkNodeStatus.GATED,
+            prompt_sync_required=True,
+        ),
+        WorkNode("video:ready", "video", "视频派发", WorkNodeStatus.READY),
+        WorkNode(
+            "visual:failed",
+            "visual",
+            "角色",
+            WorkNodeStatus.FAILED,
+            error="invalid reference",
+        ),
+    ]
+    state["failures"] = {
+        "video:prep": "PROMPT_PREPARATION_FAILED",
+        "video:ready": "reference budget exceeded",
+    }
+    feedback = _queue_completion_resume(driver, after_failure=after_failure)[
+        -1
+    ]
+    text = feedback.content_parts[0].text
+    assert "PROMPT_PREPARATION_FAILED" in text
+    assert "reference budget exceeded" in text
+    assert "invalid reference" in text
+    assert text.index("PROMPT_PREPARATION_FAILED") < text.index("剧本 0")
+    assert text.index("invalid reference") < text.index("剧本 0")
+    assert "剧本 5" not in text
+    assert feedback.metadata["modelRequiredNodes"][:3] == [
+        "video:prep",
+        "video:ready",
+        "visual:failed",
+    ]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [WorkNodeStatus.READY, WorkNodeStatus.GATED],
+)
+def test_yolo_scheduler_failure_alone_is_actionable(
+    completion_resume_runtime,
+    status,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    state["nodes"][0] = replace(
+        state["nodes"][0],
+        status=status,
+        missing=(),
+        authored_text_gap=False,
+        prompt_sync_required=True,
+    )
+    state["failures"] = {"video:ep1": "PROMPT_PREPARATION_FAILED"}
+    feedback = _queue_completion_resume(driver)[-1]
+    assert feedback.source == driver.YOLO_RESUME_SOURCE
+    assert "PROMPT_PREPARATION_FAILED" in feedback.content_parts[0].text
+    state["failures"]["video:ep1"] = "another deterministic error"
+    feedback = _queue_completion_resume(driver)[-1]
+    assert (
+        feedback.metadata["completionCheckpoint"]["unproductiveResumes"] == 1
+    )
+    assert "another deterministic error" in feedback.content_parts[0].text
+    assert (
+        _queue_completion_resume(driver)[-1].metadata["executionPause"][
+            "reason"
+        ]
+        == "no_committed_progress"
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [WorkNodeStatus.READY, WorkNodeStatus.RUNNING],
+)
+def test_yolo_machine_only_work_stays_scheduler_owned(
+    completion_resume_runtime,
+    status,
+) -> None:
+    services, driver, state = completion_resume_runtime
+    state["nodes"] = [
+        WorkNode("video:ep1", "video", "视频", status, command="r2v_generation"),
+    ]
+    before = services.sessions.list_messages(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=None,
+    )
+    assert _queue_completion_resume(driver) == before
+    assert state["wakes"] == [PROJECT_ID]
+    assert not driver._wake.is_set()
+
+
+def test_yolo_transient_failure_without_nodes_still_gets_bounded_resume(
+    completion_resume_runtime,
+) -> None:
+    _services, driver, state = completion_resume_runtime
+    state["nodes"] = []
+    messages = _queue_completion_resume(driver, after_failure=True)
+    assert messages[-1].source == driver.YOLO_RESUME_SOURCE
+    assert "瞬态故障" in messages[-1].content_parts[0].text
+    messages = _queue_completion_resume(driver, after_failure=True)
+    assert (
+        messages[-1].metadata["executionPause"]["reason"]
+        == "no_committed_progress"
+    )
+
+
 def test_model_blocked_with_its_pending_review_is_a_neutral_pause(
     tmp_path,
     monkeypatch,
@@ -3124,14 +3762,29 @@ def test_yolo_resume_carries_quiet_digest_and_respects_fuse(
     )
 
 
-@pytest.mark.parametrize(
-    "reason",
-    ["no_committed_progress", "media_budget_exhausted"],
-)
-def test_yolo_pause_reasons_are_durable_not_new_model_requests(
+@pytest.mark.parametrize("completion_resume_runtime", [250], indirect=True)
+def test_yolo_resumes_after_many_historical_media_tasks(
+    completion_resume_runtime,
+):
+    _services, driver, state = completion_resume_runtime
+    history = driver.executions.list_tasks(PROJECT_ID)
+    assert len(history) == 250
+    assert all(task.kind is TaskKind.IMAGE_GENERATION for task in history)
+
+    messages = _queue_completion_resume(driver)
+
+    assert state["wakes"] == [PROJECT_ID]
+    assert messages[-1].source == driver.YOLO_RESUME_SOURCE
+    assert messages[-1].metadata["modelRequiredNodes"] == ["video:ep1"]
+    assert not any(
+        item.source == "creator_execution_notice" for item in messages
+    )
+    assert driver._wake.is_set()
+
+
+def test_yolo_no_progress_pause_is_durable_not_a_new_model_request(
     tmp_path,
     monkeypatch,
-    reason,
 ):
     services, snapshot = _create_project(tmp_path, initial_goal="完成短剧")
     driver = _driver(services, lambda *_args: AgentModelTurn())
@@ -3160,26 +3813,15 @@ def test_yolo_pause_reasons_are_durable_not_new_model_requests(
         "wake",
         lambda _project_id: None,
     )
-    if reason == "no_committed_progress":
-        services.sessions.append_message(
-            PROJECT_ID,
-            SESSION_ID,
-            CONVERSATION_ID,
-            role="user",
-            source=driver.YOLO_RESUME_SOURCE,
-            content_parts=[{"type": "text", "text": "修正输入文本"}],
-            metadata={"projectGeneration": snapshot.generation},
-        )
-    else:
-
-        def exhausted(*_args):
-            raise driver_module.MediaCallBudgetExhausted("used budget")
-
-        monkeypatch.setattr(
-            driver_module,
-            "ensure_media_call_budget",
-            exhausted,
-        )
+    services.sessions.append_message(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        role="user",
+        source=driver.YOLO_RESUME_SOURCE,
+        content_parts=[{"type": "text", "text": "修正输入文本"}],
+        metadata={"projectGeneration": snapshot.generation},
+    )
     before = services.sessions.list_messages(PROJECT_ID, SESSION_ID)
     asyncio.run(
         driver._queue_yolo_completion_resume(
@@ -3194,7 +3836,10 @@ def test_yolo_pause_reasons_are_durable_not_new_model_requests(
         m.message_id for m in after if m.role == "user"
     ]
     assert after[-1].source == "creator_execution_notice"
-    assert after[-1].metadata["executionPause"]["reason"] == reason
+    assert (
+        after[-1].metadata["executionPause"]["reason"]
+        == "no_committed_progress"
+    )
     assert not driver._wake.is_set()
 
 

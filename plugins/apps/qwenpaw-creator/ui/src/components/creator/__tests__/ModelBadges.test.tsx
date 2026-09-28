@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import ModelBadges from "../ModelBadges";
 import type { ModelConfigData } from "@/contracts/creator";
@@ -59,5 +59,19 @@ describe("ModelBadges", () => {
       "data-status",
       dataStatus,
     );
+  });
+});
+
+describe("platform quick config entry", () => {
+  it("opens one-click setup without going through the model dialog", async () => {
+    // Wiring guard: the entry lives beside the status badges and is
+    // unconditional - a deployment that cannot reach the platform should show
+    // a failing button, not a missing one.
+    renderBadges();
+    fireEvent.click(await screen.findByRole("button", { name: "一键配置" }));
+
+    expect(
+      await screen.findByRole("button", { name: "拉取并配置" }),
+    ).toBeInTheDocument();
   });
 });

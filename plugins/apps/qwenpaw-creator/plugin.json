@@ -30,7 +30,9 @@
     "backend/skills/edu-math-tutorial/SKILL.md",
     "backend/skills/informal-launch-captions/SKILL.md",
     "backend/skills/professional-media-prompts/SKILL.md",
-    "backend/skills/visual-asset-design/SKILL.md"
+    "backend/skills/visual-asset-design/SKILL.md",
+    "player/ivb/static/interaction-runtime.js",
+    "player/ivb/static/authored-player.js"
   ],
   "pack_exclude": [
     "backend/tests",
@@ -47,7 +49,8 @@
     "ui/plugin-entry.js",
     "ui/tsconfig.json",
     "ui/vite.config.ts",
-    "ui/vitest.config.ts"
+    "ui/vitest.config.ts",
+    "player/docs"
   ],
   "meta": {
     "pawapp": {

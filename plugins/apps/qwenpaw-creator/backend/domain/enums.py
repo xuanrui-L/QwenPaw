@@ -96,6 +96,8 @@ class TaskKind(StrEnum):
     AI_EDIT_EXECUTE = "ai_edit_execute"
     COMPOSE = "compose"
     SCRIPT_DRAFT = "script_draft"
+    INTERACTION_DRAFT = "interaction_draft"
+    COVER_GENERATION = "cover_generation"
 
 
 class CreatorProgressPhase(StrEnum):
@@ -136,6 +138,8 @@ class CreatorCommandType(StrEnum):
     COMPOSE_FINAL_VIDEO = "COMPOSE_FINAL_VIDEO"
     ANALYZE_SOURCE_MEDIA = "ANALYZE_SOURCE_MEDIA"
     GENERATE_TIMELINE_SCRIPT = "GENERATE_TIMELINE_SCRIPT"
+    GENERATE_INTERACTION_MOTION = "GENERATE_INTERACTION_MOTION"
+    GENERATE_COVER = "GENERATE_COVER"
 
 
 DETERMINISTIC_COMMANDS = frozenset(

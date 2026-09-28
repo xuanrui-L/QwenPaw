@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import InteractionView from "@/components/interaction/InteractionView";
+import { PresentationPreview } from "@/components/interaction/PresentationEditor";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
@@ -20,10 +22,12 @@ import {
 import {
   selectFinalFilmVersionId,
   selectRoughCutFrames,
+  hasTimelinePreviewContent,
   type RoughCutSource,
 } from "@/selectors/blueprintSelectors";
 import {
   selectLiveTimelineIds,
+  selectNarrativeShape,
   timelineEndTick,
 } from "@/selectors/timelineElementSelectors";
 import TimelineLivePreview from "@/components/timeline/TimelineLivePreview";
@@ -42,9 +46,20 @@ function DraftTimelinePlayer({
   const [playing, setPlaying] = useState(true);
   const duration = timelineEndTick(timeline);
   const tps = timeline.ticks_per_second || 1000;
+  const available = hasTimelinePreviewContent(project, timeline);
   useEffect(() => {
-    if (duration > 0 && tick >= duration) onEnded();
-  }, [tick, duration, onEnded]);
+    if (available && duration > 0 && tick >= duration) onEnded();
+  }, [tick, duration, onEnded, available]);
+  if (!available)
+    return (
+      <div
+        role="status"
+        data-roughcut-unavailable
+        className="flex h-[min(68vh,720px)] w-[min(88vw,1000px)] items-center justify-center px-8 text-center text-sm text-white/75"
+      >
+        {t("blueprint.previewUnavailable")}
+      </div>
+    );
   return (
     <div data-roughcut-live className="w-[min(88vw,1000px)] pt-10">
       <div className="h-[min(68vh,720px)]">
@@ -95,18 +110,57 @@ function DraftTimelinePlayer({
 const SOURCE_STYLE: Record<RoughCutSource, string> = {
   final: "bg-[var(--color-success)]/90",
   storyboard: "bg-[var(--color-primary,#3b82f6)]/90",
-  design: "bg-[var(--color-warning)]/90",
   none: "bg-black/50",
 };
 
 /** Sentinel playing id of the whole-film chip (never a real timeline id). */
 const FULL_FILM_ID = "__full_film__";
 
+function RoughCutVideoThumbnail({ src }: { src: string }) {
+  const containerRef = useRef<HTMLSpanElement>(null);
+  const [visible, setVisible] = useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof IntersectionObserver === "undefined") return;
+    // The horizontal strip can contain hundreds of shots. Mount a decoder
+    // only while its frame is visible, including clipping by the strip.
+    const observer = new IntersectionObserver(([entry]) => {
+      setVisible(entry.isIntersecting);
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <span ref={containerRef} className="block h-full w-full" aria-hidden="true">
+      {visible && (
+        <video
+          src={src}
+          muted
+          playsInline
+          preload="metadata"
+          className="h-full w-full object-cover"
+        />
+      )}
+    </span>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Cinema preview: a near-fullscreen floating overlay. The whole-film  */
 /* chip plays the composed mp4; timeline chips play the story in       */
-/* narrative order.                                                    */
+/* narrative order — at branch points the audience choice surfaces so  */
+/* every fork is previewable.                                          */
 /* ------------------------------------------------------------------ */
+
+interface CinemaOption {
+  edgeId: string;
+  label: string;
+  target: string;
+}
 
 function PreviewCinema({
   project,
@@ -125,19 +179,33 @@ function PreviewCinema({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const wholeFilm = startId === FULL_FILM_ID;
-  const initialId = startId;
+  // Branching projects have no meaningful composed whole film: the
+  // whole-film sentinel enters the branch-following playback instead,
+  // starting from the entry timeline (same test as selectNarrativeShape).
+  const branching = selectNarrativeShape(project) === "branching";
+  const wholeFilm = startId === FULL_FILM_ID && !branching;
+  const initialId =
+    startId === FULL_FILM_ID && branching
+      ? selectLiveTimelineIds(project)[0] ?? startId
+      : startId;
   const [currentId, setCurrentId] = useState(initialId);
   const [segmentIndex, setSegmentIndex] = useState(1);
+  const [options, setOptions] = useState<CinemaOption[] | null>(null);
   const [ended, setEnded] = useState(false);
   const [error, setError] = useState(false);
   const [replayNonce, setReplayNonce] = useState(0);
   /** Intrinsic aspect ratio of the playing video; lets the frame hug it. */
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
 
+  // Both story shapes use the same checked storyboard / shot preview. This
+  // component already follows narrative edges when the draft segment ends.
+  // A server rough cut may still substitute character reference sheets.
+  const srcFor = srcOf;
+
   useEffect(() => {
     setCurrentId(initialId);
     setSegmentIndex(1);
+    setOptions(null);
     setEnded(false);
     setError(false);
     setAspectRatio(null);
@@ -153,9 +221,51 @@ function PreviewCinema({
 
   const liveOrder = useMemo(() => selectLiveTimelineIds(project), [project]);
 
+  const edges = useMemo(
+    () => project.narrative_edges ?? [],
+    [project.narrative_edges],
+  );
+
+  const interactionElement = useMemo(
+    () =>
+      Object.values(
+        project.timelines.items[currentId]?.elements_by_id ?? {},
+      ).find(
+        (element) => element.enabled && element.creation.type === "interaction",
+      ),
+    [project, currentId],
+  );
+  const creation =
+    interactionElement?.creation.type === "interaction"
+      ? interactionElement.creation
+      : null;
+  const openChoice = useCallback(() => {
+    if (!creation) return false;
+    setOptions(
+      creation.options.flatMap((option) => {
+        const edge = edges.find(
+          (edge) =>
+            edge.edge_id === option.edge_ref &&
+            edge.source_timeline_id === currentId,
+        );
+        return edge
+          ? [
+              {
+                edgeId: edge.edge_id,
+                label: edge.label,
+                target: edge.target_timeline_id,
+              },
+            ]
+          : [];
+      }),
+    );
+    return true;
+  }, [creation, edges, currentId]);
+
   const advanceTo = useCallback((timelineId: string) => {
     setCurrentId(timelineId);
     setSegmentIndex((index) => index + 1);
+    setOptions(null);
     setEnded(false);
     setError(false);
     setAspectRatio(null);
@@ -166,14 +276,34 @@ function PreviewCinema({
       setEnded(true);
       return;
     }
-    // Linear story: fall through the live timelines in narrative order.
-    const next = liveOrder[liveOrder.indexOf(currentId) + 1];
-    if (next) {
-      advanceTo(next);
+    if (openChoice()) return;
+    const outgoing = edges.filter(
+      (edge) => edge.source_timeline_id === currentId,
+    );
+    if (outgoing.length > 1) {
+      setOptions(
+        outgoing.map((edge) => ({
+          edgeId: edge.edge_id,
+          label: edge.label || edge.prompt || labelOf(edge.target_timeline_id),
+          target: edge.target_timeline_id,
+        })),
+      );
       return;
     }
+    if (outgoing.length === 1) {
+      advanceTo(outgoing[0].target_timeline_id);
+      return;
+    }
+    if (edges.length === 0) {
+      // Linear story: fall through the live timelines in narrative order.
+      const next = liveOrder[liveOrder.indexOf(currentId) + 1];
+      if (next) {
+        advanceTo(next);
+        return;
+      }
+    }
     setEnded(true);
-  }, [wholeFilm, currentId, liveOrder, advanceTo]);
+  }, [wholeFilm, edges, liveOrder, currentId, labelOf, advanceTo, openChoice]);
 
   const replay = useCallback(() => {
     setReplayNonce((nonce) => nonce + 1);
@@ -208,7 +338,7 @@ function PreviewCinema({
             {t("blueprint.roughCutFailed")}
           </div>
         ) : !wholeFilm &&
-          !srcOf(currentId) &&
+          !srcFor(currentId) &&
           project.timelines.items[currentId] ? (
           <DraftTimelinePlayer
             key={`${currentId}:${replayNonce}`}
@@ -222,7 +352,7 @@ function PreviewCinema({
           // in either orientation.
           <video
             key={`${currentId}:${replayNonce}`}
-            src={(wholeFilm ? filmUrl : srcOf(currentId)) ?? undefined}
+            src={(wholeFilm ? filmUrl : srcFor(currentId)) ?? undefined}
             controls
             autoPlay
             playsInline
@@ -231,6 +361,21 @@ function PreviewCinema({
               if (videoWidth > 0 && videoHeight > 0) {
                 setAspectRatio(videoWidth / videoHeight);
               }
+            }}
+            onTimeUpdate={(event) => {
+              if (
+                interactionElement &&
+                !options &&
+                event.currentTarget.currentTime >=
+                  interactionElement.span.start_tick /
+                    project.timelines.items[currentId].ticks_per_second
+              ) {
+                event.currentTarget.pause();
+                openChoice();
+              }
+            }}
+            onPlay={(event) => {
+              if (options) event.currentTarget.pause();
             }}
             onEnded={handleEnded}
             onError={() => setError(true)}
@@ -247,6 +392,25 @@ function PreviewCinema({
                 ? "h-auto max-h-[82vh] max-w-[92vw]"
                 : "h-[min(82vh,900px)] w-auto max-w-full object-contain"
             }`}
+          />
+        )}
+
+        {/* Branch choice overlay — every fork stays previewable. */}
+        {options && (
+          <InteractionView
+            creation={
+              creation ?? {
+                type: "interaction",
+                question: t("blueprint.previewChoice"),
+                options: options.map((option) => ({ edge_ref: option.edgeId })),
+              }
+            }
+            project={project}
+            onSelect={(ref) => {
+              const target = options.find((option) => option.edgeId === ref)
+                ?.target;
+              if (target) advanceTo(target);
+            }}
           />
         )}
 
@@ -292,7 +456,7 @@ interface BlueprintRoughCutStripProps {
 /**
  * Rough-cut preview strip (plan §4.8): one frame per enabled element, sourced
  * purely from existing artifacts — selected element_video ▸ storyboard image ▸
- * referenced entity design ▸ placeholder. Clicking a frame opens the owning
+ * empty placeholder. Clicking a frame opens the owning
  * timeline's script panel; play chips open the floating cinema overlay.
  */
 export default function BlueprintRoughCutStrip({
@@ -308,6 +472,7 @@ export default function BlueprintRoughCutStrip({
     () => [...new Set(frames.map((frame) => frame.timelineId))],
     [frames],
   );
+  const isBranching = selectNarrativeShape(project) === "branching";
   const filmVersionId = useMemo(
     () => selectFinalFilmVersionId(project),
     [project],
@@ -315,7 +480,14 @@ export default function BlueprintRoughCutStrip({
   const filmUrl = filmVersionId
     ? getArtifactVersionMediaUrl(filmVersionId)
     : null;
-  if (!frames.length && !filmUrl) return null;
+  const hasSegment = selectLiveTimelineIds(project).some((id) => {
+    const slot = project.assets.artifact_slots_by_id[`timeline:${id}:render`];
+    const version = slot?.selected_version_id
+      ? project.assets.artifact_versions_by_id[slot.selected_version_id]
+      : null;
+    return slot?.kind === "final_video" && Boolean(version && !version.stale);
+  });
+  if (!frames.length && !filmUrl && !hasSegment) return null;
 
   const timelineLabelOf = (timelineId: string) => {
     const timeline = project.timelines.items[timelineId];
@@ -328,10 +500,20 @@ export default function BlueprintRoughCutStrip({
     const slot =
       project.assets.artifact_slots_by_id[`timeline:${timelineId}:render`];
     if (slot?.kind !== "final_video" || !slot.selected_version_id) return null;
-    if (project.assets.artifact_versions_by_id[slot.selected_version_id]?.stale)
-      return null;
+    const version =
+      project.assets.artifact_versions_by_id[slot.selected_version_id];
+    if (!version || version.stale) return null;
     return getArtifactVersionMediaUrl(slot.selected_version_id);
   };
+
+  const canPreview = (id: string) =>
+    Boolean(
+      finalCutUrlOf(id) ||
+        (project.timelines.items[id] &&
+          hasTimelinePreviewContent(project, project.timelines.items[id])),
+    );
+  const entryId = selectLiveTimelineIds(project)[0];
+  const canPreviewEntry = Boolean(entryId && canPreview(entryId));
 
   const togglePlay = (timelineId: string) => {
     setPlayingId((current) => (current === timelineId ? null : timelineId));
@@ -350,10 +532,16 @@ export default function BlueprintRoughCutStrip({
         <button
           type="button"
           data-roughcut-preview-all
+          disabled={!canPreviewEntry}
+          title={
+            !canPreviewEntry
+              ? t("blueprint.previewUnavailable")
+              : t("blueprint.previewAll")
+          }
           onClick={() =>
             setPlayingId(selectLiveTimelineIds(project)[0] ?? null)
           }
-          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--color-text-primary)] px-2.5 py-1 text-[10px] font-bold text-[var(--color-bg-primary)] shadow-[0_2px_8px_rgba(0,0,0,.2)] transition-all hover:-translate-y-px hover:opacity-90"
+          className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[var(--color-text-primary)] px-2.5 py-1 text-[10px] font-bold text-[var(--color-bg-primary)] shadow-[0_2px_8px_rgba(0,0,0,.2)] transition-all enabled:hover:-translate-y-px enabled:hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Play className="h-3 w-3" />
           {t("blueprint.previewAll")}
@@ -365,23 +553,36 @@ export default function BlueprintRoughCutStrip({
           })}
         </span>
         <span className="ml-auto flex min-w-0 shrink items-center gap-1.5 overflow-x-auto py-0.5 [scrollbar-width:none]">
-          {Boolean(filmUrl) && (
+          {(isBranching
+            ? selectLiveTimelineIds(project).length > 0
+            : Boolean(filmUrl)) && (
             <button
               type="button"
               data-roughcut-play-film
+              disabled={isBranching && !canPreviewEntry}
               onClick={() => togglePlay(FULL_FILM_ID)}
-              title={t("blueprint.playFullFilm")}
-              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors ${
+              title={
+                isBranching && !canPreviewEntry
+                  ? t("blueprint.previewUnavailable")
+                  : isBranching
+                  ? t("blueprint.playFullInteractive")
+                  : t("blueprint.playFullFilm")
+              }
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                 playingId === FULL_FILM_ID
                   ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
                   : "border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
               }`}
             >
               <Film className="h-3 w-3" />
-              {t("blueprint.playFullFilm")}
-              <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
-                {t("blueprint.finalCutBadge")}
-              </span>
+              {isBranching
+                ? t("blueprint.playFullInteractive")
+                : t("blueprint.playFullFilm")}
+              {!isBranching && (
+                <span className="rounded bg-[var(--color-success)]/15 px-1 text-[9px] font-bold text-[var(--color-success)]">
+                  {t("blueprint.finalCutBadge")}
+                </span>
+              )}
             </button>
           )}
           <button
@@ -402,16 +603,48 @@ export default function BlueprintRoughCutStrip({
           </button>
         </span>
       </div>
-      {playingId && (
-        <PreviewCinema
-          project={project}
-          startId={playingId}
-          filmUrl={filmUrl}
-          labelOf={timelineLabelOf}
-          srcOf={finalCutUrlOf}
-          onClose={() => setPlayingId(null)}
-        />
+      {!canPreviewEntry && !hasSegment && (
+        <p
+          role="status"
+          data-roughcut-empty
+          className="mt-2 text-xs text-[var(--color-text-tertiary)]"
+        >
+          {t("blueprint.previewUnavailable")}
+        </p>
       )}
+      {playingId === FULL_FILM_ID && isBranching
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[1200] flex items-center justify-center bg-black/70 p-5"
+              role="dialog"
+              aria-label="互动作品预览"
+              data-authored-cinema
+            >
+              <div className="w-[94vw] overflow-hidden rounded-lg bg-[var(--color-bg-primary)]">
+                <div className="flex justify-end p-2">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setPlayingId(null)}
+                  >
+                    关闭预览
+                  </button>
+                </div>
+                <PresentationPreview project={project} review={false} />
+              </div>
+            </div>,
+            document.body,
+          )
+        : playingId && (
+            <PreviewCinema
+              project={project}
+              startId={playingId}
+              filmUrl={filmUrl}
+              labelOf={timelineLabelOf}
+              srcOf={finalCutUrlOf}
+              onClose={() => setPlayingId(null)}
+            />
+          )}
       {!collapsed && (
         <div className="mt-2 flex items-stretch gap-3 overflow-x-auto pb-1.5">
           {timelineIds.map((timelineId) => {
@@ -433,9 +666,14 @@ export default function BlueprintRoughCutStrip({
                   <button
                     type="button"
                     data-roughcut-play={timelineId}
+                    disabled={!canPreview(timelineId)}
                     onClick={() => togglePlay(timelineId)}
-                    title={t("blueprint.playRoughCut")}
-                    className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors ${
+                    title={t(
+                      canPreview(timelineId)
+                        ? "blueprint.playRoughCut"
+                        : "blueprint.previewUnavailable",
+                    )}
+                    className={`inline-flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
                       playingId === timelineId
                         ? "text-[var(--color-accent)]"
                         : "text-[var(--color-text-secondary)] hover:text-[var(--color-accent)]"
@@ -500,12 +738,7 @@ export default function BlueprintRoughCutStrip({
                         <span className="relative block h-[82px] w-full overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-secondary)] transition-colors group-hover:border-[var(--color-accent)]">
                           {url &&
                             (frame.mediaKind === "video" ? (
-                              <video
-                                src={url}
-                                muted
-                                preload="metadata"
-                                className="h-full w-full object-cover"
-                              />
+                              <RoughCutVideoThumbnail src={url} />
                             ) : (
                               <img
                                 src={url}

@@ -93,6 +93,91 @@ def test_token_plan_probe_uses_models_endpoint(type_, model_name) -> None:
 
 
 @pytest.mark.parametrize(
+    ("type_", "model_name"),
+    [
+        ("llm", "qwen3.8-flash"),
+        ("vlm", "qwen3.8-max"),
+        ("image", "qwen-image-3.0"),
+        ("asr", "qwen-audio-3.0-asr-flash"),
+        ("tts", "qwen-audio-3.0-tts-flash"),
+    ],
+)
+def test_agentscope_gateway_probe_lists_models_and_never_completes(
+    type_,
+    model_name,
+) -> None:
+    """Every section of the proxy probes for free.
+
+    The chat route bills even at ``max_tokens=8``, and a Credits-exhausted
+    account answers it with a 403 that looks exactly like a permission error -
+    so a chat probe cannot tell a broken configuration from an empty balance.
+    """
+    url, headers, payload = _probe_payload(
+        _request(
+            type=type_,
+            model_name=model_name,
+            protocol="AgentScope Platform",
+            base_url="https://platform-pre.agentscope.io/v1",
+            provider=None,
+        ),
+    )
+
+    assert url == "https://platform-pre.agentscope.io/v1/models"
+    assert payload == {"_get_probe": True}
+    assert "chat/completions" not in url
+    assert headers["Authorization"] == "Bearer sk-test"
+
+
+def test_agentscope_probe_is_keyed_on_the_host_not_the_label() -> None:
+    # Recognition accepts the proxy host as well as the protocol label, so
+    # keeping a custom label and pasting the proxy endpoint is still probed
+    # for free instead of falling through to the billable chat completion.
+    url, _headers, payload = _probe_payload(
+        _request(
+            type="llm",
+            model_name="qwen3.8-flash",
+            protocol="自定义",
+            base_url="https://platform-pre.agentscope.io/v1",
+            provider=None,
+        ),
+    )
+
+    assert url == "https://platform-pre.agentscope.io/v1/models"
+    assert payload == {"_get_probe": True}
+
+
+def test_agentscope_video_probe_keeps_the_capability_guard() -> None:
+    # Video runs the local capability guard first, then the free probe: the
+    # Bailian fall-through would ping the temporary-upload policy API,
+    # which answers 401 InvalidApiKey for a proxy key.
+    url, _headers, payload = _probe_payload(
+        _request(
+            type="video",
+            model_name="happyhorse-1.1",
+            protocol="AgentScope Platform",
+            base_url="https://platform-pre.agentscope.io/v1",
+            provider=None,
+        ),
+    )
+
+    assert url == "https://platform-pre.agentscope.io/v1/models"
+    assert payload == {"_get_probe": True}
+    assert "/uploads" not in url
+
+    with pytest.raises(ValueError) as excinfo:
+        _probe_payload(
+            _request(
+                type="video",
+                model_name="not-a-real-model",
+                protocol="AgentScope Platform",
+                base_url="https://platform-pre.agentscope.io/v1",
+                provider=None,
+            ),
+        )
+    assert "VIDEO_MODEL_CAPABILITY_UNKNOWN" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
     ("protocol", "base_url", "model_name", "expected_url", "expected_params"),
     [
         (

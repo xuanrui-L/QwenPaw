@@ -9,6 +9,9 @@ mounts the router at ``/qwenpaw-creator`` and standalone development mounts it a
 
 from __future__ import annotations
 
+import json
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -19,12 +22,14 @@ from services.runtime_files.runtime_dependencies import (
 
 from .file_asset_routes import router as file_assets_router
 from .example_routes import router as examples_router
+from .feedback_routes import router as feedback_router
 from .file_execution_routes import router as file_execution_router
 from .file_media_routes import router as file_media_router
 from .file_session_routes import router as file_sessions_router
 from .file_source_intelligence_routes import (
     router as file_source_intelligence_router,
 )
+from .interactive_bundle_routes import router as interactive_bundle_router
 from .model_routes import bind_creator_tool_config
 from .model_routes import router as model_router
 from .observability_routes import router as observability_router
@@ -45,9 +50,6 @@ router = APIRouter(
     dependencies=[Depends(bind_creator_trace_request)],
     route_class=CreatorErrorRoute,
 )
-# Archives transfer existing project data and media. They require no model
-# connection; an incompatible local model config must not prevent restoring
-# or backing up a Project created with different settings.
 router.include_router(archive_router)
 configured_router = APIRouter(
     dependencies=[Depends(bind_creator_tool_config)],
@@ -62,12 +64,39 @@ configured_router.include_router(file_sessions_router)
 configured_router.include_router(file_execution_router)
 configured_router.include_router(file_media_router)
 configured_router.include_router(work_graph_router)
+configured_router.include_router(interactive_bundle_router)
 configured_router.include_router(prompt_sync_router)
 configured_router.include_router(model_router)
 configured_router.include_router(observability_router)
+configured_router.include_router(feedback_router)
 configured_router.include_router(video_templates_router)
 configured_router.include_router(voice_router)
 router.include_router(configured_router)
+
+
+@lru_cache(maxsize=1)
+def _creator_plugin_identity() -> dict[str, str]:
+    """Read the plugin's id/version straight from plugin.json (single source)."""
+
+    manifest = Path(__file__).resolve().parents[2] / "plugin.json"
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    return {
+        "plugin_id": str(data.get("id", "")),
+        "version": str(data.get("version", "")),
+    }
+
+
+@router.get("/version", tags=["infrastructure"])
+async def version() -> dict[str, str]:
+    """Return the Creator plugin version (public-safe payload).
+
+    Mirrors the host ``/api/version`` contract so tooling can probe this
+    deployment. Reads plugin.json directly with no service or auth
+    dependency, so it answers even when the filesystem runtime is degraded
+    and doubles as a readiness probe.
+    """
+
+    return {**_creator_plugin_identity(), "runtime": "creator-filesystem"}
 
 
 @router.get("/health", tags=["infrastructure"])

@@ -3,6 +3,7 @@ import {
   CreatorHttpError,
   decideFileProjectReview,
   getActiveFileProjectReview,
+  getModelConfig,
   newClientId,
 } from "@/api/creator";
 import type {
@@ -11,6 +12,11 @@ import type {
   FileProjectReviewRecord,
 } from "@/contracts/creator";
 import i18n from "@/i18n";
+import {
+  interactiveReviewKey,
+  isInteractiveDesignReview,
+  usesYoloReview,
+} from "@/lib/interactiveDesignReview";
 
 export type FileProjectReviewSyncStatus =
   | "idle"
@@ -41,6 +47,7 @@ export const DEFAULT_FILE_PROJECT_REVIEW_POLL_OPTIONS: FileProjectReviewPollOpti
 export interface FileProjectReviewState {
   projectId: string | null;
   reviews: FileProjectReviewRecord[];
+  autoReviewIds: string[];
   etag: string | null;
   syncStatus: FileProjectReviewSyncStatus;
   syncError: string | null;
@@ -76,6 +83,7 @@ interface PollController {
 const reviewBase = (projectId: string | null = null) => ({
   projectId,
   reviews: [] as FileProjectReviewRecord[],
+  autoReviewIds: [] as string[],
   etag: null,
   syncStatus: "idle" as FileProjectReviewSyncStatus,
   syncError: null,
@@ -128,6 +136,80 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
     let controller: PollController | null = null;
     const inFlightByProject = new Map<string, Promise<void>>();
     const retryDecisionIds = new Map<string, string>();
+    const autoReviewAttempts = new Set<string>();
+    const modeChecks = new Map<string, { at: number; allowed: boolean }>();
+
+    const autoReviewCandidates = (reviews: FileProjectReviewRecord[]) =>
+      reviews.filter(
+        (review) =>
+          isInteractiveDesignReview(review) &&
+          !autoReviewAttempts.has(interactiveReviewKey(review)),
+      );
+
+    const applyInteractiveReviewMode = async (
+      projectId: string,
+      epoch: number,
+    ) => {
+      const current = () =>
+        epoch === projectEpoch && get().projectId === projectId;
+      if (!current() || get().decisionInFlight) return;
+      const candidates = autoReviewCandidates(get().reviews);
+      if (!candidates.length) return;
+      const lastMode = modeChecks.get(projectId);
+      if (lastMode && !lastMode.allowed && Date.now() - lastMode.at < 15_000)
+        return;
+      try {
+        // Read the persisted mode immediately before deciding. A cached modal
+        // selection is not authority for accepting generated content.
+        const config = await getModelConfig();
+        if (!current()) return;
+        const allowed = usesYoloReview(config);
+        modeChecks.set(projectId, { at: Date.now(), allowed });
+        if (!allowed) return;
+        for (const candidate of candidates) {
+          if (!current() || get().decisionInFlight) return;
+          const fresh = get().reviews.find(
+            (review) => review.review_id === candidate.review_id,
+          );
+          if (
+            !fresh ||
+            fresh.decision_token !== candidate.decision_token ||
+            interactiveReviewKey(fresh) !== interactiveReviewKey(candidate) ||
+            !isInteractiveDesignReview(fresh)
+          )
+            continue;
+          autoReviewAttempts.add(interactiveReviewKey(fresh));
+          set((state) => ({
+            autoReviewIds: [
+              ...new Set([...state.autoReviewIds, fresh.review_id]),
+            ],
+          }));
+          // Reuse normal CAS/idempotency handling. No synthetic resolved state,
+          // project patch, generation request, or independent resume message.
+          await get().decide(
+            projectId,
+            fresh.review_id,
+            fresh.operations
+              .filter((operation) => operation.decision === "PENDING")
+              .map((operation) => ({
+                operation_id: operation.operation_id,
+                decision: "ACCEPT",
+              })),
+          );
+        }
+      } catch (error) {
+        if (current()) {
+          modeChecks.set(projectId, { at: Date.now(), allowed: false });
+          set({
+            syncError: i18n.t("fileReview.autoModeFailed", {
+              detail: errorMessage(error),
+            }),
+          });
+        }
+      } finally {
+        if (current()) set({ autoReviewIds: [] });
+      }
+    };
 
     const decisionRetryKey = (
       projectId: string,
@@ -151,6 +233,8 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
     const ensureProject = (projectId: string) => {
       if (get().projectId === projectId) return;
       projectEpoch += 1;
+      autoReviewAttempts.clear();
+      modeChecks.clear();
       set(reviewBase(projectId));
     };
 
@@ -263,6 +347,12 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
             );
             return {
               reviews: pendingReviews,
+              autoReviewIds:
+                modeChecks.get(projectId)?.allowed === false
+                  ? []
+                  : autoReviewCandidates(pendingReviews).map(
+                      (review) => review.review_id,
+                    ),
               etag: result.etag,
               requestInFlight: false,
               syncStatus: "healthy" as const,
@@ -271,6 +361,7 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
               lastGoodAt: new Date().toISOString(),
             };
           });
+          await applyInteractiveReviewMode(projectId, epoch);
         } catch (error) {
           const notFound =
             error instanceof CreatorHttpError &&
@@ -533,6 +624,8 @@ export const useFileProjectReviewStore = create<FileProjectReviewState>(
       reset: (projectId = null) => {
         stopController();
         projectEpoch += 1;
+        autoReviewAttempts.clear();
+        modeChecks.clear();
         set(reviewBase(projectId));
       },
       pollOnce,

@@ -199,6 +199,33 @@ def test_wan_video_urls_accept_api_root_or_full_endpoint(monkeypatch) -> None:
     )
 
 
+def test_agentscope_proxy_resolves_on_the_v1_api_root(monkeypatch) -> None:
+    # Measured on platform-pre: /compatible-mode/v1 is not deployed there (it
+    # answers the frontend HTML shell), while /v1 serves chat, media, tasks
+    # and uploads alike - so the plain API root has to build every endpoint.
+    assert config.video_backend_for_protocol("AgentScope Platform") == "wan"
+    monkeypatch.setattr(config, "get_video_backend", lambda: "wan")
+    monkeypatch.setattr(
+        config,
+        "get_video_base_url",
+        lambda: "https://platform-pre.agentscope.io/v1",
+    )
+    assert config.get_video_submit_url() == (
+        "https://platform-pre.agentscope.io/v1/"
+        "services/aigc/video-generation/video-synthesis"
+    )
+    assert config.get_video_task_url("task-proxy") == (
+        "https://platform-pre.agentscope.io/v1/tasks/task-proxy"
+    )
+    assert (
+        config.chat_url_for(
+            "https://platform-pre.agentscope.io/v1",
+            "openai",
+        )
+        == "https://platform-pre.agentscope.io/v1/chat/completions"
+    )
+
+
 @pytest.mark.parametrize(
     "model_name",
     ["wan2.7", "wan3.0-video", "kling/kling-v3-video-generation"],

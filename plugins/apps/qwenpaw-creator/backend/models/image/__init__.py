@@ -88,6 +88,7 @@ def _detect_backend_from_names(model_name: str, base_url: str) -> str | None:
         or "multimodal-generation" in base_url
         or "dashscope" in base_url
         or _is_maas_endpoint(base_url)
+        or model_config.is_agentscope_endpoint(base_url)
     ):
         return "DASHSCOPE"
     return None
@@ -168,6 +169,10 @@ def _backend_for_protocol(protocol: str) -> str | None:
     if "dashscope" in protocol or "百炼" in protocol:
         return "DASHSCOPE"
     if "token plan" in protocol or "tokenplan" in protocol:
+        return "DASHSCOPE"
+    if "agentscope" in protocol:
+        # Same multimodal-generation wire format; only the reference-media
+        # transport differs (models.config.is_agentscope_gateway).
         return "DASHSCOPE"
     if "gemini" in protocol:
         return "GEMINI"

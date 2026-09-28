@@ -6,6 +6,8 @@ import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import { useOnboardingStore } from "@/store/onboardingStore";
 import Breadcrumb from "./Breadcrumb";
 import ModelBadges from "@/components/creator/ModelBadges";
+import CreditsRing from "@/components/creator/CreditsRing";
+import ModelCreditsNotice from "@/components/creator/ModelCreditsNotice";
 import LanguageToggle from "@/components/common/LanguageToggle";
 import logoMarkUrl from "@/assets/design/logo-mark.png";
 import { useTranslation } from "react-i18next";
@@ -125,6 +127,8 @@ export default function TopNav() {
           </button>
         </Tooltip>
         <LanguageToggle className="icon-button shrink-0 text-[11px] font-semibold" />
+        <CreditsRing />
+        <ModelCreditsNotice />
         <ModelBadges />
       </div>
     </header>

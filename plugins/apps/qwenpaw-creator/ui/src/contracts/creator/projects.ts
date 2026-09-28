@@ -6,6 +6,7 @@ export interface ProjectCreateRequest {
   productionStage?: "script" | "media";
   clientRequestId: string;
   name: string;
+  nameSource?: "user" | "auto";
   description?: string;
   scenario: CreatorScenario;
   aspectRatio: string;

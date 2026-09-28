@@ -1,5 +1,6 @@
 import {
   Fragment,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,7 +14,12 @@ import type {
   ReactNode,
 } from "react";
 import { Button, Tooltip, message } from "antd";
-import { ArrowUpOutlined, MenuFoldOutlined } from "@ant-design/icons";
+import { useShallow } from "zustand/react/shallow";
+import {
+  ArrowUpOutlined,
+  CommentOutlined,
+  MenuFoldOutlined,
+} from "@ant-design/icons";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -57,6 +63,7 @@ import {
   type SubagentStreamTool,
 } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
+import { MODEL_QUOTA_ERROR_CODE } from "@/store/modelCreditsStore";
 import { useWorkGraphStore } from "@/store/workGraphStore";
 import WorkGraphPanel from "@/components/agent/WorkGraphPanel";
 import { useExecutionAuthorizationStore } from "@/store/executionAuthorizationStore";
@@ -81,9 +88,9 @@ import {
   creatorActionEnvelope,
   deduplicateReviewFeedbackMessages,
   isReviewFeedbackMessage,
+  isUserAuthorityMessage,
   shouldRenderConversationMessage,
   toolCallPresentations,
-  type CreatorActionEnvelope,
   type ToolCallPresentation,
 } from "@/lib/creatorMessagePresentation";
 import {
@@ -94,6 +101,7 @@ import AgentProgressOverview from "./AgentProgressOverview";
 import AgentWaitHint from "./AgentWaitHint";
 import AgentActivityIndicator from "./AgentActivityIndicator";
 import DecisionTray from "./DecisionTray";
+import FeedbackModal from "@/components/creator/FeedbackModal";
 import MentionInput, { type MentionInputHandle } from "./MentionInput";
 import { reviewPendingUnits } from "./FileProjectReviewPanel";
 import OnboardingHint from "@/components/onboarding/OnboardingHint";
@@ -390,94 +398,31 @@ function MessageParts({
   );
 }
 
-function ThinkingDisclosure({
-  children,
-  active,
-}: {
-  children: string;
-  active: boolean;
-}) {
-  const { t } = useTranslation();
-  if (!children || !active) return null;
-  // Thinking is intentionally status-only, including when legacy detail settings are enabled.
-  return (
-    <div data-agent-thinking className="agent-activity-row">
-      <AgentActivityIndicator phase="running" />
-      <span>{t("agentActivity.thinking")}</span>
-    </div>
-  );
-}
-
 function simplifyErrorMessage(_text: string): string {
   // Provider/runtime errors may contain prompts, local paths and protocol data.
   return i18n.t("agentActivity.failureHint");
 }
 
-function ActionDisclosure({
-  envelope,
-  active,
+const ConversationMessage = memo(function ConversationMessage({
+  item,
 }: {
-  envelope: CreatorActionEnvelope;
-  active: boolean;
+  item: CreatorMessage;
 }) {
-  const { t } = useTranslation();
-  const session = useCreatorSessionStore((state) => state.session);
-  const waiting =
-    envelope.action === "yield_until_runtime_event" &&
-    session?.status === "WAITING_RUNTIME";
-  if (!active && !waiting) return null;
-  return (
-    <div data-agent-action={envelope.action} className="agent-activity-row">
-      <AgentActivityIndicator phase="waiting" />
-      <span>
-        {waiting ? t("agentActivity.background") : t("agentActivity.preparing")}
-      </span>
-    </div>
-  );
-}
-
-function ConversationMessage({ item }: { item: CreatorMessage }) {
+  useTranslation();
   const project = useProjectSnapshotStore((state) => state.project);
-  const waitingForRuntime = useCreatorSessionStore(
-    (state) => state.session?.status === "WAITING_RUNTIME",
-  );
   if (isReviewFeedbackMessage(item)) return <ReviewFeedbackCard item={item} />;
   if (item.role === "tool") return null;
   const envelope =
     item.role === "assistant" ? creatorActionEnvelope(item) : null;
   const streaming = item.metadata?.streaming === true;
-  const parts =
+  const content =
     item.role === "assistant"
       ? actionAwareConversationContent(item, envelope, project)
       : conversationContent(item, project);
-  const content =
-    item.role === "assistant"
-      ? parts
-          .map((part) =>
-            part.type === "text"
-              ? {
-                  ...part,
-                  text: publicAssistantText(part.text, { streaming, project }),
-                }
-              : part,
-          )
-          .filter((part) => part.type !== "text" || part.text)
-      : parts;
-  const thinking =
-    typeof item.metadata?.providerThinking === "string"
-      ? item.metadata.providerThinking
-      : "";
-  const showThinking = !content.length && streaming && Boolean(thinking);
-  const showAction =
-    !content.length &&
-    !thinking &&
-    envelope &&
-    !(envelope.syntax === "native" && envelope.action === "tool_call") &&
-    (streaming ||
-      (envelope.action === "yield_until_runtime_event" && waitingForRuntime));
-  // A persisted tool envelope or hidden thinking has no conversation body.
-  // Do not leave an empty sibling between otherwise consecutive tool rows.
-  if (!content.length && !showThinking && !showAction) return null;
+  // Transient thinking/preparation belongs in the fixed live-status row.
+  // Inserting then removing a message for each tool round shrinks the feed
+  // and makes bottom-following scroll backwards when the result is persisted.
+  if (!content.length) return null;
   if (item.role === "user") {
     // Sent attachments must stay visible on the message itself — the
     // composer chips are consumed by the send.
@@ -522,16 +467,10 @@ function ConversationMessage({ item }: { item: CreatorMessage }) {
       data-streaming={streaming && content.length > 0}
       className="agent-assistant-message"
     >
-      {showThinking && (
-        <ThinkingDisclosure active={streaming}>{thinking}</ThinkingDisclosure>
-      )}
-      {content.length > 0 && <MessageParts parts={content} richText />}
-      {showAction && (
-        <ActionDisclosure envelope={envelope} active={streaming} />
-      )}
+      <MessageParts parts={content} richText />
     </div>
   );
-}
+});
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -1157,6 +1096,7 @@ export default function AgentDock({
     (state) => state.setDecisionTrayCollapsed,
   );
 
+  const sessionProjectId = useCreatorSessionStore((state) => state.projectId);
   const session = useCreatorSessionStore((state) => state.session);
   const agentStatusBar = useCreatorSessionStore(
     (state) => state.agentStatusBar,
@@ -1165,7 +1105,11 @@ export default function AgentDock({
   const streamingAssistantMessages = useCreatorSessionStore(
     (state) => state.streamingAssistantMessages,
   );
-  const events = useCreatorSessionStore((state) => state.events);
+  const events = useCreatorSessionStore(
+    useShallow((state) =>
+      state.events.filter((event) => !event.type.endsWith("message_delta")),
+    ),
+  );
   const queuedUi = useCreatorSessionStore((state) => state.queuedUi);
   const activeConversationId = useCreatorSessionStore(
     (state) => state.activeConversationId,
@@ -1183,6 +1127,9 @@ export default function AgentDock({
     (state) => state.loadOlderMessages,
   );
   const sendMessage = useCreatorSessionStore((state) => state.sendMessage);
+  // Feedback lives here because this is where a run is watched: the person
+  // complains about what they can see failing, and only types the reason.
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const stopping = useCreatorSessionStore((state) => state.stopping);
   const isReplaying = useCreatorSessionStore((state) => state.isReplaying);
   const stopAllAgents = useCreatorSessionStore((state) => state.stopAllAgents);
@@ -1203,9 +1150,15 @@ export default function AgentDock({
     useFileProjectReviewStore((state) =>
       state.projectId === projectId ? state.reviews : null,
     ) ?? [];
+  const autoReviewIds = useFileProjectReviewStore(
+    (state) => state.autoReviewIds,
+  );
   const pendingFileReviewCount = fileReviews.reduce(
     (total, review) =>
-      total + (review.status === "PENDING" ? reviewPendingUnits(review) : 0),
+      total +
+      (review.status === "PENDING" && !autoReviewIds.includes(review.review_id)
+        ? reviewPendingUnits(review)
+        : 0),
     0,
   );
   const selectedRef = useCreatorInteractionStore((state) => state.selectedRef);
@@ -1237,6 +1190,7 @@ export default function AgentDock({
   );
   const stoppable =
     Object.values(subagentActivities).some((activity) => !activity.completed) ||
+    tasks.some((task) => ["QUEUED", "RUNNING"].includes(task.status)) ||
     runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status)) ||
     Boolean(session && STOPPABLE_SESSION_STATUSES.includes(session.status));
   const showWorkspace = tab === "activity";
@@ -1316,13 +1270,60 @@ export default function AgentDock({
   const stickBottom = useRef(true);
   const previousPendingAuthorizationCount = useRef(0);
   const lastOpenedFileReviewToken = useRef<string | null>(null);
-  const lastOpenedExecutionPause = useRef<string | null>(null);
+  const openedExecutionPauses = useRef(new Set<string>());
   const resizeRef = useRef<{
     startX: number;
     startY: number;
     startW: number;
     startH: number;
   } | null>(null);
+
+  const activeExecutionPause = useMemo(() => {
+    if (
+      sessionProjectId !== projectId ||
+      session?.projectId !== projectId ||
+      !activeConversationId ||
+      streaming ||
+      session.status === "WAITING_RUNTIME" ||
+      queued.some((item) => item.state !== "failed")
+    )
+      return null;
+    // The store loads messages for the current session/conversation and clears
+    // them on a switch. Later runtime rows or summaries do not end a pause.
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const notice = messages[index];
+      if (isUserAuthorityMessage(notice)) break;
+      const pause = recordValue(notice.metadata.executionPause);
+      if (
+        notice.role !== "assistant" ||
+        notice.source !== "creator_execution_notice" ||
+        !pause ||
+        pause.reason === "media_budget_exhausted"
+      )
+        continue;
+      const text = conversationContent(notice, project)
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .filter(Boolean)
+        .join("\n\n");
+      return text
+        ? {
+            key: `${projectId}:${session.id}:${activeConversationId}:${notice.messageId}`,
+            text,
+          }
+        : null;
+    }
+    return null;
+  }, [
+    activeConversationId,
+    messages,
+    project,
+    projectId,
+    queued,
+    session,
+    sessionProjectId,
+    streaming,
+    t,
+  ]);
 
   const orderedMessages = useMemo(() => {
     const nextMessageSeq = (messages.at(-1)?.messageSeq ?? 0) + 1;
@@ -1404,6 +1405,17 @@ export default function AgentDock({
     [toolCalls],
   );
 
+  const mainThinking = useMemo(
+    () =>
+      Object.values(streamingAssistantMessages).some(
+        (item) =>
+          !item.toolCall &&
+          Object.keys(item.thinkingDeltas).length > 0 &&
+          Object.keys(item.deltas).length === 0,
+      ),
+    [streamingAssistantMessages],
+  );
+
   // Live status row above the input: derived purely on the frontend, no data
   // structures are mutated. `t` must stay in the deps: the labels come from
   // the global i18n singleton, so a runtime language switch has to recompute
@@ -1419,6 +1431,7 @@ export default function AgentDock({
         isReplaying,
         subagentActivities,
         toolCalls,
+        mainThinking,
         tasks,
         project,
         rateLimitRetry,
@@ -1433,6 +1446,7 @@ export default function AgentDock({
       isReplaying,
       subagentActivities,
       toolCalls,
+      mainThinking,
       tasks,
       project,
       rateLimitRetry,
@@ -1441,16 +1455,18 @@ export default function AgentDock({
     ],
   );
 
-  // A throttled run stops with the full conversation still intact; the
-  // continue control re-submits a resume request so the Agent picks the
-  // same task back up on the previous messages.
-  const resumeAfterRateLimit = async () => {
+  // A stopped run keeps the full conversation intact; the continue control
+  // re-submits a resume request so the Agent picks the same task back up on the
+  // previous messages. The message differs by cause: resuming after a throttle
+  // is "carry on", while resuming after an exhausted Credits balance is only
+  // honest once the user has actually redeemed more.
+  const resumeAfterBlockedModelRun = async (resumeMessageKey: string) => {
     if (rateLimitResuming) return;
     setRateLimitResuming(true);
     const resumeProject = projectId;
     const resumeVersion = projectLifecycleVersion.current;
     try {
-      await sendMessage({ message: t("agent.rateLimitResumeMessage") });
+      await sendMessage({ message: t(resumeMessageKey) });
     } catch (error) {
       if (
         currentProject.current === resumeProject &&
@@ -1585,19 +1601,15 @@ export default function AgentDock({
   }, [fileReviews, pendingFileReviewCount, setOpen]);
 
   useEffect(() => {
-    const notice = messages.at(-1);
     if (
-      session?.projectId !== projectId ||
-      notice?.source !== "creator_execution_notice" ||
-      !notice.metadata.executionPause
+      !activeExecutionPause ||
+      openedExecutionPauses.current.has(activeExecutionPause.key)
     )
       return;
-    const token = `${projectId}:${notice.messageId}`;
-    if (lastOpenedExecutionPause.current === token) return;
-    lastOpenedExecutionPause.current = token;
+    openedExecutionPauses.current.add(activeExecutionPause.key);
     stickBottom.current = true;
     setOpen(true);
-  }, [messages, projectId, session?.projectId, setOpen]);
+  }, [activeExecutionPause, setOpen]);
 
   useEffect(() => {
     const stored = loadDockSize(sidebar);
@@ -1643,7 +1655,7 @@ export default function AgentDock({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mentionQuery, open, setOpen]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (open && feedSlot == null && scrollRef.current && stickBottom.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
@@ -2237,6 +2249,20 @@ export default function AgentDock({
 
           <AgentProgressOverview projectId={projectId} />
 
+          {activeExecutionPause && (
+            <div
+              key={activeExecutionPause.key}
+              data-agent-execution-pause
+              role="alert"
+              tabIndex={0}
+              className="mx-4 mt-3 max-h-36 shrink-0 overflow-y-auto rounded-lg border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-xs leading-5 text-[var(--color-text-primary)]"
+            >
+              <p className="whitespace-pre-wrap break-words">
+                {activeExecutionPause.text}
+              </p>
+            </div>
+          )}
+
           {showWorkspace && (
             <div className="max-h-56 overflow-y-auto border-b border-[var(--color-border)] bg-[var(--color-bg-secondary)]/40 px-4 py-3">
               <WorkspacePanel />
@@ -2384,9 +2410,32 @@ export default function AgentDock({
                           type="primary"
                           danger
                           loading={rateLimitResuming}
-                          onClick={() => void resumeAfterRateLimit()}
+                          onClick={() =>
+                            void resumeAfterBlockedModelRun(
+                              "agent.rateLimitResumeMessage",
+                            )
+                          }
                         >
                           {t("agent.rateLimitContinue")}
+                        </Button>
+                      </div>
+                    ) : session.error.code === MODEL_QUOTA_ERROR_CODE ? (
+                      // Nothing the Agent retries can fix this one: the
+                      // provider refuses before reaching any model, so the
+                      // only way forward is a human redeeming Credits.
+                      <div className="flex items-center justify-between gap-2">
+                        <span>{t("agent.quotaExhausted")}</span>
+                        <Button
+                          size="small"
+                          type="primary"
+                          loading={rateLimitResuming}
+                          onClick={() =>
+                            void resumeAfterBlockedModelRun(
+                              "agent.quotaResumeMessage",
+                            )
+                          }
+                        >
+                          {t("agent.quotaContinue")}
                         </Button>
                       </div>
                     ) : (
@@ -2461,6 +2510,17 @@ export default function AgentDock({
                       </span>
                     </span>
                   )}
+                <Button
+                  type="text"
+                  size="small"
+                  data-agent-feedback
+                  aria-label={t("feedback.action")}
+                  icon={<CommentOutlined />}
+                  className="shrink-0 !h-6 !px-1.5 !text-[11px]"
+                  onClick={() => setFeedbackOpen(true)}
+                >
+                  {t("feedback.action")}
+                </Button>
               </div>
               <AgentWaitHint
                 projectId={projectId}
@@ -2724,7 +2784,9 @@ export default function AgentDock({
                     danger
                     aria-label={t("agent.stopAllAgents")}
                     icon={<Square className="h-3 w-3 fill-current" />}
-                    disabled={stopping}
+                    disabled={
+                      stopping || session?.status === "INTERRUPT_REQUESTED"
+                    }
                     onClick={() => {
                       const stopProject = projectId;
                       const stopVersion = submissionVersion.current;
@@ -2733,8 +2795,14 @@ export default function AgentDock({
                         submissionVersion.current === stopVersion;
                       void stopAllAgents()
                         .then(() => {
-                          if (isCurrent())
-                            message.success(t("agent.stopAllSuccess"));
+                          if (isCurrent()) {
+                            if (
+                              useCreatorSessionStore.getState().session
+                                ?.status === "CANCELLED"
+                            )
+                              message.success(t("agent.stopAllSuccess"));
+                            else message.info(t("agent.stopRequested"));
+                          }
                         })
                         .catch(() => {
                           if (isCurrent())
@@ -2766,6 +2834,11 @@ export default function AgentDock({
           </>
         </div>
       )}
+      <FeedbackModal
+        open={feedbackOpen}
+        projectId={projectId}
+        onClose={() => setFeedbackOpen(false)}
+      />
     </>
   );
 }

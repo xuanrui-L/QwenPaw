@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from domain.errors import StorageIntegrityError, ValidationError
 from models import config as model_config
-from models.media_transport import upload_local_file_to_dashscope_temp
+from models.media_transport import upload_reference_file_for_provider
 from services.project_files.assets import AssetFileStore
 from services.project_files.facade import CreatorFileServices
 from services.project_files.remote_cache import resolve_remote_cache
@@ -212,11 +212,13 @@ async def _short_video_frame_parts(
             },
         ]
         for timestamp_ms, frame_path in frames:
-            public_url = await upload_local_file_to_dashscope_temp(
+            public_url = await upload_reference_file_for_provider(
                 frame_path,
                 api_key=api_key,
                 model_name=model_name,
                 media_type="image/jpeg",
+                base_url=model_config.get_vlm_base_url(),
+                protocol=model_config.get_vlm_protocol(),
             )
             parts.append(
                 {
@@ -416,11 +418,13 @@ async def source_intelligence_content_parts(
                     "本地素材传给素材理解 Agent 需要配置 Creator VLM API key",
                 )
             local_path = Path(file_store.project_root, indexed.relative_uri)
-            public_url = await upload_local_file_to_dashscope_temp(
+            public_url = await upload_reference_file_for_provider(
                 local_path,
                 api_key=api_key,
                 model_name=model_name,
                 media_type=version.media_type,
+                base_url=model_config.get_vlm_base_url(),
+                protocol=model_config.get_vlm_protocol(),
             )
         if public_url in seen_urls:
             continue
@@ -484,11 +488,13 @@ async def document_page_content_parts(
         _checksum, page, local_path = resolved
         if not local_path.is_file():
             raise StorageIntegrityError(f"文档页图不存在: {ref}")
-        public_url = await upload_local_file_to_dashscope_temp(
+        public_url = await upload_reference_file_for_provider(
             local_path,
             api_key=api_key,
             model_name=model_name,
             media_type="image/png",
+            base_url=model_config.get_vlm_base_url(),
+            protocol=model_config.get_vlm_protocol(),
         )
         parts.append(
             {
@@ -558,11 +564,13 @@ async def video_frame_content_parts(
             raise StorageIntegrityError(f"视频帧路径越界: {ref}")
         if not local_path.is_file():
             raise StorageIntegrityError(f"视频帧不存在: {ref}")
-        public_url = await upload_local_file_to_dashscope_temp(
+        public_url = await upload_reference_file_for_provider(
             local_path,
             api_key=api_key,
             model_name=model_name,
             media_type="image/jpeg",
+            base_url=model_config.get_vlm_base_url(),
+            protocol=model_config.get_vlm_protocol(),
         )
         parts.append(
             {

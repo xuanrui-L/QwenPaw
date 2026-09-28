@@ -3,6 +3,8 @@ import type { ProjectDocument } from "@/contracts/creator";
 import {
   selectFinalFilmVersionId,
   selectRoughCutFrames,
+  roughCutFrameForElement,
+  hasTimelinePreviewContent,
 } from "@/selectors/blueprintSelectors";
 import { selectLiveTimelineIds } from "@/selectors/timelineElementSelectors";
 import { projectDocument } from "@/test/creatorFixtures";
@@ -75,6 +77,44 @@ describe("selectFinalFilmVersionId", () => {
 });
 
 describe("selectRoughCutFrames", () => {
+  it("never substitutes a character reference for a missing, stale or invalid storyboard", () => {
+    const project = cloneProject();
+    const timeline = project.timelines.items["timeline:main"];
+    const shot = timeline.elements_by_id["r2v-window"];
+    timeline.elements_by_id = { "r2v-window": shot };
+    delete project.assets.artifact_slots_by_id["element:r2v-window:video"];
+    expect(roughCutFrameForElement(project, shot).source).toBe("none");
+    expect(hasTimelinePreviewContent(project, timeline)).toBe(false);
+    const slot = (project.assets.artifact_slots_by_id[
+      "element:r2v-window:storyboard"
+    ] = {
+      slot_id: "element:r2v-window:storyboard",
+      owner_ref: "element:r2v-window",
+      kind: "r2v_storyboard_image",
+      selected_version_id: "missing-version",
+      version_ids: ["missing-version"],
+      metadata: {},
+    });
+    expect(roughCutFrameForElement(project, shot).source).toBe("none");
+    const version = (project.assets.artifact_versions_by_id["storyboard"] = {
+      ...project.assets.artifact_versions_by_id["cat-anchor-v1"],
+      version_id: "storyboard",
+      kind: "r2v_storyboard_image",
+      slot_id: slot.slot_id,
+      owner_ref: slot.owner_ref,
+      stale: true as boolean,
+    });
+    slot.selected_version_id = version.version_id;
+    expect(roughCutFrameForElement(project, shot).source).toBe("none");
+    version.stale = false;
+    expect(roughCutFrameForElement(project, shot)).toMatchObject({
+      source: "storyboard",
+      versionId: "storyboard",
+    });
+    expect(hasTimelinePreviewContent(project, timeline)).toBe(true);
+    delete project.assets.files_by_id[version.file_id];
+    expect(roughCutFrameForElement(project, shot).source).toBe("none");
+  });
   it("history snapshots contribute no frames and do not inflate counts", () => {
     const baseline = selectRoughCutFrames(cloneProject());
     const frames = selectRoughCutFrames(withSnapshot(cloneProject()));

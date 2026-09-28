@@ -17,6 +17,9 @@
 **/.vite
 **/*.log
 **/.DS_Store
+# Local e2e scratch data (exported bundles, recordings) — hundreds of MB, never
+# needed in the image: the runtime reads player sources, not .e2e output.
+**/.e2e
 plugins/apps/qwenpaw-creator/backend/tests
 plugins/apps/qwenpaw-creator/backend/scripts
 plugins/apps/qwenpaw-creator/backend/pytest.ini

@@ -86,6 +86,9 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
       state.projectId === projectId ? state.reviews : null,
     ) ?? [];
   const decide = useFileProjectReviewStore((state) => state.decide);
+  const autoReviewIds = useFileProjectReviewStore(
+    (state) => state.autoReviewIds,
+  );
   const project = useProjectSnapshotStore((state) =>
     state.projectId === projectId ? state.project : null,
   );
@@ -105,9 +108,11 @@ export default function DecisionTray({ projectId }: { projectId: string }) {
     () =>
       fileReviews.filter(
         (review) =>
-          review.status === "PENDING" && reviewPendingUnits(review) > 0,
+          review.status === "PENDING" &&
+          !autoReviewIds.includes(review.review_id) &&
+          reviewPendingUnits(review) > 0,
       ),
-    [fileReviews],
+    [fileReviews, autoReviewIds],
   );
   const items = useMemo(
     () => trayItemsOf(pendingAuths, pendingReviews, project),

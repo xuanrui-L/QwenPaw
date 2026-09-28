@@ -49,7 +49,8 @@ export function getHostProviders(): Promise<HostProviderInfo[]> {
 }
 
 export function getModelConfig(): Promise<ModelConfigData> {
-  return creatorRequest("/models/config");
+  // Review decisions must use the saved policy, never an HTTP-cached mode.
+  return creatorRequest("/models/config", { cache: "no-store" });
 }
 
 export interface ResolvedModels {
@@ -92,6 +93,8 @@ export function getVideoCapabilities(
   return creatorRequest(`/models/video-capabilities?${query.toString()}`);
 }
 
+export type TtsProvider = "bailian" | "gateway";
+
 export interface TtsModelCapability {
   model: string;
   label: string;
@@ -99,6 +102,8 @@ export interface TtsModelCapability {
   transport: "http" | "websocket";
   systemVoices: string[];
   supportsDesign: boolean;
+  /** Endpoints that actually serve this model. */
+  providers: TtsProvider[];
 }
 
 export interface TtsCapabilities {

@@ -144,6 +144,8 @@ export interface AgentLiveStatusInput {
   isReplaying: boolean;
   subagentActivities: Record<string, SubagentActivity>;
   toolCalls: ToolCallPresentation[];
+  /** Current main model reasoning, shown in the fixed status row only. */
+  mainThinking?: boolean;
   tasks: TaskView[];
   project: ProjectDocument | null;
   /** Current project's actual undecided review units, including media reviews. */
@@ -409,6 +411,7 @@ export function deriveAgentLiveStatus(
     isReplaying,
     subagentActivities,
     toolCalls,
+    mainThinking = false,
     tasks,
     project,
     rateLimitRetry,
@@ -610,6 +613,10 @@ export function deriveAgentLiveStatus(
       // terminal results. It has no run identity proving current ownership.
       (hasQueuedInput && session?.status !== "RUNNING"
         ? i18n.t("liveStatus.commandSent")
+        : mainThinking &&
+          session?.status === "RUNNING" &&
+          !toolCalls.some((call) => call.status === "started")
+        ? i18n.t("agentActivity.thinking")
         : i18n.t("agent.processing"));
     return {
       state: "working",

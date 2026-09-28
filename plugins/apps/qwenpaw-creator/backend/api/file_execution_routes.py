@@ -749,7 +749,6 @@ async def _rebind_workgraph_authorization(
         services,
         store,
         current.project_id,
-        check_media_budget=False,
         confirmed_project_etag=project_etag,
         confirmed_node_id=workgraph["nodeId"],
     )

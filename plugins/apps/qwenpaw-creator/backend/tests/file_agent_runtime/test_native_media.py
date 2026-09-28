@@ -58,9 +58,22 @@ def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
         "get_vlm_model_name",
         lambda: "qwen3.7-plus",
     )
+    # The decision point needs the VLM section's endpoint identity so a
+    # platform-configured Creator uploads attachments through the platform
+    # instead of the Bailian domain (which rejects sk-as keys with 401).
+    monkeypatch.setattr(
+        native_media.model_config,
+        "get_vlm_base_url",
+        lambda: "https://platform-pre.agentscope.io/v1",
+    )
+    monkeypatch.setattr(
+        native_media.model_config,
+        "get_vlm_protocol",
+        lambda: "AgentScope Platform",
+    )
     monkeypatch.setattr(
         native_media,
-        "upload_local_file_to_dashscope_temp",
+        "upload_reference_file_for_provider",
         fake_upload,
     )
     request = CreatorMessageRecord(
@@ -84,6 +97,8 @@ def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
 
     assert len(observed_paths) == 1
     assert observed_paths[0][0].read_bytes() == b"video-bytes"
+    assert observed_paths[0][1]["base_url"] == ("https://platform-pre.agentscope.io/v1")
+    assert observed_paths[0][1]["protocol"] == "AgentScope Platform"
     assert parts == [
         {
             "type": "video_url",
@@ -127,7 +142,7 @@ def test_url_backed_version_uses_public_source_without_local_cache(
 
     monkeypatch.setattr(
         native_media,
-        "upload_local_file_to_dashscope_temp",
+        "upload_reference_file_for_provider",
         unexpected_upload,
     )
     request = CreatorMessageRecord(
@@ -218,7 +233,7 @@ def test_short_video_target_ref_is_delivered_as_frame_sequence(
     )
     monkeypatch.setattr(
         native_media,
-        "upload_local_file_to_dashscope_temp",
+        "upload_reference_file_for_provider",
         fake_upload,
     )
     monkeypatch.setattr(
@@ -261,9 +276,7 @@ def test_short_video_target_ref_is_delivered_as_frame_sequence(
     assert "short.mp4" in parts[0]["text"]
     assert parts[1]["image_url"]["frameTimestampMs"] == 0
     assert parts[4]["image_url"]["frameTimestampMs"] == 1230
-    assert all(
-        part["image_url"]["versionId"] == version_id for part in parts[1:]
-    )
+    assert all(part["image_url"]["versionId"] == version_id for part in parts[1:])
     assert uploads == [
         "frame-00.jpg",
         "frame-01.jpg",
@@ -322,7 +335,7 @@ def test_target_refs_scope_media_to_the_delegated_asset(
     )
     monkeypatch.setattr(
         native_media,
-        "upload_local_file_to_dashscope_temp",
+        "upload_reference_file_for_provider",
         fake_upload,
     )
     request = CreatorMessageRecord(
@@ -392,7 +405,7 @@ def test_document_page_refs_become_native_image_parts(
     )
     monkeypatch.setattr(
         native_media,
-        "upload_local_file_to_dashscope_temp",
+        "upload_reference_file_for_provider",
         fake_upload,
     )
     refs = [document_page_ref(checksum, page) for page in (1, 2)]

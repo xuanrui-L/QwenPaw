@@ -28,9 +28,16 @@ ARG PYPI_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 # -----------------------------------------------------------------------------
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS creator-ui-builder
 WORKDIR /app
-COPY plugins/apps/qwenpaw-creator/ui /app/creator-ui
-COPY plugins/apps/qwenpaw-creator/templates /app/templates
-RUN cd /app/creator-ui && npm ci --include=dev && npm run build
+# The UI build ends with scripts/verify-package.mjs, which resolves the plugin
+# root as <ui>/scripts/../.. and asserts every plugin.json pack_requires entry
+# (backend/skills/**, player/ivb/static/**). Building a bare ui/ copy therefore
+# fails on a missing <root>/plugin.json; stage the whole plugin instead.
+COPY plugins/apps/qwenpaw-creator /app/plugin
+# The Creator UI imports the shared player runtime via ../../../../player/... ,
+# which resolves outside ui/. Stage 1 needs it at /app/player or rollup cannot
+# resolve the import.
+COPY plugins/apps/qwenpaw-creator/player /app/player
+RUN cd /app/plugin/ui && npm ci --include=dev && npm run build
 
 # -----------------------------------------------------------------------------
 # Final stage: runtime image with Creator plugin on top of official QwenPaw.
@@ -56,7 +63,7 @@ COPY plugins/apps/qwenpaw-creator /app/bundled-plugins/qwenpaw-creator
 # Copy Creator UI build artifacts from Stage 1.
 # Vite outputs to dist/app/ (SPA files) and package-plugin.mjs generates
 # dist/index.js (plugin entry wrapper). Copy the full dist/ so both are included.
-COPY --from=creator-ui-builder /app/creator-ui/dist/ /app/bundled-plugins/qwenpaw-creator/ui/dist/
+COPY --from=creator-ui-builder /app/plugin/ui/dist/ /app/bundled-plugins/qwenpaw-creator/ui/dist/
 
 # Install Creator Python dependencies into the existing venv.
 # Extract hostname from PYPI_INDEX_URL for --trusted-host (strip protocol and path).

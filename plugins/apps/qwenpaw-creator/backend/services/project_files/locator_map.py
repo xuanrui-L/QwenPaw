@@ -178,12 +178,27 @@ def derive_ui_locator(
         and tokens[1] == "items"
         and tokens[3] == "elements_by_id"
     ):
+        timeline = (
+            project.get("timelines", {}).get("items", {}).get(tokens[2], {})
+        )
+        element = timeline.get("elements_by_id", {}).get(tokens[4], {})
+        if element.get("creation", {}).get("type") == "interaction":
+            return {
+                "page": "blueprint",
+                "timelineId": tokens[2],
+                "elementId": tokens[4],
+                "mediaType": "text",
+                "field": pointer,
+            }
         return {
             "page": "plan",
             "mediaType": "text",
             "elementId": tokens[4],
             "field": pointer,
         }
+
+    if pointer.startswith("/interactive_presentation"):
+        return {"page": "blueprint", "mediaType": "text", "field": pointer}
 
     # Top-level Project prose (name/description/strategy/visual/...).  These
     # live on the Plan page and are matched in the DOM by data-creator-path.

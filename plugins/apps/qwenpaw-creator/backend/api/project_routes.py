@@ -389,6 +389,7 @@ async def create_project(
         scenario=request.scenario,
         settings=_settings(request),
     )
+    project.name_source = request.name_source
     if request.template_id:
         from services.media_files.video_templates import (
             apply_video_template_to_project,

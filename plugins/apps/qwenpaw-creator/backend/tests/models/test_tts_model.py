@@ -14,6 +14,7 @@ from models import tts_model
 from models.tts_capabilities import (
     DEFAULT_TTS_MODEL,
     capability_for,
+    models_for,
     require_capability,
     supported_models,
 )
@@ -357,6 +358,56 @@ def test_every_supported_model_declares_a_usable_voice_source() -> None:
         )
         assert capability.clone_model()
         assert capability.transport in {"http", "websocket"}
+
+
+def test_qwen_audio_models_carry_their_own_voice_lists() -> None:
+    """Each Qwen-Audio revision speaks only its own voices, and is its own row.
+
+    ``-plus`` was absent from the table and ``-flash`` carried none, so
+    ``require_capability`` silently substituted the default model and sent a
+    Qwen3-TTS voice name to a Qwen-Audio request. The provider rejects that as
+    an upstream 400, which the model proxy re-reports as a retryable 502 - a
+    wrong voice name therefore reads exactly like a broken endpoint.
+    """
+
+    plus = require_capability("qwen-audio-3.0-tts-plus")
+    flash = require_capability("qwen-audio-3.0-tts-flash")
+    assert plus.model == "qwen-audio-3.0-tts-plus"
+    assert flash.model == "qwen-audio-3.0-tts-flash"
+    assert plus.has_system_voices
+    assert flash.has_system_voices
+
+    assert not set(plus.system_voices) & set(flash.system_voices)
+    default = require_capability(DEFAULT_TTS_MODEL)
+    inherited = set(flash.system_voices) & set(default.system_voices)
+    # A Qwen3-TTS voice name must never reach a Qwen-Audio request: the
+    # provider rejects it as an upstream 400 that the proxy re-reports as a
+    # retryable 502.
+    assert not inherited
+
+
+def test_gateway_offers_only_the_models_it_routes() -> None:
+    """The proxy answers unlisted speech names with MODEL_NOT_ALLOWED.
+
+    Measured: ``qwen3-tts-flash`` against the platform-pre base returns
+    ``ASP.BIZ.MODEL_NOT_ALLOWED`` in under a second. A choice list that
+    includes it therefore recommends a guaranteed failure, so the endpoint
+    each model is served on has to stay in the table.
+    """
+
+    assert {item.model for item in models_for("gateway")} == {
+        "qwen-audio-3.0-tts-flash",
+        "qwen-audio-3.0-tts-plus",
+    }
+    # Nothing disappears from the endpoint this table was written for.
+    assert {item.model for item in models_for("bailian")} == {
+        item.model for item in supported_models()
+    }
+    # A protocol switch auto-selects the first gateway model, so that one has
+    # to be the cheaper revision and speakable without creating a voice first.
+    first = models_for("gateway")[0]
+    assert first.model == "qwen-audio-3.0-tts-flash"
+    assert first.has_system_voices
 
 
 def test_unknown_model_falls_back_to_the_default() -> None:

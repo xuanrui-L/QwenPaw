@@ -37,6 +37,10 @@ def _bind_qwen3(monkeypatch, *, language: str = "") -> None:
         "get_asr_base_url",
         lambda: "https://asr.example/api/v1/services/audio/asr/transcription",
     )
+    # Pinned: the protocol decides both the endpoint prefix and whether a
+    # local chunk is uploaded as oss:// or through a provider media route,
+    # so a developer's persisted config must not be able to move these.
+    monkeypatch.setattr(config, "get_asr_protocol", lambda: "")
 
 
 def _bind_single_chunk(
@@ -157,14 +161,17 @@ def test_qwen3_chunking_applies_cumulative_offsets(
         lambda *_args: chunks,
     )
 
-    async def fake_upload(path, *, api_key, model_name, media_type):
+    async def fake_upload(path, *, api_key, model_name, media_type, **kwargs):
         assert (api_key, model_name) == ("asr-key", "qwen3-asr-flash")
         assert media_type == "audio/mpeg"
+        # A Bailian base keeps the model-bound temporary upload: oss:// is
+        # only resolvable there, and the header that resolves it is sent.
+        assert kwargs["protocol"] == ""
         return f"oss://dashscope-instant/{path.name}"
 
     monkeypatch.setattr(
         asr_model,
-        "upload_local_file_to_dashscope_temp",
+        "upload_reference_file_for_provider",
         fake_upload,
     )
     respx.post(ENDPOINT).mock(

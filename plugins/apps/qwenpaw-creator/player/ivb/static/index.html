@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>IVB 放映</title>
+<link rel="stylesheet" href="assets/styles/player.css"/>
+</head>
+<body data-screen="loading">
+
+<!-- ⓪ 库页(项目列表) -->
+<section id="screen-library" hidden>
+  <header class="lib-head">
+    <h1>互动视频库</h1>
+    <div class="lib-scope">
+      <button id="lib-scope-all" class="scope-btn" type="button">全部</button>
+      <button id="lib-scope-mine" class="scope-btn" type="button">我的</button>
+      <button id="lib-upload" class="scope-btn" type="button">导入互动包</button>
+      <input id="lib-upload-file" type="file" accept=".zip,application/zip" aria-label="互动视频包" hidden/>
+    </div>
+  </header>
+  <p id="lib-upload-status" role="status" aria-live="polite" hidden></p>
+  <div id="lib-grid" class="lib-grid"></div>
+  <p id="lib-empty" class="lib-empty hidden">还没有作品。点击“导入互动包”，选择 Creator 导出的 ZIP 文件。</p>
+</section>
+
+<main id="player"></main><div id="fatal" role="alert" hidden></div>
+<script src="assets/state.js"></script>
+<script src="assets/interaction-runtime.js"></script>
+<script src="assets/authored-player.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

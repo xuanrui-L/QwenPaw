@@ -91,6 +91,9 @@ class RuntimeEventKind(StrEnum):
     SUBAGENT_TERMINAL = "subagent_terminal"
     NODE_DETERMINISTIC_FAILURE = "node_deterministic_failure"
     NODE_TRANSIENT_CAP_EXHAUSTED = "node_transient_cap_exhausted"
+    # The provider refused to spend more Credits. Account-wide, not per node:
+    # paid dispatch for the whole project is held until the balance changes.
+    PROVIDER_CREDITS_EXHAUSTED = "provider_credits_exhausted"
     GRAPH_ALL_DONE = "graph_all_done"
     COMPOSE_COMPLETED = "compose_completed"
     NODE_DISPATCH_STARTED = "node_dispatch_started"
@@ -116,6 +119,10 @@ EVENT_LEVELS: dict[RuntimeEventKind, NotificationLevel] = {
     RuntimeEventKind.NODE_TRANSIENT_CAP_EXHAUSTED: (
         NotificationLevel.NEXT_STEP
     ),
+    # Not quiet: nothing in the project can progress until a human tops the
+    # balance up, and a staged event would only surface behind some later
+    # delivery - by which time the user has usually given up on the run.
+    RuntimeEventKind.PROVIDER_CREDITS_EXHAUSTED: NotificationLevel.NEXT_STEP,
     RuntimeEventKind.GRAPH_ALL_DONE: NotificationLevel.NEXT_STEP,
     RuntimeEventKind.COMPOSE_COMPLETED: NotificationLevel.NEXT_STEP,
     RuntimeEventKind.NODE_DISPATCH_STARTED: NotificationLevel.QUIET,

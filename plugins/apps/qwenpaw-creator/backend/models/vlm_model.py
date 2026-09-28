@@ -38,6 +38,7 @@ from models.concurrency import model_slot
 from models.output_budget import anthropic_output_limit
 from models.media_transport import upload_local_file_to_dashscope_temp
 from models.model_capability_cache import get_capability_cache
+from models.sse import decode_chat_response
 from services.runtime_files.safe_remote_download import (
     SafeRemoteDownloadError,
     open_safe_remote_stream,
@@ -756,7 +757,16 @@ async def _call_openai_vlm(
                 json=body,
             )
     response.raise_for_status()
-    return response.json()
+    # A gateway may force text/event-stream on this call even though the body
+    # never asked for ``stream``; fold it back into the chat.completion shape
+    # that _parse_openai_response already expects.
+    return decode_chat_response(
+        status_code=response.status_code,
+        text=response.text,
+        content_type=str(response.headers.get("content-type") or ""),
+        model_name=model_name,
+        url=f"{base_url.rstrip('/')}/chat/completions",
+    )
 
 
 async def _call_anthropic_vlm(

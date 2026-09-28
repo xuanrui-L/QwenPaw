@@ -104,12 +104,48 @@ function countsOf(items: AgentProgressItem[]) {
 function phaseOf(status: string): AgentProgressPhase {
   if (["done", "SUCCEEDED"].includes(status)) return "completed";
   if (
-    ["running", "RUNNING", "RUNNING_MODEL", "WAITING_RUNTIME"].includes(status)
+    [
+      "running",
+      "RUNNING",
+      "RUNNING_MODEL",
+      "WAITING_RUNTIME",
+      "QUEUED",
+      "QUEUED_CAPACITY",
+    ].includes(status)
   )
     return "running";
-  if (["ready", "gated", "QUEUED", "QUEUED_CAPACITY"].includes(status))
-    return "preparing";
+  if (["ready", "gated"].includes(status)) return "preparing";
   return "attention";
+}
+
+function waitingReason(
+  node: WorkGraphNode,
+  nodes: WorkGraphNode[],
+  project: ProjectDocument | null,
+): string {
+  const dependencies = nodes.filter(
+    (dependency) =>
+      node.deps.includes(dependency.id) && dependency.status !== "done",
+  );
+  const outdated = dependencies.find(
+    (dependency) => dependency.status === "stale",
+  );
+  if (outdated)
+    return i18n.t("agentProgress.waitingForUpdate", {
+      target: creatorWorkNodeLabel(outdated, project),
+    });
+  if (dependencies.length)
+    return i18n.t("agentProgress.waitingForTarget", {
+      target: creatorWorkNodeLabel(dependencies[0], project),
+    });
+  if (
+    node.missing.some((reason) =>
+      /^(?:visual_prompt|storyboard_prompt|video_prompt) 缺失$/.test(reason),
+    )
+  ) {
+    return i18n.t("agentProgress.waitingForPrompt");
+  }
+  return i18n.t("agentActivity.waitingDeps");
 }
 function percent(
   value: number | null,
@@ -518,6 +554,8 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
                 : "image_generation",
             status: "RUNNING",
           })
+        : node.status === "gated"
+        ? waitingReason(node, nodes, project)
         : i18n.t(`agentActivity.${graphStates[node.status] ?? "currentStage"}`),
       phase,
       locator: operationLocator(
@@ -577,7 +615,14 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
       continue;
     visibleRunIds.add(run.id);
     const group = groupFor(run.targetRefs ?? []);
-    const phase = phaseOf(run.status);
+    // Run and task polls can arrive in either order. A terminal run must not
+    // hide an admitted child task that still reports active work. Prefer a
+    // running child over a queued sibling, keeping its actual status/progress.
+    const activeTask = ["WAITING_AUTHORIZATION", "BLOCKED"].includes(run.status)
+      ? undefined
+      : linkedTasks.find((task) => task.status === "RUNNING") ??
+        linkedTasks.find((task) => task.status === "QUEUED");
+    const phase = phaseOf(activeTask?.status ?? run.status);
     const sourceResultSaved =
       phase === "running" &&
       String(run.role).includes("source_intelligence") &&
@@ -611,13 +656,18 @@ export function buildAgentProgressModel(input: AgentProgressInput): {
         creatorRoleLabel(run.role),
         ...targetLabels.filter((label) => label !== group.label),
       ].join(" · "),
-      status: run.status,
+      ...(activeTask ? { task: activeTask } : {}),
+      status: activeTask?.status ?? run.status,
       statusLabel: sourceResultSaved
         ? i18n.t("progressOverview.finishingSource")
+        : activeTask
+        ? creatorTaskStatusLabel(activeTask)
         : creatorRunStatusLabel(run, tasks),
       phase,
       locator: group.locator,
-      progressPercent: null,
+      progressPercent: activeTask
+        ? percent(activeTask.progress, phase, activeTask.kind)
+        : null,
     });
   }
   for (const task of tasks) {
