@@ -97,7 +97,9 @@ def test_asset_version_refs_are_uploaded_and_attached_as_native_media(
 
     assert len(observed_paths) == 1
     assert observed_paths[0][0].read_bytes() == b"video-bytes"
-    assert observed_paths[0][1]["base_url"] == ("https://platform-pre.agentscope.io/v1")
+    assert observed_paths[0][1]["base_url"] == (
+        "https://platform-pre.agentscope.io/v1"
+    )
     assert observed_paths[0][1]["protocol"] == "AgentScope Platform"
     assert parts == [
         {
@@ -276,7 +278,9 @@ def test_short_video_target_ref_is_delivered_as_frame_sequence(
     assert "short.mp4" in parts[0]["text"]
     assert parts[1]["image_url"]["frameTimestampMs"] == 0
     assert parts[4]["image_url"]["frameTimestampMs"] == 1230
-    assert all(part["image_url"]["versionId"] == version_id for part in parts[1:])
+    assert all(
+        part["image_url"]["versionId"] == version_id for part in parts[1:]
+    )
     assert uploads == [
         "frame-00.jpg",
         "frame-01.jpg",

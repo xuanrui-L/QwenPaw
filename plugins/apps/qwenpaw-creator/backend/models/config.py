@@ -2086,6 +2086,37 @@ def _clear_skills_config_cache():
     _SKILLS_CONFIG_CACHE_FINGERPRINT = None
 
 
+def write_skills_config(entries: list) -> None:
+    """Persist SkillEntry items atomically, then invalidate the parse cache.
+
+    Mirrors ``_get_skills_config_path`` but is writable: an explicit
+    ``CREATOR_SKILLS_CONFIG_PATH`` wins, otherwise the canonical
+    ``<data root>/config/skills_config.json`` is used. The read-only
+    sentinel path is never written — a missing data root raises instead.
+    """
+
+    from services.runtime_files.atomic_store import atomic_replace_bytes
+    from services.storage_root import require_creator_data_root
+
+    configured = os.environ.get("CREATOR_SKILLS_CONFIG_PATH", "").strip()
+    if configured:
+        path = Path(configured).expanduser().resolve(strict=False)
+    else:
+        path = require_creator_data_root() / "config" / "skills_config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        "skills": [
+            entry.model_dump(mode="json", exclude_none=True)
+            for entry in entries
+        ],
+    }
+    atomic_replace_bytes(
+        path,
+        json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    _clear_skills_config_cache()
+
+
 # ─── live operation (real websites driven by the agent) ────────────────
 # Only resource ceilings and capability switches live here. What a desktop
 # application is actually allowed to do stays in the host's own Computer Use

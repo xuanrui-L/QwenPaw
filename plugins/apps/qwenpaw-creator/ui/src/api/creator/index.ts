@@ -8,6 +8,7 @@ export * from "./models";
 export * from "./platform";
 export * from "./projects";
 export * from "./sessions";
+export * from "./skills";
 export * from "./tasks";
 export * from "./timelines";
 export * from "./videoTemplates";
