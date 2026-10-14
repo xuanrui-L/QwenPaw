@@ -712,7 +712,10 @@ def test_roleless_audio_roles_do_not_depend_on_json_key_order() -> None:
 
     forward = _with_elements(
         _audio_element(
-            "a-track", start_tick=0, duration_tick=5_000, role=None
+            "a-track",
+            start_tick=0,
+            duration_tick=5_000,
+            role=None,
         ),
         _audio_element(
             "b-track",
@@ -729,7 +732,10 @@ def test_roleless_audio_roles_do_not_depend_on_json_key_order() -> None:
             role=None,
         ),
         _audio_element(
-            "a-track", start_tick=0, duration_tick=5_000, role=None
+            "a-track",
+            start_tick=0,
+            duration_tick=5_000,
+            role=None,
         ),
     )
 

@@ -228,30 +228,30 @@ def _json(project: Project) -> dict[str, Any]:
 
 
 def _snapshot_document(snapshot: ProjectSnapshot) -> dict[str, Any]:
-    """The authoritative "before" document a snapshot's ETag was hashed from.
+    """The persisted recovery ETag anchor for one snapshot.
 
     ``ProjectStore.read`` hashes the persisted *source* document
-    (:func:`project_document_etag`), which stays stable across an in-memory
-    migration. Recovery re-hashes both transaction snapshots against those
-    source ETags: ``base.json`` must equal ``journal.base_etag`` and
-    ``latest.json`` must equal ``journal.publish_base_etag`` (which is
-    ``latest.etag``). It also recomputes ``diff_json(base.json,
-    candidate.json)`` and requires it to equal ``journal.touched_pointers``.
-    So both documents must be that same source, not the migrated
-    ``model_dump``: a load-time repair that changes a *stored* field (muting an
-    older overlapping narration) would otherwise make the two representations
-    -- and their ETags -- diverge, and turn a recoverable crash into a
-    permanent integrity error. Using the source for both also keeps the
-    three-way merge consistent (``base`` and ``latest`` are the same
-    representation), so the repair rides along as an explicit touched pointer
-    and is persisted by the candidate on this first commit.
+    (:func:`project_document_etag`). Recovery re-hashes the two persisted
+    transaction snapshots against those source ETags: ``base.json`` must
+    equal ``journal.base_etag`` and ``latest.json`` must equal
+    ``journal.publish_base_etag`` (``latest.etag``), so those two files stay
+    the source document verbatim.
+
+    The source is deliberately *not* the diff base. User-edit diffs,
+    protected-pointer checks and the three-way merge run on the migrated
+    ``model_dump`` (``_json``), the same representation the candidate is
+    built from: diffing the raw source against the candidate would report
+    every model-defaulted field, timestamp canonicalisation and generation
+    fill as a user edit and reject legitimate saves of older documents.
+    Recovery recomputes ``touched_pointers`` the same way -- it normalizes
+    ``base.json`` before diffing it against ``candidate.json``.
 
     Only a source already at ``CURRENT_PROJECT_SCHEMA_VERSION`` is used
-    verbatim: a legacy source below it would diff ``/schema_version`` (a
-    protected pointer) against the migrated candidate, so those keep the
-    migrated ``model_dump`` exactly as before. Snapshots built in memory
-    (``source_document is None``) also keep the ``model_dump`` -- their model
-    already is the authority ``project_etag`` hashed.
+    verbatim; a legacy source below it is not guaranteed to re-hash to its
+    stored ETag once migrated, so those keep the migrated ``model_dump``.
+    Snapshots built in memory (``source_document is None``) also keep the
+    ``model_dump`` -- their model already is the authority ``project_etag``
+    hashed.
     """
 
     source = snapshot.source_document
@@ -409,7 +409,12 @@ class ProjectCommitBoundary:
         round_id = _runtime_path_segment(round_id or transaction_id)
         origin_value = ChangeOrigin(origin)
         policy_value = ReviewPolicy(review_policy)
-        base_data = _snapshot_document(base)
+        base_doc = _snapshot_document(base)
+        # Diffs, protection checks and the three-way merge run on the
+        # migrated model_dump so system normalization never surfaces as a
+        # user edit; base_doc is only the recovery ETag anchor persisted
+        # as base.json below.
+        base_data = _json(base.project)
         candidate_data = copy.deepcopy(dict(candidate))
         candidate_etag = _candidate_hash(candidate_data)
         requested = diff_json(base_data, candidate_data)
@@ -533,7 +538,7 @@ class ProjectCommitBoundary:
                     ChangeRoundRecord,
                 ).write(round_record)
                 AtomicJsonRecordStore(staged_transaction / "base.json").write(
-                    base_data,
+                    base_doc,
                 )
                 AtomicJsonRecordStore(
                     staged_transaction / "candidate.json",
@@ -639,7 +644,8 @@ class ProjectCommitBoundary:
                     from domain.errors import ConflictError
 
                     raise ConflictError("项目在保存同步结果时已更新，请按最新内容重新生成")
-                latest_data = _snapshot_document(latest)
+                latest_doc = _snapshot_document(latest)
+                latest_data = _json(latest.project)
                 if prompt_sync_context_validator is not None:
                     prompt_sync_context_validator(latest_data)
                 merged, _requested_changes = merge_candidate(
@@ -712,7 +718,7 @@ class ProjectCommitBoundary:
                     AtomicJsonRecordStore(
                         transaction_root / "latest.json",
                     ).write(
-                        latest_data,
+                        latest_doc,
                     )
                     AtomicJsonRecordStore(
                         transaction_root / "final.json",
