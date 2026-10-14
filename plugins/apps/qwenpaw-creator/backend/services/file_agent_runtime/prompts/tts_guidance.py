@@ -148,6 +148,12 @@ def _editing_guidance(capability, scenario: str) -> str:
         "gain_db 调音量、pan 调声像。",
     )
     lines.append(
+        "- 改配音/换音色某段旁白时，必须复用既有 audio Element：用 "
+        "jq_project 把它的 source_asset_version_id 换绑成新合成的 "
+        "version（或先删除旧 Element 再建）；禁止在同一区间再叠一条 "
+        "narration——两条旁白重叠会变成双声同时播放，系统会直接拒绝写入。",
+    )
+    lines.append(
         "- 合成时旁白按 span 混入成片，旁白播放区间内画面原声会自动压低，"
         "两者不会互相干扰；若某段原声本身是内容重点（台词、现场声），"
         "该段不要安排旁白。",
