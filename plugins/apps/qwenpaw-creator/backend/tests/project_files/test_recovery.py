@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -461,6 +462,85 @@ def test_legacy_double_narration_published_prepared_recovers(
         transaction_id="after-recovery",
     )
     assert result.snapshot.project.description == "edit after recovery"
+
+
+def test_legacy_double_narration_project_replaced_recovery_stays_consistent(
+    tmp_path,
+    monkeypatch,
+):
+    """A legacy (source != normalized) Project that dies after the Project is
+    replaced must recover, rebuilding the same business ChangeSet commit
+    persisted -- not one polluted by the load-time repair.
+
+    Regression: recovery recomputed business changes from the raw
+    ``latest.json``/``base.json`` source while commit used the migrated
+    ``model_dump``, so the enable-flip repair surfaced as a phantom change,
+    the ChangeSet disagreed with the snapshots, and a recoverable crash became
+    a permanent integrity error (also on the idempotent second pass).
+    """
+
+    store, base = _legacy_double_narration_store(tmp_path)
+    round_id = "round-dn-replaced"
+    _crash_with_project_replaced(
+        store,
+        base,
+        monkeypatch,
+        transaction_id="tx-dn-replaced",
+        round_id=round_id,
+        review=True,
+    )
+
+    first = recover(store)
+    assert first.ok
+    assert first.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
+    second = recover(store)
+    assert second.ok
+    assert second.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+    changeset = read_changeset(store, round_id)
+    assert [c.json_pointer for c in changeset.changes] == ["/name"]
+    review = read_review(store, round_id)
+    assert [o.json_pointer for o in review.operations] == ["/name"]
+
+
+def test_unnormalized_source_project_replaced_recovery_has_no_phantom_change(
+    tmp_path,
+    monkeypatch,
+):
+    """An imported Project whose source omits an optional field must recover
+    with only the real user edit in its ChangeSet/Review.
+
+    The model back-fills the missing ``script_approval_fingerprint`` on load;
+    that normalization is not a user edit and must never appear as a business
+    change. Same root cause as the double-narration case above: recovery must
+    diff the migrated ``model_dump``, not the raw source.
+    """
+
+    store, _base = make_store(tmp_path)
+    path = store.project_path(PROJECT_ID)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["settings"].pop("script_approval_fingerprint", None)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    base = store.read(PROJECT_ID)
+    assert base.source_document != base.project.model_dump(mode="json")
+
+    round_id = "round-approval-replaced"
+    _crash_with_project_replaced(
+        store,
+        base,
+        monkeypatch,
+        transaction_id="tx-approval-replaced",
+        round_id=round_id,
+        review=True,
+    )
+
+    report = recover(store)
+    assert report.ok
+    assert report.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
+    review = read_review(store, round_id)
+    assert [o.json_pointer for o in review.operations] == ["/name"]
+    changeset = read_changeset(store, round_id)
+    assert [c.json_pointer for c in changeset.changes] == ["/name"]
 
 
 def test_project_replaced_recovery_is_idempotent_and_rebuilds_runtime_state(

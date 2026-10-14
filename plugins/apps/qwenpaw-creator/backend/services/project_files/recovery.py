@@ -666,7 +666,15 @@ class ProjectCommitRecoveryCoordinator:
                     "prepared final generation must equal or follow latest generation",
                 )
 
-        requested = diff_json(base_data, candidate_data)
+        # touched_pointers were recorded against the migrated model_dump,
+        # the same representation candidate.json is built from. Normalize
+        # base.json before diffing so system normalization (defaulted
+        # fields, timestamp canonicalisation) is not mistaken for a user
+        # edit; see commit._snapshot_document.
+        requested = diff_json(
+            base_project.model_dump(mode="json"),
+            candidate_data,
+        )
         protected = sorted(
             change.pointer
             for change in requested
@@ -827,7 +835,13 @@ class ProjectCommitRecoveryCoordinator:
                 raise _IntegrityProblem(
                     "current Project differs from prepared final.json",
                 )
-            changes = _business_changes(inputs.latest_data, inputs.final_data)
+            # Recompute on the migrated model_dump, not the raw latest.json
+            # source, so this matches the ChangeSet commit persisted; see
+            # _business_changes.
+            changes = _business_changes(
+                inputs.latest_project.model_dump(mode="json"),
+                inputs.final_data,
+            )
             if not changes:
                 raise _IntegrityProblem(
                     "prepared Project publication has no business changes",
@@ -839,7 +853,7 @@ class ProjectCommitRecoveryCoordinator:
                 "pre-publish latest cannot be reconstructed safely",
             )
         candidate_changes = _business_changes(
-            inputs.base_data,
+            inputs.base_project.model_dump(mode="json"),
             inputs.candidate_data,
         )
         current_changes = _business_changes(
@@ -1403,6 +1417,17 @@ def _replace_journal(
 
 
 def _business_changes(before: Any, after: Any) -> tuple[JsonChange, ...]:
+    """Non-protected changes between two migrated ``model_dump`` documents.
+
+    Both sides must be the normalized ``model_dump``, never the raw
+    ``base.json``/``latest.json`` source: the source still carries system
+    normalization (defaulted fields, timestamp canonicalisation) and load-time
+    repairs, which are not user edits and would surface here as phantom
+    changes -- diverging from the ChangeSet ``commit`` persisted from its own
+    migrated ``model_dump`` and bricking recovery. See
+    ``commit._snapshot_document``.
+    """
+
     return tuple(
         change
         for change in diff_json(before, after)
@@ -1413,9 +1438,15 @@ def _business_changes(before: Any, after: Any) -> tuple[JsonChange, ...]:
 def _prepared_business_changes(
     inputs: _RecoveryInputs,
 ) -> tuple[JsonChange, ...]:
-    if inputs.latest_data is not None and inputs.final_data is not None:
-        return _business_changes(inputs.latest_data, inputs.final_data)
-    return _business_changes(inputs.base_data, inputs.candidate_data)
+    if inputs.latest_project is not None and inputs.final_data is not None:
+        return _business_changes(
+            inputs.latest_project.model_dump(mode="json"),
+            inputs.final_data,
+        )
+    return _business_changes(
+        inputs.base_project.model_dump(mode="json"),
+        inputs.candidate_data,
+    )
 
 
 def _change_signatures(
