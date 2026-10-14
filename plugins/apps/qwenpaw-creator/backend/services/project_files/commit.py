@@ -105,6 +105,20 @@ class CommitJournalState(StrEnum):
     ABORTED = "ABORTED"
 
 
+# Document representation a journal's ``touched_pointers`` and snapshots were
+# diffed against.  Recovery recomputes both and MUST replay the same
+# representation the committing boundary used, or a legitimate transaction is
+# misread as tampered.  ``SOURCE`` (the default, so journals persisted before
+# this field existed keep recovering) diffs the raw ``base.json`` /
+# ``candidate.json`` / ``latest.json`` verbatim.  ``MIGRATED`` diffs the
+# migrated ``model_dump`` on both sides so system normalization (defaulted
+# fields, timestamp canonicalisation, load-time repairs such as muting an older
+# overlapping narration) never surfaces as a phantom user edit.  New commits
+# stamp ``MIGRATED``.
+DIFF_SEMANTICS_SOURCE = 1
+DIFF_SEMANTICS_MIGRATED = 2
+
+
 class ProjectCommitJournal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -121,6 +135,11 @@ class ProjectCommitJournal(BaseModel):
     final_etag: str | None = None
     temp_path: str
     touched_pointers: list[str]
+    # Representation ``touched_pointers`` was diffed against; see
+    # DIFF_SEMANTICS_*.  Defaults to the legacy source semantics so a journal
+    # written before this field existed still recovers against the exact
+    # documents it recorded.
+    diff_semantics: int = DIFF_SEMANTICS_SOURCE
     created_at: datetime
     updated_at: datetime
     error: str | None = None
@@ -510,6 +529,7 @@ class ProjectCommitBoundary:
                 candidate_etag=candidate_etag,
                 temp_path=f"runtime/temp/project.json.{transaction_id}.tmp",
                 touched_pointers=[item.pointer for item in requested],
+                diff_semantics=DIFF_SEMANTICS_MIGRATED,
                 created_at=timestamp,
                 updated_at=timestamp,
             )

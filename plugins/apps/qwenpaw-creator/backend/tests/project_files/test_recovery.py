@@ -9,6 +9,8 @@ import pytest
 
 from domain.enums import TransactionStatus
 from services.project_files import commit as commit_module
+from services.project_files import migrations as migrations_module
+from services.project_files import models as models_module
 from services.project_files.commit import (
     CommitJournalState,
     PendingProjectRecoveryError,
@@ -27,7 +29,10 @@ from services.project_files.serialization import (
     load_project_document,
 )
 from services.project_files.store import ProjectStore
-from services.runtime_files.atomic_store import AtomicJsonRecordStore
+from services.runtime_files.atomic_store import (
+    AtomicJsonRecordStore,
+    json_document_bytes,
+)
 
 from .conftest import (
     PROJECT_ID,
@@ -541,6 +546,177 @@ def test_unnormalized_source_project_replaced_recovery_has_no_phantom_change(
     assert [o.json_pointer for o in review.operations] == ["/name"]
     changeset = read_changeset(store, round_id)
     assert [c.json_pointer for c in changeset.changes] == ["/name"]
+
+
+def _enter_pre_narration_gate_runtime(monkeypatch):
+    """Load/commit as the pre-gate Runtime (merge base 6e44d30) did.
+
+    The narration self-heal and the double-voice write gate both landed after
+    the merge base. A pre-upgrade Runtime therefore loaded and committed a
+    legacy double-narration Project verbatim: ``base.json``,
+    ``candidate.json``, ``latest.json``, ``final.json`` and the published
+    ``project.json`` all kept ``narr-old.enabled=True``, and
+    ``touched_pointers`` was the source diff -- just the user's rename.
+    Recovery must replay that exact representation, so
+    the cross-version regressions below build the transaction with both repairs
+    disabled and then strip the version field the old Runtime never wrote.
+    """
+
+    monkeypatch.setattr(
+        migrations_module,
+        "_deconflict_overlapping_narration",
+        lambda document, *, step: document,
+    )
+    monkeypatch.setattr(
+        models_module,
+        "_validate_narration_overlap",
+        lambda *_args, **_kwargs: None,
+    )
+
+
+def _strip_diff_semantics(store, transaction_id):
+    """Drop ``diff_semantics`` so the journal parses as a pre-field record.
+
+    A base-6e44d30 journal predates the field entirely; recovery must treat an
+    absent field as ``DIFF_SEMANTICS_SOURCE`` and replay the raw source diff.
+    """
+
+    path = transaction_root(store, transaction_id) / "journal.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("diff_semantics", None)
+    path.write_bytes(json_document_bytes(raw))
+
+
+def test_commit_stamps_migrated_diff_semantics(tmp_path):
+    """A current commit records ``DIFF_SEMANTICS_MIGRATED``.
+
+    This is the version marker that lets recovery keep diffing the migrated
+    ``model_dump`` for new transactions while the cross-version tests below
+    strip it to replay legacy source semantics.
+    """
+
+    store, base = make_store(tmp_path)
+    candidate = base.project.model_dump(mode="json")
+    candidate["name"] = "Stamped"
+    ProjectCommitBoundary(store).commit(
+        base=base,
+        candidate=candidate,
+        origin="runtime_task",
+        transaction_id="tx-stamp",
+    )
+    journal = read_journal(store, "tx-stamp")
+    assert journal.diff_semantics == commit_module.DIFF_SEMANTICS_MIGRATED
+
+
+def test_pre_narration_gate_finalized_transaction_recovers(
+    tmp_path,
+    monkeypatch,
+):
+    """Cross-version, completed: a pre-gate ``RUNTIME_FINALIZED`` transaction
+    for a legacy double-narration Project recovers as ``ALREADY_FINALIZED``.
+
+    The old journal recorded ``touched_pointers=['/name']`` from a source diff
+    over ``base.json``/``candidate.json`` that both kept
+    ``narr-old.enabled=True``. Current recovery loads ``base.json`` and
+    self-heals that flag to ``False``; diffing the healed ``model_dump``
+    against the raw candidate would add a phantom
+    ``/timelines/.../narr-old/enabled`` and reject the journal with "journal
+    touched_pointers do not match its snapshots". The absent
+    ``diff_semantics`` selects the source representation so the recompute
+    matches what the old Runtime wrote.
+    """
+
+    store, _base = _legacy_double_narration_store(tmp_path)
+    transaction_id = "tx-xgate-finalized"
+    round_id = "round-xgate-finalized"
+    with monkeypatch.context() as patch:
+        _enter_pre_narration_gate_runtime(patch)
+        base = store.read(PROJECT_ID)
+        elements = base.project.timelines.items["timeline:main"].elements_by_id
+        assert elements["narr-old"].enabled is True  # no self-heal pre-gate
+        candidate = base.project.model_dump(mode="json")
+        candidate["name"] = "Finalized before upgrade"
+        ProjectCommitBoundary(store).commit(
+            base=base,
+            candidate=candidate,
+            transaction_id=transaction_id,
+            round_id=round_id,
+            **review_commit_kwargs(review_boundary(base)),
+        )
+    _strip_diff_semantics(store, transaction_id)
+    journal = read_journal(store, transaction_id)
+    assert journal.state is CommitJournalState.RUNTIME_FINALIZED
+    assert journal.touched_pointers == ["/name"]
+    assert journal.diff_semantics == commit_module.DIFF_SEMANTICS_SOURCE
+
+    report = recover(store)
+    assert report.ok
+    assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+    assert store.read(PROJECT_ID).project.name == "Finalized before upgrade"
+    # Idempotent: a second startup pass stays ALREADY_FINALIZED.
+    again = recover(store)
+    assert again.ok
+    assert again.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+
+def test_pre_narration_gate_project_replaced_transaction_recovers(
+    tmp_path,
+    monkeypatch,
+):
+    """Cross-version, interrupted: a pre-gate transaction that died after the
+    Project was replaced but before Review bookkeeping recovers to
+    ``FINALIZED_RUNTIME``, and the next real edit commits instead of 503.
+
+    Same source-vs-migrated divergence as above, on the ``PROJECT_REPLACED``
+    path where recovery rebuilds the business ChangeSet/Review from the
+    snapshots. Without the version marker the phantom ``/enabled`` made
+    recovery fail, the next commit raise ``PendingProjectRecoveryError`` and a
+    real rename PATCH return 503 ``STORAGE_INTEGRITY_ERROR``.
+    """
+
+    store, _base = _legacy_double_narration_store(tmp_path)
+    transaction_id = "tx-xgate-replaced"
+    round_id = "round-xgate-replaced"
+    with monkeypatch.context() as patch:
+        _enter_pre_narration_gate_runtime(patch)
+        base = store.read(PROJECT_ID)
+        narr_old = base.project.timelines.items["timeline:main"].elements_by_id
+        assert narr_old["narr-old"].enabled is True
+        _crash_with_project_replaced(
+            store,
+            base,
+            monkeypatch,
+            transaction_id=transaction_id,
+            round_id=round_id,
+            review=True,
+        )
+    _strip_diff_semantics(store, transaction_id)
+    journal = read_journal(store, transaction_id)
+    assert journal.state is CommitJournalState.PROJECT_REPLACED
+    assert journal.touched_pointers == ["/name"]
+
+    report = recover(store)
+    assert report.ok
+    assert report.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
+    changeset = read_changeset(store, round_id)
+    assert [c.json_pointer for c in changeset.changes] == ["/name"]
+    review = read_review(store, round_id)
+    assert [o.json_pointer for o in review.operations] == ["/name"]
+
+    # The CR's follow-up: a real rename after recovery must commit instead of
+    # raising PendingProjectRecoveryError (surfaced as 503 to the API).
+    after = store.read(PROJECT_ID)
+    next_candidate = after.project.model_dump(mode="json")
+    next_candidate["name"] = "Renamed after cross-version recovery"
+    result = ProjectCommitBoundary(store).commit(
+        base=after,
+        candidate=next_candidate,
+        origin="runtime_task",
+        transaction_id="after-xgate-replaced",
+    )
+    assert (
+        result.snapshot.project.name == "Renamed after cross-version recovery"
+    )
 
 
 def test_project_replaced_recovery_is_idempotent_and_rebuilds_runtime_state(
