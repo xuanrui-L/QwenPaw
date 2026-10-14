@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import os
 from pathlib import Path, PurePosixPath
@@ -33,7 +33,7 @@ from .models import Project
 from .archive import write_project_archive
 from .serialization import (
     CanonicalJsonError,
-    load_project_json_with_etag,
+    load_project_json_with_source,
     project_etag,
     project_file_bytes,
 )
@@ -88,6 +88,19 @@ class ProjectSnapshot:
     project: Project
     etag: str
     generation: int
+    # The exact persisted source document ``etag`` was hashed from, when this
+    # snapshot was read from disk; None for snapshots built in memory (create /
+    # replace / review) whose ``model_dump`` already is the authority that
+    # ``project_etag`` hashed. A commit boundary writes this as ``base.json``
+    # so it and ``etag`` share one representation even after a load-time repair
+    # changed a stored field. See serialization.load_project_json_with_source.
+    # Auxiliary to identity: a snapshot read back from disk represents the same
+    # state as one built in memory, so it is excluded from equality/repr.
+    source_document: dict[str, Any] | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,7 +355,11 @@ class ProjectStore:
                 f"project.json exceeds {self.max_project_json_bytes} bytes",
             )
         try:
-            project, source_etag = load_project_json_with_etag(payload)
+            (
+                project,
+                source_etag,
+                source_document,
+            ) = load_project_json_with_source(payload)
         except CanonicalJsonError as exc:
             raise ProjectIntegrityError(
                 f"Invalid project.json for {safe_id}",
@@ -356,6 +373,7 @@ class ProjectStore:
             project=project,
             etag=source_etag,
             generation=project.generation,
+            source_document=source_document,
         )
 
     def replace(

@@ -21,10 +21,15 @@ from services.project_files.recovery import (
     ProjectRecoveryIntegrityError,
     RecoveryAction,
 )
+from services.project_files.serialization import (
+    canonical_json_bytes,
+    load_project_document,
+)
 from services.project_files.store import ProjectStore
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
 
 from .conftest import (
+    PROJECT_ID,
     make_store,
     read_changeset,
     read_journal,
@@ -38,6 +43,7 @@ from .conftest import (
     runtime_root,
     transaction_root,
 )
+from .test_audio_layering import _audio_element, _project_raw
 
 
 pytestmark = pytest.mark.unit
@@ -259,6 +265,202 @@ def test_prepared_but_published_project_is_proved_and_fully_recovered(
     assert [c.json_pointer for c in changeset.changes] == ["/description"]
     assert changeset.base_etag == base.etag
     assert changeset.final_etag == current.etag
+
+
+def _legacy_double_narration_store(tmp_path):
+    """``project-1`` on disk as a pre-gate v9 doc: two enabled narrations.
+
+    The write gate rejects two overlapping narration tracks, so this document
+    is persisted directly -- exactly as a runtime predating the gate would have
+    left it. Loading repairs it (mutes the older take), which is what makes
+    ``base.project`` diverge from the source ``base.etag`` was hashed from:
+    the crash-recovery hazard. ``audio-version-2`` is created later, so
+    ``narr-new`` is the take that stays enabled.
+    """
+
+    store = ProjectStore(tmp_path.resolve())
+    store.create(Project.new(project_id=PROJECT_ID, name="Initial"))
+    raw = _project_raw()
+    raw["project_id"] = PROJECT_ID
+    raw["name"] = "Initial"
+    raw["timelines"]["items"]["timeline:main"]["elements_by_id"] = {
+        "narr-old": _audio_element(
+            "narr-old",
+            start_tick=0,
+            duration_tick=8_000,
+            role="narration",
+        ),
+        "narr-new": _audio_element(
+            "narr-new",
+            start_tick=0,
+            duration_tick=8_000,
+            role="narration",
+            version_id="audio-version-2",
+        ),
+    }
+    versions = raw["assets"]["source_versions_by_id"]
+    versions["audio-version-2"] = {
+        **versions["audio-version-1"],
+        "version_id": "audio-version-2",
+        "logical_asset_id": "logical-audio-2",
+        "created_at": "2026-09-01T08:00:00Z",
+    }
+    # Round-trip through the model so every defaulted field is materialized,
+    # then restore the legacy both-enabled state the repair had muted. A
+    # complete canonical source isolates the enabled-flip divergence: base.json
+    # and the candidate then differ ONLY by that flip and the user's edit, so
+    # the three-way merge stays conflict-free -- the shape of a real pre-gate
+    # project, not a hand-built partial document.
+    full = load_project_document(raw).model_dump(mode="json")
+    full["timelines"]["items"]["timeline:main"]["elements_by_id"]["narr-old"][
+        "enabled"
+    ] = True
+    store.project_path(PROJECT_ID).write_bytes(canonical_json_bytes(full))
+    base = store.read(PROJECT_ID)
+    elements = base.project.timelines.items["timeline:main"].elements_by_id
+    # The load repair fired: the older take is muted in memory while the source
+    # on disk still has both enabled -- the exact base.etag/base.json split.
+    assert elements["narr-old"].enabled is False
+    assert elements["narr-new"].enabled is True
+    assert base.source_document is not None
+    return store, base
+
+
+def test_legacy_double_narration_prepared_unpublished_recovers(
+    tmp_path,
+    monkeypatch,
+):
+    """Window 1: rename a legacy double-narration project, then die in the
+    PREPARED window before the abort journal is durable.
+
+    ``base.json`` must be the source the ETag was hashed over -- not the
+    repaired ``model_dump`` -- or recovery reports "base.json does not match
+    journal base_etag" and turns a safely-abortable crash into a permanent
+    integrity error.
+    """
+
+    store, base = _legacy_double_narration_store(tmp_path)
+    transaction_id = "tx-legacy-unpublished"
+    round_id = "round-legacy-unpublished"
+    journal_path = transaction_root(store, transaction_id) / "journal.json"
+    candidate = base.project.model_dump(mode="json")
+    candidate["name"] = "Renamed legacy project"
+    real_write = AtomicJsonRecordStore.write
+
+    def leave_prepared(self, value):
+        if (
+            self.path == journal_path
+            and isinstance(value, ProjectCommitJournal)
+            and value.state is CommitJournalState.ABORTED
+        ):
+            raise SimulatedProcessDeath(
+                "process died before abort journal fsync",
+            )
+        return real_write(self, value)
+
+    boundary = ProjectCommitBoundary(store)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            store,
+            "replace",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                SimulatedProcessDeath("process died before Project publish"),
+            ),
+        )
+        patch.setattr(AtomicJsonRecordStore, "write", leave_prepared)
+        with pytest.raises(SimulatedProcessDeath, match="abort journal"):
+            boundary.commit(
+                base=base,
+                candidate=candidate,
+                origin="frontend_edit",
+                transaction_id=transaction_id,
+                round_id=round_id,
+            )
+
+    assert (
+        read_journal(store, transaction_id).state
+        is CommitJournalState.PREPARED
+    )
+    report = recover(store)
+    assert report.ok
+    assert report.outcomes[0].action is RecoveryAction.ABORTED_UNPUBLISHED
+    # Aborted: the rename never published; project.json is still the legacy
+    # source and still opens (re-repaired on load).
+    assert store.read(PROJECT_ID).project.name == "Initial"
+
+
+def test_legacy_double_narration_published_prepared_recovers(
+    tmp_path,
+    monkeypatch,
+):
+    """Window 2: the rename published but the journal stayed PREPARED.
+
+    Recovery must prove and finalize the publication instead of leaving a
+    permanent integrity error that blocks the next edit. The muted older take
+    rides along in the candidate and is now persisted, so the repair becomes an
+    explicit, recoverable change rather than a snapshot/ETag divergence.
+    """
+
+    store, base = _legacy_double_narration_store(tmp_path)
+    transaction_id = "tx-legacy-published"
+    round_id = "round-legacy-published"
+    journal_path = transaction_root(store, transaction_id) / "journal.json"
+    candidate = base.project.model_dump(mode="json")
+    candidate["name"] = "Renamed before crash"
+    real_write = AtomicJsonRecordStore.write
+
+    def crash_before_journal_transition(self, value):
+        if (
+            self.path == journal_path
+            and isinstance(value, ProjectCommitJournal)
+            and value.state is not CommitJournalState.PREPARED
+        ):
+            raise SimulatedProcessDeath("journal transition was not durable")
+        return real_write(self, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            AtomicJsonRecordStore,
+            "write",
+            crash_before_journal_transition,
+        )
+        with pytest.raises(SimulatedProcessDeath, match="journal transition"):
+            ProjectCommitBoundary(store).commit(
+                base=base,
+                candidate=candidate,
+                origin="frontend_edit",
+                transaction_id=transaction_id,
+                round_id=round_id,
+            )
+
+    current = store.read(PROJECT_ID)
+    assert current.project.name == "Renamed before crash"
+    published = current.project.timelines.items["timeline:main"].elements_by_id
+    assert published["narr-old"].enabled is False  # the repair persisted
+    assert (
+        read_journal(store, transaction_id).state
+        is CommitJournalState.PREPARED
+    )
+
+    report = recover(store)
+    assert report.ok
+    assert report.outcomes[0].action is RecoveryAction.FINALIZED_RUNTIME
+    assert (
+        read_journal(store, transaction_id).state
+        is CommitJournalState.RUNTIME_FINALIZED
+    )
+    # Recovery cleared the pending publication, so the next edit commits
+    # instead of raising PendingProjectRecoveryError.
+    after = store.read(PROJECT_ID)
+    next_candidate = after.project.model_dump(mode="json")
+    next_candidate["description"] = "edit after recovery"
+    result = ProjectCommitBoundary(store).commit(
+        base=after,
+        candidate=next_candidate,
+        origin="runtime_task",
+        transaction_id="after-recovery",
+    )
+    assert result.snapshot.project.description == "edit after recovery"
 
 
 def test_project_replaced_recovery_is_idempotent_and_rebuilds_runtime_state(
