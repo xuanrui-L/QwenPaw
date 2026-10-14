@@ -569,6 +569,26 @@ def _narration_spans(
     return spans
 
 
+def _audio_role_order(item: tuple[str, Any]) -> tuple[int, str]:
+    """Stable stamping order for role-less audio: earliest span, then id.
+
+    :func:`_stamp_missing_audio_roles` accumulates narration spans as it walks,
+    so the outcome must not depend on JSON key order: two documents with
+    identical content but reordered ``elements_by_id`` keys have to resolve the
+    same narration/sfx roles (and therefore the same render ducking windows).
+    Keying on the span start -- then the element id to break ties
+    deterministically -- keeps the earliest voice as the narration, matching
+    how the timeline reads. Elements without a usable span sort first and can
+    never overlap, so their position cannot change another element's role.
+    """
+
+    element_id, element = item
+    ticks = (
+        _element_span_ticks(element) if isinstance(element, Mapping) else None
+    )
+    return (ticks[0] if ticks is not None else 0, element_id)
+
+
 def _stamp_missing_audio_roles(
     document: dict[str, Any],
     *,
@@ -607,7 +627,13 @@ def _stamp_missing_audio_roles(
         voiced_spans = _voiced_spans_v8(elements)
         narration_spans = _narration_spans(elements)
         changed = False
-        for element_id, element in list(elements.items()):
+        # Stable, serialization-order-independent walk (see _audio_role_order):
+        # the earliest role-less span becomes narration and a later one it
+        # overlaps becomes sfx, regardless of ``elements_by_id`` key order.
+        for element_id, element in sorted(
+            elements.items(),
+            key=_audio_role_order,
+        ):
             if not isinstance(element, Mapping):
                 continue
             creation = element.get("creation")

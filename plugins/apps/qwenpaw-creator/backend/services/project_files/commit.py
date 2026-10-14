@@ -69,7 +69,7 @@ from .json_pointer import (
     value_at,
 )
 from .locator_map import derive_ui_locator
-from .models import Project
+from .models import CURRENT_PROJECT_SCHEMA_VERSION, Project
 from .serialization import project_etag
 from .review_bookkeeping import is_human_review_change
 from .store import ProjectSnapshot, ProjectStore
@@ -227,6 +227,42 @@ def _json(project: Project) -> dict[str, Any]:
     return project.model_dump(mode="json")
 
 
+def _snapshot_document(snapshot: ProjectSnapshot) -> dict[str, Any]:
+    """The authoritative "before" document a snapshot's ETag was hashed from.
+
+    ``ProjectStore.read`` hashes the persisted *source* document
+    (:func:`project_document_etag`), which stays stable across an in-memory
+    migration. Recovery re-hashes both transaction snapshots against those
+    source ETags: ``base.json`` must equal ``journal.base_etag`` and
+    ``latest.json`` must equal ``journal.publish_base_etag`` (which is
+    ``latest.etag``). It also recomputes ``diff_json(base.json,
+    candidate.json)`` and requires it to equal ``journal.touched_pointers``.
+    So both documents must be that same source, not the migrated
+    ``model_dump``: a load-time repair that changes a *stored* field (muting an
+    older overlapping narration) would otherwise make the two representations
+    -- and their ETags -- diverge, and turn a recoverable crash into a
+    permanent integrity error. Using the source for both also keeps the
+    three-way merge consistent (``base`` and ``latest`` are the same
+    representation), so the repair rides along as an explicit touched pointer
+    and is persisted by the candidate on this first commit.
+
+    Only a source already at ``CURRENT_PROJECT_SCHEMA_VERSION`` is used
+    verbatim: a legacy source below it would diff ``/schema_version`` (a
+    protected pointer) against the migrated candidate, so those keep the
+    migrated ``model_dump`` exactly as before. Snapshots built in memory
+    (``source_document is None``) also keep the ``model_dump`` -- their model
+    already is the authority ``project_etag`` hashed.
+    """
+
+    source = snapshot.source_document
+    if (
+        source is not None
+        and source.get("schema_version") == CURRENT_PROJECT_SCHEMA_VERSION
+    ):
+        return copy.deepcopy(dict(source))
+    return _json(snapshot.project)
+
+
 def _candidate_hash(candidate: Mapping[str, Any]) -> str:
     from .serialization import canonical_data, canonical_json_bytes
 
@@ -373,7 +409,7 @@ class ProjectCommitBoundary:
         round_id = _runtime_path_segment(round_id or transaction_id)
         origin_value = ChangeOrigin(origin)
         policy_value = ReviewPolicy(review_policy)
-        base_data = _json(base.project)
+        base_data = _snapshot_document(base)
         candidate_data = copy.deepcopy(dict(candidate))
         candidate_etag = _candidate_hash(candidate_data)
         requested = diff_json(base_data, candidate_data)
@@ -603,7 +639,7 @@ class ProjectCommitBoundary:
                     from domain.errors import ConflictError
 
                     raise ConflictError("项目在保存同步结果时已更新，请按最新内容重新生成")
-                latest_data = _json(latest.project)
+                latest_data = _snapshot_document(latest)
                 if prompt_sync_context_validator is not None:
                     prompt_sync_context_validator(latest_data)
                 merged, _requested_changes = merge_candidate(
@@ -1153,7 +1189,11 @@ class ProjectCommitBoundary:
         journal: ProjectCommitJournal,
         advance_accepted_baseline: bool,
     ) -> RuntimeChangeSet:
-        latest_data = _json(latest.project)
+        # Same authoritative source as the publish ETags below: recovery
+        # re-hashes latest.json/final.json against publish_base_etag/final_etag
+        # (both ``latest.etag``, a source hash), so the snapshots must be that
+        # source too -- see _snapshot_document.
+        latest_data = _snapshot_document(latest)
         # Persist the exact response snapshot even when this transaction did
         # not advance Project generation.  An HTTP idempotency retry may occur
         # after unrelated later commits, so consulting the then-current

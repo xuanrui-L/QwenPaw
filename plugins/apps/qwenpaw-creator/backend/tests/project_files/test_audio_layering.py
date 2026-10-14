@@ -15,7 +15,10 @@ from pydantic import ValidationError
 from services.media_files.local_execution import _timeline_speech_windows
 from services.project_files.migrations import migrate_project_document
 from services.project_files.models import AudioCreation, Project
-from services.project_files.serialization import load_project_json
+from services.project_files.serialization import (
+    canonical_json_bytes,
+    load_project_json,
+)
 
 
 pytestmark = pytest.mark.unit
@@ -688,3 +691,68 @@ def test_narration_repair_mutes_only_spans_the_latest_take_overlaps() -> None:
     assert elements["narration-a"].enabled is True
     assert elements["narration-b"].enabled is False
     assert elements["narration-c"].enabled is True
+
+
+def test_roleless_audio_roles_do_not_depend_on_json_key_order() -> None:
+    """Stamping role-less legacy audio is serialization-order independent.
+
+    ``elements_by_id`` key order is not part of a document's identity: the
+    canonical encoder sorts keys, so two orderings hash to the SAME ETag. But
+    the stamping pass accumulates narration spans as it walks, so iterating in
+    insertion order would resolve A=[0,5)/B=[4,10) to A=narration/B=sfx in one
+    ordering and the opposite in the other -- one ETag, two different mixes.
+    The walk is keyed on ``(start_tick, element_id)`` so the earliest voice is
+    always the narration.
+
+    Only narration ducks the footage audio (local_execution builds its duck
+    windows from narration tracks and mixes sfx verbatim), so a stable role
+    also means a stable duck window: [0,5) here, with B's non-overlapping tail
+    [5,10) never ducked.
+    """
+
+    forward = _with_elements(
+        _audio_element(
+            "a-track", start_tick=0, duration_tick=5_000, role=None
+        ),
+        _audio_element(
+            "b-track",
+            start_tick=4_000,
+            duration_tick=6_000,
+            role=None,
+        ),
+    )
+    reversed_keys = _with_elements(
+        _audio_element(
+            "b-track",
+            start_tick=4_000,
+            duration_tick=6_000,
+            role=None,
+        ),
+        _audio_element(
+            "a-track", start_tick=0, duration_tick=5_000, role=None
+        ),
+    )
+
+    # Same content -> identical canonical bytes -> one ETag, whichever order
+    # the keys were inserted in.
+    assert canonical_json_bytes(forward) == canonical_json_bytes(reversed_keys)
+
+    def roles(raw: dict[str, Any]) -> dict[str, str]:
+        project = load_project_json(json.dumps(raw))
+        return {
+            element_id: element.creation.role
+            for element_id, element in project.timelines.items[
+                "timeline:main"
+            ].elements_by_id.items()
+        }
+
+    # The earliest span is the narration and the later overlap is sfx in BOTH
+    # key orders, so one ETag now yields exactly one mix.
+    assert (
+        roles(forward)
+        == roles(reversed_keys)
+        == {
+            "a-track": "narration",
+            "b-track": "sfx",
+        }
+    )
