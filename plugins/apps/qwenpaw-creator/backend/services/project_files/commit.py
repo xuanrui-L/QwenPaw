@@ -282,6 +282,19 @@ def _snapshot_document(snapshot: ProjectSnapshot) -> dict[str, Any]:
     return _json(snapshot.project)
 
 
+def _snapshot_store(path: Path) -> AtomicJsonRecordStore[dict[str, Any]]:
+    """Open one transaction snapshot for compressed storage.
+
+    A snapshot repeats nearly the whole Project, so it compresses by an order
+    of magnitude.  Only the container changes: a journal etag is the checksum
+    of the canonical value, and readers sniff the gzip header, so the plain
+    snapshots already on disk stay readable and verifiable.  What goes inside
+    stays :func:`_snapshot_document`, which recovery re-hashes.
+    """
+
+    return AtomicJsonRecordStore(path, compress_payload=True)
+
+
 def _candidate_hash(candidate: Mapping[str, Any]) -> str:
     from .serialization import canonical_data, canonical_json_bytes
 
@@ -557,10 +570,10 @@ class ProjectCommitBoundary:
                     staged_transaction / "round.json",
                     ChangeRoundRecord,
                 ).write(round_record)
-                AtomicJsonRecordStore(staged_transaction / "base.json").write(
+                _snapshot_store(staged_transaction / "base.json").write(
                     base_doc,
                 )
-                AtomicJsonRecordStore(
+                _snapshot_store(
                     staged_transaction / "candidate.json",
                 ).write(candidate_data)
                 AtomicJsonRecordStore(
@@ -735,12 +748,12 @@ class ProjectCommitBoundary:
                     final_data = _json(final_project)
                     pre_publish_etag = latest.etag
                     expected_final_etag = project_etag(final_project)
-                    AtomicJsonRecordStore(
+                    _snapshot_store(
                         transaction_root / "latest.json",
                     ).write(
                         latest_doc,
                     )
-                    AtomicJsonRecordStore(
+                    _snapshot_store(
                         transaction_root / "final.json",
                     ).write(
                         final_data,
@@ -1224,10 +1237,10 @@ class ProjectCommitBoundary:
         # not advance Project generation.  An HTTP idempotency retry may occur
         # after unrelated later commits, so consulting the then-current
         # authority would not be enough to reconstruct the original result.
-        AtomicJsonRecordStore(transaction_root / "latest.json").write(
+        _snapshot_store(transaction_root / "latest.json").write(
             latest_data,
         )
-        AtomicJsonRecordStore(transaction_root / "final.json").write(
+        _snapshot_store(transaction_root / "final.json").write(
             latest_data,
         )
         journal = journal.model_copy(
