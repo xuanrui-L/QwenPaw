@@ -5,6 +5,7 @@ export * from "./fileProjectReviews";
 export * from "./media";
 export * from "./models";
 export * from "./projects";
+export * from "./scripts";
 export * from "./sessions";
 export * from "./skills";
 export * from "./tasks";

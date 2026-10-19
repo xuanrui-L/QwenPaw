@@ -17,9 +17,11 @@ from services.runtime_files.execution_store import (
     ProjectExecutionStore,
     TaskRecord,
 )
+from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import FileSpecialistToolRegistry
 
 PROJECT_ID = "project-1"
+TARGET_REF = "asset:source-1"
 
 
 def _observation_task(kind: TaskKind, suffix: str) -> TaskRecord:
@@ -147,3 +149,178 @@ def test_background_flag_is_read_from_the_nested_payload() -> None:
     assert _nested_tool_payload(envelope).get("background") is True
     assert _nested_tool_payload({"arguments": None}) == {}
     assert _nested_tool_payload({}) == {}
+
+
+def _prepare_project(tmp_path):
+    """One real Project plus its durable Runtime store."""
+
+    services = CreatorFileServices.create(tmp_path.resolve())
+
+    def initialize(staged_root) -> None:
+        services.sessions.initialize_staged_project(
+            staged_root,
+            PROJECT_ID,
+            session_id="session-1",
+            conversation_id="conversation-1",
+            initial_goal="观察素材",
+            goal_id="goal-1",
+            initial_message_id="message-initial",
+            initial_client_message_id="client-initial",
+        )
+
+    services.projects.create(
+        Project.new(project_id=PROJECT_ID, name="Harvest"),
+        initialize_staged_project=initialize,
+    )
+    return services, ProjectExecutionStore(services.root)
+
+
+def _run_task(kind: TaskKind, suffix: str, run_id: str) -> TaskRecord:
+    return TaskRecord(
+        task_id=f"task-{suffix}",
+        project_id=PROJECT_ID,
+        kind=kind,
+        request_fingerprint=uuid5(NAMESPACE_URL, f"obs:{suffix}").hex,
+        idempotency_key=f"task-{suffix}",
+        input_refs=[TARGET_REF],
+        caused_by_request_id=run_id,
+        metadata={},
+    )
+
+
+def _context(run_id: str) -> SourceAgentToolContext:
+    return SourceAgentToolContext(
+        specialist_run_id=run_id,
+        tool_call_id="call-1",
+        assistant_message_id="message-1",
+        provider_message_id=None,
+        provider="configured_vlm",
+        model="qwen-vl",
+    )
+
+
+def _harvest(registry, *, arguments, context=None):
+    return registry.invoke(
+        role=SpecialistRole.SOURCE_INTELLIGENCE,
+        name="check_observation_tasks",
+        arguments={
+            "projectId": PROJECT_ID,
+            "targetRef": TARGET_REF,
+            **arguments,
+        },
+        project_id=PROJECT_ID,
+        admitted_target_refs=[TARGET_REF],
+        project_tools=None,
+        idempotency_key="call-harvest",
+        context=context,
+    )
+
+
+def test_harvest_without_task_ids_collects_this_runs_observations(
+    tmp_path,
+) -> None:
+    """省略 taskIds 就收割本 Run 的全部观察任务，不碰别的 Run。
+
+    批量并行提交是快路，而“记住每个 taskId”正是模型不肯批量的原因。
+    """
+
+    services, executions = _prepare_project(tmp_path)
+    registry = FileSpecialistToolRegistry(services)
+    mine = [
+        executions.create_task(
+            _run_task(
+                TaskKind.OBSERVE_SOURCE_CLIP,
+                "mine-observe",
+                "specialist-run-1",
+            ),
+        ),
+        executions.create_task(
+            _run_task(
+                TaskKind.READ_SOURCE_VIDEO,
+                "mine-read",
+                "specialist-run-1",
+            ),
+        ),
+    ]
+    foreign_run = executions.create_task(
+        _run_task(
+            TaskKind.OBSERVE_SOURCE_CLIP,
+            "other-run",
+            "specialist-run-2",
+        ),
+    )
+    executions.create_task(
+        _run_task(TaskKind.COMPOSE, "not-observation", "specialist-run-1"),
+    )
+
+    result = asyncio.run(
+        _harvest(
+            registry,
+            arguments={"arguments": {"wait": False}},
+            context=_context("specialist-run-1"),
+        ),
+    )
+
+    assert set(result.task_ids) == {task.task_id for task in mine}
+    assert foreign_run.task_id not in result.task_ids
+    assert {entry["taskId"] for entry in result.payload["tasks"]} == set(
+        result.task_ids,
+    )
+    # 没触发上限时不多塞一个 note，免得每回合都往上下文里加噪声。
+    assert "note" not in result.payload
+
+
+def test_harvest_all_without_arguments_object_reports_a_note(
+    tmp_path,
+) -> None:
+    """没有可收割任务时给可读提示，而不是报“arguments 必须是 object”。"""
+
+    services, _executions = _prepare_project(tmp_path)
+    registry = FileSpecialistToolRegistry(services)
+
+    result = asyncio.run(_harvest(registry, arguments={}))
+
+    assert result.task_ids == ()
+    assert result.payload["tasks"] == []
+    assert "background=true" in result.payload["note"]
+
+
+def test_harvest_all_bound_reports_the_tasks_it_left_out(tmp_path) -> None:
+    """上限不能静默丢任务：那些观察已经付费了，必须告知怎么收割。
+
+    重复调用 harvest-all 会拿到同一批（已终态的任务也算本 Run 的待收割
+    结果），所以溢出部分只能靠显式 taskIds，提示里就得把 id 给出来。
+    """
+
+    from services.specialist_tools import _MAX_HARVEST_TASKS
+
+    services, executions = _prepare_project(tmp_path)
+    registry = FileSpecialistToolRegistry(services)
+    total = _MAX_HARVEST_TASKS + 2
+    created = [
+        executions.create_task(
+            _run_task(
+                TaskKind.OBSERVE_SOURCE_CLIP,
+                f"batch-{index:03d}",
+                "specialist-run-1",
+            ),
+        ).task_id
+        for index in range(total)
+    ]
+
+    result = asyncio.run(
+        _harvest(
+            registry,
+            arguments={"arguments": {"wait": False}},
+            context=_context("specialist-run-1"),
+        ),
+    )
+
+    # 最早提交的一批被收割，溢出的是最后两个。
+    assert list(result.task_ids) == created[:_MAX_HARVEST_TASKS]
+    note = result.payload["note"]
+    assert f"共 {total} 个观察任务" in note
+    for task_id in created[_MAX_HARVEST_TASKS:]:
+        assert task_id in note
+    assert "taskIds" in note
+    assert len(result.payload["tasks"]) == _MAX_HARVEST_TASKS

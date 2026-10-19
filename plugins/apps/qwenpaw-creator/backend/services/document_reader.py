@@ -16,6 +16,7 @@ import asyncio
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import tempfile
 from typing import Any, Literal
 
 from domain.errors import ValidationError
@@ -280,6 +281,26 @@ async def read_document(
     )
 
 
+def read_document_text(file_path: Path) -> DocumentReadResult:
+    """Extract a document's text layer without rasterizing any page image.
+
+    ``max_pages=0`` keeps the pdf/office renderers text-only: the text layer
+    is still extracted for every page (up to the renderer's own cap) while no
+    page image is produced or persisted.  Callers that only want the words
+    (indexing a script, importing a manuscript) pay no rasterization cost and
+    leave no scratch PNGs behind.
+    """
+
+    with tempfile.TemporaryDirectory(prefix="creator-doc-text-") as scratch:
+        return _read_document_sync(
+            file_path,
+            output_dir=Path(scratch),
+            pages=None,
+            budget="small",
+            max_pages=0,
+        )
+
+
 __all__ = [
     "DOC_READER_WEB_ENABLED_ENV",
     "DocumentBudget",
@@ -289,4 +310,5 @@ __all__ = [
     "SUPPORTED_DOCUMENT_EXTENSIONS",
     "is_supported_document",
     "read_document",
+    "read_document_text",
 ]

@@ -28,6 +28,7 @@ import {
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
   getVoiceCapabilities,
+  importTimelineScript,
   ingestAssetFile,
   ingestAssetValue,
   type VoiceCapabilities,
@@ -52,6 +53,10 @@ import { useCreatorInteractionStore } from "@/store/creatorInteractionStore";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
 import { nodeGenerating } from "@/lib/generationActivity";
+import {
+  detectScriptUpload,
+  type ScriptUploadKind,
+} from "@/lib/scriptUploadDetect";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import type { ProjectEditOperation } from "@/store/projectSnapshotStore";
 import { useTimelineStore } from "@/store/timelineStore";
@@ -1482,6 +1487,15 @@ export default function AssetsPage() {
   const [search, setSearch] = useState("");
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // 剧本入口：像剧本的上传先问一句，默认仍走素材理解。
+  const [scriptCandidate, setScriptCandidate] = useState<{
+    file: File;
+    kind: Exclude<ScriptUploadKind, "none">;
+  } | null>(null);
+  const [scriptTimelineId, setScriptTimelineId] = useState<string | null>(
+    null,
+  );
+  const [scriptImporting, setScriptImporting] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [voiceModalEntity, setVoiceModalEntity] =
     useState<VisualEntityDocument | null>(null);
@@ -1721,6 +1735,60 @@ export default function AssetsPage() {
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
+  const scriptTimelineOptions = useMemo(() => {
+    const order = project?.timelines.order ?? [];
+    return order.map((timelineId, index) => ({
+      value: timelineId,
+      label:
+        project?.timelines.items[timelineId]?.title?.trim() ||
+        project?.timelines.items[timelineId]?.name?.trim() ||
+        t("assets.scriptCandidateEpisodeFallback", { n: index + 1 }),
+    }));
+  }, [project, t]);
+  // 像剧本的文件多问一句「登记为剧本 / 作为素材理解」；选后者（或没
+  // 有集可选）时走的就是今天原本的上传流程，行为不变。
+  const handlePickedFile = async (file: File) => {
+    const kind = await detectScriptUpload(file);
+    if (kind === "none" || scriptTimelineOptions.length === 0) {
+      await uploadFile(file);
+      return;
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setScriptTimelineId(scriptTimelineOptions[0].value);
+    setScriptCandidate({ file, kind });
+  };
+  const importCandidateAsScript = async () => {
+    if (!scriptCandidate || !scriptTimelineId) return;
+    setScriptImporting(true);
+    try {
+      const outcome = await importTimelineScript(id, scriptTimelineId, {
+        file: scriptCandidate.file,
+      });
+      setScriptCandidate(null);
+      await pollOnce(id);
+      message.success(
+        outcome.replayed
+          ? t("blueprint.scriptImportReplayed", { detail: outcome.summary })
+          : outcome.reviewId
+            ? t("blueprint.scriptImportPendingReview", {
+                detail: outcome.summary,
+              })
+            : t("blueprint.scriptImportSucceeded", {
+                blocks: outcome.blockCount,
+                characters: outcome.characterCount,
+              }),
+      );
+    } catch (error) {
+      // Keep the dialog open: the reason stays readable, and the user can
+      // pick another episode or fall back to material understanding.
+      const text =
+        error instanceof Error ? error.message : t("assets.uploadFailed");
+      setUploadError(text);
+      message.error(text, 6);
+    } finally {
+      setScriptImporting(false);
+    }
+  };
   const addValue = async () => {
     if (!inputName.trim() || !inputValue.trim()) {
       message.warning(t("assets.fillNameAndContent"));
@@ -1805,7 +1873,7 @@ export default function AssetsPage() {
             hidden
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) void uploadFile(file);
+              if (file) void handlePickedFile(file);
             }}
           />
           <Button
@@ -2588,6 +2656,58 @@ export default function AssetsPage() {
                 ? t("assets.linkPlaceholder")
                 : t("assets.textPlaceholder")
             }
+          />
+        </div>
+      </Modal>
+
+      <Modal
+        title={t("assets.scriptCandidateTitle")}
+        open={scriptCandidate !== null}
+        maskClosable={false}
+        closable={!scriptImporting}
+        onCancel={() => {
+          if (!scriptImporting) setScriptCandidate(null);
+        }}
+        footer={[
+          <Button
+            key="script"
+            loading={scriptImporting}
+            disabled={!scriptTimelineId}
+            onClick={() => void importCandidateAsScript()}
+          >
+            {t("assets.scriptCandidateAsScript")}
+          </Button>,
+          // 默认项：不按回车、不改变习惯的用户走的就是今天的素材理解。
+          <Button
+            key="material"
+            type="primary"
+            disabled={scriptImporting}
+            onClick={() => {
+              const file = scriptCandidate?.file;
+              setScriptCandidate(null);
+              if (file) void uploadFile(file);
+            }}
+          >
+            {t("assets.scriptCandidateAsMaterial")}
+          </Button>,
+        ]}
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--color-text-secondary)]">
+            {scriptCandidate?.kind === "document"
+              ? t("assets.scriptCandidateDocumentHint", {
+                  name: scriptCandidate.file.name,
+                })
+              : t("assets.scriptCandidateTextHint", {
+                  name: scriptCandidate?.file.name ?? "",
+                })}
+          </p>
+          <Select
+            className="w-full"
+            value={scriptTimelineId ?? undefined}
+            onChange={(value) => setScriptTimelineId(value)}
+            options={scriptTimelineOptions}
+            placeholder={t("assets.scriptCandidateTimelinePlaceholder")}
           />
         </div>
       </Modal>

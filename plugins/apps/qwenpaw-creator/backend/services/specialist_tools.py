@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from domain.enums import CreatorCommandType, SpecialistRole, TaskKind
 from domain.errors import PermissionDeniedError, ValidationError
@@ -56,6 +56,11 @@ from services.source_analysis import (
     SourceAgentToolContext,
     source_analysis_service,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from services.runtime_files.execution_store import (
+        ProjectExecutionStore,
+    )
 
 logger = logging.getLogger("creator.specialist_tools")
 
@@ -764,16 +769,18 @@ _CHECK_OBSERVATION_ARGUMENTS = _arguments_schema(
             "description": (
                 "要收割的观察任务 id（observe_source_clip / "
                 "read_source_video 以 background=true 提交时返回）。"
+                "省略或留空=收割本 Run 已提交的全部观察任务。"
             ),
         },
         "wait": {
             "type": "boolean",
             "description": (
-                "true（默认）=并行等待全部任务到终态后返回结果；" "false=立即返回当前状态快照，不等待。"
+                "true（默认）=并行等待全部任务到终态后返回结果；"
+                "false=立即返回当前状态快照，不等待。"
             ),
         },
     },
-    ("taskIds",),
+    (),
 )
 
 _REVIEW_SCENE_ARGUMENTS = _arguments_schema(
@@ -924,7 +931,10 @@ _SPECS = (
             "回原片核验：按时间窗从当前 exact Source 的原始媒体抽出连续"
             "片段，由 VLM 真实观看后回答问题并附时间戳证据。"
             "query_source_memory 的 hitWindowsMs 结论在用于剪辑选段前必须"
-            "经本工具逐窗核验；窗口 0.5–120 秒。"
+            "经本工具逐窗核验；窗口 0.5–120 秒。多个互相独立的窗口"
+            "请在连续回合里全部以 background=true 提交，再用 "
+            "check_observation_tasks 一次收割；逐个同步等待会把耗时"
+            "相加。"
         ),
         roles=frozenset(
             {
@@ -945,7 +955,8 @@ _SPECS = (
             "视频按动态分辨率/帧率抽帧，帧序列带时间戳以原生图片进入你的"
             "下一条消息。典型用法：budget=small 不传时间窗扫全片建立定位，"
             "再对命中段用 budget=large + 时间窗细看；需要连续动态细节时"
-            "改用 observe_source_clip。"
+            "改用 observe_source_clip。多个互不依赖的时段/素材请以 "
+            "background=true 批量提交后一次收割。"
         ),
         roles=frozenset(
             {
@@ -964,7 +975,9 @@ _SPECS = (
             "收割以 background=true 提交的观察任务（observe_source_clip /"
             " read_source_video）：wait=true（默认）并行等待全部任务完成后"
             "返回各自结果（read 任务的帧图随之注入）；wait=false 立即返回"
-            "状态快照。提交的后台任务必须在结束工作前收割。"
+            "状态快照。taskIds 可省略：省略即收割本 Run 已提交的全部观察"
+            "任务，批量并行提交时不必记住每个 taskId。提交的后台任务必须"
+            "在结束工作前收割。"
         ),
         roles=frozenset(
             {
@@ -1069,6 +1082,67 @@ def _tool_available(name: str) -> bool:
     if name in _S2V_TOOL_NAMES:
         return is_s2v_configured()
     return True
+
+
+_OBSERVATION_TASK_KINDS = frozenset(
+    {
+        TaskKind.OBSERVE_SOURCE_CLIP,
+        TaskKind.READ_SOURCE_VIDEO,
+    },
+)
+# Harvest-all is bounded so one long run cannot pull an unbounded task
+# list into the model context. The overflow is reported, never dropped
+# silently: an unharvested observation is work the model already paid for.
+_MAX_HARVEST_TASKS = 32
+_MAX_REPORTED_OVERFLOW_TASKS = 16
+
+
+def _run_observation_task_ids(
+    executions: ProjectExecutionStore,
+    project_id: str,
+    specialist_run_id: str | None,
+) -> list[str]:
+    """Every observation task this specialist Run submitted.
+
+    ``list_tasks`` is ``updated_at``-descending, so reversing it yields the
+    least-recently-updated first; that order only decides which tasks the
+    harvest bound keeps when a Run submitted more than the bound.
+
+    ``check_observation_tasks`` accepts an omitted ``taskIds`` so a model
+    can batch independent observations without tracking ids; ownership
+    therefore has to come from the durable records, and the lookup stays
+    read-only.  Terminal tasks are included on purpose: a background
+    observation that already finished still owes the model its result, and
+    harvesting it twice is idempotent.  The caller applies the harvest bound
+    so it can also report what the bound left out.
+    """
+
+    if not specialist_run_id:
+        return []
+    task_ids: list[str] = []
+    for record in reversed(executions.list_tasks(project_id)):
+        if record.kind not in _OBSERVATION_TASK_KINDS:
+            continue
+        if (
+            record.run_id != specialist_run_id
+            and record.caused_by_request_id != specialist_run_id
+        ):
+            continue
+        task_ids.append(record.task_id)
+    return task_ids
+
+
+def _harvest_overflow_note(total: int, rest: list[str]) -> str:
+    """Name the observations the harvest bound left out, with their ids."""
+
+    shown = ", ".join(rest[:_MAX_REPORTED_OVERFLOW_TASKS])
+    if len(rest) > _MAX_REPORTED_OVERFLOW_TASKS:
+        shown += " …"
+    return (
+        f"本 Run 共 {total} 个观察任务，一次最多收割 "
+        f"{_MAX_HARVEST_TASKS} 个；还有 {len(rest)} 个未收割，请用 "
+        f"taskIds 显式收割：{shown}"
+    )
 
 
 class FileSpecialistToolRegistry:
@@ -1209,7 +1283,14 @@ class FileSpecialistToolRegistry:
                 )
         payload = arguments.get("arguments")
         if not isinstance(payload, Mapping):
-            raise ValidationError("Specialist tool arguments 必须是 object")
+            if name == "check_observation_tasks" and payload is None:
+                # Harvest-all mode: with taskIds optional the natural call
+                # shape carries no arguments object at all.
+                payload = {}
+            else:
+                raise ValidationError(
+                    "Specialist tool arguments 必须是 object",
+                )
 
         if name in {
             "transcribe_source_audio",
@@ -1382,8 +1463,41 @@ class FileSpecialistToolRegistry:
                 ProjectExecutionStore,
             )
 
-            task_ids = [str(item) for item in payload["taskIds"]]
+            task_ids = [str(item) for item in payload.get("taskIds") or []]
             executions = ProjectExecutionStore(self.services.root)
+            overflow_note: str | None = None
+            if not task_ids:
+                # Harvest-all: batching independent observations is the
+                # fast path, and having to remember every taskId is what
+                # keeps a model from batching. Discovery is run-scoped.
+                discovered = await asyncio.to_thread(
+                    _run_observation_task_ids,
+                    executions,
+                    project_id,
+                    (
+                        context.specialist_run_id
+                        if context is not None
+                        else None
+                    ),
+                )
+                if not discovered:
+                    return SpecialistToolResult(
+                        payload={
+                            "ok": True,
+                            "tasks": [],
+                            "note": (
+                                "本 Run 没有已提交的观察任务；先用 "
+                                "observe_source_clip / read_source_video "
+                                "以 background=true 提交。"
+                            ),
+                        },
+                    )
+                task_ids = discovered[:_MAX_HARVEST_TASKS]
+                if len(discovered) > _MAX_HARVEST_TASKS:
+                    overflow_note = _harvest_overflow_note(
+                        len(discovered),
+                        discovered[_MAX_HARVEST_TASKS:],
+                    )
             snapshot: list[dict[str, Any]] = []
             for candidate_id in task_ids:
                 try:
@@ -1412,7 +1526,11 @@ class FileSpecialistToolRegistry:
                     },
                 )
             return SpecialistToolResult(
-                payload={"ok": True, "tasks": snapshot},
+                payload={
+                    "ok": True,
+                    "tasks": snapshot,
+                    **({"note": overflow_note} if overflow_note else {}),
+                },
                 task_ids=tuple(task_ids),
             )
 

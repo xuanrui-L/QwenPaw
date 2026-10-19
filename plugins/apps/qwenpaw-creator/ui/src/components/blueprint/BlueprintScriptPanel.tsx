@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { message } from "antd";
-import { Film, LayoutList } from "lucide-react";
+import { Film, LayoutList, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   ProjectDocument,
   TimelineElementDocument,
 } from "@/contracts/creator";
-import { getArtifactVersionMediaUrl } from "@/api/creator";
+import {
+  getArtifactVersionMediaUrl,
+  importTimelineScript,
+} from "@/api/creator";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useProjectSnapshotStore } from "@/store/projectSnapshotStore";
 import {
@@ -320,6 +323,8 @@ export default function BlueprintScriptPanel({
   }, [open, selectedVersionId]);
 
   const [synopsisDraft, setSynopsisDraft] = useState("");
+  const scriptFileInput = useRef<HTMLInputElement | null>(null);
+  const [importing, setImporting] = useState(false);
   useEffect(() => {
     setSynopsisDraft(timeline?.synopsis ?? "");
   }, [timeline?.synopsis, timelineId, open]);
@@ -400,6 +405,38 @@ export default function BlueprintScriptPanel({
     message.success(t("blueprint.requestChangesPrefilled"));
   };
 
+  // 剧本直登：写好的正文直接落成本集剧本版本，不进入素材理解链路。
+  const importScriptFile = async (file: File) => {
+    if (!timelineId) return;
+    setImporting(true);
+    try {
+      const outcome = await importTimelineScript(projectId, timelineId, {
+        file,
+      });
+      await useProjectSnapshotStore.getState().pollOnce(projectId);
+      message.success(
+        outcome.replayed
+          ? t("blueprint.scriptImportReplayed", { detail: outcome.summary })
+          : outcome.reviewId
+          ? t("blueprint.scriptImportPendingReview", {
+              detail: outcome.summary,
+            })
+          : t("blueprint.scriptImportSucceeded", {
+              blocks: outcome.blockCount,
+              characters: outcome.characterCount,
+            }),
+      );
+    } catch (error) {
+      message.error(
+        t("blueprint.scriptImportFailed", {
+          detail: (error as Error).message,
+        }),
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div
       data-blueprint-script-panel
@@ -451,6 +488,29 @@ export default function BlueprintScriptPanel({
           ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <input
+            ref={scriptFileInput}
+            type="file"
+            accept=".md,.markdown,.txt,.text,.rst,.srt,.vtt,text/markdown,text/plain"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) void importScriptFile(file);
+            }}
+          />
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={importing}
+            title={t("blueprint.scriptImportHint")}
+            onClick={() => scriptFileInput.current?.click()}
+          >
+            <Upload className="h-4 w-4" />
+            {importing
+              ? t("blueprint.scriptImporting")
+              : t("blueprint.importScript")}
+          </button>
           <button
             type="button"
             className="btn-secondary"
