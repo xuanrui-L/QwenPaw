@@ -27,6 +27,13 @@ from vendor.media_toolkit.renderers import (
 # rasterized page subset, bounded for pathological page counts.
 DEFAULT_MAX_TEXT_PAGES = 500
 
+# A page whose extractable text is under this many characters cannot hold a
+# real script body: it is a running header, a page number or a short title.
+_SPARSE_PAGE_TEXT_CHARS = 80
+# An image covering at least this fraction of the page is a full-page scan
+# (the body lives in the raster), not a small decorative picture or logo.
+_DOMINANT_IMAGE_COVERAGE = 0.6
+
 
 def render(path: str, **opts: Any) -> list[dict[str, Any]]:
     """Render document pages as content blocks (image + extracted text per page)."""
@@ -179,6 +186,18 @@ def _extract_page_texts(
             continue
         if text and text.strip():
             texts[idx] = text
+            # A copyable running header or page number must not be mistaken
+            # for a complete text layer.  When the page body sits in a
+            # full-page raster image yet only sparse text (header / page
+            # number / short title) is extractable, report the page so a
+            # text-only caller (script direct-landing) refuses to land half a
+            # script instead of silently dropping the scanned body.  A dense
+            # text layer (a properly OCR'd scan) or a small decorative image
+            # is deliberately *not* a gap.
+            if _page_text_is_sparse(text) and (
+                _dominant_image_coverage(page) >= _DOMINANT_IMAGE_COVERAGE
+            ):
+                gaps.append((idx, "image-body-uncovered"))
         elif _page_has_image_object(page):
             # Visible raster content with no text layer: a scanned page.
             gaps.append((idx, "image-only"))
@@ -195,6 +214,38 @@ def _page_has_image_object(page) -> bool:
     except Exception:  # pylint: disable=broad-except
         return False
     return False
+
+
+def _page_text_is_sparse(text: str) -> bool:
+    """True when a page's text layer is too short to be a real script body."""
+    return len(text.strip()) < _SPARSE_PAGE_TEXT_CHARS
+
+
+def _dominant_image_coverage(page) -> float:
+    """Largest fraction of the page area covered by one raster image object.
+
+    Returns ``0.0`` when the page carries no image, or its bounds cannot be
+    read, so a plain text page -- or one with only small decorative pictures
+    -- stays below the dominant-image threshold and is never mistaken for a
+    scanned body hiding behind a copyable header.
+    """
+    try:
+        import pypdfium2 as pdfium
+
+        page_area = page.get_width() * page.get_height()
+        if page_area <= 0:
+            return 0.0
+        coverage = 0.0
+        for obj in page.get_objects(filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,)):
+            try:
+                left, bottom, right, top = obj.get_bounds()
+            except Exception:  # pylint: disable=broad-except
+                continue
+            area = max(0.0, right - left) * max(0.0, top - bottom)
+            coverage = max(coverage, area / page_area)
+        return coverage
+    except Exception:  # pylint: disable=broad-except
+        return 0.0
 
 
 def _format_range(indices: list[int]) -> str:

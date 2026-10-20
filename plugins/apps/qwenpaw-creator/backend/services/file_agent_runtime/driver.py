@@ -6515,8 +6515,7 @@ class FileCreatorAgentRuntime:
                 ):
                     sync_observation_count += 1
                     if (
-                        sync_observation_count
-                        >= _SYNC_OBSERVATION_HINT_AFTER
+                        sync_observation_count >= _SYNC_OBSERVATION_HINT_AFTER
                         and parallel_hint_count < _SYNC_OBSERVATION_HINT_MAX
                     ):
                         parallel_hint_count += 1

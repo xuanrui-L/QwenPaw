@@ -22,14 +22,20 @@ DOCX/PDF 的正文抽取在 :mod:`services.project_files.script_document_text`�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from hashlib import sha256
+import json
 from typing import Any, Callable, Mapping, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
+from pydantic import BaseModel, ConfigDict
+
+from services.runtime_files.atomic_store import AtomicJsonRecordStore
+
 from .assets import AssetAlreadyExists, AssetFileStore
 from .commit import ProjectCommitBoundary
+from .models import IndexedFile
 from .script_artifacts import (
     add_script_version,
     script_file_relative_uri,
@@ -201,6 +207,219 @@ def _script_import_identity(
     ).hex
 
 
+_IDEMPOTENCY_DIR = "script-import-idempotency"
+
+
+class ScriptImportIdempotencyRecord(BaseModel):
+    """Durable replay record for one explicit script-import request key.
+
+    Stored under ``runtime/script-import-idempotency/{operation_id}.json`` --
+    a sibling of ``runtime/transactions`` that startup recovery never scans --
+    and keyed on the deterministic operation id derived from the caller's
+    ``Idempotency-Key``.  It remembers the request digest, so a reused key
+    carrying a different payload is rejected as a conflict, and the completed
+    outcome, so a delayed retry of an already-committed request replays that
+    result verbatim instead of re-committing the same transaction id (which
+    the boundary rejects as a duplicate) or rewinding whatever edit has since
+    become current.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    request_digest: str
+    outcome: dict[str, Any]
+    created_at: datetime
+
+
+def _script_import_request_digest(
+    project_id: str,
+    timeline_id: str,
+    checksum: str,
+    source_name: str,
+) -> str:
+    """Stable digest of the payload an idempotency key was first used for."""
+
+    payload = json.dumps(
+        {
+            "projectId": project_id,
+            "timelineId": timeline_id,
+            "checksum": checksum,
+            "sourceName": source_name,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _idempotency_store(
+    store: ProjectStore,
+    project_id: str,
+    operation_id: str,
+) -> AtomicJsonRecordStore[ScriptImportIdempotencyRecord]:
+    path = (
+        store.project_root(project_id)
+        / "runtime"
+        / _IDEMPOTENCY_DIR
+        / f"{operation_id}.json"
+    )
+    # The caller already holds the per-project lifecycle lock, which
+    # serializes every writer of this record, so the inner per-record lock
+    # would only add a second file open and timeout source.
+    return AtomicJsonRecordStore(
+        path,
+        ScriptImportIdempotencyRecord,
+        locked=False,
+    )
+
+
+def _replay_idempotent_request(
+    store: ProjectStore,
+    project_id: str,
+    operation_id: str | None,
+    request_digest: str | None,
+) -> ScriptImportOutcome | None:
+    """Replay a completed keyed request, or ``None`` when there is none.
+
+    ``None`` when the request carried no explicit key or the key is new.
+    Raises ``SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT`` when the same key arrives
+    with a different payload (a different body or a different timeline).
+    """
+
+    if operation_id is None or request_digest is None:
+        return None
+    record = _idempotency_store(
+        store,
+        project_id,
+        operation_id,
+    ).read_or_none()
+    if record is None:
+        return None
+    if record.request_digest != request_digest:
+        raise ScriptImportError(
+            "同一个 Idempotency-Key 被用于不同的剧本正文或目标时间线；请为每一次不同的导入请求生成新的键。",
+            code="SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT",
+        )
+    # This request produced no new version (it replayed a completed one), so
+    # the response is marked as a replay even though the recorded original
+    # commit was not; the rest of the outcome is returned verbatim.
+    return replace(ScriptImportOutcome(**record.outcome), replayed=True)
+
+
+def _record_idempotent_request(
+    store: ProjectStore,
+    project_id: str,
+    operation_id: str | None,
+    request_digest: str | None,
+    outcome: ScriptImportOutcome,
+) -> None:
+    """Persist the completed result so a later retry of this key replays it.
+
+    A no-op when the request carried no explicit key (both ids are ``None``):
+    an unkeyed edit mints a fresh transaction each time and keeps no record.
+    """
+
+    if operation_id is None or request_digest is None:
+        return
+    record_store = _idempotency_store(store, project_id, operation_id)
+    record_store.path.parent.mkdir(parents=True, exist_ok=True)
+    record_store.write(
+        ScriptImportIdempotencyRecord(
+            operation_id=operation_id,
+            request_digest=request_digest,
+            outcome=asdict(outcome),
+            created_at=datetime.now(UTC),
+        ),
+    )
+
+
+def _script_import_operation(
+    project_id: str,
+    timeline_id: str,
+    idempotency_key: str | None,
+    checksum: str,
+    source_name: str,
+) -> tuple[str | None, str | None]:
+    """Derive the deterministic operation id and payload digest for a key.
+
+    Both are ``None`` when the caller supplied no explicit key, so every edit
+    mints a fresh transaction and no replay record is kept.
+    """
+
+    if not idempotency_key:
+        return None, None
+    operation_id = _script_import_identity(
+        project_id,
+        timeline_id,
+        idempotency_key,
+    )
+    request_digest = _script_import_request_digest(
+        project_id,
+        timeline_id,
+        checksum,
+        source_name,
+    )
+    return operation_id, request_digest
+
+
+def _publish_script_file(
+    file_store: AssetFileStore,
+    content: bytes,
+    *,
+    file_id: str,
+    relative_uri: str,
+    checksum: str,
+    indexed: IndexedFile,
+) -> None:
+    """Write the content-addressed script body, tolerating an existing copy.
+
+    A concurrent import of identical content may have published the same
+    addressable file first; that is fine as long as the indexed copy verifies.
+    """
+
+    staged = file_store.stage_bytes(
+        content,
+        staging_id=f"script-import-{file_id[:48]}",
+    )
+    try:
+        file_store.publish(
+            staged,
+            relative_uri,
+            expected_sha256=checksum,
+            expected_size_bytes=len(content),
+        )
+    except AssetAlreadyExists:
+        file_store.abandon(staged)
+        if not file_store.inspect(indexed).available:
+            raise
+
+
+def _script_import_commit_metadata(
+    commit_metadata: Mapping[str, Any],
+    operation_id: str | None,
+) -> dict[str, Any]:
+    """Build commit metadata, pinning a deterministic transaction when keyed.
+
+    Transaction identity is per *edit*, not per content.  Re-selecting a
+    previously imported script (A -> B -> A) is a new edit and must not reuse
+    A's already-COMMITTED transaction id, or the commit boundary rejects it as
+    a duplicate.  An explicit request key still makes the transaction
+    deterministic as a safety net, but the durable replay record checked in
+    :func:`publish_script_import` is what turns a delayed retry into a no-op
+    replay; without a key the boundary mints a fresh transaction.
+    """
+
+    metadata: dict[str, Any] = {
+        **dict(commit_metadata),
+        "_lifecycle_lock_held": True,
+    }
+    if operation_id is not None:
+        metadata.setdefault("transaction_id", f"transaction-{operation_id}")
+        metadata.setdefault("round_id", f"round-script-import-{operation_id}")
+    return metadata
+
+
 def publish_script_import(
     *,
     store: ProjectStore,
@@ -221,11 +440,13 @@ def publish_script_import(
     commits as a frontend edit while the Agent tool passes its own request
     context (which may require review).
 
-    ``idempotency_key`` identifies *this edit request*, not its content: when
-    present it makes the commit transaction deterministic so a network retry
-    deduplicates.  When absent every edit mints a fresh transaction, so
-    re-selecting a previously imported script never reuses that script's
-    already-committed transaction id.
+    ``idempotency_key`` identifies *this edit request*, not its content.  When
+    present the completed result is recorded under the key, so a delayed
+    network retry replays it verbatim -- even after another edit has moved the
+    current selection on -- instead of re-committing the same transaction id;
+    reusing the key with a different payload is rejected as a conflict.  When
+    absent every edit mints a fresh transaction, so re-selecting a previously
+    imported script (A -> B -> A) never reuses that script's committed id.
     """
 
     markdown_text, block_count = normalize_script_text(raw_text)
@@ -242,10 +463,34 @@ def publish_script_import(
     relative_uri = script_file_relative_uri(file_id)
     now = datetime.now(UTC)
     file_store = AssetFileStore(store.project_root(project_id))
+    # An explicit request key gets a deterministic operation id and payload
+    # digest before the lock: the id makes the commit transaction stable (so a
+    # retry maps back to the same transaction) and both drive the durable
+    # replay record checked inside the lock below.
+    operation_id, request_digest = _script_import_operation(
+        project_id,
+        timeline_id,
+        idempotency_key,
+        checksum,
+        source_name,
+    )
 
     with store.lifecycle_lock(project_id):
         base = store.read(project_id)
         project = base.project
+        # Replay a completed keyed request before building any new edit: a
+        # delayed network retry -- even after another edit moved the selection
+        # on -- returns the original result instead of re-committing the same
+        # transaction id (which the boundary rejects as a duplicate) and never
+        # rewinds the script that is current now.
+        replayed = _replay_idempotent_request(
+            store,
+            project_id,
+            operation_id,
+            request_digest,
+        )
+        if replayed is not None:
+            return replayed
         if timeline_id.startswith(_SNAPSHOT_TIMELINE_PREFIX):
             raise ScriptImportError(
                 "snapshot: 开头的时间线是用户回滚留下的历史副本，不能把剧本"
@@ -281,7 +526,7 @@ def publish_script_import(
                     "剧本槽位选中的版本或文件索引缺失，无法复放该正文；请重新导入。",
                     code="SCRIPT_IMPORT_SLOT_CONFLICT",
                 )
-            return ScriptImportOutcome(
+            outcome = ScriptImportOutcome(
                 project_id=project_id,
                 timeline_id=timeline_id,
                 slot_id=slot.slot_id,
@@ -294,6 +539,17 @@ def publish_script_import(
                 etag=base.etag,
                 replayed=True,
             )
+            # Record the content replay too: without it a later retry of this
+            # key, after another edit moved the selection off ``version_id``,
+            # would fall through to a fresh commit and rewind the current one.
+            _record_idempotent_request(
+                store,
+                project_id,
+                operation_id,
+                request_digest,
+                outcome,
+            )
+            return outcome
 
         working = project.model_copy(deep=True)
         try:
@@ -326,46 +582,19 @@ def publish_script_import(
         indexed = working.assets.files_by_id[version.file_id]
 
         if version.file_id == file_id:
-            staged = file_store.stage_bytes(
+            _publish_script_file(
+                file_store,
                 content,
-                staging_id=f"script-import-{file_id[:48]}",
+                file_id=file_id,
+                relative_uri=relative_uri,
+                checksum=checksum,
+                indexed=indexed,
             )
-            try:
-                file_store.publish(
-                    staged,
-                    relative_uri,
-                    expected_sha256=checksum,
-                    expected_size_bytes=len(content),
-                )
-            except AssetAlreadyExists:
-                file_store.abandon(staged)
-                if not file_store.inspect(indexed).available:
-                    raise
 
-        metadata: dict[str, Any] = {
-            **dict(commit_metadata),
-            "_lifecycle_lock_held": True,
-        }
-        # Transaction identity is per *edit*, not per content.  Re-selecting a
-        # previously imported script (A -> B -> A) is a new edit and must not
-        # reuse A's already-COMMITTED transaction id, or the commit boundary
-        # rejects it as a duplicate.  Only an explicit request idempotency key
-        # makes the transaction deterministic (so a network retry dedupes);
-        # without one the boundary mints a fresh transaction per edit.
-        if idempotency_key:
-            operation_id = _script_import_identity(
-                project_id,
-                timeline_id,
-                idempotency_key,
-            )
-            metadata.setdefault(
-                "transaction_id",
-                f"transaction-{operation_id}",
-            )
-            metadata.setdefault(
-                "round_id",
-                f"round-script-import-{operation_id}",
-            )
+        metadata = _script_import_commit_metadata(
+            commit_metadata,
+            operation_id,
+        )
         commit = commits.commit(
             base=base,
             candidate=working.model_dump(mode="json"),
@@ -393,6 +622,16 @@ def publish_script_import(
                 for change in commit.changeset.changes
                 if change.json_pointer is not None
             ],
+        )
+        # Persist the completed result keyed on the request id, so a delayed
+        # retry replays it verbatim instead of re-committing the same
+        # transaction id and failing as a duplicate.
+        _record_idempotent_request(
+            store,
+            project_id,
+            operation_id,
+            request_digest,
+            outcome,
         )
     return outcome
 

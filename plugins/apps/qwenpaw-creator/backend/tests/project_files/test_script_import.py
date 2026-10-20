@@ -303,6 +303,51 @@ def test_idempotency_key_dedupes_a_retry_but_each_edit_stays_distinct(
     assert store.read(PROJECT_ID).generation == base.generation + 3
 
 
+def test_idempotency_key_replays_after_an_interleaved_edit(tmp_path) -> None:
+    """交错编辑后重试同一请求：A/key-a、B/key-b、再重试 A/key-a。
+
+    回归：幂等键此前只转成固定 transaction_id，并不回放已完成结果。
+    响应丢失后重试 A/key-a 时，早返回（只比「当前选中内容」）不成立，
+    提交边界收到已 COMMITTED 的事务 ID 抛 ProjectCommitError（HTTP 500）。
+    现在已完成请求的结果被持久记录，重试直接回放 A 的结果，且不会把
+    当前 B 覆盖回 A。
+    """
+    store, base = make_store(tmp_path)
+
+    first = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
+    second = _publish(store, text=REVISED_TEXT, idempotency_key="key-b")
+    assert second.artifact_version_id != first.artifact_version_id
+
+    # 响应丢失后重试 A/key-a：回放 A 的已完成结果，不再撞已提交事务。
+    retry = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
+
+    assert retry.artifact_version_id == first.artifact_version_id
+    assert retry.generation == first.generation
+    # 关键：回放不回滚当前状态——选中的仍是 B，生成数没有因重试再涨。
+    slot = store.read(PROJECT_ID).project.assets.artifact_slots_by_id[
+        timeline_script_slot_id("timeline:main")
+    ]
+    assert slot.selected_version_id == second.artifact_version_id
+    assert store.read(PROJECT_ID).generation == base.generation + 2
+
+
+def test_idempotency_key_rejects_a_different_payload(tmp_path) -> None:
+    """同键异 payload：一个 Idempotency-Key 不能用于两份不同的正文。"""
+    store, base = make_store(tmp_path)
+    _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
+
+    with pytest.raises(ScriptImportError) as caught:
+        _publish(store, text=REVISED_TEXT, idempotency_key="key-a")
+
+    assert caught.value.code == "SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT"
+    # 冲突请求不落任何新编辑：当前仍是首次的 A，生成数未变。
+    slot = store.read(PROJECT_ID).project.assets.artifact_slots_by_id[
+        timeline_script_slot_id("timeline:main")
+    ]
+    assert slot.version_ids == [slot.selected_version_id]
+    assert store.read(PROJECT_ID).generation == base.generation + 1
+
+
 def test_reselecting_previous_content_under_review_is_a_new_edit(
     tmp_path,
 ) -> None:

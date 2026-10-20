@@ -185,6 +185,83 @@ def test_reimporting_a_previous_script_returns_201_not_500(
     assert slot.selected_version_id == first.json()["artifactVersionId"]
 
 
+def test_retrying_a_completed_key_after_an_interleaved_edit_replays(
+    tmp_path,
+    run_scenario,
+) -> None:
+    """交错编辑后重试同一请求：A/key-a、B/key-b、再重试 A/key-a。
+
+    回归：幂等键此前只转成固定 transaction_id，并不回放已完成结果。响应
+    丢失后重试 A/key-a，早返回（只比当前选中内容）不成立，提交边界收到已
+    COMMITTED 的事务 ID 抛 ProjectCommitError，路由返回 500（[201,201,500]）。
+    现在已完成请求被持久记录，重试直接回放 A 的结果（201），且不把当前 B
+    覆盖回 A。
+    """
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await client.post(
+            _url(),
+            json={"content": SCRIPT_TEXT},
+            headers={"Idempotency-Key": "script-import-a"},
+        )
+        second = await client.post(
+            _url(),
+            json={"content": REVISED_TEXT},
+            headers={"Idempotency-Key": "script-import-b"},
+        )
+        retry = await client.post(
+            _url(),
+            json={"content": SCRIPT_TEXT},
+            headers={"Idempotency-Key": "script-import-a"},
+        )
+        return first, second, retry
+
+    first, second, retry = run_scenario(app, scenario)
+    assert [first.status_code, second.status_code, retry.status_code] == [
+        201,
+        201,
+        201,
+    ], (first.text, second.text, retry.text)
+    # 重试回放 A 的已完成结果，版本与首次一致。
+    assert (
+        retry.json()["artifactVersionId"] == first.json()["artifactVersionId"]
+    )
+    # 关键：回放不把当前剧本从 B 覆盖回 A。
+    slot = services.projects.read(
+        PROJECT_ID,
+    ).project.assets.artifact_slots_by_id[timeline_script_slot_id(TIMELINE_ID)]
+    assert slot.selected_version_id == second.json()["artifactVersionId"]
+
+
+def test_reusing_a_key_with_a_different_payload_is_a_conflict(
+    tmp_path,
+    run_scenario,
+) -> None:
+    """同一个 Idempotency-Key 用于不同正文：明确 409 冲突，不是 500。"""
+    app, _services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await client.post(
+            _url(),
+            json={"content": SCRIPT_TEXT},
+            headers={"Idempotency-Key": "script-import-a"},
+        )
+        conflict = await client.post(
+            _url(),
+            json={"content": REVISED_TEXT},
+            headers={"Idempotency-Key": "script-import-a"},
+        )
+        return first, conflict
+
+    first, conflict = run_scenario(app, scenario)
+    assert first.status_code == 201, first.text
+    assert conflict.status_code == 409, conflict.text
+    body = conflict.json()
+    assert body["code"] == "CONFLICT"
+    assert body["details"]["code"] == "SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT"
+
+
 def test_replay_file_id_resolves_to_the_indexed_file(
     tmp_path,
     run_scenario,

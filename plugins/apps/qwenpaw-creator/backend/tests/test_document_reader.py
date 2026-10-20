@@ -95,6 +95,47 @@ def _make_text_then_blank_pdf(path: Path) -> None:
         plt.close(blank)
 
 
+def _make_header_plus_scan_pdf(path: Path) -> None:
+    """Page 1 selectable text; page 2 = copyable header + rasterized body.
+
+    The running header is a real text layer, so a naive "page has any text"
+    test would call page 2 complete -- yet the dialogue only exists inside the
+    full-page image.  This is the mixed page that must still be reported.
+    """
+    import io
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from PIL import ImageDraw
+
+    with PdfPages(path) as pdf:
+        fig = plt.figure(figsize=(4, 3))
+        fig.text(0.08, 0.5, "SCENE ONE. Cover: a selectable text page.")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        img = Image.new("RGB", (600, 400), "white")
+        ImageDraw.Draw(img).text(
+            (20, 150),
+            "SCENE TWO. Alice: the missing ending must be in the script.",
+            fill="black",
+        )
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        fig2 = plt.figure(figsize=(4, 3))
+        # A copyable running header: sparse text that must not mask the scan.
+        fig2.text(0.1, 0.93, "Page 2 - Screenplay")
+        ax = fig2.add_axes([0, 0, 1, 0.85])
+        ax.axis("off")
+        ax.imshow(Image.open(buf))
+        pdf.savefig(fig2)
+        plt.close(fig2)
+
+
 def _read(path: Path, output_dir: Path, **kwargs):
     return asyncio.run(read_document(path, output_dir=output_dir, **kwargs))
 
@@ -179,6 +220,28 @@ def test_pdf_reports_image_only_pages_as_unextractable(tmp_path) -> None:
     blank_pdf = tmp_path / "blank.pdf"
     _make_text_then_blank_pdf(blank_pdf)
     assert not read_document_text(blank_pdf).unextractable_pages
+
+
+def test_pdf_reports_scanned_body_behind_a_copyable_header(tmp_path) -> None:
+    """可复制页眉 + 扫描正文页：页眉有文字层也证明不了正文完整。
+
+    回归：此前只要页面有任意可提取文字就跳过图片覆盖检查，于是「可复制
+    页码/页眉 + 扫描正文」被当成完整文字剧本，正文台词被静默丢弃。现在
+    含未覆盖扫描图像的混合页（稀疏文字 + 整页图片）被逐页报告，直登据此
+    拒绝；纯文字封面页不受影响。
+    """
+    doc = tmp_path / "header_scan.pdf"
+    _make_header_plus_scan_pdf(doc)
+    result = read_document_text(doc)
+
+    # complete 标志仍证明不了内容完整（它只对页数上限敏感）。
+    assert result.extraction_complete is True
+    # 第 2 页有可复制页眉（文字层存在），但正文在整页图片里 -> 被报告。
+    assert result.unextractable_pages == (2,)
+    # 栅格化的台词没有进索引文本（证明正文确实抽不出）。
+    assert "missing ending" not in result.indexed_text
+    # 可复制页眉本身仍被抽出（证明该页确有文字层，不是纯图片页）。
+    assert "Page 2" in result.indexed_text
 
 
 def test_csv_display_cap_and_row_cap_extraction_reporting(

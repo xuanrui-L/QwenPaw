@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, Header, Request, status
 from starlette.datastructures import UploadFile
 
 from domain.errors import (
+    ConflictError,
     NotFoundError,
     StorageIntegrityError,
     ValidationError,
@@ -203,6 +204,11 @@ def _translate(error: BaseException) -> None:
         details = {"code": error.code, **error.details}
         if error.code == "SCRIPT_IMPORT_TIMELINE_NOT_FOUND":
             raise NotFoundError(str(error), details=details) from error
+        if error.code == "SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT":
+            # A reused Idempotency-Key with a different payload is a client
+            # conflict, not a validation failure: 409 tells it to mint a new
+            # key instead of correcting the body.
+            raise ConflictError(str(error), details=details) from error
         raise ValidationError(str(error), details=details) from error
     if isinstance(error, AssetFileError):
         raise StorageIntegrityError(str(error)) from error
