@@ -295,3 +295,19 @@ def test_anthropic_protocol_dispatches_to_messages_endpoint(
     assert result == "pong"
     assert captured["url"] == "https://gateway.example.com/v1/v1/messages"
     assert captured["headers"]["x-api-key"] == "sk-test"
+
+
+def test_kimi_k3_omits_unsupported_temperature(monkeypatch) -> None:
+    # DashScope rejects ``temperature`` for kimi-k3; the OpenAI-compatible
+    # request body must omit the field entirely.
+    _patch_config(monkeypatch, protocol="DashScope（百炼）", api_key="test-key")
+    monkeypatch.setattr(
+        text_model.model_config,
+        "get_text_model_name",
+        lambda: "kimi-k3",
+    )
+    captured: dict = {}
+    _fake_httpx(monkeypatch, captured)
+
+    assert asyncio.run(text_model.chat_completion("Hello")) == "pong"
+    assert "temperature" not in captured["body"]

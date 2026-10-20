@@ -322,6 +322,31 @@ def test_reasoning_budget_reaches_sdk_request_without_limiting_tool_output(
 
 
 @pytest.mark.parametrize(
+    ("model_name", "expected_temperature"),
+    [("qwen3.7-plus", 0.2), ("kimi-k3", None)],
+)
+def test_kimi_k3_omits_unsupported_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+    model_name: str,
+    expected_temperature: float | None,
+) -> None:
+    # DashScope rejects an explicit ``temperature`` for kimi-k3, so the client
+    # must drop it and let the gateway apply the model default; every other
+    # model keeps the Creator sampling default.
+    _configure_text_model(monkeypatch)
+    monkeypatch.setattr(
+        model_client.model_config,
+        "get_text_model_name",
+        lambda: model_name,
+    )
+
+    configured = AgentScopeAgentChatClient()._configured_model()
+
+    assert isinstance(configured, DashScopeChatModel)
+    assert configured.parameters.temperature == expected_temperature
+
+
+@pytest.mark.parametrize(
     ("protocol", "base_url"),
     [
         ("Anthropic Claude", "https://api.anthropic.com"),
@@ -355,14 +380,23 @@ def test_anthropic_agent_uses_model_limit_instead_of_sdk_default(monkeypatch):
         lambda: "MiniMax-M2.7",
     )
     client = AgentScopeAgentChatClient()
-    configured = client._configured_model()
     captured = {}
 
     async def capture(**kwargs):
         captured.update(kwargs)
         raise RuntimeError("request captured before transport")
 
-    monkeypatch.setattr(configured.client.messages, "create", capture)
+    # AgentScope 2.0.4 builds ``anthropic.AsyncAnthropic`` inside the model
+    # call and keeps no persistent ``.client``, so intercept the SDK
+    # constructor and capture the request kwargs from ``messages.create``.
+    from types import SimpleNamespace
+
+    import anthropic
+
+    def _fake_anthropic(*_args, **_kwargs):
+        return SimpleNamespace(messages=SimpleNamespace(create=capture))
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _fake_anthropic)
     with pytest.raises(AgentModelError, match="request captured"):
         asyncio.run(
             client.complete(

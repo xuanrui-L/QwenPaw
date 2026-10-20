@@ -398,8 +398,11 @@ function MessageParts({
   );
 }
 
-function simplifyErrorMessage(_text: string): string {
-  // Provider/runtime errors may contain prompts, local paths and protocol data.
+export function simplifyErrorMessage(text: string): string {
+  // Classify known failures without exposing raw provider payloads or secrets.
+  if (/temperature/i.test(text) && /not supported|unsupported/i.test(text)) {
+    return i18n.t("agentActivity.unsupportedTemperature");
+  }
   return i18n.t("agentActivity.failureHint");
 }
 
@@ -2439,7 +2442,7 @@ export default function AgentDock({
                         </Button>
                       </div>
                     ) : (
-                      t("agentActivity.failureHint")
+                      simplifyErrorMessage(session.error.message)
                     )}
                   </div>
                 )}

@@ -2379,6 +2379,7 @@
     "reconnecting": "正在恢复连接",
     "connectionHint": "暂时无法获取最新进展，连接恢复后会自动更新。",
     "retryHint": "正在等待模型服务重试，暂时不需要重复发送。",
+    "unsupportedTemperature": "所选模型拒绝了 temperature 参数，请检查模型兼容性后再重试。",
     "failureHint": "本次执行未完成，可重试继续。",
     "toolFailed": "本次未成功",
     "toolFailureHint": "本次操作未成功，执行反馈已返回给 Agent。",

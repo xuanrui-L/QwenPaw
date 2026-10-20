@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import AgentDock from "@/components/agent/AgentDock";
+import AgentDock, { simplifyErrorMessage } from "@/components/agent/AgentDock";
 import { useAgentDockUiStore } from "@/store/agentDockUiStore";
 import { useCreatorSessionStore } from "@/store/creatorSessionStore";
 import { useCreatorTaskViewStore } from "@/store/creatorTaskViewStore";
@@ -1607,5 +1607,17 @@ describe("AgentDock public output and interactions", () => {
       });
     }
     expect(row.textContent).toContain("随时可以继续创作");
+  });
+});
+
+describe("safe provider failure messages", () => {
+  it("explains unsupported temperature without exposing provider details", () => {
+    const message = simplifyErrorMessage(
+      "Parameter 'temperature'=0.2 is not supported for kimi-k3; secret-token /private/path",
+    );
+    expect(message).toContain("temperature");
+    expect(message).not.toContain("secret-token");
+    expect(message).not.toContain("/private/path");
+    expect(message).not.toBe(simplifyErrorMessage("unknown provider failure"));
   });
 });

@@ -736,6 +736,8 @@ async def _call_openai_vlm(
         "temperature": temperature,
         "enable_thinking": False,
     }
+    if model_config.chat_temperature(model_name, temperature) is None:
+        body.pop("temperature", None)
     headers: dict = {
         "Content-Type": "application/json",
         **(

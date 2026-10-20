@@ -714,6 +714,18 @@ def _build_chat_model(
             formatter=formatter,
             client_kwargs=gemini_kwargs,
         )
+    # Drop the sampling temperature for models whose gateway rejects an
+    # explicit value (e.g. DashScope ``kimi-k3``); AgentScope omits a
+    # ``None`` temperature so the provider applies its own default. Only the
+    # OpenAI-compatible/DashScope path reaches here: Anthropic and Gemini
+    # return above and their ``Parameters`` differ.
+    parameters = parameters.model_copy(
+        update={
+            "temperature": model_config.chat_temperature(
+                model_name, parameters.temperature,
+            ),
+        },
+    )
     return DashScopeChatModel(
         credential=DashScopeCredential(
             api_key=api_key,

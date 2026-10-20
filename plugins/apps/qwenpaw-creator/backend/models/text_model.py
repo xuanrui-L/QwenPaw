@@ -165,6 +165,8 @@ async def _call_openai(
         # ``decode_chat_response`` folds the stream back into one completion.
         "stream": True,
     }
+    if model_config.chat_temperature(model_name, temperature) is None:
+        body.pop("temperature", None)
     # Free-tier gateways (e.g. OpenCode Zen ``*-free``) accept requests
     # without an Authorization header; an empty Bearer value would be
     # rejected as an invalid key.

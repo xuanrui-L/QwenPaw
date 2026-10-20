@@ -2379,6 +2379,7 @@
     "reconnecting": "Reconnecting",
     "connectionHint": "Latest progress is unavailable. Updates will resume when the connection returns.",
     "retryHint": "Waiting to retry the model service. No need to send again.",
+    "unsupportedTemperature": "The selected model rejected the temperature parameter. Check model compatibility before retrying.",
     "failureHint": "Execution did not finish. You can retry to continue.",
     "toolFailed": "Attempt unsuccessful",
     "toolFailureHint": "This operation was unsuccessful. Execution feedback has been returned to the Agent.",
