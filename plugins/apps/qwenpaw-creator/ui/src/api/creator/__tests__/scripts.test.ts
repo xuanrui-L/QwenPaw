@@ -49,7 +49,11 @@ describe("importTimelineScript (剧本直登)", () => {
       {
         match: "/script-import",
         method: "POST",
-        response: { ok: true, status: 201, json: { ...RESULT, replayed: true } },
+        response: {
+          ok: true,
+          status: 201,
+          json: { ...RESULT, replayed: true },
+        },
       },
     ]);
 
@@ -64,5 +68,35 @@ describe("importTimelineScript (剧本直登)", () => {
       name: "粘贴剧本",
     });
     expect(calls[0].headers["content-type"]).toBe("application/json");
+  });
+
+  it("sends a per-request Idempotency-Key so re-picking old content is a new edit", async () => {
+    const { calls } = installMockFetch([
+      {
+        match: "/script-import",
+        method: "POST",
+        response: { ok: true, status: 201, json: RESULT },
+      },
+    ]);
+
+    // Two separate imports (the A -> B -> A flow) each carry a fresh key, so
+    // the backend mints a distinct edit transaction and never collides with a
+    // previously committed one for the same content.
+    await importTimelineScript("p1", "timeline:main", { content: "A" });
+    await importTimelineScript("p1", "timeline:main", { content: "B" });
+    const [first, second] = calls.map((c) => c.headers["idempotency-key"]);
+    expect(first).toMatch(/^script-import-/);
+    expect(second).toMatch(/^script-import-/);
+    expect(first).not.toBe(second);
+
+    // An explicit key is passed through verbatim, so a network retry of the
+    // same request reuses it and the backend dedupes the retry.
+    await importTimelineScript(
+      "p1",
+      "timeline:main",
+      { content: "A" },
+      "script-import-fixed",
+    );
+    expect(calls[2].headers["idempotency-key"]).toBe("script-import-fixed");
   });
 });

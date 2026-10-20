@@ -55,6 +55,7 @@ def _result(
     *,
     complete: bool = True,
     notes: tuple[str, ...] = (),
+    unextractable_pages: tuple[int, ...] = (),
 ) -> DocumentReadResult:
     """A text-only render: no page image is produced or persisted."""
 
@@ -69,6 +70,7 @@ def _result(
         extraction_complete=complete,
         extraction_fraction=1.0 if complete else 0.5,
         notes=tuple(notes),
+        unextractable_pages=tuple(unextractable_pages),
     )
 
 
@@ -164,6 +166,33 @@ def test_document_without_a_text_layer_is_reported(monkeypatch) -> None:
     assert "文字层" in str(caught.value)
 
 
+def test_image_page_without_a_text_layer_refuses_direct_landing(
+    monkeypatch,
+) -> None:
+    """混合扫描 PDF：有可见内容却抽不出文字层的页必须拒绝直登。
+
+    回归：直登此前把 extraction_complete 当成「内容完整」，但渲染器只在
+    超页数上限时才置它为 False；图片页/扫描页没有文字层却被静默略过，
+    全局字符数又超过下限，于是半份剧本被当成完整剧本登记。现在渲染器
+    逐页报告无法抽取文字的页，直登据此拒绝并指路素材理解/人工确认。
+    """
+
+    # 封面文字层完整、extraction_complete 仍为 True、正文也长过下限，
+    # 但第 2 页是图片正文：单靠 complete / 字符数都看不出缺页。
+    _patch_reader(
+        monkeypatch,
+        _result(SCRIPT_TEXT, unextractable_pages=(2,)),
+    )
+
+    with pytest.raises(ScriptImportError) as caught:
+        extract_script_document_text(b"payload", name="混合剧本.pdf")
+
+    assert caught.value.code == "SCRIPT_IMPORT_DOCUMENT_IMAGE_PAGE"
+    message = str(caught.value)
+    assert "第 2 页" in message
+    assert "素材" in message, "必须指出还能走素材理解/人工确认这条退路"
+
+
 @pytest.mark.parametrize(
     ("error", "hint"),
     [
@@ -224,4 +253,4 @@ def test_bad_input_fails_before_touching_the_renderer(monkeypatch) -> None:
         extract_script_document_text(b"", name="剧本.docx")
     assert empty.value.code == "SCRIPT_IMPORT_DOCUMENT_NO_TEXT"
 
-    assert seen == [], "抽不出正文的上传不该启动渲染链路"
+    assert not seen, "抽不出正文的上传不该启动渲染链路"

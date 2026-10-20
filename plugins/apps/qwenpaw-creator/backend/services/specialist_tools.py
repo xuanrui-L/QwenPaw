@@ -775,8 +775,7 @@ _CHECK_OBSERVATION_ARGUMENTS = _arguments_schema(
         "wait": {
             "type": "boolean",
             "description": (
-                "true（默认）=并行等待全部任务到终态后返回结果；"
-                "false=立即返回当前状态快照，不等待。"
+                "true（默认）=并行等待全部任务到终态后返回结果；" "false=立即返回当前状态快照，不等待。"
             ),
         },
     },
@@ -1123,9 +1122,9 @@ def _run_observation_task_ids(
     for record in reversed(executions.list_tasks(project_id)):
         if record.kind not in _OBSERVATION_TASK_KINDS:
             continue
-        if (
-            record.run_id != specialist_run_id
-            and record.caused_by_request_id != specialist_run_id
+        if specialist_run_id not in (
+            record.run_id,
+            record.caused_by_request_id,
         ):
             continue
         task_ids.append(record.task_id)

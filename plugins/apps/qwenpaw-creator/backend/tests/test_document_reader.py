@@ -17,6 +17,7 @@ from services.document_reader import (
     MAX_INDEXED_TEXT_CHARS,
     is_supported_document,
     read_document,
+    read_document_text,
 )
 from vendor.media_toolkit.image_budget import (
     IMAGE_BUDGET_TOKENS,
@@ -40,6 +41,58 @@ def _make_pdf(path: Path, pages: int = 3) -> None:
             fig.text(0.1, 0.5, f"Creator Doc Page {number}: storyboard beats")
             pdf.savefig(fig)
             plt.close(fig)
+
+
+def _make_mixed_pdf(path: Path) -> None:
+    """Page 1 selectable text; page 2 rasterized dialogue (no text layer)."""
+    import io
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from PIL import ImageDraw
+
+    with PdfPages(path) as pdf:
+        fig = plt.figure(figsize=(4, 3))
+        fig.text(0.08, 0.5, "SCENE ONE. Cover: a selectable text page.")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        img = Image.new("RGB", (600, 200), "white")
+        ImageDraw.Draw(img).text(
+            (20, 80),
+            "SCENE TWO. Alice: the missing ending must be in the script.",
+            fill="black",
+        )
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        fig2 = plt.figure(figsize=(4, 3))
+        ax = fig2.add_axes([0, 0, 1, 1])
+        ax.axis("off")
+        ax.imshow(Image.open(buf))
+        pdf.savefig(fig2)
+        plt.close(fig2)
+
+
+def _make_text_then_blank_pdf(path: Path) -> None:
+    """Page 1 selectable text; page 2 genuinely blank (no text, no image)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    with PdfPages(path) as pdf:
+        fig = plt.figure(figsize=(4, 3))
+        fig.text(0.08, 0.5, "SCENE ONE. Cover: a selectable text page.")
+        pdf.savefig(fig)
+        plt.close(fig)
+        blank = plt.figure(figsize=(4, 3))
+        pdf.savefig(blank)
+        plt.close(blank)
 
 
 def _read(path: Path, output_dir: Path, **kwargs):
@@ -100,6 +153,32 @@ def test_pdf_render_grid_alignment_page_range_and_text_cap(
     assert capped.extraction_complete is False
     assert capped.extraction_fraction == 0.5
     assert any("capped at 2 of 4 pages" in note for note in capped.notes)
+
+
+def test_pdf_reports_image_only_pages_as_unextractable(tmp_path) -> None:
+    """混合扫描 PDF：图片正文页被逐页报告，空白页不被误报。
+
+    用真实 pypdfium2 解析（不是伪造的提取结果）：第 2 页把台词栅格化成
+    图片、没有文字层，渲染器仍报 extraction_complete=True，但
+    unextractable_pages 精确指出第 2 页——直登据此拒绝，不再静默丢正文。
+    """
+    mixed = tmp_path / "mixed.pdf"
+    _make_mixed_pdf(mixed)
+    result = read_document_text(mixed)
+    # 关键：complete 标志本身证明不了内容完整（它只对页数上限敏感）。
+    assert result.extraction_complete is True
+    assert result.unextractable_pages == (2,)
+    assert "SCENE TWO" not in result.indexed_text
+
+    # 全文字层 PDF：没有无法抽取的页。
+    text_pdf = tmp_path / "text.pdf"
+    _make_pdf(text_pdf, pages=2)
+    assert not read_document_text(text_pdf).unextractable_pages
+
+    # 文字页 + 真·空白页：空白页不被误报，正常文档不会被误拒。
+    blank_pdf = tmp_path / "blank.pdf"
+    _make_text_then_blank_pdf(blank_pdf)
+    assert not read_document_text(blank_pdf).unextractable_pages
 
 
 def test_csv_display_cap_and_row_cap_extraction_reporting(

@@ -905,6 +905,36 @@ def _translate_project_schema_error(
     )
 
 
+def _script_import_raw_text(
+    raw: bytes,
+    *,
+    name: str,
+    document_import: bool,
+) -> str:
+    """从源文件字节解出可直登的剧本正文。
+
+    文档（DOCX/PDF）走文字层抽取，纯文本走 UTF-8 解码；两条路径的失败
+    都翻译成带错误码的 AgentProjectToolError，绝不把未分类异常抛给模型。
+    """
+    if document_import:
+        try:
+            return extract_script_document_text(raw, name=name)
+        except ScriptImportError as error:
+            raise AgentProjectToolError(
+                str(error),
+                code=error.code,
+                retryable=error.retryable,
+                details=error.details,
+            ) from error
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AgentProjectToolError(
+            f"{name!r} 不是 UTF-8 文本，无法直登为剧本。",
+            code="SCRIPT_IMPORT_NOT_UTF8",
+        ) from error
+
+
 class AgentProjectTools:
     """Request-scoped implementation of the indexed Project tool surface."""
 
@@ -1222,27 +1252,11 @@ class AgentProjectTools:
                 f"读取剧本源文件失败：{error}",
                 code="SCRIPT_IMPORT_FILE_ERROR",
             ) from error
-        if document_import:
-            try:
-                raw_text = extract_script_document_text(
-                    raw,
-                    name=version.name,
-                )
-            except ScriptImportError as error:
-                raise AgentProjectToolError(
-                    str(error),
-                    code=error.code,
-                    retryable=error.retryable,
-                    details=error.details,
-                ) from error
-        else:
-            try:
-                raw_text = raw.decode("utf-8")
-            except UnicodeDecodeError as error:
-                raise AgentProjectToolError(
-                    f"{version.name!r} 不是 UTF-8 文本，无法直登为剧本。",
-                    code="SCRIPT_IMPORT_NOT_UTF8",
-                ) from error
+        raw_text = _script_import_raw_text(
+            raw,
+            name=version.name,
+            document_import=document_import,
+        )
         try:
             outcome = publish_script_import(
                 store=self.store,
@@ -1272,8 +1286,7 @@ class AgentProjectTools:
             "剧本正文已进入待审阅，审阅通过后才会成为当前版本；"
             "不要重新起草，也不要为该素材创建 ProjectSource 或委派素材理解。"
             if outcome.review_id is not None
-            else "剧本正文已登记为当前版本；不要重新起草覆盖它，也不要为该"
-            "素材创建 ProjectSource 或委派素材理解。"
+            else "剧本正文已登记为当前版本；不要重新起草覆盖它，也不要为该" "素材创建 ProjectSource 或委派素材理解。"
         )
         return payload
 

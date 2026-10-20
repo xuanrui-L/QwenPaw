@@ -69,6 +69,14 @@ class DocumentReadResult:
     extraction_complete: bool
     extraction_fraction: float | None
     notes: tuple[str, ...]
+    # 1-based page numbers whose visible content had no extractable text
+    # layer (scanned/image-only pages, or a pdfium text-API failure).  Empty
+    # for a fully text-layered document; genuinely blank pages are never
+    # listed.  A text-only caller (script direct-landing) refuses to land
+    # these pages because their words would be silently dropped, while the
+    # VLM path still rasterizes them, so this stays a separate signal from
+    # ``extraction_complete``.
+    unextractable_pages: tuple[int, ...] = ()
 
 
 def is_supported_document(name: str) -> bool:
@@ -160,6 +168,7 @@ def _read_document_sync(
     page_images: list[Path] = []
     extraction_complete = True
     extraction_fraction: float | None = 1.0
+    unextractable_pages: list[int] = []
 
     max_pixels = budget_to_pixels(budget, IMAGE_BUDGET_TOKENS)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -211,6 +220,10 @@ def _read_document_sync(
             else:
                 # The true total is unknown: the honest fraction is too.
                 extraction_fraction = None
+        elif block_type == "page_text_gap":
+            page_no = block.get("page")
+            if isinstance(page_no, int):
+                unextractable_pages.append(page_no)
 
     if not pages_rendered:
         pages_rendered = sorted(
@@ -259,6 +272,7 @@ def _read_document_sync(
             extraction_fraction if not extraction_complete else 1.0
         ),
         notes=tuple(notes),
+        unextractable_pages=tuple(sorted(set(unextractable_pages))),
     )
 
 

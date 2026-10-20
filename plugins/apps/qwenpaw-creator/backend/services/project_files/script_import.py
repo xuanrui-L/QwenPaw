@@ -184,12 +184,20 @@ def is_importable_script_text(
 def _script_import_identity(
     project_id: str,
     timeline_id: str,
-    checksum: str,
+    idempotency_key: str,
 ) -> str:
+    """Deterministic edit-transaction identity for one explicit request key.
+
+    Keyed on the caller-supplied idempotency key -- never on the script
+    checksum -- so re-selecting previously imported content (A -> B -> A) is a
+    *new* edit transaction, while a network retry carrying the same key maps
+    back to the same transaction and deduplicates.
+    """
+
     return uuid5(
         NAMESPACE_URL,
         f"qwenpaw-creator:script-import-transaction:"
-        f"{project_id}:{timeline_id}:{checksum}",
+        f"{project_id}:{timeline_id}:{idempotency_key}",
     ).hex
 
 
@@ -204,6 +212,7 @@ def publish_script_import(
     provenance_refs: Sequence[str] = (),
     commit_metadata: Mapping[str, Any],
     observe_snapshot: Callable[[ProjectSnapshot], None] | None = None,
+    idempotency_key: str | None = None,
 ) -> ScriptImportOutcome:
     """Write one script markdown payload as a selected ``timeline_script``.
 
@@ -211,6 +220,12 @@ def publish_script_import(
     so the caller keeps control of origin and review policy: the HTTP route
     commits as a frontend edit while the Agent tool passes its own request
     context (which may require review).
+
+    ``idempotency_key`` identifies *this edit request*, not its content: when
+    present it makes the commit transaction deterministic so a network retry
+    deduplicates.  When absent every edit mints a fresh transaction, so
+    re-selecting a previously imported script never reuses that script's
+    already-committed transaction id.
     """
 
     markdown_text, block_count = normalize_script_text(raw_text)
@@ -252,12 +267,26 @@ def publish_script_import(
             and version_id in slot.version_ids
         ):
             # Same content already selected: replay without a no-op commit.
+            # ``fileId`` must be the indexed file the selected version points
+            # at, never the artifact-version id: callers key file reads off
+            # ``assets.files_by_id``, whose keys are file ids, and a version
+            # id is not one of them (it would also duplicate
+            # ``artifactVersionId``).
+            selected = project.assets.artifact_versions_by_id.get(version_id)
+            if (
+                selected is None
+                or selected.file_id not in project.assets.files_by_id
+            ):
+                raise ScriptImportError(
+                    "剧本槽位选中的版本或文件索引缺失，无法复放该正文；请重新导入。",
+                    code="SCRIPT_IMPORT_SLOT_CONFLICT",
+                )
             return ScriptImportOutcome(
                 project_id=project_id,
                 timeline_id=timeline_id,
                 slot_id=slot.slot_id,
                 artifact_version_id=version_id,
-                file_id=slot.selected_version_id or version_id,
+                file_id=selected.file_id,
                 checksum=checksum,
                 block_count=block_count,
                 character_count=len(markdown_text),
@@ -313,20 +342,30 @@ def publish_script_import(
                 if not file_store.inspect(indexed).available:
                     raise
 
-        operation_id = _script_import_identity(
-            project_id,
-            timeline_id,
-            checksum,
-        )
         metadata: dict[str, Any] = {
             **dict(commit_metadata),
             "_lifecycle_lock_held": True,
         }
-        metadata.setdefault("transaction_id", f"transaction-{operation_id}")
-        metadata.setdefault(
-            "round_id",
-            f"round-script-import-{operation_id}",
-        )
+        # Transaction identity is per *edit*, not per content.  Re-selecting a
+        # previously imported script (A -> B -> A) is a new edit and must not
+        # reuse A's already-COMMITTED transaction id, or the commit boundary
+        # rejects it as a duplicate.  Only an explicit request idempotency key
+        # makes the transaction deterministic (so a network retry dedupes);
+        # without one the boundary mints a fresh transaction per edit.
+        if idempotency_key:
+            operation_id = _script_import_identity(
+                project_id,
+                timeline_id,
+                idempotency_key,
+            )
+            metadata.setdefault(
+                "transaction_id",
+                f"transaction-{operation_id}",
+            )
+            metadata.setdefault(
+                "round_id",
+                f"round-script-import-{operation_id}",
+            )
         commit = commits.commit(
             base=base,
             candidate=working.model_dump(mode="json"),

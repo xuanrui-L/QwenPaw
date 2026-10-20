@@ -17,11 +17,8 @@ from services.project_files.script_import import ScriptImportError
 
 PROJECT_ID = "project-1"
 TIMELINE_ID = "timeline:main"
-SCRIPT_TEXT = (
-    "## 场 1 · 内景 · 旧宅大厅 · 夜\n\n"
-    "林晚推门进来。\n\n"
-    "**林晚**（低声）：我回来了。\n"
-)
+SCRIPT_TEXT = "## 场 1 · 内景 · 旧宅大厅 · 夜\n\n林晚推门进来。\n\n**林晚**（低声）：我回来了。\n"
+REVISED_TEXT = "## 场 1 · 改稿 B\n\n新的开场。\n"
 
 pytestmark = [
     pytest.mark.integration,
@@ -58,7 +55,7 @@ def test_upload_lands_selected_script_version(tmp_path, run_scenario) -> None:
                     "我的剧本.md",
                     SCRIPT_TEXT.encode("utf-8"),
                     "text/markdown",
-                )
+                ),
             },
         )
 
@@ -142,6 +139,83 @@ def test_revised_script_appends_new_version(tmp_path, run_scenario) -> None:
     assert slot.selected_version_id == response.json()["artifactVersionId"]
 
 
+def test_reimporting_a_previous_script_returns_201_not_500(
+    tmp_path,
+    run_scenario,
+) -> None:
+    """A→B→A 走真实 HTTP 路由：三次都 201，第三次不再撞旧事务 500。
+
+    回归：事务身份此前由正文 checksum 派生，重新选用旧稿 A 会复用第一
+    次 A 已提交的事务，提交边界抛 ProjectCommitError，路由返回 500
+    （状态序列 [201, 201, 500]）。每次编辑改用独立事务后三次都成功。
+    """
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await client.post(
+            _url(),
+            json={"content": SCRIPT_TEXT},
+            headers={"Idempotency-Key": "script-import-a"},
+        )
+        second = await client.post(
+            _url(),
+            json={"content": REVISED_TEXT},
+            headers={"Idempotency-Key": "script-import-b"},
+        )
+        third = await client.post(
+            _url(),
+            json={"content": SCRIPT_TEXT},
+            headers={"Idempotency-Key": "script-import-c"},
+        )
+        return first, second, third
+
+    first, second, third = run_scenario(app, scenario)
+    assert [first.status_code, second.status_code, third.status_code] == [
+        201,
+        201,
+        201,
+    ], (first.text, second.text, third.text)
+    assert third.json()["replayed"] is False
+    assert (
+        third.json()["artifactVersionId"] == first.json()["artifactVersionId"]
+    )
+    slot = services.projects.read(
+        PROJECT_ID,
+    ).project.assets.artifact_slots_by_id[timeline_script_slot_id(TIMELINE_ID)]
+    assert slot.selected_version_id == first.json()["artifactVersionId"]
+
+
+def test_replay_file_id_resolves_to_the_indexed_file(
+    tmp_path,
+    run_scenario,
+) -> None:
+    """复放返回的 fileId 是文件索引里的键，不是重复的 artifactVersionId。"""
+    app, services = _app(tmp_path)
+
+    async def scenario(client):
+        first = await client.post(_url(), json={"content": SCRIPT_TEXT})
+        replay = await client.post(_url(), json={"content": SCRIPT_TEXT})
+        return first, replay
+
+    first, replay = run_scenario(app, scenario)
+    assert first.status_code == 201 and replay.status_code == 201
+    assert replay.json()["replayed"] is True
+    file_id = replay.json()["fileId"]
+    assert file_id == first.json()["fileId"]
+    assert file_id != replay.json()["artifactVersionId"]
+    snapshot = services.projects.read(PROJECT_ID)
+    assert file_id in snapshot.project.assets.files_by_id
+    # fileId 能真正读到剧本正文，依赖它的调用方不会落空。
+    indexed = snapshot.project.assets.files_by_id[file_id]
+    body = (
+        AssetFileStore(services.projects.project_root(PROJECT_ID))
+        .open_verified(indexed)
+        .read()
+        .decode("utf-8")
+    )
+    assert "我回来了" in body
+
+
 def test_unknown_timeline_is_not_found(tmp_path, run_scenario) -> None:
     app, _services = _app(tmp_path)
 
@@ -199,7 +273,7 @@ def test_non_text_and_undecodable_uploads_are_rejected(
                     "shot.png",
                     b"\x89PNG\r\n\x1a\n\x00\x01",
                     "image/png",
-                )
+                ),
             },
         )
         gbk = await client.post(
@@ -258,7 +332,7 @@ def test_document_upload_lands_the_extracted_text(
                     "我的剧本.docx",
                     b"PK\x03\x04-fake-docx",
                     "application/octet-stream",
-                )
+                ),
             },
         )
 
@@ -336,7 +410,7 @@ def test_oversized_document_is_refused_before_extraction(
     )
     extracted: list[str] = []
 
-    def fake_extract(data: bytes, *, name: str) -> str:
+    def fake_extract(_data: bytes, *, name: str) -> str:
         extracted.append(name)
         return SCRIPT_TEXT
 
@@ -357,4 +431,4 @@ def test_oversized_document_is_refused_before_extraction(
     assert "文档直登上限 16 字节" in response.json()["message"]
     # 与 Agent 路径的 import_script 共用同一个 code。
     assert response.json()["details"]["code"] == "SCRIPT_IMPORT_TOO_LARGE"
-    assert extracted == [], "超限的文档不该启动抽取"
+    assert not extracted, "超限的文档不该启动抽取"

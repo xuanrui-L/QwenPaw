@@ -20,7 +20,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Header, Request, status
 from starlette.datastructures import UploadFile
 
 from domain.errors import (
@@ -64,6 +64,11 @@ _SCRIPT_SUFFIXES = (
     ".srt",
     ".vtt",
 )
+
+# Bound the optional retry key like the sibling Project write routes.  It is
+# hashed into a deterministic transaction id, never used as a path verbatim,
+# and stays optional: without it each import is simply a fresh edit.
+_IDEMPOTENCY_KEY_MAX_CHARS = 192
 
 
 def _looks_like_script_text(*, name: str, media_type: str) -> bool:
@@ -143,8 +148,7 @@ async def _read_script_payload(request: Request) -> tuple[str, str]:
         if document:
             if len(payload) > cap:
                 raise ScriptImportError(
-                    f"{name} 超过文档直登上限 {cap} 字节；请把它作为素材"
-                    "上传走文档理解。",
+                    f"{name} 超过文档直登上限 {cap} 字节；请把它作为素材" "上传走文档理解。",
                     code="SCRIPT_IMPORT_TOO_LARGE",
                 )
             # LibreOffice/pdfium are blocking work: keep the loop free.
@@ -210,16 +214,24 @@ async def import_timeline_script(
     project_id: str,
     timeline_id: str,
     request: Request,
+    idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     services: CreatorFileServices = Depends(project_file_services),
 ) -> dict[str, Any]:
     """把提交的剧本正文登记为这条 Timeline 的当前剧本版本。
 
     正文可以是 UTF-8 文本（multipart 的 .md/.txt 或 JSON 的 content），
     也可以是 DOCX/PDF：后者先在服务端抽出文字层，抽不出就报错。
+    可选的 ``Idempotency-Key`` 只用于识别同一次请求的网络重试；重新
+    选用旧稿是一次新编辑，不带该键也会得到全新的事务身份。
     """
 
     committed: list[ProjectSnapshot] = []
     try:
+        key = (idempotency_key or "").strip() or None
+        if key is not None and len(key) > _IDEMPOTENCY_KEY_MAX_CHARS:
+            raise ValidationError(
+                f"Idempotency-Key 最长为 {_IDEMPOTENCY_KEY_MAX_CHARS} 个字符",
+            )
         raw_text, source_name = await _read_script_payload(request)
         outcome = await asyncio.to_thread(
             publish_script_import,
@@ -229,6 +241,7 @@ async def import_timeline_script(
             timeline_id=timeline_id,
             raw_text=raw_text,
             source_name=source_name,
+            idempotency_key=key,
             commit_metadata={
                 "origin": ChangeOrigin.FRONTEND_EDIT,
                 "review_policy": ReviewPolicy.AUTO_FIX,

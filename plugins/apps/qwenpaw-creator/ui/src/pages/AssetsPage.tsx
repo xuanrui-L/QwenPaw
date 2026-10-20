@@ -1492,9 +1492,7 @@ export default function AssetsPage() {
     file: File;
     kind: Exclude<ScriptUploadKind, "none">;
   } | null>(null);
-  const [scriptTimelineId, setScriptTimelineId] = useState<string | null>(
-    null,
-  );
+  const [scriptTimelineId, setScriptTimelineId] = useState<string | null>(null);
   const [scriptImporting, setScriptImporting] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [voiceModalEntity, setVoiceModalEntity] =
@@ -1770,13 +1768,13 @@ export default function AssetsPage() {
         outcome.replayed
           ? t("blueprint.scriptImportReplayed", { detail: outcome.summary })
           : outcome.reviewId
-            ? t("blueprint.scriptImportPendingReview", {
-                detail: outcome.summary,
-              })
-            : t("blueprint.scriptImportSucceeded", {
-                blocks: outcome.blockCount,
-                characters: outcome.characterCount,
-              }),
+          ? t("blueprint.scriptImportPendingReview", {
+              detail: outcome.summary,
+            })
+          : t("blueprint.scriptImportSucceeded", {
+              blocks: outcome.blockCount,
+              characters: outcome.characterCount,
+            }),
       );
     } catch (error) {
       // Keep the dialog open: the reason stays readable, and the user can

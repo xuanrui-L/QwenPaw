@@ -47,6 +47,9 @@ SCRIPT_TEXT = (
     "> 她看见母亲遗留的钥匙压在鞋下。\n"
 )
 
+# 一份内容不同的改稿：归一化后 checksum / 版本 ID 均与 SCRIPT_TEXT 不同。
+REVISED_TEXT = "## 场 1 · 改稿 B\n\n新的开场， Dust 在光柱里浮动。\n"
+
 
 def _front_end_meta() -> dict[str, object]:
     return {
@@ -223,7 +226,7 @@ def test_repeating_identical_content_replays_without_new_generation(
     assert replay.artifact_version_id == first.artifact_version_id
     assert replay.generation == store.read(PROJECT_ID).generation
     assert replay.generation == first.generation
-    assert replay.changed_pointers == []
+    assert not replay.changed_pointers
     slot = store.read(PROJECT_ID).project.assets.artifact_slots_by_id[
         timeline_script_slot_id("timeline:main")
     ]
@@ -246,6 +249,135 @@ def test_revised_script_appends_version_and_keeps_previous(tmp_path) -> None:
         second.artifact_version_id,
     ]
     assert slot.selected_version_id == second.artifact_version_id
+
+
+def test_reselecting_a_previous_script_after_a_revision_is_a_new_edit(
+    tmp_path,
+) -> None:
+    """A→B→A：重新选用旧稿是一次新编辑，绝不复用旧稿已提交的事务。
+
+    回归：事务身份此前由正文 checksum 派生，第三次导入 A 会撞上第一次
+    A 已 COMMITTED 的事务并被提交边界拒绝（ProjectCommitError）。事务
+    身份改为按「本次编辑」派生后，A→B→A 三次都是独立事务。
+    """
+    store, base = make_store(tmp_path)
+    first = _publish(store, text=SCRIPT_TEXT)
+    second = _publish(store, text=REVISED_TEXT)
+
+    # 第三次重新选用 A：当前选中的是 B，所以这不是 no-op 复放，而是
+    # 一次把 selected 指回 A 的真实编辑。
+    third = _publish(store, text=SCRIPT_TEXT)
+
+    assert third.replayed is False
+    assert third.artifact_version_id == first.artifact_version_id
+    assert third.artifact_version_id != second.artifact_version_id
+    slot = store.read(PROJECT_ID).project.assets.artifact_slots_by_id[
+        timeline_script_slot_id("timeline:main")
+    ]
+    assert slot.selected_version_id == first.artifact_version_id
+    # 内容寻址：A 不会因重新选用而被追加成重复版本。
+    assert slot.version_ids == [
+        first.artifact_version_id,
+        second.artifact_version_id,
+    ]
+    assert store.read(PROJECT_ID).generation == base.generation + 3
+
+
+def test_idempotency_key_dedupes_a_retry_but_each_edit_stays_distinct(
+    tmp_path,
+) -> None:
+    """显式幂等键只识别「同一次请求的重试」，不把不同编辑并成一个事务。"""
+    store, base = make_store(tmp_path)
+
+    # 同一内容 + 同一键重试：第二次是复放，不再制造新生成。
+    first = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
+    retry = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
+    assert retry.replayed is True
+    assert retry.generation == first.generation
+
+    # A→B→A 各用不同的键：三次都是独立事务，重新选用旧稿不会撞车。
+    _publish(store, text=REVISED_TEXT, idempotency_key="key-b")
+    third = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-c")
+    assert third.replayed is False
+    assert third.artifact_version_id == first.artifact_version_id
+    assert store.read(PROJECT_ID).generation == base.generation + 3
+
+
+def test_reselecting_previous_content_under_review_is_a_new_edit(
+    tmp_path,
+) -> None:
+    """待审阅场景下重新选用旧稿同样是新编辑，各拿到独立事务与审阅。"""
+    store, base = make_store(tmp_path)
+
+    def _review_publish(text: str, seq: int):
+        snapshot = store.read(PROJECT_ID)
+        boundary = ReviewBoundary(
+            request_message_seq=seq,
+            request_id=f"request-{seq}",
+            interrupted_run_id=f"run-{seq - 1}",
+            accepted_generation=snapshot.generation,
+            accepted_etag=snapshot.etag,
+        )
+        return _publish(
+            store,
+            text=text,
+            commit_metadata={
+                "origin": ChangeOrigin.AGENTDOCK_INTERRUPT,
+                "review_policy": ReviewPolicy.REQUIRE_REVIEW,
+                "review_boundary": boundary,
+                "caused_by_request_id": boundary.request_id,
+                "caused_by_message_seq": boundary.request_message_seq,
+            },
+        )
+
+    first = _review_publish(SCRIPT_TEXT, 2)
+    _review_publish(REVISED_TEXT, 3)
+    third = _review_publish(SCRIPT_TEXT, 4)
+
+    assert first.review_id is not None and third.review_id is not None
+    assert third.review_id != first.review_id
+    assert third.replayed is False
+    assert third.artifact_version_id == first.artifact_version_id
+    slot = store.read(PROJECT_ID).project.assets.artifact_slots_by_id[
+        timeline_script_slot_id("timeline:main")
+    ]
+    assert slot.selected_version_id == first.artifact_version_id
+    assert store.read(PROJECT_ID).generation == base.generation + 3
+
+
+def test_replay_file_id_points_at_the_indexed_file_not_the_version(
+    tmp_path,
+) -> None:
+    """复放返回的 fileId 必须是文件索引里的键，而不是 artifact 版本 ID。
+
+    回归：复放分支此前把 slot.selected_version_id（artifact-script-…）塞进
+    fileId，它既不在 assets.files_by_id 里，又和同一返回体的
+    artifactVersionId 重复，依赖 fileId 读文件的调用方会失败。
+    """
+    store, _base = make_store(tmp_path)
+    first = _publish(store)
+
+    replay = _publish(store)
+
+    assert replay.replayed is True
+    assert replay.file_id == first.file_id
+    assert replay.file_id != replay.artifact_version_id
+    project = store.read(PROJECT_ID).project
+    assert replay.file_id in project.assets.files_by_id
+    # 复放指向的版本确实解析到同一个已索引文件。
+    version = project.assets.artifact_versions_by_id[
+        replay.artifact_version_id
+    ]
+    assert version.file_id == replay.file_id
+    # 该文件真实可读，正文就是导入的剧本。
+    indexed = project.assets.files_by_id[replay.file_id]
+    stream = AssetFileStore(store.project_root(PROJECT_ID)).open_verified(
+        indexed,
+    )
+    assert (
+        stream.read().decode("utf-8") == normalize_script_text(SCRIPT_TEXT)[0]
+    )
+    stream.close()
 
 
 def test_unknown_and_snapshot_timeline_are_rejected(tmp_path) -> None:

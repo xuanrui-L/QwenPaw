@@ -57,7 +57,7 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
         text_indices = sorted(
             set(page_indices) | set(range(min(total, max_text_pages))),
         )
-        page_texts = _extract_page_texts(doc, text_indices)
+        page_texts, text_gaps = _extract_page_texts(doc, text_indices)
 
         blocks: list[dict[str, Any]] = [
             meta_block(
@@ -104,6 +104,18 @@ def render(path: str, **opts: Any) -> list[dict[str, Any]]:
                         "page": idx + 1,
                     },
                 )
+        # Pages with visible content but no extractable text layer are
+        # reported one by one, so a text-only caller (script direct-landing)
+        # can refuse to land half a script instead of silently dropping the
+        # scanned/rasterized pages.  Genuinely blank pages are not gaps.
+        for idx, reason in text_gaps:
+            blocks.append(
+                {
+                    "type": "page_text_gap",
+                    "page": idx + 1,
+                    "reason": reason,
+                },
+            )
         if total > max_text_pages:
             # Structured extraction coverage so the caller can report an
             # honest ratio instead of claiming completeness.
@@ -129,28 +141,60 @@ def _render_pdf_page(page, dpi: int = 150):
     return page.render(scale=dpi / 72).to_pil()
 
 
-def _extract_page_texts(doc, page_indices: list[int]) -> dict[int, str]:
+def _extract_page_texts(
+    doc,
+    page_indices: list[int],
+) -> tuple[dict[int, str], list[tuple[int, str]]]:
     """Extract each page's text layer (0-based keys) via pypdfium2's text API.
 
     Reuses the already-open document (no second file open) — same PDFium
     backend as rendering.
+
+    Returns ``(texts, gaps)``.  ``texts`` maps a page index to its extracted
+    text (only pages that yielded a non-empty text layer).  ``gaps`` lists
+    ``(page_index, reason)`` for pages whose *visible* content could not be
+    turned into text: ``"extraction-failed"`` when pdfium's text API raised,
+    or ``"image-only"`` when the page has no text layer yet carries a raster
+    image (a scanned/rasterized page).  A page with neither text nor an image
+    object is genuinely blank and is deliberately *not* a gap, so ordinary
+    documents with blank pages are never rejected.
     """
     texts: dict[int, str] = {}
+    gaps: list[tuple[int, str]] = []
     total = len(doc)
     for idx in page_indices:
         if not 0 <= idx < total:
             continue
+        page = doc[idx]
         try:
-            textpage = doc[idx].get_textpage()
+            textpage = page.get_textpage()
             try:
                 text = textpage.get_text_bounded()
             finally:
                 textpage.close()
         except Exception:  # pylint: disable=broad-except
+            # The text layer could not be read at all; the page may still
+            # carry content, so report it rather than skipping it silently.
+            gaps.append((idx, "extraction-failed"))
             continue
         if text and text.strip():
             texts[idx] = text
-    return texts
+        elif _page_has_image_object(page):
+            # Visible raster content with no text layer: a scanned page.
+            gaps.append((idx, "image-only"))
+    return texts, gaps
+
+
+def _page_has_image_object(page) -> bool:
+    """True when a pypdfium2 page carries at least one raster image object."""
+    try:
+        import pypdfium2 as pdfium
+
+        for _ in page.get_objects(filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,)):
+            return True
+    except Exception:  # pylint: disable=broad-except
+        return False
+    return False
 
 
 def _format_range(indices: list[int]) -> str:

@@ -55,9 +55,8 @@ export function looksLikeScriptName(name: string): boolean {
 }
 
 export function countScriptContentMarkers(sample: string): number {
-  return SCRIPT_CONTENT_PATTERNS.filter((pattern) =>
-    pattern.test(sample || ""),
-  ).length;
+  return SCRIPT_CONTENT_PATTERNS.filter((pattern) => pattern.test(sample || ""))
+    .length;
 }
 
 async function readSample(file: File): Promise<string> {
@@ -82,7 +81,9 @@ async function readSample(file: File): Promise<string> {
  *
  * 返回 `"none"` 时调用方必须按原来的素材上传流程继续，不做任何额外打扰。
  */
-export async function detectScriptUpload(file: File): Promise<ScriptUploadKind> {
+export async function detectScriptUpload(
+  file: File,
+): Promise<ScriptUploadKind> {
   const kind = scriptSuffixKind(file.name);
   if (kind === "none") return "none";
   if (kind === "document") {

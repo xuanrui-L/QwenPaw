@@ -100,9 +100,7 @@ describe("detectScriptUpload", () => {
 
   it("asks for a text file whose name already says script", async () => {
     // 文件名就够了，正文是不是剧本都照问（默认项仍是素材理解）。
-    const detected = await detectScriptUpload(
-      textFile("我的剧本.md", PROSE),
-    );
+    const detected = await detectScriptUpload(textFile("我的剧本.md", PROSE));
     expect(detected).toBe("text");
   });
 
@@ -113,9 +111,7 @@ describe("detectScriptUpload", () => {
   });
 
   it("stays silent for ordinary text uploads", async () => {
-    const detected = await detectScriptUpload(
-      textFile("会议记录.md", PROSE),
-    );
+    const detected = await detectScriptUpload(textFile("会议记录.md", PROSE));
     expect(detected).toBe("none");
   });
 

@@ -100,6 +100,7 @@ def extract_script_document_text(data: bytes, *, name: str) -> str:
         result.indexed_text,
         complete=result.extraction_complete,
         notes=result.notes,
+        unextractable_pages=result.unextractable_pages,
         name=name,
     )
 
@@ -109,6 +110,7 @@ def _clean_document_script_text(
     *,
     complete: bool,
     notes: tuple[str, ...],
+    unextractable_pages: tuple[int, ...],
     name: str,
 ) -> str:
     """Drop renderer scaffolding and refuse anything that is not a script."""
@@ -119,6 +121,19 @@ def _clean_document_script_text(
             f"{name} 的正文抽取不完整（{detail}）：不能只登记半份剧本。"
             "请拆分文档后分别导入，或把它作为素材上传走文档理解。",
             code="SCRIPT_IMPORT_DOCUMENT_TRUNCATED",
+        )
+    if unextractable_pages:
+        # 有可见内容却抽不出文字层的页（扫描页/图片页，或该页文字提取
+        # 失败）：直登只登记文字层，这些页的正文会被静默丢掉。全局字符
+        # 数再多也证明不了它们有正文，所以逐页拒绝并指路。空白页不进
+        # 这里，正常带空白页的文档不会被误拒。
+        pages = "、".join(str(page) for page in unextractable_pages)
+        raise ScriptImportError(
+            f"{name} 的第 {pages} 页有可见内容却抽不出文字层（扫描页/图片页，"
+            "或该页文字提取失败）：直登只会登记文字层，这些页的正文会被静默"
+            "丢掉。请把它作为素材上传走文档理解（含图片/OCR 理解）或人工确认，"
+            "或把这些页另存为可复制文字的文档后再直登。",
+            code="SCRIPT_IMPORT_DOCUMENT_IMAGE_PAGE",
         )
     lines = [
         line
