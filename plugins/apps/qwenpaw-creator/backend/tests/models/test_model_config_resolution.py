@@ -562,3 +562,44 @@ def test_live_operation_defaults_on_and_persisted_disable_wins(
         assert config.get_live_operation_enabled() is False
     finally:
         config._clear_user_config_cache()
+
+
+def test_chat_temperature_drops_seeded_and_learned_models() -> None:
+    """A seeded model omits temperature up front; any other model omits it
+    only after a provider refusal has been learned at runtime."""
+    # pylint: disable=protected-access
+    from models.model_capability_cache import get_capability_cache
+
+    cache = get_capability_cache()
+    key = config._temperature_capability_key("brand-new-model")
+    cache.clear(key)
+    try:
+        # Seeded: kimi-k3 is dropped without any prior request, and the match
+        # tolerates surrounding whitespace and letter case.
+        assert config.chat_temperature("kimi-k3", 0.2) is None
+        assert config.chat_temperature(" Kimi-K3 ", 0.2) is None
+        # An unknown model keeps the sampling default until it is learned.
+        assert config.chat_temperature("brand-new-model", 0.2) == 0.2
+        config.learn_temperature_unsupported("brand-new-model")
+        assert config.chat_temperature("brand-new-model", 0.2) is None
+        # Learning is per-model: an unrelated model is untouched.
+        assert config.chat_temperature("qwen3.7-plus", 0.2) == 0.2
+    finally:
+        cache.clear(key)
+
+
+def test_is_temperature_unsupported_error_matches_provider_refusals() -> None:
+    assert config.is_temperature_unsupported_error(
+        "Parameter 'temperature'=0.2 is not supported for kimi-k3 model",
+    )
+    assert config.is_temperature_unsupported_error(
+        "temperature is unsupported by this endpoint",
+    )
+    # Mentions temperature but is not a refusal of the parameter itself.
+    assert not config.is_temperature_unsupported_error(
+        "temperature must be a positive number",
+    )
+    # Unrelated failures must not be misclassified.
+    assert not config.is_temperature_unsupported_error(
+        "429 Too Many Requests: rate limit exceeded",
+    )

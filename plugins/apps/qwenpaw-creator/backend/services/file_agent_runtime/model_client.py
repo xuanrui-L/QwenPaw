@@ -1298,6 +1298,14 @@ class AgentScopeAgentChatClient:
             raise
         except Exception as exc:
             exc_text = str(exc)
+            if model_config.is_temperature_unsupported_error(exc_text):
+                # The AgentScope SDK path cannot cheaply re-issue the turn
+                # here, so learn the refusal and let the next
+                # _build_chat_model omit the field via chat_temperature.
+                model_config.learn_temperature_unsupported(
+                    getattr(self.model, "model", "")
+                    or model_config.get_text_model_name()
+                )
             if is_context_length_error(exc) and _context_retries_remaining:
                 # A context 400 is deterministic. Retry only after producing
                 # a strictly smaller valid context, never as rate limiting.

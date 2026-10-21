@@ -311,3 +311,81 @@ def test_kimi_k3_omits_unsupported_temperature(monkeypatch) -> None:
 
     assert asyncio.run(text_model.chat_completion("Hello")) == "pong"
     assert "temperature" not in captured["body"]
+
+
+def test_unsupported_temperature_learns_and_retries_without_it(
+    monkeypatch,
+) -> None:
+    # A model this build has never seen may still reject ``temperature``. The
+    # OpenAI-compatible path must learn the refusal, drop the field, and
+    # re-issue the same turn so the caller never sees the failure; the next
+    # call then omits it up front.
+    from models import config as model_config
+    from models.model_capability_cache import get_capability_cache
+
+    _patch_config(monkeypatch, protocol="DashScope（百炼）", api_key="test-key")
+    monkeypatch.setattr(
+        text_model.model_config,
+        "get_text_model_name",
+        lambda: "brand-new-model",
+    )
+    cache = get_capability_cache()
+    key = model_config._temperature_capability_key("brand-new-model")
+    cache.clear(key)
+
+    bodies: list[dict] = []
+    ok_payload = json.dumps({"choices": [{"message": {"content": "pong"}}]})
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, status_code: int, text: str) -> None:
+            self.status_code = status_code
+            self.text = text
+
+        def json(self) -> dict:
+            return json.loads(self.text)
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, url, *, headers, json):
+            bodies.append(dict(json))
+            if len(bodies) == 1:
+                return FakeResponse(
+                    400,
+                    "Parameter 'temperature'=0.2 is not supported for "
+                    "brand-new-model",
+                )
+            return FakeResponse(200, ok_payload)
+
+    class FakeSlot:
+        def __init__(self, _kind):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(text_model.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr(text_model, "model_slot", FakeSlot)
+
+    try:
+        assert asyncio.run(text_model.chat_completion("Hello")) == "pong"
+        # First attempt carried temperature and was rejected; the retry
+        # omitted it and succeeded.
+        assert "temperature" in bodies[0]
+        assert "temperature" not in bodies[1]
+        # The refusal is now cached, so later calls omit it without a probe.
+        assert model_config.chat_temperature("brand-new-model", 0.2) is None
+    finally:
+        cache.clear(key)

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
+from models.model_capability_cache import get_capability_cache
 from services.runtime_files.errors import LockTimeoutError
 from services.runtime_files.locking import CrossProcessFileLock
 
@@ -830,15 +831,61 @@ def is_agentscope_gateway(protocol: str = "", base_url: str = "") -> bool:
     return is_agentscope_protocol(protocol) or is_agentscope_endpoint(base_url)
 
 
+# Gateways that reject any explicit ``temperature`` for a model. The seed
+# list omits the field up front for known cases (no wasted first request);
+# ``learn_temperature_unsupported`` records any others at runtime from the
+# provider error, and ``chat_temperature`` honours both.
+_TEMPERATURE_UNSUPPORTED_MODELS = frozenset({"kimi-k3"})
+_TEMPERATURE_CAPABILITY = "rejects_temperature"
+
+
+def _temperature_capability_key(model_name: str) -> str:
+    """Capability-cache key shared by every chat transport (text/VLM/agent)."""
+    return f"chat:{model_name.strip().casefold()}"
+
+
+def is_temperature_unsupported_error(text: str) -> bool:
+    """True when a provider refused the explicit ``temperature`` parameter.
+
+    Mirrors the UI classifier in ``AgentDock.simplifyErrorMessage`` so the
+    backend learns exactly the failures the user is told about.
+    """
+    lowered = text.casefold()
+    return "temperature" in lowered and (
+        "not supported" in lowered or "unsupported" in lowered
+    )
+
+
+def learn_temperature_unsupported(model_name: str) -> None:
+    """Record that *model_name*'s gateway refuses an explicit temperature.
+
+    Later ``chat_temperature`` calls omit the field for this model, so the
+    same failure is never surfaced twice.
+    """
+    get_capability_cache().learn(
+        _temperature_capability_key(model_name),
+        _TEMPERATURE_CAPABILITY,
+        True,
+    )
+
+
 def chat_temperature(model_name: str, value: float | None) -> float | None:
-    """Let Kimi K3 choose its supported sampling default.
+    """Let models that reject ``temperature`` choose their own default.
 
     DashScope rejects an explicit ``temperature`` for ``kimi-k3`` with
     ``Parameter 'temperature'=0.2 is not supported for kimi-k3 model``;
     returning ``None`` lets callers omit the field so the gateway applies
-    the model's own default.
+    the model's own default. A model is dropped when it is on the known
+    seed list or when a previous request learned it refuses the parameter.
     """
-    return None if model_name.strip().casefold() == "kimi-k3" else value
+    if model_name.strip().casefold() in _TEMPERATURE_UNSUPPORTED_MODELS:
+        return None
+    if get_capability_cache().get(
+        _temperature_capability_key(model_name),
+        _TEMPERATURE_CAPABILITY,
+    ):
+        return None
+    return value
 
 
 def get_vlm_chat_url() -> str:
