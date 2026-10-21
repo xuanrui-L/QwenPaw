@@ -204,7 +204,9 @@ async def _call_openai(
             if (
                 response.status_code >= 400
                 and "temperature" in body
-                and model_config.is_temperature_unsupported_error(response.text)
+                and model_config.is_temperature_unsupported_error(
+                    response.text,
+                )
             ):
                 model_config.learn_temperature_unsupported(model_name)
                 body.pop("temperature", None)

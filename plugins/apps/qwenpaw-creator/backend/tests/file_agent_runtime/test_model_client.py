@@ -346,6 +346,59 @@ def test_kimi_k3_omits_unsupported_temperature(
     assert configured.parameters.temperature == expected_temperature
 
 
+def test_temperature_refusal_rebuilds_cached_model_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A first-turn refusal must invalidate the cached model so the *next*
+    # Agent turn is rebuilt without a temperature. ``_configured_model()``
+    # keys only on the connection tuple, which the capability flip does not
+    # change, so the client has to drop ``model``/``_configuration`` itself.
+    # pylint: disable=protected-access
+    from models.model_capability_cache import get_capability_cache
+
+    model_config = model_client.model_config
+    _configure_text_model(monkeypatch)
+    monkeypatch.setattr(
+        model_config,
+        "get_text_model_name",
+        lambda: "brand-new-model",
+    )
+    cache = get_capability_cache()
+    key = model_config._temperature_capability_key("brand-new-model")
+    cache.clear(key)
+    try:
+        client = AgentScopeAgentChatClient()
+        first = client._configured_model()
+        assert isinstance(first, DashScopeChatModel)
+        # Before any refusal the sampling default is still sent.
+        assert first.parameters.temperature == 0.2
+
+        async def _refuse(self, *_args, **_kwargs):
+            raise RuntimeError(
+                "Parameter 'temperature'=0.2 is not supported "
+                "for brand-new-model",
+            )
+
+        monkeypatch.setattr(DashScopeChatModel, "__call__", _refuse)
+        with pytest.raises(AgentModelError):
+            asyncio.run(
+                client.complete(
+                    messages=[{"role": "user", "content": "ping"}],
+                    tools=[],
+                ),
+            )
+
+        # The refusal was learned and the cached model dropped, so the next
+        # turn rebuilds and omits the temperature entirely.
+        assert model_config.chat_temperature("brand-new-model", 0.2) is None
+        assert client.model is None
+        second = client._configured_model()
+        assert second is not first
+        assert second.parameters.temperature is None
+    finally:
+        cache.clear(key)
+
+
 @pytest.mark.parametrize(
     ("protocol", "base_url"),
     [
@@ -380,23 +433,14 @@ def test_anthropic_agent_uses_model_limit_instead_of_sdk_default(monkeypatch):
         lambda: "MiniMax-M2.7",
     )
     client = AgentScopeAgentChatClient()
+    configured = client._configured_model()
     captured = {}
 
     async def capture(**kwargs):
         captured.update(kwargs)
         raise RuntimeError("request captured before transport")
 
-    # AgentScope 2.0.4 builds ``anthropic.AsyncAnthropic`` inside the model
-    # call and keeps no persistent ``.client``, so intercept the SDK
-    # constructor and capture the request kwargs from ``messages.create``.
-    from types import SimpleNamespace
-
-    import anthropic
-
-    def _fake_anthropic(*_args, **_kwargs):
-        return SimpleNamespace(messages=SimpleNamespace(create=capture))
-
-    monkeypatch.setattr(anthropic, "AsyncAnthropic", _fake_anthropic)
+    monkeypatch.setattr(configured.client.messages, "create", capture)
     with pytest.raises(AgentModelError, match="request captured"):
         asyncio.run(
             client.complete(

@@ -574,10 +574,16 @@ def test_chat_temperature_drops_seeded_and_learned_models() -> None:
     key = config._temperature_capability_key("brand-new-model")
     cache.clear(key)
     try:
-        # Seeded: kimi-k3 is dropped without any prior request, and the match
-        # tolerates surrounding whitespace and letter case.
-        assert config.chat_temperature("kimi-k3", 0.2) is None
-        assert config.chat_temperature(" Kimi-K3 ", 0.2) is None
+        # Seeded: the whole Kimi K2/K3 family is dropped without any prior
+        # request, and the match tolerates whitespace and letter case.
+        for seeded in (
+            "kimi-k3",
+            "kimi-k2.6",
+            "kimi-k2.7",
+            "kimi-k2.7-code",
+            " Kimi-K2.5 ",
+        ):
+            assert config.chat_temperature(seeded, 0.2) is None, seeded
         # An unknown model keeps the sampling default until it is learned.
         assert config.chat_temperature("brand-new-model", 0.2) == 0.2
         config.learn_temperature_unsupported("brand-new-model")
@@ -594,6 +600,10 @@ def test_is_temperature_unsupported_error_matches_provider_refusals() -> None:
     )
     assert config.is_temperature_unsupported_error(
         "temperature is unsupported by this endpoint",
+    )
+    # Moonshot direct calls phrase the refusal as an invalid temperature.
+    assert config.is_temperature_unsupported_error(
+        "Invalid temperature: this model uses a fixed sampling temperature",
     )
     # Mentions temperature but is not a refusal of the parameter itself.
     assert not config.is_temperature_unsupported_error(

@@ -722,7 +722,8 @@ def _build_chat_model(
     parameters = parameters.model_copy(
         update={
             "temperature": model_config.chat_temperature(
-                model_name, parameters.temperature,
+                model_name,
+                parameters.temperature,
             ),
         },
     )
@@ -1300,12 +1301,19 @@ class AgentScopeAgentChatClient:
             exc_text = str(exc)
             if model_config.is_temperature_unsupported_error(exc_text):
                 # The AgentScope SDK path cannot cheaply re-issue the turn
-                # here, so learn the refusal and let the next
-                # _build_chat_model omit the field via chat_temperature.
+                # here, so learn the refusal and drop the cached model. Its
+                # parameters still carry the rejected temperature, and
+                # _configured_model() rebuilds only when the configuration
+                # tuple changes, which the capability flip does not do; the
+                # next turn then rebuilds via _build_chat_model, which omits
+                # the field via chat_temperature.
                 model_config.learn_temperature_unsupported(
                     getattr(self.model, "model", "")
-                    or model_config.get_text_model_name()
+                    or model_config.get_text_model_name(),
                 )
+                if not self._injected:
+                    self.model = None
+                    self._configuration = None
             if is_context_length_error(exc) and _context_retries_remaining:
                 # A context 400 is deterministic. Retry only after producing
                 # a strictly smaller valid context, never as rate limiting.

@@ -835,7 +835,12 @@ def is_agentscope_gateway(protocol: str = "", base_url: str = "") -> bool:
 # list omits the field up front for known cases (no wasted first request);
 # ``learn_temperature_unsupported`` records any others at runtime from the
 # provider error, and ``chat_temperature`` honours both.
-_TEMPERATURE_UNSUPPORTED_MODELS = frozenset({"kimi-k3"})
+#
+# The whole Kimi K2/K3 family (Moonshot) samples at a fixed temperature, so
+# match it by prefix: point releases and ``-code``/``-thinking`` variants are
+# covered without a seed edit. DashScope reports ``... is not supported for
+# kimi-k3 model``; a Moonshot direct call reports ``invalid temperature``.
+_TEMPERATURE_UNSUPPORTED_MODEL_PREFIXES = ("kimi-k2", "kimi-k3")
 _TEMPERATURE_CAPABILITY = "rejects_temperature"
 
 
@@ -844,15 +849,27 @@ def _temperature_capability_key(model_name: str) -> str:
     return f"chat:{model_name.strip().casefold()}"
 
 
+def _is_seeded_temperature_unsupported(model_name: str) -> bool:
+    """True when *model_name* belongs to a family that rejects temperature."""
+    normalized = model_name.strip().casefold()
+    return normalized.startswith(_TEMPERATURE_UNSUPPORTED_MODEL_PREFIXES)
+
+
 def is_temperature_unsupported_error(text: str) -> bool:
     """True when a provider refused the explicit ``temperature`` parameter.
 
     Mirrors the UI classifier in ``AgentDock.simplifyErrorMessage`` so the
-    backend learns exactly the failures the user is told about.
+    backend learns exactly the failures the user is told about. DashScope
+    reports ``... is not supported for kimi-k3 model``; a Moonshot direct
+    call reports ``invalid temperature``.
     """
     lowered = text.casefold()
-    return "temperature" in lowered and (
-        "not supported" in lowered or "unsupported" in lowered
+    if "temperature" not in lowered:
+        return False
+    return (
+        "not supported" in lowered
+        or "unsupported" in lowered
+        or "invalid" in lowered
     )
 
 
@@ -872,13 +889,13 @@ def learn_temperature_unsupported(model_name: str) -> None:
 def chat_temperature(model_name: str, value: float | None) -> float | None:
     """Let models that reject ``temperature`` choose their own default.
 
-    DashScope rejects an explicit ``temperature`` for ``kimi-k3`` with
-    ``Parameter 'temperature'=0.2 is not supported for kimi-k3 model``;
+    DashScope rejects an explicit ``temperature`` for the Kimi K2/K3 family
+    with ``Parameter 'temperature'=0.2 is not supported for kimi-k3 model``;
     returning ``None`` lets callers omit the field so the gateway applies
-    the model's own default. A model is dropped when it is on the known
-    seed list or when a previous request learned it refuses the parameter.
+    the model's own default. A model is dropped when it belongs to a seeded
+    family or when a previous request learned it refuses the parameter.
     """
-    if model_name.strip().casefold() in _TEMPERATURE_UNSUPPORTED_MODELS:
+    if _is_seeded_temperature_unsupported(model_name):
         return None
     if get_capability_cache().get(
         _temperature_capability_key(model_name),

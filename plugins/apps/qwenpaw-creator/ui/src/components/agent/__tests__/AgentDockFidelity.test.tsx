@@ -1620,4 +1620,17 @@ describe("safe provider failure messages", () => {
     expect(message).not.toContain("/private/path");
     expect(message).not.toBe(simplifyErrorMessage("unknown provider failure"));
   });
+
+  it("also classifies a Moonshot invalid-temperature refusal", () => {
+    // Moonshot direct calls phrase the refusal as an invalid temperature;
+    // it must map to the same safe hint as the DashScope wording.
+    const invalid = simplifyErrorMessage(
+      "Invalid temperature: this model uses a fixed sampling temperature",
+    );
+    const notSupported = simplifyErrorMessage(
+      "Parameter 'temperature'=0.2 is not supported for kimi-k3",
+    );
+    expect(invalid).toBe(notSupported);
+    expect(invalid).not.toBe(simplifyErrorMessage("unknown provider failure"));
+  });
 });
