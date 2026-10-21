@@ -10,6 +10,7 @@ from contextvars import ContextVar, Token
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -842,6 +843,15 @@ def is_agentscope_gateway(protocol: str = "", base_url: str = "") -> bool:
 # kimi-k3 model``; a Moonshot direct call reports ``invalid temperature``.
 _TEMPERATURE_UNSUPPORTED_MODEL_PREFIXES = ("kimi-k2", "kimi-k3")
 _TEMPERATURE_CAPABILITY = "rejects_temperature"
+# ``invalid`` on its own is too loose: OpenAI-compatible gateways wrap many
+# unrelated 400s as ``invalid_request_error`` whose body may merely echo the
+# word ``temperature``. Require ``invalid`` to sit right beside
+# ``temperature`` (Moonshot: ``Invalid temperature: ...``); ``not supported``
+# and ``unsupported`` are already specific enough to trust on their own.
+_TEMPERATURE_REFUSAL_RE = re.compile(
+    r"not supported|unsupported|invalid[\s:]+temperature"
+    r"|temperature[\s:]+invalid",
+)
 
 
 def _temperature_capability_key(model_name: str) -> str:
@@ -866,11 +876,7 @@ def is_temperature_unsupported_error(text: str) -> bool:
     lowered = text.casefold()
     if "temperature" not in lowered:
         return False
-    return (
-        "not supported" in lowered
-        or "unsupported" in lowered
-        or "invalid" in lowered
-    )
+    return bool(_TEMPERATURE_REFUSAL_RE.search(lowered))
 
 
 def learn_temperature_unsupported(model_name: str) -> None:

@@ -1633,4 +1633,18 @@ describe("safe provider failure messages", () => {
     expect(invalid).toBe(notSupported);
     expect(invalid).not.toBe(simplifyErrorMessage("unknown provider failure"));
   });
+
+  it("does not misread a generic invalid_request_error as a refusal", () => {
+    // Gateways wrap unrelated 400s as ``invalid_request_error``; one that
+    // merely echoes ``temperature`` must fall back to the generic hint, or a
+    // real config error would be masked as an unsupported-temperature refusal.
+    const generic = simplifyErrorMessage(
+      '{"error": {"type": "invalid_request_error", "message": "temperature must be <= 2.0"}}',
+    );
+    const refusal = simplifyErrorMessage(
+      "Parameter 'temperature'=0.2 is not supported for kimi-k3",
+    );
+    expect(generic).not.toBe(refusal);
+    expect(generic).toBe(simplifyErrorMessage("unknown provider failure"));
+  });
 });

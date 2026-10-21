@@ -398,12 +398,15 @@ function MessageParts({
   );
 }
 
+// ``invalid`` must sit right beside ``temperature``: OpenAI-compatible
+// gateways wrap unrelated 400s as ``invalid_request_error`` that merely echo
+// the word. Mirrors ``models.config.is_temperature_unsupported_error``.
+const UNSUPPORTED_TEMPERATURE_RE =
+  /not supported|unsupported|invalid[\s:]+temperature|temperature[\s:]+invalid/i;
+
 export function simplifyErrorMessage(text: string): string {
   // Classify known failures without exposing raw provider payloads or secrets.
-  if (
-    /temperature/i.test(text) &&
-    /not supported|unsupported|invalid/i.test(text)
-  ) {
+  if (/temperature/i.test(text) && UNSUPPORTED_TEMPERATURE_RE.test(text)) {
     return i18n.t("agentActivity.unsupportedTemperature");
   }
   return i18n.t("agentActivity.failureHint");

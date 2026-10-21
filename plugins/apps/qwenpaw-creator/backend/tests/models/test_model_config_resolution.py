@@ -613,3 +613,13 @@ def test_is_temperature_unsupported_error_matches_provider_refusals() -> None:
     assert not config.is_temperature_unsupported_error(
         "429 Too Many Requests: rate limit exceeded",
     )
+    # ``invalid_request_error`` is a generic 400 wrapper: one that merely
+    # echoes ``temperature`` (or pairs it with an unrelated ``invalid``) must
+    # not be learned as a refusal, or the model silently loses temperature.
+    assert not config.is_temperature_unsupported_error(
+        '{"error": {"type": "invalid_request_error", '
+        '"message": "temperature must be <= 2.0"}}',
+    )
+    assert not config.is_temperature_unsupported_error(
+        "temperature is fine but your max_tokens is invalid",
+    )
