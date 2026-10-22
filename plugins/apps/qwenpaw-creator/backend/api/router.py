@@ -22,6 +22,7 @@ from .example_routes import router as examples_router
 from .file_execution_routes import router as file_execution_router
 from .file_media_routes import router as file_media_router
 from .file_session_routes import router as file_sessions_router
+from .file_script_routes import router as file_script_router
 from .file_source_intelligence_routes import (
     router as file_source_intelligence_router,
 )
@@ -59,6 +60,7 @@ configured_router.include_router(projects_router)
 configured_router.include_router(examples_router)
 configured_router.include_router(project_files_router)
 configured_router.include_router(file_assets_router)
+configured_router.include_router(file_script_router)
 configured_router.include_router(file_source_intelligence_router)
 configured_router.include_router(file_sessions_router)
 configured_router.include_router(file_execution_router)
