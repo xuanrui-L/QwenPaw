@@ -41,7 +41,7 @@ from .serialization import (
 logger = setup_logger("store")
 
 
-DEFAULT_MAX_PROJECT_JSON_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_PROJECT_JSON_BYTES = 32 * 1024 * 1024
 _SAFE_PROJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # Projects materialized from plugin-bundled inspiration examples carry this
