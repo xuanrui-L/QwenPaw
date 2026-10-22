@@ -70,12 +70,12 @@ class DocumentReadResult:
     extraction_fraction: float | None
     notes: tuple[str, ...]
     # 1-based page numbers whose visible content had no extractable text
-    # layer (scanned/image-only pages, or a pdfium text-API failure).  Empty
-    # for a fully text-layered document; genuinely blank pages are never
-    # listed.  A text-only caller (script direct-landing) refuses to land
-    # these pages because their words would be silently dropped, while the
-    # VLM path still rasterizes them, so this stays a separate signal from
-    # ``extraction_complete``.
+    # layer (scanned/image-only pages, text outlined to vector curves, or a
+    # pdfium text-API failure).  Empty for a fully text-layered document;
+    # genuinely blank pages are never listed.  A text-only caller (script
+    # direct-landing) refuses to land these pages because their words would be
+    # silently dropped, while the VLM path still rasterizes them, so this stays
+    # a separate signal from ``extraction_complete``.
     unextractable_pages: tuple[int, ...] = ()
 
 

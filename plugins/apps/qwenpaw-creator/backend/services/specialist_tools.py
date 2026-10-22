@@ -778,6 +778,16 @@ _CHECK_OBSERVATION_ARGUMENTS = _arguments_schema(
                 "true（默认）=并行等待全部任务到终态后返回结果；" "false=立即返回当前状态快照，不等待。"
             ),
         },
+        "harvestOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "仅在省略 taskIds（收割本 Run 全部观察）时生效的分页游标："
+                "从第几个任务开始收割。一次最多收割 32 个；若还有剩余，"
+                "返回的 note 会给出下一次的 harvestOffset，回填它即可继续"
+                "收割，无需记住任何 taskId。默认 0。"
+            ),
+        },
     },
     (),
 )
@@ -1103,9 +1113,12 @@ def _run_observation_task_ids(
 ) -> list[str]:
     """Every observation task this specialist Run submitted.
 
-    ``list_tasks`` is ``updated_at``-descending, so reversing it yields the
-    least-recently-updated first; that order only decides which tasks the
-    harvest bound keeps when a Run submitted more than the bound.
+    Ordered by immutable ``created_at`` (``task_id`` breaks same-instant ties),
+    *not* by ``list_tasks``' ``updated_at``: a harvest page awaited to a
+    terminal state refreshes ``updated_at``, which would reshuffle the list
+    between paged ``harvestOffset`` calls and make the cursor repeat harvested
+    tasks while permanently skipping the rest.  This order decides which tasks
+    the harvest bound keeps and gives the pagination cursor a stable basis.
 
     ``check_observation_tasks`` accepts an omitted ``taskIds`` so a model
     can batch independent observations without tracking ids; ownership
@@ -1118,29 +1131,60 @@ def _run_observation_task_ids(
 
     if not specialist_run_id:
         return []
-    task_ids: list[str] = []
-    for record in reversed(executions.list_tasks(project_id)):
-        if record.kind not in _OBSERVATION_TASK_KINDS:
-            continue
-        if specialist_run_id not in (
-            record.run_id,
-            record.caused_by_request_id,
-        ):
-            continue
-        task_ids.append(record.task_id)
-    return task_ids
+    matched = [
+        record
+        for record in executions.list_tasks(project_id)
+        if record.kind in _OBSERVATION_TASK_KINDS
+        and specialist_run_id in (record.run_id, record.caused_by_request_id)
+    ]
+    matched.sort(key=lambda record: (record.created_at, record.task_id))
+    return [record.task_id for record in matched]
 
 
-def _harvest_overflow_note(total: int, rest: list[str]) -> str:
-    """Name the observations the harvest bound left out, with their ids."""
+def _harvest_offset(payload: Mapping[str, Any]) -> int:
+    """Validated harvest-all pagination cursor (0 when absent)."""
+
+    raw = payload.get("harvestOffset")
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ValidationError("harvestOffset 必须是非负整数")
+    try:
+        offset = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError("harvestOffset 必须是非负整数") from exc
+    if offset < 0:
+        raise ValidationError("harvestOffset 必须是非负整数")
+    return offset
+
+
+def _harvest_overflow_note(
+    total: int,
+    rest: list[str],
+    next_offset: int,
+) -> str:
+    """Name the observations the harvest bound left out, and how to reach all.
+
+    Lists up to ``_MAX_REPORTED_OVERFLOW_TASKS`` ids for an immediate explicit
+    ``taskIds`` harvest, and always names the ``harvestOffset`` cursor that
+    pages through the remainder -- so a Run that submitted more observations
+    than one harvest (plus one id list) can still reach every task without the
+    model tracking ids.
+    """
 
     shown = ", ".join(rest[:_MAX_REPORTED_OVERFLOW_TASKS])
+    tail = ""
     if len(rest) > _MAX_REPORTED_OVERFLOW_TASKS:
-        shown += " …"
+        tail = (
+            f" …（另有 {len(rest) - _MAX_REPORTED_OVERFLOW_TASKS} 个未在此"
+            f"列出，用 harvestOffset 翻页取全）"
+        )
     return (
         f"本 Run 共 {total} 个观察任务，一次最多收割 "
-        f"{_MAX_HARVEST_TASKS} 个；还有 {len(rest)} 个未收割，请用 "
-        f"taskIds 显式收割：{shown}"
+        f"{_MAX_HARVEST_TASKS} 个；还有 {len(rest)} 个未收割。可用 "
+        f"taskIds 显式收割：{shown}{tail}；或省略 taskIds 并传 "
+        f"harvestOffset={next_offset} 收割下一批（无需记住 id，重复直到"
+        f"没有剩余）。"
     )
 
 
@@ -1491,11 +1535,27 @@ class FileSpecialistToolRegistry:
                             ),
                         },
                     )
-                task_ids = discovered[:_MAX_HARVEST_TASKS]
-                if len(discovered) > _MAX_HARVEST_TASKS:
+                offset = _harvest_offset(payload)
+                if offset >= len(discovered):
+                    # Paged past the end: every task was already harvested.
+                    return SpecialistToolResult(
+                        payload={
+                            "ok": True,
+                            "tasks": [],
+                            "note": (
+                                f"本 Run 共 {len(discovered)} 个观察任务，"
+                                f"harvestOffset={offset} 已越过全部，无需"
+                                f"再收割。"
+                            ),
+                        },
+                    )
+                task_ids = discovered[offset : offset + _MAX_HARVEST_TASKS]
+                rest = discovered[offset + _MAX_HARVEST_TASKS :]
+                if rest:
                     overflow_note = _harvest_overflow_note(
                         len(discovered),
-                        discovered[_MAX_HARVEST_TASKS:],
+                        rest,
+                        offset + _MAX_HARVEST_TASKS,
                     )
             snapshot: list[dict[str, Any]] = []
             for candidate_id in task_ids:
