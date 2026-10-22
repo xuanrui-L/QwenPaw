@@ -404,6 +404,62 @@ def test_idempotency_key_reconciles_a_committed_import_after_a_crash(
     assert store.read(PROJECT_ID).generation == base.generation + 2
 
 
+def test_committed_import_crash_rejects_a_different_body_under_same_key(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """崩溃窗口 + 同键异正文：必须拒绝，绝不假成功返回不存在的版本。
+
+    回归：A/key-a 提交成功但幂等记录未落盘时，_replay_committed_import
+    此前只判断事务已提交，就用本次重试的 B 参数重建结果——返回成功、
+    replayed=True 和 B 的 artifactVersionId，而 B 从未落版本（选中的仍
+    是 A），还把错误结果写成 key-a 的后续回放记录。现在对账原事务的
+    candidate：同键不同正文返回 SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT。
+    """
+    store, base = make_store(tmp_path)
+
+    # 模拟 A/key-a 在 commit 之后、记录写之前崩溃：那一次记录不落盘。
+    # pylint: disable-next=protected-access
+    real_record = script_import_module._record_idempotent_request
+    crashed = {"pending": True}
+
+    def _flaky_record(*args, **kwargs):
+        if crashed["pending"]:
+            crashed["pending"] = False
+            return None  # 崩溃：A/key-a 的记录没有持久化
+        return real_record(*args, **kwargs)
+
+    monkeypatch.setattr(
+        script_import_module,
+        "_record_idempotent_request",
+        _flaky_record,
+    )
+
+    first = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
+    assert first.replayed is False
+
+    # 记录缺失时，用同一个 key-a 提交不同的正文 B：撞已提交事务 ->
+    # 对账 candidate 发现原提交是 A、不是 B -> 拒绝，而不是假成功。
+    with pytest.raises(ScriptImportError) as caught:
+        _publish(store, text=REVISED_TEXT, idempotency_key="key-a")
+    assert caught.value.code == "SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT"
+
+    # B 从未落版本：选中的仍是 A，生成数没有因这次被拒的重试再涨。
+    project = store.read(PROJECT_ID).project
+    slot = project.assets.artifact_slots_by_id[
+        timeline_script_slot_id("timeline:main")
+    ]
+    assert slot.selected_version_id == first.artifact_version_id
+    assert slot.version_ids == [first.artifact_version_id]
+    assert store.read(PROJECT_ID).generation == base.generation + 1
+    # 关键：拒绝路径没有把 B 写成 key-a 的回放记录——之后正确的
+    # A/key-a 重试仍回放到 A（若误写了 B 的记录，这里会因 digest 不
+    # 匹配而报冲突）。
+    retry = _publish(store, text=SCRIPT_TEXT, idempotency_key="key-a")
+    assert retry.replayed is True
+    assert retry.artifact_version_id == first.artifact_version_id
+
+
 def test_reselecting_previous_content_under_review_is_a_new_edit(
     tmp_path,
 ) -> None:
@@ -444,6 +500,134 @@ def test_reselecting_previous_content_under_review_is_a_new_edit(
     ]
     assert slot.selected_version_id == first.artifact_version_id
     assert store.read(PROJECT_ID).generation == base.generation + 3
+
+
+def test_identical_reimport_under_pending_review_keeps_the_review_id(
+    tmp_path,
+) -> None:
+    """REQUIRE_REVIEW 下同正文重导入：保留待审阅身份，不谎报已登记。
+
+    回归：同正文提前返回分支此前不恢复 review_id，于是审阅仍 pending
+    时重导入 A 返回 reviewId=None、replayed=True，工具据此报“剧本正文已
+    登记为当前版本”，误导 Agent/调用方以为审阅保护已生效。现在回填该
+    正文关联的 pending review_id，工具仍报“待审阅”。
+    """
+    store, base = make_store(tmp_path)
+
+    def _review_publish(text: str, seq: int):
+        snapshot = store.read(PROJECT_ID)
+        boundary = ReviewBoundary(
+            request_message_seq=seq,
+            request_id=f"request-{seq}",
+            interrupted_run_id=f"run-{seq - 1}",
+            accepted_generation=snapshot.generation,
+            accepted_etag=snapshot.etag,
+        )
+        return _publish(
+            store,
+            text=text,
+            commit_metadata={
+                "origin": ChangeOrigin.AGENTDOCK_INTERRUPT,
+                "review_policy": ReviewPolicy.REQUIRE_REVIEW,
+                "review_boundary": boundary,
+                "caused_by_request_id": boundary.request_id,
+                "caused_by_message_seq": boundary.request_message_seq,
+            },
+        )
+
+    first = _review_publish(SCRIPT_TEXT, 2)
+    assert first.replayed is False
+    assert first.review_id is not None
+
+    # 审阅尚未通过时再导入同一正文 A：命中同正文提前返回分支。
+    again = _review_publish(SCRIPT_TEXT, 3)
+    assert again.replayed is True
+    assert again.artifact_version_id == first.artifact_version_id
+    # 关键：待审阅身份被保留，工具据此仍报“待审阅”而非“已登记”。
+    assert again.review_id == first.review_id
+    # 重导入没有新增生成（仍是同正文复放，不是新提交）。
+    assert store.read(PROJECT_ID).generation == base.generation + 1
+
+    # 审阅仍是 pending（没有被这次重导入悄悄决议/绕过）。
+    from services.project_files.review import ProjectReviewService
+
+    pending = ProjectReviewService(store).all_pending(PROJECT_ID)
+    assert first.review_id in {review.review_id for review in pending}
+
+
+def test_identical_reimport_after_script_line_decided_is_not_pending(
+    tmp_path,
+) -> None:
+    """混合审阅：剧本行已决议、别的行仍 pending 时，重导入不报待审阅。
+
+    回归：``_pending_script_review_id`` 此前只要 review 仍在 ``all_pending``
+    就按 version_id 匹配它的 operation，于是一个「剧本行已 ACCEPT、仅剩其它
+    operation 未决」的混合审阅会把已定的剧本重新报成待审阅。现在只匹配本身
+    仍 PENDING 的 operation：剧本行既已决议，同正文重导入应 replayed 且
+    review_id=None，不再谎称审阅未决。
+    """
+    from services.project_files.review import (
+        ProjectReviewService,
+        ReviewDecisionItem,
+    )
+    from services.runtime_files.models import ReviewStatus
+
+    store, _base = make_store(tmp_path)
+
+    def _review_publish(text: str, seq: int):
+        snapshot = store.read(PROJECT_ID)
+        boundary = ReviewBoundary(
+            request_message_seq=seq,
+            request_id=f"request-{seq}",
+            interrupted_run_id=f"run-{seq - 1}",
+            accepted_generation=snapshot.generation,
+            accepted_etag=snapshot.etag,
+        )
+        return _publish(
+            store,
+            text=text,
+            commit_metadata={
+                "origin": ChangeOrigin.AGENTDOCK_INTERRUPT,
+                "review_policy": ReviewPolicy.REQUIRE_REVIEW,
+                "review_boundary": boundary,
+                "caused_by_request_id": boundary.request_id,
+                "caused_by_message_seq": boundary.request_message_seq,
+            },
+        )
+
+    first = _review_publish(SCRIPT_TEXT, 2)
+    assert first.review_id is not None
+    service = ProjectReviewService(store)
+    review = next(
+        item
+        for item in service.all_pending(PROJECT_ID)
+        if item.review_id == first.review_id
+    )
+    # 剧本行 = pointer 里带 version_id 的那条（版本创建）；只决议它。
+    script_op = next(
+        op
+        for op in review.operations
+        if first.artifact_version_id in (op.json_pointer or "")
+    )
+    partial = service.decide(
+        project_id=PROJECT_ID,
+        review_id=review.review_id,
+        decision_token=review.decision_token,
+        decisions=[
+            ReviewDecisionItem(
+                operation_id=script_op.operation_id,
+                decision="ACCEPT",
+            ),
+        ],
+    )
+    # 还有别的 operation 未决 -> 审阅整体仍 pending（仍会进 all_pending）。
+    assert partial.status is ReviewStatus.PENDING
+
+    # 同正文重导入：命中同正文复放，但剧本行已决议 -> 不再报待审阅。
+    again = _review_publish(SCRIPT_TEXT, 3)
+    assert again.replayed is True
+    assert again.artifact_version_id == first.artifact_version_id
+    assert again.review_id is None
 
 
 def test_replay_file_id_points_at_the_indexed_file_not_the_version(

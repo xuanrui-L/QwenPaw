@@ -8,7 +8,7 @@ from uuid import uuid5, NAMESPACE_URL
 
 import pytest
 
-from domain.enums import SpecialistRole, TaskKind
+from domain.enums import SpecialistRole, TaskKind, TaskStatus
 from domain.errors import ValidationError
 from services.file_agent_runtime.driver import FileCreatorAgentRuntime
 from services.project_files.facade import CreatorFileServices
@@ -324,3 +324,160 @@ def test_harvest_all_bound_reports_the_tasks_it_left_out(tmp_path) -> None:
         assert task_id in note
     assert "taskIds" in note
     assert len(result.payload["tasks"]) == _MAX_HARVEST_TASKS
+
+
+def test_harvest_all_pages_through_every_task_with_harvest_offset(
+    tmp_path,
+) -> None:
+    """溢出批次靠 harvestOffset 翻页取全：49 个任务两次收割全覆盖。
+
+    回合预算提高后，一个 Run 可能提交远超一次收割上限（32）的观察。
+    默认调用只返回前 32 个，提示窗也只列得下 16 个 id，第 49 个既不在
+    返回里、也不在提示里——若没有可推进的游标，模型只能回查原始提交响应
+    才能找齐，与“省略 taskIds 收割本 Run 全部任务”的承诺相悖。
+    """
+
+    from services.specialist_tools import _MAX_HARVEST_TASKS
+
+    services, executions = _prepare_project(tmp_path)
+    registry = FileSpecialistToolRegistry(services)
+    total = _MAX_HARVEST_TASKS + 17  # 49：一页收割 + 一页显式 id 都盖不住
+    created = [
+        executions.create_task(
+            _run_task(
+                TaskKind.OBSERVE_SOURCE_CLIP,
+                f"batch-{index:03d}",
+                "specialist-run-1",
+            ),
+        ).task_id
+        for index in range(total)
+    ]
+
+    # 第一页：默认 offset=0 收割前 32 个，提示给出下一页游标。
+    first = asyncio.run(
+        _harvest(
+            registry,
+            arguments={"arguments": {"wait": False}},
+            context=_context("specialist-run-1"),
+        ),
+    )
+    assert list(first.task_ids) == created[:_MAX_HARVEST_TASKS]
+    assert len(first.payload["tasks"]) == _MAX_HARVEST_TASKS
+    note = first.payload["note"]
+    assert f"共 {total} 个观察任务" in note
+    assert f"harvestOffset={_MAX_HARVEST_TASKS}" in note
+    # 第 49 个任务既不在返回里，也溢出了 16 个 id 的提示窗——正是旧实现
+    # 永远够不到的那一个。
+    assert created[-1] not in note
+    assert created[-1] not in first.task_ids
+
+    # 第二页：回填游标收割剩下的 17 个，含此前够不到的第 49 个。
+    second = asyncio.run(
+        _harvest(
+            registry,
+            arguments={
+                "arguments": {
+                    "wait": False,
+                    "harvestOffset": _MAX_HARVEST_TASKS,
+                },
+            },
+            context=_context("specialist-run-1"),
+        ),
+    )
+    assert list(second.task_ids) == created[_MAX_HARVEST_TASKS:]
+    assert len(second.payload["tasks"]) == total - _MAX_HARVEST_TASKS
+    assert created[-1] in second.task_ids
+    # 全部收割完，没有剩余，就不再塞溢出提示。
+    assert "note" not in second.payload
+
+    # 两页合起来正好覆盖全部 49 个，无重复无遗漏。
+    paged = list(first.task_ids) + list(second.task_ids)
+    assert paged == created
+    assert len(set(paged)) == total
+
+    # 游标越过末尾：幂等地返回空，并说明已收割完。
+    exhausted = asyncio.run(
+        _harvest(
+            registry,
+            arguments={"arguments": {"wait": False, "harvestOffset": total}},
+            context=_context("specialist-run-1"),
+        ),
+    )
+    assert exhausted.task_ids == ()
+    assert exhausted.payload["tasks"] == []
+    assert "已越过全部" in exhausted.payload["note"]
+
+
+def _complete(executions, task_id: str) -> None:
+    """Drive a QUEUED observation to SUCCEEDED (refreshes its updated_at)."""
+
+    executions.transition_task(
+        PROJECT_ID,
+        task_id,
+        expected_status=TaskStatus.QUEUED,
+        status=TaskStatus.RUNNING,
+    )
+    executions.transition_task(
+        PROJECT_ID,
+        task_id,
+        expected_status=TaskStatus.RUNNING,
+        status=TaskStatus.SUCCEEDED,
+    )
+
+
+def test_harvest_offset_cursor_is_stable_when_page_one_completes(
+    tmp_path,
+) -> None:
+    """翻页游标必须建在不可变顺序上：第一页收割后转终态，第二页仍要精确
+    返回剩下的任务，而不是重复第一页、永久漏掉尾部。
+
+    harvest-all 默认 wait=true 会把本页任务推进到终态，刷新它们的
+    updated_at；若发现顺序依赖 updated_at，这批任务会移到列表另一端，
+    令 offset 游标错位（重复已收割项、丢失未收割项且不再报溢出）。
+    """
+
+    from services.specialist_tools import _MAX_HARVEST_TASKS
+
+    services, executions = _prepare_project(tmp_path)
+    registry = FileSpecialistToolRegistry(services)
+    total = _MAX_HARVEST_TASKS + 17
+    created = [
+        executions.create_task(
+            _run_task(
+                TaskKind.OBSERVE_SOURCE_CLIP,
+                f"batch-{index:03d}",
+                "specialist-run-1",
+            ),
+        ).task_id
+        for index in range(total)
+    ]
+
+    first = asyncio.run(
+        _harvest(
+            registry,
+            arguments={"arguments": {"wait": False}},
+            context=_context("specialist-run-1"),
+        ),
+    )
+    assert list(first.task_ids) == created[:_MAX_HARVEST_TASKS]
+
+    # 第一页收割（wait=true）会把这些任务推进到终态，刷新 updated_at。
+    for task_id in first.task_ids:
+        _complete(executions, task_id)
+
+    second = asyncio.run(
+        _harvest(
+            registry,
+            arguments={
+                "arguments": {
+                    "wait": False,
+                    "harvestOffset": _MAX_HARVEST_TASKS,
+                },
+            },
+            context=_context("specialist-run-1"),
+        ),
+    )
+    # 游标稳定：第二页正好是剩下的 17 个，与第一页无交集，合起来全覆盖。
+    assert list(second.task_ids) == created[_MAX_HARVEST_TASKS:]
+    assert not (set(second.task_ids) & set(first.task_ids))
+    assert list(first.task_ids) + list(second.task_ids) == created

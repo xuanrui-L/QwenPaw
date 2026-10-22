@@ -435,6 +435,47 @@ _COMMITTED_JOURNAL_STATES = frozenset(
 )
 
 
+def _committed_script_version_id(
+    store: ProjectStore,
+    project_id: str,
+    transaction_id: str,
+    timeline_id: str,
+) -> str | None:
+    """The script version a committed transaction actually selected.
+
+    Reads the transaction's durable ``candidate.json`` (kept for every
+    committed transaction) and returns this timeline's script-slot
+    ``selected_version_id``, or ``None`` when it cannot be read or parsed.
+    Because the version id is content-addressed, comparing it against a
+    retry's version id proves whether the same key carried the same body.
+    """
+
+    try:
+        candidate = AtomicJsonRecordStore(
+            store.project_root(project_id)
+            / "runtime"
+            / "transactions"
+            / transaction_id
+            / "candidate.json",
+        ).read_or_none()
+    except Exception:  # pylint: disable=broad-except
+        # A corrupt/unreadable candidate cannot verify the original request.
+        return None
+    if not isinstance(candidate, dict):
+        return None
+    assets = candidate.get("assets")
+    if not isinstance(assets, dict):
+        return None
+    slots = assets.get("artifact_slots_by_id")
+    if not isinstance(slots, dict):
+        return None
+    slot = slots.get(timeline_script_slot_id(timeline_id))
+    if not isinstance(slot, dict):
+        return None
+    selected = slot.get("selected_version_id")
+    return selected if isinstance(selected, str) else None
+
+
 def _replay_committed_import(
     store: ProjectStore,
     project_id: str,
@@ -476,6 +517,29 @@ def _replay_committed_import(
     ).read_or_none()
     if journal is None or journal.state not in _COMMITTED_JOURNAL_STATES:
         raise error
+    # The journal proves *a* commit landed under this deterministic transaction
+    # id, but not that it was *this* body: the id is derived from the key, so a
+    # retry reusing the key with different content maps to the same committed
+    # transaction.  Verify against the committed candidate (content-addressed
+    # version id) before rebuilding a result, so a same-key/different-body
+    # retry is rejected instead of fabricating a success for a version that
+    # never landed -- and never persisting that fabrication as the replay
+    # record for future retries.
+    committed_version_id = _committed_script_version_id(
+        store,
+        project_id,
+        transaction_id,
+        timeline_id,
+    )
+    if committed_version_id is None:
+        # The committed candidate cannot be read, so the original request
+        # cannot be verified: surface the real failure, do not invent one.
+        raise error
+    if committed_version_id != version.version_id:
+        raise ScriptImportError(
+            "同一个 Idempotency-Key 已被用于不同的剧本正文；请为每一次不同的导入请求生成新的键。",
+            code="SCRIPT_IMPORT_IDEMPOTENCY_CONFLICT",
+        )
     outcome = ScriptImportOutcome(
         project_id=project_id,
         timeline_id=timeline_id,
@@ -497,6 +561,48 @@ def _replay_committed_import(
         outcome,
     )
     return outcome
+
+
+def _pending_script_review_id(
+    store: ProjectStore,
+    project_id: str,
+    version_id: str,
+) -> str | None:
+    """A still-pending review that would decide this exact script version.
+
+    A ``REQUIRE_REVIEW`` import replaces the Project optimistically and records
+    a pending Review that gates whether the new version is accepted.  Re-
+    importing the identical body then hits the same-content replay while that
+    review is still pending; without restoring its id the caller/tool would
+    report the body as already current.  Matches a *still-PENDING* operation
+    on the content-addressed version id -- inside its pointer (the version
+    created on a first import) or as its ``after`` value (the slot
+    re-selection) -- so a mixed review whose script line was already decided
+    is never reported as 待审阅, and a different pending review never
+    attaches.  ``None`` when no pending operation concerns this version.
+    """
+
+    from services.runtime_files.models import ReviewOperationDecision
+
+    from .review import ProjectReviewService
+
+    try:
+        pending = ProjectReviewService(store).all_pending(project_id)
+    except Exception:  # pylint: disable=broad-except
+        # Review state is unreadable: fall back to the plain content replay
+        # rather than failing an otherwise-valid identical import.
+        return None
+    for review in pending:
+        for operation in review.operations:
+            # A Review stays PENDING while *any* operation is undecided, so
+            # only an operation that is itself still PENDING proves this script
+            # version has not been decided yet.
+            if operation.decision is not ReviewOperationDecision.PENDING:
+                continue
+            pointer = operation.json_pointer or ""
+            if version_id in pointer or operation.after == version_id:
+                return review.review_id
+    return None
 
 
 def publish_script_import(
@@ -605,6 +711,16 @@ def publish_script_import(
                     "剧本槽位选中的版本或文件索引缺失，无法复放该正文；请重新导入。",
                     code="SCRIPT_IMPORT_SLOT_CONFLICT",
                 )
+            # The same content can already be selected while a REQUIRE_REVIEW
+            # commit for it is still pending (the Project is replaced
+            # optimistically and the review gates acceptance).  Restore that
+            # review id so the caller/tool reports "待审阅" instead of
+            # claiming the body already landed as the current version.
+            pending_review_id = _pending_script_review_id(
+                store,
+                project_id,
+                version_id,
+            )
             outcome = ScriptImportOutcome(
                 project_id=project_id,
                 timeline_id=timeline_id,
@@ -617,6 +733,7 @@ def publish_script_import(
                 generation=base.generation,
                 etag=base.etag,
                 replayed=True,
+                review_id=pending_review_id,
             )
             # Record the content replay too: without it a later retry of this
             # key, after another edit moved the selection off ``version_id``,
