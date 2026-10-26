@@ -479,5 +479,5 @@ def test_harvest_offset_cursor_is_stable_when_page_one_completes(
     )
     # 游标稳定：第二页正好是剩下的 17 个，与第一页无交集，合起来全覆盖。
     assert list(second.task_ids) == created[_MAX_HARVEST_TASKS:]
-    assert not (set(second.task_ids) & set(first.task_ids))
+    assert set(second.task_ids).isdisjoint(first.task_ids)
     assert list(first.task_ids) + list(second.task_ids) == created

@@ -5,6 +5,10 @@
 # The response doubles have to expose httpx's ``json()`` method, which
 # shadows the stdlib module this file also imports.
 # pylint: disable=redefined-outer-name
+# The fake transports stand in for a real client's ``post``, so they have
+# to accept the url and headers the caller passes even though the double
+# never looks at them.
+# pylint: disable=unused-argument
 
 from __future__ import annotations
 

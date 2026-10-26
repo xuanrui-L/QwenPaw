@@ -693,9 +693,7 @@ export function useProjectLaunch(options?: {
       const folderFiles = materialFiles.filter(
         (att) => att.source === "folder",
       );
-      const looseFiles = materialFiles.filter(
-        (att) => att.source !== "folder",
-      );
+      const looseFiles = materialFiles.filter((att) => att.source !== "folder");
       const committedUrlAttachments = attachments.filter(
         (att): att is Extract<AttachmentDraft, { kind: "url" }> =>
           att.kind === "url",

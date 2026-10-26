@@ -778,9 +778,17 @@ def test_an_input_links_the_asset_instead_of_doubling_it(
     assert destination.stat().st_ino == final.stat().st_ino
     assert final.stat().st_nlink == 2
 
-    release_scratch_media(scratch, reason="terminal")
+    release = release_scratch_media(scratch, reason="terminal")
 
-    assert not destination.exists()
+    # Unlike the marked cases above, what this one claims is that the
+    # linked Asset outlives the release of its scratch entry, and that
+    # holds everywhere.  A platform that cannot pin a directory refuses
+    # to delete anything at all, so only the unlink is conditional.
+    if task_scratch.pinned_release_supported():
+        assert not destination.exists()
+    else:
+        assert release.removed_files == 0
+        assert destination.exists()
     assert final.read_bytes() == b"artifact-payload" * 8
 
 

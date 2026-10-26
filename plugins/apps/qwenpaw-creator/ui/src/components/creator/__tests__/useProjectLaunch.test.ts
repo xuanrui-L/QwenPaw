@@ -54,7 +54,9 @@ const wrapper = ({ children }: { children: ReactNode }) =>
 const scriptFile = () =>
   new File(["## 场 1\n\n小明：你好"], "我的剧本.md", { type: "text/markdown" });
 const secondScriptFile = () =>
-  new File(["## 场 2\n\n小红：再见"], "第二集剧本.md", { type: "text/markdown" });
+  new File(["## 场 2\n\n小红：再见"], "第二集剧本.md", {
+    type: "text/markdown",
+  });
 const videoFile = () => new File(["bytes"], "cat.mp4", { type: "video/mp4" });
 
 const fileAtts = (attachments: AttachmentDraft[]) =>
@@ -80,7 +82,10 @@ beforeEach(() => {
     conversationId: "c1",
   });
   api.importTimelineScript.mockResolvedValue({ artifactVersionId: "script-1" });
-  api.ingestAssetFile.mockResolvedValue({ assetVersionId: "av1", taskId: "t1" });
+  api.ingestAssetFile.mockResolvedValue({
+    assetVersionId: "av1",
+    taskId: "t1",
+  });
   api.sendCreatorMessage.mockResolvedValue({});
 });
 
