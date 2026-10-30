@@ -651,7 +651,13 @@
     "viewFullImage": "放大查看图片",
     "currentVersion": "当前采用",
     "audioSample": "音频样本",
-    "currentPrompt": "当前生成提示词"
+    "currentPrompt": "当前生成提示词",
+    "deleteTooltip": "删除素材",
+    "deleteConfirmTitle": "确认删除素材",
+    "deleteConfirmContent": "确定要删除素材「{{name}}」吗？删除后无法恢复。",
+    "deleteConfirmOk": "删除",
+    "deleteSuccess": "素材已删除",
+    "deleteFailed": "删除失败"
   },
   "plan": {
     "creativeBrief": "创作总纲",

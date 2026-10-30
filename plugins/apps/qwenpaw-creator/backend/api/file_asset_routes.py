@@ -2013,4 +2013,29 @@ async def get_asset_content(
     )
 
 
+@router.delete("/assets/{version_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_source_asset_version(
+    project_id: str,
+    version_id: str,
+    services: CreatorFileServices = Depends(project_file_services),
+) -> None:
+    """Delete an uploaded source asset version.
+
+    This removes the version from the project metadata. The actual file on
+    disk is not deleted (immutable assets), but it becomes orphaned.
+    """
+    try:
+        await asyncio.to_thread(
+            services.projects.remove_source_asset_version,
+            project_id,
+            version_id,
+        )
+    except NotFoundError:
+        raise
+    except ConflictError:
+        raise
+    except Exception as error:
+        raise StorageIntegrityError(str(error)) from error
+
+
 __all__ = ["router"]
