@@ -18,7 +18,7 @@ import tempfile
 import time
 import wave
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse, urlsplit
 
 import httpx
@@ -56,7 +56,10 @@ from services.runtime_files.errors import (
 from services.runtime_files.idempotency_store import IdempotencyRecordStore
 from services.runtime_files.locking import CrossProcessFileLock
 from services.runtime_files.models import IdempotencyStatus
-from services.storage_root import require_creator_data_root
+from services.storage_root import (
+    CreatorDataRootError,
+    require_creator_data_root,
+)
 
 # QwenPaw secret store for reading encrypted provider API keys
 try:
@@ -2055,6 +2058,187 @@ async def _asr_probe(
     )
 
 
+def _operator_written_base_url(section: str) -> str:
+    """Return a section's Base URL only when the operator actually wrote one.
+
+    ``load_model_config()`` starts from ``_defaults()``, which pre-fills the
+    DashScope address for ASR and Embedding and turns their key-reuse switches
+    on. A non-empty ``base_url`` on a section nobody configured is therefore a
+    product default, not proof that the operator authorised a stored credential
+    for that host. Reading defaults as authorization would let any client of
+    ``/models/test`` make the server send a key saved for another provider to
+    the built-in endpoint, so only values written to ``model_config.json`` or
+    the environment are treated as explicit.
+    """
+    try:
+        raw = _read_raw_config(_config_paths()).get(section)
+    except (CreatorDataRootError, ValidationError, OSError, TimeoutError):
+        # A config we cannot read proves no authorization: refuse through the
+        # empty-home path rather than inventing a trusted host or turning the
+        # connection test into an unhandled error.
+        return ""
+    value = (
+        str(raw.get("base_url") or "").strip() if isinstance(raw, dict) else ""
+    )
+    if not value:
+        for name in _ENV_MAPPING.get(section, {}).get("base_url", ()):
+            if os.environ.get(name):
+                value = os.environ[name].strip()
+                break
+    return value
+
+
+def _credential_owner_section(loaded: ModelConfigData, section: str) -> str:
+    """Return the section that really owns the credential ``section`` sends.
+
+    ``_assemble_model_config`` copies values, not provenance: a VLM saved with
+    ``use_llm`` holds the LLM credential in its own fields, and an embedding
+    reusing the VLM key inherits that same credential one step further.
+    Asking whether the borrowing field is non-empty would attribute the key to
+    the borrower - whose Base URL the operator never wrote for it - and refuse
+    the one origin the key genuinely belongs to.
+    """
+    if section == "vlm":
+        return "llm" if loaded.vlm.use_llm else "vlm"
+    if section == "embedding":
+        if loaded.vlm.use_llm or not loaded.vlm.api_key:
+            # A keyless VLM, or one that borrows the LLM itself, never owns
+            # the credential this switch asks to reuse.
+            return "llm"
+        return "vlm"
+    return section
+
+
+def _normalized_origin(base_url: str) -> str:
+    """Return the ``scheme://host:port`` HTTPX itself would connect to.
+
+    The guard only has to agree with the client that actually sends the
+    credential, so the origin is taken from HTTPX's own parser rather than a
+    hand-rolled one. That choice is what makes the comparison safe in both
+    directions: HTTPX normalizes case, treats an explicit default port as the
+    scheme default, decodes punycode (``xn--aistant-0va`` and ``aßistant`` are
+    one host), and *rejects* what a looser mapping would fold together - a
+    fullwidth ``ｍ`` maps onto ``example.com`` under UTS-46 while HTTPX raises
+    InvalidURL for it, and casefolding turns ``ß`` into ``ss``.
+
+    Two spellings HTTPX renders to the same host are the same endpoint; a host
+    HTTPX refuses returns ``""``, so the guard answers with a config error
+    instead of letting InvalidURL escape as HTTP 500. Path differences stay
+    allowed - DashScope's ``api`` and ``compatible-mode`` roots share a key.
+    """
+    try:
+        url = httpx.URL(base_url)
+    except (httpx.InvalidURL, ValueError, UnicodeError):
+        return ""
+    scheme = url.scheme.casefold()
+    # No casefold() here: it folds "ß" into "ss", which is the exact collision
+    # this guard exists to catch. HTTPX has already normalized ASCII case.
+    host = url.host
+    if scheme not in {"http", "https"} or not host:
+        return ""
+    port = url.port or (443 if scheme == "https" else 80)
+    if ":" in host:  # IPv6 literal keeps its brackets in the comparison key
+        return f"{scheme}://[{host}]:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _origin_scheme_text(base_url: str) -> str:
+    """Best-effort scheme used only to word a refusal, never to decide one."""
+    try:
+        return urlparse(base_url).scheme.casefold()
+    except ValueError:
+        return ""
+
+
+def _probe_target_refusal(
+    probed_base_url: str,
+    model_type: str,
+    *,
+    supplied_key: str,
+    stored_key: str,
+    trusted_base_urls: Sequence[str],
+    unconfigured_target: bool = False,
+) -> str:
+    """Return a user-facing refusal when the probe target must not be used.
+
+    ``/models/test`` deliberately accepts an unsaved ``base_url`` so an
+    operator can check an edited config before persisting it.  That is safe
+    while the credential also comes from the request - the caller already
+    holds it - and unsafe the moment the route reaches into its own stored
+    configuration: the caller would then be steering a *saved* secret to any
+    host it picked (CWE-522).  Three separate cases follow from that:
+
+    * a request that carries its own key may test any http(s) address;
+    * a probe that will send **no** credential is a plain URL check, so
+      binding its origin would only break keyless local endpoints;
+    * once a non-empty stored credential is in play, it may only travel to an
+      origin the operator explicitly saved it for, and when no such origin is
+      recorded the target must not be completed from the request itself.
+    """
+    target_origin = _normalized_origin(probed_base_url)
+    if not target_origin:
+        scheme = _origin_scheme_text(probed_base_url)
+        if scheme in {"http", "https"}:
+            # The scheme is fine but HTTPX will not build a request for this
+            # host at all (homograph, stray control character, half-written
+            # IPv6 literal). Report the address instead of a protocol hint.
+            return (
+                f"配置不完整：{model_type} 的 Base URL 无法解析"
+                f"（当前: {probed_base_url}）。请在配置弹窗中核对协议、主机与端口。"
+            )
+        return (
+            f"配置不完整：{model_type} 的 Base URL 必须使用 http 或 https 协议"
+            f"（当前: {scheme or '未指定'}）。"
+        )
+    if supplied_key:
+        return ""
+    if not stored_key:
+        return ""
+    homes = {
+        origin
+        for origin in (_normalized_origin(url) for url in trusted_base_urls)
+        if origin
+    }
+    if not homes:
+        return (
+            "安全限制：本次探测会使用已保存的 API Key，但该 Key 没有记录归属地址，"
+            f"无法确认它属于本次请求的目标（本次请求: {target_origin}）。"
+            "请先在配置弹窗中保存该地址的 Base URL，或为新地址直接填写 API Key。"
+        )
+    if target_origin not in homes:
+        default_note = (
+            "本次目标来自内置默认地址，该分项尚未保存 Base URL。" if unconfigured_target else ""
+        )
+        return (
+            "安全限制：本次探测会使用已保存的 API Key，但目标地址与该 Key 保存时的"
+            f"归属地址不一致（已保存: {'、'.join(sorted(homes))}，本次请求: "
+            f"{target_origin}）。{default_note}"
+            "请先保存该分项的 Base URL 后再测试，或在配置弹窗中为新地址填写 API Key。"
+        )
+    return ""
+
+
+def _non_secret_probe_params(
+    payload: dict[str, Any],
+    api_key: str,
+) -> dict[str, Any]:
+    """Keep the credential out of query strings.
+
+    A GET probe sends its payload as URL parameters, and query strings end up
+    in provider access logs, intermediaries and browser history.  No builder
+    puts the key in the parameters today; this drops any value that *carries*
+    the key - bare or wrapped in a scheme such as ``Bearer`` - so a future
+    builder cannot regress it.
+    """
+    if not api_key:
+        return payload
+    return {
+        key: value
+        for key, value in payload.items()
+        if api_key not in str(value)
+    }
+
+
 async def _prepare_probe_payload(
     body: ModelConnectionTestRequest,
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
@@ -2519,6 +2703,37 @@ def _grade_attestation(
     return grader(document)
 
 
+_PROBE_CREDENTIAL_HEADERS = (
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+)
+_PROBE_CREDENTIAL_PREFIXES = ("Bearer ", "Token ")
+
+
+def _probe_credential(headers: dict[str, str]) -> str:
+    """Return the bare secret ``headers`` will carry on the wire.
+
+    By the time a probe is sent the credential only exists inside its auth
+    header, and it arrives under several spellings (``Bearer``, ``Token``,
+    ``x-api-key``, ``x-goog-api-key``). Reading it back from the request,
+    rather than passing it down from each caller, is what keeps the filtering
+    with the transport: a caller that forgets to filter can no longer leak.
+    Each builder sets exactly one of those headers, so the first match is the
+    credential this probe sends.
+    """
+    for name, value in headers.items():
+        if name.lower() not in _PROBE_CREDENTIAL_HEADERS:
+            continue
+        secret = value.strip()
+        for prefix in _PROBE_CREDENTIAL_PREFIXES:
+            if secret.startswith(prefix):
+                secret = secret[len(prefix) :].strip()
+                break
+        return secret
+    return ""
+
+
 async def _send_probe(
     client: httpx.AsyncClient,
     url: str,
@@ -2537,7 +2752,12 @@ async def _send_probe(
 
     The destination is validated on the way out and the connected peer on
     the way back, so every probe shape carries the same policy and a new
-    shape cannot forget it.
+    shape cannot forget it. A GET also drops any query value that contains
+    the credential it is about to send: a query string is echoed into access
+    logs, proxy logs and error pages, none of which the operator authorised
+    to hold the key. Only the GET shape is filtered - a body is what the
+    endpoint was configured to receive, and some policy endpoints need the
+    credential in it to answer at all.
     """
     _assert_probe_destination(url)
     # These markers are this function's to consume: copy first so a caller
@@ -2547,7 +2767,14 @@ async def _send_probe(
     payload.pop("_attests", None)
     if payload.pop("_get_probe", False):
         headers.pop("Content-Type", None)
-        response = await client.get(url, headers=headers, params=payload)
+        response = await client.get(
+            url,
+            headers=headers,
+            params=_non_secret_probe_params(
+                payload,
+                _probe_credential(headers),
+            ),
+        )
     elif multipart is not None:
         headers.pop("Content-Type", None)
         response = await client.post(
@@ -2788,12 +3015,40 @@ async def test_model_connection(
     loaded = await asyncio.to_thread(load_model_config)
     item = getattr(loaded, body.type)
     fallback_api_key = item.api_key
+    # The addresses this credential may reach: only Base URLs the operator
+    # actually wrote (model_config.json or env), never the ones _defaults()
+    # pre-fills - see _operator_written_base_url.
+    section_home = _operator_written_base_url(body.type)
+    trusted_base_urls = [section_home]
     if (
         body.type in ("asr", "tts", "s2v", "image", "video")
         and getattr(item, "reuse_llm_key", False)
         and not fallback_api_key
     ):
         fallback_api_key = loaded.llm.api_key
+        # A reused LLM key belongs to the LLM endpoint, and a section host the
+        # operator saved next to the reuse switch was authorised by that
+        # switch; a default-filled address was not.
+        trusted_base_urls.append(_operator_written_base_url("llm"))
+    if body.type == "vlm" and getattr(item, "use_llm", False):
+        # "Reuse the text model" is an explicit decision to send the LLM
+        # credential, and assembly overwrites whatever address the VLM
+        # section still holds, so the VLM's own stale host is not an
+        # authorization either - only the LLM's written origin is.
+        if loaded.llm.api_key:
+            fallback_api_key = loaded.llm.api_key
+            trusted_base_urls = [_operator_written_base_url("llm")]
+    if (
+        body.type == "embedding"
+        and getattr(item, "reuse_vlm_key", False)
+        and not fallback_api_key
+    ):
+        # Trust the origin of the key that is really selected: a VLM that
+        # borrows the LLM credential cannot be named its owner, and the
+        # embedding's own saved address stays authorised by its switch.
+        key_owner = _credential_owner_section(loaded, "embedding")
+        fallback_api_key = getattr(loaded, key_owner).api_key
+        trusted_base_urls.append(_operator_written_base_url(key_owner))
     request_api_key = "" if body.api_key == SECRET_MASK else body.api_key
     selected = body.model_copy(
         update={
@@ -2822,6 +3077,18 @@ async def test_model_connection(
                 "请在模型配置弹窗中补齐后重试。"
             ),
         )
+    refusal = _probe_target_refusal(
+        selected.base_url,
+        body.type,
+        supplied_key=request_api_key,
+        stored_key=fallback_api_key,
+        trusted_base_urls=trusted_base_urls,
+        unconfigured_target=bool(
+            not section_home and not (body.base_url or "").strip(),
+        ),
+    )
+    if refusal:
+        return ConnectionTestResponse(ok=False, ms=0, error=refusal)
     start = time.monotonic()
     try:
         url, headers, payload = await _prepare_probe_payload(selected)
@@ -2930,7 +3197,12 @@ async def test_model_connection(
                 f"连接超时，请检查网络或 Base URL" f"（当前 Base URL: {selected.base_url}）"
             ),
         )
-    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+    except (
+        httpx.InvalidURL,
+        httpx.HTTPError,
+        ValueError,
+        RuntimeError,
+    ) as exc:
         # RuntimeError covers the ASR probe's sample upload, which refuses an
         # absent credential or a malformed policy before any probe is sent.
         return ConnectionTestResponse(
