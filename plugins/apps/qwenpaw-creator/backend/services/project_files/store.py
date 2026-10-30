@@ -424,11 +424,12 @@ class ProjectStore:
         project_id: str,
         version_id: str,
     ) -> ProjectSnapshot:
-        """Remove a source asset version from the project.
+        """Remove a source asset version and its unreferenced files.
 
-        This removes the version from source_versions_by_id and updates the
-        project metadata. The actual file on disk is not deleted (immutable
-        assets), but it becomes orphaned and may be cleaned up later.
+        This removes the version from source_versions_by_id, removes any
+        file_id / thumbnail_file_id entries from files_by_id that are no
+        longer referenced by any remaining metadata, and deletes the
+        corresponding on-disk files.
         """
         safe_id = _safe_project_id(project_id)
 
@@ -451,14 +452,22 @@ class ProjectStore:
                     f"referenced by {references}",
                 )
 
-            # Remove the version
+            version = project.assets.source_versions_by_id[version_id]
+            candidate_file_ids: list[str] = []
+            if version.file_id is not None:
+                candidate_file_ids.append(version.file_id)
+            if version.thumbnail_file_id is not None:
+                candidate_file_ids.append(version.thumbnail_file_id)
+
+            # Remove the version from metadata
+            remaining_versions = {
+                vid: v
+                for vid, v in project.assets.source_versions_by_id.items()
+                if vid != version_id
+            }
             updated_assets = project.assets.model_copy(
                 update={
-                    "source_versions_by_id": {
-                        vid: v
-                        for vid, v in project.assets.source_versions_by_id.items()
-                        if vid != version_id
-                    },
+                    "source_versions_by_id": remaining_versions,
                 },
             )
             updated_project = project.model_copy(
@@ -469,12 +478,121 @@ class ProjectStore:
                 },
             )
 
-            payload = self._checked_payload(updated_project)
+            # Determine which file_ids are no longer referenced by any
+            # remaining metadata and can be deleted from disk.
             project_root = self.project_root(safe_id)
+            files_to_delete = self._collect_deletable_files(
+                updated_project, candidate_file_ids,
+            )
+
+            # Remove unreferenced files from the index
+            if files_to_delete:
+                remaining_files = {
+                    fid: f
+                    for fid, f in updated_project.assets.files_by_id.items()
+                    if fid not in files_to_delete
+                }
+                final_assets = updated_project.assets.model_copy(
+                    update={"files_by_id": remaining_files},
+                )
+                updated_project = updated_project.model_copy(
+                    update={"assets": final_assets},
+                )
+
+            payload = self._checked_payload(updated_project)
             self._validate_asset_paths(project_root, updated_project)
             self._atomic_write(project_root, payload)
 
+            # Delete the actual files from disk after metadata is updated
+            for file_id, relative_uri in files_to_delete.items():
+                self._delete_asset_file(project_root, relative_uri, file_id)
+
         return _snapshot(updated_project)
+
+    def _collect_deletable_files(
+        self,
+        project: Project,
+        candidate_file_ids: list[str],
+    ) -> dict[str, str]:
+        """Return file_ids that are no longer referenced by any metadata.
+
+        Returns a mapping of file_id -> relative_uri for each candidate
+        that is not referenced by any remaining asset version, artifact
+        version, intelligence version, or other index entry.
+        """
+        if not candidate_file_ids:
+            return {}
+
+        # Build the set of all file_ids still referenced by any metadata
+        referenced: set[str] = set()
+
+        # Files referenced by remaining source versions
+        for version in project.assets.source_versions_by_id.values():
+            if version.file_id is not None:
+                referenced.add(version.file_id)
+            if version.thumbnail_file_id is not None:
+                referenced.add(version.thumbnail_file_id)
+
+        # Files referenced by source intelligence versions
+        for version in project.assets.intelligence_versions_by_id.values():
+            if version.file_id is not None:
+                referenced.add(version.file_id)
+
+        # Files referenced by artifact versions
+        for version in project.assets.artifact_versions_by_id.values():
+            if version.file_id is not None:
+                referenced.add(version.file_id)
+            if version.thumbnail_file_id is not None:
+                referenced.add(version.thumbnail_file_id)
+
+        # Files referenced by visual variants (character lineup refs)
+        for entity in project.visual.entities.items.values():
+            for variant in entity.variants.items.values():
+                for fid in (variant.reference_asset_version_ids or []):
+                    ref_version = (
+                        project.assets.source_versions_by_id.get(fid)
+                    )
+                    if ref_version and ref_version.file_id is not None:
+                        referenced.add(ref_version.file_id)
+
+        # Files referenced by the index itself (files_by_id entries that
+        # are not candidates for deletion remain referenced)
+        result: dict[str, str] = {}
+        for file_id in candidate_file_ids:
+            if file_id in referenced:
+                continue
+            indexed = project.assets.files_by_id.get(file_id)
+            if indexed is not None:
+                result[file_id] = indexed.relative_uri
+        return result
+
+    def _delete_asset_file(
+        self,
+        project_root: Path,
+        relative_uri: str,
+        file_id: str,
+    ) -> None:
+        """Delete one asset file from disk.  Best-effort; logs on failure."""
+        try:
+            parts = PurePosixPath(relative_uri).parts
+            candidate = project_root.joinpath(*parts)
+            # Safety: ensure the resolved path is still within assets/
+            resolved = candidate.resolve(strict=False)
+            assets_root = (project_root / "assets").resolve(strict=True)
+            resolved.relative_to(assets_root)
+            candidate.unlink(missing_ok=True)
+            logger.info(
+                "asset file deleted: file_id=%s uri=%s",
+                file_id,
+                relative_uri,
+            )
+        except Exception:
+            logger.warning(
+                "failed to delete asset file: file_id=%s uri=%s",
+                file_id,
+                relative_uri,
+                exc_info=True,
+            )
 
     def _find_source_version_references(
         self,
