@@ -29,7 +29,14 @@ from services.runtime_files.path_safety import is_link_path, is_link_stat
 from services.storage_root import require_creator_data_root
 from utils.logger import setup_logger
 
-from .models import Project
+from .models import (
+    ArtifactVersionRenderSource,
+    AudioCreation,
+    OverlayCreation,
+    Project,
+    R2VCreation,
+    SourceVersionRenderSource,
+)
 from .archive import write_project_archive
 from .serialization import (
     CanonicalJsonError,
@@ -663,6 +670,48 @@ class ProjectStore:
         for lineup_id, lineup in project.visual.cast_lineups.items.items():
             if version_id in (lineup.reference_asset_version_ids or []):
                 references.append(f"cast-lineup:{lineup_id}")
+
+        # Check timeline element references
+        for timeline in project.timelines.items.values():
+            for element_id, element in timeline.elements_by_id.items():
+                # Skip snapshot timelines (frozen copies)
+                if timeline.timeline_id.startswith("snapshot:"):
+                    continue
+
+                # Check render_source (SourceVersionRenderSource only)
+                render_source = element.render_source
+                if (
+                    isinstance(render_source, SourceVersionRenderSource)
+                    and not isinstance(
+                        render_source, ArtifactVersionRenderSource
+                    )
+                    and render_source.version_id == version_id
+                ):
+                    references.append(f"render-source:{element_id}")
+
+                creation = element.creation
+                # R2VCreation references
+                if isinstance(creation, R2VCreation):
+                    if version_id in (
+                        creation.storyboard_reference_version_ids or []
+                    ):
+                        references.append(
+                            f"r2v-storyboard-ref:{element_id}"
+                        )
+                    if version_id in (
+                        creation.video_reference_version_ids or []
+                    ):
+                        references.append(f"r2v-video-ref:{element_id}")
+                # OverlayCreation references
+                elif isinstance(creation, OverlayCreation):
+                    if version_id in (
+                        creation.reference_version_ids or []
+                    ):
+                        references.append(f"overlay-ref:{element_id}")
+                # AudioCreation references
+                elif isinstance(creation, AudioCreation):
+                    if creation.source_asset_version_id == version_id:
+                        references.append(f"audio-source:{element_id}")
 
         return references
 

@@ -2019,10 +2019,12 @@ async def delete_source_asset_version(
     version_id: str,
     services: CreatorFileServices = Depends(project_file_services),
 ) -> None:
-    """Delete an uploaded source asset version.
+    """Delete an uploaded source asset version and its unreferenced files.
 
-    This removes the version from the project metadata. The actual file on
-    disk is not deleted (immutable assets), but it becomes orphaned.
+    This removes the version from the project metadata and deletes any
+    on-disk files that are no longer referenced by remaining metadata.
+    If the version is still referenced elsewhere (timeline elements,
+    visual variants, etc.), the deletion is refused with a 409 Conflict.
     """
     try:
         await asyncio.to_thread(
