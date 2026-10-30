@@ -556,8 +556,17 @@ class ProjectStore:
                     ref_version = (
                         project.assets.source_versions_by_id.get(fid)
                     )
-                    if ref_version and ref_version.file_id is not None:
-                        referenced.add(ref_version.file_id)
+                    if ref_version is not None:
+                        if ref_version.file_id is not None:
+                            referenced.add(ref_version.file_id)
+                        if ref_version.thumbnail_file_id is not None:
+                            referenced.add(
+                                ref_version.thumbnail_file_id
+                            )
+                        if ref_version.native_model_file_id is not None:
+                            referenced.add(
+                                ref_version.native_model_file_id
+                            )
 
         # Files referenced by cast lineups
         for lineup in project.visual.cast_lineups.items.values():
@@ -565,8 +574,13 @@ class ProjectStore:
                 ref_version = (
                     project.assets.source_versions_by_id.get(fid)
                 )
-                if ref_version and ref_version.file_id is not None:
-                    referenced.add(ref_version.file_id)
+                if ref_version is not None:
+                    if ref_version.file_id is not None:
+                        referenced.add(ref_version.file_id)
+                    if ref_version.thumbnail_file_id is not None:
+                        referenced.add(ref_version.thumbnail_file_id)
+                    if ref_version.native_model_file_id is not None:
+                        referenced.add(ref_version.native_model_file_id)
 
         # Files referenced by the index itself (files_by_id entries that
         # are not candidates for deletion remain referenced)
@@ -615,16 +629,32 @@ class ProjectStore:
         """Find all references to a source asset version in the project."""
         references = []
 
-        # Check visual entity references
+        # Check ProjectSource selected version
+        for source in project.sources.sources.items.values():
+            if source.selected_asset_version_id == version_id:
+                references.append(f"project-source:{source.source_id}")
+
+        # Check SourceIntelligenceVersion dependency
+        for intel_id, intel in (
+            project.assets.intelligence_versions_by_id.items()
+        ):
+            if intel.source_asset_version_id == version_id:
+                references.append(f"intelligence:{intel_id}")
+
+        # Check CharacterVoice sample source
         for entity_id, entity in project.visual.entities.items.items():
-            if entity.selected_artifact_version_id == version_id:
-                references.append(f"visual-entity:{entity_id}")
+            if (
+                entity.voice is not None
+                and entity.voice.sample_source_version_id == version_id
+            ):
+                references.append(f"voice:{entity_id}")
+
+        # Check visual variant references
+        for entity_id, entity in project.visual.entities.items.items():
             for variant_id, variant in entity.variants.items.items():
-                if variant.selected_artifact_version_id == version_id:
-                    references.append(
-                        f"visual-variant:{entity_id}@{variant_id}"
-                    )
-                if version_id in (variant.reference_asset_version_ids or []):
+                if version_id in (
+                    variant.reference_asset_version_ids or []
+                ):
                     references.append(
                         f"visual-variant-refs:{entity_id}@{variant_id}"
                     )
