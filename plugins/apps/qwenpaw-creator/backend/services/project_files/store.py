@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -19,7 +19,7 @@ from typing import Any, Final
 from uuid import uuid4
 
 from pydantic import ValidationError
-from domain.errors import BadRequestError
+from domain.errors import BadRequestError, ConflictError, NotFoundError
 from services.runtime_files.atomic_store import (
     atomic_replace_path,
     fsync_directory as runtime_fsync_directory,
@@ -418,6 +418,92 @@ class ProjectStore:
             self._validate_asset_paths(project_root, candidate)
             self._atomic_write(project_root, payload)
         return _snapshot(candidate)
+
+    def remove_source_asset_version(
+        self,
+        project_id: str,
+        version_id: str,
+    ) -> ProjectSnapshot:
+        """Remove a source asset version from the project.
+
+        This removes the version from source_versions_by_id and updates the
+        project metadata. The actual file on disk is not deleted (immutable
+        assets), but it becomes orphaned and may be cleaned up later.
+        """
+        safe_id = _safe_project_id(project_id)
+
+        with self._lock:
+            current = self.read(safe_id)
+            project = current.project
+
+            if version_id not in project.assets.source_versions_by_id:
+                raise NotFoundError(
+                    f"Source asset version not found: {version_id}",
+                )
+
+            # Check if the version is referenced anywhere
+            references = self._find_source_version_references(
+                project, version_id
+            )
+            if references:
+                raise ConflictError(
+                    f"Cannot delete source asset version {version_id}: "
+                    f"referenced by {references}",
+                )
+
+            # Remove the version
+            updated_assets = project.assets.model_copy(
+                update={
+                    "source_versions_by_id": {
+                        vid: v
+                        for vid, v in project.assets.source_versions_by_id.items()
+                        if vid != version_id
+                    },
+                },
+            )
+            updated_project = project.model_copy(
+                update={
+                    "assets": updated_assets,
+                    "generation": project.generation + 1,
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+
+            payload = self._checked_payload(updated_project)
+            project_root = self.project_root(safe_id)
+            self._validate_asset_paths(project_root, updated_project)
+            self._atomic_write(project_root, payload)
+
+        return _snapshot(updated_project)
+
+    def _find_source_version_references(
+        self,
+        project: Project,
+        version_id: str,
+    ) -> list[str]:
+        """Find all references to a source asset version in the project."""
+        references = []
+
+        # Check artifact version references
+        for artifact_id, artifact in project.assets.artifact_versions_by_id.items():
+            if version_id in (artifact.reference_asset_version_ids or []):
+                references.append(f"artifact:{artifact_id}")
+
+        # Check visual entity references
+        for entity_id, entity in project.visual.entities.items.items():
+            if entity.selected_artifact_version_id == version_id:
+                references.append(f"visual-entity:{entity_id}")
+            for variant_id, variant in entity.variants.items.items():
+                if variant.selected_artifact_version_id == version_id:
+                    references.append(
+                        f"visual-variant:{entity_id}@{variant_id}"
+                    )
+                if version_id in (variant.reference_asset_version_ids or []):
+                    references.append(
+                        f"visual-variant-refs:{entity_id}@{variant_id}"
+                    )
+
+        return references
 
     def list(
         self,

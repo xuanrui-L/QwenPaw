@@ -164,3 +164,14 @@ export function downloadSourceCache(
     { timeoutMs: 300_000 },
   );
 }
+
+/** Delete an uploaded source asset version. */
+export function deleteSourceAssetVersion(
+  projectId: string,
+  versionId: string,
+): Promise<void> {
+  return creatorRequest(
+    `${assetsPath(projectId)}/${encodeURIComponent(versionId)}`,
+    { method: "DELETE" },
+  );
+}

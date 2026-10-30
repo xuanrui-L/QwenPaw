@@ -680,7 +680,13 @@
     "viewFullImage": "Enlarge image",
     "currentVersion": "In use",
     "audioSample": "Audio sample",
-    "currentPrompt": "Current generation prompt"
+    "currentPrompt": "Current generation prompt",
+    "deleteTooltip": "Delete asset",
+    "deleteConfirmTitle": "Confirm delete asset",
+    "deleteConfirmContent": "Are you sure you want to delete asset \"{{name}}\"? This cannot be undone.",
+    "deleteConfirmOk": "Delete",
+    "deleteSuccess": "Asset deleted",
+    "deleteFailed": "Delete failed"
   },
   "plan": {
     "creativeBrief": "Creative Brief",

@@ -14,6 +14,7 @@ import {
   Paperclip,
   Search,
   SquarePen,
+  Trash2,
   Upload,
 } from "lucide-react";
 import { MenuUnfoldOutlined } from "@ant-design/icons";
@@ -25,6 +26,7 @@ import PromptEditorModal, {
 import { refImageThumbUrl } from "@/components/workbench/referenceThumbs";
 import {
   createCharacterVoice,
+  deleteSourceAssetVersion,
   getArtifactVersionMediaUrl,
   getAssetVersionMediaUrl,
   getVoiceCapabilities,
@@ -1759,6 +1761,32 @@ export default function AssetsPage() {
     }
   };
 
+  const handleDeleteSourceAsset = async (versionId: string, name: string) => {
+    Modal.confirm({
+      title: t("assets.deleteConfirmTitle"),
+      content: t("assets.deleteConfirmContent", { name }),
+      okText: t("assets.deleteConfirmOk"),
+      okType: "danger",
+      cancelText: t("common.cancel"),
+      onOk: async () => {
+        try {
+          await deleteSourceAssetVersion(id, versionId);
+          message.success(t("assets.deleteSuccess"));
+          // Refresh project data
+          await pollOnce(id);
+          // Clear selection if deleted item was selected
+          if (selected?.id === versionId) {
+            selectItem(null);
+          }
+        } catch (error) {
+          const text =
+            error instanceof Error ? error.message : t("assets.deleteFailed");
+          message.error(text, 6);
+        }
+      },
+    });
+  };
+
   // Hooks must run unconditionally, before the loading early-returns.
   const narrowWorkspace = useNarrowWorkspace();
   const detailRail = useDetailRail(narrowWorkspace);
@@ -2048,6 +2076,20 @@ export default function AssetsPage() {
                                   {t("assets.memoryBuilt")}
                                 </span>
                               )}
+                            {item.kind === "source" && (
+                              <button
+                                type="button"
+                                data-asset-delete={item.id}
+                                title={t("assets.deleteTooltip")}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  handleDeleteSourceAsset(item.id, display.name);
+                                }}
+                                className="absolute right-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-red-500/80 text-white opacity-0 transition-opacity hover:bg-red-600 group-hover:opacity-100"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                           </div>
                           <div className="p-3">
                             <h3 className="truncate text-sm font-semibold text-[var(--color-text-primary)]">
