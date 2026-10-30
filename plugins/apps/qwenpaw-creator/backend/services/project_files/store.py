@@ -458,6 +458,8 @@ class ProjectStore:
                 candidate_file_ids.append(version.file_id)
             if version.thumbnail_file_id is not None:
                 candidate_file_ids.append(version.thumbnail_file_id)
+            if version.native_model_file_id is not None:
+                candidate_file_ids.append(version.native_model_file_id)
 
             # Remove the version from metadata
             remaining_versions = {
@@ -532,6 +534,8 @@ class ProjectStore:
                 referenced.add(version.file_id)
             if version.thumbnail_file_id is not None:
                 referenced.add(version.thumbnail_file_id)
+            if version.native_model_file_id is not None:
+                referenced.add(version.native_model_file_id)
 
         # Files referenced by source intelligence versions
         for version in project.assets.intelligence_versions_by_id.values():
@@ -554,6 +558,15 @@ class ProjectStore:
                     )
                     if ref_version and ref_version.file_id is not None:
                         referenced.add(ref_version.file_id)
+
+        # Files referenced by cast lineups
+        for lineup in project.visual.cast_lineups.items.values():
+            for fid in (lineup.reference_asset_version_ids or []):
+                ref_version = (
+                    project.assets.source_versions_by_id.get(fid)
+                )
+                if ref_version and ref_version.file_id is not None:
+                    referenced.add(ref_version.file_id)
 
         # Files referenced by the index itself (files_by_id entries that
         # are not candidates for deletion remain referenced)
@@ -602,11 +615,6 @@ class ProjectStore:
         """Find all references to a source asset version in the project."""
         references = []
 
-        # Check artifact version references
-        for artifact_id, artifact in project.assets.artifact_versions_by_id.items():
-            if version_id in (artifact.reference_asset_version_ids or []):
-                references.append(f"artifact:{artifact_id}")
-
         # Check visual entity references
         for entity_id, entity in project.visual.entities.items.items():
             if entity.selected_artifact_version_id == version_id:
@@ -620,6 +628,11 @@ class ProjectStore:
                     references.append(
                         f"visual-variant-refs:{entity_id}@{variant_id}"
                     )
+
+        # Check cast lineup references
+        for lineup_id, lineup in project.visual.cast_lineups.items.items():
+            if version_id in (lineup.reference_asset_version_ids or []):
+                references.append(f"cast-lineup:{lineup_id}")
 
         return references
 
