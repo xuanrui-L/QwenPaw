@@ -62,6 +62,10 @@ _INLINE_MEDIA_MAX_BYTES = 512 * 1024
 # small enough that dropping every tool exchange leaves it somewhere to live.
 MEDIA_CLAMP_RATIO_ENV = "CREATOR_MEDIA_CLAMP_RATIO"
 DEFAULT_MEDIA_CLAMP_RATIO = 0.5
+# Tuning the share down is legitimate; tuning it to nothing is not. A ratio
+# small enough to charge a screenshot for a few bytes would make every block
+# free, which is the failure this guard exists to catch.
+MIN_MEDIA_CLAMP_RATIO = 0.05
 # Only the ceiling is derived from the budget. The floor stays absolute, so a
 # huge clip is never treated as free just because the budget happens to be
 # small: several floor-priced blocks must still be able to overflow it.
@@ -79,10 +83,33 @@ def _media_clamp_ratio() -> float:
     # A nonsensical setting must not disable the guard it exists to provide.
     if not 0 < ratio <= 1:
         return DEFAULT_MEDIA_CLAMP_RATIO
-    return ratio
+    return min(1.0, max(MIN_MEDIA_CLAMP_RATIO, ratio))
 
 
 MEDIA_OBSERVATION_DEGRADE_ENV = "CREATOR_MEDIA_OBSERVATION_DEGRADE_ENABLED"
+
+# The input window a token budget can be measured against. A model class in
+# the SDK carries a default that has nothing to do with whichever model is
+# configured here, so the only accepted source is one an operator wrote down:
+# undeclared means the byte guard stays the sole limit.
+MODEL_CONTEXT_TOKENS_ENV = "CREATOR_MODEL_CONTEXT_TOKENS"
+
+
+def declared_context_tokens() -> int | None:
+    """The context window declared for this deployment, or ``None``.
+
+    Read per call, like the other knobs, so a restart-free change stays
+    possible in tests and a value of 0 or junk means "not declared" rather
+    than a budget that refuses every request.
+    """
+    raw = (os.environ.get(MODEL_CONTEXT_TOKENS_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        tokens = int(raw)
+    except ValueError:
+        return None
+    return tokens if tokens > 0 else None
 
 
 def media_observation_degrade_enabled() -> bool:
@@ -540,7 +567,8 @@ def _budget_diagnostics(
     for item in messages:
         role = str(item.get("role") or "?")
         by_role[role] = by_role.get(role, 0) + _media_aware_bytes(
-            item, budget_bytes=max_bytes,
+            item,
+            budget_bytes=max_bytes,
         )
     return {
         "max_bytes": max_bytes,
@@ -666,6 +694,7 @@ def demote_human_inline_media(
     *,
     vault: "MediaVault | None",
     budget_bytes: int = MODEL_INPUT_BYTES,
+    one_step: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Last relief under real pressure: move a human attachment, or leave it.
 
@@ -673,23 +702,36 @@ def demote_human_inline_media(
     requirement reads like a person who changed their mind. A block whose
     bytes could not be stored keeps its payload: the budget is allowed to
     fail, an upload a human made is not allowed to disappear quietly.
+
+    ``one_step`` moves the single most expensive attachment and stops. The
+    caller re-checks the real budget after every step, so a request that fits
+    once one picture has left does not lose the rest of a person's uploads.
     """
-    result: list[dict[str, Any]] = []
-    demoted: list[dict[str, Any]] = []
-    refused = 0
-    handles: list[dict[str, Any]] = []
-    for item in messages:
-        record = dict(item)
+    result: list[dict[str, Any]] = [dict(item) for item in messages]
+    candidates: list[tuple[int, int]] = []
+    for index, record in enumerate(result):
         if _demotion_eligible(record):
-            result.append(record)
             continue
         blocks = collect_inline_media(
             record.get("content"),
             budget_bytes=budget_bytes,
         )
-        if not blocks:
-            result.append(record)
-            continue
+        if blocks:
+            candidates.append(
+                (index, sum(int(block["charge"]) for block in blocks)),
+            )
+
+    moved: list[dict[str, Any]] = []
+    handles: list[dict[str, Any]] = []
+    refused = 0
+
+    def attempt(index: int) -> bool:
+        nonlocal refused
+        record = result[index]
+        blocks = collect_inline_media(
+            record.get("content"),
+            budget_bytes=budget_bytes,
+        )
         content, removed = (
             _demote_in_node(record.get("content"), vault, human=True)
             if vault is not None
@@ -697,15 +739,23 @@ def demote_human_inline_media(
         )
         if not removed or not all(handle for _, handle in removed):
             refused += len(blocks)
-            result.append(record)
-            continue
+            return False
         record["content"] = content
-        demoted.extend(blocks)
+        moved.extend(blocks)
         handles.extend(_record_demotions(record, removed))
-        result.append(record)
+        return True
+
+    ordered = (
+        sorted(candidates, key=lambda item: -item[1])
+        if one_step
+        else candidates
+    )
+    for index, _charge in ordered:
+        if attempt(index) and one_step:
+            break
     return result, {
-        "demoted_blocks": len(demoted),
-        "demoted_charge_bytes": sum(int(b["charge"]) for b in demoted),
+        "demoted_blocks": len(moved),
+        "demoted_charge_bytes": sum(int(block["charge"]) for block in moved),
         "stored_blocks": len(handles),
         "refused_blocks": refused,
         "handles": handles,
@@ -1025,8 +1075,8 @@ def prepare_model_messages(
             return True
         # Bytes miss the mistake in both directions: a screenshot is megabytes
         # of Base64 for a few thousand vision tokens, while dense text is the
-        # reverse. The window the model declares is the second guard, and only
-        # the model about to read this request can supply it.
+        # reverse. The declared window is the second guard, and it stays off
+        # until an operator states it (see ``declared_context_tokens``).
         return max_tokens is not None and (
             estimate_input_tokens(request_payload()) > max_tokens
         )

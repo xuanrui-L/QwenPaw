@@ -20,6 +20,7 @@ from hashlib import sha256
 from typing import Callable
 
 from domain.errors import StorageIntegrityError, ValidationError
+from services.storage_root import CreatorDataRootError
 from services.workspace.content_store import ContentStore
 from utils.logger import setup_logger
 
@@ -28,6 +29,17 @@ logger = setup_logger("creator.media_vault")
 # Blobs are immutable and keyed by content, so the same image demoted in two
 # turns of one project occupies exactly one copy on disk.
 NAMESPACE = "blob"
+
+# Opening the store resolves the Creator data root, which raises on a machine
+# where it is unset or not absolute. That is one more way the durable copy is
+# missing, not a reason to fail the turn: the docstring above is a contract, so
+# every path here lists the failure it must not let escape.
+_UNAVAILABLE = (
+    StorageIntegrityError,
+    ValidationError,
+    OSError,
+    CreatorDataRootError,
+)
 
 MediaVault = Callable[[str], "str | None"]
 
@@ -125,7 +137,7 @@ def store_data_url(
     digest = digest_for(payload)
     try:
         _open_store(store).put_bytes(payload, namespace=NAMESPACE)
-    except (StorageIntegrityError, ValidationError, OSError) as exc:
+    except _UNAVAILABLE as exc:
         logger.warning(
             "media vault could not store %s bytes as %s: %s",
             len(payload),
@@ -145,7 +157,7 @@ def load_data_url(
     """Rebuild a ``data:`` URL from its stored bytes, or ``None`` if absent."""
     try:
         payload = _open_store(store).read_bytes(digest, namespace=NAMESPACE)
-    except (StorageIntegrityError, ValidationError, OSError) as exc:
+    except _UNAVAILABLE as exc:
         logger.warning("media vault could not read %s: %s", digest[:12], exc)
         return None
     return (
@@ -172,7 +184,7 @@ def load_by_handle(
         return None
     try:
         payload = _open_store(store).read_bytes(digest, namespace=NAMESPACE)
-    except (StorageIntegrityError, ValidationError, OSError) as exc:
+    except _UNAVAILABLE as exc:
         logger.warning("media vault could not read %s: %s", digest[:12], exc)
         return None
     body = base64.b64encode(payload).decode("ascii")
