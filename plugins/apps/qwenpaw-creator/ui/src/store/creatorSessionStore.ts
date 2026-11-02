@@ -32,6 +32,27 @@ import {
 
 const conversationRetryIds = new Map<string, string>();
 
+/**
+ * Durable events a fresh Project view replays behind the session head.
+ *
+ * Replaying from seq 0 streamed every event a long-running Project ever wrote
+ * (observed: 62k frames), and every 200-event page cost one store commit and
+ * one full dock re-render, so the dock sat on 「加载中」 while the browser
+ * folded history it could not keep. The window only has to cover detached
+ * specialist lifecycles still open at load time.
+ *
+ * This is behaviourally safe against the ingest cap below: `ingestEvents`
+ * already discards everything older than the last EVENT_WINDOW events, so a
+ * full replay and a windowed replay converge on the same stored state — the
+ * full one just pays hundreds of extra commits to get there. Keep this well
+ * above EVENT_WINDOW so the oldest retained event is always one the replay
+ * actually delivered.
+ */
+export const REPLAY_WINDOW = 2000;
+
+/** Events kept in memory by `ingestEvents`; older ones are dropped. */
+const EVENT_WINDOW = 500;
+
 async function createStableConversation(projectId: string) {
   const requestId =
     conversationRetryIds.get(projectId) ?? newClientId("conversation");
@@ -658,7 +679,6 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
         const sessionGeneration = ++sessionRefreshGeneration;
         const state = get();
         const sameProject = state.projectId === projectId;
-        const initialResumeAfter = sameProject ? state.lastEventSeq : 0;
         const preferredConversationId = sameProject
           ? state.activeConversationId
           : null;
@@ -694,8 +714,13 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
             return;
           // Mainline IDLE/ERROR does not settle detached specialist work.
           // Replay from the local cursor to rebuild its independent lifecycle.
-          const resumeAfter = initialResumeAfter;
-          replayUntilSeq = sessionResponse.session.lastEventSeq;
+          // A first view has no local cursor, so it replays a bounded window
+          // off the durable head instead of the Project's whole event history.
+          const replayUntilHead = sessionResponse.session.lastEventSeq;
+          const resumeAfter = sameProject
+            ? state.lastEventSeq
+            : Math.max(0, replayUntilHead - REPLAY_WINDOW);
+          replayUntilSeq = replayUntilHead;
           let conversations = conversationPage.items;
           let activeConversationId =
             preferredConversationId &&
@@ -1833,7 +1858,7 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           if (session && session.lastEventSeq !== lastEventSeq)
             session = { ...session, lastEventSeq };
           const combinedEvents = [...current.events, ...accepted];
-          const recentStart = Math.max(0, combinedEvents.length - 500);
+          const recentStart = Math.max(0, combinedEvents.length - EVENT_WINDOW);
           // A superseded run may have no tool-result message. Preserve its
           // authoritative end event after high-volume streaming deltas leave
           // the recent window, including when rebuilding from durable SSE.

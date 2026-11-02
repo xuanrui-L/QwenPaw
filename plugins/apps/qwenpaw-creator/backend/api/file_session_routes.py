@@ -77,6 +77,11 @@ from .file_execution_routes import _cancel_task_sync
 
 logger = logging.getLogger("qwenpaw.creator.api.file_session_routes")
 
+# Events scanned when looking for the admission's own ``message.accepted``.
+# Generous next to a single send, bounded next to a session's whole history; a
+# miss still falls back to the full scan.
+_ACCEPTED_EVENT_TAIL_WINDOW = 200
+
 
 def _log_safe(value: Any) -> str:
     """Neutralize CR/LF in user-provided values before logging."""
@@ -371,7 +376,9 @@ async def create_conversation(
                 conversation_id,
             )
             if conversation.title != request.title.strip():
-                raise ConflictError("Idempotency-Key 已用于不同的 Conversation 请求")
+                raise ConflictError(
+                    "Idempotency-Key 已用于不同的 Conversation 请求",
+                )
         except RuntimeConversationNotFound:
             conversation = await asyncio.to_thread(
                 store.create_conversation,
@@ -422,33 +429,41 @@ async def list_messages(
             session.session_id,
             conversation_id,
         )
-        messages = await asyncio.to_thread(
-            store.list_messages,
-            project_id,
-            session.session_id,
-            after_seq=0 if backward else after,
-            limit=None,
-        )
+        # Over-fetch by one so "is there an older/newer page" stays answerable
+        # without reading the whole stream: the cursor reads below stop as soon
+        # as the window is full.
+        if backward:
+            messages = await asyncio.to_thread(
+                store.list_recent_messages,
+                project_id,
+                session.session_id,
+                limit=limit + 1,
+                conversation_id=conversation_id,
+                before_seq=before,
+            )
+        else:
+            messages = await asyncio.to_thread(
+                store.list_messages,
+                project_id,
+                session.session_id,
+                after_seq=after,
+                limit=limit + 1,
+                conversation_id=conversation_id,
+            )
     except BaseException as error:
         _translate_runtime_error(error)
-    matching = [
-        item for item in messages if item.conversation_id == conversation_id
-    ]
-    next_after: int | None = None
-    next_before: int | None = None
-    if backward:
-        older = (
-            matching
-            if before is None
-            else [item for item in matching if item.message_seq < before]
-        )
-        page = older[-limit:]
-        if page and len(older) > limit:
-            next_before = page[0].message_seq
-    else:
-        page = matching[:limit]
-        if len(matching) > limit:
-            next_after = page[-1].message_seq
+    has_more = len(messages) > limit
+    if has_more:
+        # Backward paging wants the newest `limit` of what it read, forward
+        # wants the oldest, and the extra record tells both that more exist.
+        messages = messages[:limit] if not backward else messages[-limit:]
+    page = messages
+    next_after: int | None = (
+        page[-1].message_seq if has_more and not backward and page else None
+    )
+    next_before: int | None = (
+        page[0].message_seq if has_more and backward and page else None
+    )
     return {
         "items": [
             {
@@ -538,22 +553,46 @@ async def post_message(
                 goal_id="goal-" + sha256(key.encode("utf-8")).hexdigest()[:24],
                 metadata={"source": "agentdock"},
             )
-        events = await asyncio.to_thread(
-            store.list_events,
+        # The admission just happened, so its event sits at the durable tail.
+        # Reading the whole stream per message cost the session's full history
+        # (99 MB observed). The full scan remains as an explicit fallback so a
+        # window that was too small can never turn into a duplicate
+        # ``message.accepted`` write.
+        window = await asyncio.to_thread(
+            store.list_recent_events,
             project_id,
             session.session_id,
-            after_seq=0,
-            limit=None,
+            limit=1,
+            event_type="message.accepted",
+            message_id=admitted.message.message_id,
+            max_scan=_ACCEPTED_EVENT_TAIL_WINDOW,
         )
-        event = next(
-            (
-                item
-                for item in events
-                if item.event_type == "message.accepted"
-                and item.message_id == admitted.message.message_id
-            ),
-            None,
-        )
+        event = window[-1] if window else None
+        if event is None:
+            events = await asyncio.to_thread(
+                store.list_events,
+                project_id,
+                session.session_id,
+                after_seq=0,
+                limit=None,
+            )
+            event = next(
+                (
+                    item
+                    for item in events
+                    if item.event_type == "message.accepted"
+                    and item.message_id == admitted.message.message_id
+                ),
+                None,
+            )
+            if event is not None:
+                logger.warning(
+                    "message.accepted found beyond the %d-event tail window "
+                    "project=%s message=%s",
+                    _ACCEPTED_EVENT_TAIL_WINDOW,
+                    _log_safe(project_id),
+                    admitted.message.message_id,
+                )
         if event is None:
             event = await asyncio.to_thread(
                 store.append_event,

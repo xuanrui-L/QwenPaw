@@ -1359,13 +1359,64 @@ class ProjectRuntimeSessionStore:
         *,
         after_seq: int = 0,
         limit: int | None = None,
+        conversation_id: str | None = None,
     ) -> list[CreatorMessageRecord]:
         project_id, session_id = self._safe_session_ids(project_id, session_id)
         _validate_window(after_seq, limit)
         with self._project_lock_read(project_id):
             self._read_session_snapshot_unlocked(project_id, session_id)
-            records = self._message_records_unlocked(project_id, session_id)
-            return _window(records, after_seq=after_seq, limit=limit)
+            # Cursor read: the stream is contiguous, so paging forward from a
+            # recent seq no longer parses every message the session wrote just
+            # to slice off the first page.
+            return self._messages_store(
+                project_id,
+                session_id,
+            ).read_records_after(
+                after_seq,
+                limit=limit,
+                where=(
+                    None
+                    if conversation_id is None
+                    else lambda record: record.conversation_id
+                    == conversation_id
+                ),
+            )
+
+    def list_recent_messages(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        limit: int,
+        conversation_id: str | None = None,
+        before_seq: int | None = None,
+    ) -> list[CreatorMessageRecord]:
+        """The last *limit* messages, oldest-first, without a full scan.
+
+        Opening a conversation page asks for the newest handful, optionally
+        older than a cursor. Reading every record and slicing in Python made
+        that cost the whole session history (observed: 284 MB and ~1.1 GB RSS
+        for 1112 messages), so the filter and the stop condition both live in
+        the backwards reader instead.
+        """
+        project_id, session_id = self._safe_session_ids(project_id, session_id)
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        with self._project_lock_read(project_id):
+            self._read_session_snapshot_unlocked(project_id, session_id)
+
+            def keep(record: CreatorMessageRecord) -> bool:
+                if before_seq is not None and record.message_seq >= before_seq:
+                    return False
+                return (
+                    conversation_id is None
+                    or record.conversation_id == conversation_id
+                )
+
+            return self._messages_store(
+                project_id,
+                session_id,
+            ).read_tail(limit, where=keep)
 
     def append_event(
         self,
@@ -1448,6 +1499,43 @@ class ProjectRuntimeSessionStore:
             store = self._events_store(project_id, session_id)
             records = store.read_records_after(after_seq, limit=limit)
             return records
+
+    def list_recent_events(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        limit: int,
+        event_type: str | None = None,
+        message_id: str | None = None,
+        max_scan: int | None = None,
+    ) -> list[SessionEventRecord]:
+        """The last *limit* events, oldest-first, optionally filtered.
+
+        The send path asks a tail question -- "did this admission already get
+        its ``message.accepted``" -- and used to answer it by parsing the whole
+        ``events.jsonl`` (99 MB on a long session) for every message sent.
+
+        ``max_scan`` bounds the events read rather than the events returned, so
+        a caller can treat "not in the tail" as an answer and take its own
+        fallback instead of paying a full scan for a miss.
+        """
+        project_id, session_id = self._safe_session_ids(project_id, session_id)
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        if max_scan is not None and max_scan < 1:
+            raise ValueError("max_scan must be positive")
+        with self._project_lock_read(project_id):
+
+            def keep(record: SessionEventRecord) -> bool:
+                if event_type is not None and record.event_type != event_type:
+                    return False
+                return message_id is None or record.message_id == message_id
+
+            return self._events_store(
+                project_id,
+                session_id,
+            ).read_tail(limit, where=keep, max_scan=max_scan)
 
     def event_reader(
         self,

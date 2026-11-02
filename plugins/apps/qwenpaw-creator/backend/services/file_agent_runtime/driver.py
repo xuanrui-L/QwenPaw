@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import mimetypes
+import os
 from pathlib import Path, PurePosixPath
 import secrets
 import shutil
@@ -145,7 +146,12 @@ from services.external_skills import (
     render_external_skills_context,
     view_skill as view_external_skill,
 )
-from services.observability import report_error, trace_event, traced_async
+from services.observability import (
+    mem_probe,
+    report_error,
+    trace_event,
+    traced_async,
+)
 from services.source_analysis import SourceAgentToolContext
 from services.specialist_tools import (
     CHARACTER_VOICE_TOOL_NAME,
@@ -5005,6 +5011,11 @@ class FileCreatorAgentRuntime:
             for take in outcome.takes:
                 try:
                     video = take.video_path.read_bytes()
+                    mem_probe.stage(
+                        "live_operation.take_bytes",
+                        take_id=take.take_id,
+                        bytes=len(video),
+                    )
                 except OSError as exc:
                     issues.append(f"take_unreadable:{take.take_id}")
                     logger.warning(
@@ -8011,15 +8022,18 @@ class FileCreatorAgentRuntime:
         result: Mapping[str, Any],
         failed: bool = False,
     ) -> None:
-        raw_result = json.dumps(
-            result,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
         result_kind = _runtime_action_result_kind(
             tool_name,
             result,
             failed=failed,
+        )
+        stored_result: Mapping[str, Any] = result
+        if result_kind == _PROJECT_SNAPSHOT_RESULT_KIND:
+            stored_result = _durable_project_echo(result)
+        raw_result = json.dumps(
+            stored_result,
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
         appended = await self._persist_session_append(
             f"{project_id}: tool result",
@@ -8233,6 +8247,14 @@ class FileCreatorAgentRuntime:
         elements yet must still resume. Outside auto_approve such a failure
         still queues only the free prompt repair; paid continuation keeps
         waiting for a human.
+
+        The fuse below only counts resumes inside one uninterrupted runtime
+        streak, so a human message used to re-arm it: the same unchanged gap
+        came back right after any unrelated chat turn and the Agent re-read
+        the same shots again. Every resume therefore persists the fingerprint
+        of the gap it asked about plus the DONE set at that moment, and a
+        repeat is dropped while that fingerprint, the project generation and
+        the DONE set are all unchanged.
         """
 
         from .manual_regeneration_hold import ManualRegenerationHoldStore
@@ -8428,6 +8450,51 @@ class FileCreatorAgentRuntime:
                 separators=(",", ":"),
             ).encode("utf-8"),
         ).hexdigest()[:32]
+        # A human turn used to be a full reset. The fingerprint covers exactly
+        # the nodes/missing/errors this resume text asks about, so an identical
+        # fingerprint on an unchanged project generation means the previous
+        # instruction is still unanswered — re-sending it only burns model
+        # turns. Any real write bumps the generation, any gate change moves the
+        # fingerprint and any new DONE node counts as progress, so the
+        # suppression releases itself. Transient failures bypass it: their
+        # resume died before it could act.
+        if not after_failure:
+            latest_resume = None
+            spans_human_turn = False
+            for item in reversed(messages):
+                if item.role != "user":
+                    continue
+                if item.source in {
+                    self.YOLO_RESUME_SOURCE,
+                    self.PROMPT_CONTRACT_RESUME_SOURCE,
+                }:
+                    latest_resume = item
+                    break
+                if item.source in {
+                    self.MAINLINE_RESUME_SOURCE,
+                    NOTIFICATION_SOURCE,
+                }:
+                    continue
+                spans_human_turn = True
+            if spans_human_turn and latest_resume is not None:
+                previous_done = set(
+                    latest_resume.metadata.get("doneNodeIdsAtResume") or (),
+                )
+                if (
+                    latest_resume.source == active_resume_source
+                    and latest_resume.metadata.get("projectGeneration")
+                    == snapshot.generation
+                    and latest_resume.metadata.get("actionableFingerprint")
+                    == actionable_fingerprint
+                    and not completed_now - previous_done
+                ):
+                    logger.info(
+                        "%s skipped for %s: gap unchanged since message %s",
+                        active_resume_source,
+                        project_id,
+                        latest_resume.message_seq,
+                    )
+                    return
         unproductive_resumes = resume_streak
         no_progress = False
         if checkpoint_valid:
@@ -8510,6 +8577,16 @@ class FileCreatorAgentRuntime:
                     + "\nR2V prompt 由你直接负责；请只修复上述"
                     " Project 字段并重新核对，保留已经完成的工作。"
                 )
+        if any(node.prompt_sync_required for node in feedback_nodes):
+            # The plan/prompt gate only clears through a real text edit or an
+            # explicit keep-current decision. Without naming that decision the
+            # model can only re-read the same shots until the resume fuse
+            # trips.
+            text += (
+                "\n若你已核对某个镜头的叙述与提示词，确认现有提示词仍然准确、"
+                "无需改写，请调用 confirm_prompt_sync（stage 指定 storyboard 或 "
+                "video）记录该结论；不要反复 read_project 复核同一镜头。"
+            )
         message_source = (
             self.YOLO_RESUME_SOURCE
             if auto_approve
@@ -8534,6 +8611,8 @@ class FileCreatorAgentRuntime:
             metadata={
                 "resumeAfterRunId": run_id,
                 "projectGeneration": snapshot.generation,
+                "actionableFingerprint": actionable_fingerprint,
+                "doneNodeIdsAtResume": sorted(completed_now),
                 "unfinishedElements": unfinished,
                 "modelRequiredNodes": [
                     node.node_id for node in feedback_nodes[:12]
@@ -9638,6 +9717,43 @@ def _message_text(
 # changes to reconstruct current state. Durable Runtime history keeps every
 # original byte.
 _SNAPSHOT_SOURCE = "runtime_action_result"
+
+_TOOL_ECHO_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def tool_echo_receipt_enabled() -> bool:
+    """Whether a durable Project echo stores the bounded view, not the bytes.
+
+    Every ``read_project`` / ``jq_project`` / ``patch_project`` result used to
+    be appended verbatim, so the conversation kept every intermediate state of
+    the Project forever (observed: 96% of a 284 MB ``messages.jsonl``, and the
+    page reader paid it on every open).  Nothing the model can still be shown
+    depends on that surplus: the wire context and the rebuilt history already
+    collapse these records with :func:`project_snapshot_view` and receipts.
+
+    This changes what is *persisted*, so it needs an emergency switch: set
+    ``CREATOR_TOOL_ECHO_RECEIPT=0`` to go back to byte-for-byte retention.
+    """
+
+    raw = os.environ.get("CREATOR_TOOL_ECHO_RECEIPT", "")
+    return raw.strip().casefold() not in _TOOL_ECHO_DISABLED_VALUES
+
+
+def _durable_project_echo(
+    result: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """The Project snapshot exactly as durable conversation history keeps it.
+
+    The projection is the one the ephemeral wire context already builds for the
+    newest snapshot: frozen history timelines get indexed instead of copied, and
+    the payload stays bounded.  Identifiers the metadata column carries
+    (generation, etag, changedPointers) survive untouched, and a later snapshot
+    still collapses this record to a receipt when the model context is rebuilt.
+    """
+
+    if not tool_echo_receipt_enabled():
+        return result
+    return project_snapshot_view(result)
 
 
 @dataclass(frozen=True)

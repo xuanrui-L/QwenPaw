@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Interactive bundle assembly tests (branching deliverable, plan §2.7b)."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import hashlib
@@ -12,10 +14,15 @@ from datetime import datetime, timezone
 
 import pytest
 
+from api import interactive_bundle_routes as routes
+from domain.errors import ConflictError
 from services.media_files.interactive_bundle import (
     assemble_interactive_bundle,
     derive_interactive_manifest,
     InteractiveBundleError,
+    InteractiveBundlePlan,
+    plan_interactive_bundle,
+    write_interactive_bundle,
     PLAYER_HTML,
 )
 from services.project_files.models import (
@@ -605,3 +612,123 @@ def test_export_and_project_reject_foreign_edges_and_multiple_choices():
     raw["timelines"]["items"]["tl:ep3"]["elements_by_id"]["el:second"] = point
     with pytest.raises(ValueError, match="only one"):
         Project.model_validate(raw)
+
+
+def test_streamed_package_matches_the_in_memory_one() -> None:
+    """Streaming must not change the deliverable, only how it is held.
+
+    The export path pipes each Asset straight into the archive instead of
+    reading it whole; that is only safe while every member -- name, order,
+    bytes and compression -- stays identical to the in-memory assembler.
+    """
+
+    project, payloads = _branching_project()
+    _draft_presentation(project)
+    in_memory = assemble_interactive_bundle(
+        project,
+        read_artifact_file=payloads.__getitem__,
+    )
+
+    plan = plan_interactive_bundle(
+        project,
+        read_artifact_file=payloads.__getitem__,
+    )
+    streamed = io.BytesIO()
+    write_interactive_bundle(
+        plan,
+        streamed,
+        read_artifact_file=payloads.__getitem__,
+        copy_artifact_file=lambda file_id, sink: sink.write(payloads[file_id]),
+    )
+
+    with zipfile.ZipFile(io.BytesIO(in_memory)) as reference:
+        with zipfile.ZipFile(io.BytesIO(streamed.getvalue())) as actual:
+            assert reference.namelist() == actual.namelist()
+            for name in reference.namelist():
+                assert actual.read(name) == reference.read(name)
+                assert (
+                    actual.getinfo(name).compress_type
+                    == reference.getinfo(name).compress_type
+                )
+
+
+def _export_services(tmp_path):
+    from services.project_files.facade import CreatorFileServices
+
+    services = CreatorFileServices.create(tmp_path.resolve())
+    services.projects.create(Project.new(project_id="bundle", name="Bundle"))
+    return services
+
+
+def test_package_is_written_after_the_lifecycle_lock_is_released(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save must stay possible while a package is being streamed.
+
+    The probe re-enters the Project lock from the writer: if export ever
+    takes the lock back over the byte phase, this blocks on the lock's own
+    timeout and fails instead of quietly serializing every commit.
+    """
+
+    services = _export_services(tmp_path)
+    project = services.projects.read("bundle").project
+    plan = InteractiveBundlePlan(
+        payload={},
+        authored_html="",
+        segments=(),
+        cover_file_id=None,
+        cover_fallback_file_id=None,
+    )
+    reachables: list[bool] = []
+
+    def write_outside_lock(_plan, target, **_kwargs):
+        with services.projects.lifecycle_lock("bundle"):
+            reachables.append(True)
+        target.write(b"zip-bytes")
+
+    monkeypatch.setattr(routes, "_plan_locked", lambda *_args: (project, plan))
+    monkeypatch.setattr(routes, "write_interactive_bundle", write_outside_lock)
+
+    size, chunks = routes._assemble("bundle", services)
+
+    assert reachables == [True]
+    assert size == len(b"zip-bytes")
+    assert b"".join(chunks) == b"zip-bytes"
+
+
+def test_scratch_package_is_removed_on_both_paths(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The package on disk is scratch: drained or failed, nothing is left."""
+
+    services = _export_services(tmp_path)
+    project = services.projects.read("bundle").project
+    plan = InteractiveBundlePlan(
+        payload={},
+        authored_html="",
+        segments=(),
+        cover_file_id=None,
+        cover_fallback_file_id=None,
+    )
+    exports = services.projects.root / "exports"
+    monkeypatch.setattr(routes, "_plan_locked", lambda *_args: (project, plan))
+
+    def write_and_leave(_plan, target, **_kwargs):
+        target.write(b"complete-package")
+
+    monkeypatch.setattr(routes, "write_interactive_bundle", write_and_leave)
+    _size, chunks = routes._assemble("bundle", services)
+    assert list(exports.glob("*.zip"))
+    assert b"".join(chunks) == b"complete-package"
+    assert not list(exports.glob("*.zip"))
+
+    def write_then_fail(_plan, target, **_kwargs):
+        target.write(b"partial")
+        raise InteractiveBundleError("segment file is missing")
+
+    monkeypatch.setattr(routes, "write_interactive_bundle", write_then_fail)
+    with pytest.raises(ConflictError, match="segment file is missing"):
+        routes._assemble("bundle", services)
+    assert not list(exports.glob("*.zip"))

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 import json
 import logging
@@ -345,6 +346,7 @@ class DurableJsonlStore(Generic[T]):
         after_seq: int,
         *,
         limit: int | None = None,
+        where: Callable[[T], bool] | None = None,
     ) -> list[T]:
         """Return records with ``seq > after_seq`` without scanning the head.
 
@@ -357,11 +359,12 @@ class DurableJsonlStore(Generic[T]):
         repaired by the next locked append.
 
         Seq contiguity is validated over the returned range.  ``limit`` caps
-        the count from the tail.
+        the count from the tail.  ``where`` filters after that validation, so
+        a filtered page cannot hide a gap in the durable stream.
         """
         if after_seq < 0:
             after_seq = 0
-        if after_seq == 0 and limit is None:
+        if after_seq == 0 and limit is None and where is None:
             envelopes, _durable, _torn_tail = self._scan_bytes(
                 self._read_bytes_unlocked(),
             )
@@ -369,11 +372,94 @@ class DurableJsonlStore(Generic[T]):
                 self._validate_record(e.record, line_number=e.seq)
                 for e in envelopes
             ]
-        envelopes = self._read_envelopes_after_unlocked(after_seq, limit)
-        return [
-            self._validate_record(e.record, line_number=e.seq)
+        envelopes = self._read_envelopes_after_unlocked(after_seq, None)
+        records = [
+            cast(T, self._validate_record(e.record, line_number=e.seq))
             for e in envelopes
         ]
+        if where is not None:
+            records = [record for record in records if where(record)]
+        return records[:limit] if limit is not None else records
+
+    def read_tail(
+        self,
+        limit: int,
+        *,
+        where: Callable[[T], bool] | None = None,
+        max_scan: int | None = None,
+    ) -> list[T]:
+        """Return the last *limit* records, oldest-first, without a full scan.
+
+        Paging backwards used to read the whole stream because the only
+        available cursor stopped at a caller-supplied ``seq`` and a page open
+        passed no lower bound at all. This walks backwards from EOF and stops
+        as soon as the window is full, so opening a filtered page costs what it
+        reads instead of the session's entire history.
+
+        ``limit`` caps what is returned, which is not what caps the work: a
+        ``where`` that matches rarely still walks back to the start of the
+        stream. ``max_scan`` bounds the lines actually read so a caller that
+        asks a tail question can afford to be told "not in the tail" and take
+        an explicit fallback, instead of paying a full scan for a miss.
+
+        Seq contiguity is checked over the scanned range *before* ``where``
+        filters, so a gap inside the window is still reported; a gap older than
+        the window is simply never read, which is the accepted trade of a
+        bounded page. A malformed line falls back to the authoritative full
+        scan so diagnostics stay exact rather than silently skipping history.
+        """
+        if limit < 1:
+            raise ValueError("JSONL page limit must be positive")
+        collected: list[T] = []
+        expected: int | None = None
+        scanned = 0
+        for raw in self._iter_complete_lines_reverse():  # newest-first
+            scanned += 1
+            try:
+                envelope = JsonlEnvelope.model_validate(
+                    strict_json_loads(raw),
+                )
+                record = cast(
+                    T,
+                    self._validate_record(
+                        envelope.record,
+                        line_number=envelope.seq,
+                    ),
+                )
+            except (
+                UnicodeDecodeError,
+                ValueError,
+                PydanticValidationError,
+                JsonlCorruptionError,
+            ):
+                return self._tail_fallback(limit, where)
+            if expected is not None and envelope.seq != expected:
+                return self._tail_fallback(limit, where)
+            expected = envelope.seq - 1
+            if where is None or where(record):
+                collected.append(record)
+                if len(collected) >= limit:
+                    break
+            if max_scan is not None and scanned >= max_scan:
+                break
+        collected.reverse()
+        return collected
+
+    def _tail_fallback(
+        self,
+        limit: int,
+        where: Callable[[T], bool] | None,
+    ) -> list[T]:
+        envelopes, _durable, _torn = self._scan_bytes(
+            self._read_bytes_unlocked(),
+        )
+        records = [
+            cast(T, self._validate_record(e.record, line_number=e.seq))
+            for e in envelopes
+        ]
+        if where is not None:
+            records = [record for record in records if where(record)]
+        return records[-limit:]
 
     def _iter_complete_lines_reverse(self) -> Iterator[bytes]:
         """Yield complete lines newest-first, dropping any trailing torn fragment.

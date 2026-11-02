@@ -456,6 +456,7 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
         started = asyncio.Event()
         release = asyncio.Event()
         calls: list[tuple[str, str]] = []
+        prechecks: list[dict] = []
 
         async def fake_execute(
             _services,
@@ -478,7 +479,7 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
         )
         monkeypatch.setattr(
             "services.media_files.local_execution.validate_local_media_execution",
-            lambda *_args, **_kwargs: None,
+            lambda _services, **kwargs: prechecks.append(kwargs),
         )
 
         first = await client.post(
@@ -492,9 +493,9 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
         )
         release.set()
         await asyncio.sleep(0)
-        return first, second, calls
+        return first, second, calls, prechecks
 
-    first, second, calls = run_scenario(app, scenario)
+    first, second, calls, prechecks = run_scenario(app, scenario)
     assert first.status_code == 202
     assert first.json()["taskId"] == "task-compose-1"
     assert first.json()["replayed"] is False
@@ -502,6 +503,12 @@ def test_timeline_render_dispatches_once_and_returns_before_completion(
     assert second.json()["taskId"] == "task-compose-1"
     assert second.json()["replayed"] is True
     assert calls == [("project-1", "timeline:timeline:main")]
+    # The precheck must not enforce the scene gate: stale locks are
+    # repaired by the auto-rereview inside the dispatch it precedes.
+    assert prechecks
+    assert all(
+        precheck["enforce_scene_gate"] is False for precheck in prechecks
+    )
 
 
 def test_file_execution_authorization_can_be_polled_and_approved(

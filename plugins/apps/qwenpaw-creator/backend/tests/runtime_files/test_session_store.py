@@ -22,6 +22,7 @@ from services.runtime_files import (
     RuntimeProjectState,
     SessionStateConflict,
 )
+from services.runtime_files.jsonl_store import DurableJsonlStore
 
 pytestmark = pytest.mark.unit
 
@@ -526,3 +527,136 @@ def test_restart_repairs_heads_and_restores_missing_boundary(tmp_path):
     assert replay.replayed is True
     assert replay.review_boundary == admitted.review_boundary
     assert next_message.message_seq == 3
+
+
+def _spy_full_reads(monkeypatch) -> list[str]:
+    """Record whole-stream reads, so a paging test can prove it skipped one."""
+
+    reads: list[str] = []
+    original = DurableJsonlStore._read_bytes_unlocked
+
+    def spy(self):  # type: ignore[no-untyped-def]
+        reads.append(self.path.name)
+        return original(self)
+
+    monkeypatch.setattr(DurableJsonlStore, "_read_bytes_unlocked", spy)
+    return reads
+
+
+def test_list_recent_messages_reads_only_the_tail_window(
+    tmp_path,
+    monkeypatch,
+):
+    # Opening a conversation asks for the newest handful. This used to parse
+    # every message the session ever wrote and slice in Python, which on a long
+    # session cost hundreds of MB per page.
+    _, _, store, _ = _runtime(tmp_path)
+    for index in range(30):
+        _append(store, "user", f"message {index}")
+    reads = _spy_full_reads(monkeypatch)
+
+    page = store.list_recent_messages(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=5,
+        conversation_id=CONVERSATION_ID,
+    )
+
+    assert [item.message_seq for item in page] == [26, 27, 28, 29, 30]
+    assert not reads
+
+
+def test_list_recent_messages_pages_backwards_from_a_cursor(tmp_path):
+    _, _, store, _ = _runtime(tmp_path)
+    for index in range(30):
+        _append(store, "user", f"message {index}")
+
+    older = store.list_recent_messages(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=5,
+        conversation_id=CONVERSATION_ID,
+        before_seq=26,
+    )
+
+    assert [item.message_seq for item in older] == [21, 22, 23, 24, 25]
+
+
+def test_list_recent_messages_filters_conversation_while_scanning(tmp_path):
+    # The conversation filter has to live in the scan: a page of one
+    # conversation must not be truncated by newer messages of another.
+    _, _, store, _ = _runtime(tmp_path)
+    other = store.create_conversation(
+        PROJECT_ID,
+        SESSION_ID,
+        conversation_id="conversation-2",
+        title="Other",
+    )
+    for index in range(4):
+        _append(store, "user", f"first {index}")
+        store.append_message(
+            PROJECT_ID,
+            SESSION_ID,
+            other.conversation_id,
+            role="user",
+            content_parts=_text(f"second {index}"),
+        )
+
+    page = store.list_recent_messages(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=3,
+        conversation_id=CONVERSATION_ID,
+    )
+
+    # Sequences 1, 3, 5, 7 belong to the default conversation.
+    assert [item.message_seq for item in page] == [3, 5, 7]
+    assert {item.conversation_id for item in page} == {CONVERSATION_ID}
+
+
+def test_list_recent_events_finds_the_admission_in_the_tail_window(
+    tmp_path,
+    monkeypatch,
+):
+    _, _, store, _ = _runtime(tmp_path)
+    admitted = _admit(store, "request-tail")
+    store.append_event(
+        PROJECT_ID,
+        SESSION_ID,
+        event_type="message.accepted",
+        actor="user",
+        message_id=admitted.message.message_id,
+    )
+    for index in range(40):
+        store.append_event(
+            PROJECT_ID,
+            SESSION_ID,
+            event_type="task.progress_updated",
+            payload={"index": index},
+        )
+    reads = _spy_full_reads(monkeypatch)
+
+    found = store.list_recent_events(
+        PROJECT_ID,
+        SESSION_ID,
+        limit=1,
+        event_type="message.accepted",
+        message_id=admitted.message.message_id,
+        max_scan=200,
+    )
+
+    assert [item.message_id for item in found] == [admitted.message.message_id]
+    # A window too small answers "not in the tail" rather than walking back to
+    # the head: the send route turns that into an explicit full-scan fallback.
+    assert (
+        store.list_recent_events(
+            PROJECT_ID,
+            SESSION_ID,
+            limit=1,
+            event_type="message.accepted",
+            message_id=admitted.message.message_id,
+            max_scan=5,
+        )
+        == []
+    )
+    assert not reads

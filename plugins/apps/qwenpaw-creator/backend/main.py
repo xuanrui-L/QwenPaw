@@ -51,11 +51,14 @@ from services.media_files.motion_engine import ensure_vendor_libs  # noqa: E402
 from services.media_files.task_scratch import (
     release_orphaned_scratch,
 )  # noqa: E402
-from services.observability import trace_event  # noqa: E402
+from services.observability import mem_probe, trace_event  # noqa: E402
 from services.project_files.facade import (  # noqa: E402
     CreatorFileServices,
     clear_creator_file_service_registry,
     creator_file_services,
+)
+from services.project_files.transaction_gc import (  # noqa: E402
+    collect_terminal_transactions,
 )
 from services.runtime_files.runtime_dependencies import (  # noqa: E402
     CreatorBinaryDependencyError,
@@ -179,13 +182,41 @@ async def _sweep_orphaned_scratch(services: CreatorFileServices) -> None:
         )
 
 
+async def _collect_settled_transactions(services: CreatorFileServices) -> None:
+    """Drop commit history no reader can use, without gating startup.
+
+    Runs after the scratch sweep, which stamps the reclaim baseline this sweep
+    measures against. Recovery has already reconciled every journal by now, so
+    anything still non-terminal is a transaction the next commit must see.
+    """
+
+    try:
+        sweep = await asyncio.to_thread(
+            collect_terminal_transactions,
+            services,
+        )
+    except Exception:  # noqa: BLE001 - cleanup must never gate startup
+        logger.warning("terminal transaction sweep failed", exc_info=True)
+        return
+    if sweep.removed_transactions:
+        logger.info(
+            "terminal transactions released: projects=%s swept=%s "
+            "transactions=%s bytes=%s",
+            sweep.projects,
+            sweep.swept_projects,
+            sweep.removed_transactions,
+            sweep.removed_bytes,
+        )
+
+
 @app.hook("startup", priority=90)
-async def _startup() -> None:
+async def _startup() -> None:  # pylint: disable=too-many-statements
     global _file_services
     try:
         configure_creator_runtime_environment()
         data_root = require_creator_data_root()
         log_path = configure_creator_file_logging(data_root)
+        mem_probe.start_probe(data_root)
         trace_event(
             "creator.runtime.starting",
             component="pawapp",
@@ -204,6 +235,7 @@ async def _startup() -> None:
             services,
         )
         reset_remote_ingest_admission()
+        mem_probe.stage("runtime.prepared")
     except (CreatorDataRootError, CreatorBinaryDependencyError) as exc:
         trace_event(
             "creator.runtime.startup_failed",
@@ -254,6 +286,7 @@ async def _startup() -> None:
     _file_services = services
     logger.info("QwenPaw Creator file runtime ready at %s", data_root)
     await _sweep_orphaned_scratch(services)
+    await _collect_settled_transactions(services)
     # Loud, not silent: explicitly set review env vars take full control
     # and the settings-center toggles are ignored — a field incident had
     # review running with the UI switched off because a stale env stayed
@@ -339,7 +372,10 @@ async def _shutdown() -> None:
         try:
             await drain_timeline_render_jobs()
         finally:
-            await _shutdown_file_runtime()
+            try:
+                await _shutdown_file_runtime()
+            finally:
+                mem_probe.stop_probe()
 
 
 async def _shutdown_file_runtime() -> None:

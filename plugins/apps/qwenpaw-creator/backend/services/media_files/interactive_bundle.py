@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import io
 import base64
+from dataclasses import dataclass
 from pathlib import Path
 import json
 import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from typing import Any
+from typing import Any, BinaryIO
 
 from services.project_files.models import (
     narrative_timeline_ids,
@@ -443,21 +444,30 @@ html,body,#player{margin:0;width:100%;height:100%;overflow:hidden}
 </body></html>"""
 
 
-def assemble_interactive_bundle(
+@dataclass(frozen=True)
+class InteractiveBundlePlan:
+    """The bundle decided from one Project snapshot, before any media is read.
+
+    Planning is what has to run under the Project lifecycle lock: it reads
+    project state and the small authored documents. Writing only streams
+    already-named media into the archive, so it may run after the lock is
+    released -- a concurrent edit cannot silently change what ships, because
+    every streamed file is re-verified against its recorded checksum.
+    """
+
+    payload: dict[str, Any]
+    authored_html: str
+    segments: tuple[tuple[str, str], ...]
+    cover_file_id: str | None
+    cover_fallback_file_id: str | None
+
+
+def plan_interactive_bundle(
     project: Project,
     *,
     read_artifact_file: Callable[[str], bytes],
-) -> bytes:
-    """Build the distributable zip.
-
-    ``read_artifact_file`` maps an ArtifactVersion ``file_id`` to raw bytes so
-    this module stays storage-agnostic (the caller owns the assets root).
-
-    The whole-piece ``cover.jpg`` comes from the cover stored on the project
-    (generated in-flow by the cover task); when none is present yet we fall
-    back to a frame from the entry segment so the bundle still ships a cover
-    for the platform, which cannot grab one at runtime.
-    """
+) -> InteractiveBundlePlan:
+    """Validate the project and decide every bundle entry from the snapshot."""
 
     from .presentation_authoring import presentation_is_current
     from services.project_files.presentation_html import (
@@ -548,10 +558,17 @@ def assemble_interactive_bundle(
                 raise InteractiveBundleError(
                     "invalid interaction motion: " + "; ".join(problems),
                 )
-    runtime = (
-        Path(__file__).resolve().parents[3]
-        / "player/ivb/static/interaction-runtime.js"
-    ).read_text(encoding="utf-8")
+
+    segments: list[tuple[str, str]] = []
+    for timeline_id, ref in manifest.segments.items():
+        version_id = ref.removeprefix("artifact-version:")
+        version = project.assets.artifact_versions_by_id.get(version_id)
+        if version is None:
+            raise InteractiveBundleError(
+                f"segment version {version_id!r} " "is not in the asset index",
+            )
+        segments.append((payload["segments"][timeline_id], version.file_id))
+
     import hashlib
 
     payload["content_revision"] = hashlib.sha256(
@@ -568,12 +585,67 @@ def assemble_interactive_bundle(
             sort_keys=True,
         ).encode(),
     ).hexdigest()
+    cover_file_id, cover_fallback_file_id = _plan_cover_source(
+        project,
+        manifest,
+    )
+    return InteractiveBundlePlan(
+        payload=payload,
+        authored_html=authored_html,
+        segments=tuple(segments),
+        cover_file_id=cover_file_id,
+        cover_fallback_file_id=cover_fallback_file_id,
+    )
+
+
+def _plan_cover_source(
+    project: Project,
+    manifest: InteractiveManifest,
+) -> tuple[str | None, str | None]:
+    """Name the two cover candidates, in priority order.
+
+    Only the choice moves here. The writer still decides: a stored poster that
+    is missing, unreadable or empty yields to a frame from the entry segment.
+    """
+
+    entry_ref = manifest.segments.get(manifest.entry_timeline_id)
+    fallback_file_id: str | None = None
+    if entry_ref:
+        version = project.assets.artifact_versions_by_id.get(
+            entry_ref.removeprefix("artifact-version:"),
+        )
+        fallback_file_id = version.file_id if version else None
+    return (
+        project.interactive_presentation.cover_file_id or None,
+        fallback_file_id,
+    )
+
+
+def write_interactive_bundle(
+    plan: InteractiveBundlePlan,
+    target: BinaryIO,
+    *,
+    read_artifact_file: Callable[[str], bytes],
+    copy_artifact_file: Callable[[str, BinaryIO], None] | None = None,
+) -> None:
+    """Stream one planned bundle into *target*.
+
+    ``copy_artifact_file`` lets the caller pipe one media file straight into
+    the archive; without it the member is materialized through
+    ``read_artifact_file``. The distinction is what keeps a multi-branch
+    export's peak at one segment instead of the whole package.
+    """
+
+    payload = plan.payload
+    runtime = (
+        Path(__file__).resolve().parents[3]
+        / "player/ivb/static/interaction-runtime.js"
+    ).read_text(encoding="utf-8")
     authored_runtime = (
         Path(__file__).resolve().parents[3]
         / "player/ivb/static/authored-player.js"
     ).read_text(encoding="utf-8")
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
         bundle.writestr(
             "index.html",
             PLAYER_HTML.replace("__INTERACTION_RUNTIME__", runtime)
@@ -600,49 +672,83 @@ def assemble_interactive_bundle(
                 indent=2,
             ),
         )
-        bundle.writestr("presentation.html", authored_html)
-        for timeline_id, ref in manifest.segments.items():
-            version_id = ref.removeprefix("artifact-version:")
-            version = project.assets.artifact_versions_by_id.get(version_id)
-            if version is None:
-                raise InteractiveBundleError(
-                    f"segment version {version_id!r} "
-                    "is not in the asset index",
-                )
-            bundle.writestr(
-                payload["segments"][timeline_id],
-                read_artifact_file(version.file_id),
+        bundle.writestr("presentation.html", plan.authored_html)
+        for zip_name, file_id in plan.segments:
+            _put_media(
+                bundle,
+                zip_name,
+                file_id,
+                read_artifact_file,
+                copy_artifact_file,
             )
-        _write_cover(
-            bundle,
-            project,
-            manifest,
-            read_artifact_file,
-        )
+        _write_cover(bundle, plan, read_artifact_file)
+
+
+def _put_media(
+    bundle: zipfile.ZipFile,
+    zip_name: str,
+    file_id: str,
+    read_artifact_file: Callable[[str], bytes],
+    copy_artifact_file: Callable[[str, BinaryIO], None] | None,
+) -> None:
+    if copy_artifact_file is None:
+        bundle.writestr(zip_name, read_artifact_file(file_id))
+        return
+    with bundle.open(zip_name, "w", force_zip64=True) as entry:
+        copy_artifact_file(file_id, entry)
+
+
+def assemble_interactive_bundle(
+    project: Project,
+    *,
+    read_artifact_file: Callable[[str], bytes],
+) -> bytes:
+    """Build the distributable zip in memory.
+
+    ``read_artifact_file`` maps an ArtifactVersion ``file_id`` to raw bytes so
+    this module stays storage-agnostic (the caller owns the assets root).
+
+    Export routes should prefer ``plan_interactive_bundle`` plus
+    ``write_interactive_bundle`` with a streaming copier: this wrapper holds
+    the whole package, which a large multi-branch project cannot afford.
+    """
+
+    plan = plan_interactive_bundle(
+        project,
+        read_artifact_file=read_artifact_file,
+    )
+    buffer = io.BytesIO()
+    write_interactive_bundle(
+        plan,
+        buffer,
+        read_artifact_file=read_artifact_file,
+    )
     return buffer.getvalue()
 
 
 def _write_cover(
     bundle: zipfile.ZipFile,
-    project: Project,
-    manifest: InteractiveManifest,
+    plan: InteractiveBundlePlan,
     read_artifact_file: Callable[[str], bytes],
 ) -> None:
-    """Ship ``cover.jpg``: the stored poster, else an entry-segment frame."""
+    """Ship ``cover.jpg``: the stored poster, else an entry-segment frame.
+
+    Always materialized: a poster is one small still, and the frame fallback
+    has to hand ffmpeg the cut anyway. Streaming it into the archive would
+    only defer the same peak, not remove it.
+    """
 
     from .cover_generation import COVER_FILENAME, poster_frame_from_video
 
     cover: bytes | None = None
-    cover_file_id = project.interactive_presentation.cover_file_id
-    if cover_file_id:
+    if plan.cover_file_id:
         try:
-            cover = read_artifact_file(cover_file_id)
+            cover = read_artifact_file(plan.cover_file_id)
         except InteractiveBundleError:
             cover = None
     if not cover:
         cover = _entry_cover_fallback(
-            project,
-            manifest,
+            plan,
             read_artifact_file,
             poster_frame_from_video,
         )
@@ -651,22 +757,17 @@ def _write_cover(
 
 
 def _entry_cover_fallback(
-    project: Project,
-    manifest: InteractiveManifest,
+    plan: InteractiveBundlePlan,
     read_artifact_file: Callable[[str], bytes],
     poster_frame_from_video: Callable[[bytes], bytes | None],
 ) -> bytes | None:
     """Pull one frame from the entry segment's final cut as a cover."""
 
-    entry_ref = manifest.segments.get(manifest.entry_timeline_id)
-    if not entry_ref:
-        return None
-    version = project.assets.artifact_versions_by_id.get(
-        entry_ref.removeprefix("artifact-version:"),
-    )
-    if version is None:
+    if plan.cover_fallback_file_id is None:
         return None
     try:
-        return poster_frame_from_video(read_artifact_file(version.file_id))
+        return poster_frame_from_video(
+            read_artifact_file(plan.cover_fallback_file_id),
+        )
     except InteractiveBundleError:
         return None
