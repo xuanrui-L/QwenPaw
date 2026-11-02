@@ -94,6 +94,16 @@ def audit_ledger_enabled() -> bool:
     return raw.casefold() not in _DISABLED_VALUES
 
 
+_LIGHT_TERMINAL_ENV = "CREATOR_RECOVERY_LIGHT_TERMINAL"
+
+
+def light_terminal_audit_enabled() -> bool:
+    """Whether a terminal entry may be decided without reading its snapshots."""
+
+    raw = os.environ.get(_LIGHT_TERMINAL_ENV, "").strip()
+    return raw.casefold() not in _DISABLED_VALUES
+
+
 def _audit_fingerprint(transaction_root: Path) -> dict[str, Any]:
     """Size and mtime of every frozen file, journal included.
 
@@ -238,6 +248,10 @@ class ProjectCommitRecoveryCoordinator:
         # ledger for every entry turned the fast path quadratic (42 s).
         self._ledger_tables: dict[str, dict[str, Any]] = {}
         self._ledger_dirty: set[str] = set()
+        # Recovery never rewrites project.json, yet the full audit re-read and
+        # re-validated the live document once per transaction entry: hundreds
+        # of identical 8 MB parses per Project per boot.
+        self._current_cache: dict[str, ProjectSnapshot] = {}
 
     def recover_project(
         self,
@@ -426,6 +440,142 @@ class ProjectCommitRecoveryCoordinator:
                 store.path,
             )
 
+    def _current_snapshot(self, project_id: str) -> ProjectSnapshot:
+        """The live Project, read once per pass per Project."""
+
+        cached = self._current_cache.get(project_id)
+        if cached is None:
+            cached = self.store.read(project_id)
+            self._current_cache[project_id] = cached
+        return cached
+
+    def _audit_terminal_inputs(
+        self,
+        project_id: str,
+        runtime_root: Path,
+        transaction_root: Path,
+        journal: ProjectCommitJournal,
+    ) -> TransactionRecoveryOutcome | None:
+        """Decide a terminal entry from its small Runtime facts alone.
+
+        A terminal transaction publishes nothing, and whether it still needs
+        a repair is provable from journal + Round + ChangeSet + state, all
+        small files.  The frozen Project snapshots therefore stay unread on
+        the common path: reading them cost a deepcopy, a migration and an
+        ETag derivation per entry per boot.  Anything this cannot prove
+        returns ``None`` and the caller runs the full audit, so the only
+        signals lost are log-only alarms about snapshot bytes a terminal
+        entry no longer acts on.
+        """
+
+        if journal.state is CommitJournalState.ABORTED:
+            return TransactionRecoveryOutcome(
+                transaction_id=journal.transaction_id,
+                action=RecoveryAction.SKIPPED_ABORTED,
+                state_before=journal.state,
+                state_after=journal.state,
+            )
+        if journal.state is not CommitJournalState.RUNTIME_FINALIZED:
+            # PROJECT_REPLACED still promotes its journal and republishes
+            # Runtime facts; PREPARED is live.  Both keep the full audit.
+            return None
+        if not journal.final_etag:
+            raise _IntegrityProblem(
+                "RUNTIME_FINALIZED journal has no final_etag",
+            )
+        transaction_round = _read_optional_snapshot(
+            AtomicJsonRecordStore(
+                transaction_root / "round.json",
+                ChangeRoundRecord,
+            ),
+        )
+        aggregate_round = _read_optional_snapshot(
+            AtomicJsonRecordStore(
+                runtime_root
+                / "change-rounds"
+                / journal.round_id
+                / "round.json",
+                ChangeRoundRecord,
+            ),
+        )
+        if aggregate_round is None or transaction_round is None:
+            # A missing aggregate is either an integrity error or the narrow
+            # PREPARED recreate window; both belong to the full audit.
+            return None
+        round_record = transaction_round.value
+        if (
+            round_record.round_id != journal.round_id
+            or round_record.project_id != project_id
+        ):
+            raise _IntegrityProblem(
+                "ChangeRound identity does not match journal",
+            )
+        try:
+            _validate_same_round(aggregate_round.value, round_record)
+        except Exception as exc:
+            raise _IntegrityProblem(
+                "aggregate ChangeRound provenance conflicts with transaction",
+            ) from exc
+        changeset = AtomicJsonRecordStore(
+            transaction_root / "changeset.json",
+            RuntimeChangeSet,
+        ).read_or_none()
+        state = AtomicJsonRecordStore(
+            self.store.project_root(project_id) / "runtime" / "state.json",
+            RuntimeProjectState,
+        ).read_or_none()
+        if changeset is None or state is None:
+            return None
+        _validate_changeset_provenance(changeset, round_record, journal)
+        expected_round_status = _terminal_round_status(
+            round_record,
+            has_changes=bool(changeset.changes),
+        )
+        if (
+            round_record.review_policy is ReviewPolicy.REQUIRE_REVIEW
+            and round_record.status is TransactionStatus.COMMITTED
+            and state.active_round_id != round_record.round_id
+            and state.accepted_generation >= changeset.final_generation
+        ):
+            expected_round_status = TransactionStatus.COMMITTED
+        if round_record.status is not expected_round_status:
+            return None
+        if state.project_id != journal.project_id:
+            raise _IntegrityProblem(
+                "RuntimeProjectState belongs to another Project",
+            )
+        if state.last_project_generation < changeset.final_generation:
+            return None
+        if (
+            state.last_project_generation == changeset.final_generation
+            and state.last_project_etag != changeset.final_etag
+        ):
+            raise _IntegrityProblem(
+                "RuntimeProjectState final ETag conflicts with ChangeSet",
+            )
+        current = self._current_snapshot(project_id)
+        if (
+            current.generation == state.last_project_generation
+            and current.etag != state.last_project_etag
+        ):
+            raise _IntegrityProblem(
+                "RuntimeProjectState conflicts with current Project",
+            )
+        if (
+            round_record.review_policy is ReviewPolicy.REQUIRE_REVIEW
+            and changeset.changes
+            and round_record.status is TransactionStatus.PENDING_REVIEW
+        ):
+            # Proving the Review consistent needs the recovered business
+            # changes, i.e. the snapshots this path exists to leave unread.
+            return None
+        return TransactionRecoveryOutcome(
+            transaction_id=journal.transaction_id,
+            action=RecoveryAction.ALREADY_FINALIZED,
+            state_before=journal.state,
+            state_after=journal.state,
+        )
+
     def _recover_entry(
         self,
         project_id: str,
@@ -474,6 +624,19 @@ class ProjectCommitRecoveryCoordinator:
             )
             probe_snapshot = probe_store.read_snapshot()
             probe_journal = probe_snapshot.value
+            if light_terminal_audit_enabled():
+                light = self._audit_terminal_inputs(
+                    project_id,
+                    runtime_root,
+                    transaction_root,
+                    probe_journal,
+                )
+                if light is not None:
+                    return self._ledger_record(
+                        runtime_root,
+                        transaction_root,
+                        light,
+                    )
             if probe_journal.state in (
                 CommitJournalState.ABORTED,
                 CommitJournalState.PROJECT_REPLACED,
@@ -566,7 +729,7 @@ class ProjectCommitRecoveryCoordinator:
                     ),
                 )
 
-            current = self.store.read(project_id)
+            current = self._current_snapshot(project_id)
             if state_before is CommitJournalState.PREPARED:
                 if inputs.journal.final_etag is None:
                     return self._abort_unpublished(inputs)
@@ -1701,24 +1864,39 @@ def _same_changeset(left: RuntimeChangeSet, right: RuntimeChangeSet) -> bool:
     return left_data == right_data
 
 
-def _validate_changeset_identity(
+def _validate_changeset_provenance(
     changeset: RuntimeChangeSet,
-    inputs: _RecoveryInputs,
+    round_record: ChangeRoundRecord,
+    journal: ProjectCommitJournal,
 ) -> None:
+    """The ChangeSet's own fields against the journal and Round, no snapshots."""
+
     if (
-        changeset.round_id != inputs.round_record.round_id
-        or changeset.project_id != inputs.journal.project_id
-        or changeset.origin is not inputs.round_record.origin
-        or changeset.review_policy is not inputs.round_record.review_policy
-        or changeset.caused_by_request_id
-        != inputs.round_record.caused_by_request_id
+        changeset.round_id != round_record.round_id
+        or changeset.project_id != journal.project_id
+        or changeset.origin is not round_record.origin
+        or changeset.review_policy is not round_record.review_policy
+        or changeset.caused_by_request_id != round_record.caused_by_request_id
         or changeset.caused_by_message_seq
-        != inputs.round_record.caused_by_message_seq
-        or changeset.final_etag != inputs.journal.final_etag
+        != round_record.caused_by_message_seq
+        or changeset.final_etag != journal.final_etag
     ):
         raise _IntegrityProblem(
             "ChangeSet identity/provenance conflicts with journal",
         )
+    if not changeset.changes and changeset.base_etag != changeset.final_etag:
+        raise _IntegrityProblem("no-change ChangeSet must use one ETag")
+
+
+def _validate_changeset_identity(
+    changeset: RuntimeChangeSet,
+    inputs: _RecoveryInputs,
+) -> None:
+    _validate_changeset_provenance(
+        changeset,
+        inputs.round_record,
+        inputs.journal,
+    )
     if changeset.changes:
         # A stale but field-disjoint candidate may have been merged onto a
         # newer pre-publish Project.  The journal's base_etag is the caller's
@@ -1734,8 +1912,6 @@ def _validate_changeset_identity(
             raise _IntegrityProblem(
                 "ChangeSet base ETag conflicts with prepared publication",
             )
-    elif changeset.base_etag != changeset.final_etag:
-        raise _IntegrityProblem("no-change ChangeSet must use one ETag")
 
 
 def _same_project_changes(

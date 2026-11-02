@@ -957,8 +957,9 @@ def test_legacy_schema_transaction_recovers_without_fail_closing(
 def _spy_load_inputs(monkeypatch, calls):
     from services.project_files import recovery as recovery_module
 
-    original = (  # pylint: disable=protected-access
-        recovery_module.ProjectCommitRecoveryCoordinator._load_inputs
+    original = getattr(
+        recovery_module.ProjectCommitRecoveryCoordinator,
+        "_load_inputs",
     )
 
     def spy(self, *args, **kwargs):
@@ -993,6 +994,7 @@ def test_a_second_boot_reuses_the_audit_ledger(tmp_path, monkeypatch):
     diffs and ETags for 236 seconds at every boot, publishing nothing.
     """
 
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
     store = _finalized_store(tmp_path)
     calls: list = []
     _spy_load_inputs(monkeypatch, calls)
@@ -1014,6 +1016,7 @@ def test_a_moved_snapshot_invalidates_the_ledger(tmp_path, monkeypatch):
 
     import os
 
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
     store = _finalized_store(tmp_path)
     calls: list = []
     _spy_load_inputs(monkeypatch, calls)
@@ -1031,6 +1034,7 @@ def test_a_moved_snapshot_invalidates_the_ledger(tmp_path, monkeypatch):
 
 def test_the_ledger_can_be_switched_off(tmp_path, monkeypatch):
     monkeypatch.setenv("CREATOR_RECOVERY_AUDIT_LEDGER", "0")
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
     store = _finalized_store(tmp_path)
     calls: list = []
     _spy_load_inputs(monkeypatch, calls)
@@ -1040,3 +1044,55 @@ def test_the_ledger_can_be_switched_off(tmp_path, monkeypatch):
     recover(store)
 
     assert calls, "with the ledger off every boot audits in full"
+
+
+def test_a_terminal_entry_is_decided_without_its_snapshots(
+    tmp_path,
+    monkeypatch,
+):
+    """The first boot pays stats and small Runtime facts, not 8 MB deepcopies.
+
+    The ledger only helps the second boot; the imported Project's first boot
+    after a copy is the one people wait minutes for.
+    """
+
+    store = _finalized_store(tmp_path)
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+
+    report = recover(store)
+
+    assert not calls
+    assert report.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+
+def test_incomplete_runtime_metadata_still_falls_through_to_repair(
+    tmp_path,
+    monkeypatch,
+):
+    """What the light audit cannot prove belongs to the full audit."""
+
+    store = _finalized_store(tmp_path)
+    (transaction_root(store, "tx-ledger") / "changeset.json").unlink()
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+
+    report = recover(store)
+
+    assert calls, "a missing ChangeSet must defer to the full audit"
+    action = report.outcomes[0].action
+    assert action is RecoveryAction.REPAIRED_FINALIZED_RUNTIME
+
+
+def test_the_light_terminal_audit_can_be_switched_off(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("CREATOR_RECOVERY_LIGHT_TERMINAL", "0")
+    store = _finalized_store(tmp_path)
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+
+    recover(store)
+
+    assert calls, "with the light audit off the first boot audits in full"
