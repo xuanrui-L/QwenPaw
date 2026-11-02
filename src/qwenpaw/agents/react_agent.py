@@ -31,7 +31,10 @@ from agentscope.state import AgentState
 from agentscope.tool import Toolkit
 
 from .context.base import ContextManager
-from .context.overflow_recovery import call_with_overflow_recovery
+from .context.overflow_recovery import (
+    call_with_overflow_recovery,
+    is_context_overflow_error,
+)
 from .skill_system import get_workspace_skills_dir
 from .utils.image_freezing import freeze_local_images_async
 from .utils.message_request_normalizer import _is_media_block
@@ -639,48 +642,11 @@ class QwenPawAgent(CodingModeMixin, Agent):
     def _is_context_overflow_error(exc: Exception) -> bool:
         """Return whether *exc* is a provider 400 for an oversized input.
 
-        A bare 400 is deliberately insufficient: malformed tool schemas,
-        unsupported parameters, and media errors must keep their existing
-        handling.  Prefer the structured status code when the SDK exposes it,
-        with the rendered exception as a compatibility fallback for gateways
-        that wrap the original response.
+        The classification lives with the recovery boundary it feeds, so a
+        runtime recovering from the same refusal cannot drift to a second
+        set of markers.
         """
-        status = extract_status_code(exc)
-        error_str = str(exc).lower()
-        if status != 400 and "error code: 400" not in error_str:
-            return False
-
-        overflow_markers = (
-            "range of input length",
-            "context length exceeded",
-            "context_length_exceeded",
-            "maximum context length",
-            "maximum context window",
-            "max input length",
-            "input length should be",
-            "input is too long",
-            "prompt is too long",
-            "prompt too long",
-            "too many input tokens",
-        )
-        if any(marker in error_str for marker in overflow_markers):
-            return True
-
-        gemini_overflow_marker_groups = (
-            (
-                "input token count",
-                "exceeds the maximum number of tokens allowed",
-            ),
-            (
-                "input token count",
-                "model only supports up to",
-            ),
-        )
-        return any(
-            all(marker in error_str for marker in marker_group)
-            for marker_group in gemini_overflow_marker_groups
-        )
-
+        return is_context_overflow_error(exc)
     async def _call_model(
         self,
         messages: list[Msg],
