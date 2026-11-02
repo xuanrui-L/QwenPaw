@@ -1434,6 +1434,32 @@ def test_media_clamp_ratio_env_cannot_disable_the_guard(monkeypatch):
         assert model_context._media_charge_bounds(100_000)[1] == 50_000
 
 
+def test_a_tiny_clamp_ratio_cannot_price_a_screenshot_at_nothing(monkeypatch):
+    """A legal-but-small share is clamped, never taken as "this media is free".
+
+    0.0001 passes the sanity check, and multiplying the budget by it used to
+    charge a 3840x2160 screenshot for a few dozen bytes - the guard then
+    concluded there was room left for any number of images and the provider
+    refused the request. The floor the same function documents has to survive
+    the tuning knob.
+    """
+    monkeypatch.setenv("CREATOR_MEDIA_CLAMP_RATIO", "0.0001")
+    budget = model_context.MODEL_INPUT_BYTES
+    floor, ceiling = model_context._media_charge_bounds(budget)
+
+    assert ceiling == int(budget * model_context.MIN_MEDIA_CLAMP_RATIO)
+    assert floor == model_context._INLINE_MEDIA_MIN_BYTES
+
+    charge = model_context._data_url_charge(
+        _screenshot_data_url(3840, 2160),
+        budget_bytes=budget,
+    )
+    assert charge == floor
+    # A finite number of floor-priced blocks still has to be able to overflow
+    # the budget; otherwise the knob has turned the media invisible.
+    assert budget // charge < 100
+
+
 def _screenshot_data_url(width: int, height: int) -> str:
     from PIL import Image
 
@@ -1509,27 +1535,38 @@ def test_token_budget_compacts_what_the_byte_guard_cannot_see():
     assert model_context.estimate_input_tokens(guarded) <= 20_000
 
 
-def test_input_token_budget_never_invents_an_unpublished_window():
-    """The reserve leaves room for the reply; silence disables the guard."""
+def test_input_token_budget_never_invents_an_unpublished_window(monkeypatch):
+    """Only a window an operator wrote down may price the input.
+
+    A model class in the SDK carries a default context size that describes the
+    class, not whichever model this deployment points at. Reading it priced a
+    32K model against 131072, so the guard stayed off and the provider became
+    the one to discover the mistake - on every turn of a long session.
+    """
     client = AgentScopeAgentChatClient.__new__(AgentScopeAgentChatClient)
 
-    class _SizedModel:
-        context_size = 32_000
+    class _SdkDefaultModel:
+        # What ``DashScopeChatModel`` reports when nothing was configured.
+        context_size = 131_072
 
-    class _BlindModel:
-        pass
+    client._configured_model = _SdkDefaultModel
+    monkeypatch.delenv(
+        model_context.MODEL_CONTEXT_TOKENS_ENV,
+        raising=False,
+    )
+    assert client._input_token_budget() is None
 
-    client._configured_model = _SizedModel
+    monkeypatch.setenv(model_context.MODEL_CONTEXT_TOKENS_ENV, "32000")
     assert client._input_token_budget() == 32_000 - max(1024, 32_000 // 8)
 
-    client._configured_model = _BlindModel
-    assert client._input_token_budget() is None
+    # The reserve is floored, so a tiny declared window cannot price the
+    # input at nothing.
+    monkeypatch.setenv(model_context.MODEL_CONTEXT_TOKENS_ENV, "8192")
+    assert client._input_token_budget() == 8192 - 1024
 
-    def broken():
-        raise RuntimeError("model not configured")
-
-    client._configured_model = broken
-    assert client._input_token_budget() is None
+    for junk in ("", "   ", "0", "-1", "thirty two thousand"):
+        monkeypatch.setenv(model_context.MODEL_CONTEXT_TOKENS_ENV, junk)
+        assert client._input_token_budget() is None
 
 
 # ---------------------------------------------------------------------------
@@ -1850,6 +1887,43 @@ def test_turning_demotion_off_restores_the_hard_local_refusal(monkeypatch):
     assert asked == []
 
 
+def test_only_the_priciest_upload_moves_when_one_was_enough():
+    """Relief is paid out per attachment, and stops where the request fits.
+
+    Two uploads and a contract text overflow together, and the bigger one alone
+    clears the budget. Sweeping the batch would have spent a person's second
+    reference image on pressure the first one caused, and the run would then
+    have had nothing left to look at.
+    """
+    big = _data_url(b"\x22" * (13_000 * 128), mime="image/jpeg")
+    small = _data_url(b"\x33" * (6_000 * 128), mime="image/jpeg")
+    messages = [
+        {"role": "system", "content": "A" * 12_000},
+        _attachment(big, seq=11),
+        _attachment(small, seq=12),
+    ]
+    max_bytes = 30_000
+    client = _ladder_client(lambda _url: "f" * 64)
+
+    with pytest.raises(ModelContextBudgetError) as caught:
+        prepare_model_messages(messages, [], max_bytes=max_bytes)
+
+    prepared, note = client._fit_refused_request(
+        messages,
+        [],
+        max_bytes=max_bytes,
+        failure=caught.value,
+    )
+
+    assert [part["type"] for part in prepared[1]["content"]] == [
+        "text",
+        "text",
+    ]
+    assert prepared[2]["content"][1]["image_url"]["url"] == small
+    assert prepared[2]["content"][0]["text"] == "按这张参考图改分镜"
+    assert "真人附件媒体 1 块（已存档 1 块）" in note
+
+
 # ---------------------------------------------------------------------------
 # P3: a provider that answers "too long" is recovered in two steps, and the
 # classification vocabulary stays the platform's.
@@ -1926,7 +2000,10 @@ def _overflow_client(failures: int):
     def fitted(messages, tools, *, max_bytes, failure):
         forced.append(max_bytes)
         return original_fit(
-            messages, tools, max_bytes=max_bytes, failure=failure,
+            messages,
+            tools,
+            max_bytes=max_bytes,
+            failure=failure,
         )
 
     client._fit_refused_request = fitted
@@ -2214,6 +2291,7 @@ def test_an_overflow_after_streamed_output_is_not_replayed():
     ("status", "message"),
     [
         (400, "This model's maximum context length is 32768 tokens"),
+        (400, "This model's context window exceeded."),
         (400, "Range of input length should be [1, 30720]"),
         (400, "too many input tokens in this request"),
         (
@@ -2324,3 +2402,108 @@ def test_turning_demotion_off_declines_the_provider_overflow_too(monkeypatch):
     assert provider.calls == 1
     assert asked == []
     assert forced == []
+
+
+_TEXT_BUDGET = 40_000
+
+
+def _text_only_history() -> list[dict]:
+    """A long session of finished reads: no media anywhere in it."""
+    messages = [
+        {"role": "system", "content": "项目创作契约"},
+        {
+            "role": "user",
+            "source": "user",
+            "content": "把六集分镜做完再交审阅",
+        },
+    ]
+    for index in range(6):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": f"call-{index}", "function": {"name": "read"}},
+                ],
+            },
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{index}",
+                "name": "read",
+                "content": "镜头描述 " * 420,
+            },
+        )
+    return messages
+
+
+def test_a_text_only_overflow_is_answered_by_retiring_old_tool_exchanges():
+    """No media to trade is not the same as nothing left to give up.
+
+    A long plain-text session is the shape that actually broke: the provider
+    refused on length, the gentle step found nothing media-shaped, and the
+    request then has to be rebuilt at half the budget so compaction retires
+    completed tool exchanges. Stopping at the first refusal left that session
+    with no second attempt at all.
+    """
+
+    async def scenario():
+        client, provider, asked, _forced = _overflow_client(failures=1)
+        notices: list[RateLimitRetryNotice] = []
+
+        async def on_retry(notice: RateLimitRetryNotice) -> None:
+            notices.append(notice)
+
+        turn = await client.complete(
+            messages=_text_only_history(),
+            tools=[],
+            on_rate_limit_retry=on_retry,
+            _context_budget_bytes=_TEXT_BUDGET,
+        )
+        return provider, asked, notices, turn
+
+    provider, asked, notices, turn = asyncio.run(scenario())
+
+    assert turn.content == "降级后的输入仍可用"
+    assert provider.calls == 2
+    # Nothing traded was a person's: there was no media, and the requirement
+    # row still reads the same in the replayed request.
+    assert asked == []
+    assert len(provider.requests[1]) < len(provider.requests[0])
+    assert "把六集分镜做完再交审阅" in _request_text(provider.requests[1])
+    assert [n.reason for n in notices] == ["context_recovery"]
+
+
+def test_an_overflow_that_cannot_be_made_smaller_fails_as_a_model_error():
+    """The last refusal stays a retryable model error, with the provider's text.
+
+    Handing back the provider's raw exception made the driver classify the run
+    as a non-retryable agent failure, so an oversized session reported nothing
+    it could act on and offered no retry. The recovery boundary owns the stop;
+    the error type still belongs to the model.
+    """
+    messages = [
+        {"role": "system", "content": "项目创作契约"},
+        {
+            "role": "user",
+            "source": "user",
+            "content": "需求原文。" * 2_000,
+        },
+    ]
+
+    async def scenario():
+        client, provider, asked, _forced = _overflow_client(failures=99)
+        with pytest.raises(AgentModelError) as caught:
+            await client.complete(
+                messages=messages,
+                tools=[],
+                _context_budget_bytes=_TEXT_BUDGET,
+            )
+        return provider, asked, caught
+
+    provider, asked, caught = asyncio.run(scenario())
+
+    assert provider.calls == 1
+    assert asked == []
+    assert "maximum context length" in str(caught.value)

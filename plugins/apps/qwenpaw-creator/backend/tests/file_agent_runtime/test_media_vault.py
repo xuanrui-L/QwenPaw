@@ -100,6 +100,28 @@ def test_a_failed_write_degrades_the_pointer_not_the_request(
     assert media_vault.split_data_url("https://example.com/a.png") is None
 
 
+def test_an_unresolvable_data_root_stays_inside_the_vault(monkeypatch):
+    """Opening the store is allowed to fail, and that failure never leaves.
+
+    Every entry point resolves CREATOR_DATA_ROOT lazily, so a machine where it
+    is unset or relative raises the moment a block is demoted. That is one more
+    way the durable copy is missing: the turn keeps its pointer without a
+    recall handle. Letting it escape would turn a request that would have
+    worked into an error the user sees.
+    """
+    url = _data_url(_PNG_BYTES)
+    monkeypatch.delenv("CREATOR_DATA_ROOT", raising=False)
+
+    assert media_vault.store_data_url(url) is None
+    assert media_vault.make_vault()(url) is None
+    assert media_vault.load_by_handle("a" * 64) is None
+    assert media_vault.load_data_url("a" * 64, "image/png") is None
+
+    monkeypatch.setenv("CREATOR_DATA_ROOT", "relative/path")
+    assert media_vault.store_data_url(url) is None
+    assert media_vault.load_by_handle("a" * 64) is None
+
+
 def _recall_runtime() -> FileCreatorAgentRuntime:
     # The recall path reads the vault and nothing else, so it can be exercised
     # without assembling a whole runtime.

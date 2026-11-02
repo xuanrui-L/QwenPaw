@@ -3801,6 +3801,7 @@ class FileCreatorAgentRuntime:
                     consumed_message_seq=input_cursor,
                 )
 
+            recalled_parts: list[dict[str, Any]] = []
             for call in turn.tool_calls:
                 tool_call_count += 1
                 if call.name == REQUEST_WORKGRAPH_EXECUTION:
@@ -4075,18 +4076,17 @@ class FileCreatorAgentRuntime:
                 if call.name == RECALL_MEDIA_TOOL_NAME and not tool_failed:
                     # The tool result is JSON text, which no provider reads as
                     # an image. The recalled bytes have to arrive the same way
-                    # any other media does: native parts on a user turn.
-                    recalled_content = await self._recalled_media_content(
-                        result=result,
+                    # any other media does: native parts on a user turn. That
+                    # turn is held until every tool result of this assistant
+                    # turn has been appended, because a user row wedged between
+                    # two tool results splits the group: the provider sees an
+                    # unanswered tool_calls message, and compaction can never
+                    # pair the group up to drop it again.
+                    recalled_parts.extend(
+                        await self._recalled_media_content(
+                            result=result,
+                        ),
                     )
-                    if recalled_content:
-                        messages.append(
-                            {
-                                "role": "user",
-                                "source": MEDIA_RECALL_SOURCE,
-                                "content": recalled_content,
-                            },
-                        )
                 if (
                     call.name == REQUEST_WORKGRAPH_EXECUTION
                     and not tool_failed
@@ -4143,6 +4143,14 @@ class FileCreatorAgentRuntime:
                         "arguments; the run stopped instead of starting "
                         "another model turn",
                     )
+            if recalled_parts:
+                messages.append(
+                    {
+                        "role": "user",
+                        "source": MEDIA_RECALL_SOURCE,
+                        "content": recalled_parts,
+                    },
+                )
             if (
                 turn_number == effective_max_turns
                 and not finalization_turn_added
