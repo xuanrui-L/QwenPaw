@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -150,7 +151,9 @@ def test_a_collapsed_file_is_left_alone_on_the_next_run(
     path = _seed_session(tmp_path, 3)
     assert _run(monkeypatch, "--data-root", str(tmp_path)) == 0
     after_first = path.read_bytes()
-    backups = sorted((tmp_path / elide.BACKUP_SUBDIR).rglob("messages.jsonl"))
+    backups = sorted(
+        (tmp_path / elide.BACKUP_SUBDIR).rglob(f"*{elide.BACKUP_SUFFIX}"),
+    )
     capsys.readouterr()
 
     assert _run(monkeypatch, "--data-root", str(tmp_path)) == 0
@@ -169,8 +172,14 @@ def test_the_original_file_is_backed_up_before_the_swap(
 
     assert _run(monkeypatch, "--data-root", str(tmp_path)) == 0
 
-    backup = tmp_path / elide.BACKUP_SUBDIR / path.relative_to(tmp_path)
-    assert backup.read_bytes() == before
+    # The backup is compressed and timestamped now: one copy per pass, named
+    # by the moment it was taken, and it must still give the bytes back.
+    backups = sorted(
+        (tmp_path / elide.BACKUP_SUBDIR).rglob(f"*{elide.BACKUP_SUFFIX}"),
+    )
+    assert len(backups) == 1
+    with gzip.open(backups[0], "rb") as handle:
+        assert handle.read() == before
     assert path.read_bytes() != before
 
 
