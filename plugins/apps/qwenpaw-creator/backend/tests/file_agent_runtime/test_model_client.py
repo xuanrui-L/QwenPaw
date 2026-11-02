@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import io
 import json
 
 from agentscope.message import (
@@ -28,12 +30,16 @@ from services.file_agent_runtime.model_client import (
     AgentScopeVlmChatClient,
     AgentToolCall,
     CallbackAgentChatClient,
+    OverflowAfterOutputError,
     RateLimitExhaustedError,
     RateLimitRetryNotice,
+    is_context_length_error,
     records_to_agentscope_messages,
 )
 from services.file_agent_runtime import model_client
+from services.file_agent_runtime import media_vault
 from services.file_agent_runtime import model_context
+from services.workspace.content_store import ContentStore
 from services.file_agent_runtime.model_context import (
     ModelContextBudgetError,
     _inline_media_relief,
@@ -229,6 +235,11 @@ def test_media_bearing_automatic_history_is_elided_under_budget():
                 "source": "run_review_feedback",
                 "content": [
                     {"type": "text", "text": f"review-{index}"},
+                    # Two blocks, so even the cheapest remaining review still
+                    # overflows this budget: the guard is that they all leave,
+                    # not that compaction stops wherever pricing happens to
+                    # allow a single one to linger.
+                    media,
                     media,
                 ],
             },
@@ -1241,9 +1252,9 @@ def test_inline_media_relief_does_not_walk_plain_strings(monkeypatch):
     original = model_context._inline_media_relief
     visited: list = []
 
-    def counting(node):
+    def counting(node, *, budget_bytes=model_context.MODEL_INPUT_BYTES):
         visited.append(node)
-        return original(node)
+        return original(node, budget_bytes=budget_bytes)
 
     monkeypatch.setattr(model_context, "_inline_media_relief", counting)
     history = [
@@ -1264,3 +1275,998 @@ def test_inline_media_relief_does_not_walk_plain_strings(monkeypatch):
         "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
     }
     assert original([{"role": "user", "content": [media]}]) > 0
+
+
+def test_one_huge_screenshot_can_no_longer_refuse_its_own_request():
+    """A single media block must never outgrow the entire input budget.
+
+    Regression guard: the inline-media ceiling was an absolute 512KB, which
+    is larger than ``MODEL_INPUT_BYTES`` itself. One big screenshot therefore
+    overflowed the request all by itself, while compaction was forbidden from
+    dropping the contract message carrying it — the turn got refused locally
+    and never reached the provider.
+    """
+    encoded = base64.b64encode(b"\x00" * (8 * 1024 * 1024)).decode()
+    data_url = f"data:image/png;base64,{encoded}"
+    messages = [
+        {"role": "system", "content": "项目创作契约"},
+        {
+            "role": "user",
+            "source": "user",
+            "content": [
+                {"type": "text", "text": "理解这张图"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+    result = prepare_model_messages(messages, [])
+
+    # It fits now, and nothing about the human attachment was rewritten.
+    assert result[1]["content"][1]["image_url"]["url"] == data_url
+    ceiling = model_context._media_charge_bounds(
+        model_context.MODEL_INPUT_BYTES,
+    )[1]
+    assert ceiling < model_context.MODEL_INPUT_BYTES
+
+
+def test_derived_inline_media_demotes_to_a_pointer_and_spares_human_input():
+    """Only media a tool produced can leave; a human attachment cannot."""
+    encoded = base64.b64encode(b"\x00" * (4 * 1024 * 1024)).decode()
+    data_url = f"data:image/jpeg;base64,{encoded}"
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call-frame",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+        {
+            "role": "user",
+            "source": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+    result, receipt = model_context.demote_derived_inline_media(messages)
+
+    stub = result[0]["content"][0]["text"]
+    assert result[0]["content"][0]["type"] == "text"
+    assert "image/jpeg" in stub
+    assert "fingerprint=sha256:" in stub
+    # The human upload stays byte-for-byte: no durable handle exists yet.
+    assert result[1]["content"][0]["image_url"]["url"] == data_url
+    assert receipt["demoted_blocks"] == 1
+    assert receipt["human_attachment_blocks"] == 1
+
+
+def test_budget_failure_names_the_blocks_that_overflowed():
+    """A refusal has to say what it blamed, not just that it refused."""
+    encoded = base64.b64encode(b"\x00" * (1024 * 1024)).decode()
+    data_url = f"data:image/jpeg;base64,{encoded}"
+    media = {"type": "image_url", "image_url": {"url": data_url}}
+    messages = [
+        {"role": "user", "source": "user", "content": [media, media, media]},
+    ]
+
+    with pytest.raises(ModelContextBudgetError) as caught:
+        prepare_model_messages(messages, [], max_bytes=16 * 1024)
+
+    info = caught.value.diagnostics
+    assert info["media_block_count"] == 3
+    assert info["max_bytes"] == 16 * 1024
+    assert info["used_bytes"] > info["max_bytes"]
+    assert (
+        info["media_blocks"][0]["charge"] == info["media_blocks"][-1]["charge"]
+    )
+    text = model_context.format_budget_failure(caught.value)
+    assert "内联媒体 3 块" in text
+    assert "image/jpeg" in text
+    assert "user 16" in text or "user" in text
+
+
+def test_media_clamp_ratio_env_cannot_disable_the_guard(monkeypatch):
+    """The escape hatch tunes the ceiling; nonsense falls back to default."""
+    monkeypatch.setenv("CREATOR_MEDIA_CLAMP_RATIO", "0.25")
+    assert model_context._media_charge_bounds(100_000)[1] == 25_000
+    for broken in ("0", "-1", "abc", ""):
+        if broken:
+            monkeypatch.setenv("CREATOR_MEDIA_CLAMP_RATIO", broken)
+        else:
+            monkeypatch.delenv("CREATOR_MEDIA_CLAMP_RATIO", raising=False)
+        assert model_context._media_charge_bounds(100_000)[1] == 50_000
+
+
+def _screenshot_data_url(width: int, height: int) -> str:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (120, 120, 120)).save(
+        buffer,
+        format="PNG",
+    )
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    return f"data:image/png;base64,{encoded}"
+
+
+@pytest.mark.skipif(
+    not model_context._HOST_CONTEXT_ESTIMATOR_AVAILABLE,
+    reason="host estimator is optional for standalone plugin installs",
+)
+def test_media_is_priced_by_the_hosts_vision_estimate():
+    """One shared answer for "what will this image cost".
+
+    The byte conversion saw a 3840x2160 screenshot as roughly 2K tokens, so a
+    compactor watching it kept concluding there was room left. The host
+    estimate counts Qwen-VL 28px patches and puts the same image near 11.8K.
+    """
+    from qwenpaw.agents.utils.media_token_estimate import (
+        estimate_data_url_tokens,
+    )
+
+    data_url = _screenshot_data_url(3840, 2160)
+
+    assert model_context._data_url_tokens(
+        data_url,
+    ) == estimate_data_url_tokens(data_url)
+    # Explicitly above what the old /4 byte conversion could ever report.
+    assert estimate_data_url_tokens(data_url) > 8_192 // 4
+
+
+def test_token_budget_compacts_what_the_byte_guard_cannot_see():
+    """A request can be small on the wire and enormous to the model.
+
+    Inline media is floored in the byte budget, so a 4K screenshot plus one
+    completed tool exchange stays well under 384KB while costing the provider
+    tens of thousands of tokens. Only the window guard removes the exchange.
+    """
+    data_url = _screenshot_data_url(3840, 2160)
+    verbose_result = "镜头描述 " * 12_000
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-1", "function": {"name": "read"}}],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": verbose_result,
+        },
+        {
+            "role": "user",
+            "source": "user",
+            "content": [
+                {"type": "text", "text": "看这张图"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        },
+    ]
+
+    # Without the window guard the exchange stays: bytes never crossed.
+    unguarded = prepare_model_messages(messages, [])
+    assert [item["role"] for item in unguarded].count("tool") == 1
+
+    guarded = prepare_model_messages(messages, [], max_tokens=20_000)
+    assert [item["role"] for item in guarded].count("tool") == 0
+    assert model_context.estimate_input_tokens(guarded) <= 20_000
+
+
+def test_input_token_budget_never_invents_an_unpublished_window():
+    """The reserve leaves room for the reply; silence disables the guard."""
+    client = AgentScopeAgentChatClient.__new__(AgentScopeAgentChatClient)
+
+    class _SizedModel:
+        context_size = 32_000
+
+    class _BlindModel:
+        pass
+
+    client._configured_model = _SizedModel
+    assert client._input_token_budget() == 32_000 - max(1024, 32_000 // 8)
+
+    client._configured_model = _BlindModel
+    assert client._input_token_budget() is None
+
+    def broken():
+        raise RuntimeError("model not configured")
+
+    client._configured_model = broken
+    assert client._input_token_budget() is None
+
+
+# ---------------------------------------------------------------------------
+# P2: a demoted block stays recallable, and only proven pressure moves a
+# human upload.
+# ---------------------------------------------------------------------------
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _data_url(payload: bytes, mime: str = "image/png") -> str:
+    return f"data:{mime};base64,{base64.b64encode(payload).decode()}"
+
+
+def _blob_vault(tmp_path):
+    """A vault over the real content store, so handles name real bytes."""
+    store = ContentStore(tmp_path)
+    return media_vault.make_vault(store), store
+
+
+def _attachment(data_url: str, *, seq: int = 7) -> dict:
+    return {
+        "role": "user",
+        "source": "user",
+        "messageSeq": seq,
+        "content": [
+            {"type": "text", "text": "按这张参考图改分镜"},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    }
+
+
+def test_a_demoted_human_attachment_reads_back_byte_for_byte(tmp_path):
+    """Pressure may move a person's upload, but never without its bytes.
+
+    The pointer left in the vacated slot is the only answer to "what was the
+    reference image", so the exact payload behind it has to come back. A
+    demotion that could not promise that would be rewriting a requirement and
+    calling the loss recallable.
+    """
+    payload = _PNG_MAGIC + b"frame" * 40_000
+    data_url = _data_url(payload)
+    vault, store = _blob_vault(tmp_path)
+    digest = hashlib.sha256(payload).hexdigest()
+
+    result, receipt = model_context.demote_human_inline_media(
+        [_attachment(data_url)],
+        vault=vault,
+    )
+
+    assert receipt["demoted_blocks"] == 1
+    assert receipt["stored_blocks"] == 1
+    assert receipt["refused_blocks"] == 0
+    stub = result[0]["content"][1]
+    assert stub["type"] == "text"
+    # Announced as what it was: an unexplained hole where a person's screenshot
+    # was reads like the person withdrew the requirement.
+    assert "user attachment moved out of this request" in stub["text"]
+    assert f"handle=sha256:{digest}" in stub["text"]
+    assert "recall_media" in stub["text"]
+    assert result[0]["content"][0]["text"] == "按这张参考图改分镜"
+
+    recorded = result[0]["metadata"][model_context.DEMOTED_MEDIA_METADATA_KEY][
+        0
+    ]
+    assert recorded["handle"] == digest
+    assert recorded["mime"] == "image/png"
+    assert recorded["decodedBytes"] == len(payload)
+    assert recorded["messageSeq"] == 7
+    assert recorded["estimatedTokens"] > 0
+
+    restored = media_vault.load_by_handle(f"sha256:{digest}", store=store)
+    assert restored is not None
+    assert base64.b64decode(restored[0].split(";base64,", 1)[1]) == payload
+    assert restored[1] == len(payload)
+
+
+def test_a_human_attachment_without_a_durable_copy_is_never_rewritten():
+    """The budget is allowed to fail; an upload is not allowed to vanish.
+
+    Without a vault, or when the write itself fails, a demotion would leave a
+    pointer to bytes nobody stored. Refusing keeps the person's input intact
+    and the failure honest instead of trading one for the other.
+    """
+    payload = _PNG_MAGIC + b"frame" * 40_000
+    data_url = _data_url(payload)
+    messages = [_attachment(data_url)]
+
+    for label, vault in (
+        ("no vault at all", None),
+        ("a vault that cannot write", lambda _url: None),
+    ):
+        result, receipt = model_context.demote_human_inline_media(
+            messages,
+            vault=vault,
+        )
+
+        assert receipt["demoted_blocks"] == 0, label
+        assert receipt["refused_blocks"] == 1, label
+        assert result[0]["content"][1]["image_url"]["url"] == data_url, label
+        assert "metadata" not in result[0], label
+
+
+def test_a_partially_storable_attachment_is_demoted_whole_or_not_at_all():
+    """A requirement cut in half reads like a person who changed their mind."""
+    first = _data_url(_PNG_MAGIC + b"frame" * 40_000)
+    second = _data_url(b"second reference")
+    first_digest = hashlib.sha256(_PNG_MAGIC + b"frame" * 40_000).hexdigest()
+
+    def store_only_first(url: str) -> str | None:
+        return first_digest if url == first else None
+
+    message = {
+        "role": "user",
+        "source": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": first}},
+            {"type": "image_url", "image_url": {"url": second}},
+        ],
+    }
+
+    result, receipt = model_context.demote_human_inline_media(
+        [message],
+        vault=store_only_first,
+    )
+
+    assert receipt["demoted_blocks"] == 0
+    assert receipt["refused_blocks"] == 2
+    assert result[0]["content"][0]["image_url"]["url"] == first
+    assert result[0]["content"][1]["image_url"]["url"] == second
+
+
+def test_a_recalled_block_is_derived_media_again():
+    """Recall must not re-pin the window it just freed.
+
+    Bytes the Agent brought back are the runtime's own observation: the
+    pointer that answered once can answer again, so the next tight budget has
+    to be able to move them without reaching for a human message.
+    """
+    data_url = _data_url(b"\x00" * (2 * 1024 * 1024), mime="image/jpeg")
+    messages = [
+        {
+            "role": "user",
+            "source": model_context.MEDIA_RECALL_SOURCE,
+            "content": [{"type": "image_url", "image_url": {"url": data_url}}],
+        },
+    ]
+
+    result, receipt = model_context.demote_derived_inline_media(messages)
+
+    assert receipt["demoted_blocks"] == 1
+    assert receipt["human_attachment_blocks"] == 0
+    assert result[0]["content"][0]["type"] == "text"
+    assert "inline media left this context" in result[0]["content"][0]["text"]
+
+
+def test_history_compaction_keeps_the_handle_and_drops_the_rest():
+    """A pointer outlives the turns between demotion and the recall.
+
+    The handle is the only place a demoted attachment can be found from, so
+    history compaction has to carry it; the tracing noise next to it does not
+    belong in the model's input at all.
+    """
+    history = [
+        {
+            "role": "user",
+            "source": "user",
+            "messageSeq": 3,
+            "content": [{"type": "text", "text": "参考图已移出本次请求"}],
+            "metadata": {
+                model_context.DEMOTED_MEDIA_METADATA_KEY: [
+                    {"handle": "a" * 64},
+                ],
+                "streamingDiagnostics": {"chunks": 128},
+            },
+        },
+    ]
+
+    result = compact_conversation_history(history)
+
+    kept = result[0]["metadata"]
+    assert kept[model_context.DEMOTED_MEDIA_METADATA_KEY] == [
+        {"handle": "a" * 64},
+    ]
+    assert "streamingDiagnostics" not in kept
+
+
+def _ladder_payload() -> list[dict]:
+    """A contract text plus one derived observation and one human upload."""
+    data_url = _data_url(b"\x00" * (2 * 1024 * 1024), mime="image/jpeg")
+    return [
+        {"role": "system", "content": "A" * 5_000},
+        {
+            "role": "tool",
+            "tool_call_id": "call-frame",
+            "content": [{"type": "image_url", "image_url": {"url": data_url}}],
+        },
+        {
+            "role": "user",
+            "source": "user",
+            "content": [{"type": "image_url", "image_url": {"url": data_url}}],
+        },
+    ]
+
+
+def _ladder_client(vault) -> AgentScopeAgentChatClient:
+    client = AgentScopeAgentChatClient.__new__(AgentScopeAgentChatClient)
+    built: list[str] = []
+
+    def build_vault():
+        built.append("vault")
+        return vault
+
+    client._media_vault = build_vault
+    client._input_token_budget = lambda: None
+    return client
+
+
+def _refusal(max_bytes: int) -> ModelContextBudgetError:
+    try:
+        prepare_model_messages(_ladder_payload(), [], max_bytes=max_bytes)
+    except ModelContextBudgetError as exc:
+        return exc
+    raise AssertionError("the ladder payload was expected to overflow")
+
+
+def test_the_refusal_ladder_gives_up_its_own_observations_first():
+    """A person's upload moves only after cheaper relief provably failed."""
+    asked: list[str] = []
+
+    def vault(url: str) -> str:
+        asked.append(url)
+        return "b" * 64
+
+    failure = _refusal(12_000)
+    client = _ladder_client(vault)
+
+    prepared, _note = client._fit_refused_request(
+        _ladder_payload(),
+        [],
+        max_bytes=12_000,
+        failure=failure,
+    )
+
+    # The tool observation left; the attachment stayed exactly as sent.
+    assert prepared[1]["content"][0]["type"] == "text"
+    assert prepared[2]["content"][0]["image_url"]["url"] == (
+        _ladder_payload()[2]["content"][0]["image_url"]["url"]
+    )
+    assert len(asked) == 1
+
+
+def test_the_ladder_reaches_a_human_upload_only_under_proven_pressure():
+    """When the runtime's own media is not enough, the upload goes recallably."""
+    failure = _refusal(9_000)
+    client = _ladder_client(lambda _url: "c" * 64)
+
+    prepared, _note = client._fit_refused_request(
+        _ladder_payload(),
+        [],
+        max_bytes=9_000,
+        failure=failure,
+    )
+
+    assert [part["type"] for part in prepared[2]["content"]] == ["text"]
+    assert "user attachment moved out of this request" in (
+        prepared[2]["content"][0]["text"]
+    )
+    assert prepared[0]["content"] == "A" * 5_000
+    assert prepared[1]["metadata"][model_context.DEMOTED_MEDIA_METADATA_KEY]
+    assert prepared[2]["metadata"][model_context.DEMOTED_MEDIA_METADATA_KEY]
+
+
+def test_a_refusal_that_survived_both_steps_says_what_it_gave_up():
+    """A refusal after two steps has to name what it already sacrificed.
+
+    The input that keeps failing is no longer the input the caller sent, so
+    the error without the demotion record would be describing a request that
+    nobody assembled.
+    """
+    failure = _refusal(5_000)
+    client = _ladder_client(lambda _url: "d" * 64)
+
+    with pytest.raises(AgentModelError) as caught:
+        client._fit_refused_request(
+            _ladder_payload(),
+            [],
+            max_bytes=5_000,
+            failure=failure,
+        )
+
+    text = str(caught.value)
+    assert "媒体降级记录" in text
+    assert "派生观察媒体 1 块（已存档 1 块）" in text
+    assert "真人附件媒体 1 块（已存档 1 块）" in text
+    assert "sha256:" + "d" * 12 in text
+
+
+def test_turning_demotion_off_restores_the_hard_local_refusal(monkeypatch):
+    """The escape hatch is a switch, not a preference."""
+    monkeypatch.setenv(
+        model_context.MEDIA_OBSERVATION_DEGRADE_ENV,
+        "0",
+    )
+    asked: list[str] = []
+    client = _ladder_client(lambda url: asked.append(url) or "e" * 64)
+
+    with pytest.raises(AgentModelError) as caught:
+        client._fit_refused_request(
+            _ladder_payload(),
+            [],
+            max_bytes=9_000,
+            failure=_refusal(9_000),
+        )
+
+    assert "预算" in str(caught.value)
+    assert "媒体降级记录" not in str(caught.value)
+    assert asked == []
+
+
+# ---------------------------------------------------------------------------
+# P3: a provider that answers "too long" is recovered in two steps, and the
+# classification vocabulary stays the platform's.
+# ---------------------------------------------------------------------------
+
+_OVERFLOW_MESSAGE = (
+    "Error code: 400: This model's maximum context length is 32768 tokens. "
+    "Your input has 51200 tokens."
+)
+
+# One block priced at 13,000 of the byte budget, so a 40,000-byte request holds
+# the contract text plus two of them, while a halved request cannot hold the
+# contract text plus even one.
+_OVERFLOW_BLOCK_BYTES = 13_000 * model_context._INLINE_MEDIA_BYTES_DIVISOR
+_OVERFLOW_CONTRACT_BYTES = 12_000
+_OVERFLOW_BUDGET = 40_000
+
+
+def _overflow_payload() -> tuple[list[dict], str, str]:
+    """A contract text, one observed frame and one human upload."""
+    derived = _data_url(b"\x11" * _OVERFLOW_BLOCK_BYTES, mime="image/jpeg")
+    human = _data_url(b"\x22" * _OVERFLOW_BLOCK_BYTES, mime="image/jpeg")
+    messages = [
+        {"role": "system", "content": "A" * _OVERFLOW_CONTRACT_BYTES},
+        {
+            "role": "user",
+            "source": model_context.MEDIA_RECALL_SOURCE,
+            "messageSeq": 9,
+            "content": [{"type": "image_url", "image_url": {"url": derived}}],
+        },
+        _attachment(human, seq=11),
+    ]
+    return messages, derived, human
+
+
+class _OverflowProvider:
+    """Refuses the first ``failures`` calls as too long, then answers."""
+
+    model = "qwen3.7-plus"
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+        self.requests: list[list] = []
+
+    async def __call__(self, messages, *, tools=None):
+        del tools
+        self.calls += 1
+        self.requests.append(list(messages))
+        if self.calls <= self.failures:
+            raise RuntimeError(_OVERFLOW_MESSAGE)
+        return ChatResponse(
+            id="response-overflow-recovered",
+            content=[TextBlock(text="降级后的输入仍可用")],
+            is_last=True,
+        )
+
+
+def _overflow_client(failures: int):
+    """A client whose vault only records, so every demotion is auditable."""
+    asked: list[str] = []
+
+    def vault(url: str) -> str:
+        asked.append(url)
+        return hashlib.sha256(url.encode()).hexdigest()
+
+    provider = _OverflowProvider(failures)
+    client = AgentScopeAgentChatClient(provider)  # type: ignore[arg-type]
+    client._media_vault = lambda: vault
+    client._input_token_budget = lambda: None
+    forced: list[int] = []
+    original_fit = client._fit_refused_request
+
+    def fitted(messages, tools, *, max_bytes, failure):
+        forced.append(max_bytes)
+        return original_fit(
+            messages, tools, max_bytes=max_bytes, failure=failure,
+        )
+
+    client._fit_refused_request = fitted
+    return client, provider, asked, forced
+
+
+def _walk_content(node, wanted_key: str, found: list[str]) -> None:
+    dump = getattr(node, "model_dump", None)
+    if callable(dump):
+        # AgentScope blocks are models, so the request has to be read the way
+        # the provider will serialize it.
+        node = dump()
+    if isinstance(node, dict):
+        value = node.get(wanted_key)
+        if isinstance(value, str):
+            found.append(value)
+        for child in node.values():
+            _walk_content(child, wanted_key, found)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            _walk_content(item, wanted_key, found)
+
+
+def _media_id(data_url: str) -> str:
+    """A cheap, comparable name for one inline payload."""
+    mime, _, encoded = data_url.partition(";base64,")
+    return f"{mime.removeprefix('data:')}:{_b64_id(encoded)}"
+
+
+def _b64_id(encoded: str) -> str:
+    return hashlib.sha256(encoded.encode()).hexdigest()[:12]
+
+
+def _request_media(native_messages) -> list[str]:
+    """Which inline payloads one request the provider actually saw still had."""
+    found: list[str] = []
+    for message in native_messages:
+        blocks = getattr(message, "content", None)
+        for block in blocks if isinstance(blocks, (list, tuple)) else []:
+            dump = getattr(block, "model_dump", None)
+            shape = dump() if callable(dump) else block
+            if not isinstance(shape, dict) or shape.get("type") != "data":
+                continue
+            source = shape.get("source") or {}
+            found.append(
+                f"{source.get('media_type')}:{_b64_id(str(source.get('data')))}",
+            )
+    return found
+
+
+def _request_text(native_messages) -> str:
+    found: list[str] = []
+    for message in native_messages:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            found.append(content)
+        _walk_content(content, "text", found)
+    return "\n".join(found)
+
+
+def test_a_provider_overflow_is_answered_by_gentle_relief_and_one_replay():
+    """Only the runtime's own observation is traded for the second attempt.
+
+    The provider said the request was too long, not that the conversation was
+    wrong, so the retry gives up the frame a tool can produce again and keeps
+    the person's upload byte for byte. The forced step belongs to a request
+    that overflowed as well, not to this one.
+    """
+    messages, derived, human = _overflow_payload()
+
+    async def scenario():
+        client, provider, asked, forced = _overflow_client(failures=1)
+        notices: list[RateLimitRetryNotice] = []
+
+        async def on_retry(notice: RateLimitRetryNotice) -> None:
+            notices.append(notice)
+
+        turn = await client.complete(
+            messages=messages,
+            tools=[],
+            on_rate_limit_retry=on_retry,
+            _context_budget_bytes=_OVERFLOW_BUDGET,
+        )
+        return provider, asked, forced, notices, turn
+
+    provider, asked, forced, notices, turn = asyncio.run(scenario())
+
+    assert turn.content == "降级后的输入仍可用"
+    assert provider.calls == 2
+    assert asked == [derived]
+    assert _request_media(provider.requests[0]) == [
+        _media_id(derived),
+        _media_id(human),
+    ]
+    assert _request_media(provider.requests[1]) == [_media_id(human)]
+    assert "inline media left this context" in _request_text(
+        provider.requests[1],
+    )
+    assert "user attachment moved out of this request" not in _request_text(
+        provider.requests[1],
+    )
+    assert forced == []
+    # An overflow is deterministic: it is answered with a smaller request and
+    # never with a wait.
+    assert [(n.reason, n.delay_seconds) for n in notices] == [
+        ("context_recovery", 0),
+    ]
+
+
+def test_the_gentle_retry_overflowing_too_forces_the_whole_ladder():
+    """The second step is the one that may move a person's upload."""
+    messages, derived, human = _overflow_payload()
+
+    async def scenario():
+        client, provider, asked, forced = _overflow_client(failures=2)
+        notices: list[RateLimitRetryNotice] = []
+
+        async def on_retry(notice: RateLimitRetryNotice) -> None:
+            notices.append(notice)
+
+        turn = await client.complete(
+            messages=messages,
+            tools=[],
+            on_rate_limit_retry=on_retry,
+            _context_budget_bytes=_OVERFLOW_BUDGET,
+        )
+        return provider, asked, forced, notices, turn
+
+    provider, asked, forced, notices, turn = asyncio.run(scenario())
+
+    assert turn.content == "降级后的输入仍可用"
+    assert provider.calls == 3
+    assert asked == [derived, derived, human]
+    # Halved, so compaction also gives up the old tool exchanges.
+    assert forced == [_OVERFLOW_BUDGET // 2]
+    assert _request_media(provider.requests[2]) == []
+    assert "user attachment moved out of this request" in _request_text(
+        provider.requests[2],
+    )
+    # One recovery is one notice: the forced step is the tail of the same
+    # boundary, not a second retry budget spending the first.
+    assert [n.reason for n in notices] == ["context_recovery"]
+
+
+def test_a_refusal_that_survived_both_recovery_steps_says_what_it_gave_up():
+    """A provider that keeps saying no must not hide the degraded input.
+
+    "It just keeps erroring" was unlocatable because the refusal described a
+    request nobody assembled: the recovery had already moved media out of it.
+    The final error carries that record, and stops after the two steps.
+    """
+    messages, derived, human = _overflow_payload()
+
+    async def scenario():
+        client, provider, asked, forced = _overflow_client(failures=99)
+        with pytest.raises(AgentModelError) as caught:
+            await client.complete(
+                messages=messages,
+                tools=[],
+                _context_budget_bytes=_OVERFLOW_BUDGET,
+            )
+        return provider, asked, forced, caught
+
+    provider, asked, forced, caught = asyncio.run(scenario())
+
+    # The recovery is bounded: original attempt, gentle retry, forced retry.
+    assert provider.calls == 3
+    assert asked == [derived, derived, human]
+    assert forced == [_OVERFLOW_BUDGET // 2]
+    text = str(caught.value)
+    assert "maximum context length" in text
+    assert "媒体降级记录" in text
+    assert "真人附件媒体 1 块（已存档 1 块）" in text
+
+
+def test_a_provider_failure_that_is_not_about_length_leaves_the_input_alone():
+    """Recovery degrades input for a refusal that means "too long", only.
+
+    Re-running a request the provider already answered another way would pay
+    for the tokens a second time, and a content-policy refusal has nothing to
+    gain from a smaller request.
+    """
+    messages, _derived, _human = _overflow_payload()
+
+    class _PolicyRefusal:
+        model = "qwen3.7-plus"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, messages_, *, tools=None):
+            del messages_, tools
+            self.calls += 1
+            raise RuntimeError("Error code: 400: content policy refused this")
+
+    async def scenario():
+        client, _provider, asked, forced = _overflow_client(failures=99)
+        provider = _PolicyRefusal()
+        client.model = provider  # type: ignore[assignment]
+        with pytest.raises(AgentModelError) as caught:
+            await client.complete(
+                messages=messages,
+                tools=[],
+                _context_budget_bytes=_OVERFLOW_BUDGET,
+            )
+        return provider, asked, forced, caught
+
+    provider, asked, forced, caught = asyncio.run(scenario())
+
+    assert provider.calls == 1
+    assert asked == []
+    assert forced == []
+    assert "content policy refused this" in str(caught.value)
+
+
+def test_an_overflow_after_streamed_output_is_not_replayed():
+    """Recovering would say the same answer twice, so it refuses instead.
+
+    The platform boundary never replays output a model already spoke; the
+    plugin reaches it through the same rule rather than a second one.
+    """
+    messages, _derived, _human = _overflow_payload()
+
+    class _StreamThenOverflow:
+        model = "qwen3.7-plus"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, messages_, *, tools=None):
+            del messages_, tools
+            self.calls += 1
+
+            async def chunks():
+                yield ChatResponse(
+                    id="response-partial",
+                    content=[
+                        ToolCallBlock(
+                            id="call-read-1",
+                            name="read_project",
+                            input='{"proj',
+                        ),
+                    ],
+                    is_last=False,
+                )
+                raise RuntimeError(_OVERFLOW_MESSAGE)
+
+            return chunks()
+
+    async def scenario():
+        client, _provider, asked, forced = _overflow_client(failures=99)
+        provider = _StreamThenOverflow()
+        client.model = provider  # type: ignore[assignment]
+        streamed: list[tuple[str, str, str]] = []
+
+        async def on_tool_call_delta(
+            call_id: str,
+            name: str,
+            delta: str,
+        ) -> None:
+            streamed.append((call_id, name, delta))
+
+        with pytest.raises(OverflowAfterOutputError) as caught:
+            await client.complete(
+                messages=messages,
+                tools=_tools(),
+                on_tool_call_delta=on_tool_call_delta,
+                _context_budget_bytes=_OVERFLOW_BUDGET,
+            )
+        return provider, asked, forced, streamed, caught
+
+    provider, asked, forced, streamed, caught = asyncio.run(scenario())
+
+    # The user already watched a tool call start; a second attempt would say
+    # it twice.
+    assert streamed == [("call-read-1", "read_project", '{"proj')]
+    assert provider.calls == 1
+    assert asked == []
+    assert forced == []
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert "maximum context length" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        (400, "This model's maximum context length is 32768 tokens"),
+        (400, "Range of input length should be [1, 30720]"),
+        (400, "too many input tokens in this request"),
+        (
+            400,
+            "The provided tokens (51200) exceeds the available context size "
+            "(32768)",
+        ),
+        (None, "prompt is too long for the selected model"),
+        (413, "input is too long for this gateway"),
+        (422, "context_length_exceeded"),
+    ],
+)
+def test_a_length_refusal_is_recognised_in_the_words_the_provider_uses(
+    status,
+    message,
+):
+    """One classifier, the platform's, widened only for transport reality.
+
+    The platform's marker list is the single vocabulary here, so a gateway
+    that answers 413/422 or leaks only text is still understood, while the
+    plugin does not maintain a second list to drift from the first.
+    """
+
+    class _Refusal(RuntimeError):
+        pass
+
+    exc = _Refusal(f"Error code: {status}: {message}" if status else message)
+    if status is not None:
+        exc.status_code = status
+
+    assert is_context_length_error(exc)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 500: maximum context length backend is unhealthy",
+        "Error code: 503: too many input tokens queued",
+    ],
+)
+def test_a_server_side_failure_is_not_read_as_a_too_long_refusal(message):
+    """A hiccup must not be answered by sacrificing the conversation.
+
+    A 5xx says the provider failed, not that the input costs too much; the
+    transient budget retries it as it is, and degrading would trade away
+    media for nothing.
+    """
+
+    class _ServerFault(RuntimeError):
+        pass
+
+    exc = _ServerFault(message)
+    exc.status_code = int(message.split("Error code: ", 1)[1][:3])
+
+    assert not is_context_length_error(exc)
+
+
+@pytest.mark.skipif(
+    not model_client._HOST_OVERFLOW_RECOVERY_AVAILABLE,
+    reason="the platform package is optional for standalone plugin installs",
+)
+def test_overflow_recovery_is_the_platform_function():
+    """The boundary is imported, not reimplemented.
+
+    A second overflow boundary in the plugin is a second place where "one
+    retry" and "never replay output" can disagree with the platform.
+    """
+    from qwenpaw.agents.context.overflow_recovery import (
+        CONTEXT_OVERFLOW_MARKERS as host_markers,
+    )
+    from qwenpaw.agents.context.overflow_recovery import (
+        call_with_overflow_recovery as host_call,
+    )
+    from qwenpaw.agents.context.overflow_recovery import (
+        is_context_overflow_error as host_classify,
+    )
+
+    assert model_client._HOST_OVERFLOW_RECOVERY_AVAILABLE
+    assert model_client.CONTEXT_OVERFLOW_MARKERS is host_markers
+    assert model_client.call_with_overflow_recovery is host_call
+    assert model_client.is_context_overflow_error is host_classify
+
+
+def test_turning_demotion_off_declines_the_provider_overflow_too(monkeypatch):
+    """The escape hatch has to cover the recovery path, not just the local one.
+
+    A deployment that refuses demotion expects the provider's own refusal to
+    come back unchanged instead of a quietly rewritten second request.
+    """
+    monkeypatch.setenv(
+        model_context.MEDIA_OBSERVATION_DEGRADE_ENV,
+        "0",
+    )
+    messages, _derived, _human = _overflow_payload()
+
+    async def scenario():
+        client, provider, asked, forced = _overflow_client(failures=1)
+        with pytest.raises(RuntimeError, match="maximum context length"):
+            await client.complete(
+                messages=messages,
+                tools=[],
+                _context_budget_bytes=_OVERFLOW_BUDGET,
+            )
+        return provider, asked, forced
+
+    provider, asked, forced = asyncio.run(scenario())
+
+    assert provider.calls == 1
+    assert asked == []
+    assert forced == []
