@@ -8264,32 +8264,34 @@ class FileCreatorAgentRuntime:
         it must neither wake the model nor reset the unattended resume fuse.
         Existing message.completed delivery also restores it after reconnect.
         """
-        messages = await asyncio.to_thread(
-            self.sessions.list_messages,
-            project_id,
-            session_id,
-            after_seq=0,
-            limit=None,
-        )
         automatic_sources = {
             self.YOLO_RESUME_SOURCE,
             self.PROMPT_CONTRACT_RESUME_SOURCE,
             self.MAINLINE_RESUME_SOURCE,
             NOTIFICATION_SOURCE,
         }
-        anchor = next(
-            (
-                item.message_seq
-                for item in reversed(messages)
-                if item.role == "user" and item.source not in automatic_sources
-            ),
-            0,
+        # Both questions here are tail questions -- the anchor is the newest
+        # human turn, and the dedupe asks whether this pause key was already
+        # filed.  Answering them from a full read cost the Session's entire
+        # stream (606 MB observed in the field) on exactly the Sessions that
+        # pause the most.
+        anchor_record = await asyncio.to_thread(
+            self.sessions.find_recent_message,
+            project_id,
+            session_id,
+            where=lambda item: item.role == "user"
+            and item.source not in automatic_sources,
         )
+        anchor = anchor_record.message_seq if anchor_record is not None else 0
         pause_key = f"{conversation_id}:{anchor}:{reason}"
-        if any(
-            item.metadata.get("executionPauseKey") == pause_key
-            for item in messages
-        ):
+        filed = await asyncio.to_thread(
+            self.sessions.find_recent_message,
+            project_id,
+            session_id,
+            where=lambda item: item.metadata.get("executionPauseKey")
+            == pause_key,
+        )
+        if filed is not None:
             return
         text = "自动创作已暂停，作品尚未完成。\n\n" + explanation
         if unfinished:
@@ -8928,26 +8930,20 @@ class FileCreatorAgentRuntime:
             AgentRunStatus.FAILED,
         }:
             return
-        messages = await asyncio.to_thread(
-            self.sessions.list_messages,
+        queued = await asyncio.to_thread(
+            self.sessions.find_recent_message,
             project_id,
             session_id,
-            after_seq=0,
-            limit=None,
+            where=lambda item: item.source == self.MAINLINE_RESUME_SOURCE
+            and item.metadata.get("resumeAfterRunId") == intervention_run_id,
         )
-        if any(
-            item.source == self.MAINLINE_RESUME_SOURCE
-            and item.metadata.get("resumeAfterRunId") == intervention_run_id
-            for item in messages
-        ):
+        if queued is not None:
             return
-        mainline_request = next(
-            (
-                item
-                for item in messages
-                if item.message_seq == interrupted.caused_by_message_seq
-            ),
-            None,
+        mainline_request = await asyncio.to_thread(
+            self.sessions.message_at,
+            project_id,
+            session_id,
+            message_seq=interrupted.caused_by_message_seq or 0,
         )
         mainline_goal = (
             _message_text(mainline_request)

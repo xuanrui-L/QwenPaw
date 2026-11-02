@@ -574,20 +574,10 @@ class CreatorFileServices:
         active Goal's Conversation, then the default Conversation.
         """
 
-        messages = self.sessions.list_messages(
+        originating = self.sessions.message_at(
             project_id,
             session.session_id,
-            after_seq=0,
-            limit=None,
-        )
-        originating = next(
-            (
-                item
-                for item in messages
-                if item.message_seq
-                == journal.review_before.request_message_seq
-            ),
-            None,
+            message_seq=journal.review_before.request_message_seq,
         )
         if originating is not None:
             return originating.conversation_id

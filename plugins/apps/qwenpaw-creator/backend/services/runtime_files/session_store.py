@@ -1440,6 +1440,65 @@ class ProjectRuntimeSessionStore:
                 session_id,
             ).read_tail(limit, where=keep)
 
+    def message_at(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        message_seq: int,
+    ) -> CreatorMessageRecord | None:
+        """Return the one message at *message_seq* without reading the stream.
+
+        Callers that already name the seq they want -- a review's originating
+        request, an interrupted run's causing message -- used to answer that by
+        parsing every record the Session ever wrote, and the Streams that make
+        that expensive are the pathological ones: old records carry Project
+        echoes of hundreds of kilobytes each.  Seqs are line numbers, so this
+        costs one line.  A seq below 1 names nothing and is answered without
+        touching the disk.
+        """
+
+        project_id, session_id = self._safe_session_ids(project_id, session_id)
+        if message_seq < 1:
+            return None
+        with self._project_lock_read(project_id):
+            self._read_session_snapshot_unlocked(project_id, session_id)
+            return self._message_record_at_unlocked(
+                project_id,
+                session_id,
+                message_seq,
+            )
+
+    def find_recent_message(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        where: Callable[[CreatorMessageRecord], bool],
+        max_scan: int | None = None,
+    ) -> CreatorMessageRecord | None:
+        """Return the newest message satisfying *where*, walked back from EOF.
+
+        ``has a pause notice already been filed for this key`` and ``has this
+        run already been resumed`` are existence questions, not history reads.
+        Leaving ``max_scan`` unset keeps the walk exhaustive, so ``None`` means
+        the record is genuinely absent -- the same answer a full read gave, at
+        one record's worth of peak heap.
+        """
+
+        project_id, session_id = self._safe_session_ids(project_id, session_id)
+        with self._project_lock_read(project_id):
+            self._read_session_snapshot_unlocked(project_id, session_id)
+            found = self._messages_store(
+                project_id,
+                session_id,
+            ).read_tail(
+                1,
+                where=where,
+                max_scan=max_scan,
+            )
+            return found[-1] if found else None
+
     def append_event(
         self,
         project_id: str,

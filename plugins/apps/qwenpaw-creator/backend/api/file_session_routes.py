@@ -569,22 +569,22 @@ async def post_message(
         )
         event = window[-1] if window else None
         if event is None:
-            events = await asyncio.to_thread(
-                store.list_events,
+            # Exhaustive, but bounded in memory: walk the stream backwards one
+            # record at a time instead of materializing it.  The fallback used
+            # to parse every event the Session ever wrote -- and the send path
+            # runs it per message -- which is exactly what a long session
+            # cannot afford.  The answer is unchanged: a miss here still means
+            # the admission has no ``message.accepted`` anywhere.
+            found = await asyncio.to_thread(
+                store.list_recent_events,
                 project_id,
                 session.session_id,
-                after_seq=0,
-                limit=None,
+                limit=1,
+                event_type="message.accepted",
+                message_id=admitted.message.message_id,
+                max_scan=None,
             )
-            event = next(
-                (
-                    item
-                    for item in events
-                    if item.event_type == "message.accepted"
-                    and item.message_id == admitted.message.message_id
-                ),
-                None,
-            )
+            event = found[-1] if found else None
             if event is not None:
                 logger.warning(
                     "message.accepted found beyond the %d-event tail window "

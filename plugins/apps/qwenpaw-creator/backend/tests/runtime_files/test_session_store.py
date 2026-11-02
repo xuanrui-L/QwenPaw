@@ -566,6 +566,63 @@ def test_list_recent_messages_reads_only_the_tail_window(
     assert not reads
 
 
+def test_message_at_reads_only_the_named_line(tmp_path, monkeypatch):
+    # A review follow-up already names the seq of the request it belongs to.
+    # Locating that message used to parse every record the session ever wrote,
+    # which on the field's long sessions meant hundreds of MB per lookup.
+    _, _, store, _ = _runtime(tmp_path)
+    for index in range(30):
+        _append(store, "user", f"message {index}")
+    reads = _spy_full_reads(monkeypatch)
+
+    found = store.message_at(PROJECT_ID, SESSION_ID, message_seq=7)
+
+    assert found is not None
+    assert found.message_seq == 7
+    assert not reads
+    # A seq that names nothing is answered without touching the disk.
+    assert store.message_at(PROJECT_ID, SESSION_ID, message_seq=0) is None
+
+
+def test_find_recent_message_answers_existence_without_the_stream(
+    tmp_path,
+    monkeypatch,
+):
+    # "Was this pause notice already filed" is an existence question.  The walk
+    # is exhaustive -- a miss really means absent -- but it never materializes
+    # the stream, which is what a 606 MB history could not afford.
+    _, _, store, _ = _runtime(tmp_path)
+    for index in range(20):
+        _append(store, "user", f"noise {index}")
+    marker = _append(
+        store,
+        "assistant",
+        "filed",
+        metadata={"executionPauseKey": "pause-key-1"},
+    )
+    reads = _spy_full_reads(monkeypatch)
+
+    found = store.find_recent_message(
+        PROJECT_ID,
+        SESSION_ID,
+        where=lambda item: item.metadata.get("executionPauseKey")
+        == "pause-key-1",
+    )
+
+    assert found is not None
+    assert found.message_seq == marker.message.message_seq
+    assert (
+        store.find_recent_message(
+            PROJECT_ID,
+            SESSION_ID,
+            where=lambda item: item.metadata.get("executionPauseKey")
+            == "never-filed",
+        )
+        is None
+    )
+    assert not reads
+
+
 def test_last_message_seq_tracks_the_head_without_reading_the_stream(
     tmp_path,
     monkeypatch,
