@@ -566,6 +566,26 @@ def test_list_recent_messages_reads_only_the_tail_window(
     assert not reads
 
 
+def test_last_message_seq_tracks_the_head_without_reading_the_stream(
+    tmp_path,
+    monkeypatch,
+):
+    # The YOLO fuse asks "did anything land since I decided?" once per second.
+    # Answering that with list_messages rebuilt the whole history every tick.
+    _, _, store, _ = _runtime(tmp_path)
+    assert store.last_message_seq(PROJECT_ID, SESSION_ID) == 0
+    _append(store, "user", "first")
+    _append(store, "assistant", "reply")
+    reads = _spy_full_reads(monkeypatch)
+
+    head = store.last_message_seq(PROJECT_ID, SESSION_ID)
+
+    assert head == 2
+    assert not reads
+    _append(store, "user", "third")
+    assert store.last_message_seq(PROJECT_ID, SESSION_ID) == 3
+
+
 def test_list_recent_messages_pages_backwards_from_a_cursor(tmp_path):
     _, _, store, _ = _runtime(tmp_path)
     for index in range(30):
@@ -660,3 +680,95 @@ def test_list_recent_events_finds_the_admission_in_the_tail_window(
         == []
     )
     assert not reads
+
+
+def test_create_goal_reads_the_root_message_without_a_full_scan(
+    tmp_path,
+    monkeypatch,
+):
+    # A goal references exactly one message, but the old code materialized the
+    # whole durable stream and indexed it in Python -- inside the exclusive
+    # Project lock, where every 10s lock waiter pays for it.
+    _, _, store, _ = _runtime(tmp_path)
+    root = _append(store, "user", "objective")
+    for index in range(30):
+        _append(store, "user", f"message {index}")
+    reads = _spy_full_reads(monkeypatch)
+
+    goal = store.create_goal(
+        PROJECT_ID,
+        SESSION_ID,
+        CONVERSATION_ID,
+        goal_id="goal-read",
+        root_message_seq=root.message.message_seq,
+        intent="Create the Project",
+    )
+
+    assert goal.root_message_seq == 1
+    # Recovery legitimately walks the (small) queued stream; the message stream
+    # is the one that used to be materialized whole, and it must not be read as
+    # a whole here.
+    assert "messages.jsonl" not in reads
+
+
+def test_client_id_lookup_reaches_the_head_without_holding_the_stream(
+    tmp_path,
+    monkeypatch,
+):
+    _, _, store, _ = _runtime(tmp_path)
+    oldest = _append(
+        store,
+        "user",
+        "oldest",
+        client_message_id="client-oldest",
+    )
+    for index in range(30):
+        _append(store, "user", f"message {index}")
+    reads = _spy_full_reads(monkeypatch)
+
+    found = store._message_by_client_id_unlocked(
+        PROJECT_ID,
+        SESSION_ID,
+        "client-oldest",
+    )
+    missing = store._message_by_client_id_unlocked(
+        PROJECT_ID,
+        SESSION_ID,
+        "client-never-used",
+    )
+
+    assert found is not None
+    assert found.message_id == oldest.message.message_id
+    # "absent" still means absent everywhere: the replay walks to the head
+    # of the stream, it just holds one page at a time instead of the whole
+    # history.
+    assert missing is None
+    assert not reads
+
+
+def test_recovery_restores_a_boundary_beyond_one_replay_page(
+    tmp_path,
+    monkeypatch,
+):
+    # Recovery replays the message stream in pages to re-assert review
+    # boundaries. The page window must not decide which history gets seen, so
+    # force one record per page while the boundary sits on message 2.
+    monkeypatch.setattr(
+        "services.runtime_files.session_store._MESSAGE_REPLAY_PAGE",
+        1,
+    )
+    root, snapshot, store, _bootstrap = _runtime(tmp_path)
+    _activate_runtime(root, snapshot, store)
+    _admit(store, "request-review", "change")
+    for index in range(4):
+        _append(store, "assistant", f"later {index}")
+    boundary_path = _boundary_file(store, "request-review")
+    boundary_path.unlink()
+
+    recovered = ProjectRuntimeSessionStore(root).get_session(
+        PROJECT_ID,
+        SESSION_ID,
+    )
+
+    assert recovered.last_message_seq == 6
+    assert boundary_path.is_file()

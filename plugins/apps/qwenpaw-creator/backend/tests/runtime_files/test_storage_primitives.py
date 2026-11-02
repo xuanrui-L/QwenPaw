@@ -330,6 +330,52 @@ def test_jsonl_never_skips_a_malformed_complete_line(tmp_path):
         store.append(EventRecord(worker=1, value=2))
 
 
+def test_jsonl_read_record_at_targets_one_line(tmp_path):
+    path = tmp_path / "events.jsonl"
+    store = DurableJsonlStore(path, EventRecord)
+    for value in range(5):
+        store.append(EventRecord(worker=0, value=value))
+
+    assert store.read_record_at(3).value == 2
+    assert store.read_record_at(5).value == 4
+    assert store.read_record_at(6) is None
+    with pytest.raises(ValueError, match="must be positive"):
+        store.read_record_at(0)
+
+
+def test_jsonl_read_record_at_treats_a_torn_crash_tail_as_absent(tmp_path):
+    path = tmp_path / "events.jsonl"
+    store = DurableJsonlStore(path, EventRecord)
+    store.append(EventRecord(worker=0, value=1))
+    with path.open("ab") as handle:
+        handle.write(b'{"seq":2,"record":{"worker":0')
+
+    assert store.read_record_at(1).value == 1
+    assert store.read_record_at(2) is None
+
+
+def test_jsonl_read_record_at_reads_an_absent_stream_as_empty(tmp_path):
+    store = DurableJsonlStore(tmp_path / "events.jsonl", EventRecord)
+
+    assert store.read_record_at(1) is None
+
+
+def test_jsonl_read_record_at_reports_a_seq_disagreeing_with_its_line(
+    tmp_path,
+):
+    path = tmp_path / "events.jsonl"
+    store = DurableJsonlStore(path, EventRecord)
+    store.append(EventRecord(worker=0, value=1))
+    with path.open("ab") as handle:
+        handle.write(
+            b'{"seq":9,"written_at":"2026-10-29T00:00:00+00:00",'
+            b'"record":{"worker":0,"value":2}}\n',
+        )
+
+    with pytest.raises(JsonlCorruptionError, match="line 2 has seq 9"):
+        store.read_record_at(2)
+
+
 def test_concurrent_threads_allocate_unique_contiguous_jsonl_sequences(
     tmp_path,
 ):

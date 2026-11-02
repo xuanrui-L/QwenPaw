@@ -23,7 +23,6 @@ import {
   copyProject,
   getRecreateParams,
   listProjects,
-  listTasks,
   getArtifactVersionMediaUrl,
   CreatorHttpError,
   newClientId,
@@ -274,26 +273,18 @@ export default function HomePage() {
       try {
         const data = await listProjects(100, 0, sort, order);
         const projectList = data.items || [];
+        // One response carries both the cards and the "working" badge: the
+        // listing answers hasActiveTask for every Project, so the page renders
+        // as soon as it arrives instead of waiting on a per-Project /tasks
+        // round trip for each card.
         setProjects(projectList);
-        // Fetch tasks for each project to determine if there's active background work.
-        // This ensures the status display matches the in-project live status.
-        const activeTaskProjects = new Set<string>();
-        await Promise.all(
-          projectList.map(async (project) => {
-            try {
-              const tasksData = await listTasks(project.projectId);
-              const hasActiveTask = (tasksData.items || []).some(
-                (task) => task.status === "QUEUED" || task.status === "RUNNING",
-              );
-              if (hasActiveTask) {
-                activeTaskProjects.add(project.projectId);
-              }
-            } catch {
-              // Ignore task fetch errors for individual projects
-            }
-          }),
+        setProjectsWithActiveTasks(
+          new Set(
+            projectList
+              .filter((project) => project.hasActiveTask)
+              .map((project) => project.projectId),
+          ),
         );
-        setProjectsWithActiveTasks(activeTaskProjects);
       } catch {
         message.error(t("home.loadFailed"));
       } finally {

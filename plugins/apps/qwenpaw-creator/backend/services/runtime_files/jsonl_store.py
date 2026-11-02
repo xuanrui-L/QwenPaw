@@ -337,6 +337,60 @@ class DurableJsonlStore(Generic[T]):
             for envelope in self.read_all()
         ]
 
+    def read_record_at(self, seq: int) -> T | None:
+        """Return the record whose line number is *seq*, or ``None``.
+
+        Seqs are 1-based line numbers by construction -- one envelope per line,
+        contiguity asserted on every read path -- so a targeted lookup can walk
+        newline boundaries and parse exactly one line. This is what lets a
+        caller fetch one historical record without materializing the stream:
+        the full read dominated both CPU and the peak heap on long sessions
+        (observed: 853 MB of Python heap for one 285 MB messages file).
+
+        Lock-free like every other read path: complete lines are immutable, and
+        an unrepaired crash tail reads as absent rather than being repaired here.
+        """
+
+        if seq < 1:
+            raise ValueError("record seq must be positive")
+        raw = b""
+        line_number = 0
+        try:
+            handle = self.path.open("rb")
+        except FileNotFoundError:
+            # An absent stream is an empty stream, matching read_records().
+            return None
+        with handle:
+            while line_number < seq:
+                raw = handle.readline()
+                if not raw or not raw.endswith(b"\n"):
+                    return None
+                line_number += 1
+            try:
+                envelope = JsonlEnvelope.model_validate(strict_json_loads(raw))
+            except (
+                UnicodeDecodeError,
+                ValueError,
+                PydanticValidationError,
+            ) as error:
+                raise JsonlCorruptionError(
+                    self.path,
+                    f"complete line {seq} is invalid: {error}",
+                ) from error
+            if envelope.seq != line_number:
+                raise JsonlCorruptionError(
+                    self.path,
+                    f"line {line_number} has seq {envelope.seq}, "
+                    f"expected {line_number}",
+                )
+            return cast(
+                T,
+                self._validate_record(
+                    envelope.record,
+                    line_number=line_number,
+                ),
+            )
+
     def forward_reader(self, after_seq: int = 0) -> JsonlReadCursor[T]:
         """Create a bounded, sequential reader for one durable subscription."""
         return JsonlReadCursor(self, after_seq)
