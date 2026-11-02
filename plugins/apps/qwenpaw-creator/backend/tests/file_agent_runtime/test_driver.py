@@ -632,6 +632,7 @@ def _edit_client(*, description: str):
             "patch_project",
             "ground_prompt_context",
             "ground_image_objects",
+            "recall_media",
             "browser_use",
             "elements_at",
             "import_script_asset",
