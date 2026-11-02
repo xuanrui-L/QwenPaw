@@ -329,15 +329,17 @@ def test_cancelling_the_pass_kills_its_child(
     assert probe.returncode == 1
 
 
-def test_a_confirmed_project_lifts_the_size_ceiling(
+def test_the_size_ceiling_stands_even_for_a_confirmed_project(
     tmp_path: Path,
     calls,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The ceiling protects people who never asked; this person asked.
+    """Confirming reclaim does not buy a 2.3 GB peak in the background.
 
-    Confirming also accepts the measured cost: the collapse peaks at about
-    four times the stream, which is why the automatic pass refuses it.
+    The confirmation lifts the deletion cap, where a person is deciding about
+    their own bytes.  It does not lift the collapse ceiling: that one exists
+    because the reader pays ~4x the stream in resident memory, and a background
+    pass must never be able to spend that on its own authority.
     """
 
     monkeypatch.setenv("CREATOR_MESSAGE_ELISION_MAX_BYTES", str(1024 * 1024))
@@ -352,5 +354,6 @@ def test_a_confirmed_project_lifts_the_size_ceiling(
 
     summary = _elide(tmp_path)
 
-    assert summary.oversize_files == 0
-    assert calls == [[str(tmp_path), PROJECT.removeprefix("project-")]]
+    assert summary.oversize_files == 1
+    assert summary.files == 0
+    assert calls == []

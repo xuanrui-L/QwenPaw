@@ -30,7 +30,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from services.media_files.task_scratch import read_reclaim_confirmation
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
 
 logger = logging.getLogger(__name__)
@@ -159,13 +158,7 @@ def _candidates(
                 continue
             if size < MIN_ELISION_BYTES:
                 continue
-            confirmed = (
-                read_reclaim_confirmation(
-                    directory.parent.parent,
-                )
-                is not None
-            )
-            if size > ceiling and not confirmed:
+            if size > ceiling:
                 oversize_files += 1
                 oversize_bytes += size
                 continue
