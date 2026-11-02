@@ -717,8 +717,13 @@ class FfmpegLocalMediaRunner:
                 video_filter,
                 "-c:v",
                 "libx264",
+                # ``fast`` instead of ``medium``, measured on a 12 s window of a
+                # real 1080p cut through the warm_bright chain: 9.21 s / 496 MB
+                # against 10.89 s / 567 MB, and the two outputs differ by PSNR
+                # 48.8 dB / SSIM 0.994 -- this pass re-encodes footage that is
+                # already lossy, so the preset only redistributes bits.
                 "-preset",
-                "medium",
+                "fast",
                 "-crf",
                 "18",
                 "-pix_fmt",
@@ -2328,7 +2333,9 @@ class FfmpegLocalMediaRunner:
         try:
             with media_gate.slot("ffmpeg"):
                 process = subprocess.Popen(
-                    [self.executable, *arguments],
+                    media_gate.thread_limited_argv(
+                        [self.executable, *arguments],
+                    ),
                     cwd=cwd,
                     # ffmpeg reads stdin by default; inheriting the service
                     # process tty triggers SIGTTIN and suspends the process

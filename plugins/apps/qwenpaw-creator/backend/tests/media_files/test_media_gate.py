@@ -200,6 +200,149 @@ def test_run_forwards_the_subprocess_contract(
     assert failure.value.returncode == 3
 
 
+def test_slot_count_reserves_the_host_before_sizing_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ffmpeg is not the only tenant: the host interpreter pays first."""
+
+    monkeypatch.delenv(media_gate.ENV_SLOTS, raising=False)
+    monkeypatch.setattr(
+        media_gate,
+        "container_memory_mb",
+        lambda: media_gate.HOST_RESERVE_MB
+        + media_gate.DEFAULT_FFMPEG_PEAK_MB * 1.9,
+    )
+    assert media_gate.slot_count() == 1
+    # A 1 GB container fits one measured 512 MB encoder plus the host, not the
+    # four the old 120 MB estimate happily handed out.
+    monkeypatch.setattr(media_gate, "container_memory_mb", lambda: 1024.0)
+    assert media_gate.slot_count() == 1
+    monkeypatch.setattr(media_gate, "container_memory_mb", lambda: 4096.0)
+    assert media_gate.slot_count() == media_gate.MAX_SLOTS
+
+
+def test_cpu_budget_reads_a_cgroup_quota(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    v2 = tmp_path / "cpu.max"
+    v2.write_text("250000 100000", encoding="ascii")
+    missing = str(tmp_path / "absent")
+    monkeypatch.setattr(media_gate, "_CGROUP_V2_CPU_MAX", str(v2))
+    monkeypatch.setattr(media_gate, "_CGROUP_V1_QUOTA", missing)
+    monkeypatch.setattr(media_gate, "_CGROUP_V1_PERIOD", missing)
+
+    assert media_gate.cpu_budget() == 2
+
+    # "max" is no ceiling, so the affinity-aware count decides.
+    v2.write_text("max", encoding="ascii")
+    assert media_gate.cpu_budget() >= 1
+
+
+def test_cpu_budget_falls_back_to_the_cgroup_v1_pair(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quota = tmp_path / "cpu.cfs_quota_us"
+    period = tmp_path / "cpu.cfs_period_us"
+    quota.write_text("400000", encoding="ascii")
+    period.write_text("100000", encoding="ascii")
+    v2_absent = str(tmp_path / "none")
+    monkeypatch.setattr(media_gate, "_CGROUP_V2_CPU_MAX", v2_absent)
+    monkeypatch.setattr(media_gate, "_CGROUP_V1_QUOTA", str(quota))
+    monkeypatch.setattr(media_gate, "_CGROUP_V1_PERIOD", str(period))
+
+    assert media_gate.cpu_budget() == 4
+
+
+def test_thread_ceiling_follows_the_cores_a_container_owns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(media_gate.ENV_ENCODE_THREADS, raising=False)
+    monkeypatch.setattr(media_gate, "cpu_budget", lambda: 16)
+    limit = media_gate.MAX_THREADS_PER_PROCESS
+    assert media_gate.threads_per_process() == limit
+    monkeypatch.setattr(media_gate, "cpu_budget", lambda: 1)
+    floor = media_gate.MIN_THREADS_PER_PROCESS
+    assert media_gate.threads_per_process() == floor
+    monkeypatch.setenv(media_gate.ENV_ENCODE_THREADS, "0")
+    assert media_gate.threads_per_process() == 0
+
+
+def test_thread_limit_lands_on_the_encoder_not_the_decoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(media_gate, "threads_per_process", lambda: 3)
+    media_gate.reset_gate()
+    argv = media_gate.thread_limited_argv(
+        [
+            "/opt/bin/ffmpeg-macos-aarch64-v7.1",
+            "-y",
+            "-i",
+            "/tmp/a.mp4",
+            "-i",
+            "/tmp/b.mp4",
+            "-c:v",
+            "libx264",
+            "/tmp/out.mp4",
+        ],
+    )
+
+    assert argv[argv.index("-threads") + 1] == "3"
+    # Before the inputs it would bind to the decoder and only slow the read.
+    assert argv.index("-threads") > argv.index("/tmp/b.mp4")
+
+
+def test_thread_limit_leaves_other_programs_and_explicit_choices_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(media_gate, "threads_per_process", lambda: 3)
+    media_gate.reset_gate()
+    probe = ["ffprobe", "-i", "/tmp/a.mp4"]
+    pinned = ["ffmpeg", "-i", "a.mp4", "-threads", "1", "out.mp4"]
+
+    assert media_gate.thread_limited_argv(probe) == probe
+    assert media_gate.thread_limited_argv(pinned) == pinned
+
+
+def test_run_spawns_with_the_thread_cap_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate is the funnel: call sites never spell out ``-threads``."""
+
+    seen: list[list[str]] = []
+
+    class _FakeProcess:
+        def __init__(self, args, **_options: object) -> None:
+            seen.append(list(args))
+            self.args = args
+            self.returncode = 0
+            self.pid = os.getpid()
+
+        def __enter__(self) -> "_FakeProcess":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            self.returncode = 0
+
+        def communicate(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[str, str]:
+            return ("", "")
+
+    monkeypatch.setattr(media_gate, "threads_per_process", lambda: 2)
+    media_gate.reset_gate()
+    monkeypatch.setattr(subprocess, "Popen", _FakeProcess)
+
+    media_gate.run(["ffmpeg", "-y", "-i", "a.mp4", "-an", "out.mp4"])
+
+    assert seen == [
+        ["ffmpeg", "-y", "-i", "a.mp4", "-threads", "2", "-an", "out.mp4"],
+    ]
+
+
 def _spawn_gated_runs(runs: int, ledger) -> None:
     """Run *runs* fake media processes through the gate from own threads."""
 
