@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import replace
 import hashlib
 import io
@@ -36,6 +37,7 @@ from services.file_agent_runtime.driver import (
     _tool_call_transport_metadata,
 )
 from services.file_agent_runtime import driver as driver_module
+from services.file_agent_runtime import media_vault
 from services.file_agent_runtime.prompts import render_creator_system_prompt
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
@@ -68,6 +70,7 @@ from services.runtime_files.execution_models import (
     TaskRecord,
 )
 from services.specialist_tools import SpecialistToolResult
+from services.workspace.content_store import ContentStore
 
 pytestmark = pytest.mark.unit
 
@@ -6031,3 +6034,72 @@ def test_upload_joining_a_live_run_starts_understanding(
         "本轮上传素材的理解已启动" in str(entry.get("content") or "")
         for entry in joined_turn
     )
+
+
+def test_recalled_media_arrives_after_its_own_tool_group(
+    tmp_path, monkeypatch,
+):
+    """The recalled bytes ride behind the tool result, never inside its group.
+
+    ``recall_media`` answers with JSON text, so the restored payload has to
+    reach the provider as native media on a user turn. The loop publishes that
+    turn after the whole assistant turn has been answered: a user row placed
+    before a tool result leaves the provider an unanswered tool_calls message,
+    and compaction can then never pair the group up to drop it again.
+    """
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    payload = _png_bytes_for_grounding()
+    digest = media_vault.store_data_url(
+        "data:image/png;base64," + base64.b64encode(payload).decode(),
+        store=ContentStore(tmp_path.resolve()),
+    )
+
+    seen: list[list[dict]] = []
+    turn = 0
+
+    async def callback(messages, tools):
+        del tools
+        nonlocal turn
+        turn += 1
+        seen.append([dict(item) for item in messages])
+        if turn == 1:
+            return _tool_turn(
+                call_id="recall-1",
+                name="recall_media",
+                arguments={"handles": [digest]},
+            )
+        if turn == 2:
+            return _read_call("read-1")
+        return AgentModelTurn(content="已取回参考图，继续。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="取回之前移出的参考图，然后继续。",
+        )
+        driver = _driver(services, CallbackAgentChatClient(callback))
+        await _run_to_idle(driver, services)
+        await driver.stop()
+
+    asyncio.run(scenario())
+
+    assert turn == 3
+    # The recalled user row follows the tool result it belongs to; it is never
+    # published before that result, and never held back past the next turn.
+    assert [item["role"] for item in seen[1]][-3:] == [
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert [item["role"] for item in seen[2]][-5:] == [
+        "assistant",
+        "tool",
+        "user",
+        "assistant",
+        "tool",
+    ]
+    recalled = seen[1][-1]
+    assert recalled["source"] == driver_module.MEDIA_RECALL_SOURCE
+    assert [part["type"] for part in recalled["content"]][-1] == "image_url"
+    restored = recalled["content"][-1]["image_url"]["url"]
+    assert base64.b64decode(restored.split(";base64,", 1)[1]) == payload

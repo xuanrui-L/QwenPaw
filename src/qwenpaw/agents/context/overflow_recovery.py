@@ -28,6 +28,7 @@ CONTEXT_OVERFLOW_MARKERS: tuple[str, ...] = (
     "context_length_exceeded",
     "maximum context length",
     "maximum context window",
+    "context window exceeded",
     "max input length",
     "input length should be",
     "input is too long",
