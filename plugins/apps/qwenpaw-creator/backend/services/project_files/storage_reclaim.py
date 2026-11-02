@@ -23,7 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from services.media_files.task_scratch import (
+    confirm_project_reclaim,
     history_reclaim_kept,
+    read_reclaim_confirmation,
     release_orphaned_scratch,
 )
 
@@ -37,6 +39,7 @@ class HistoryReclaimResult:
 
     project_id: str
     history_kept: bool
+    confirmed_at: datetime | None
     removed_transactions: int
     transaction_bytes: int
     released_files: int
@@ -65,23 +68,30 @@ def reclaim_project_history(
         return HistoryReclaimResult(
             project_id=project_id,
             history_kept=True,
+            confirmed_at=read_reclaim_confirmation(project_root),
             removed_transactions=0,
             transaction_bytes=0,
             released_files=0,
             released_bytes=0,
         )
+    # The press is the confirmation: from now on the automatic passes may
+    # reclaim this Project even above the cap that makes them step back.
+    confirmed_at = confirm_project_reclaim(project_root, now=moment)
     transactions = collect_terminal_transactions(
         services,
         project_ids=(project_id,),
+        enforce_cap=False,
     )
     scratch = release_orphaned_scratch(
         services,
         now=moment,
         project_ids=(project_id,),
+        enforce_cap=False,
     )
     return HistoryReclaimResult(
         project_id=project_id,
         history_kept=False,
+        confirmed_at=confirmed_at,
         removed_transactions=transactions.removed_transactions,
         transaction_bytes=transactions.removed_bytes,
         released_files=scratch.removed_files,

@@ -84,6 +84,18 @@ BASELINE_VERSION = 1
 HISTORY_OPTOUT_FILE_NAME = ".storage-history-optout.json"
 KEEP_PROJECT_HISTORY_ENV = "CREATOR_STORAGE_KEEP_HISTORY"
 
+# A person confirms reclaiming one oversized Project by pressing the console's
+# button, which posts the on-demand route; this file is the receipt the sweeps
+# then honour.  Without it, a Project whose settled history is bigger than the
+# cap below is reported, not touched.
+RECLAIM_CONFIRMATION_FILE_NAME = ".storage-reclaim-confirmed.json"
+
+# Above this much settled history in one Project, the automatic pass steps back
+# and asks.  Measured on the field Project: 17 GB of receipts and scratch, i.e.
+# minutes of deletion and a rewrite nobody asked for yet.
+AUTO_RECLAIM_MAX_BYTES_ENV = "CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES"
+AUTO_RECLAIM_DEFAULT_MAX_BYTES = 4 * 1024 * 1024 * 1024
+
 # The conversation collapse keeps one compressed pre-pass copy of each
 # stream it rewrites, outside every Project directory, so nothing in the
 # per-Project accounting would ever show it.  It is reported because it
@@ -133,6 +145,8 @@ class ScratchSweepSummary:
     removed_files: int = 0
     removed_bytes: int = 0
     stopped_early: bool = False
+    skipped_projects: int = 0
+    skipped_bytes: int = 0
 
 
 @dataclass(slots=True)
@@ -707,6 +721,58 @@ def keep_project_history(
     return read_history_optout(project_root) or moment
 
 
+def _reclaim_confirmation_store(
+    project_root: Path,
+) -> AtomicJsonRecordStore[dict[str, Any]]:
+    return AtomicJsonRecordStore(
+        Path(project_root) / "runtime" / RECLAIM_CONFIRMATION_FILE_NAME,
+        None,
+    )
+
+
+def read_reclaim_confirmation(project_root: Path) -> datetime | None:
+    """When a person confirmed reclaiming this Project, if anyone ever did."""
+
+    try:
+        stored = _reclaim_confirmation_store(Path(project_root)).read_or_none()
+    except OSError:
+        return None
+    if not isinstance(stored, dict):
+        return None
+    raw = stored.get("confirmedAt")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def confirm_project_reclaim(project_root: Path, *, now: datetime) -> datetime:
+    """Record the confirmation once, keeping the first confirmed moment."""
+
+    moment = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    existing = read_reclaim_confirmation(project_root)
+    if existing is not None:
+        return existing
+    _reclaim_confirmation_store(Path(project_root)).try_create(
+        {"version": BASELINE_VERSION, "confirmedAt": moment.isoformat()},
+    )
+    return read_reclaim_confirmation(project_root) or moment
+
+
+def auto_reclaim_max_bytes() -> int:
+    """One Project's settled history above this is reported, not reclaimed."""
+
+    raw = os.environ.get(AUTO_RECLAIM_MAX_BYTES_ENV, "").strip()
+    try:
+        value = int(raw) if raw else AUTO_RECLAIM_DEFAULT_MAX_BYTES
+    except ValueError:
+        return AUTO_RECLAIM_DEFAULT_MAX_BYTES
+    return value if value > 0 else AUTO_RECLAIM_DEFAULT_MAX_BYTES
+
+
 def history_reclaim_kept(project_root: Path) -> bool:
     """Whether this Project's pre-baseline history must be left alone.
 
@@ -809,6 +875,84 @@ def _releasable_now(
     return moment - task.updated_at >= grace
 
 
+def _projected_release_bytes(
+    tasks: Iterable[TaskRecord],
+    directories: dict[str, Path],
+    *,
+    baseline: datetime,
+    kept: bool,
+    moment: datetime,
+    grace: timedelta,
+) -> int:
+    """What releasing this Project's settled scratch would free.
+
+    The cap has to be judged before any unlink, and judging it must not cost
+    more than the stats the profile already pays for.
+    """
+
+    projected = 0
+    for task in tasks:
+        directory = directories.get(task.task_id)
+        if directory is None:
+            continue
+        if not _releasable_now(
+            task,
+            baseline=baseline,
+            kept=kept,
+            moment=moment,
+            grace=grace,
+        ):
+            continue
+        projected += _releasable_bytes(directory)
+    return projected
+
+
+def _until_budget_exhausted(
+    tasks: Iterable[TaskRecord],
+    budget: SweepBudget | None,
+) -> Iterator[TaskRecord]:
+    """Yield tasks until this pass's budget runs out, then stop quietly."""
+
+    for task in tasks:
+        if budget is not None and not budget.has_room():
+            return
+        yield task
+
+
+def _withheld_release_bytes(
+    project_root: Path,
+    tasks: Iterable[TaskRecord],
+    directories: dict[str, Path],
+    *,
+    baseline: datetime,
+    kept: bool,
+    moment: datetime,
+    grace: timedelta,
+    enforce_cap: bool,
+    cap: int,
+) -> int:
+    """The release this Project must wait on, or 0 when nothing withholds it.
+
+    Above the cap an automatic pass steps back and asks; a confirmation on the
+    Project, or a caller that passes ``enforce_cap=False`` because a person is
+    watching right now, lifts that.
+    """
+
+    if not enforce_cap:
+        return 0
+    if read_reclaim_confirmation(project_root) is not None:
+        return 0
+    projected = _projected_release_bytes(
+        tasks,
+        directories,
+        baseline=baseline,
+        kept=kept,
+        moment=moment,
+        grace=grace,
+    )
+    return projected if projected > cap else 0
+
+
 def release_orphaned_scratch(
     services: TaskStore,
     *,
@@ -816,6 +960,7 @@ def release_orphaned_scratch(
     grace: timedelta = ORPHAN_RELEASE_GRACE,
     project_ids: Iterable[str] | None = None,
     budget: SweepBudget | None = None,
+    enforce_cap: bool = True,
 ) -> ScratchSweepSummary:
     """Collect the scratch a crash left behind after a Task already finished.
 
@@ -841,6 +986,9 @@ def release_orphaned_scratch(
     released_directories = 0
     removed_files = 0
     removed_bytes = 0
+    skipped_projects = 0
+    skipped_bytes = 0
+    cap = auto_reclaim_max_bytes()
     for project_id in services.projects.discover_project_ids():
         if project_ids is not None and project_id not in set(project_ids):
             continue
@@ -867,9 +1015,30 @@ def release_orphaned_scratch(
                 exc_info=True,
             )
             continue
-        for task in tasks:
-            if budget is not None and not budget.has_room():
-                break
+        withheld = _withheld_release_bytes(
+            project_root,
+            tasks,
+            directories,
+            baseline=baseline,
+            kept=kept,
+            moment=moment,
+            grace=grace,
+            enforce_cap=enforce_cap,
+            cap=cap,
+        )
+        if withheld:
+            skipped_projects += 1
+            skipped_bytes += withheld
+            logger.warning(
+                "scratch reclaim withheld pending confirmation: "
+                "project=%s bytes=%s cap=%s (confirm through "
+                "POST /storage/projects/{id}/reclaim-history)",
+                project_id,
+                withheld,
+                cap,
+            )
+            continue
+        for task in _until_budget_exhausted(tasks, budget):
             directory = directories.get(task.task_id)
             if directory is None:
                 continue
@@ -894,6 +1063,8 @@ def release_orphaned_scratch(
         removed_files=removed_files,
         removed_bytes=removed_bytes,
         stopped_early=bool(budget is not None and budget.stopped_early),
+        skipped_projects=skipped_projects,
+        skipped_bytes=skipped_bytes,
     )
 
 
@@ -968,6 +1139,7 @@ def project_storage_profile(
         root = Path(services.projects.project_root(project_id))
         baseline = read_scratch_baseline(root)
         kept_since = read_history_optout(root)
+        confirmed_at = read_reclaim_confirmation(root)
         try:
             finished = {
                 task.task_id: task
@@ -1014,6 +1186,17 @@ def project_storage_profile(
                 measured["transactionsBytes"] += size
         if include_orphans:
             measured["orphanBytes"] = _orphan_bytes(services, project_id, root)
+        # What the automatic passes would take here if they were allowed: the
+        # console shows it next to a confirm button once it exceeds the cap.
+        # Imported late: transaction_gc imports this module at top level.
+        from services.project_files.transaction_gc import (
+            surplus_transaction_bytes,
+        )
+
+        pending_bytes = (
+            surplus_transaction_bytes(root)
+            + measured["taskWorkReclaimableBytes"]
+        )
         for key, value in measured.items():
             totals[key] += value
         projects.append(
@@ -1023,6 +1206,10 @@ def project_storage_profile(
                 "historyKeptAt": (
                     kept_since.isoformat() if kept_since else None
                 ),
+                "reclaimConfirmedAt": (
+                    confirmed_at.isoformat() if confirmed_at else None
+                ),
+                "pendingReclaimBytes": pending_bytes,
                 **measured,
             },
         )

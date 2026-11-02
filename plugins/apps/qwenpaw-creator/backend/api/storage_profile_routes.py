@@ -81,6 +81,11 @@ async def reclaim_history(
         {
             "projectId": result.project_id,
             "historyKept": result.history_kept,
+            "confirmedAt": (
+                result.confirmed_at.isoformat()
+                if result.confirmed_at
+                else None
+            ),
             "removedTransactions": result.removed_transactions,
             "transactionBytes": result.transaction_bytes,
             "releasedFiles": result.released_files,

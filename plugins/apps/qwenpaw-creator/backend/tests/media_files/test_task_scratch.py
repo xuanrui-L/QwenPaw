@@ -1008,3 +1008,46 @@ def test_the_pass_budget_comes_from_the_environment(
     assert tuned.max_bytes == 1024
     # Zero seconds means "no clock bound", not "delete nothing".
     assert tuned.deadline is None
+
+
+def test_an_oversized_projects_scratch_waits_for_a_person(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap is per Project, so a small one next door is still swept."""
+
+    from services.media_files.task_scratch import confirm_project_reclaim
+
+    monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "10")
+    scratch = _scratch(tmp_path)
+    store = ProjectExecutionStore(tmp_path)
+    store.create_task(_task(TaskStatus.QUEUED))
+    _moved(
+        store,
+        "task-1",
+        frm=TaskStatus.QUEUED,
+        to=TaskStatus.RUNNING,
+        updated_at=T0 - timedelta(days=2),
+    )
+    _moved(
+        store,
+        "task-1",
+        frm=TaskStatus.RUNNING,
+        to=TaskStatus.SUCCEEDED,
+        updated_at=T0 - timedelta(days=1),
+    )
+
+    withheld = release_orphaned_scratch(_services(tmp_path), now=T0)
+
+    assert withheld.removed_files == 0
+    assert withheld.skipped_projects == 1
+    assert withheld.skipped_bytes > 10
+    assert len(_media(scratch)) == 2
+
+    confirm_project_reclaim(tmp_path / PROJECT_ID, now=T0)
+
+    swept = release_orphaned_scratch(_services(tmp_path), now=T0)
+
+    assert swept.removed_files == 2
+    assert swept.skipped_projects == 0
+    assert _media(scratch) == []

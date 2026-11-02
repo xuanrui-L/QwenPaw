@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import gzip
 import importlib.util
 import sys
@@ -326,3 +327,30 @@ def test_cancelling_the_pass_kills_its_child(
         check=False,
     )
     assert probe.returncode == 1
+
+
+def test_a_confirmed_project_lifts_the_size_ceiling(
+    tmp_path: Path,
+    calls,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The ceiling protects people who never asked; this person asked.
+
+    Confirming also accepts the measured cost: the collapse peaks at about
+    four times the stream, which is why the automatic pass refuses it.
+    """
+
+    monkeypatch.setenv("CREATOR_MESSAGE_ELISION_MAX_BYTES", str(1024 * 1024))
+    _conversation(
+        tmp_path,
+        size=session_elision.MIN_ELISION_BYTES + 4096,
+    )
+    task_scratch.confirm_project_reclaim(
+        tmp_path / PROJECT,
+        now=datetime.now(timezone.utc),
+    )
+
+    summary = _elide(tmp_path)
+
+    assert summary.oversize_files == 0
+    assert calls == [[str(tmp_path), PROJECT.removeprefix("project-")]]

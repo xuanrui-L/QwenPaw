@@ -212,3 +212,39 @@ def test_requests_are_told_to_retry_while_recovery_runs():
             project_file_services()
     finally:
         facade.mark_runtime_preparing(False)
+
+
+def test_confirming_writes_a_receipt_the_sweeps_then_honour(
+    api_request,
+    app,
+    api_runtime_root,
+    monkeypatch,
+):
+    """The button is the confirmation the automatic pass waits for."""
+
+    from services.media_files.task_scratch import (
+        RECLAIM_CONFIRMATION_FILE_NAME,
+    )
+
+    monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "100")
+    transactions = _seed_legacy_project(api_runtime_root, PROJECT_A, count=60)
+
+    response = api_request(
+        app,
+        "POST",
+        f"/storage/projects/{PROJECT_A}/reclaim-history",
+        json={"confirm": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["confirmedAt"]
+    assert body["removedTransactions"] == 10
+    marker = (
+        api_runtime_root
+        / PROJECT_A
+        / "runtime"
+        / RECLAIM_CONFIRMATION_FILE_NAME
+    )
+    assert marker.is_file()
+    assert len(list(transactions.iterdir())) == 50

@@ -17,6 +17,11 @@ class ProjectStorageProfileData(StrictModel):
         default=None,
         alias="historyKeptAt",
     )
+    reclaim_confirmed_at: str | None = Field(
+        default=None,
+        alias="reclaimConfirmedAt",
+    )
+    pending_reclaim_bytes: int = Field(default=0, alias="pendingReclaimBytes")
     task_work_bytes: int = Field(default=0, alias="taskWorkBytes")
     task_work_legacy_bytes: int = Field(default=0, alias="taskWorkLegacyBytes")
     task_work_reclaimable_bytes: int = Field(
@@ -42,6 +47,7 @@ class HistoryReclaimResultData(StrictModel):
 
     project_id: str = Field(alias="projectId")
     history_kept: bool = Field(alias="historyKept")
+    confirmed_at: str | None = Field(default=None, alias="confirmedAt")
     removed_transactions: int = Field(default=0, alias="removedTransactions")
     transaction_bytes: int = Field(default=0, alias="transactionBytes")
     released_files: int = Field(default=0, alias="releasedFiles")

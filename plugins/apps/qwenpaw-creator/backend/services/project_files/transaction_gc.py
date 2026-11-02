@@ -42,7 +42,9 @@ from typing import Any
 
 from services.media_files.task_scratch import (
     SweepBudget,
+    auto_reclaim_max_bytes,
     history_reclaim_kept,
+    read_reclaim_confirmation,
     read_scratch_baseline,
 )
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
@@ -90,6 +92,8 @@ class TransactionGCSummary:
     removed_transactions: int = 0
     removed_bytes: int = 0
     stopped_early: bool = False
+    skipped_projects: int = 0
+    skipped_bytes: int = 0
 
 
 def _journal_state(transaction_dir: Path) -> str | None:
@@ -152,13 +156,56 @@ def _eligible(
     return True
 
 
+def _eligible_candidates(
+    transactions_root: Path,
+    baseline: datetime | None,
+    kept: bool,
+) -> list[tuple[float, Path, int]]:
+    """Settled transaction directories with their mtime and byte size."""
+
+    candidates: list[tuple[float, Path, int]] = []
+    for entry in transactions_root.iterdir():
+        if not _eligible(entry, baseline=baseline, kept=kept):
+            continue
+        candidates.append((_mtime(entry), entry, _directory_bytes(entry)))
+    return candidates
+
+
+def surplus_transaction_bytes(
+    project_root: Path,
+    *,
+    retention: int = TERMINAL_TRANSACTION_RETENTION,
+) -> int:
+    """What a sweep would reclaim below one Project, without touching it.
+
+    The storage profile answers "how much is waiting for my confirmation" with
+    this; computing it by deleting would be a poor way to ask.
+    """
+
+    transactions_root = Path(project_root) / "runtime" / TRANSACTIONS_DIR_NAME
+    if not transactions_root.is_dir():
+        return 0
+    kept = history_reclaim_kept(project_root)
+    baseline = read_scratch_baseline(Path(project_root))
+    candidates = _eligible_candidates(transactions_root, baseline, kept)
+    if len(candidates) <= retention:
+        return 0
+    return sum(size for _mtime_v, _entry, size in candidates[retention:])
+
+
 def collect_project_transactions(
     project_root: Path,
     *,
     retention: int = TERMINAL_TRANSACTION_RETENTION,
     budget: SweepBudget | None = None,
+    enforce_cap: bool = True,
+    report: dict | None = None,
 ) -> tuple[int, int]:
-    """Remove settled transactions below one Project; return (count, bytes)."""
+    """Remove settled transactions below one Project; return (count, bytes).
+
+    ``report`` receives ``skipped_bytes`` when the Project's settled surplus is
+    above the automatic cap and nobody confirmed reclaiming it yet.
+    """
 
     if not transaction_gc_enabled():
         return (0, 0)
@@ -173,14 +220,19 @@ def collect_project_transactions(
         # sweep stamps it this boot, so the next one can collect.  A Project
         # whose history is not kept needs no such proof at all.
         return (0, 0)
-    candidates: list[tuple[float, Path, int]] = []
-    for entry in transactions_root.iterdir():
-        if not _eligible(entry, baseline=baseline, kept=kept):
-            continue
-        candidates.append((_mtime(entry), entry, _directory_bytes(entry)))
+    candidates = _eligible_candidates(transactions_root, baseline, kept)
     if len(candidates) <= retention:
         return (0, 0)
     candidates.sort(key=lambda item: item[0], reverse=True)
+    surplus = candidates[retention:]
+    if enforce_cap and report is not None:
+        projected = sum(size for _mtime_v, _entry, size in surplus)
+        if (
+            projected > auto_reclaim_max_bytes()
+            and read_reclaim_confirmation(project_root) is None
+        ):
+            report["skipped_bytes"] = projected
+            return (0, 0)
     removed = 0
     removed_bytes = 0
     for _mtime_value, entry, size in candidates[retention:]:
@@ -206,6 +258,7 @@ def collect_terminal_transactions(
     retention: int = TERMINAL_TRANSACTION_RETENTION,
     project_ids: Any | None = None,
     budget: SweepBudget | None = None,
+    enforce_cap: bool = True,
 ) -> TransactionGCSummary:
     """Sweep every discovered Project once; never raise, never gate startup.
 
@@ -222,6 +275,8 @@ def collect_terminal_transactions(
     swept = 0
     removed = 0
     removed_bytes = 0
+    skipped_projects = 0
+    skipped_bytes = 0
     for project_id in services.projects.discover_project_ids():
         if wanted is not None and project_id not in wanted:
             continue
@@ -230,11 +285,25 @@ def collect_terminal_transactions(
         projects += 1
         try:
             project_root = Path(services.projects.project_root(project_id))
+            report: dict = {}
             count, size = collect_project_transactions(
                 project_root,
                 retention=retention,
                 budget=budget,
+                enforce_cap=enforce_cap,
+                report=report,
             )
+            if report.get("skipped_bytes"):
+                skipped_projects += 1
+                skipped_bytes += report["skipped_bytes"]
+                logger.warning(
+                    "transaction reclaim withheld pending confirmation: "
+                    "project=%s bytes=%s cap=%s (confirm through "
+                    "POST /storage/projects/{id}/reclaim-history)",
+                    project_id,
+                    report["skipped_bytes"],
+                    auto_reclaim_max_bytes(),
+                )
         except Exception:  # noqa: BLE001 - a sweep never breaks startup
             logger.warning(
                 "transaction sweep skipped: project=%s",
@@ -252,6 +321,8 @@ def collect_terminal_transactions(
         removed_transactions=removed,
         removed_bytes=removed_bytes,
         stopped_early=bool(budget is not None and budget.stopped_early),
+        skipped_projects=skipped_projects,
+        skipped_bytes=skipped_bytes,
     )
 
 

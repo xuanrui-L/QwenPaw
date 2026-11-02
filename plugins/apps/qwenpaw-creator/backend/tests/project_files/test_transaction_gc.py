@@ -520,3 +520,86 @@ def test_an_expired_pass_deletes_nothing(tmp_path):
     assert outcome == (0, 0)
     assert kept.is_dir()
     assert budget.stopped_early
+
+
+def test_an_oversized_project_waits_for_a_person(tmp_path, monkeypatch):
+    """Seventeen gigabytes is a decision, not a background job.
+
+    The field Project's settled history is minutes of deletion and a rewrite
+    of receipts nobody may have wanted gone; above the cap the automatic pass
+    reports it and leaves, until the storage page's confirm button lands.
+    """
+
+    from services.media_files.task_scratch import confirm_project_reclaim
+
+    monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "1000")
+    project_root = _managed(tmp_path)
+    first = _transaction(
+        project_root,
+        "txn-1",
+        "ABORTED",
+        age_days=-5,
+        body_bytes=4096,
+    )
+    second = _transaction(
+        project_root,
+        "txn-2",
+        "ABORTED",
+        age_days=-4,
+        body_bytes=4096,
+    )
+    report = {}
+
+    outcome = collect_project_transactions(
+        project_root,
+        retention=0,
+        report=report,
+    )
+
+    assert outcome == (0, 0)
+    assert report["skipped_bytes"] > 1000
+    assert first.is_dir() and second.is_dir()
+
+    confirm_project_reclaim(project_root, now=BASELINE)
+
+    assert collect_project_transactions(project_root, retention=0) != (0, 0)
+    assert not first.is_dir() and not second.is_dir()
+
+
+def test_the_on_demand_reclaim_ignores_the_cap(tmp_path, monkeypatch):
+    """A person who pressed confirm asked for exactly this, cap or no cap."""
+
+    monkeypatch.setenv("CREATOR_STORAGE_AUTO_RECLAIM_MAX_BYTES", "1000")
+    project_root = _managed(tmp_path)
+    directory = _transaction(
+        project_root,
+        "txn-1",
+        "ABORTED",
+        age_days=-5,
+        body_bytes=4096,
+    )
+
+    summary = collect_terminal_transactions(
+        type(
+            "S",
+            (),
+            {
+                "projects": type(
+                    "P",
+                    (),
+                    {
+                        "discover_project_ids": staticmethod(
+                            lambda: [project_root.name],
+                        ),
+                        "project_root": staticmethod(lambda _id: project_root),
+                    },
+                )(),
+            },
+        )(),
+        retention=0,
+        enforce_cap=False,
+    )
+
+    assert summary.removed_transactions == 1
+    assert summary.skipped_projects == 0
+    assert not directory.is_dir()

@@ -202,6 +202,13 @@ async def _sweep_orphaned_scratch(
             sweep.removed_bytes,
             sweep.stopped_early,
         )
+    if sweep.skipped_projects:
+        logger.warning(
+            "scratch reclaim withheld pending confirmation: projects=%s "
+            "bytes=%s (confirm through the storage page)",
+            sweep.skipped_projects,
+            sweep.skipped_bytes,
+        )
 
 
 async def _collect_settled_transactions(
@@ -231,6 +238,13 @@ async def _collect_settled_transactions(
             sweep.removed_transactions,
             sweep.removed_bytes,
             sweep.stopped_early,
+        )
+    if sweep.skipped_projects:
+        logger.warning(
+            "transaction reclaim withheld pending confirmation: projects=%s "
+            "bytes=%s (confirm through the storage page)",
+            sweep.skipped_projects,
+            sweep.skipped_bytes,
         )
 
 
