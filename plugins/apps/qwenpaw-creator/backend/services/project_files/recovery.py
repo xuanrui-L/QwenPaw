@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import copy
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -65,6 +66,52 @@ from .serialization import (
 from .store import ProjectSnapshot, ProjectStore
 
 logger = logging.getLogger("qwenpaw.creator.project_files.recovery")
+
+# Boot re-audits every terminal transaction by re-deriving business diffs and
+# ETags over frozen snapshots: 455 entries cost 236 seconds on one imported
+# Project, every single boot, for results no branch consumes.  The ledger
+# records an audit's outcome against a fingerprint of the bytes it audited, so
+# the next boot pays a stat per file instead of a deepcopy per megabyte.  Any
+# byte that moves changes the fingerprint and forces a real audit again.
+AUDIT_LEDGER_FILE_NAME = ".recovery-audit-ledger.json"
+_AUDIT_LEDGER_ENV = "CREATOR_RECOVERY_AUDIT_LEDGER"
+_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+_FINGERPRINT_FILES = (
+    "journal.json",
+    "base.json",
+    "candidate.json",
+    "final.json",
+    "latest.json",
+    "round.json",
+    "changeset.json",
+)
+
+
+def audit_ledger_enabled() -> bool:
+    """Whether boot may reuse a previous audit of unchanged frozen bytes."""
+
+    raw = os.environ.get(_AUDIT_LEDGER_ENV, "").strip()
+    return raw.casefold() not in _DISABLED_VALUES
+
+
+def _audit_fingerprint(transaction_root: Path) -> dict[str, Any]:
+    """Size and mtime of every frozen file, journal included.
+
+    Stats only: reading the journal costs a cross-process lock per entry, and
+    hashing 30 MB of snapshots would cost the seconds this ledger exists to
+    save.  Corruption that preserves both size and mtime is beyond what any
+    boot-time audit claims to catch.
+    """
+
+    files = {}
+    for name in _FINGERPRINT_FILES:
+        try:
+            info = (transaction_root / name).lstat()
+        except OSError:
+            files[name] = None
+            continue
+        files[name] = [info.st_size, info.st_mtime_ns]
+    return {"files": files}
 
 
 class RecoveryAction(StrEnum):
@@ -187,6 +234,10 @@ class ProjectCommitRecoveryCoordinator:
     ) -> None:
         self.store = store
         self.lock_timeout_seconds = lock_timeout_seconds
+        # One ledger read per pass per Project: re-parsing a thousand-entry
+        # ledger for every entry turned the fast path quadratic (42 s).
+        self._ledger_tables: dict[str, dict[str, Any]] = {}
+        self._ledger_dirty: set[str] = set()
 
     def recover_project(
         self,
@@ -245,6 +296,7 @@ class ProjectCommitRecoveryCoordinator:
                 )
                 if not entry.name.startswith(".")
             )
+            self._flush_audit_ledger(runtime_root)
         return ProjectRecoveryReport(project_id=project_id, outcomes=outcomes)
 
     def recover_all(self) -> CreatorRecoveryReport:
@@ -283,6 +335,97 @@ class ProjectCommitRecoveryCoordinator:
         )
         return report
 
+    def _audit_ledger_store(
+        self,
+        runtime_root: Path,
+    ) -> AtomicJsonRecordStore[dict[str, Any]]:
+        return AtomicJsonRecordStore(
+            runtime_root / AUDIT_LEDGER_FILE_NAME,
+            None,
+        )
+
+    def _ledger_hit(
+        self,
+        runtime_root: Path,
+        transaction_root: Path,
+    ) -> TransactionRecoveryOutcome | None:
+        """The cached outcome for these exact bytes, if a boot audited them."""
+
+        stored = self._ledger_table(runtime_root)
+        entry = stored.get(transaction_root.name)
+        if not isinstance(entry, dict):
+            return None
+        if entry.get("fingerprint") != _audit_fingerprint(transaction_root):
+            return None
+        for action in RecoveryAction:
+            if action.value != entry.get("action"):
+                continue
+            return TransactionRecoveryOutcome(
+                transaction_id=str(entry.get("transaction_id", "")),
+                action=action,
+                state_before=(
+                    CommitJournalState(entry["state_before"])
+                    if entry.get("state_before")
+                    else None
+                ),
+                state_after=(
+                    CommitJournalState(entry["state_after"])
+                    if entry.get("state_after")
+                    else None
+                ),
+                detail="terminal transaction (audit ledger hit)",
+            )
+        return None
+
+    def _ledger_record(
+        self,
+        runtime_root: Path,
+        transaction_root: Path,
+        outcome: TransactionRecoveryOutcome,
+    ) -> TransactionRecoveryOutcome:
+        """Remember an outcome against the bytes it was derived from."""
+
+        stored = self._ledger_table(runtime_root)
+        stored[transaction_root.name] = {
+            "fingerprint": _audit_fingerprint(transaction_root),
+            "action": outcome.action.value,
+            "transaction_id": outcome.transaction_id,
+            "state_before": (
+                outcome.state_before.value if outcome.state_before else None
+            ),
+            "state_after": (
+                outcome.state_after.value if outcome.state_after else None
+            ),
+        }
+        self._ledger_dirty.add(str(runtime_root))
+        return outcome
+
+    def _ledger_table(self, runtime_root: Path) -> dict[str, Any]:
+        key = str(runtime_root)
+        stored = self._ledger_tables.get(key)
+        if stored is None:
+            try:
+                loaded = self._audit_ledger_store(runtime_root).read_or_none()
+            except OSError:
+                loaded = None
+            stored = loaded if isinstance(loaded, dict) else {}
+            self._ledger_tables[key] = stored
+        return stored
+
+    def _flush_audit_ledger(self, runtime_root: Path) -> None:
+        key = str(runtime_root)
+        if key not in self._ledger_dirty:
+            return
+        self._ledger_dirty.discard(key)
+        store = self._audit_ledger_store(runtime_root)
+        try:
+            store.write(self._ledger_table(runtime_root))
+        except OSError:
+            logger.warning(
+                "recovery audit ledger cannot be written: %s",
+                store.path,
+            )
+
     def _recover_entry(
         self,
         project_id: str,
@@ -299,6 +442,10 @@ class ProjectCommitRecoveryCoordinator:
                 raise _IntegrityProblem(
                     "transaction entry must be a real directory",
                 )
+            if audit_ledger_enabled():
+                cached = self._ledger_hit(runtime_root, transaction_root)
+                if cached is not None:
+                    return cached
             journal_path = transaction_root / "journal.json"
             try:
                 journal_stat = journal_path.lstat()
@@ -380,17 +527,24 @@ class ProjectCommitRecoveryCoordinator:
                             value=promoted,
                         )
                         state_after = CommitJournalState.RUNTIME_FINALIZED
-                    return TransactionRecoveryOutcome(
-                        transaction_id=probe_journal.transaction_id,
-                        action=(
-                            RecoveryAction.SKIPPED_ABORTED
-                            if probe_journal.state
-                            is CommitJournalState.ABORTED
-                            else RecoveryAction.ALREADY_FINALIZED
+                    return self._ledger_record(
+                        runtime_root,
+                        transaction_root,
+                        TransactionRecoveryOutcome(
+                            transaction_id=probe_journal.transaction_id,
+                            action=(
+                                RecoveryAction.SKIPPED_ABORTED
+                                if probe_journal.state
+                                is CommitJournalState.ABORTED
+                                else RecoveryAction.ALREADY_FINALIZED
+                            ),
+                            state_before=probe_journal.state,
+                            state_after=state_after,
+                            detail=(
+                                "terminal transaction "
+                                "(frozen-model snapshots)"
+                            ),
                         ),
-                        state_before=probe_journal.state,
-                        state_after=state_after,
-                        detail="terminal transaction (frozen-model snapshots)",
                     )
 
             inputs = self._load_inputs(
@@ -401,11 +555,15 @@ class ProjectCommitRecoveryCoordinator:
             transaction_id = inputs.journal.transaction_id
             state_before = inputs.journal.state
             if state_before is CommitJournalState.ABORTED:
-                return TransactionRecoveryOutcome(
-                    transaction_id=transaction_id,
-                    action=RecoveryAction.SKIPPED_ABORTED,
-                    state_before=state_before,
-                    state_after=state_before,
+                return self._ledger_record(
+                    runtime_root,
+                    transaction_root,
+                    TransactionRecoveryOutcome(
+                        transaction_id=transaction_id,
+                        action=RecoveryAction.SKIPPED_ABORTED,
+                        state_before=state_before,
+                        state_after=state_before,
+                    ),
                 )
 
             current = self.store.read(project_id)
@@ -479,11 +637,15 @@ class ProjectCommitRecoveryCoordinator:
 
             if inputs.journal.state is CommitJournalState.RUNTIME_FINALIZED:
                 if self._runtime_metadata_complete(inputs, current):
-                    return TransactionRecoveryOutcome(
-                        transaction_id=transaction_id,
-                        action=RecoveryAction.ALREADY_FINALIZED,
-                        state_before=state_before,
-                        state_after=state_before,
+                    return self._ledger_record(
+                        runtime_root,
+                        transaction_root,
+                        TransactionRecoveryOutcome(
+                            transaction_id=transaction_id,
+                            action=RecoveryAction.ALREADY_FINALIZED,
+                            state_before=state_before,
+                            state_after=state_before,
+                        ),
                     )
                 if (
                     not inputs.journal.final_etag

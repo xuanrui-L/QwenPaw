@@ -952,3 +952,91 @@ def test_legacy_schema_transaction_recovers_without_fail_closing(
         transaction_id="post-legacy-commit",
     )
     assert store.read("project-1").project.name == "After legacy recovery"
+
+
+def _spy_load_inputs(monkeypatch, calls):
+    from services.project_files import recovery as recovery_module
+
+    original = (  # pylint: disable=protected-access
+        recovery_module.ProjectCommitRecoveryCoordinator._load_inputs
+    )
+
+    def spy(self, *args, **kwargs):
+        calls.append(args[2] if len(args) > 2 else kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        recovery_module.ProjectCommitRecoveryCoordinator,
+        "_load_inputs",
+        spy,
+    )
+
+
+def _finalized_store(tmp_path):
+    store, base = make_store(tmp_path)
+    candidate = base.project.model_dump(mode="json")
+    candidate["name"] = "Committed"
+    ProjectCommitBoundary(store).commit(
+        base=base,
+        candidate=candidate,
+        origin="frontend_edit",
+        transaction_id="tx-ledger",
+        round_id="round-ledger",
+    )
+    return store
+
+
+def test_a_second_boot_reuses_the_audit_ledger(tmp_path, monkeypatch):
+    """The audit ran once; the bytes have not moved since, so it stands.
+
+    Measured on the field Project: 455 terminal entries re-derived business
+    diffs and ETags for 236 seconds at every boot, publishing nothing.
+    """
+
+    store = _finalized_store(tmp_path)
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+
+    first = recover(store)
+    assert calls, "the first boot must really audit"
+    assert first.outcomes[0].action is RecoveryAction.ALREADY_FINALIZED
+
+    calls.clear()
+    second = recover(store)
+
+    assert not calls
+    assert second.outcomes[0].action is first.outcomes[0].action
+    assert "ledger hit" in (second.outcomes[0].detail or "")
+
+
+def test_a_moved_snapshot_invalidates_the_ledger(tmp_path, monkeypatch):
+    """The fingerprint is the promise: same bytes, same verdict."""
+
+    import os
+
+    store = _finalized_store(tmp_path)
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+    recover(store)
+    calls.clear()
+
+    frozen = transaction_root(store, "tx-ledger") / "final.json"
+    stamp = os.stat(frozen).st_atime_ns
+    os.utime(frozen, ns=(stamp, os.stat(frozen).st_mtime_ns + 5))
+
+    recover(store)
+
+    assert calls, "a touched snapshot must be audited again"
+
+
+def test_the_ledger_can_be_switched_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("CREATOR_RECOVERY_AUDIT_LEDGER", "0")
+    store = _finalized_store(tmp_path)
+    calls: list = []
+    _spy_load_inputs(monkeypatch, calls)
+    recover(store)
+    calls.clear()
+
+    recover(store)
+
+    assert calls, "with the ledger off every boot audits in full"
