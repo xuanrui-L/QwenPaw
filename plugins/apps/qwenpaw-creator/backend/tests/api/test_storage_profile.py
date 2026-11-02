@@ -193,3 +193,22 @@ def test_the_collapse_backups_are_counted_where_they_actually_sit(
     body = api_request(app, "GET", "/storage/profile").json()
 
     assert body["elisionBackupBytes"] == 102
+
+
+def test_requests_are_told_to_retry_while_recovery_runs():
+    """A dead socket for minutes reads as a broken plugin, not a busy one.
+
+    The first create() holds the registry lock for the whole recovery scan, so
+    a request that arrives in that window must be answered, not queued.
+    """
+
+    from api.dependencies import project_file_services
+    from domain.errors import RuntimePreparingError
+    from services.project_files import facade
+
+    facade.mark_runtime_preparing(True)
+    try:
+        with pytest.raises(RuntimePreparingError):
+            project_file_services()
+    finally:
+        facade.mark_runtime_preparing(False)

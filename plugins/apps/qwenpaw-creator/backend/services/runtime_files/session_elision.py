@@ -53,8 +53,8 @@ MAX_AUTO_ELISION_BYTES_ENV = "CREATOR_MESSAGE_ELISION_MAX_BYTES"
 MAX_AUTO_ELISION_DEFAULT = 64 * 1024 * 1024
 
 # The child asks to be killed first.  Its peak belongs to the same cgroup as
-# the server, and when the limit is reached the kernel picks by score: this is
-# the difference between losing a cleanup pass and losing the app.
+# the server, and when the limit is reached the kernel picks by score: this
+# is the difference between losing a cleanup pass and losing the app.
 CHILD_OOM_SCORE_ADJ = "800"
 
 # Generous, because the point is to survive a stream hundreds of times larger
@@ -273,6 +273,12 @@ async def _run_one(
         process.kill()
         await process.wait()
         return False, "elision timed out"
+    except asyncio.CancelledError:
+        # Shutdown cancels the maintenance pass; a child left rewriting a
+        # session file would outlive the app that owns the data root.
+        process.kill()
+        await process.wait()
+        raise
     text = (output or b"").decode("utf-8", "replace").strip()
     if process.returncode != 0:
         return False, _tail(text)

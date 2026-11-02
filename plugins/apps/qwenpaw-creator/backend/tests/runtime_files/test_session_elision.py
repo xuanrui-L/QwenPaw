@@ -289,3 +289,40 @@ def test_a_second_collapse_replaces_the_backup_it_no_longer_needs(
     assert not first.exists()
     assert gzip.open(second, "rb").read() == original
     assert sorted(backup_root.rglob("*.gz")) == [second]
+
+
+def test_cancelling_the_pass_kills_its_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown must not orphan a child that is rewriting a session file.
+
+    The collapse holds 2.3 GB and a temp file for the duration of a pass; a
+    process that survives its parent would keep rewriting bytes in a data root
+    nobody is serving any more.
+    """
+
+    import subprocess
+    import time
+
+    slow = tmp_path / "slow-child.py"
+    slow.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    monkeypatch.setattr(session_elision, "ELISION_SCRIPT", slow)
+
+    async def _go() -> None:
+        task = asyncio.create_task(session_elision._run_one(tmp_path, "x"))
+        await asyncio.sleep(0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_go())
+    time.sleep(0.5)
+
+    # pgrep exits 1 when nothing matches, which is exactly the outcome wanted.
+    probe = subprocess.run(
+        ["pgrep", "-f", str(slow)],
+        capture_output=True,
+        check=False,
+    )
+    assert probe.returncode == 1

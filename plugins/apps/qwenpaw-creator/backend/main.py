@@ -12,6 +12,7 @@ router prefix contract.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
@@ -58,6 +59,7 @@ from services.project_files.facade import (  # noqa: E402
     CreatorFileServices,
     clear_creator_file_service_registry,
     creator_file_services,
+    mark_runtime_preparing,
 )
 from services.project_files.transaction_gc import (  # noqa: E402
     collect_terminal_transactions,
@@ -310,7 +312,18 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
             ensure_creator_runtime_dependencies,
         )
         await asyncio.to_thread(ensure_vendor_libs)
-        services = creator_file_services(data_root)
+        # Recovery scans every Project and takes minutes on a large tree.  The
+        # event loop has to keep answering while it runs, and requests that
+        # arrive in that window get a 503 instead of queueing behind the same
+        # registry lock the recovery holds.
+        mark_runtime_preparing(True)
+        try:
+            services = await asyncio.to_thread(
+                creator_file_services,
+                data_root,
+            )
+        finally:
+            mark_runtime_preparing(False)
         await asyncio.to_thread(
             recover_interrupted_source_analysis,
             services,
@@ -334,7 +347,7 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
     try:
         await start_file_media_execution_services(services)
         await start_creator_agent_runtime(services)
-        recover_interrupted_source_memory(services)
+        await asyncio.to_thread(recover_interrupted_source_memory, services)
         # Observation/read workers live only in process memory: fail their
         # orphaned QUEUED/RUNNING Tasks closed so waiters see a retryable
         # error instead of polling a record no worker will ever finish.
@@ -440,12 +453,20 @@ async def _startup() -> None:  # pylint: disable=too-many-statements
 
 @app.hook("shutdown", priority=90)
 async def _shutdown() -> None:
-    global _file_services
+    global _file_services, _maintenance_task
     trace_event(
         "creator.runtime.stopping",
         component="pawapp",
     )
     _file_services = None
+    if _maintenance_task is not None:
+        # A sweep -- or a collapse child holding a rewritten session file --
+        # must not outlive the app that owns the data root.  Cancelling the
+        # task kills the child too; see _run_one.
+        _maintenance_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await _maintenance_task
+        _maintenance_task = None
     try:
         await drain_remote_ingest_tasks()
     finally:
