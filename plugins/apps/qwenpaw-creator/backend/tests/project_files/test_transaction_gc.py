@@ -18,7 +18,10 @@ import time
 
 import pytest
 
-from services.media_files.task_scratch import remember_scratch_baseline
+from services.media_files.task_scratch import (
+    keep_project_history,
+    remember_scratch_baseline,
+)
 from services.project_files import transaction_gc
 from services.project_files.transaction_gc import (
     collect_project_transactions,
@@ -132,15 +135,51 @@ def test_an_unknown_state_is_not_treated_as_terminal(tmp_path):
     assert future.is_dir()
 
 
-def test_history_before_the_baseline_is_left_alone(tmp_path):
+def test_pre_baseline_history_is_reclaimed_by_default(tmp_path):
+    """A customer inside a pod cannot press anything, so the date gate is
+    gone by default: a settled transaction is settled whatever day it was.
+    """
+
     project_root = _managed(tmp_path)
-    _transaction(project_root, "txn-legacy", "ABORTED", age_days=-5)
+    legacy = _transaction(project_root, "txn-legacy", "ABORTED", age_days=-5)
+
+    count, size = collect_project_transactions(project_root, retention=0)
+
+    assert count == 1
+    assert size > 0
+    assert not legacy.is_dir()
+
+
+def test_keeping_history_restores_the_baseline_gate(tmp_path):
+    """The #217 promise survives as an explicit choice, per Project."""
+
+    project_root = _managed(tmp_path)
+    legacy = _transaction(project_root, "txn-legacy", "ABORTED", age_days=-5)
+    keep_project_history(project_root, now=BASELINE)
 
     assert collect_project_transactions(project_root, retention=0) == (0, 0)
-    assert (project_root / "runtime" / "transactions" / "txn-legacy").is_dir()
+    assert legacy.is_dir()
 
 
-def test_a_project_without_a_baseline_is_skipped(tmp_path):
+def test_the_install_switch_keeps_every_projects_history(
+    tmp_path,
+    monkeypatch,
+):
+    """One env var restores the fleet-wide behaviour without a code change."""
+
+    monkeypatch.setenv("CREATOR_STORAGE_KEEP_HISTORY", "1")
+    project_root = _managed(tmp_path)
+    legacy = _transaction(project_root, "txn-legacy", "ABORTED", age_days=-5)
+
+    assert collect_project_transactions(project_root, retention=0) == (0, 0)
+    assert legacy.is_dir()
+
+
+def test_a_project_without_a_baseline_is_swept_now(tmp_path):
+    """No baseline used to mean "nothing is provably new"; with the date gate
+    no longer protecting history there is nothing left to wait for.
+    """
+
     project_root = _runtime(tmp_path)
     directory = _transaction(
         project_root,
@@ -149,8 +188,30 @@ def test_a_project_without_a_baseline_is_skipped(tmp_path):
         age_days=1,
     )
 
-    assert collect_project_transactions(project_root, retention=0) == (0, 0)
-    assert directory.is_dir()
+    assert collect_project_transactions(project_root, retention=0) != (0, 0)
+    assert not directory.is_dir()
+
+
+def test_the_default_sweep_bends_no_other_rule(tmp_path):
+    """Reclaiming by default changes the date gate and nothing else.
+
+    Field note: one imported Project held 618 terminal transactions -- 8.4 GB
+    -- every one older than its baseline, so the gated sweep freed exactly
+    nothing.  Retention and the terminal-state test still have to hold.
+    """
+
+    project_root = _managed(tmp_path)
+    oldest = _transaction(project_root, "txn-oldest", "ABORTED", age_days=-9)
+    recent = _transaction(project_root, "txn-recent", "ABORTED", age_days=-5)
+    unsettled = _transaction(project_root, "txn-open", "PREPARED", age_days=-5)
+
+    count, size = collect_project_transactions(project_root, retention=1)
+
+    assert count == 1
+    assert size > 0
+    assert not oldest.is_dir()  # the oldest beyond the retention goes first
+    assert recent.is_dir()  # the newest receipt is still kept
+    assert unsettled.is_dir()  # an unsettled transaction is never touched
 
 
 def test_the_settled_listing_is_invalidated(tmp_path):
@@ -396,3 +457,66 @@ def test_a_failing_sweep_never_reaches_the_committer(
     )
     _wait_for_idle()
     assert len(attempts) == 2
+
+
+def test_one_pass_stops_at_its_byte_budget_and_says_so(tmp_path):
+    """A boot must not wait on a tree bigger than itself.
+
+    The field Project held 8.4 GB of settled transactions; unlinking all of
+    them is minutes of work, and a startup hook that waits those minutes looks
+    exactly like a hang to the person who just upgraded.
+    """
+
+    from services.media_files.task_scratch import SweepBudget
+
+    project_root = _managed(tmp_path)
+    oldest = _transaction(
+        project_root,
+        "txn-oldest",
+        "ABORTED",
+        age_days=-9,
+        body_bytes=4096,
+    )
+    recent = _transaction(
+        project_root,
+        "txn-recent",
+        "ABORTED",
+        age_days=-5,
+        body_bytes=4096,
+    )
+    # The budget is one whole transaction, journal included -- what the sweep
+    # measures is the directory, not the payload it was seeded with.
+    one = sum(f.stat().st_size for f in recent.rglob("*") if f.is_file())
+    budget = SweepBudget(max_bytes=one, deadline=time.monotonic() + 60)
+
+    count, size = collect_project_transactions(
+        project_root,
+        retention=0,
+        budget=budget,
+    )
+
+    # One fits, the second is refused -- and the pass admits it stopped short.
+    assert count == 1
+    assert size == one
+    assert budget.stopped_early
+    assert recent.is_dir() != oldest.is_dir()
+
+
+def test_an_expired_pass_deletes_nothing(tmp_path):
+    """The clock bound is checked before the first directory, not after."""
+
+    from services.media_files.task_scratch import SweepBudget
+
+    project_root = _managed(tmp_path)
+    kept = _transaction(project_root, "txn-1", "ABORTED", age_days=-5)
+    budget = SweepBudget(deadline=time.monotonic() - 1)
+
+    outcome = collect_project_transactions(
+        project_root,
+        retention=0,
+        budget=budget,
+    )
+
+    assert outcome == (0, 0)
+    assert kept.is_dir()
+    assert budget.stopped_early

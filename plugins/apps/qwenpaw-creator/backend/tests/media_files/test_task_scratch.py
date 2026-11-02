@@ -283,9 +283,15 @@ def test_a_failing_listener_cannot_rollback_task_state(
 
 
 @_needs_pinned_release
-def test_sweep_ignores_everything_from_before_the_baseline(
+def test_sweep_releases_pre_baseline_scratch_by_default(
     tmp_path: Path,
 ) -> None:
+    """A settled Task is settled whatever day it was.
+
+    An imported Project held 326 SUCCEEDED tasks -- 9.5 GB -- all older than
+    its baseline; a gate that only opened on a click could not reach them, so
+    the default released them and the click became an opt-out.
+    """
     scratch = _scratch(tmp_path)
     store = ProjectExecutionStore(tmp_path)
     store.create_task(_task(TaskStatus.QUEUED))
@@ -306,9 +312,9 @@ def test_sweep_ignores_everything_from_before_the_baseline(
 
     swept = release_orphaned_scratch(_services(tmp_path), now=T0)
 
-    assert swept.removed_files == 0
+    assert swept.removed_files == 2
     assert read_scratch_baseline(tmp_path / PROJECT_ID) == T0
-    assert len(_media(scratch)) == 2
+    assert _media(scratch) == []
 
     # A task that finished after the baseline is fair game once it is quiet.
     later = _scratch(tmp_path, "task-2")
@@ -330,7 +336,49 @@ def test_sweep_ignores_everything_from_before_the_baseline(
 
     assert summary.removed_files == 2
     assert _media(later) == []
+    assert _media(scratch) == []
+
+
+@_needs_pinned_release
+def test_keeping_history_spares_the_pre_baseline_scratch(
+    tmp_path: Path,
+) -> None:
+    """The #217 promise, kept as a per-Project choice.
+
+    Opting out restores the date gate and nothing else: a still-running or
+    quarantined Task was never in scope to begin with.
+    """
+
+    scratch = _scratch(tmp_path)
+    store = ProjectExecutionStore(tmp_path)
+    store.create_task(_task(TaskStatus.QUEUED))
+    _moved(
+        store,
+        "task-1",
+        frm=TaskStatus.QUEUED,
+        to=TaskStatus.RUNNING,
+        updated_at=T0 - timedelta(days=2),
+    )
+    _moved(
+        store,
+        "task-1",
+        frm=TaskStatus.RUNNING,
+        to=TaskStatus.SUCCEEDED,
+        updated_at=T0 - timedelta(days=1),
+    )
+    task_scratch.remember_scratch_baseline(tmp_path / PROJECT_ID, now=T0)
+    task_scratch.keep_project_history(tmp_path / PROJECT_ID, now=T0)
+
+    swept = release_orphaned_scratch(
+        _services(tmp_path),
+        now=T0 + ORPHAN_RELEASE_GRACE + timedelta(minutes=5),
+    )
+
+    assert swept.removed_files == 0
     assert len(_media(scratch)) == 2
+    # Documents are never scratch media, kept or not.
+    assert "spec.json" in _survivors(scratch)
+    assert "provider-tasks.jsonl" in _survivors(scratch)
 
 
 @_needs_pinned_release
@@ -479,13 +527,15 @@ def test_allocating_scratch_baselines_a_project_that_was_never_created(
     assert summary.removed_files == 1
 
 
-def test_scratch_brought_in_by_an_import_stays_protected(
+def test_scratch_brought_in_by_an_import_is_reclaimed_by_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The stamp lands at first allocation, later than any archived Task, so
-    # the "pre-upgrade bytes stay put" rule holds for a Project that arrived
-    # through an archive rather than through creation.
+    # the old date gate used to protect a Project that arrived through an
+    # archive -- precisely the imported 24 GB Projects that could not free a
+    # byte on their own.  Settled scratch goes by default now; choosing to
+    # keep the history restores the gate (see the opt-out case above).
     from utils.paths import media_task_scope, task_work_root
 
     legacy = _scratch(tmp_path, "task-legacy")
@@ -511,8 +561,8 @@ def test_scratch_brought_in_by_an_import_stays_protected(
         now=now + ORPHAN_RELEASE_GRACE + timedelta(minutes=5),
     )
 
-    assert summary.removed_files == 0
-    assert len(_media(legacy)) == 2
+    assert summary.removed_files == 2
+    assert _media(legacy) == []
 
 
 def _replace_with_a_link(scratch: Path, outside: Path) -> Path:
@@ -889,3 +939,72 @@ def test_profile_splits_scratch_and_transactions_at_the_baseline(
     assert project_storage_profile(_services(tmp_path))["totals"][
         "taskWorkReclaimableBytes"
     ] == _media_bytes(fresh)
+
+
+def test_the_scratch_sweep_stops_when_the_pass_budget_runs_out(
+    tmp_path: Path,
+) -> None:
+    """One budget carries both sweeps, so the second can be refused.
+
+    A Project with 326 finished Tasks is not one boot's work; leaving the rest
+    for the next pass still frees most of it, while blocking the first paint
+    frees nothing that anybody can see.
+    """
+
+    from services.media_files.task_scratch import SweepBudget
+
+    first = _scratch(tmp_path)
+    second = _scratch(tmp_path, "task-2")
+    store = ProjectExecutionStore(tmp_path)
+    store.create_task(_task(TaskStatus.QUEUED))
+    store.create_task(
+        _task(TaskStatus.QUEUED).model_copy(update={"task_id": "task-2"}),
+    )
+    for task_id in ("task-1", "task-2"):
+        _moved(
+            store,
+            task_id,
+            frm=TaskStatus.QUEUED,
+            to=TaskStatus.RUNNING,
+            updated_at=T0 - timedelta(days=2),
+        )
+        _moved(
+            store,
+            task_id,
+            frm=TaskStatus.RUNNING,
+            to=TaskStatus.SUCCEEDED,
+            updated_at=T0 - timedelta(days=1),
+        )
+
+    swept = release_orphaned_scratch(
+        _services(tmp_path),
+        now=T0,
+        budget=SweepBudget(max_bytes=1),
+    )
+
+    assert swept.released_directories == 1
+    assert swept.stopped_early
+    assert len(_media(first)) + len(_media(second)) == 2
+
+
+def test_the_pass_budget_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An install that would rather wait can raise or drop the bound."""
+
+    monkeypatch.delenv("CREATOR_STORAGE_SWEEP_MAX_BYTES", raising=False)
+    monkeypatch.delenv("CREATOR_STORAGE_SWEEP_MAX_SECONDS", raising=False)
+
+    budget = task_scratch.budget_from_environment(monotonic=100.0)
+
+    assert budget.max_bytes == task_scratch.SWEEP_DEFAULT_MAX_BYTES
+    assert budget.deadline == 100.0 + task_scratch.SWEEP_DEFAULT_MAX_SECONDS
+
+    monkeypatch.setenv("CREATOR_STORAGE_SWEEP_MAX_BYTES", "1024")
+    monkeypatch.setenv("CREATOR_STORAGE_SWEEP_MAX_SECONDS", "0")
+
+    tuned = task_scratch.budget_from_environment()
+
+    assert tuned.max_bytes == 1024
+    # Zero seconds means "no clock bound", not "delete nothing".
+    assert tuned.deadline is None

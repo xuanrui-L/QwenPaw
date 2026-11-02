@@ -13,8 +13,10 @@ script only recovers surplus that is already invisible -- each record is
 rewritten to exactly the text the runtime was already substituting for it.
 
 Nothing is deleted, no sequence is renumbered, ``written_at`` carries over, and
-every file is copied to a backup root first.  A file that grows while the
-script works is refused, not merged.
+every file is copied to a backup root first -- compressed, timestamped, and
+kept only for the newest pass, because a plain copy of a 606 MB stream would
+cost more than the collapse saves.  A file that grows while the script works is
+refused, not merged.
 """
 
 # This repair path deliberately reuses the runtime's own private projection
@@ -25,6 +27,8 @@ script works is refused, not merged.
 from __future__ import annotations
 
 import argparse
+import glob
+import gzip
 import os
 import shutil
 import sys
@@ -54,6 +58,11 @@ from services.runtime_files.models import (  # noqa: E402
 )
 
 BACKUP_SUBDIR = "elide-backups"
+BACKUP_SUFFIX = ".jsonl.gz"
+# The newest pass only.  A backup exists so a wrong collapse can be undone
+# before the next turn of the app; older ones are superseded states of a file
+# nobody can already see, and each costs the whole stream again.
+BACKUP_KEEP = 1
 LINE_NEWLINE_BYTES = 1
 
 
@@ -206,16 +215,41 @@ def _decide(path: Path) -> SessionDecision | None:
 
 
 def _backup(path: Path, data_root: Path, backup_root: Path) -> Path:
-    """Copy the durable file aside, keeping its path under the data root."""
+    """Copy the durable file aside, compressed and under its own name.
 
-    target = backup_root / path.relative_to(data_root)
+    Timestamped rather than fixed: this repair now runs from the product on
+    every boot, and a backup that refuses to be written a second time would
+    silently make the second collapse impossible.  The name carries its own
+    moment, so the ordering the retention below needs is already in it.
+    """
+
+    moment = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+    relative = path.relative_to(data_root)
+    target = (
+        backup_root / relative.parent / f"{path.stem}-{moment}{BACKUP_SUFFIX}"
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        raise RuntimeError(
-            f"backup already exists, refusing to overwrite: {target}",
-        )
-    shutil.copy2(path, target)
+    with path.open("rb") as source, gzip.open(target, "wb", 6) as sink:
+        shutil.copyfileobj(source, sink)
+    _prune_backups(target, path.stem)
     return target
+
+
+def _prune_backups(target: Path, stem: str) -> None:
+    """Keep the newest few copies of this one file, drop the older ones."""
+
+    pattern = os.path.join(
+        str(target.parent),
+        f"{stem}-*{BACKUP_SUFFIX}",
+    )
+    siblings = sorted(glob.glob(pattern))
+    if not BACKUP_KEEP:
+        return
+    for stale in siblings[:-BACKUP_KEEP]:
+        try:
+            os.unlink(stale)
+        except OSError as exc:
+            print(f"  warning: stale backup kept: {stale} ({exc})")
 
 
 def _rewrite(decision: SessionDecision) -> None:

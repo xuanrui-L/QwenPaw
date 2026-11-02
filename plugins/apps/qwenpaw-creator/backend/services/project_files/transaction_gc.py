@@ -20,10 +20,11 @@ deliberately conservative:
   inherit its uncertainty.
 * The newest :data:`TERMINAL_TRANSACTION_RETENTION` terminal transactions stay,
   so a rollback or an incident review still has recent receipts.
-* Nothing older than the Project's reclaim baseline is touched, matching the
-  scratch release rule: history a Project arrived with is treated as the
-  user's, and a build that cannot read compressed snapshots must be able to
-  roll back to a plain-document tree.
+* Pre-baseline history goes too, by default: a customer cannot press anything
+  inside a pod, and space that only returns after a click never comes back.  A
+  Project that chose to keep its history -- its own marker, or
+  ``CREATOR_STORAGE_KEEP_HISTORY`` for a whole install -- is still untouched
+  below the baseline, matching the scratch release rule.
 
 One env var turns the whole sweep off without a code change.
 """
@@ -31,6 +32,7 @@ One env var turns the whole sweep off without a code change.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
@@ -38,7 +40,11 @@ import shutil
 import threading
 from typing import Any
 
-from services.media_files.task_scratch import read_scratch_baseline
+from services.media_files.task_scratch import (
+    SweepBudget,
+    history_reclaim_kept,
+    read_scratch_baseline,
+)
 from services.runtime_files.atomic_store import AtomicJsonRecordStore
 from services.runtime_files.path_safety import is_link_path
 
@@ -83,6 +89,7 @@ class TransactionGCSummary:
     swept_projects: int = 0
     removed_transactions: int = 0
     removed_bytes: int = 0
+    stopped_early: bool = False
 
 
 def _journal_state(transaction_dir: Path) -> str | None:
@@ -121,10 +128,35 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+def _eligible(
+    entry: Path,
+    *,
+    baseline: datetime | None,
+    kept: bool,
+) -> bool:
+    """Whether one directory is settled history this sweep may collect.
+
+    A journal that cannot be read, or names a state the commit boundary has not
+    reached, is never touched; a Project that asked to keep its history still
+    gets the date gate.
+    """
+
+    if not entry.is_dir() or is_link_path(entry):
+        return False
+    if _journal_state(entry) not in TERMINAL_JOURNAL_STATES:
+        return False
+    if baseline is not None and kept and _mtime(entry) < baseline.timestamp():
+        # Arrived with the Project, and this Project asked for its history to
+        # be kept -- so the date gate still protects it.
+        return False
+    return True
+
+
 def collect_project_transactions(
     project_root: Path,
     *,
     retention: int = TERMINAL_TRANSACTION_RETENTION,
+    budget: SweepBudget | None = None,
 ) -> tuple[int, int]:
     """Remove settled transactions below one Project; return (count, bytes)."""
 
@@ -133,20 +165,17 @@ def collect_project_transactions(
     transactions_root = Path(project_root) / "runtime" / TRANSACTIONS_DIR_NAME
     if not transactions_root.is_dir():
         return (0, 0)
+    kept = history_reclaim_kept(project_root)
     baseline = read_scratch_baseline(Path(project_root))
-    if baseline is None:
-        # Nothing is provably newer than an unrecorded start; the scratch sweep
-        # stamps it this boot, so the next one can collect.
+    if baseline is None and kept:
+        # A Project keeping its history needs proof that a transaction is newer
+        # than its start, and an unrecorded start proves nothing; the scratch
+        # sweep stamps it this boot, so the next one can collect.  A Project
+        # whose history is not kept needs no such proof at all.
         return (0, 0)
     candidates: list[tuple[float, Path, int]] = []
     for entry in transactions_root.iterdir():
-        if not entry.is_dir() or is_link_path(entry):
-            continue
-        if _journal_state(entry) not in TERMINAL_JOURNAL_STATES:
-            continue
-        if _mtime(entry) < baseline.timestamp():
-            # Arrived with the Project: pre-upgrade history, not this build's
-            # to reclaim.
+        if not _eligible(entry, baseline=baseline, kept=kept):
             continue
         candidates.append((_mtime(entry), entry, _directory_bytes(entry)))
     if len(candidates) <= retention:
@@ -155,12 +184,16 @@ def collect_project_transactions(
     removed = 0
     removed_bytes = 0
     for _mtime_value, entry, size in candidates[retention:]:
+        if budget is not None and not budget.may_spend(size):
+            break
         shutil.rmtree(entry, ignore_errors=True)
         if entry.exists():
             logger.warning("transaction directory survived removal: %s", entry)
             continue
         removed += 1
         removed_bytes += size
+        if budget is not None:
+            budget.charge(size)
     if removed:
         # The listing the commit path cached no longer matches the directory.
         drop_transaction_index(transactions_root)
@@ -171,22 +204,36 @@ def collect_terminal_transactions(
     services: Any,
     *,
     retention: int = TERMINAL_TRANSACTION_RETENTION,
+    project_ids: Any | None = None,
+    budget: SweepBudget | None = None,
 ) -> TransactionGCSummary:
-    """Sweep every discovered Project once; never raise, never gate startup."""
+    """Sweep every discovered Project once; never raise, never gate startup.
+
+    ``project_ids`` scopes the sweep, which is what the on-demand reclaim uses
+    when a person asks for their space back before the next boot.  A shared
+    ``budget`` bounds a scheduled pass; without one the sweep runs to the end
+    of the tree.
+    """
 
     if not transaction_gc_enabled():
         return TransactionGCSummary()
+    wanted = None if project_ids is None else set(project_ids)
     projects = 0
     swept = 0
     removed = 0
     removed_bytes = 0
     for project_id in services.projects.discover_project_ids():
+        if wanted is not None and project_id not in wanted:
+            continue
+        if budget is not None and not budget.has_room():
+            break
         projects += 1
         try:
             project_root = Path(services.projects.project_root(project_id))
             count, size = collect_project_transactions(
                 project_root,
                 retention=retention,
+                budget=budget,
             )
         except Exception:  # noqa: BLE001 - a sweep never breaks startup
             logger.warning(
@@ -204,6 +251,7 @@ def collect_terminal_transactions(
         swept_projects=swept,
         removed_transactions=removed,
         removed_bytes=removed_bytes,
+        stopped_early=bool(budget is not None and budget.stopped_early),
     )
 
 
