@@ -253,3 +253,113 @@ def test_a_recalled_webp_reaches_the_model_as_an_image_part(
     restored = parts[-1]["image_url"]["url"]
     assert restored.startswith("data:image/webp;")
     assert base64.b64decode(restored.split(";base64,", 1)[1]) == _WEBP_BYTES
+
+
+# A handle is all recall has to work from, and the byte store keeps bytes
+# only, so the media type has to come back off the payload. Each of these
+# opens with a framing signature rather than a format one: RIFF names a
+# container with the deciding tag four bytes past a size field, EBML names a
+# family, and an ISO-base box puts its brand after its length.
+_AVI_BYTES = (
+    b"RIFF" + (12).to_bytes(4, "little") + b"AVI " + b"LIST" + b"hdrl" * 40
+)
+_WEBM_BYTES = b"\x1a\x45\xdf\xa3" + b"\x00" * 8 + b"webm" + b"\x00" * 64
+_MKV_BYTES = b"\x1a\x45\xdf\xa3" + b"\x00" * 8 + b"matroska" + b"\x00" * 64
+_MOV_BYTES = b"\x00\x00\x00\x18" + b"ftyp" + b"qt  " + b"\x00" * 8
+_M4V_BYTES = b"\x00\x00\x00\x18" + b"ftyp" + b"M4V " + b"\x00" * 8
+_AVIF_BYTES = b"\x00\x00\x00\x1c" + b"ftyp" + b"avif" + b"\x00" * 12
+_MP4_BYTES = b"\x00\x00\x00\x18" + b"ftyp" + b"isom" + b"\x00" * 8
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (_AVI_BYTES, "video/x-msvideo"),
+        (_WEBM_BYTES, "video/webm"),
+        (_MKV_BYTES, "video/x-matroska"),
+        (_MOV_BYTES, "video/quicktime"),
+        (_AVIF_BYTES, "image/avif"),
+        (_M4V_BYTES, "video/mp4"),
+        (_MP4_BYTES, "video/mp4"),
+    ],
+)
+def test_a_stored_container_is_named_by_what_it_holds(payload, expected):
+    """Reading four bytes is a guess the stored file can contradict.
+
+    The type decides whether a recalled block is handed to the model as
+    something it can look at, so an AVI answering "audio/wav" and a WebM
+    answering "opaque bytes" both describe a clip the runtime is about to
+    claim it cannot show.
+    """
+    assert media_vault.sniff_mime(payload) == expected
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (_WEBM_BYTES, "video/webm"),
+        (_MKV_BYTES, "video/x-matroska"),
+        (_AVI_BYTES, "video/x-msvideo"),
+        (_MOV_BYTES, "video/quicktime"),
+    ],
+)
+def test_a_recalled_clip_reaches_the_model_as_a_video_part(
+    tmp_path,
+    monkeypatch,
+    payload,
+    expected,
+):
+    """The pointer named a video; recall has to deliver one.
+
+    The vault keeps bytes, not the declaration the upload arrived with, so a
+    clip is restored by reading the payload. Every container the Creator
+    runtime inlines has to answer with a displayable family, because the
+    alternative is a sentence telling the model it was shown nothing.
+    """
+    monkeypatch.setenv("CREATOR_DATA_ROOT", str(tmp_path.resolve()))
+    store = ContentStore(tmp_path)
+    digest = media_vault.store_data_url(
+        _data_url(payload, mime=expected),
+        store=store,
+    )
+
+    async def scenario():
+        runtime = _recall_runtime()
+        result = await runtime._run_recall_media(
+            arguments={"handles": [digest]},
+        )
+        return result, await runtime._recalled_media_content(result=result)
+
+    result, parts = asyncio.run(scenario())
+
+    assert result["recalled"][0]["mime"] == expected
+    assert parts[-1]["type"] == "video_url"
+    restored = parts[-1]["video_url"]["url"]
+    assert restored.startswith(f"data:{expected};")
+    assert base64.b64decode(restored.split(";base64,", 1)[1]) == payload
+
+
+def test_a_missing_type_does_not_answer_for_the_stored_bytes(tmp_path):
+    """A generic declaration is the question, not the answer.
+
+    ``data:;base64,`` carries no type and the parser records that gap as
+    opaque bytes. Letting the gap stand would hand a stored picture back as
+    something no provider can display, so the bytes keep the vote.
+    """
+    store = ContentStore(tmp_path)
+    digest = media_vault.store_data_url(
+        _data_url(_PNG_BYTES, mime=media_vault.GENERIC_MIME),
+        store=store,
+    )
+
+    url = media_vault.load_data_url(
+        digest,
+        media_vault.GENERIC_MIME,
+        store=store,
+    )
+    assert url.startswith("data:image/png;base64,")
+
+    loaded = media_vault.load_by_handle(digest, mime="", store=store)
+    assert loaded is not None
+    assert loaded[0].startswith("data:image/png;base64,")
+    assert loaded[1] == len(_PNG_BYTES)

@@ -6157,3 +6157,67 @@ def test_recalled_media_arrives_after_its_own_tool_group(
     assert [part["type"] for part in recalled["content"]][-1] == "image_url"
     restored = recalled["content"][-1]["image_url"]["url"]
     assert base64.b64decode(restored.split(";base64,", 1)[1]) == payload
+
+
+def test_the_next_turn_resumes_from_the_shape_that_was_sent(tmp_path):
+    """A recovery rewrites the request, and the run has to remember that.
+
+    The demotion ladder moves media out of the message list it was handed and
+    answers from the rewritten one. Left holding the original, the next turn of
+    the same run puts the refused bytes straight back and pays for the refusal
+    again, which is how one oversized upload turned into a loop of them.
+
+    The durable record is deliberately not what is asserted here: a person's
+    upload stays on disk exactly as sent, and only the ephemeral wire context
+    follows what the model actually read.
+    """
+    seen: list[list[dict]] = []
+    turn = 0
+    sent_shape = [
+        {"role": "system", "content": "本轮实际发送的上下文"},
+        {
+            "role": "user",
+            "source": "user",
+            "messageSeq": 3,
+            "content": [{"type": "text", "text": "句柄取代了内联图片"}],
+        },
+    ]
+
+    async def callback(messages, tools):
+        del tools
+        nonlocal turn
+        turn += 1
+        seen.append([dict(item) for item in messages])
+        if turn == 1:
+            return AgentModelTurn(
+                tool_calls=(
+                    AgentToolCall(
+                        call_id="read-1",
+                        name="read_project",
+                        arguments={"projectId": PROJECT_ID},
+                    ),
+                ),
+                sent_messages=list(sent_shape),
+            )
+        return AgentModelTurn(content="已按降级后的上下文继续。")
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="按这张参考图改分镜。",
+        )
+        driver = _driver(services, CallbackAgentChatClient(callback))
+        await _run_to_idle(driver, services)
+        await driver.stop()
+
+    asyncio.run(scenario())
+
+    assert turn == 2
+    # The second turn starts from the request the client answered, not from the
+    # one the run assembled before the refusal.
+    assert [item["content"] for item in seen[1]][:2] == [
+        sent_shape[0]["content"],
+        sent_shape[1]["content"],
+    ]
+    # and it still carries the tool exchange this turn produced.
+    assert [item["role"] for item in seen[1]][-2:] == ["assistant", "tool"]

@@ -2618,3 +2618,213 @@ def test_an_overflow_that_cannot_be_made_smaller_fails_as_a_model_error():
     assert asked == []
     assert "maximum context length" in str(caught.value)
     assert isinstance(caught.value, ModelContextUnfitError)
+
+
+# ---------------------------------------------------------------------------
+# B1: a provider refusal over uploads only still earns the whole ladder.
+# ---------------------------------------------------------------------------
+
+
+def _upload_only_payload() -> tuple[list[dict], str, str]:
+    """A contract text and two of a person's uploads, nothing the runtime made.
+
+    This is the shape that stopped at the first refusal: no derived frame for
+    the gentle step to trade and no completed tool exchange for compaction to
+    retire, so "there is nothing left to rebuild" was read as "there is
+    nothing left to give up" and the uploads were never even offered.
+    """
+    first = _data_url(b"\x33" * _OVERFLOW_BLOCK_BYTES, mime="image/jpeg")
+    second = _data_url(b"\x44" * _OVERFLOW_BLOCK_BYTES, mime="image/jpeg")
+    messages = [
+        {"role": "system", "content": "A" * _OVERFLOW_CONTRACT_BYTES},
+        _attachment(first, seq=5),
+        _attachment(second, seq=6),
+    ]
+    return messages, first, second
+
+
+def test_a_refusal_over_uploads_only_still_runs_the_ladder():
+    """The local guard is not the one that prices a vision window.
+
+    Inline media is charged as vision tokens here and as real tokens by the
+    provider, so an oversized upload session almost always reaches the
+    provider before it reaches this guard. The refusal then has to be answered
+    by the ladder that can move those bytes, not by one burned call and a
+    terminal error.
+    """
+    _unused, first, second = _upload_only_payload()
+
+    async def scenario():
+        client, provider, asked, forced = _overflow_client(failures=1)
+        notices: list[RateLimitRetryNotice] = []
+
+        async def on_retry(notice: RateLimitRetryNotice) -> None:
+            notices.append(notice)
+
+        turn = await client.complete(
+            messages=_unused,
+            tools=[],
+            on_rate_limit_retry=on_retry,
+            _context_budget_bytes=_OVERFLOW_BUDGET,
+        )
+        return provider, asked, forced, notices, turn
+
+    provider, asked, forced, notices, turn = asyncio.run(scenario())
+
+    assert turn.content == "降级后的输入仍可用"
+    assert provider.calls == 2
+    # Both uploads were still tradable: the pressure was media-shaped, so the
+    # ladder moved them one at a time until the request fitted.
+    assert sorted(asked) == sorted([first, second])
+    assert forced == [_OVERFLOW_BUDGET // 2]
+    assert _request_media(provider.requests[1]) == []
+    assert "user attachment moved out of this request" in _request_text(
+        provider.requests[1],
+    )
+    assert [(n.reason, n.delay_seconds) for n in notices] == [
+        ("context_recovery", 0),
+    ]
+
+
+def test_the_rewritten_turn_carries_the_shape_that_was_actually_sent():
+    """A recovery that hides its own request leaves the next turn to repeat it.
+
+    The demotion ladder rewrites the input, and a turn built from the caller's
+    original list would put the refused bytes straight back into the next
+    request and pay for the same refusal twice.
+    """
+    messages, _first, _second = _upload_only_payload()
+
+    async def scenario():
+        client, _provider, _asked, _forced = _overflow_client(failures=1)
+        return await client.complete(
+            messages=messages,
+            tools=[],
+            _context_budget_bytes=_OVERFLOW_BUDGET,
+        )
+
+    turn = asyncio.run(scenario())
+
+    assert turn.sent_messages is not None
+    assert turn.sent_messages != list(messages)
+    assert ";base64," not in json.dumps(
+        turn.sent_messages,
+        ensure_ascii=False,
+    )
+    assert ";base64," in json.dumps(list(messages), ensure_ascii=False)
+
+
+def test_a_compacted_replay_that_overflows_too_reaches_the_forced_step():
+    """Wrapping only the gentle retry left compaction with no second lever.
+
+    A long session that had to be rebuilt at half the budget still carries its
+    uploads, and the replay is the same client's request: a refusal there
+    belongs to the same boundary as a refusal after gentle relief.
+    """
+    messages, human = _upload_and_tool_history()
+
+    async def scenario():
+        client, provider, asked, forced = _overflow_client(failures=2)
+        notices: list[RateLimitRetryNotice] = []
+
+        async def on_retry(notice: RateLimitRetryNotice) -> None:
+            notices.append(notice)
+
+        turn = await client.complete(
+            messages=messages,
+            tools=[],
+            on_rate_limit_retry=on_retry,
+            _context_budget_bytes=_OVERFLOW_BUDGET,
+        )
+        return provider, asked, forced, notices, turn
+
+    provider, asked, forced, notices, turn = asyncio.run(scenario())
+
+    assert turn.content == "降级后的输入仍可用"
+    assert provider.calls == 3
+    assert asked == [human]
+    assert forced == [_OVERFLOW_BUDGET // 2]
+    assert _request_media(provider.requests[2]) == []
+    # One recovery is one notice, whichever step closed it.
+    assert [n.reason for n in notices] == ["context_recovery"]
+
+
+def _upload_and_tool_history() -> tuple[list[dict], str]:
+    """Finished reads plus one upload: compaction has something to retire.
+
+    Sized so the request fits this client's guard on the first attempt, which
+    is what makes the provider the one that refuses, and leaves an upload
+    behind for the forced step to find.
+    """
+    messages = [
+        {"role": "system", "content": "项目创作契约"},
+        {
+            "role": "user",
+            "source": "user",
+            "messageSeq": 1,
+            "content": "把六集分镜做完再交审阅",
+        },
+    ]
+    for index in range(3):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": f"call-{index}", "function": {"name": "read"}},
+                ],
+            },
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{index}",
+                "name": "read",
+                "content": "镜头描述 " * 300,
+            },
+        )
+    human = _data_url(b"\x55" * _OVERFLOW_BLOCK_BYTES, mime="image/jpeg")
+    messages.append(_attachment(human, seq=9))
+    return messages, human
+
+
+def test_turning_demotion_off_promises_a_retry_it_does_not_make(
+    monkeypatch,
+):
+    """The escape hatch stays terminal for an upload-only refusal too.
+
+    B1 routes this shape through the forced boundary, so the switch has to be
+    honoured there: a notice would announce a smaller request the disabled
+    ladder is not allowed to build, and a retryable classification would spend
+    a second call on bytes no longer permitted to move.
+    """
+    monkeypatch.setenv(
+        model_context.MEDIA_OBSERVATION_DEGRADE_ENV,
+        "0",
+    )
+    messages, _first, _second = _upload_only_payload()
+
+    async def scenario():
+        client, provider, asked, forced = _overflow_client(failures=99)
+        notices: list[RateLimitRetryNotice] = []
+
+        async def on_retry(notice: RateLimitRetryNotice) -> None:
+            notices.append(notice)
+
+        with pytest.raises(AgentModelError) as caught:
+            await client.complete(
+                messages=messages,
+                tools=[],
+                on_rate_limit_retry=on_retry,
+                _context_budget_bytes=_OVERFLOW_BUDGET,
+            )
+        return provider, asked, forced, notices, caught
+
+    provider, asked, forced, notices, caught = asyncio.run(scenario())
+
+    assert provider.calls == 1
+    assert asked == []
+    assert forced == []
+    assert notices == []
+    assert isinstance(caught.value, ModelContextUnfitError)
+    assert "maximum context length" in str(caught.value)

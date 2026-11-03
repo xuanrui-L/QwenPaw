@@ -30,6 +30,9 @@ logger = setup_logger("creator.media_vault")
 # turns of one project occupies exactly one copy on disk.
 NAMESPACE = "blob"
 
+# The type a `data:` URL does not state. Never an answer on its own.
+GENERIC_MIME = "application/octet-stream"
+
 # Opening the store resolves the Creator data root, which raises on a machine
 # where it is unset or not absolute. That is one more way the durable copy is
 # missing, not a reason to fail the turn: the docstring above is a contract, so
@@ -56,7 +59,10 @@ def split_data_url(url: str) -> tuple[str, bytes] | None:
         # worth a second guess; the pointer still records what it was.
         return None
     mime = header[5:] if header.startswith("data:") else ""
-    return mime.split(";")[0].strip() or "application/octet-stream", payload
+    return (
+        mime.split(";")[0].strip() or GENERIC_MIME,
+        payload,
+    )
 
 
 def digest_for(payload: bytes) -> str:
@@ -69,9 +75,9 @@ def digest_for(payload: bytes) -> str:
 # than guessed at, which a provider rejects with an error the model cannot
 # read any better than the pointer it came from.
 #
-# RIFF is deliberately absent: it names a framing, not a format, so the table
-# below would match a WEBP image on its first four bytes and hand the model an
-# audio type it can neither look at nor explain.
+# RIFF, EBML and the ISO-base `ftyp` box are deliberately absent: each names a
+# framing, not a format, so the tag that decides the family sits after a size
+# field the prefix table cannot skip.
 _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"\x89PNG\r\n\x1a\n", "image/png"),
@@ -86,20 +92,54 @@ _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"%PDF", "application/pdf"),
 )
 
+# The four-byte brand right after `ftyp`'s box length. Unlisted brands stay
+# video/mp4, which is what the ISO-base family means in practice for a
+# provider reading these bytes.
+_FTYPBRAND_MIMES: dict[bytes, str] = {
+    b"qt  ": "video/quicktime",
+    b"M4V ": "video/mp4",
+    b"avif": "image/avif",
+    b"avis": "image/avif",
+    b"heic": "image/heic",
+    b"heix": "image/heic",
+    b"mif1": "image/heic",
+}
+
+# An EBML master is Matroska-family, so it is a video container whichever way
+# the DocType reads. `webm` is what the Creator runtime inlines, and a
+# mislabeled but still video/* type keeps the part displayable, whereas an
+# opaque one would not.
+_EBML_MAGIC = b"\x1a\x45\xdf\xa3"
+
+
+def _riff_mime(payload: bytes) -> str:
+    """Family of a RIFF file, read past the four-byte size the tag follows."""
+    tag = payload[8:12]
+    if tag == b"WEBP":
+        return "image/webp"
+    if tag == b"AVI ":
+        return "video/x-msvideo"
+    return "audio/wav"
+
+
+def _ebml_mime(payload: bytes) -> str:
+    head = payload[:128]
+    if b"matroska" in head:
+        return "video/x-matroska"
+    return "video/webm"
+
 
 def sniff_mime(payload: bytes) -> str:
     """Best-effort media type from the leading bytes of a stored payload."""
-    # WEBP is "RIFF" plus a four-byte size and the "WEBP" tag, and MP4 carries
-    # the box length before "ftyp": both need the header read, not matched.
-    # RIFF is checked before the table, never through it, because the tag that
-    # decides the family sits after the size field the table cannot skip.
     if payload[:4] == b"RIFF":
-        return "image/webp" if payload[8:12] == b"WEBP" else "audio/wav"
+        return _riff_mime(payload)
+    if payload[:4] == _EBML_MAGIC:
+        return _ebml_mime(payload)
     for magic, media_type in _MAGIC_SIGNATURES:
         if payload.startswith(magic):
             return media_type
     if payload[4:8] == b"ftyp":
-        return "video/mp4"
+        return _FTYPBRAND_MIMES.get(payload[8:12], "video/mp4")
     return "application/octet-stream"
 
 
@@ -166,9 +206,23 @@ def load_data_url(
         logger.warning("media vault could not read %s: %s", digest[:12], exc)
         return None
     return (
-        f"data:{mime or sniff_mime(payload)};"
+        f"data:{_typed_or_sniffed(mime, payload)};"
         f"base64,{base64.b64encode(payload).decode('ascii')}"
     )
+
+
+def _typed_or_sniffed(declared: str, payload: bytes) -> str:
+    """The declared type when it names one, otherwise what the bytes say.
+
+    A ``data:;base64,`` header carries no type and ``split_data_url`` records
+    the gap as a generic one. Letting that stand in for an answer would ship a
+    stored picture back as opaque bytes, which no provider can display, so a
+    generic declaration is treated as "unknown" and sniffing still runs.
+    """
+    value = (declared or "").strip()
+    if not value or value == GENERIC_MIME:
+        return sniff_mime(payload)
+    return value
 
 
 def load_by_handle(
@@ -193,8 +247,7 @@ def load_by_handle(
         logger.warning("media vault could not read %s: %s", digest[:12], exc)
         return None
     body = base64.b64encode(payload).decode("ascii")
-    declared = (mime or "").strip()
-    url = f"data:{declared or sniff_mime(payload)};base64,{body}"
+    url = f"data:{_typed_or_sniffed(mime, payload)};base64,{body}"
     return url, len(payload)
 
 
@@ -210,6 +263,7 @@ def make_vault(
 
 
 __all__ = [
+    "GENERIC_MIME",
     "MediaVault",
     "digest_for",
     "load_by_handle",

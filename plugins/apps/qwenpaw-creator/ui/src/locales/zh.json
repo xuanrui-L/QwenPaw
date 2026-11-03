@@ -1061,6 +1061,7 @@
     "quotaExhausted": "模型 Credits 不足，已停止自动重试；请在平台「模型调用」页用贡献值兑换后继续",
     "quotaContinue": "已兑换，继续",
     "quotaResumeMessage": "我已兑换 Credits，请继续之前中断的任务",
+    "contextUnfit": "输入已超出模型上下文窗口，可让出的内容已全部让出；请减少本次附图数量或精简文字后重新发送。",
     "mentionHint": "输入 @ 可引用分镜、素材等对象作为上下文；当前选中的对象也会自动带入对话。",
     "clearAll": "清空全部引用、划选文本与输入框内的 @ 引用",
     "clear": "清空",
