@@ -1502,6 +1502,59 @@ def test_derived_inline_media_demotes_to_a_pointer_and_spares_human_input():
     assert receipt["human_attachment_blocks"] == 1
 
 
+def test_media_inside_a_serialized_string_is_counted_as_the_media_it_is():
+    """The census has to agree with what the demotion is allowed to strip.
+
+    Only a ``url`` key was walked, so a payload a tool answered as plain text
+    was billed at its full Base64 length, reported as no inline media at all,
+    and left where a demotion that rewrites every string it passes would have
+    traded it. The byte estimate still declines to scan plain strings - it runs
+    over the whole history on every turn - so this is about what a refusal can
+    name, not about what a request pays.
+    """
+    encoded = base64.b64encode(b"\x00" * (2 * 1024 * 1024)).decode()
+    data_url = f"data:image/jpeg;base64,{encoded}"
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call-frame",
+            "content": json.dumps({"resultKind": "frame", "url": data_url}),
+        },
+        {
+            "role": "user",
+            "source": "user",
+            "content": [{"type": "text", "text": data_url}],
+        },
+    ]
+
+    blocks = model_context.collect_inline_media(messages)
+
+    assert len(blocks) == 2
+    assert {block["mime"] for block in blocks} == {"image/jpeg"}
+
+    _result, receipt = model_context.demote_derived_inline_media(
+        messages,
+        vault=lambda _url: "h" * 64,
+    )
+
+    # One block traded and one kept as a person's, which is the census total: a
+    # report that could not add up would be a guess about the request.
+    assert receipt["demoted_blocks"] == 1
+    assert receipt["human_attachment_blocks"] == 1
+    traded = receipt["demoted_blocks"] + receipt["human_attachment_blocks"]
+    assert traded == len(blocks)
+
+    with pytest.raises(ModelContextBudgetError) as caught:
+        prepare_model_messages(messages, [], max_bytes=16 * 1024)
+
+    info = caught.value.diagnostics
+    assert info["media_block_count"] == 2
+    assert info["media_blocks"][0]["mime"] == "image/jpeg"
+    # What the request pays is deliberately unchanged: no relief is taken for a
+    # payload riding in a string, so the refusal still bills its full length.
+    assert info["used_bytes"] == info["raw_bytes"]
+
+
 def test_budget_failure_names_the_blocks_that_overflowed():
     """A refusal has to say what it blamed, not just that it refused."""
     encoded = base64.b64encode(b"\x00" * (1024 * 1024)).decode()
@@ -2379,7 +2432,10 @@ def test_the_gentle_retry_overflowing_too_forces_the_whole_ladder():
 
     assert turn.content == "降级后的输入仍可用"
     assert provider.calls == 3
-    assert asked == [derived, derived, human]
+    # The frame the gentle step already archived is not written down twice:
+    # the forced step is handed the request that was just refused, so only the
+    # upload still looking for a home gets stored.
+    assert asked == [derived, human]
     # Halved, so compaction also gives up the old tool exchanges.
     assert forced == [_OVERFLOW_BUDGET // 2]
     assert _request_media(provider.requests[2]) == []
@@ -2414,12 +2470,15 @@ def test_a_refusal_that_survived_both_recovery_steps_says_what_it_gave_up():
 
     # The recovery is bounded: original attempt, gentle retry, forced retry.
     assert provider.calls == 3
-    assert asked == [derived, derived, human]
+    assert asked == [derived, human]
     assert forced == [_OVERFLOW_BUDGET // 2]
     text = str(caught.value)
     assert "maximum context length" in text
     assert "媒体降级记录" in text
     assert "真人附件媒体 1 块（已存档 1 块）" in text
+    # One frame left, so one frame is reported: rebuilding the record from the
+    # refused request used to count the same block in both steps.
+    assert text.count("派生观察媒体") == 1
 
 
 def test_a_provider_failure_that_is_not_about_length_leaves_the_input_alone():
@@ -2648,6 +2707,11 @@ def test_turning_demotion_off_declines_the_provider_overflow_too(monkeypatch):
 
 
 _TEXT_BUDGET = 40_000
+# Six finished reads of 420 repeats each: serialized, the session stays under
+# the byte guard, so it is the provider that refuses, and half of its raw size
+# is tighter than half of the budget.
+_TEXT_EXCHANGES = 6
+_TEXT_ROW_REPEATS = 420
 
 
 def _text_only_history() -> list[dict]:
@@ -2660,7 +2724,7 @@ def _text_only_history() -> list[dict]:
             "content": "把六集分镜做完再交审阅",
         },
     ]
-    for index in range(6):
+    for index in range(_TEXT_EXCHANGES):
         messages.append(
             {
                 "role": "assistant",
@@ -2675,10 +2739,24 @@ def _text_only_history() -> list[dict]:
                 "role": "tool",
                 "tool_call_id": f"call-{index}",
                 "name": "read",
-                "content": "镜头描述 " * 420,
+                "content": "镜头描述 " * _TEXT_ROW_REPEATS,
             },
         )
     return messages
+
+
+def _request_read_rows(native_messages) -> int:
+    """How many of the session's finished reads a request still held."""
+    rows = 0
+    for message in native_messages:
+        blocks = getattr(message, "content", None)
+        for block in blocks if isinstance(blocks, (list, tuple)) else []:
+            shape = (
+                block.model_dump() if hasattr(block, "model_dump") else block
+            )
+            if isinstance(shape, dict) and shape.get("type") == "tool_result":
+                rows += 1
+    return rows
 
 
 def test_a_text_only_overflow_is_answered_by_retiring_old_tool_exchanges():
@@ -3105,3 +3183,98 @@ def test_media_the_runtime_observed_is_traded_before_a_person_could_be():
 
     assert "真人附件" not in note
     assert "image_url" in json.dumps(prepared[3]["content"])
+
+
+def _forced_step_input(client) -> list[list[dict]]:
+    """Wrap the forced step so the shape it was handed becomes assertable."""
+    handed: list[list[dict]] = []
+    original = client._recover_forced_overflow
+
+    async def recording(exc, **kwargs):
+        handed.append(list(kwargs["messages"]))
+        return await original(exc, **kwargs)
+
+    client._recover_forced_overflow = recording
+    return handed
+
+
+def test_the_forced_step_is_handed_the_request_the_provider_just_refused():
+    """Rebuilding from the pre-compaction wire unsays what compaction did.
+
+    The history fallback tightens to half the serialized size whenever that is
+    tighter than half the budget, while the forced step halves the *budget* and
+    never sees that number. Handed the wire from before compaction it re-runs
+    the retirement against the looser budget, so the completed exchanges the
+    provider had already been denied come back into the very request built to
+    be smaller than the refusal it is answering.
+    """
+
+    async def scenario():
+        client, provider, _asked, forced = _overflow_client(failures=2)
+        handed = _forced_step_input(client)
+        with pytest.raises(AgentModelError):
+            await client.complete(
+                messages=_text_only_history(),
+                tools=[],
+                _context_budget_bytes=_TEXT_BUDGET,
+            )
+        return provider, forced, handed
+
+    provider, forced, handed = asyncio.run(scenario())
+
+    # A text-only request has nothing left for the second step to trade, so the
+    # recovery stops there; what it was about to rebuild from is the point.
+    assert provider.calls == 2
+    assert forced == [_TEXT_BUDGET // 2]
+    assert len(handed) == 1
+    refused = _request_read_rows(provider.requests[1])
+    assert 0 < refused < _TEXT_EXCHANGES
+    handed_rows = [m for m in handed[0] if m.get("role") == "tool"]
+    assert len(handed_rows) == refused
+
+
+def _string_media_wire() -> tuple[list[dict], str]:
+    """A tool answer whose payload rides inside a text part's JSON."""
+    observed = _data_url(b"\x00" * (2 * 1024 * 1024), mime="image/jpeg")
+    uploaded = _data_url(b"\x10" * (64 * 1024), mime="image/jpeg")
+    answer = json.dumps({"resultKind": "frame", "url": observed})
+    wire = [
+        {"role": "system", "content": "A" * 5_000},
+        {
+            "role": "tool",
+            "tool_call_id": "call-frame",
+            "name": "read_frame",
+            "content": [{"type": "text", "text": answer}],
+        },
+        _attachment(uploaded, seq=11),
+    ]
+    return wire, observed
+
+
+def test_media_a_tool_answered_as_plain_text_can_still_be_given_up():
+    """Media a census cannot find is media the ladder will not trade.
+
+    ``demote_derived_inline_media`` only strips a row its own walk found blocks
+    in, so a payload the tool answer serialized into a text part used to pass
+    through untouched: the megabytes stayed, and the refusal that followed
+    reported no inline media at all - which the entry gate then read as
+    pressure no demotion could relieve, so the turn ended instead of giving up
+    what had just been measured.
+    """
+    wire, observed = _string_media_wire()
+    asked: list[str] = []
+    client = _ladder_client(lambda url: asked.append(url) or "g" * 64)
+
+    prepared, _note = client._fit_refused_request(
+        wire,
+        [],
+        max_bytes=16_000,
+        failure=_refusal_at(wire, 16_000),
+    )
+
+    dump = json.dumps(prepared, ensure_ascii=False)
+    assert observed not in dump
+    assert "image/jpeg" in dump
+    assert asked == [observed]
+    # The frame was the whole overage, so a person's upload never had to move.
+    assert "user attachment moved out of this request" not in dump
