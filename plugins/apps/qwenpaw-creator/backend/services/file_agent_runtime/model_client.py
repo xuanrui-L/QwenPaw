@@ -1872,11 +1872,16 @@ class AgentScopeAgentChatClient:
                         # second refusal has to reach the forced step the same
                         # way a gentle one does. Left unwrapped, a session that
                         # needed compaction could never trade a media block.
+                        # The forced step rebuilds from what the provider just
+                        # refused, not from the shape before compaction: handed
+                        # the original, it re-retires every exchange a second
+                        # time and measures them against the budget that was
+                        # never in force for this retry.
                         return await call_with_overflow_recovery(
                             self.complete,
                             lambda retry_exc: self._recover_forced_overflow(
                                 retry_exc,
-                                messages=messages,
+                                messages=smaller,
                                 tools=tools,
                                 max_bytes=_context_budget_bytes,
                                 retry_kwargs=retry_kwargs,
@@ -1903,7 +1908,7 @@ class AgentScopeAgentChatClient:
                         self.complete,
                         lambda retry_exc: self._recover_forced_overflow(
                             retry_exc,
-                            messages=messages,
+                            messages=smaller,
                             tools=tools,
                             max_bytes=_context_budget_bytes,
                             retry_kwargs=retry_kwargs,
