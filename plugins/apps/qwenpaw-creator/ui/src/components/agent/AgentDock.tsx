@@ -1661,6 +1661,20 @@ export default function AgentDock({
     const replayJustEnded = prevIsReplaying.current && !isReplaying;
     prevIsReplaying.current = isReplaying;
 
+    // Replay settling is an explicit "land on newest" intent, except when the
+    // user deliberately scrolled up during the suppressed replay window. This
+    // runs BEFORE every early return: the dock unmounts entirely when closed
+    // (`{open && ...}`), so consuming the edge and clearing the flag here stops
+    // it leaking into a later replay / project switch and silently suppressing
+    // the bottom-follow we set out to guarantee.
+    if (replayJustEnded) {
+      if (!userScrolledDuringReplay.current) {
+        stickBottom.current = true;
+        setShowJump(false);
+      }
+      userScrolledDuringReplay.current = false;
+    }
+
     // Suppress per-frame bottom-follow only while the replay stream is
     // genuinely healthy. If SSE is disconnected / reconnecting we must not lock
     // the viewport at the top — fall through to the normal follow below so the
@@ -1670,16 +1684,6 @@ export default function AgentDock({
     if (!open || feedSlot != null) return;
     const element = scrollRef.current;
     if (!element) return;
-
-    // Replay settling is an explicit "land on newest" intent, except when the
-    // user deliberately scrolled up during the suppressed replay window.
-    if (replayJustEnded) {
-      if (!userScrolledDuringReplay.current) {
-        stickBottom.current = true;
-        setShowJump(false);
-      }
-      userScrolledDuringReplay.current = false;
-    }
 
     if (!stickBottom.current) return;
     element.scrollTop = element.scrollHeight;

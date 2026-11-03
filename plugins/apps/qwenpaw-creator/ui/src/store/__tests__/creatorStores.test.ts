@@ -175,7 +175,12 @@ describe("bounded frontend caches", () => {
   it("bounds the first-entry replay to a recent window for terminal projects", async () => {
     installMockFetch(
       bootstrapRoutes({
-        session: { lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 10_000, status: "IDLE" },
+        session: {
+          lastMessageSeq: 1,
+          lastConsumedMessageSeq: 1,
+          lastEventSeq: 10_000,
+          status: "IDLE",
+        },
       }),
     );
     await store().bootstrap("p1");
@@ -187,7 +192,12 @@ describe("bounded frontend caches", () => {
   it("falls back to a full replay on first entry when the session is still working", async () => {
     installMockFetch(
       bootstrapRoutes({
-        session: { lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 10_000, status: "RUNNING" },
+        session: {
+          lastMessageSeq: 1,
+          lastConsumedMessageSeq: 1,
+          lastEventSeq: 10_000,
+          status: "RUNNING",
+        },
       }),
     );
     await store().bootstrap("p1");
@@ -196,14 +206,42 @@ describe("bounded frontend caches", () => {
     expect(testEventSources()[0].url).toContain("events?after=0");
   });
 
+  it("keeps the full replay when a terminal session still has a running task", async () => {
+    installMockFetch(
+      bootstrapRoutes({
+        session: {
+          lastMessageSeq: 1,
+          lastConsumedMessageSeq: 1,
+          lastEventSeq: 10_000,
+          status: "IDLE",
+        },
+        runningTaskCount: 1,
+      }),
+    );
+    await store().bootstrap("p1");
+    // Terminal mainline but a detached specialist is still running: its card is
+    // rebuilt only from window-edge events, so keep the full replay.
+    expect(testEventSources()[0].url).toContain("events?after=0");
+  });
+
   it("resumes a same-project reconnect at the local cursor, ignoring the window", async () => {
     installMockFetch(
       bootstrapRoutes({
-        session: { lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 20_000, status: "IDLE" },
+        session: {
+          lastMessageSeq: 1,
+          lastConsumedMessageSeq: 1,
+          lastEventSeq: 20_000,
+          status: "IDLE",
+        },
       }),
     );
     seed({
-      session: sessionView({ lastMessageSeq: 1, lastConsumedMessageSeq: 1, lastEventSeq: 20_000, status: "IDLE" }),
+      session: sessionView({
+        lastMessageSeq: 1,
+        lastConsumedMessageSeq: 1,
+        lastEventSeq: 20_000,
+        status: "IDLE",
+      }),
       activeConversationId: "c1",
       messages: [msg({ messageId: "m1", messageSeq: 1 })],
       lastEventSeq: 20_000,

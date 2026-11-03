@@ -2030,8 +2030,24 @@ async def delete_source_asset_version(
     the deleted version's logical asset are cancelled to prevent stale
     agent operations.
     """
-    from services.runtime_files.execution_store import ProjectExecutionStore
-    from domain.enums import SpecialistRunStatus, TaskStatus
+    from domain.enums import (
+        SpecialistRunStatus,
+        TERMINAL_SPECIALIST_STATUSES,
+    )
+
+    # Capture the deleted version's identity BEFORE removal so the
+    # post-delete cancellation can match runs/tasks that targeted this logical
+    # asset (`asset:<id>`) or a source that no longer exists (`source:<id>`).
+    deleted_logical_id: str | None = None
+    try:
+        pre = await asyncio.to_thread(services.projects.read, project_id)
+        ver = pre.project.assets.source_versions_by_id.get(version_id)
+        deleted_logical_id = ver.logical_asset_id if ver else None
+    except Exception:  # noqa: BLE001 - identity capture is best-effort
+        logger.warning(
+            "asset delete: pre-read identity failed",
+            exc_info=True,
+        )
 
     try:
         snapshot = await asyncio.to_thread(
@@ -2046,83 +2062,101 @@ async def delete_source_asset_version(
     except Exception as error:
         raise StorageIntegrityError(str(error)) from error
 
-    # Cancel any pending runs/tasks that reference the deleted version's
-    # logical asset. The source intelligence agent uses target_ref format
-    # `source:<sourceId>`. We cancel runs whose target_refs point to sources
-    # that no longer exist after deletion.
+    # Cancel pending runs/tasks that targeted the deleted asset. A run may
+    # reference the asset as `asset:<logicalAssetId>` (delegate_to_agent
+    # contract) or `source:<sourceId>` (internal command). We cancel when the
+    # logical asset matches, or when its `source:` target no longer exists
+    # after deletion. NOTE: this is a durable-state cancellation via the
+    # execution store's CAS transition; in-process worker termination and
+    # scratch/credit release remain owned by each scheduler's own cancel path.
     try:
         exec_store = ProjectExecutionStore(services.root)
         runs = await asyncio.to_thread(
-            exec_store.list_specialist_runs, project_id
+            exec_store.list_specialist_runs,
+            project_id,
         )
         tasks = await asyncio.to_thread(exec_store.list_tasks, project_id)
 
-        # Build set of remaining source IDs for quick lookup
         remaining_source_ids = set(
-            snapshot.project.sources.sources.items.keys()
+            snapshot.project.sources.sources.items.keys(),
         )
+        active_run_statuses = (
+            set(SpecialistRunStatus) - TERMINAL_SPECIALIST_STATUSES
+        )
+        active_task_statuses = {TaskStatus.QUEUED, TaskStatus.RUNNING}
 
-        # Find runs targeting sources that no longer exist
         for run in runs:
-            if run.status not in (
-                SpecialistRunStatus.QUEUED,
-                SpecialistRunStatus.RUNNING,
-            ):
+            if run.status not in active_run_statuses:
                 continue
-            # Check if any target_ref references a now-missing source
+
             should_cancel = False
-            for target_ref in run.target_refs:
-                if target_ref.startswith("source:"):
-                    source_id = target_ref.removeprefix("source:")
-                    if source_id not in remaining_source_ids:
+            for ref in run.target_refs:
+                if ref.startswith("asset:"):
+                    if (
+                        deleted_logical_id
+                        and ref.removeprefix("asset:") == deleted_logical_id
+                    ):
                         should_cancel = True
                         break
-            
-            if should_cancel:
-                # Cancel this run and its tasks
-                try:
-                    await asyncio.to_thread(
-                        exec_store.transition_specialist_run,
-                        project_id,
-                        run.run_id,
-                        expected_status={
-                            SpecialistRunStatus.QUEUED,
-                            SpecialistRunStatus.RUNNING,
+                elif ref.startswith("source:"):
+                    if ref.removeprefix("source:") not in remaining_source_ids:
+                        should_cancel = True
+                        break
+            if not should_cancel:
+                continue
+
+            try:
+                await asyncio.to_thread(
+                    exec_store.transition_specialist_run,
+                    project_id,
+                    run.run_id,
+                    expected_status=active_run_statuses,
+                    status=SpecialistRunStatus.CANCELLED,
+                    updates={
+                        "metadata": {
+                            **run.metadata,
+                            "cancelReason": "SOURCE_ASSET_DELETED",
                         },
-                        status=SpecialistRunStatus.CANCELLED,
-                        updates={
-                            "cancel_reason": "SOURCE_ASSET_DELETED",
-                        },
-                    )
-                except Exception:
-                    pass  # Best-effort cancellation
-                # Cancel associated tasks
-                for task in tasks:
-                    if task.run_id == run.run_id and task.status in (
-                        TaskStatus.QUEUED,
-                        TaskStatus.RUNNING,
-                    ):
-                        try:
-                            await asyncio.to_thread(
-                                exec_store.transition_task,
-                                project_id,
-                                task.task_id,
-                                expected_status={
-                                    TaskStatus.QUEUED,
-                                    TaskStatus.RUNNING,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - best-effort cancellation
+                logger.warning(
+                    "asset delete: failed to cancel run %s",
+                    run.run_id,
+                    exc_info=True,
+                )
+
+            for task in tasks:
+                if (
+                    task.run_id == run.run_id
+                    and task.status in active_task_statuses
+                ):
+                    try:
+                        await asyncio.to_thread(
+                            exec_store.transition_task,
+                            project_id,
+                            task.task_id,
+                            expected_status=active_task_statuses,
+                            status=TaskStatus.CANCELLED,
+                            updates={
+                                "error": {
+                                    "code": "SOURCE_ASSET_DELETED",
+                                    "message": "Source asset was deleted",
                                 },
-                                status=TaskStatus.CANCELLED,
-                                updates={
-                                    "error": {
-                                        "code": "SOURCE_ASSET_DELETED",
-                                        "message": "Source asset was deleted",
-                                    },
-                                },
-                            )
-                        except Exception:
-                            pass  # Best-effort cancellation
-    except Exception:
-        pass  # Best-effort cleanup; don't fail the deletion
+                            },
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "asset delete: failed to cancel task %s",
+                            task.task_id,
+                            exc_info=True,
+                        )
+    except Exception:  # noqa: BLE001 - best-effort cleanup
+        logger.warning(
+            "asset delete: run/task cancellation failed for project %s",
+            project_id,
+            exc_info=True,
+        )
 
 
 __all__ = ["router"]
