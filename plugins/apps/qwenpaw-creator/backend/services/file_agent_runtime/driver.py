@@ -191,6 +191,7 @@ from .model_client import (
     AgentStreamCallbackPassthrough,
     AgentModelTurn,
     DEFAULT_MODEL_TURN_TIMEOUT_SECONDS as _DEFAULT_MODEL_TURN_TIMEOUT_SECONDS,
+    ModelContextUnfitError,
     RateLimitExhaustedError,
     RateLimitRetryNotice,
     AgentScopeAgentChatClient,
@@ -3175,6 +3176,28 @@ class FileCreatorAgentRuntime:
                 run_id,
                 message,
                 code="TOOL_NON_PROGRESS",
+                message_text=str(exc),
+                retryable=False,
+            )
+            self._blocked_heads[project_id] = message.message_seq
+        except ModelContextUnfitError as exc:
+            # The client already proved no smaller version of this request
+            # exists, so an automatic resume would re-send the same bytes and
+            # pay for another model call to reproduce one error message. The
+            # run waits here until a shorter input arrives.
+            logger.error(
+                "Agent run %s failed — input too large with nothing left to "
+                "give up: %s",
+                run_id,
+                exc,
+            )
+            await self._fail_run(
+                project_id,
+                session.session_id,
+                goal.goal_id,
+                run_id,
+                message,
+                code="MODEL_CONTEXT_UNFIT",
                 message_text=str(exc),
                 retryable=False,
             )

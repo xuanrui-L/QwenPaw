@@ -35,6 +35,7 @@ from services.file_agent_runtime.driver import (
 )
 from services.file_agent_runtime import driver as driver_module
 from services.file_agent_runtime import media_vault
+from services.file_agent_runtime.model_client import ModelContextUnfitError
 from services.file_agent_runtime.prompts import render_creator_system_prompt
 from services.file_agent_runtime.work_graph import (
     WorkGraph,
@@ -1310,6 +1311,57 @@ def test_repeated_malformed_jq_project_arguments_stop_after_two_retries(
         True,
     ]
     assert "Do not resend it" in errors[-1]["recovery"]
+
+
+def test_a_proven_unfittable_input_is_not_resumed_automatically(
+    tmp_path,
+) -> None:
+    """An input the client proved it cannot shrink waits for a human.
+
+    The resume fuse bounds how often a parked run is re-entered, not whether
+    it is worth trying: re-sending bytes the same window already refused buys
+    a second copy of one error message at the price of a full model call, at
+    3am, unattended. Every other model fault keeps the retry a transient fault
+    can still profit from.
+    """
+    calls: list[int] = []
+
+    async def callback(_messages, _tools):
+        calls.append(1)
+        raise ModelContextUnfitError(
+            "模型必要输入仍超过单次上下文预算；真人附件未移动。",
+        )
+
+    async def scenario():
+        services, _snapshot = _create_project(
+            tmp_path,
+            initial_goal="Create the project plan",
+        )
+        driver = _driver(services, callback)
+        resumes: list[bool] = []
+        original_resume = driver._queue_yolo_completion_resume
+
+        async def record_resume(*args, **kwargs):
+            resumes.append(bool(kwargs.get("after_failure")))
+            return await original_resume(*args, **kwargs)
+
+        driver._queue_yolo_completion_resume = record_resume
+        await _run_to_idle(driver, services, error=True)
+        session = services.sessions.get_project_session(PROJECT_ID)
+        runs = driver.runs.list(PROJECT_ID)
+        await driver.stop()
+        return session, runs, resumes
+
+    session, runs, resumes = asyncio.run(scenario())
+
+    assert calls == [1]
+    assert session.error is not None
+    assert session.error["code"] == "MODEL_CONTEXT_UNFIT"
+    assert session.error["retryable"] is False
+    assert "真人附件未移动" in session.error["message"]
+    # The failure path never asked for a resume, so nothing re-enters the run.
+    assert resumes == []
+    assert [run.status.value for run in runs] == ["FAILED"]
 
 
 def test_initial_creation_runs_auto_fix_tool_loop_without_review(
@@ -5395,7 +5447,8 @@ def test_upload_joining_a_live_run_starts_understanding(
 
 
 def test_recalled_media_arrives_after_its_own_tool_group(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     """The recalled bytes ride behind the tool result, never inside its group.
 

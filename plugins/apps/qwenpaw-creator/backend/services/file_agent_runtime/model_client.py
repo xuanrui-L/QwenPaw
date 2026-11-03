@@ -55,6 +55,7 @@ from .model_context import (
     demote_human_inline_media,
     format_budget_failure,
     format_demotion_record,
+    media_could_bridge_the_gap,
     media_observation_degrade_enabled,
     prepare_model_messages,
 )
@@ -121,6 +122,17 @@ class OverflowAfterOutputError(AgentModelError):
 
 class AgentModelConfigurationError(AgentModelError):
     pass
+
+
+class ModelContextUnfitError(AgentModelError):
+    """The input was proven too large with nothing left to give up.
+
+    Everything the recovery ladder can move has moved, so an automatic resume
+    would re-send bytes the same window already refused and buy one error
+    message at the price of a full model call. The run stops and waits for a
+    human to shorten the input; every other ``AgentModelError`` describes a
+    fault a retry can plausibly clear.
+    """
 
 
 class RateLimitExhaustedError(AgentModelError):
@@ -1018,6 +1030,23 @@ class AgentScopeAgentChatClient:
             if prepared is not None:
                 return prepared, self._report_demotions(record, max_bytes)
             failure = refused or failure
+        # Pressure has to be media-shaped before an upload moves. The very
+        # accounting that refused the request says whether it is: when every
+        # inline block together costs less than the overage, no amount of
+        # demotion can fit, and the ladder would strip a person's attachments
+        # one by one while heading for the identical failure.
+        if not media_could_bridge_the_gap(failure.diagnostics):
+            raise ModelContextUnfitError(
+                "\n".join(
+                    part
+                    for part in (
+                        format_budget_failure(failure),
+                        "缺口不是媒体造成的，真人附件未移动。",
+                        format_demotion_record(record),
+                    )
+                    if part
+                ),
+            ) from failure
         # Proven pressure is what earns this step, and it is paid one
         # attachment at a time: the most expensive upload moves, the request
         # is measured again, and the trade stops the moment it fits. Demoting
@@ -1055,7 +1084,7 @@ class AgentScopeAgentChatClient:
                 return prepared, self._report_demotions(record, max_bytes)
             failure = refused or failure
         record.append(("真人附件媒体", totals))
-        raise AgentModelError(
+        raise ModelContextUnfitError(
             "\n".join(
                 part
                 for part in (
@@ -1522,7 +1551,7 @@ class AgentScopeAgentChatClient:
                                 "nothing left can be given up: %s",
                                 exc,
                             )
-                            raise AgentModelError(
+                            raise ModelContextUnfitError(
                                 "\n".join((exc_text, *_demotion_notes)),
                             ) from exc
                         logger.warning(
@@ -1573,13 +1602,14 @@ class AgentScopeAgentChatClient:
                         _demotion_notes=notes,
                         **retry_kwargs,
                     )
-                if _demotion_notes:
-                    # Two steps ran and the provider still says no. The input
-                    # it refused is not the input the caller wrote, so the
-                    # refusal has to name the media that already left.
-                    raise AgentModelError(
-                        "\n".join((exc_text, *_demotion_notes)),
-                    ) from exc
+                # Reaching here means the ladder already ran: this call only
+                # exists with its retry budget spent, so the provider has now
+                # refused a request this client cannot make any smaller. The
+                # notes name the media that already left, because the input it
+                # refused is not the input the caller wrote.
+                raise ModelContextUnfitError(
+                    "\n".join((exc_text, *_demotion_notes)),
+                ) from exc
             is_rate_limit = is_rate_limit_error(exc)
             if is_rate_limit and _rate_limit_retries_remaining > 0:
                 attempt = (
