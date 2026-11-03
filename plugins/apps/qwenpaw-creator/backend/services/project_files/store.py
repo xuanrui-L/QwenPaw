@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # flake8: noqa: E501
-# pylint: disable=try-except-raise
+# pylint: disable=try-except-raise,too-many-branches,too-many-statements
 """Filesystem ProjectStore for the single ``project.json`` authority."""
 
 from __future__ import annotations
@@ -501,14 +501,16 @@ class ProjectStore:
 
             # Auto-clean non-timeline dangling references
             updated_project = self._detach_source_version_refs(
-                updated_project, version_id
+                updated_project,
+                version_id,
             )
 
             # Determine which file_ids are no longer referenced by any
             # remaining metadata and can be deleted from disk.
             project_root = self.project_root(safe_id)
             files_to_delete = self._collect_deletable_files(
-                updated_project, candidate_file_ids,
+                updated_project,
+                candidate_file_ids,
             )
 
             # Remove unreferenced files from the index
@@ -576,28 +578,24 @@ class ProjectStore:
         # Files referenced by visual variants (character lineup refs)
         for entity in project.visual.entities.items.values():
             for variant in entity.variants.items.values():
-                for fid in (variant.reference_asset_version_ids or []):
-                    ref_version = (
-                        project.assets.source_versions_by_id.get(fid)
-                    )
+                for fid in variant.reference_asset_version_ids or []:
+                    ref_version = project.assets.source_versions_by_id.get(fid)
                     if ref_version is not None:
                         if ref_version.file_id is not None:
                             referenced.add(ref_version.file_id)
                         if ref_version.thumbnail_file_id is not None:
                             referenced.add(
-                                ref_version.thumbnail_file_id
+                                ref_version.thumbnail_file_id,
                             )
                         if ref_version.native_model_file_id is not None:
                             referenced.add(
-                                ref_version.native_model_file_id
+                                ref_version.native_model_file_id,
                             )
 
         # Files referenced by cast lineups
         for lineup in project.visual.cast_lineups.items.values():
-            for fid in (lineup.reference_asset_version_ids or []):
-                ref_version = (
-                    project.assets.source_versions_by_id.get(fid)
-                )
+            for fid in lineup.reference_asset_version_ids or []:
+                ref_version = project.assets.source_versions_by_id.get(fid)
                 if ref_version is not None:
                     if ref_version.file_id is not None:
                         referenced.add(ref_version.file_id)
@@ -668,7 +666,8 @@ class ProjectStore:
                 if (
                     isinstance(render_source, SourceVersionRenderSource)
                     and not isinstance(
-                        render_source, ArtifactVersionRenderSource
+                        render_source,
+                        ArtifactVersionRenderSource,
                     )
                     and render_source.version_id == version_id
                 ):
@@ -681,7 +680,7 @@ class ProjectStore:
                         creation.storyboard_reference_version_ids or []
                     ):
                         references.append(
-                            f"r2v-storyboard-ref:{element_id}"
+                            f"r2v-storyboard-ref:{element_id}",
                         )
                     if version_id in (
                         creation.video_reference_version_ids or []
@@ -693,9 +692,7 @@ class ProjectStore:
                         references.append(f"i2v-first-frame:{element_id}")
                 # OverlayCreation references
                 elif isinstance(creation, OverlayCreation):
-                    if version_id in (
-                        creation.reference_version_ids or []
-                    ):
+                    if version_id in (creation.reference_version_ids or []):
                         references.append(f"overlay-ref:{element_id}")
                 # AudioCreation references
                 elif isinstance(creation, AudioCreation):
@@ -721,6 +718,17 @@ class ProjectStore:
         """
         updates: dict = {}
 
+        # Intelligence versions keyed to the deleted source version. Step 2
+        # removes them, so any source pointer into one of these must be cleared
+        # in the SAME batch; otherwise `Project._validate_graph` sees a dangling
+        # `current_intelligence_version_id` and the write raises a 500 instead of
+        # completing the deletion.
+        dropped_intel_ids = {
+            iid
+            for iid, iv in project.assets.intelligence_versions_by_id.items()
+            if iv.source_asset_version_id == version_id
+        }
+
         # 1. Fix ProjectSource.selected_asset_version_id
         #    selected_asset_version_id is a required EntityId (not optional).
         #    When the selected version is deleted, pick another version with
@@ -731,21 +739,26 @@ class ProjectStore:
             if source.selected_asset_version_id == version_id:
                 # Find another version with the same logical_asset_id
                 replacement = None
-                for vid, ver in (
-                    project.assets.source_versions_by_id.items()
-                ):
+                for vid, ver in project.assets.source_versions_by_id.items():
                     if (
                         vid != version_id
-                        and ver.logical_asset_id
-                        == source.logical_asset_id
+                        and ver.logical_asset_id == source.logical_asset_id
                     ):
                         replacement = vid
                         break
                 if replacement:
+                    pointer_update: dict = {
+                        "selected_asset_version_id": replacement,
+                    }
+                    if (
+                        source.current_intelligence_version_id
+                        in dropped_intel_ids
+                    ):
+                        pointer_update[
+                            "current_intelligence_version_id"
+                        ] = None
                     replaced_sources[source_id] = source.model_copy(
-                        update={
-                            "selected_asset_version_id": replacement,
-                        },
+                        update=pointer_update,
                     )
                 else:
                     removed_source_ids.add(source_id)
@@ -773,13 +786,11 @@ class ProjectStore:
         # 2. Delete SourceIntelligenceVersions that depend on this version
         remaining_intel = {
             iid: iv
-            for iid, iv in (
-                project.assets.intelligence_versions_by_id.items()
-            )
+            for iid, iv in (project.assets.intelligence_versions_by_id.items())
             if iv.source_asset_version_id != version_id
         }
         if len(remaining_intel) != len(
-            project.assets.intelligence_versions_by_id
+            project.assets.intelligence_versions_by_id,
         ):
             updates["assets"] = project.assets.model_copy(
                 update={
@@ -793,9 +804,7 @@ class ProjectStore:
         # 3. Clear CharacterVoice.sample_source_version_id
         visual_updates: dict = {}
         cleared_entities: dict = {}
-        for entity_id, entity in (
-            current.visual.entities.items.items()
-        ):
+        for entity_id, entity in current.visual.entities.items.items():
             if (
                 entity.voice is not None
                 and entity.voice.sample_source_version_id == version_id
@@ -807,15 +816,13 @@ class ProjectStore:
                     update={"voice": new_voice},
                 )
         if cleared_entities:
-            visual_updates["entities"] = (
-                current.visual.entities.model_copy(
-                    update={
-                        "items": {
-                            **current.visual.entities.items,
-                            **cleared_entities,
-                        },
+            visual_updates["entities"] = current.visual.entities.model_copy(
+                update={
+                    "items": {
+                        **current.visual.entities.items,
+                        **cleared_entities,
                     },
-                )
+                },
             )
 
         # 4. Remove version from VisualVariant refs
@@ -825,14 +832,10 @@ class ProjectStore:
         variant_updates: dict = {}
         for entity_id, entity in base_entities.items.items():
             for variant_id, variant in entity.variants.items.items():
-                if version_id in (
-                    variant.reference_asset_version_ids or []
-                ):
+                if version_id in (variant.reference_asset_version_ids or []):
                     new_refs = [
                         r
-                        for r in (
-                            variant.reference_asset_version_ids or []
-                        )
+                        for r in (variant.reference_asset_version_ids or [])
                         if r != version_id
                     ]
                     variant_updates.setdefault(entity_id, {})[
@@ -865,9 +868,7 @@ class ProjectStore:
         base_lineups = current.visual.cast_lineups
         lineup_updates: dict = {}
         for lineup_id, lineup in base_lineups.items.items():
-            if version_id in (
-                lineup.reference_asset_version_ids or []
-            ):
+            if version_id in (lineup.reference_asset_version_ids or []):
                 new_refs = [
                     r
                     for r in (lineup.reference_asset_version_ids or [])
@@ -879,15 +880,13 @@ class ProjectStore:
                     },
                 )
         if lineup_updates:
-            visual_updates["cast_lineups"] = (
-                base_lineups.model_copy(
-                    update={
-                        "items": {
-                            **base_lineups.items,
-                            **lineup_updates,
-                        },
+            visual_updates["cast_lineups"] = base_lineups.model_copy(
+                update={
+                    "items": {
+                        **base_lineups.items,
+                        **lineup_updates,
                     },
-                )
+                },
             )
 
         if visual_updates:

@@ -1482,7 +1482,9 @@ export default function AssetsPage() {
   const patching = useProjectSnapshotStore((state) => state.patching);
   const refreshTasks = useCreatorTaskViewStore((state) => state.refresh);
   const tasks = useCreatorTaskViewStore((state) => state.tasks);
-  const refreshSession = useCreatorSessionStore((state) => state.refreshSession);
+  const refreshSession = useCreatorSessionStore(
+    (state) => state.refreshSession,
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [origin, setOrigin] = useState<OriginKey>("any");
@@ -1774,13 +1776,19 @@ export default function AssetsPage() {
         try {
           await deleteSourceAssetVersion(id, versionId);
           message.success(t("assets.deleteSuccess"));
-          // Refresh project data, task/run states, and session to clear stale
-          // agent activities (e.g. "素材理解中") that targeted the deleted source.
-          await Promise.all([
+          // Refresh project data and task/session views after a successful
+          // delete. These are best-effort and settle independently: a failed
+          // refresh must NOT surface a "delete failed" error once the delete has
+          // already succeeded. Stale "素材理解中" cards converge via the backend
+          // terminal subagent events, not via refreshSession directly.
+          const refreshes = await Promise.allSettled([
             pollOnce(id),
             refreshTasks(id),
             refreshSession(),
           ]);
+          refreshes.forEach((result) => {
+            if (result.status === "rejected") console.error(result.reason);
+          });
           // Clear selection if deleted item was selected
           if (selected?.id === versionId) {
             selectItem(null);
@@ -2090,7 +2098,10 @@ export default function AssetsPage() {
                                 title={t("assets.deleteTooltip")}
                                 onClick={(event) => {
                                   event.stopPropagation();
-                                  handleDeleteSourceAsset(item.id, display.name);
+                                  handleDeleteSourceAsset(
+                                    item.id,
+                                    display.name,
+                                  );
                                 }}
                                 className="absolute right-2 top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-red-500/80 text-white opacity-0 transition-opacity hover:bg-red-600 group-hover:opacity-100"
                               >

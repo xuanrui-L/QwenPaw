@@ -707,14 +707,18 @@ export const useCreatorSessionStore = create<CreatorSessionState>(
           const isTerminalStatus = ["IDLE", "CANCELLED", "ERROR"].includes(
             sessionResponse.session.status,
           );
+          // A terminal session status only means the mainline loop stopped; a
+          // detached specialist can still be running, and its card is rebuilt
+          // solely from window-edge events. If the status bar reports live work,
+          // keep the full replay so those specialist cards survive the reload.
+          const hasActiveWork =
+            (sessionResponse.agentStatusBar?.activity?.runningTaskCount ?? 0) >
+            0;
           const resumeAfter = sameProject
             ? state.lastEventSeq
-            : isTerminalStatus
-              ? Math.max(
-                  0,
-                  sessionResponse.session.lastEventSeq - REPLAY_WINDOW,
-                )
-              : 0;
+            : isTerminalStatus && !hasActiveWork
+            ? Math.max(0, sessionResponse.session.lastEventSeq - REPLAY_WINDOW)
+            : 0;
           replayUntilSeq = sessionResponse.session.lastEventSeq;
           let conversations = conversationPage.items;
           let activeConversationId =
